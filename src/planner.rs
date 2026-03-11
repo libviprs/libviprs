@@ -1,0 +1,669 @@
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum PlannerError {
+    #[error("zero dimension: {width}x{height}")]
+    ZeroDimension { width: u32, height: u32 },
+    #[error("tile size must be > 0, got {0}")]
+    ZeroTileSize(u32),
+    #[error("overlap {overlap} must be less than tile size {tile_size}")]
+    OverlapTooLarge { overlap: u32, tile_size: u32 },
+    #[error("dimensions too large: {width}x{height} would overflow")]
+    DimensionOverflow { width: u32, height: u32 },
+}
+
+/// Output tile layout format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Layout {
+    /// Deep Zoom Image — `{level}/{col}_{row}.{ext}`, plus `.dzi` manifest.
+    DeepZoom,
+    /// XYZ / slippy map — `{z}/{x}/{y}.{ext}`.
+    Xyz,
+}
+
+/// Configuration for pyramid generation.
+#[derive(Debug, Clone)]
+pub struct PyramidPlanner {
+    image_width: u32,
+    image_height: u32,
+    tile_size: u32,
+    overlap: u32,
+    layout: Layout,
+}
+
+/// A complete pyramid plan ready for execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PyramidPlan {
+    pub image_width: u32,
+    pub image_height: u32,
+    pub tile_size: u32,
+    pub overlap: u32,
+    pub layout: Layout,
+    pub levels: Vec<LevelPlan>,
+}
+
+/// Plan for a single pyramid level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelPlan {
+    /// Level index (0 = smallest / most zoomed out).
+    pub level: u32,
+    /// Pixel dimensions at this level.
+    pub width: u32,
+    pub height: u32,
+    /// Number of tile columns.
+    pub cols: u32,
+    /// Number of tile rows.
+    pub rows: u32,
+}
+
+/// Coordinates identifying a single tile in the pyramid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TileCoord {
+    pub level: u32,
+    pub col: u32,
+    pub row: u32,
+}
+
+/// The pixel rectangle a tile covers within its level's image space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PyramidPlanner {
+    pub fn new(
+        image_width: u32,
+        image_height: u32,
+        tile_size: u32,
+        overlap: u32,
+        layout: Layout,
+    ) -> Result<Self, PlannerError> {
+        if image_width == 0 || image_height == 0 {
+            return Err(PlannerError::ZeroDimension {
+                width: image_width,
+                height: image_height,
+            });
+        }
+        if tile_size == 0 {
+            return Err(PlannerError::ZeroTileSize(tile_size));
+        }
+        if overlap >= tile_size {
+            return Err(PlannerError::OverlapTooLarge { overlap, tile_size });
+        }
+        Ok(Self {
+            image_width,
+            image_height,
+            tile_size,
+            overlap,
+            layout,
+        })
+    }
+
+    /// Compute the full pyramid plan.
+    pub fn plan(&self) -> PyramidPlan {
+        let levels = self.compute_levels();
+        PyramidPlan {
+            image_width: self.image_width,
+            image_height: self.image_height,
+            tile_size: self.tile_size,
+            overlap: self.overlap,
+            layout: self.layout,
+            levels,
+        }
+    }
+
+    fn compute_levels(&self) -> Vec<LevelPlan> {
+        let mut levels = Vec::new();
+        let mut w = self.image_width;
+        let mut h = self.image_height;
+
+        // Build from full resolution down to 1x1-ish
+        let mut dims = vec![(w, h)];
+        while w > 1 || h > 1 {
+            w = ceil_div(w, 2);
+            h = ceil_div(h, 2);
+            dims.push((w, h));
+        }
+
+        // Reverse so level 0 = smallest
+        dims.reverse();
+
+        for (level, &(w, h)) in dims.iter().enumerate() {
+            let (cols, rows) = self.tile_grid(w, h);
+            levels.push(LevelPlan {
+                level: level as u32,
+                width: w,
+                height: h,
+                cols,
+                rows,
+            });
+        }
+
+        levels
+    }
+
+    /// Compute the number of tile columns and rows for an image of the given dimensions.
+    fn tile_grid(&self, width: u32, height: u32) -> (u32, u32) {
+        if width == 0 || height == 0 {
+            return (0, 0);
+        }
+        let cols = ceil_div(width, self.tile_size);
+        let rows = ceil_div(height, self.tile_size);
+        (cols, rows)
+    }
+}
+
+impl PyramidPlan {
+    /// Total number of tiles across all levels.
+    pub fn total_tile_count(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|l| l.cols as u64 * l.rows as u64)
+            .sum()
+    }
+
+    /// Number of levels in the pyramid.
+    pub fn level_count(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// Iterate over all tile coordinates in the pyramid.
+    pub fn tile_coords(&self) -> impl Iterator<Item = TileCoord> + '_ {
+        self.levels.iter().flat_map(|level| {
+            (0..level.rows).flat_map(move |row| {
+                (0..level.cols).map(move |col| TileCoord {
+                    level: level.level,
+                    col,
+                    row,
+                })
+            })
+        })
+    }
+
+    /// Get the pixel rectangle for a tile, accounting for overlap.
+    ///
+    /// The rectangle describes where in the level's image space this tile
+    /// reads from. Edge tiles are clipped to the image boundary.
+    pub fn tile_rect(&self, coord: TileCoord) -> Option<TileRect> {
+        let level = self.levels.get(coord.level as usize)?;
+        if coord.col >= level.cols || coord.row >= level.rows {
+            return None;
+        }
+
+        let x_start = if coord.col == 0 {
+            0
+        } else {
+            coord.col * self.tile_size - self.overlap
+        };
+        let y_start = if coord.row == 0 {
+            0
+        } else {
+            coord.row * self.tile_size - self.overlap
+        };
+
+        let x_end_unclipped = if coord.col == 0 {
+            self.tile_size + self.overlap
+        } else {
+            (coord.col + 1) * self.tile_size + self.overlap
+        };
+        let y_end_unclipped = if coord.row == 0 {
+            self.tile_size + self.overlap
+        } else {
+            (coord.row + 1) * self.tile_size + self.overlap
+        };
+
+        let x_end = x_end_unclipped.min(level.width);
+        let y_end = y_end_unclipped.min(level.height);
+
+        Some(TileRect {
+            x: x_start,
+            y: y_start,
+            width: x_end - x_start,
+            height: y_end - y_start,
+        })
+    }
+
+    /// Generate the output path for a tile given the layout.
+    pub fn tile_path(&self, coord: TileCoord, extension: &str) -> Option<String> {
+        let level = self.levels.get(coord.level as usize)?;
+        if coord.col >= level.cols || coord.row >= level.rows {
+            return None;
+        }
+        match self.layout {
+            Layout::DeepZoom => Some(format!(
+                "{}/{}_{}.{}",
+                coord.level, coord.col, coord.row, extension
+            )),
+            Layout::Xyz => Some(format!(
+                "{}/{}/{}.{}",
+                coord.level, coord.col, coord.row, extension
+            )),
+        }
+    }
+
+    /// Generate a Deep Zoom `.dzi` manifest (XML).
+    pub fn dzi_manifest(&self, format: &str) -> Option<String> {
+        if self.layout != Layout::DeepZoom {
+            return None;
+        }
+        Some(format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <Image xmlns=\"http://schemas.microsoft.com/deepzoom/2008\"\n\
+             \x20 Format=\"{format}\"\n\
+             \x20 Overlap=\"{overlap}\"\n\
+             \x20 TileSize=\"{tile_size}\">\n\
+             \x20 <Size Width=\"{width}\" Height=\"{height}\"/>\n\
+             </Image>",
+            overlap = self.overlap,
+            tile_size = self.tile_size,
+            width = self.image_width,
+            height = self.image_height,
+        ))
+    }
+}
+
+impl LevelPlan {
+    /// Total tiles at this level.
+    pub fn tile_count(&self) -> u64 {
+        self.cols as u64 * self.rows as u64
+    }
+}
+
+impl TileCoord {
+    pub fn new(level: u32, col: u32, row: u32) -> Self {
+        Self { level, col, row }
+    }
+}
+
+fn ceil_div(a: u32, b: u32) -> u32 {
+    (a + b - 1) / b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_dimension_rejected() {
+        assert!(PyramidPlanner::new(0, 100, 256, 0, Layout::DeepZoom).is_err());
+        assert!(PyramidPlanner::new(100, 0, 256, 0, Layout::DeepZoom).is_err());
+    }
+
+    #[test]
+    fn zero_tile_size_rejected() {
+        assert!(PyramidPlanner::new(100, 100, 0, 0, Layout::DeepZoom).is_err());
+    }
+
+    #[test]
+    fn overlap_must_be_less_than_tile_size() {
+        assert!(PyramidPlanner::new(100, 100, 256, 256, Layout::DeepZoom).is_err());
+        assert!(PyramidPlanner::new(100, 100, 256, 300, Layout::DeepZoom).is_err());
+        assert!(PyramidPlanner::new(100, 100, 256, 255, Layout::DeepZoom).is_ok());
+    }
+
+    #[test]
+    fn single_pixel_image() {
+        let planner = PyramidPlanner::new(1, 1, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        assert_eq!(plan.level_count(), 1);
+        assert_eq!(plan.levels[0].width, 1);
+        assert_eq!(plan.levels[0].height, 1);
+        assert_eq!(plan.levels[0].cols, 1);
+        assert_eq!(plan.levels[0].rows, 1);
+        assert_eq!(plan.total_tile_count(), 1);
+    }
+
+    #[test]
+    fn image_smaller_than_tile() {
+        let planner = PyramidPlanner::new(100, 80, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        // Full resolution level should have 1x1 tile grid
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 100);
+        assert_eq!(top.height, 80);
+        assert_eq!(top.cols, 1);
+        assert_eq!(top.rows, 1);
+    }
+
+    #[test]
+    fn image_exactly_n_tiles() {
+        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 512);
+        assert_eq!(top.height, 512);
+        assert_eq!(top.cols, 2);
+        assert_eq!(top.rows, 2);
+    }
+
+    #[test]
+    fn image_not_multiple_of_tile() {
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 500);
+        assert_eq!(top.height, 300);
+        assert_eq!(top.cols, 2); // ceil(500/256)
+        assert_eq!(top.rows, 2); // ceil(300/256)
+    }
+
+    #[test]
+    fn non_square_image() {
+        let planner = PyramidPlanner::new(1000, 200, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 1000);
+        assert_eq!(top.height, 200);
+        assert_eq!(top.cols, 4);
+        assert_eq!(top.rows, 1);
+    }
+
+    #[test]
+    fn level_dimensions_halve_correctly() {
+        let planner = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+
+        // Top level = full resolution
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 1024);
+        assert_eq!(top.height, 768);
+
+        // Each level below should be ceil(prev/2)
+        for i in (1..plan.levels.len()).rev() {
+            let upper = &plan.levels[i];
+            let lower = &plan.levels[i - 1];
+            assert_eq!(lower.width, ceil_div(upper.width, 2));
+            assert_eq!(lower.height, ceil_div(upper.height, 2));
+        }
+
+        // Bottom level
+        assert_eq!(plan.levels[0].width, 1);
+        assert_eq!(plan.levels[0].height, 1);
+    }
+
+    #[test]
+    fn level_indices_are_sequential() {
+        let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        for (i, level) in plan.levels.iter().enumerate() {
+            assert_eq!(level.level, i as u32);
+        }
+    }
+
+    #[test]
+    fn total_tile_count_sums_all_levels() {
+        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let manual_count: u64 = plan.levels.iter().map(|l| l.cols as u64 * l.rows as u64).sum();
+        assert_eq!(plan.total_tile_count(), manual_count);
+    }
+
+    #[test]
+    fn tile_coords_count_matches_total() {
+        let planner = PyramidPlanner::new(800, 600, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let coord_count = plan.tile_coords().count() as u64;
+        assert_eq!(coord_count, plan.total_tile_count());
+    }
+
+    #[test]
+    fn tile_rect_no_overlap() {
+        let planner = PyramidPlanner::new(600, 400, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+
+        // Tile (0,0) — top-left
+        let r = plan.tile_rect(TileCoord::new(top.level, 0, 0)).unwrap();
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 0);
+        assert_eq!(r.width, 256);
+        assert_eq!(r.height, 256);
+
+        // Tile (1,0) — middle column
+        let r = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
+        assert_eq!(r.x, 256);
+        assert_eq!(r.y, 0);
+        assert_eq!(r.width, 256);
+        assert_eq!(r.height, 256);
+
+        // Tile (2,1) — bottom-right, clipped to image boundary
+        // cols=ceil(600/256)=3, rows=ceil(400/256)=2
+        let r = plan.tile_rect(TileCoord::new(top.level, 2, 1)).unwrap();
+        assert_eq!(r.x, 512);
+        assert_eq!(r.y, 256);
+        assert_eq!(r.width, 600 - 512); // 88
+        assert_eq!(r.height, 400 - 256); // 144
+    }
+
+    #[test]
+    fn tile_rect_with_overlap() {
+        let planner = PyramidPlanner::new(600, 400, 256, 1, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+
+        // Tile (0,0) — no left/top overlap, right/bottom overlap = 1
+        let r = plan.tile_rect(TileCoord::new(top.level, 0, 0)).unwrap();
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 0);
+        assert_eq!(r.width, 256 + 1); // tile_size + overlap
+        assert_eq!(r.height, 256 + 1);
+
+        // Tile (1,0) — has left overlap
+        let r = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
+        assert_eq!(r.x, 256 - 1); // tile_size - overlap
+        assert_eq!(r.width, (600 - (256 - 1)).min(256 + 2)); // clipped
+    }
+
+    #[test]
+    fn tile_rect_out_of_bounds_returns_none() {
+        let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert!(plan.tile_rect(TileCoord::new(top.level, 1, 0)).is_none());
+        assert!(plan.tile_rect(TileCoord::new(top.level, 0, 1)).is_none());
+        assert!(plan.tile_rect(TileCoord::new(999, 0, 0)).is_none());
+    }
+
+    #[test]
+    fn tile_rects_cover_full_image_no_overlap() {
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+
+        // Verify every pixel is covered by exactly one tile
+        let mut coverage = vec![0u32; top.width as usize * top.height as usize];
+
+        for row in 0..top.rows {
+            for col in 0..top.cols {
+                let r = plan
+                    .tile_rect(TileCoord::new(top.level, col, row))
+                    .unwrap();
+                for y in r.y..r.y + r.height {
+                    for x in r.x..r.x + r.width {
+                        coverage[y as usize * top.width as usize + x as usize] += 1;
+                    }
+                }
+            }
+        }
+
+        for (i, &count) in coverage.iter().enumerate() {
+            assert_eq!(
+                count, 1,
+                "Pixel ({}, {}) covered {} times",
+                i % top.width as usize,
+                i / top.width as usize,
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn deep_zoom_tile_path() {
+        let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        let path = plan
+            .tile_path(TileCoord::new(top.level, 0, 0), "jpeg")
+            .unwrap();
+        assert_eq!(path, format!("{}/0_0.jpeg", top.level));
+    }
+
+    #[test]
+    fn xyz_tile_path() {
+        let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::Xyz).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        let path = plan
+            .tile_path(TileCoord::new(top.level, 3, 5), "png")
+            .unwrap();
+        assert_eq!(path, format!("{}/3/5.png", top.level));
+    }
+
+    #[test]
+    fn tile_path_out_of_bounds_returns_none() {
+        let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        assert!(plan.tile_path(TileCoord::new(999, 0, 0), "png").is_none());
+    }
+
+    #[test]
+    fn dzi_manifest_structure() {
+        let planner = PyramidPlanner::new(1024, 768, 256, 1, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let manifest = plan.dzi_manifest("jpeg").unwrap();
+
+        assert!(manifest.contains("Format=\"jpeg\""));
+        assert!(manifest.contains("Overlap=\"1\""));
+        assert!(manifest.contains("TileSize=\"256\""));
+        assert!(manifest.contains("Width=\"1024\""));
+        assert!(manifest.contains("Height=\"768\""));
+    }
+
+    #[test]
+    fn dzi_manifest_returns_none_for_xyz() {
+        let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::Xyz).unwrap();
+        let plan = planner.plan();
+        assert!(plan.dzi_manifest("png").is_none());
+    }
+
+    #[test]
+    fn plan_is_deterministic() {
+        let planner = PyramidPlanner::new(4000, 3000, 256, 1, Layout::DeepZoom).unwrap();
+        let plan_a = planner.plan();
+        let plan_b = planner.plan();
+        assert_eq!(plan_a, plan_b);
+    }
+
+    #[test]
+    fn large_image_level_count() {
+        // 50000x50000 — should not panic or overflow
+        let planner = PyramidPlanner::new(50_000, 50_000, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        // log2(50000) ≈ 15.6, so ~16 levels + level 0
+        assert!(plan.level_count() >= 16);
+        assert!(plan.level_count() <= 18);
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 50_000);
+        assert_eq!(top.height, 50_000);
+    }
+
+    #[test]
+    fn different_tile_sizes() {
+        for tile_size in [64, 128, 256, 512, 1024] {
+            let planner =
+                PyramidPlanner::new(2048, 1536, tile_size, 0, Layout::DeepZoom).unwrap();
+            let plan = planner.plan();
+            let top = plan.levels.last().unwrap();
+            assert_eq!(top.cols, ceil_div(2048, tile_size));
+            assert_eq!(top.rows, ceil_div(1536, tile_size));
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn tile_coverage_no_overlap(
+            w in 1u32..2048,
+            h in 1u32..2048,
+            tile_size in 1u32..512,
+        ) {
+            let planner = PyramidPlanner::new(w, h, tile_size, 0, Layout::DeepZoom).unwrap();
+            let plan = planner.plan();
+
+            for level in &plan.levels {
+                // Every pixel at this level must be covered exactly once
+                let mut min_x_covered = level.width;
+                let mut min_y_covered = level.height;
+                let mut max_x_covered = 0u32;
+                let mut max_y_covered = 0u32;
+                let mut total_area = 0u64;
+
+                for row in 0..level.rows {
+                    for col in 0..level.cols {
+                        let r = plan.tile_rect(TileCoord::new(level.level, col, row)).unwrap();
+                        min_x_covered = min_x_covered.min(r.x);
+                        min_y_covered = min_y_covered.min(r.y);
+                        max_x_covered = max_x_covered.max(r.x + r.width);
+                        max_y_covered = max_y_covered.max(r.y + r.height);
+                        total_area += r.width as u64 * r.height as u64;
+                    }
+                }
+
+                // Coverage starts at (0,0)
+                prop_assert_eq!(min_x_covered, 0, "Level {} x gap at start", level.level);
+                prop_assert_eq!(min_y_covered, 0, "Level {} y gap at start", level.level);
+                // Coverage reaches image boundary
+                prop_assert_eq!(max_x_covered, level.width, "Level {} x short", level.level);
+                prop_assert_eq!(max_y_covered, level.height, "Level {} y short", level.level);
+                // No overlap means total area == image area
+                prop_assert_eq!(
+                    total_area,
+                    level.width as u64 * level.height as u64,
+                    "Level {} area mismatch (overlap/gap)",
+                    level.level,
+                );
+            }
+        }
+
+        #[test]
+        fn level_halving_invariant(w in 2u32..10000, h in 2u32..10000) {
+            let planner = PyramidPlanner::new(w, h, 256, 0, Layout::DeepZoom).unwrap();
+            let plan = planner.plan();
+
+            for i in 1..plan.levels.len() {
+                let upper = &plan.levels[i];
+                let lower = &plan.levels[i - 1];
+                prop_assert_eq!(lower.width, ceil_div(upper.width, 2));
+                prop_assert_eq!(lower.height, ceil_div(upper.height, 2));
+            }
+
+            // Bottom level is 1x1
+            prop_assert_eq!(plan.levels[0].width, 1);
+            prop_assert_eq!(plan.levels[0].height, 1);
+            // Top level is original
+            let top = plan.levels.last().unwrap();
+            prop_assert_eq!(top.width, w);
+            prop_assert_eq!(top.height, h);
+        }
+
+        #[test]
+        fn plan_determinism(
+            w in 1u32..5000,
+            h in 1u32..5000,
+            tile_size in 1u32..512,
+        ) {
+            let planner = PyramidPlanner::new(w, h, tile_size, 0, Layout::DeepZoom).unwrap();
+            let a = planner.plan();
+            let b = planner.plan();
+            prop_assert_eq!(a, b);
+        }
+    }
+}

@@ -1,0 +1,23 @@
+[package]
+name = "libviprs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[features]
+default = []
+pdfium = ["dep:pdfium-render"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+lopdf = "0.36"
+pdfium-render = { version = "0.8", optional = true }
+thiserror = "2"
+
+[dev-dependencies]
+loom = "0.7"
+proptest = "1"
+tempfile = "3"

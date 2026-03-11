@@ -1,0 +1,27 @@
+[package]
+name = "libviprs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.libviprs]
+path = ".."
+
+[[bin]]
+name = "fuzz_decode"
+path = "fuzz_targets/fuzz_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pdf_render"
+path = "fuzz_targets/fuzz_pdf_render.rs"
+doc = false
+
+[workspace]
