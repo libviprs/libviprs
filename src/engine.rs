@@ -114,14 +114,8 @@ pub fn generate_pyramid_observed(
         }
 
         // Extract and emit tiles for this level
-        let level_tiles = extract_and_emit_level(
-            &current,
-            plan,
-            level_idx as u32,
-            sink,
-            config,
-            observer,
-        )?;
+        let level_tiles =
+            extract_and_emit_level(&current, plan, level_idx as u32, sink, config, observer)?;
         tiles_produced += level_tiles;
 
         observer.on_event(EngineEvent::LevelCompleted {
@@ -362,7 +356,11 @@ mod tests {
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
             assert_eq!(tile.width, rect.width, "Width mismatch at {:?}", tile.coord);
-            assert_eq!(tile.height, rect.height, "Height mismatch at {:?}", tile.coord);
+            assert_eq!(
+                tile.height, rect.height,
+                "Height mismatch at {:?}",
+                tile.coord
+            );
         }
     }
 
@@ -386,11 +384,16 @@ mod tests {
             let mut tiles = sink.tiles();
             tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
-            assert_eq!(tiles.len(), ref_tiles.len(), "Tile count mismatch at concurrency={concurrency}");
+            assert_eq!(
+                tiles.len(),
+                ref_tiles.len(),
+                "Tile count mismatch at concurrency={concurrency}"
+            );
 
             for (ref_t, t) in ref_tiles.iter().zip(tiles.iter()) {
                 assert_eq!(ref_t.coord, t.coord);
-                assert_eq!(ref_t.data, t.data,
+                assert_eq!(
+                    ref_t.data, t.data,
                     "Tile data diverged at {:?} with concurrency={concurrency}",
                     t.coord
                 );
@@ -552,7 +555,10 @@ mod tests {
         let events = obs.events();
         let finished = events.last().unwrap();
         match finished {
-            EngineEvent::Finished { total_tiles, levels } => {
+            EngineEvent::Finished {
+                total_tiles,
+                levels,
+            } => {
                 assert_eq!(*total_tiles, plan.total_tile_count());
                 assert_eq!(*levels, plan.level_count() as u32);
             }

@@ -112,14 +112,8 @@ mod tests {
         {
             let encoder = image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
             let data = vec![128u8; w as usize * h as usize * 3];
-            image::ImageEncoder::write_image(
-                encoder,
-                &data,
-                w,
-                h,
-                image::ColorType::Rgb8.into(),
-            )
-            .unwrap();
+            image::ImageEncoder::write_image(encoder, &data, w, h, image::ColorType::Rgb8.into())
+                .unwrap();
         }
         buf
     }
@@ -130,14 +124,8 @@ mod tests {
             let encoder =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut buf), 95);
             let data = vec![128u8; w as usize * h as usize * 3];
-            image::ImageEncoder::write_image(
-                encoder,
-                &data,
-                w,
-                h,
-                image::ColorType::Rgb8.into(),
-            )
-            .unwrap();
+            image::ImageEncoder::write_image(encoder, &data, w, h, image::ColorType::Rgb8.into())
+                .unwrap();
         }
         buf
     }
@@ -184,11 +172,26 @@ mod tests {
 
     #[test]
     fn color_type_mapping() {
-        assert_eq!(color_type_to_format(image::ColorType::L8).unwrap(), PixelFormat::Gray8);
-        assert_eq!(color_type_to_format(image::ColorType::Rgb8).unwrap(), PixelFormat::Rgb8);
-        assert_eq!(color_type_to_format(image::ColorType::Rgba8).unwrap(), PixelFormat::Rgba8);
-        assert_eq!(color_type_to_format(image::ColorType::Rgb16).unwrap(), PixelFormat::Rgb16);
-        assert_eq!(color_type_to_format(image::ColorType::La8).unwrap(), PixelFormat::Rgba8);
+        assert_eq!(
+            color_type_to_format(image::ColorType::L8).unwrap(),
+            PixelFormat::Gray8
+        );
+        assert_eq!(
+            color_type_to_format(image::ColorType::Rgb8).unwrap(),
+            PixelFormat::Rgb8
+        );
+        assert_eq!(
+            color_type_to_format(image::ColorType::Rgba8).unwrap(),
+            PixelFormat::Rgba8
+        );
+        assert_eq!(
+            color_type_to_format(image::ColorType::Rgb16).unwrap(),
+            PixelFormat::Rgb16
+        );
+        assert_eq!(
+            color_type_to_format(image::ColorType::La8).unwrap(),
+            PixelFormat::Rgba8
+        );
     }
 
     #[test]

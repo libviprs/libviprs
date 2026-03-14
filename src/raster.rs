@@ -3,7 +3,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RasterError {
-    #[error("dimensions {width}x{height} with format {format:?} require {expected} bytes, got {actual}")]
+    #[error(
+        "dimensions {width}x{height} with format {format:?} require {expected} bytes, got {actual}"
+    )]
     BufferSizeMismatch {
         width: u32,
         height: u32,
@@ -35,7 +37,12 @@ pub struct Raster {
 
 impl Raster {
     /// Create a new raster from existing pixel data.
-    pub fn new(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Result<Self, RasterError> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        data: Vec<u8>,
+    ) -> Result<Self, RasterError> {
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -49,7 +56,12 @@ impl Raster {
                 actual: data.len(),
             });
         }
-        Ok(Self { width, height, format, data })
+        Ok(Self {
+            width,
+            height,
+            format,
+            data,
+        })
     }
 
     /// Create a raster filled with zeros.
@@ -249,9 +261,9 @@ mod tests {
 
         // First pixel of extracted region should be (2,3) from original
         let bpp = 3;
-        assert_eq!(sub.data()[0], 2);  // x
-        assert_eq!(sub.data()[1], 3);  // y
-        assert_eq!(sub.data()[2], 5);  // x+y
+        assert_eq!(sub.data()[0], 2); // x
+        assert_eq!(sub.data()[1], 3); // y
+        assert_eq!(sub.data()[2], 5); // x+y
         // Last pixel: (5,7) in original
         let last = (4 * 5 - 1) * bpp;
         assert_eq!(sub.data()[last], 5);

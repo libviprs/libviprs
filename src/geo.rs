@@ -55,11 +55,7 @@ impl GeoTransform {
     /// - `pixel_size_x`: geographic units per pixel in X (typically positive)
     /// - `pixel_size_y`: geographic units per pixel in Y (typically negative
     ///   for top-down rasters)
-    pub fn from_origin_and_scale(
-        origin: GeoCoord,
-        pixel_size_x: f64,
-        pixel_size_y: f64,
-    ) -> Self {
+    pub fn from_origin_and_scale(origin: GeoCoord, pixel_size_x: f64, pixel_size_y: f64) -> Self {
         Self {
             a: pixel_size_x,
             b: 0.0,
@@ -89,19 +85,15 @@ impl GeoTransform {
 
         // Solve for a, b, c (geo_x coefficients)
         let a = (g0.x * (p1.y - p2.y) - g1.x * (p0.y - p2.y) + g2.x * (p0.y - p1.y)) * inv_det;
-        let b =
-            (p0.x * (g1.x - g2.x) - p1.x * (g0.x - g2.x) + p2.x * (g0.x - g1.x)) * inv_det;
-        let c = (p0.x * (p1.y * g2.x - p2.y * g1.x)
-            - p1.x * (p0.y * g2.x - p2.y * g0.x)
+        let b = (p0.x * (g1.x - g2.x) - p1.x * (g0.x - g2.x) + p2.x * (g0.x - g1.x)) * inv_det;
+        let c = (p0.x * (p1.y * g2.x - p2.y * g1.x) - p1.x * (p0.y * g2.x - p2.y * g0.x)
             + p2.x * (p0.y * g1.x - p1.y * g0.x))
             * inv_det;
 
         // Solve for d, e, f (geo_y coefficients)
         let d = (g0.y * (p1.y - p2.y) - g1.y * (p0.y - p2.y) + g2.y * (p0.y - p1.y)) * inv_det;
-        let e =
-            (p0.x * (g1.y - g2.y) - p1.x * (g0.y - g2.y) + p2.x * (g0.y - g1.y)) * inv_det;
-        let f = (p0.x * (p1.y * g2.y - p2.y * g1.y)
-            - p1.x * (p0.y * g2.y - p2.y * g0.y)
+        let e = (p0.x * (g1.y - g2.y) - p1.x * (g0.y - g2.y) + p2.x * (g0.y - g1.y)) * inv_det;
+        let f = (p0.x * (p1.y * g2.y - p2.y * g1.y) - p1.x * (p0.y * g2.y - p2.y * g0.y)
             + p2.x * (p0.y * g1.y - p1.y * g0.y))
             * inv_det;
 
@@ -195,12 +187,7 @@ impl GeoTransform {
     }
 
     /// Compute the geographic coordinate for the center of a tile.
-    pub fn tile_center(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-        tile_size: u32,
-    ) -> GeoCoord {
+    pub fn tile_center(&self, tile_x: u32, tile_y: u32, tile_size: u32) -> GeoCoord {
         let px = (tile_x as f64 + 0.5) * tile_size as f64;
         let py = (tile_y as f64 + 0.5) * tile_size as f64;
         self.pixel_to_geo(PixelCoord { x: px, y: py })
@@ -287,11 +274,7 @@ mod tests {
     #[test]
     fn simple_scale_translate() {
         // 1 pixel = 0.1 degrees, origin at (-122.0, 37.0), Y goes down
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(-122.0, 37.0),
-            0.1,
-            -0.1,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(-122.0, 37.0), 0.1, -0.1);
 
         let geo = t.pixel_to_geo(PixelCoord::new(0.0, 0.0));
         assert_geo_eq(geo, GeoCoord::new(-122.0, 37.0));
@@ -302,11 +285,7 @@ mod tests {
 
     #[test]
     fn round_trip_pixel_geo_pixel() {
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(-122.4, 37.8),
-            0.001,
-            -0.001,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(-122.4, 37.8), 0.001, -0.001);
 
         let original = PixelCoord::new(500.0, 300.0);
         let geo = t.pixel_to_geo(original);
@@ -316,11 +295,7 @@ mod tests {
 
     #[test]
     fn round_trip_geo_pixel_geo() {
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(0.0, 0.0),
-            0.05,
-            -0.05,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(0.0, 0.0), 0.05, -0.05);
 
         let original = GeoCoord::new(2.5, -1.5);
         let pixel = t.geo_to_pixel(original).unwrap();
@@ -397,11 +372,7 @@ mod tests {
 
     #[test]
     fn inverse_exists() {
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(10.0, 20.0),
-            0.5,
-            -0.5,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(10.0, 20.0), 0.5, -0.5);
         let inv = t.inverse().unwrap();
         let p = PixelCoord::new(100.0, 200.0);
         let g = t.pixel_to_geo(p);
@@ -423,11 +394,7 @@ mod tests {
 
     #[test]
     fn image_bounds_simple() {
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(-122.0, 37.0),
-            0.001,
-            -0.001,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(-122.0, 37.0), 0.001, -0.001);
         let bounds = t.image_bounds(1000, 800);
         assert!(approx_eq(bounds.min.x, -122.0));
         assert!(approx_eq(bounds.max.x, -121.0));
@@ -437,11 +404,7 @@ mod tests {
 
     #[test]
     fn image_bounds_contains() {
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(0.0, 10.0),
-            0.01,
-            -0.01,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(0.0, 10.0), 0.01, -0.01);
         let bounds = t.image_bounds(100, 100);
         assert!(bounds.contains(GeoCoord::new(0.5, 9.5)));
         assert!(!bounds.contains(GeoCoord::new(-1.0, 9.5)));
@@ -472,11 +435,7 @@ mod tests {
 
     #[test]
     fn tile_center_calculation() {
-        let t = GeoTransform::from_origin_and_scale(
-            GeoCoord::new(0.0, 100.0),
-            1.0,
-            -1.0,
-        );
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(0.0, 100.0), 1.0, -1.0);
         // Tile (0,0) at tile_size=256: center pixel = (128, 128)
         let center = t.tile_center(0, 0, 256);
         assert!(approx_eq(center.x, 128.0));

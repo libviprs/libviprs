@@ -11,10 +11,10 @@ pub mod resize;
 pub mod sink;
 pub mod source;
 
-pub use engine::{generate_pyramid, generate_pyramid_observed, EngineConfig, EngineResult};
+pub use engine::{EngineConfig, EngineResult, generate_pyramid, generate_pyramid_observed};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
-pub use pdf::{extract_page_image, pdf_info, PdfInfo};
+pub use pdf::{PdfInfo, extract_page_image, pdf_info};
 pub use pixel::PixelFormat;
 pub use planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
 pub use raster::{Raster, RegionView};

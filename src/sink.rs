@@ -128,7 +128,9 @@ impl TileSink for SlowSink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileFormat {
     Png,
-    Jpeg { quality: u8 },
+    Jpeg {
+        quality: u8,
+    },
     /// Raw pixel bytes (no encoding). Fastest, useful for pipelines that
     /// encode later or for testing.
     Raw,
@@ -212,9 +214,7 @@ impl TileSink for FsSink {
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
-fn color_type_for_format(
-    fmt: crate::pixel::PixelFormat,
-) -> Result<image::ColorType, SinkError> {
+fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
     use crate::pixel::PixelFormat;
     match fmt {
         PixelFormat::Gray8 => Ok(image::ColorType::L8),
@@ -243,10 +243,8 @@ pub(crate) fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
 
 fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-        std::io::Cursor::new(&mut buf),
-        quality,
-    );
+    let encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
     let ct = color_type_for_format(raster.format())?;
     image::ImageEncoder::write_image(
         encoder,
@@ -316,7 +314,11 @@ mod tests {
         let plan = planner.plan();
         let top = plan.levels.last().unwrap();
 
-        let sink = FsSink::new(dir.path().join("output_files"), plan.clone(), TileFormat::Raw);
+        let sink = FsSink::new(
+            dir.path().join("output_files"),
+            plan.clone(),
+            TileFormat::Raw,
+        );
 
         let tile = Tile {
             coord: TileCoord::new(top.level, 0, 0),
@@ -327,7 +329,10 @@ mod tests {
         let expected_path = dir
             .path()
             .join(format!("output_files/{}/0_0.raw", top.level));
-        assert!(expected_path.exists(), "Tile file not found at {expected_path:?}");
+        assert!(
+            expected_path.exists(),
+            "Tile file not found at {expected_path:?}"
+        );
 
         let contents = std::fs::read(&expected_path).unwrap();
         assert_eq!(contents.len(), 8 * 8 * 3);
@@ -388,7 +393,10 @@ mod tests {
         sink.finish().unwrap();
 
         let dzi_path = dir.path().join("tiles.dzi");
-        assert!(!dzi_path.exists(), "DZI should not be written for XYZ layout");
+        assert!(
+            !dzi_path.exists(),
+            "DZI should not be written for XYZ layout"
+        );
     }
 
     #[test]

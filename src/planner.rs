@@ -397,7 +397,11 @@ mod tests {
     fn total_tile_count_sums_all_levels() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let manual_count: u64 = plan.levels.iter().map(|l| l.cols as u64 * l.rows as u64).sum();
+        let manual_count: u64 = plan
+            .levels
+            .iter()
+            .map(|l| l.cols as u64 * l.rows as u64)
+            .sum();
         assert_eq!(plan.total_tile_count(), manual_count);
     }
 
@@ -478,9 +482,7 @@ mod tests {
 
         for row in 0..top.rows {
             for col in 0..top.cols {
-                let r = plan
-                    .tile_rect(TileCoord::new(top.level, col, row))
-                    .unwrap();
+                let r = plan.tile_rect(TileCoord::new(top.level, col, row)).unwrap();
                 for y in r.y..r.y + r.height {
                     for x in r.x..r.x + r.width {
                         coverage[y as usize * top.width as usize + x as usize] += 1;
@@ -491,7 +493,8 @@ mod tests {
 
         for (i, &count) in coverage.iter().enumerate() {
             assert_eq!(
-                count, 1,
+                count,
+                1,
                 "Pixel ({}, {}) covered {} times",
                 i % top.width as usize,
                 i / top.width as usize,
@@ -573,8 +576,7 @@ mod tests {
     #[test]
     fn different_tile_sizes() {
         for tile_size in [64, 128, 256, 512, 1024] {
-            let planner =
-                PyramidPlanner::new(2048, 1536, tile_size, 0, Layout::DeepZoom).unwrap();
+            let planner = PyramidPlanner::new(2048, 1536, tile_size, 0, Layout::DeepZoom).unwrap();
             let plan = planner.plan();
             let top = plan.levels.last().unwrap();
             assert_eq!(top.cols, ceil_div(2048, tile_size));

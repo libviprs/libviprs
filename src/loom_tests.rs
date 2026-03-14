@@ -12,7 +12,7 @@
 #[cfg(loom)]
 mod tests {
     use loom::sync::atomic::{AtomicUsize, Ordering};
-    use loom::sync::{Arc, Mutex, Condvar};
+    use loom::sync::{Arc, Condvar, Mutex};
     use loom::thread;
 
     /// A bounded queue simulating the engine's tile channel.

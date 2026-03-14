@@ -94,8 +94,7 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
             let sx0 = (dx as u64 * src_w as u64 / dst_w as u64) as u32;
             let sy0 = (dy as u64 * src_h as u64 / dst_h as u64) as u32;
             let sx1 = (((dx + 1) as u64 * src_w as u64 + dst_w as u64 - 1) / dst_w as u64) as u32;
-            let sy1 =
-                (((dy + 1) as u64 * src_h as u64 + dst_h as u64 - 1) / dst_h as u64) as u32;
+            let sy1 = (((dy + 1) as u64 * src_h as u64 + dst_h as u64 - 1) / dst_h as u64) as u32;
             let sx1 = sx1.min(src_w);
             let sy1 = sy1.min(src_h);
 
@@ -217,11 +216,7 @@ mod tests {
 
     #[test]
     fn half_preserves_format() {
-        for fmt in [
-            PixelFormat::Gray8,
-            PixelFormat::Rgb8,
-            PixelFormat::Rgba8,
-        ] {
+        for fmt in [PixelFormat::Gray8, PixelFormat::Rgb8, PixelFormat::Rgba8] {
             let bpp = fmt.bytes_per_pixel();
             let pixel: Vec<u8> = (0..bpp).map(|i| (i * 50) as u8).collect();
             let src = solid_raster(8, 8, &pixel, fmt);

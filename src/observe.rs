@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::planner::TileCoord;
 
@@ -7,7 +7,12 @@ use crate::planner::TileCoord;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
     /// A level is about to be processed.
-    LevelStarted { level: u32, width: u32, height: u32, tile_count: u64 },
+    LevelStarted {
+        level: u32,
+        width: u32,
+        height: u32,
+        tile_count: u64,
+    },
     /// A tile was produced and sent to the sink.
     TileCompleted { coord: TileCoord },
     /// A level finished processing.
@@ -155,8 +160,17 @@ mod tests {
             levels: 6,
         });
         let events = obs.events();
-        assert!(matches!(events[0], EngineEvent::LevelStarted { level: 5, .. }));
-        assert!(matches!(events[1], EngineEvent::Finished { total_tiles: 10, .. }));
+        assert!(matches!(
+            events[0],
+            EngineEvent::LevelStarted { level: 5, .. }
+        ));
+        assert!(matches!(
+            events[1],
+            EngineEvent::Finished {
+                total_tiles: 10,
+                ..
+            }
+        ));
     }
 
     #[test]

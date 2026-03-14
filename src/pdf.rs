@@ -48,8 +48,7 @@ pub struct PdfPageInfo {
 
 /// Get information about a PDF document.
 pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
-    let doc =
-        lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
     let page_count = pages_map.len();
     let mut pages = Vec::with_capacity(page_count);
@@ -76,8 +75,7 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
 /// a single large JPEG or JPEG2000 image. We extract the raw compressed stream
 /// and decode it with the `image` crate, avoiding any PDF rendering.
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
-    let doc =
-        lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
     let total = pages_map.len();
 
@@ -159,7 +157,10 @@ fn extract_largest_image(
         // Get the image data (may be compressed with filters like DCTDecode/FlateDecode)
         let data = get_image_data(doc, stream)?;
 
-        if best.as_ref().is_none_or(|(best_size, _)| pixel_count > *best_size) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_size, _)| pixel_count > *best_size)
+        {
             best = Some((pixel_count, data));
         }
     }
@@ -184,10 +185,7 @@ enum ImageData {
 }
 
 /// Get image data from a PDF stream, handling common filters.
-fn get_image_data(
-    doc: &lopdf::Document,
-    stream: &lopdf::Stream,
-) -> Result<ImageData, PdfError> {
+fn get_image_data(doc: &lopdf::Document, stream: &lopdf::Stream) -> Result<ImageData, PdfError> {
     let filter: &[u8] = stream
         .dict
         .get(b"Filter")
@@ -262,8 +260,7 @@ fn get_image_data(
             let mut data = decompressed;
             data.truncate(expected);
 
-            let raster = Raster::new(width, height, format, data)
-                .map_err(PdfError::Raster)?;
+            let raster = Raster::new(width, height, format, data).map_err(PdfError::Raster)?;
             Ok(ImageData::Decoded(raster))
         }
         b"JPXDecode" => {
@@ -419,11 +416,7 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 /// extracted as embedded images. Requires the `pdfium` feature and a PDFium
 /// library available at runtime.
 #[cfg(feature = "pdfium")]
-pub fn render_page_pdfium(
-    path: &Path,
-    page: usize,
-    dpi: u32,
-) -> Result<Raster, PdfError> {
+pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
     use pdfium_render::prelude::*;
 
     let pdfium = Pdfium::default();
@@ -477,7 +470,7 @@ mod tests {
         assert_eq!(raster.height(), 1);
         assert_eq!(raster.format(), PixelFormat::Rgb8);
         let data = raster.data();
-        assert_eq!(data[0], 0);   // R
+        assert_eq!(data[0], 0); // R
         assert_eq!(data[1], 255); // G
         assert_eq!(data[2], 255); // B
     }
