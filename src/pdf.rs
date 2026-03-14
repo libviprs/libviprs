@@ -486,8 +486,8 @@ fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
     use pdfium_render::prelude::*;
 
     #[cfg(feature = "pdfium-static")]
-    let bindings = Pdfium::bind_to_statically_linked_library()
-        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+    let bindings =
+        Pdfium::bind_to_statically_linked_library().map_err(|e| PdfError::Pdfium(e.to_string()))?;
     #[cfg(not(feature = "pdfium-static"))]
     let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
         .or_else(|_| Pdfium::bind_to_system_library())
@@ -600,8 +600,7 @@ pub fn render_page_pdfium_budgeted(
 
     // Compute the DPI that fits within the pixel budget
     let scale_at_max = max_dpi as f64 / 72.0;
-    let pixels_at_max =
-        (width_pts * scale_at_max) as u64 * (height_pts * scale_at_max) as u64;
+    let pixels_at_max = (width_pts * scale_at_max) as u64 * (height_pts * scale_at_max) as u64;
 
     let (dpi_used, capped) = if pixels_at_max <= max_pixels {
         (max_dpi, false)
