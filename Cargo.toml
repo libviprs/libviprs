@@ -10,6 +10,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 [features]
 default = []
 pdfium = ["dep:pdfium-render"]
+pdfium-static = ["pdfium", "pdfium-render/static"]
 
 [dependencies]
 flate2 = "1"
