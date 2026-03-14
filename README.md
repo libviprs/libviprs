@@ -80,10 +80,31 @@ println!("{} tiles across {} levels", result.tiles_produced, result.levels_proce
 ## CI
 
 GitHub Actions runs on every push/PR:
-- `cargo test` — unit tests
-- `cargo clippy -D warnings` — lint
 - `cargo fmt --check` — formatting
+- `cargo clippy -D warnings` — lint (default + `pdfium` feature)
+- `cargo test` — unit tests
 - `cargo +nightly miri test` — undefined behavior detection
 - Loom tests (on push + PRs labeled `concurrency`)
 
 See `.github/workflows/ci.yml`.
+
+### Running CI locally
+
+A `Makefile` mirrors the full CI pipeline. Run everything with:
+
+```sh
+make ci
+```
+
+Or run individual checks:
+
+```sh
+make fmt      # check formatting
+make clippy   # clippy (default + pdfium features)
+make test     # unit tests
+make miri     # miri (requires nightly + miri component)
+make loom     # loom concurrency tests
+```
+
+> **Prerequisites:** `make miri` requires the nightly toolchain with the miri component.
+> Install with: `rustup toolchain install nightly --component miri`

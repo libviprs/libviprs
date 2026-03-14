@@ -271,6 +271,12 @@ mod tests {
 
     // -- Scale + translate (no rotation) --
 
+    /**
+     * Tests that a simple scale+translate transform maps pixels to geo coords.
+     * Works by creating a transform with known origin (-122, 37) and 0.1 deg/px,
+     * then verifying pixel (0,0) maps to the origin and pixel (10,5) maps to
+     * the expected offset (-121.0, 36.5) based on the scale factors.
+     */
     #[test]
     fn simple_scale_translate() {
         // 1 pixel = 0.1 degrees, origin at (-122.0, 37.0), Y goes down
@@ -283,6 +289,12 @@ mod tests {
         assert_geo_eq(geo, GeoCoord::new(-121.0, 36.5));
     }
 
+    /**
+     * Tests that pixel_to_geo followed by geo_to_pixel recovers the original pixel.
+     * Works because the transform is invertible (non-zero scale), so composing
+     * forward and inverse must yield identity within floating-point tolerance.
+     * Input: pixel (500, 300) -> geo -> Output: pixel (500, 300).
+     */
     #[test]
     fn round_trip_pixel_geo_pixel() {
         let t = GeoTransform::from_origin_and_scale(GeoCoord::new(-122.4, 37.8), 0.001, -0.001);
@@ -293,6 +305,12 @@ mod tests {
         assert_pixel_eq(back, original);
     }
 
+    /**
+     * Tests that geo_to_pixel followed by pixel_to_geo recovers the original geo coord.
+     * Works because the forward transform is the exact inverse of geo_to_pixel,
+     * so the round trip must be lossless within floating-point tolerance.
+     * Input: geo (2.5, -1.5) -> pixel -> Output: geo (2.5, -1.5).
+     */
     #[test]
     fn round_trip_geo_pixel_geo() {
         let t = GeoTransform::from_origin_and_scale(GeoCoord::new(0.0, 0.0), 0.05, -0.05);
@@ -305,6 +323,12 @@ mod tests {
 
     // -- GCPs --
 
+    /**
+     * Tests that GCPs forming an identity mapping produce an identity transform.
+     * Works by supplying three GCPs where pixel coords equal geo coords, so the
+     * solved affine must be the identity matrix. Any arbitrary point like (5, 3)
+     * should map to itself.
+     */
     #[test]
     fn from_gcps_identity() {
         // Pixel coords == geo coords
@@ -321,6 +345,12 @@ mod tests {
         );
     }
 
+    /**
+     * Tests GCP-derived transform with a 2x scale and translation offset.
+     * Works by providing three GCPs that encode scale=2 and offset=(10, 20),
+     * then checking that the midpoint pixel (50, 50) maps to the expected
+     * geo coord (110, 120) = (50*2+10, 50*2+20).
+     */
     #[test]
     fn from_gcps_with_scale_and_offset() {
         // 2x scale + offset
@@ -337,6 +367,12 @@ mod tests {
         );
     }
 
+    /**
+     * Tests that a GCP-derived transform correctly maps all input GCPs and
+     * supports round-trip conversion for arbitrary interior points.
+     * Works by first verifying each GCP maps exactly, then converting an
+     * interior pixel (500, 400) to geo and back, expecting identity.
+     */
     #[test]
     fn from_gcps_round_trip() {
         let gcps = [
@@ -358,6 +394,12 @@ mod tests {
         assert_pixel_eq(back, p);
     }
 
+    /**
+     * Tests that collinear GCPs are rejected (returns None).
+     * Works because three points on the line y=x produce a zero determinant
+     * in the system of equations, making the affine unsolvable.
+     * Input: three points along y=x -> Output: None.
+     */
     #[test]
     fn from_gcps_collinear_returns_none() {
         let gcps = [
@@ -370,6 +412,12 @@ mod tests {
 
     // -- Inverse --
 
+    /**
+     * Tests that a non-degenerate transform has a valid inverse and that
+     * geo_to_pixel correctly reverses pixel_to_geo.
+     * Works by converting pixel (100, 200) to geo, then back via geo_to_pixel,
+     * and asserting the result matches the original pixel coordinates.
+     */
     #[test]
     fn inverse_exists() {
         let t = GeoTransform::from_origin_and_scale(GeoCoord::new(10.0, 20.0), 0.5, -0.5);
@@ -382,6 +430,12 @@ mod tests {
         assert_pixel_eq(back2, p);
     }
 
+    /**
+     * Tests that a singular (degenerate) transform returns None for inverse
+     * and geo_to_pixel. Works because a=0,b=0 makes the determinant (a*e-b*d)
+     * equal to zero, so the transform is not invertible.
+     * Input: degenerate transform with a=0, b=0 -> Output: None for both.
+     */
     #[test]
     fn singular_transform_no_inverse() {
         // Degenerate: all geo X = 0 regardless of pixel
@@ -392,6 +446,12 @@ mod tests {
 
     // -- Image bounds --
 
+    /**
+     * Tests that image_bounds computes the correct geographic bounding box.
+     * Works by using a 1000x800 image with 0.001 deg/px scale and origin at
+     * (-122, 37), so the bbox should span [-122, -121] in X and [36.2, 37] in Y
+     * (Y decreases because pixel_size_y is negative).
+     */
     #[test]
     fn image_bounds_simple() {
         let t = GeoTransform::from_origin_and_scale(GeoCoord::new(-122.0, 37.0), 0.001, -0.001);
@@ -402,6 +462,11 @@ mod tests {
         assert!(approx_eq(bounds.max.y, 37.0));
     }
 
+    /**
+     * Tests that GeoBounds::contains correctly classifies interior and exterior
+     * points. Works by computing bounds for a 100x100 image, then checking that
+     * the center point (0.5, 9.5) is inside and (-1.0, 9.5) is outside.
+     */
     #[test]
     fn image_bounds_contains() {
         let t = GeoTransform::from_origin_and_scale(GeoCoord::new(0.0, 10.0), 0.01, -0.01);
@@ -410,6 +475,11 @@ mod tests {
         assert!(!bounds.contains(GeoCoord::new(-1.0, 9.5)));
     }
 
+    /**
+     * Tests that GeoBounds::center returns the midpoint of the bounding box.
+     * Works by constructing a box from (0,0) to (10,20) and verifying the
+     * center is at (5, 10), the arithmetic mean of the min/max coords.
+     */
     #[test]
     fn bounds_center() {
         let bounds = GeoBounds {
@@ -421,6 +491,11 @@ mod tests {
         assert!(approx_eq(center.y, 10.0));
     }
 
+    /**
+     * Tests that GeoBounds::width and height return correct dimensions.
+     * Works by constructing a box from (-5,-3) to (5,7) and verifying
+     * width = 10.0 and height = 10.0 via simple subtraction of extremes.
+     */
     #[test]
     fn bounds_dimensions() {
         let bounds = GeoBounds {
@@ -433,6 +508,12 @@ mod tests {
 
     // -- Tile center --
 
+    /**
+     * Tests that tile_center computes the geo coord at the center of a tile.
+     * Works by using tile (0,0) with tile_size=256, so the center pixel is
+     * (128, 128). With 1:1 scale and origin (0, 100), the geo center should
+     * be (128.0, -28.0) i.e. 100 - 128.
+     */
     #[test]
     fn tile_center_calculation() {
         let t = GeoTransform::from_origin_and_scale(GeoCoord::new(0.0, 100.0), 1.0, -1.0);
@@ -449,6 +530,12 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
+        // Property test: for any valid origin, scale, and pixel coordinate,
+        // pixel_to_geo followed by geo_to_pixel must recover the original pixel.
+        // Works because the scale factors are constrained to be non-zero (and thus
+        // invertible), guaranteeing the round trip is lossless within tolerance.
+        // Input ranges: origin in [-180,180]x[-90,90], scale in [0.0001,1.0],
+        // pixel in [0, 10000]x[0, 10000].
         #[test]
         fn round_trip_pixel_geo(
             ox in -180.0f64..180.0,

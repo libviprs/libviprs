@@ -72,6 +72,12 @@ impl PixelFormat {
 mod tests {
     use super::*;
 
+    /**
+     * Tests that bytes_per_pixel equals channels * bytes_per_channel for every format.
+     * Works by iterating all PixelFormat variants and checking the arithmetic identity,
+     * catching mismatches if one method is updated without the others.
+     * Input: all 6 variants → Output: identity holds for each (e.g. Rgb8: 3 == 3*1).
+     */
     #[test]
     fn bytes_per_pixel_matches_channels_times_depth() {
         for fmt in [
@@ -90,6 +96,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that with_alpha and without_alpha are inverses of each other.
+     * Works by converting non-alpha formats to alpha and back, verifying the
+     * original format is recovered.
+     * Input: Rgb8 → with_alpha → Rgba8 → without_alpha → Rgb8.
+     */
     #[test]
     fn alpha_round_trip() {
         assert_eq!(PixelFormat::Rgb8.with_alpha(), PixelFormat::Rgba8);
@@ -98,18 +110,33 @@ mod tests {
         assert_eq!(PixelFormat::Rgba16.without_alpha(), PixelFormat::Rgb16);
     }
 
+    /**
+     * Tests that calling with_alpha on formats that already have alpha is a no-op.
+     * Works by applying with_alpha to Rgba8/Rgba16 and asserting the result is unchanged.
+     * Input: Rgba8.with_alpha() → Output: Rgba8.
+     */
     #[test]
     fn with_alpha_is_idempotent() {
         assert_eq!(PixelFormat::Rgba8.with_alpha(), PixelFormat::Rgba8);
         assert_eq!(PixelFormat::Rgba16.with_alpha(), PixelFormat::Rgba16);
     }
 
+    /**
+     * Tests that calling without_alpha on formats without alpha is a no-op.
+     * Works by applying without_alpha to Rgb8/Gray8 and asserting the result is unchanged.
+     * Input: Rgb8.without_alpha() → Output: Rgb8.
+     */
     #[test]
     fn without_alpha_is_idempotent() {
         assert_eq!(PixelFormat::Rgb8.without_alpha(), PixelFormat::Rgb8);
         assert_eq!(PixelFormat::Gray8.without_alpha(), PixelFormat::Gray8);
     }
 
+    /**
+     * Tests that has_alpha returns true only for Rgba8 and Rgba16.
+     * Works by checking every variant and asserting the expected boolean.
+     * Input: Gray8→false, Rgb8→false, Rgba8→true, Rgb16→false, Rgba16→true.
+     */
     #[test]
     fn has_alpha_correctness() {
         assert!(!PixelFormat::Gray8.has_alpha());

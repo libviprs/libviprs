@@ -295,6 +295,12 @@ mod tests {
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
     }
 
+    /**
+     * Tests that single-threaded engine produces the correct total tile count.
+     * Works by running generate_pyramid with concurrency=0 (default) and asserting
+     * both the returned count and the sink's stored count match the plan.
+     * Input: 512x512 RGB gradient, tile_size=256 -> Output: plan.total_tile_count() tiles.
+     */
     #[test]
     fn single_threaded_produces_all_tiles() {
         let src = gradient_raster(512, 512);
@@ -309,6 +315,12 @@ mod tests {
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that multi-threaded engine produces the correct total tile count.
+     * Works by running generate_pyramid with concurrency=4 and verifying the
+     * result and sink agree with the plan's expected tile count.
+     * Input: 512x512 RGB gradient, tile_size=256, 4 threads -> Output: all expected tiles.
+     */
     #[test]
     fn parallel_produces_all_tiles() {
         let src = gradient_raster(512, 512);
@@ -323,6 +335,12 @@ mod tests {
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that every expected (level, col, row) coordinate appears in the output.
+     * Works by sorting the produced tile coordinates and the plan's expected
+     * coordinates, then asserting exact equality between the two sets.
+     * Input: 600x400 non-square image, tile_size=256, concurrency=2.
+     */
     #[test]
     fn all_tile_coords_present() {
         let src = gradient_raster(600, 400);
@@ -343,6 +361,12 @@ mod tests {
         assert_eq!(coords, expected);
     }
 
+    /**
+     * Tests that each produced tile has the width and height specified by the plan.
+     * Works by comparing every tile's dimensions against plan.tile_rect() for
+     * its coordinate, catching off-by-one errors at image/tile boundaries.
+     * Input: 500x300 non-tile-aligned image, tile_size=256.
+     */
     #[test]
     fn tile_dimensions_match_plan() {
         let src = gradient_raster(500, 300);
@@ -364,6 +388,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that tile pixel data is identical regardless of concurrency level.
+     * Works by generating a reference pyramid single-threaded, then re-running
+     * at concurrency 1, 2, 4, 8, 16 and byte-comparing every tile's data.
+     * Input: 256x256 gradient, tile_size=64 -> Output: identical tiles at all concurrency levels.
+     */
     #[test]
     fn deterministic_across_concurrency_levels() {
         let src = gradient_raster(256, 256);
@@ -401,6 +431,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that EngineResult.levels_processed matches the plan's level count.
+     * Works by checking the result metadata against plan.level_count(),
+     * ensuring no levels are skipped or double-counted.
+     * Input: 64x64 image, tile_size=256 -> Output: levels_processed == plan.level_count().
+     */
     #[test]
     fn levels_processed_matches_plan() {
         let src = gradient_raster(64, 64);
@@ -412,6 +448,12 @@ mod tests {
         assert_eq!(result.levels_processed, plan.level_count() as u32);
     }
 
+    /**
+     * Tests the edge case where the image is smaller than a single tile.
+     * Works by verifying that each pyramid level produces exactly one tile,
+     * so total tiles equals the number of levels.
+     * Input: 10x10 image, tile_size=256 -> Output: one tile per level.
+     */
     #[test]
     fn small_image_single_tile() {
         let src = gradient_raster(10, 10);
@@ -423,6 +465,12 @@ mod tests {
         assert_eq!(result.tiles_produced, plan.level_count() as u64);
     }
 
+    /**
+     * Tests that the engine completes correctly with a minimal buffer size.
+     * Works by setting buffer_size=1 with 4 concurrent workers, forcing
+     * frequent producer blocking, and verifying no tiles are lost.
+     * Input: 512x512 image, tile_size=128, buffer=1 -> Output: all tiles produced.
+     */
     #[test]
     fn backpressure_small_buffer() {
         let src = gradient_raster(512, 512);
@@ -437,12 +485,24 @@ mod tests {
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 
+    /**
+     * Tests that a raster where every pixel is identical is detected as blank.
+     * Works by creating an 8x8 solid-color raster and asserting is_blank_tile
+     * returns true, since all pixel triplets are (128, 128, 128).
+     * Input: 8x8 solid val=128 -> Output: true.
+     */
     #[test]
     fn is_blank_tile_solid() {
         let r = solid_raster(8, 8, 128);
         assert!(is_blank_tile(&r));
     }
 
+    /**
+     * Tests that a raster with even one differing pixel is not blank.
+     * Works by creating a solid raster then modifying the first byte,
+     * making the first pixel differ from the rest.
+     * Input: 8x8 solid val=128 with data[0]=0 -> Output: false.
+     */
     #[test]
     fn is_blank_tile_not_blank() {
         let mut data = vec![128u8; 8 * 8 * 3];
@@ -451,12 +511,24 @@ mod tests {
         assert!(!is_blank_tile(&r));
     }
 
+    /**
+     * Tests the boundary case of a 1x1 pixel raster for blank detection.
+     * Works because a single-pixel raster has no other pixel to differ from,
+     * so it is trivially blank regardless of its color value.
+     * Input: 1x1 RGB pixel [1,2,3] -> Output: true.
+     */
     #[test]
     fn is_blank_tile_single_pixel() {
         let r = Raster::new(1, 1, PixelFormat::Rgb8, vec![1, 2, 3]).unwrap();
         assert!(is_blank_tile(&r));
     }
 
+    /**
+     * Tests that tiles generated with overlap have dimensions matching the plan.
+     * Works by using overlap=2, which adds border pixels to tiles, then
+     * verifying each tile's width/height against plan.tile_rect().
+     * Input: 600x400 image, tile_size=256, overlap=2 -> Output: correct overlap-adjusted sizes.
+     */
     #[test]
     fn overlap_tiles_have_correct_size() {
         let src = gradient_raster(600, 400);
@@ -474,6 +546,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that parallel engine works correctly when the sink is slow.
+     * Works by using a SlowSink with 1ms delay and a small buffer (2),
+     * stressing the backpressure mechanism under realistic conditions.
+     * Input: 128x128 image, tile_size=64, 4 threads, 1ms sink delay -> Output: all tiles.
+     */
     #[test]
     fn concurrent_with_slow_sink() {
         use crate::sink::SlowSink;
@@ -494,6 +572,12 @@ mod tests {
 
     // -- Observability tests --
 
+    /**
+     * Tests that the observer receives a TileCompleted event for every tile.
+     * Works by counting TileCompleted events from a CollectingObserver and
+     * comparing against the plan's total tile count.
+     * Input: 128x128 image, tile_size=64 -> Output: tile_events == total_tile_count.
+     */
     #[test]
     fn observer_receives_all_tile_events() {
         let src = gradient_raster(128, 128);
@@ -513,6 +597,12 @@ mod tests {
         assert_eq!(tile_events as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that LevelStarted events arrive in top-down order and Finished is last.
+     * Works by extracting level numbers from LevelStarted events and comparing
+     * against a descending sequence, then checking the final event type.
+     * Input: 64x64 image, tile_size=256 -> Output: levels in descending order, Finished last.
+     */
     #[test]
     fn observer_receives_level_events_in_order() {
         let src = gradient_raster(64, 64);
@@ -542,6 +632,12 @@ mod tests {
         assert!(matches!(events.last(), Some(EngineEvent::Finished { .. })));
     }
 
+    /**
+     * Tests that the Finished event carries the correct total tile and level counts.
+     * Works by matching on the last event and asserting its fields equal
+     * the plan's total_tile_count and level_count.
+     * Input: 256x256 image, tile_size=128 -> Output: Finished{total_tiles, levels} match plan.
+     */
     #[test]
     fn observer_finished_event_has_correct_totals() {
         let src = gradient_raster(256, 256);
@@ -566,6 +662,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that the observer receives all TileCompleted events under concurrency.
+     * Works by running with concurrency=4 and verifying the TileCompleted count
+     * matches the plan, ensuring thread-safe event delivery.
+     * Input: 256x256 image, tile_size=64, 4 threads -> Output: correct event count.
+     */
     #[test]
     fn observer_works_with_concurrency() {
         let src = gradient_raster(256, 256);
@@ -592,6 +694,12 @@ mod tests {
         assert_eq!(tile_events as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that peak memory tracking reports at least the source raster size.
+     * Works by checking that peak_memory_bytes >= source pixel data size,
+     * since the source raster must be held in memory throughout.
+     * Input: 512x512 RGB (786432 bytes) -> Output: peak_memory_bytes >= 786432.
+     */
     #[test]
     fn peak_memory_is_reported() {
         let src = gradient_raster(512, 512);
@@ -610,6 +718,12 @@ mod tests {
         );
     }
 
+    /**
+     * Tests that peak memory stays bounded below 2x the source raster size.
+     * Works because the engine only holds one level raster at a time, so
+     * peak usage should not exceed source + one downscaled copy.
+     * Input: 1024x1024 RGB (3145728 bytes) -> Output: peak < 6291456 bytes.
+     */
     #[test]
     fn peak_memory_is_bounded() {
         // For a 1024x1024 image, peak memory should not be wildly larger

@@ -127,6 +127,11 @@ impl Default for MemoryTracker {
 mod tests {
     use super::*;
 
+    /**
+     * Tests that CollectingObserver records every event it receives.
+     * Works by sending three distinct event types and checking event_count().
+     * Input: LevelStarted, TileCompleted, LevelCompleted → Output: event_count() == 3.
+     */
     #[test]
     fn collecting_observer_captures_events() {
         let obs = CollectingObserver::new();
@@ -146,6 +151,12 @@ mod tests {
         assert_eq!(obs.event_count(), 3);
     }
 
+    /**
+     * Tests that CollectingObserver preserves insertion order of events.
+     * Works by emitting LevelStarted then Finished and pattern-matching
+     * the returned vec by index to confirm ordering.
+     * Input: LevelStarted(level=5), Finished(total=10) → Output: events()[0] is LevelStarted, events()[1] is Finished.
+     */
     #[test]
     fn collecting_observer_preserves_order() {
         let obs = CollectingObserver::new();
@@ -173,6 +184,11 @@ mod tests {
         ));
     }
 
+    /**
+     * Tests that NoopObserver accepts events without panicking.
+     * Works by calling on_event; the test passing (no crash) confirms
+     * the no-op implementation is valid.
+     */
     #[test]
     fn noop_observer_compiles() {
         let obs = NoopObserver;
@@ -182,18 +198,34 @@ mod tests {
         });
     }
 
+    /**
+     * Tests that NoopObserver satisfies Send + Sync bounds.
+     * Works by calling a generic function constrained with Send + Sync;
+     * a compile failure would indicate the type cannot be shared across threads.
+     */
     #[test]
     fn noop_observer_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<NoopObserver>();
     }
 
+    /**
+     * Tests that CollectingObserver satisfies Send + Sync bounds.
+     * Works via a compile-time check; the Mutex interior makes this
+     * non-trivial to guarantee.
+     */
     #[test]
     fn collecting_observer_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<CollectingObserver>();
     }
 
+    /**
+     * Tests alloc/dealloc tracking and peak-memory watermark.
+     * Works by performing a sequence of alloc/dealloc calls and asserting
+     * current and peak at each step.
+     * Input: alloc(100), alloc(200), dealloc(150), dealloc(150) → Output: current=0, peak=300.
+     */
     #[test]
     fn memory_tracker_basic() {
         let t = MemoryTracker::new();
@@ -217,6 +249,11 @@ mod tests {
         assert_eq!(t.peak_bytes(), 300);
     }
 
+    /**
+     * Tests that reset() zeroes both current and peak counters.
+     * Works by allocating 500 bytes, resetting, then asserting both return 0.
+     * Input: alloc(500), reset() → Output: current=0, peak=0.
+     */
     #[test]
     fn memory_tracker_reset() {
         let t = MemoryTracker::new();
@@ -226,6 +263,12 @@ mod tests {
         assert_eq!(t.peak_bytes(), 0);
     }
 
+    /**
+     * Tests thread safety of MemoryTracker under concurrent access.
+     * Works by spawning 8 threads that each alloc/dealloc equal amounts,
+     * then verifying current returns to 0 and peak is non-zero.
+     * Input: 8 threads × 100 alloc(10)/dealloc(10) → Output: current=0, peak>0.
+     */
     #[test]
     fn memory_tracker_concurrent() {
         use std::thread;

@@ -461,6 +461,13 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
 mod tests {
     use super::*;
 
+    /**
+     * Tests that CMYK-to-RGB conversion produces correct color values.
+     * Works by converting a single pure-cyan pixel (C=255, M=0, Y=0, K=0)
+     * and checking that the resulting RGB raster has R=0, G=255, B=255.
+     * Input: 1x1 CMYK pixel [255, 0, 0, 0].
+     * Output: 1x1 Rgb8 raster with data [0, 255, 255].
+     */
     #[test]
     fn cmyk_to_rgb_basic() {
         // Pure cyan: C=255, M=0, Y=0, K=0 → R=0, G=255, B=255
@@ -475,18 +482,36 @@ mod tests {
         assert_eq!(data[2], 255); // B
     }
 
+    /**
+     * Tests that obj_to_f64 correctly converts a lopdf Integer to f64.
+     * Works by creating an Integer(42) object and verifying it returns Some(42.0),
+     * confirming the integer-to-float promotion path.
+     * Input: lopdf::Object::Integer(42). Output: Some(42.0).
+     */
     #[test]
     fn obj_to_f64_integer() {
         let obj = lopdf::Object::Integer(42);
         assert_eq!(obj_to_f64(&obj), Some(42.0));
     }
 
+    /**
+     * Tests that obj_to_f64 correctly passes through a lopdf Real value.
+     * Works by creating a Real(3.14) object and checking the returned f64
+     * is within floating-point tolerance of 3.14.
+     * Input: lopdf::Object::Real(3.14). Output: Some(~3.14).
+     */
     #[test]
     fn obj_to_f64_real() {
         let obj = lopdf::Object::Real(3.14);
         assert!((obj_to_f64(&obj).unwrap() - 3.14).abs() < 0.001);
     }
 
+    /**
+     * Tests that obj_to_f64 returns None for non-numeric PDF object types.
+     * Works by passing a Boolean object, which has no meaningful f64 conversion,
+     * and verifying the function correctly rejects it with None.
+     * Input: lopdf::Object::Boolean(true). Output: None.
+     */
     #[test]
     fn obj_to_f64_other() {
         let obj = lopdf::Object::Boolean(true);

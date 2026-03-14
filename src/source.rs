@@ -130,6 +130,12 @@ mod tests {
         buf
     }
 
+    /**
+     * Tests that a valid PNG byte buffer can be decoded into a Raster.
+     * Works by encoding a known 32x24 RGB image to PNG in-memory, then
+     * decoding it back and verifying dimensions, format, and buffer size.
+     * Input: 32x24 RGB8 PNG bytes → Output: Raster(32, 24, Rgb8, 2304 bytes).
+     */
     #[test]
     fn decode_png_from_memory() {
         let png = create_test_png(32, 24);
@@ -140,6 +146,12 @@ mod tests {
         assert_eq!(raster.data().len(), 32 * 24 * 3);
     }
 
+    /**
+     * Tests that a valid JPEG byte buffer can be decoded into a Raster.
+     * Works by encoding a 16x16 RGB image to JPEG at quality 95, then
+     * decoding it and checking dimensions and format are preserved.
+     * Input: 16x16 RGB8 JPEG bytes → Output: Raster(16, 16, Rgb8).
+     */
     #[test]
     fn decode_jpeg_from_memory() {
         let jpeg = create_test_jpeg(16, 16);
@@ -149,18 +161,36 @@ mod tests {
         assert_eq!(raster.format(), PixelFormat::Rgb8);
     }
 
+    /**
+     * Tests that decode_bytes returns an error for invalid image data.
+     * Works by passing an arbitrary non-image byte string and asserting Err,
+     * confirming the decoder rejects garbage input.
+     * Input: b"not an image" → Output: Err.
+     */
     #[test]
     fn decode_invalid_bytes_returns_error() {
         let result = decode_bytes(b"not an image");
         assert!(result.is_err());
     }
 
+    /**
+     * Tests that decode_bytes returns an error for an empty buffer.
+     * Works by passing a zero-length slice, ensuring the decoder does not
+     * panic and instead produces a meaningful error.
+     * Input: b"" → Output: Err.
+     */
     #[test]
     fn decode_empty_bytes_returns_error() {
         let result = decode_bytes(b"");
         assert!(result.is_err());
     }
 
+    /**
+     * Tests that generate_test_raster produces a Raster with correct
+     * dimensions, pixel format, and buffer size.
+     * Works by generating a 100x50 test raster and checking all properties.
+     * Input: (100, 50) → Output: Raster(100, 50, Rgb8, 15000 bytes).
+     */
     #[test]
     fn generate_test_raster_dimensions() {
         let r = generate_test_raster(100, 50).unwrap();
@@ -170,6 +200,12 @@ mod tests {
         assert_eq!(r.data().len(), 100 * 50 * 3);
     }
 
+    /**
+     * Tests that color_type_to_format correctly maps image crate ColorType
+     * variants to PixelFormat, including the La8→Rgba8 promotion.
+     * Works by checking each supported mapping individually.
+     * Input: e.g. ColorType::L8 → Output: PixelFormat::Gray8.
+     */
     #[test]
     fn color_type_mapping() {
         assert_eq!(
@@ -194,6 +230,12 @@ mod tests {
         );
     }
 
+    /**
+     * Tests that decode_file can read and decode a PNG from disk.
+     * Works by writing a known PNG to a temp file, then decoding it
+     * with decode_file and verifying the resulting Raster properties.
+     * Input: 8x8 RGB8 PNG on disk → Output: Raster(8, 8, Rgb8).
+     */
     #[test]
     fn decode_file_from_disk() {
         // Write a temp PNG and decode it
@@ -208,6 +250,12 @@ mod tests {
         assert_eq!(raster.format(), PixelFormat::Rgb8);
     }
 
+    /**
+     * Tests that decode_file returns an error for a nonexistent path.
+     * Works by passing a path that does not exist and asserting Err,
+     * confirming proper I/O error propagation.
+     * Input: Path("/nonexistent/image.png") → Output: Err.
+     */
     #[test]
     fn decode_file_not_found() {
         let result = decode_file(Path::new("/nonexistent/image.png"));
