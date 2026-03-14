@@ -12,6 +12,7 @@ default = []
 pdfium = ["dep:pdfium-render"]
 
 [dependencies]
+flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 lopdf = "0.36"
 pdfium-render = { version = "0.8", optional = true }

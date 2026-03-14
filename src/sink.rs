@@ -128,7 +128,9 @@ impl TileSink for SlowSink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileFormat {
     Png,
-    Jpeg { quality: u8 },
+    Jpeg {
+        quality: u8,
+    },
     /// Raw pixel bytes (no encoding). Fastest, useful for pipelines that
     /// encode later or for testing.
     Raw,
@@ -212,9 +214,7 @@ impl TileSink for FsSink {
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
-fn color_type_for_format(
-    fmt: crate::pixel::PixelFormat,
-) -> Result<image::ColorType, SinkError> {
+fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
     use crate::pixel::PixelFormat;
     match fmt {
         PixelFormat::Gray8 => Ok(image::ColorType::L8),
@@ -226,7 +226,7 @@ fn color_type_for_format(
     }
 }
 
-pub(crate) fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
+pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf));
     let ct = color_type_for_format(raster.format())?;
@@ -243,10 +243,8 @@ pub(crate) fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
 
 fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-        std::io::Cursor::new(&mut buf),
-        quality,
-    );
+    let encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
     let ct = color_type_for_format(raster.format())?;
     image::ImageEncoder::write_image(
         encoder,
@@ -278,6 +276,11 @@ mod tests {
 
     // -- MemorySink tests --
 
+    /**
+     * Tests that MemorySink accumulates every tile written to it.
+     * Works by writing three tiles and checking tile_count() matches.
+     * Input: 3 write_tile calls -> Output: tile_count() == 3.
+     */
     #[test]
     fn memory_sink_collects_tiles() {
         let sink = MemorySink::new();
@@ -287,6 +290,11 @@ mod tests {
         assert_eq!(sink.tile_count(), 3);
     }
 
+    /**
+     * Tests that MemorySink faithfully preserves tile coordinates.
+     * Works by writing a tile with specific coords and reading them back via tiles().
+     * Input: tile at (3, 2, 5) -> Output: tiles()[0].coord == TileCoord(3, 2, 5).
+     */
     #[test]
     fn memory_sink_preserves_coords() {
         let sink = MemorySink::new();
@@ -295,6 +303,11 @@ mod tests {
         assert_eq!(tiles[0].coord, TileCoord::new(3, 2, 5));
     }
 
+    /**
+     * Tests that MemorySink satisfies the Send + Sync bounds required by TileSink.
+     * Works by using a compile-time assertion function that only accepts Send + Sync types.
+     * If MemorySink is not Send + Sync, the test fails to compile.
+     */
     #[test]
     fn memory_sink_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -303,12 +316,23 @@ mod tests {
 
     // -- FsSink tests --
 
+    /**
+     * Tests that FsSink satisfies the Send + Sync bounds required by TileSink.
+     * Works by using a compile-time assertion function that only accepts Send + Sync types.
+     * If FsSink is not Send + Sync, the test fails to compile.
+     */
     #[test]
     fn fs_sink_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<FsSink>();
     }
 
+    /**
+     * Tests that FsSink writes raw tile data to the correct filesystem path.
+     * Works by creating a DeepZoom sink, writing one tile, and verifying the file
+     * exists at the expected path with the correct byte length (8*8*3 for Rgb8).
+     * Input: 8x8 Rgb8 tile -> Output: file at {level}/0_0.raw with 192 bytes.
+     */
     #[test]
     fn fs_sink_writes_tile_to_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -316,7 +340,11 @@ mod tests {
         let plan = planner.plan();
         let top = plan.levels.last().unwrap();
 
-        let sink = FsSink::new(dir.path().join("output_files"), plan.clone(), TileFormat::Raw);
+        let sink = FsSink::new(
+            dir.path().join("output_files"),
+            plan.clone(),
+            TileFormat::Raw,
+        );
 
         let tile = Tile {
             coord: TileCoord::new(top.level, 0, 0),
@@ -327,12 +355,21 @@ mod tests {
         let expected_path = dir
             .path()
             .join(format!("output_files/{}/0_0.raw", top.level));
-        assert!(expected_path.exists(), "Tile file not found at {expected_path:?}");
+        assert!(
+            expected_path.exists(),
+            "Tile file not found at {expected_path:?}"
+        );
 
         let contents = std::fs::read(&expected_path).unwrap();
         assert_eq!(contents.len(), 8 * 8 * 3);
     }
 
+    /**
+     * Tests that FsSink automatically creates intermediate directories.
+     * Works by writing all tiles for a 512x512 image and verifying the
+     * level directory was created under the base path.
+     * Input: multi-tile 512x512 pyramid -> Output: tiles/{level}/ directory exists.
+     */
     #[test]
     fn fs_sink_creates_directory_structure() {
         let dir = tempfile::tempdir().unwrap();
@@ -358,6 +395,12 @@ mod tests {
         assert!(dir.path().join(format!("tiles/{}", top.level)).is_dir());
     }
 
+    /**
+     * Tests that finish() writes a valid DZI manifest for DeepZoom layouts.
+     * Works by calling finish() and verifying the .dzi file contains the
+     * expected XML attributes for format, tile size, overlap, and dimensions.
+     * Input: 1024x768 image, tile 256, overlap 1 -> Output: .dzi with matching attributes.
+     */
     #[test]
     fn fs_sink_writes_dzi_manifest() {
         let dir = tempfile::tempdir().unwrap();
@@ -378,6 +421,11 @@ mod tests {
         assert!(manifest.contains("Height=\"768\""));
     }
 
+    /**
+     * Tests that finish() does not produce a .dzi file for XYZ layouts.
+     * Works by creating an XYZ sink, calling finish(), and asserting no .dzi exists.
+     * Input: XYZ layout sink -> Output: no .dzi file on disk.
+     */
     #[test]
     fn fs_sink_no_dzi_for_xyz() {
         let dir = tempfile::tempdir().unwrap();
@@ -388,9 +436,18 @@ mod tests {
         sink.finish().unwrap();
 
         let dzi_path = dir.path().join("tiles.dzi");
-        assert!(!dzi_path.exists(), "DZI should not be written for XYZ layout");
+        assert!(
+            !dzi_path.exists(),
+            "DZI should not be written for XYZ layout"
+        );
     }
 
+    /**
+     * Tests that FsSink uses the {z}/{x}/{y}.ext path convention for XYZ layouts.
+     * Works by writing a tile at col=1, row=0 and checking the file lands at
+     * tiles/{level}/1/0.raw instead of the DeepZoom col_row naming.
+     * Input: tile (level, 1, 0) with XYZ layout -> Output: file at {z}/1/0.raw.
+     */
     #[test]
     fn fs_sink_xyz_path_structure() {
         let dir = tempfile::tempdir().unwrap();
@@ -412,6 +469,12 @@ mod tests {
         assert!(expected.exists(), "XYZ tile not found at {expected:?}");
     }
 
+    /**
+     * Tests that FsSink correctly encodes tiles as PNG when configured.
+     * Works by writing a tile with TileFormat::Png and verifying the output
+     * file starts with the PNG magic bytes (0x89, 'P', 'N', 'G').
+     * Input: 8x8 Rgb8 raster -> Output: file with PNG header bytes.
+     */
     #[test]
     fn fs_sink_encodes_png() {
         let dir = tempfile::tempdir().unwrap();
@@ -433,6 +496,12 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
     }
 
+    /**
+     * Tests that FsSink correctly encodes tiles as JPEG when configured.
+     * Works by writing a tile with TileFormat::Jpeg and verifying the output
+     * file starts with the JPEG SOI marker (0xFF, 0xD8).
+     * Input: 8x8 Rgb8 raster, quality 85 -> Output: file with JPEG SOI marker.
+     */
     #[test]
     fn fs_sink_encodes_jpeg() {
         let dir = tempfile::tempdir().unwrap();
@@ -458,6 +527,12 @@ mod tests {
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
     }
 
+    /**
+     * Tests that two FsSink instances produce identical output for the same input.
+     * Works by writing the same tile to two separate temp directories and comparing
+     * the raw file contents byte-for-byte.
+     * Input: same 256x256 tile to two sinks -> Output: identical file bytes.
+     */
     #[test]
     fn fs_sink_deterministic_paths() {
         let dir1 = tempfile::tempdir().unwrap();
@@ -487,6 +562,11 @@ mod tests {
 
     // -- Encoding edge cases --
 
+    /**
+     * Tests that encode_png handles the Gray8 pixel format correctly.
+     * Works by encoding a 4x4 Gray8 raster and verifying the PNG magic bytes.
+     * Input: 4x4 Gray8 raster -> Output: valid PNG (starts with 0x89 PNG).
+     */
     #[test]
     fn encode_png_gray8() {
         let raster = Raster::zeroed(4, 4, PixelFormat::Gray8).unwrap();
@@ -494,6 +574,11 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
     }
 
+    /**
+     * Tests that encode_png handles the Rgba8 pixel format correctly.
+     * Works by encoding a 4x4 Rgba8 raster and verifying the PNG magic bytes.
+     * Input: 4x4 Rgba8 raster -> Output: valid PNG (starts with 0x89 PNG).
+     */
     #[test]
     fn encode_png_rgba8() {
         let raster = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
@@ -501,6 +586,12 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
     }
 
+    /**
+     * Tests that encode_jpeg handles Rgb8 pixel format correctly.
+     * Works by encoding a 4x4 Rgb8 raster at quality 90 and checking
+     * that the output starts with the JPEG SOI marker (0xFF, 0xD8).
+     * Input: 4x4 Rgb8 raster, quality 90 -> Output: valid JPEG header.
+     */
     #[test]
     fn encode_jpeg_rgb8() {
         let raster = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
