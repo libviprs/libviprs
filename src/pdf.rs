@@ -480,36 +480,30 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 // Pdfium-based rendering (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// Render a PDF page to a raster using PDFium.
-///
-/// This handles vector content (AutoCAD exports, text, paths) that cannot be
-/// extracted as embedded images. Requires the `pdfium` feature and a PDFium
-/// library available at runtime.
+/// Open a pdfium instance with the appropriate bindings.
 #[cfg(feature = "pdfium")]
-pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
+fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
     use pdfium_render::prelude::*;
 
-    let pdfium = Pdfium::default();
-    let document = pdfium
-        .load_pdf_from_file(path, None)
+    #[cfg(feature = "pdfium-static")]
+    let bindings =
+        Pdfium::bind_to_statically_linked_library().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+    #[cfg(not(feature = "pdfium-static"))]
+    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+        .or_else(|_| Pdfium::bind_to_system_library())
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let pages = document.pages();
-    let total = pages.len();
-    if page == 0 || page > total as usize {
-        return Err(PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
+    Ok(Pdfium::new(bindings))
+}
 
-    let pdf_page = pages
-        .get(page as u16 - 1)
-        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
-    let scale = dpi as f32 / 72.0;
-    let width = (pdf_page.width().value * scale) as u32;
-    let height = (pdf_page.height().value * scale) as u32;
+/// Render a page at the given pixel dimensions and return a Raster.
+#[cfg(feature = "pdfium")]
+fn render_at_size(
+    pdf_page: &pdfium_render::prelude::PdfPage<'_>,
+    width: u32,
+    height: u32,
+) -> Result<Raster, PdfError> {
+    use pdfium_render::prelude::*;
 
     let config = PdfRenderConfig::new()
         .set_target_width(width as i32)
@@ -525,6 +519,109 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
     let data = rgba.into_raw();
 
     Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
+}
+
+/// Render a PDF page to a raster using PDFium.
+///
+/// This handles vector content (AutoCAD exports, text, paths) that cannot be
+/// extracted as embedded images. Requires the `pdfium` feature and a PDFium
+/// library available at runtime.
+#[cfg(feature = "pdfium")]
+pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
+    let pdfium = init_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let pages = document.pages();
+    let total = pages.len();
+    if page == 0 || page > total as usize {
+        return Err(PdfError::PageOutOfRange {
+            page,
+            total: total as usize,
+        });
+    }
+    let pdf_page = pages
+        .get(page as u16 - 1)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let scale = dpi as f32 / 72.0;
+    let width = (pdf_page.width().value * scale) as u32;
+    let height = (pdf_page.height().value * scale) as u32;
+
+    render_at_size(&pdf_page, width, height)
+}
+
+/// Result of a budget-constrained render, including the DPI that was used.
+#[cfg(feature = "pdfium")]
+#[derive(Debug)]
+pub struct BudgetRenderResult {
+    pub raster: Raster,
+    pub dpi_used: u32,
+    pub capped: bool,
+}
+
+/// Render a PDF page to a raster, capping the output size to a maximum pixel
+/// budget to prevent excessive memory use on large documents.
+///
+/// - `max_dpi`: the preferred DPI (e.g. 300). Used when the result fits within
+///   the budget.
+/// - `max_pixels`: maximum total pixel count (width * height). If rendering at
+///   `max_dpi` would exceed this, the DPI is automatically reduced so the
+///   output fits.
+///
+/// Returns the raster along with the actual DPI used and whether it was capped.
+#[cfg(feature = "pdfium")]
+pub fn render_page_pdfium_budgeted(
+    path: &Path,
+    page: usize,
+    max_dpi: u32,
+    max_pixels: u64,
+) -> Result<BudgetRenderResult, PdfError> {
+    let pdfium = init_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let pages = document.pages();
+    let total = pages.len();
+    if page == 0 || page > total as usize {
+        return Err(PdfError::PageOutOfRange {
+            page,
+            total: total as usize,
+        });
+    }
+    let pdf_page = pages
+        .get(page as u16 - 1)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let width_pts = pdf_page.width().value as f64;
+    let height_pts = pdf_page.height().value as f64;
+
+    // Compute the DPI that fits within the pixel budget
+    let scale_at_max = max_dpi as f64 / 72.0;
+    let pixels_at_max = (width_pts * scale_at_max) as u64 * (height_pts * scale_at_max) as u64;
+
+    let (dpi_used, capped) = if pixels_at_max <= max_pixels {
+        (max_dpi, false)
+    } else {
+        // scale = sqrt(max_pixels / (w_pts * h_pts)), then dpi = scale * 72
+        let scale = (max_pixels as f64 / (width_pts * height_pts)).sqrt();
+        let dpi = (scale * 72.0).floor() as u32;
+        (dpi.max(1), true)
+    };
+
+    let scale = dpi_used as f32 / 72.0;
+    let width = (width_pts as f32 * scale) as u32;
+    let height = (height_pts as f32 * scale) as u32;
+
+    let raster = render_at_size(&pdf_page, width, height)?;
+
+    Ok(BudgetRenderResult {
+        raster,
+        dpi_used,
+        capped,
+    })
 }
 
 #[cfg(test)]
