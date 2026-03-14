@@ -226,7 +226,7 @@ fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorT
     }
 }
 
-pub(crate) fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
+pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf));
     let ct = color_type_for_format(raster.format())?;

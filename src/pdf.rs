@@ -184,97 +184,167 @@ enum ImageData {
     Decoded(Raster),
 }
 
-/// Get image data from a PDF stream, handling common filters.
-fn get_image_data(doc: &lopdf::Document, stream: &lopdf::Stream) -> Result<ImageData, PdfError> {
-    let filter: &[u8] = stream
-        .dict
-        .get(b"Filter")
-        .ok()
-        .and_then(|f| f.as_name().ok())
-        .unwrap_or(b"");
+/// Resolve the filter(s) on a PDF stream into a list of filter names.
+///
+/// Handles both single-name filters (`/DCTDecode`) and filter arrays
+/// (`[/FlateDecode /DCTDecode]`).
+fn resolve_filters(stream: &lopdf::Stream) -> Vec<Vec<u8>> {
+    let filter_obj = match stream.dict.get(b"Filter").ok() {
+        Some(f) => f,
+        None => return vec![],
+    };
 
+    // Single name filter
+    if let Ok(name) = filter_obj.as_name() {
+        return vec![name.to_vec()];
+    }
+
+    // Array of filters
+    if let Ok(arr) = filter_obj.as_array() {
+        return arr
+            .iter()
+            .filter_map(|f| f.as_name().ok().map(|n| n.to_vec()))
+            .collect();
+    }
+
+    vec![]
+}
+
+/// Get image data from a PDF stream, handling common filters.
+///
+/// Supports single filters and chained filter arrays (e.g. `[/FlateDecode /DCTDecode]`).
+fn get_image_data(doc: &lopdf::Document, stream: &lopdf::Stream) -> Result<ImageData, PdfError> {
+    let filters = resolve_filters(stream);
+
+    // Normalize: treat chained [FlateDecode, DCTDecode] as "decompress then JPEG"
+    let terminal_filter: &[u8] = match filters.as_slice() {
+        [] => b"",
+        [single] => single,
+        [first, second] if first.as_slice() == b"FlateDecode" => {
+            // Chained: FlateDecode wrapping another format — decompress first,
+            // then treat the inner data according to the second filter.
+            let decompressed = flate_decompress(&stream.content)?;
+            return dispatch_single_filter(doc, stream, second, decompressed);
+        }
+        _ => {
+            let names: Vec<String> = filters
+                .iter()
+                .map(|f| String::from_utf8_lossy(f).to_string())
+                .collect();
+            return Err(PdfError::UnsupportedFormat(format!(
+                "filter chain: [{}]",
+                names.join(", ")
+            )));
+        }
+    };
+
+    dispatch_single_filter(doc, stream, terminal_filter, stream.content.clone())
+}
+
+/// Handle a single filter applied to image data.
+fn dispatch_single_filter(
+    doc: &lopdf::Document,
+    stream: &lopdf::Stream,
+    filter: &[u8],
+    data: Vec<u8>,
+) -> Result<ImageData, PdfError> {
     match filter {
         b"DCTDecode" => {
             // JPEG data — return raw, let `image` crate decode
-            Ok(ImageData::Encoded(stream.content.clone()))
+            Ok(ImageData::Encoded(data))
         }
         b"FlateDecode" => {
             // Deflate-compressed raw pixels
-            let mut stream_clone = stream.clone();
-            stream_clone
-                .decompress()
-                .map_err(|e| PdfError::Parse(format!("decompress: {e}")))?;
-            let decompressed = stream_clone.content;
-
-            let width = stream
-                .dict
-                .get(b"Width")
-                .ok()
-                .and_then(|w| w.as_i64().ok())
-                .unwrap_or(0) as u32;
-            let height = stream
-                .dict
-                .get(b"Height")
-                .ok()
-                .and_then(|h| h.as_i64().ok())
-                .unwrap_or(0) as u32;
-            let bpc = stream
-                .dict
-                .get(b"BitsPerComponent")
-                .ok()
-                .and_then(|b| b.as_i64().ok())
-                .unwrap_or(8) as u32;
-            let cs = stream
-                .dict
-                .get(b"ColorSpace")
-                .ok()
-                .and_then(|c| resolve_object(doc, c).ok())
-                .and_then(|c| c.as_name().ok().map(|n| n.to_vec()));
-
-            let color_space: &[u8] = cs.as_deref().unwrap_or(b"DeviceRGB");
-
-            let format = match (color_space, bpc) {
-                (b"DeviceGray", 8) => PixelFormat::Gray8,
-                (b"DeviceGray", 16) => PixelFormat::Gray16,
-                (b"DeviceRGB", 8) => PixelFormat::Rgb8,
-                (b"DeviceRGB", 16) => PixelFormat::Rgb16,
-                (b"DeviceCMYK", _) => {
-                    let raster = cmyk_to_rgb_raster(&decompressed, width, height)?;
-                    return Ok(ImageData::Decoded(raster));
-                }
-                _ => {
-                    return Err(PdfError::UnsupportedFormat(format!(
-                        "{} @ {bpc}bpc",
-                        String::from_utf8_lossy(color_space)
-                    )));
-                }
-            };
-
-            let expected = width as usize * height as usize * format.bytes_per_pixel();
-            if decompressed.len() < expected {
-                return Err(PdfError::Decode(format!(
-                    "decompressed size {} < expected {expected}",
-                    decompressed.len()
-                )));
-            }
-            let mut data = decompressed;
-            data.truncate(expected);
-
-            let raster = Raster::new(width, height, format, data).map_err(PdfError::Raster)?;
-            Ok(ImageData::Decoded(raster))
+            let decompressed = flate_decompress(&data)?;
+            decode_raw_pixels(doc, stream, decompressed)
         }
         b"JPXDecode" => {
             // JPEG 2000 — return raw, let `image` crate attempt decode
-            Ok(ImageData::Encoded(stream.content.clone()))
+            Ok(ImageData::Encoded(data))
         }
         b"" => {
-            // No filter — raw data, try as image
-            Ok(ImageData::Encoded(stream.content.clone()))
+            // No filter — try as encoded image, fall back to raw pixels
+            Ok(ImageData::Encoded(data))
         }
         other => Err(PdfError::UnsupportedFormat(
             String::from_utf8_lossy(other).to_string(),
         )),
     }
+}
+
+/// Decode raw (uncompressed) pixel data using the stream's image metadata.
+fn decode_raw_pixels(
+    doc: &lopdf::Document,
+    stream: &lopdf::Stream,
+    decompressed: Vec<u8>,
+) -> Result<ImageData, PdfError> {
+    let width = stream
+        .dict
+        .get(b"Width")
+        .ok()
+        .and_then(|w| w.as_i64().ok())
+        .unwrap_or(0) as u32;
+    let height = stream
+        .dict
+        .get(b"Height")
+        .ok()
+        .and_then(|h| h.as_i64().ok())
+        .unwrap_or(0) as u32;
+    let bpc = stream
+        .dict
+        .get(b"BitsPerComponent")
+        .ok()
+        .and_then(|b| b.as_i64().ok())
+        .unwrap_or(8) as u32;
+    let cs = stream
+        .dict
+        .get(b"ColorSpace")
+        .ok()
+        .and_then(|c| resolve_object(doc, c).ok())
+        .and_then(|c| c.as_name().ok().map(|n| n.to_vec()));
+
+    let color_space: &[u8] = cs.as_deref().unwrap_or(b"DeviceRGB");
+
+    let format = match (color_space, bpc) {
+        (b"DeviceGray", 8) => PixelFormat::Gray8,
+        (b"DeviceGray", 16) => PixelFormat::Gray16,
+        (b"DeviceRGB", 8) => PixelFormat::Rgb8,
+        (b"DeviceRGB", 16) => PixelFormat::Rgb16,
+        (b"DeviceCMYK", _) => {
+            let raster = cmyk_to_rgb_raster(&decompressed, width, height)?;
+            return Ok(ImageData::Decoded(raster));
+        }
+        _ => {
+            return Err(PdfError::UnsupportedFormat(format!(
+                "{} @ {bpc}bpc",
+                String::from_utf8_lossy(color_space)
+            )));
+        }
+    };
+
+    let expected = width as usize * height as usize * format.bytes_per_pixel();
+    if decompressed.len() < expected {
+        return Err(PdfError::Decode(format!(
+            "decompressed size {} < expected {expected}",
+            decompressed.len()
+        )));
+    }
+    let mut data = decompressed;
+    data.truncate(expected);
+
+    let raster = Raster::new(width, height, format, data).map_err(PdfError::Raster)?;
+    Ok(ImageData::Decoded(raster))
+}
+
+/// Decompress zlib/deflate data.
+fn flate_decompress(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+    use std::io::Read;
+    let mut decoder = flate2::read::ZlibDecoder::new(data);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| PdfError::Decode(format!("flate decompress: {e}")))?;
+    Ok(out)
 }
 
 /// Convert CMYK raw bytes to RGB Raster.

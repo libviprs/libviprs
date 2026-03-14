@@ -11,12 +11,17 @@ pub mod resize;
 pub mod sink;
 pub mod source;
 
-pub use engine::{EngineConfig, EngineResult, generate_pyramid, generate_pyramid_observed};
+pub use engine::{
+    EngineConfig, EngineError, EngineResult, generate_pyramid, generate_pyramid_observed,
+    is_blank_tile,
+};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
-pub use pdf::{PdfInfo, extract_page_image, pdf_info};
+pub use pdf::{PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
 pub use pixel::PixelFormat;
-pub use planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
-pub use raster::{Raster, RegionView};
-pub use sink::{FsSink, MemorySink, TileFormat, TileSink};
-pub use source::decode_file;
+pub use planner::{
+    Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
+};
+pub use raster::{Raster, RasterError, RegionView};
+pub use sink::{FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
+pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
