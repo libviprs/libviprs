@@ -203,7 +203,7 @@ fn extract_and_emit_parallel(
 
     // Spawn workers
     let concurrency = config.concurrency.min(coords.len());
-    let chunk_size = (coords.len() + concurrency - 1) / concurrency;
+    let chunk_size = coords.len().div_ceil(concurrency);
 
     std::thread::scope(|s| {
         // Spawn producer threads

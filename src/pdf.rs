@@ -497,13 +497,13 @@ mod tests {
     /**
      * Tests that obj_to_f64 correctly passes through a lopdf Real value.
      * Works by creating a Real(3.14) object and checking the returned f64
-     * is within floating-point tolerance of 3.14.
-     * Input: lopdf::Object::Real(3.14). Output: Some(~3.14).
+     * is within floating-point tolerance of 2.78.
+     * Input: lopdf::Object::Real(2.78). Output: Some(~2.78).
      */
     #[test]
     fn obj_to_f64_real() {
-        let obj = lopdf::Object::Real(3.14);
-        assert!((obj_to_f64(&obj).unwrap() - 3.14).abs() < 0.001);
+        let obj = lopdf::Object::Real(2.78);
+        assert!((obj_to_f64(&obj).unwrap() - 2.78).abs() < 0.001);
     }
 
     /**

@@ -1,13 +1,13 @@
-/// Geo-coordinate mapping for tile pyramids.
-///
-/// Maps pixel coordinates ↔ geographic coordinates using an affine transform.
-/// This supports the common case of geo-referenced blueprints and plans where
-/// the relationship between pixel space and geographic space is a linear
-/// (affine) mapping — rotation, scale, skew, and translation.
-///
-/// For most construction/AEC use cases, an affine transform is sufficient
-/// because the area covered by a single plan sheet is small enough that
-/// Earth curvature effects are negligible.
+//! Geo-coordinate mapping for tile pyramids.
+//!
+//! Maps pixel coordinates ↔ geographic coordinates using an affine transform.
+//! This supports the common case of geo-referenced blueprints and plans where
+//! the relationship between pixel space and geographic space is a linear
+//! (affine) mapping — rotation, scale, skew, and translation.
+//!
+//! For most construction/AEC use cases, an affine transform is sufficient
+//! because the area covered by a single plan sheet is small enough that
+//! Earth curvature effects are negligible.
 
 /// A 2D point in pixel space (column, row from top-left origin).
 #[derive(Debug, Clone, Copy, PartialEq)]

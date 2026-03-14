@@ -279,7 +279,7 @@ impl TileCoord {
 }
 
 fn ceil_div(a: u32, b: u32) -> u32 {
-    (a + b - 1) / b
+    a.div_ceil(b)
 }
 
 #[cfg(test)]
@@ -532,7 +532,7 @@ mod tests {
         // Tile (1,0) — has left overlap
         let r = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
         assert_eq!(r.x, 256 - 1); // tile_size - overlap
-        assert_eq!(r.width, (600 - (256 - 1)).min(256 + 2)); // clipped
+        assert_eq!(r.width, 258); // 256 + 2 (tile_size + 2*overlap)
     }
 
     /**
