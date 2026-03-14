@@ -17,9 +17,9 @@ pub use engine::{
 };
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
-#[cfg(feature = "pdfium")]
-pub use pdf::render_page_pdfium;
 pub use pdf::{PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
+#[cfg(feature = "pdfium")]
+pub use pdf::{render_page_pdfium, render_page_pdfium_budgeted, BudgetRenderResult};
 pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
