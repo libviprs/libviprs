@@ -279,24 +279,40 @@ impl TileCoord {
 }
 
 fn ceil_div(a: u32, b: u32) -> u32 {
-    (a + b - 1) / b
+    a.div_ceil(b)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /**
+     * Tests that images with zero width or height are rejected.
+     * Works by attempting to create a planner with width=0 and height=0 separately.
+     * Input: 0x100 or 100x0 image → Output: Err(ZeroDimension).
+     */
     #[test]
     fn zero_dimension_rejected() {
         assert!(PyramidPlanner::new(0, 100, 256, 0, Layout::DeepZoom).is_err());
         assert!(PyramidPlanner::new(100, 0, 256, 0, Layout::DeepZoom).is_err());
     }
 
+    /**
+     * Tests that a tile size of zero is rejected.
+     * Works by passing tile_size=0, which would cause division by zero in grid calculations.
+     * Input: 100x100 image, tile_size=0 → Output: Err(ZeroTileSize).
+     */
     #[test]
     fn zero_tile_size_rejected() {
         assert!(PyramidPlanner::new(100, 100, 0, 0, Layout::DeepZoom).is_err());
     }
 
+    /**
+     * Tests that overlap must be strictly less than tile_size.
+     * Works by checking overlap == tile_size (invalid), overlap > tile_size (invalid),
+     * and overlap == tile_size - 1 (valid boundary case).
+     * Input: overlap=256 with tile_size=256 → Err; overlap=255 → Ok.
+     */
     #[test]
     fn overlap_must_be_less_than_tile_size() {
         assert!(PyramidPlanner::new(100, 100, 256, 256, Layout::DeepZoom).is_err());
@@ -304,6 +320,11 @@ mod tests {
         assert!(PyramidPlanner::new(100, 100, 256, 255, Layout::DeepZoom).is_ok());
     }
 
+    /**
+     * Tests the degenerate case of a 1x1 pixel image.
+     * Works by verifying the pyramid has exactly one level with one 1x1 tile.
+     * Input: 1x1 image → Output: 1 level, 1 tile, dimensions 1x1.
+     */
     #[test]
     fn single_pixel_image() {
         let planner = PyramidPlanner::new(1, 1, 256, 0, Layout::DeepZoom).unwrap();
@@ -316,6 +337,11 @@ mod tests {
         assert_eq!(plan.total_tile_count(), 1);
     }
 
+    /**
+     * Tests that an image smaller than tile_size produces a 1x1 tile grid at full resolution.
+     * Works by creating a 100x80 image with tile_size=256 and checking the top level grid.
+     * Input: 100x80, tile=256 → Output: top level has cols=1, rows=1.
+     */
     #[test]
     fn image_smaller_than_tile() {
         let planner = PyramidPlanner::new(100, 80, 256, 0, Layout::DeepZoom).unwrap();
@@ -328,6 +354,11 @@ mod tests {
         assert_eq!(top.rows, 1);
     }
 
+    /**
+     * Tests that an image exactly divisible by tile_size produces the correct grid.
+     * Works by using a 512x512 image with tile_size=256, expecting a clean 2x2 grid.
+     * Input: 512x512, tile=256 → Output: top level has cols=2, rows=2.
+     */
     #[test]
     fn image_exactly_n_tiles() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
@@ -339,6 +370,11 @@ mod tests {
         assert_eq!(top.rows, 2);
     }
 
+    /**
+     * Tests that non-divisible dimensions use ceiling division for tile counts.
+     * Works by using a 500x300 image where ceil(500/256)=2 and ceil(300/256)=2.
+     * Input: 500x300, tile=256 → Output: cols=2, rows=2.
+     */
     #[test]
     fn image_not_multiple_of_tile() {
         let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom).unwrap();
@@ -350,6 +386,11 @@ mod tests {
         assert_eq!(top.rows, 2); // ceil(300/256)
     }
 
+    /**
+     * Tests that non-square (wide) images compute asymmetric tile grids correctly.
+     * Works by using a 1000x200 image where width needs 4 columns but height needs only 1 row.
+     * Input: 1000x200, tile=256 → Output: cols=4, rows=1.
+     */
     #[test]
     fn non_square_image() {
         let planner = PyramidPlanner::new(1000, 200, 256, 0, Layout::DeepZoom).unwrap();
@@ -361,6 +402,12 @@ mod tests {
         assert_eq!(top.rows, 1);
     }
 
+    /**
+     * Tests that each pyramid level's dimensions are ceil(prev/2) of the level above.
+     * Works by iterating all adjacent level pairs and verifying the halving relationship,
+     * plus checking that the bottom level is 1x1 and the top is the original size.
+     * Input: 1024x768 → Output: top=1024x768, bottom=1x1, each level halves.
+     */
     #[test]
     fn level_dimensions_halve_correctly() {
         let planner = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom).unwrap();
@@ -384,6 +431,11 @@ mod tests {
         assert_eq!(plan.levels[0].height, 1);
     }
 
+    /**
+     * Tests that level indices are assigned sequentially starting from 0.
+     * Works by iterating all levels and comparing each level's index to its position.
+     * Input: 2048x2048 pyramid → Output: levels[i].level == i for all i.
+     */
     #[test]
     fn level_indices_are_sequential() {
         let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom).unwrap();
@@ -393,14 +445,28 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that total_tile_count() equals the manual sum of cols*rows across all levels.
+     * Works by computing the sum independently and comparing to the method's result.
+     * Input: 512x512, tile=256 → Output: both sums match.
+     */
     #[test]
     fn total_tile_count_sums_all_levels() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let manual_count: u64 = plan.levels.iter().map(|l| l.cols as u64 * l.rows as u64).sum();
+        let manual_count: u64 = plan
+            .levels
+            .iter()
+            .map(|l| l.cols as u64 * l.rows as u64)
+            .sum();
         assert_eq!(plan.total_tile_count(), manual_count);
     }
 
+    /**
+     * Tests that tile_coords() iterator yields exactly total_tile_count() items.
+     * Works by counting the iterator output and comparing to the total_tile_count() method.
+     * Input: 800x600, tile=256 → Output: iterator count == total_tile_count().
+     */
     #[test]
     fn tile_coords_count_matches_total() {
         let planner = PyramidPlanner::new(800, 600, 256, 0, Layout::DeepZoom).unwrap();
@@ -409,6 +475,12 @@ mod tests {
         assert_eq!(coord_count, plan.total_tile_count());
     }
 
+    /**
+     * Tests tile_rect without overlap returns correct pixel rectangles.
+     * Works by checking the origin tile (0,0), a middle tile (1,0), and the
+     * bottom-right edge tile which should be clipped to the image boundary.
+     * Input: 600x400, tile=256, tile(2,1) → Output: rect clipped to (512,256)-(600,400).
+     */
     #[test]
     fn tile_rect_no_overlap() {
         let planner = PyramidPlanner::new(600, 400, 256, 0, Layout::DeepZoom).unwrap();
@@ -438,6 +510,12 @@ mod tests {
         assert_eq!(r.height, 400 - 256); // 144
     }
 
+    /**
+     * Tests tile_rect with overlap=1 adds extra pixels to tile boundaries.
+     * Works by verifying tile (0,0) gets overlap on right/bottom only, and
+     * tile (1,0) gets overlap on both left and right sides.
+     * Input: 600x400, overlap=1, tile(0,0) → width=257; tile(1,0) → x=255.
+     */
     #[test]
     fn tile_rect_with_overlap() {
         let planner = PyramidPlanner::new(600, 400, 256, 1, Layout::DeepZoom).unwrap();
@@ -454,9 +532,14 @@ mod tests {
         // Tile (1,0) — has left overlap
         let r = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
         assert_eq!(r.x, 256 - 1); // tile_size - overlap
-        assert_eq!(r.width, (600 - (256 - 1)).min(256 + 2)); // clipped
+        assert_eq!(r.width, 258); // 256 + 2 (tile_size + 2*overlap)
     }
 
+    /**
+     * Tests that tile_rect returns None for out-of-bounds coordinates.
+     * Works by requesting tiles beyond the grid dimensions and an invalid level index.
+     * Input: 256x256 (1x1 grid), tile(1,0) or level=999 → Output: None.
+     */
     #[test]
     fn tile_rect_out_of_bounds_returns_none() {
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom).unwrap();
@@ -467,6 +550,12 @@ mod tests {
         assert!(plan.tile_rect(TileCoord::new(999, 0, 0)).is_none());
     }
 
+    /**
+     * Tests that tiles with no overlap cover every pixel exactly once at the top level.
+     * Works by building a coverage map over all pixels and incrementing for each tile rect,
+     * then asserting every pixel has count == 1 (no gaps, no overlaps).
+     * Input: 500x300, tile=256, overlap=0 → Output: all pixels covered exactly once.
+     */
     #[test]
     fn tile_rects_cover_full_image_no_overlap() {
         let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom).unwrap();
@@ -478,9 +567,7 @@ mod tests {
 
         for row in 0..top.rows {
             for col in 0..top.cols {
-                let r = plan
-                    .tile_rect(TileCoord::new(top.level, col, row))
-                    .unwrap();
+                let r = plan.tile_rect(TileCoord::new(top.level, col, row)).unwrap();
                 for y in r.y..r.y + r.height {
                     for x in r.x..r.x + r.width {
                         coverage[y as usize * top.width as usize + x as usize] += 1;
@@ -491,7 +578,8 @@ mod tests {
 
         for (i, &count) in coverage.iter().enumerate() {
             assert_eq!(
-                count, 1,
+                count,
+                1,
                 "Pixel ({}, {}) covered {} times",
                 i % top.width as usize,
                 i / top.width as usize,
@@ -500,6 +588,11 @@ mod tests {
         }
     }
 
+    /**
+     * Tests Deep Zoom tile path format: "{level}/{col}_{row}.{ext}".
+     * Works by generating a path for the top-level origin tile and comparing to expected format.
+     * Input: tile(top_level, 0, 0), ext="jpeg" → Output: "{level}/0_0.jpeg".
+     */
     #[test]
     fn deep_zoom_tile_path() {
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom).unwrap();
@@ -511,6 +604,11 @@ mod tests {
         assert_eq!(path, format!("{}/0_0.jpeg", top.level));
     }
 
+    /**
+     * Tests XYZ/slippy-map tile path format: "{level}/{col}/{row}.{ext}".
+     * Works by generating a path for a specific tile coordinate and verifying the format.
+     * Input: tile(top_level, 3, 5), ext="png" → Output: "{level}/3/5.png".
+     */
     #[test]
     fn xyz_tile_path() {
         let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::Xyz).unwrap();
@@ -522,6 +620,11 @@ mod tests {
         assert_eq!(path, format!("{}/3/5.png", top.level));
     }
 
+    /**
+     * Tests that tile_path returns None for out-of-bounds level indices.
+     * Works by requesting a path for a non-existent level (999).
+     * Input: level=999, col=0, row=0 → Output: None.
+     */
     #[test]
     fn tile_path_out_of_bounds_returns_none() {
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom).unwrap();
@@ -529,6 +632,12 @@ mod tests {
         assert!(plan.tile_path(TileCoord::new(999, 0, 0), "png").is_none());
     }
 
+    /**
+     * Tests that dzi_manifest() produces valid XML with the correct attributes.
+     * Works by checking that the manifest string contains the expected Format,
+     * Overlap, TileSize, Width, and Height attribute values.
+     * Input: 1024x768, tile=256, overlap=1, format="jpeg" → Output: XML with matching attrs.
+     */
     #[test]
     fn dzi_manifest_structure() {
         let planner = PyramidPlanner::new(1024, 768, 256, 1, Layout::DeepZoom).unwrap();
@@ -542,6 +651,11 @@ mod tests {
         assert!(manifest.contains("Height=\"768\""));
     }
 
+    /**
+     * Tests that dzi_manifest() returns None for non-DeepZoom layouts.
+     * Works by creating an Xyz layout plan and verifying the manifest is unavailable.
+     * Input: Layout::Xyz → Output: None.
+     */
     #[test]
     fn dzi_manifest_returns_none_for_xyz() {
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::Xyz).unwrap();
@@ -549,6 +663,11 @@ mod tests {
         assert!(plan.dzi_manifest("png").is_none());
     }
 
+    /**
+     * Tests that calling plan() twice on the same planner yields identical results.
+     * Works by comparing two plans via PartialEq, ensuring no hidden randomness.
+     * Input: same planner called twice → Output: plan_a == plan_b.
+     */
     #[test]
     fn plan_is_deterministic() {
         let planner = PyramidPlanner::new(4000, 3000, 256, 1, Layout::DeepZoom).unwrap();
@@ -557,6 +676,12 @@ mod tests {
         assert_eq!(plan_a, plan_b);
     }
 
+    /**
+     * Tests that very large images (50000x50000) do not panic or overflow.
+     * Works by verifying the level count is in the expected range (~16-17 levels)
+     * and the top level preserves the original dimensions.
+     * Input: 50000x50000 → Output: 16-18 levels, top level = 50000x50000.
+     */
     #[test]
     fn large_image_level_count() {
         // 50000x50000 — should not panic or overflow
@@ -570,11 +695,16 @@ mod tests {
         assert_eq!(top.height, 50_000);
     }
 
+    /**
+     * Tests that varying tile sizes all produce the correct grid dimensions.
+     * Works by iterating over tile sizes [64, 128, 256, 512, 1024] and checking
+     * that cols and rows equal ceil(image_dim / tile_size) for each.
+     * Input: 2048x1536 with various tile sizes → Output: cols/rows match ceil division.
+     */
     #[test]
     fn different_tile_sizes() {
         for tile_size in [64, 128, 256, 512, 1024] {
-            let planner =
-                PyramidPlanner::new(2048, 1536, tile_size, 0, Layout::DeepZoom).unwrap();
+            let planner = PyramidPlanner::new(2048, 1536, tile_size, 0, Layout::DeepZoom).unwrap();
             let plan = planner.plan();
             let top = plan.levels.last().unwrap();
             assert_eq!(top.cols, ceil_div(2048, tile_size));
@@ -589,6 +719,10 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
+        // Property test: tiles with no overlap cover every pixel at every level exactly once.
+        // Works by checking that the bounding box of all tile rects spans (0,0) to (width,height)
+        // and the total tile area equals the level's pixel area (no gaps or overlaps).
+        // Input: random w in 1..2048, h in 1..2048, tile_size in 1..512.
         #[test]
         fn tile_coverage_no_overlap(
             w in 1u32..2048,
@@ -633,6 +767,9 @@ mod proptests {
             }
         }
 
+        // Property test: each level's dimensions are exactly ceil(upper/2) of the level above,
+        // the bottom level is always 1x1, and the top level matches the original dimensions.
+        // Input: random w in 2..10000, h in 2..10000.
         #[test]
         fn level_halving_invariant(w in 2u32..10000, h in 2u32..10000) {
             let planner = PyramidPlanner::new(w, h, 256, 0, Layout::DeepZoom).unwrap();
@@ -654,6 +791,9 @@ mod proptests {
             prop_assert_eq!(top.height, h);
         }
 
+        // Property test: calling plan() twice always produces identical results.
+        // Works by comparing two plans via PartialEq for random dimensions and tile sizes.
+        // Input: random w in 1..5000, h in 1..5000, tile_size in 1..512.
         #[test]
         fn plan_determinism(
             w in 1u32..5000,
