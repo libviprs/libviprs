@@ -1,5 +1,15 @@
 use thiserror::Error;
 
+/// Errors that can occur when constructing a [`PyramidPlanner`].
+///
+/// These represent invalid configurations that would lead to undefined behaviour
+/// during pyramid generation -- for example, zero-sized images or an overlap that
+/// equals or exceeds the tile size. Catching them at planner-construction time
+/// keeps the rest of the pipeline free of defensive checks.
+///
+/// # Example usage
+///
+/// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 #[derive(Debug, Error)]
 pub enum PlannerError {
     #[error("zero dimension: {width}x{height}")]
@@ -13,15 +23,42 @@ pub enum PlannerError {
 }
 
 /// Output tile layout format.
+///
+/// Determines the directory structure and naming convention used when writing
+/// pyramid tiles to disk. Different viewers expect different conventions, so
+/// this enum lets callers pick the one that matches their target.
+///
+/// # Variants
+///
+/// * `DeepZoom` -- `{level}/{col}_{row}.{ext}` with a companion `.dzi` XML
+///   manifest. Compatible with OpenSeadragon, Leaflet, and similar viewers.
+/// * `Xyz` -- `{z}/{x}/{y}.{ext}`, the standard slippy-map / tile-server
+///   convention used by web mapping libraries.
+///
+/// # Example usage
+///
+/// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layout {
-    /// Deep Zoom Image — `{level}/{col}_{row}.{ext}`, plus `.dzi` manifest.
+    /// Deep Zoom Image -- `{level}/{col}_{row}.{ext}`, plus `.dzi` manifest.
     DeepZoom,
-    /// XYZ / slippy map — `{z}/{x}/{y}.{ext}`.
+    /// XYZ / slippy map -- `{z}/{x}/{y}.{ext}`.
     Xyz,
 }
 
-/// Configuration for pyramid generation.
+/// Configuration builder for pyramid tile generation.
+///
+/// Holds the source image dimensions, tile size, overlap, and target layout.
+/// Call [`PyramidPlanner::plan`] to compute a complete [`PyramidPlan`] that
+/// describes every level and tile coordinate in the pyramid.
+///
+/// Constructing a `PyramidPlanner` validates all parameters up-front, so
+/// downstream code can assume the configuration is sane.
+///
+/// # Example usage
+///
+/// * [CLI plan command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 #[derive(Debug, Clone)]
 pub struct PyramidPlanner {
     image_width: u32,
@@ -31,7 +68,21 @@ pub struct PyramidPlanner {
     layout: Layout,
 }
 
-/// A complete pyramid plan ready for execution.
+/// A complete, immutable pyramid plan ready for execution.
+///
+/// Contains all the information needed to slice an image into pyramid tiles:
+/// the original image dimensions, tile parameters, the chosen layout, and a
+/// [`Vec`] of [`LevelPlan`]s ordered from the smallest (most zoomed-out) level
+/// to the largest (full-resolution) level.
+///
+/// Obtain a `PyramidPlan` by calling [`PyramidPlanner::plan`]. Tile writers
+/// iterate over [`PyramidPlan::tile_coords`] and use [`PyramidPlan::tile_rect`]
+/// and [`PyramidPlan::tile_path`] to decide what to read and where to write.
+///
+/// # Example usage
+///
+/// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+/// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PyramidPlan {
     pub image_width: u32,
@@ -43,12 +94,23 @@ pub struct PyramidPlan {
 }
 
 /// Plan for a single pyramid level.
+///
+/// Each level represents one resolution step in the multi-resolution pyramid.
+/// Level 0 is the smallest (typically 1x1), and the highest-indexed level is
+/// the full-resolution image. The `cols` and `rows` fields describe the tile
+/// grid at this resolution, computed via ceiling division of the level
+/// dimensions by the tile size.
+///
+/// # Example usage
+///
+/// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LevelPlan {
     /// Level index (0 = smallest / most zoomed out).
     pub level: u32,
-    /// Pixel dimensions at this level.
+    /// Pixel width at this level.
     pub width: u32,
+    /// Pixel height at this level.
     pub height: u32,
     /// Number of tile columns.
     pub cols: u32,
@@ -57,6 +119,15 @@ pub struct LevelPlan {
 }
 
 /// Coordinates identifying a single tile in the pyramid.
+///
+/// A lightweight, `Copy` address for one tile, consisting of the pyramid
+/// level index and the column/row position within that level's tile grid.
+/// Used as a key when querying [`PyramidPlan::tile_rect`] and
+/// [`PyramidPlan::tile_path`].
+///
+/// # Example usage
+///
+/// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileCoord {
     pub level: u32,
@@ -65,6 +136,16 @@ pub struct TileCoord {
 }
 
 /// The pixel rectangle a tile covers within its level's image space.
+///
+/// Describes the origin `(x, y)` and size `(width, height)` of the region
+/// that should be read from the level image to produce this tile. Edge tiles
+/// are clipped to the image boundary, so their dimensions may be smaller than
+/// `tile_size + 2 * overlap`. Overlap pixels are included in the rectangle
+/// so that tile viewers can blend edges seamlessly.
+///
+/// # Example usage
+///
+/// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileRect {
     pub x: u32,
@@ -74,6 +155,10 @@ pub struct TileRect {
 }
 
 impl PyramidPlanner {
+    /// Create a new `PyramidPlanner` after validating all parameters.
+    ///
+    /// Returns [`PlannerError`] if any dimension is zero, tile size is zero,
+    /// or overlap is not strictly less than tile size.
     pub fn new(
         image_width: u32,
         image_height: u32,
@@ -103,6 +188,16 @@ impl PyramidPlanner {
     }
 
     /// Compute the full pyramid plan.
+    ///
+    /// Builds every [`LevelPlan`] from level 0 (1x1) up to the full-resolution
+    /// level, computing tile grid dimensions at each step. The returned
+    /// [`PyramidPlan`] is a pure data structure with no side-effects; it can
+    /// be queried, serialised, or handed to a tile-writing executor.
+    ///
+    /// # Example usage
+    ///
+    /// * [CLI plan command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+    /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
     pub fn plan(&self) -> PyramidPlan {
         let levels = self.compute_levels();
         PyramidPlan {
@@ -158,6 +253,9 @@ impl PyramidPlanner {
 
 impl PyramidPlan {
     /// Total number of tiles across all levels.
+    ///
+    /// Useful for progress reporting and pre-allocating storage. The count is
+    /// the sum of `cols * rows` for every [`LevelPlan`] in the pyramid.
     pub fn total_tile_count(&self) -> u64 {
         self.levels
             .iter()
@@ -166,11 +264,22 @@ impl PyramidPlan {
     }
 
     /// Number of levels in the pyramid.
+    ///
+    /// Equal to `floor(log2(max(width, height))) + 1`, ranging from a single
+    /// 1x1 level for a 1x1 image up to ~17 levels for a 50 000-pixel image.
     pub fn level_count(&self) -> usize {
         self.levels.len()
     }
 
     /// Iterate over all tile coordinates in the pyramid.
+    ///
+    /// Yields [`TileCoord`]s in level-ascending, row-major order. This is the
+    /// primary iteration method used by tile-writing executors to walk every
+    /// tile that needs to be produced.
+    ///
+    /// # Example usage
+    ///
+    /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
     pub fn tile_coords(&self) -> impl Iterator<Item = TileCoord> + '_ {
         self.levels.iter().flat_map(|level| {
             (0..level.rows).flat_map(move |row| {
@@ -186,7 +295,16 @@ impl PyramidPlan {
     /// Get the pixel rectangle for a tile, accounting for overlap.
     ///
     /// The rectangle describes where in the level's image space this tile
-    /// reads from. Edge tiles are clipped to the image boundary.
+    /// reads from. Edge tiles are clipped to the image boundary. Interior
+    /// tiles extend by `overlap` pixels on every side so that viewers can
+    /// blend adjacent tiles without visible seams.
+    ///
+    /// Returns `None` if the coordinate is out of bounds (invalid level,
+    /// column, or row).
+    ///
+    /// # Example usage
+    ///
+    /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
     pub fn tile_rect(&self, coord: TileCoord) -> Option<TileRect> {
         let level = self.levels.get(coord.level as usize)?;
         if coord.col >= level.cols || coord.row >= level.rows {
@@ -227,6 +345,16 @@ impl PyramidPlan {
     }
 
     /// Generate the output path for a tile given the layout.
+    ///
+    /// Formats the path according to the [`Layout`] selected at planning time:
+    /// * [`Layout::DeepZoom`] -- `{level}/{col}_{row}.{ext}`
+    /// * [`Layout::Xyz`] -- `{level}/{col}/{row}.{ext}`
+    ///
+    /// Returns `None` if the coordinate is out of bounds.
+    ///
+    /// # Example usage
+    ///
+    /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
     pub fn tile_path(&self, coord: TileCoord, extension: &str) -> Option<String> {
         let level = self.levels.get(coord.level as usize)?;
         if coord.col >= level.cols || coord.row >= level.rows {
@@ -245,6 +373,14 @@ impl PyramidPlan {
     }
 
     /// Generate a Deep Zoom `.dzi` manifest (XML).
+    ///
+    /// Produces the companion XML descriptor that Deep Zoom viewers need in
+    /// order to discover tile parameters. Returns `None` if the plan's layout
+    /// is not [`Layout::DeepZoom`], since other layouts have no manifest.
+    ///
+    /// # Example usage
+    ///
+    /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
     pub fn dzi_manifest(&self, format: &str) -> Option<String> {
         if self.layout != Layout::DeepZoom {
             return None;
@@ -266,13 +402,17 @@ impl PyramidPlan {
 }
 
 impl LevelPlan {
-    /// Total tiles at this level.
+    /// Total tiles at this level (`cols * rows`).
+    ///
+    /// Convenience method for progress tracking or capacity pre-allocation
+    /// when processing a single level at a time.
     pub fn tile_count(&self) -> u64 {
         self.cols as u64 * self.rows as u64
     }
 }
 
 impl TileCoord {
+    /// Create a new `TileCoord` from explicit level, column, and row indices.
     pub fn new(level: u32, col: u32, row: u32) -> Self {
         Self { level, col, row }
     }

@@ -4,6 +4,17 @@ use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
 use thiserror::Error;
 
+/// Errors that can occur when writing tiles to a sink.
+///
+/// Covers I/O failures (e.g. filesystem permission errors), image encoding
+/// failures (e.g. unsupported pixel format for JPEG), and general sink errors
+/// for invalid coordinates or configuration. Every [`TileSink`] method returns
+/// `Result<(), SinkError>`.
+///
+/// # Examples
+///
+/// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for error handling patterns.
 #[derive(Debug, Error)]
 pub enum SinkError {
     #[error("I/O error: {0}")]
@@ -14,11 +25,37 @@ pub enum SinkError {
     Other(String),
 }
 
+/// Single-byte marker written in place of blank tiles when using
+/// `BlankTileStrategy::Placeholder`. Consumers can detect placeholder
+/// files by checking `file.len() == 1 && file[0] == BLANK_TILE_MARKER`.
+///
+/// # Examples
+///
+/// See [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
+/// for placeholder detection patterns.
+pub const BLANK_TILE_MARKER: u8 = 0x00;
+
 /// A produced tile, ready for output.
+///
+/// Represents a single tile in the pyramid after rasterisation. The engine
+/// creates a `Tile` for every grid cell in the plan, attaches the rendered
+/// [`Raster`], and passes it to a [`TileSink`]. The `blank` flag allows sinks
+/// to write a lightweight placeholder instead of encoding a full image when
+/// all pixels are identical.
+///
+/// # Examples
+///
+/// See [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
+/// for usage with blank detection.
 #[derive(Debug)]
 pub struct Tile {
     pub coord: TileCoord,
     pub raster: Raster,
+    /// When `true`, this tile is blank (all pixels identical) and was marked
+    /// for placeholder output by `BlankTileStrategy::Placeholder`.
+    ///
+    /// See [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs).
+    pub blank: bool,
 }
 
 /// Trait for receiving tiles produced by the engine.
@@ -26,6 +63,13 @@ pub struct Tile {
 /// Implementations handle where tiles go — filesystem, object store, memory, etc.
 /// The engine calls `write_tile` from worker threads, so implementations must be
 /// `Send + Sync`.
+///
+/// # Examples
+///
+/// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for filesystem sink integration tests and
+/// [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for how the CLI wires up a sink.
 pub trait TileSink: Send + Sync {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError>;
     fn finish(&self) -> Result<(), SinkError> {
@@ -37,12 +81,31 @@ pub trait TileSink: Send + Sync {
 // MemorySink
 // ---------------------------------------------------------------------------
 
-/// In-memory sink that collects all tiles. Useful for testing.
+/// In-memory sink that collects all tiles into a `Vec<CollectedTile>`.
+///
+/// Primarily intended for testing: it lets you assert on the exact tiles the
+/// engine produced without touching the filesystem. Thread-safe via an internal
+/// `Mutex`, so it satisfies `Send + Sync`.
+///
+/// # Examples
+///
+/// See [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
+/// for end-to-end usage with the engine.
 #[derive(Debug)]
 pub struct MemorySink {
     tiles: std::sync::Mutex<Vec<CollectedTile>>,
 }
 
+/// A snapshot of a tile captured by [`MemorySink`].
+///
+/// Stores the tile's coordinate, dimensions, and raw pixel bytes so that tests
+/// can inspect tile output without needing to decode an image format. Created
+/// automatically when [`MemorySink::write_tile`] is called.
+///
+/// # Examples
+///
+/// See [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
+/// for assertions on collected tiles.
 #[derive(Debug, Clone)]
 pub struct CollectedTile {
     pub coord: TileCoord,
@@ -89,7 +152,16 @@ impl TileSink for MemorySink {
 // SlowSink (testing)
 // ---------------------------------------------------------------------------
 
-/// A sink that artificially delays writes. For testing backpressure.
+/// A sink that artificially delays every `write_tile` call by a fixed duration.
+///
+/// Wraps a [`MemorySink`] so tiles are still collected for inspection. Exists
+/// to test backpressure and concurrency behaviour in the engine: by making the
+/// sink slow, you can verify that the engine correctly limits in-flight work.
+///
+/// # Examples
+///
+/// See [stress tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/stress.rs)
+/// for backpressure scenarios.
 #[derive(Debug)]
 pub struct SlowSink {
     inner: MemorySink,
@@ -125,6 +197,16 @@ impl TileSink for SlowSink {
 // ---------------------------------------------------------------------------
 
 /// Tile image encoding format for filesystem output.
+///
+/// Controls how [`FsSink`] encodes pixel data before writing to disk. Also
+/// determines the file extension via [`TileFormat::extension`].
+///
+/// # Examples
+///
+/// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for format selection and
+/// [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for how the CLI maps user flags to a `TileFormat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileFormat {
     Png,
@@ -151,6 +233,17 @@ impl TileFormat {
 /// Directory structure follows the plan's layout:
 /// - DeepZoom: `{base}/{level}/{col}_{row}.{ext}` + `{base}.dzi`
 /// - XYZ: `{base}/{z}/{x}/{y}.{ext}`
+///
+/// Intermediate directories are created automatically. Call [`TileSink::finish`]
+/// after all tiles have been written to emit format-specific metadata (e.g. the
+/// DZI manifest for DeepZoom layouts).
+///
+/// # Examples
+///
+/// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for integration tests and
+/// [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for how the `pyramid` command constructs an `FsSink`.
 #[derive(Debug)]
 pub struct FsSink {
     base_dir: PathBuf,
@@ -159,6 +252,8 @@ pub struct FsSink {
 }
 
 impl FsSink {
+    /// Creates a new filesystem sink rooted at `base_dir` with the given
+    /// pyramid plan and tile encoding format.
     pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan, format: TileFormat) -> Self {
         Self {
             base_dir: base_dir.into(),
@@ -167,6 +262,7 @@ impl FsSink {
         }
     }
 
+    /// Returns the root output directory for this sink.
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
@@ -195,8 +291,12 @@ impl TileSink for FsSink {
             std::fs::create_dir_all(parent)?;
         }
 
-        let encoded = self.encode_tile(&tile.raster)?;
-        std::fs::write(&path, &encoded)?;
+        if tile.blank {
+            std::fs::write(&path, [BLANK_TILE_MARKER])?;
+        } else {
+            let encoded = self.encode_tile(&tile.raster)?;
+            std::fs::write(&path, &encoded)?;
+        }
         Ok(())
     }
 
@@ -226,6 +326,20 @@ fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorT
     }
 }
 
+/// Encodes a [`Raster`] as a PNG image and returns the raw PNG bytes.
+///
+/// Supports all pixel formats defined in [`crate::pixel::PixelFormat`]. This is
+/// exposed publicly so callers that bypass [`FsSink`] (e.g. custom sinks or
+/// one-off exports) can still produce PNG output.
+///
+/// # Errors
+///
+/// Returns [`SinkError::Encode`] if the underlying image encoder fails.
+///
+/// # Examples
+///
+/// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for encoding in the context of tile output.
 pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf));
@@ -271,6 +385,7 @@ mod tests {
         Tile {
             coord: TileCoord::new(level, col, row),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         }
     }
 
@@ -349,6 +464,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top.level, 0, 0),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -386,6 +502,7 @@ mod tests {
                 let tile = Tile {
                     coord: TileCoord::new(top.level, col, row),
                     raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                    blank: false,
                 };
                 sink.write_tile(&tile).unwrap();
             }
@@ -461,6 +578,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top.level, 1, 0),
             raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -487,6 +605,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top_level, 0, 0),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -518,6 +637,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top_level, 0, 0),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -550,6 +670,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top.level, 0, 0),
             raster,
+            blank: false,
         };
 
         sink1.write_tile(&tile).unwrap();
