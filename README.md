@@ -131,5 +131,5 @@ make loom     # loom concurrency tests
 
 
 <p align="center">
-  <img src="" alt="libviprs" width="200">
+  <img src="https://github.com/user-attachments/assets/a9f63802-2b58-4fa4-a6b1-7ad4544c6df2" alt="libviprs-flash-sign" width="400">
 </p>
