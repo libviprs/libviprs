@@ -14,11 +14,19 @@ pub enum SinkError {
     Other(String),
 }
 
+/// Single-byte marker written in place of blank tiles when using
+/// `BlankTileStrategy::Placeholder`. Consumers can detect placeholder
+/// files by checking `file.len() == 1 && file[0] == BLANK_TILE_MARKER`.
+pub const BLANK_TILE_MARKER: u8 = 0x00;
+
 /// A produced tile, ready for output.
 #[derive(Debug)]
 pub struct Tile {
     pub coord: TileCoord,
     pub raster: Raster,
+    /// When `true`, this tile is blank (all pixels identical) and was marked
+    /// for placeholder output by `BlankTileStrategy::Placeholder`.
+    pub blank: bool,
 }
 
 /// Trait for receiving tiles produced by the engine.
@@ -195,8 +203,12 @@ impl TileSink for FsSink {
             std::fs::create_dir_all(parent)?;
         }
 
-        let encoded = self.encode_tile(&tile.raster)?;
-        std::fs::write(&path, &encoded)?;
+        if tile.blank {
+            std::fs::write(&path, [BLANK_TILE_MARKER])?;
+        } else {
+            let encoded = self.encode_tile(&tile.raster)?;
+            std::fs::write(&path, &encoded)?;
+        }
         Ok(())
     }
 
@@ -271,6 +283,7 @@ mod tests {
         Tile {
             coord: TileCoord::new(level, col, row),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         }
     }
 
@@ -349,6 +362,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top.level, 0, 0),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -386,6 +400,7 @@ mod tests {
                 let tile = Tile {
                     coord: TileCoord::new(top.level, col, row),
                     raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                    blank: false,
                 };
                 sink.write_tile(&tile).unwrap();
             }
@@ -461,6 +476,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top.level, 1, 0),
             raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -487,6 +503,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top_level, 0, 0),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -518,6 +535,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top_level, 0, 0),
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+            blank: false,
         };
         sink.write_tile(&tile).unwrap();
 
@@ -550,6 +568,7 @@ mod tests {
         let tile = Tile {
             coord: TileCoord::new(top.level, 0, 0),
             raster,
+            blank: false,
         };
 
         sink1.write_tile(&tile).unwrap();

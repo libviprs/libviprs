@@ -12,8 +12,8 @@ pub mod sink;
 pub mod source;
 
 pub use engine::{
-    EngineConfig, EngineError, EngineResult, generate_pyramid, generate_pyramid_observed,
-    is_blank_tile,
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, generate_pyramid,
+    generate_pyramid_observed, is_blank_tile,
 };
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
@@ -25,5 +25,5 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
-pub use sink::{FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
+pub use sink::{BLANK_TILE_MARKER, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};

@@ -20,6 +20,18 @@ pub enum EngineError {
     WorkerPanic,
 }
 
+/// Controls how blank (uniform-color) tiles are handled during pyramid generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlankTileStrategy {
+    /// Emit blank tiles as full raster data (default). Every tile coordinate
+    /// produces a complete image file, including tiles that are entirely one color.
+    Emit,
+    /// Replace blank tiles with a 1-byte placeholder marker (`0x00`). Consumers
+    /// can detect these marker files by their size and generate their own blank
+    /// tiles on the fly, saving significant disk space for sparse images.
+    Placeholder,
+}
+
 /// Configuration for the execution engine.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -30,6 +42,9 @@ pub struct EngineConfig {
     /// Background color (RGB) used to pad edge tiles to the full tile size.
     /// Defaults to white (255, 255, 255).
     pub background_rgb: [u8; 3],
+    /// How to handle tiles where every pixel is the same color.
+    /// Defaults to `Emit` (write full tile data).
+    pub blank_tile_strategy: BlankTileStrategy,
 }
 
 impl Default for EngineConfig {
@@ -38,6 +53,7 @@ impl Default for EngineConfig {
             concurrency: 0,
             buffer_size: 64,
             background_rgb: [255, 255, 255],
+            blank_tile_strategy: BlankTileStrategy::Emit,
         }
     }
 }
@@ -52,12 +68,20 @@ impl EngineConfig {
         self.buffer_size = n;
         self
     }
+
+    pub fn with_blank_tile_strategy(mut self, strategy: BlankTileStrategy) -> Self {
+        self.blank_tile_strategy = strategy;
+        self
+    }
 }
 
 /// Result of a completed pyramid generation.
 #[derive(Debug)]
 pub struct EngineResult {
     pub tiles_produced: u64,
+    /// Number of tiles that were blank and replaced with placeholders
+    /// (only non-zero when `BlankTileStrategy::Placeholder` is used).
+    pub tiles_skipped: u64,
     pub levels_processed: u32,
     /// Peak tracked memory in bytes (raster buffers only).
     pub peak_memory_bytes: u64,
@@ -87,6 +111,7 @@ pub fn generate_pyramid_observed(
 ) -> Result<EngineResult, EngineError> {
     let top_level = plan.levels.len() - 1;
     let mut tiles_produced: u64 = 0;
+    let mut tiles_skipped: u64 = 0;
     let tracker = MemoryTracker::new();
 
     // Track source raster
@@ -118,9 +143,10 @@ pub fn generate_pyramid_observed(
         }
 
         // Extract and emit tiles for this level
-        let level_tiles =
+        let (level_tiles, level_skipped) =
             extract_and_emit_level(&current, plan, level_idx as u32, sink, config, observer)?;
         tiles_produced += level_tiles;
+        tiles_skipped += level_skipped;
 
         observer.on_event(EngineEvent::LevelCompleted {
             level: level.level,
@@ -140,12 +166,14 @@ pub fn generate_pyramid_observed(
 
     Ok(EngineResult {
         tiles_produced,
+        tiles_skipped,
         levels_processed: plan.levels.len() as u32,
         peak_memory_bytes: tracker.peak_bytes(),
     })
 }
 
 /// Extract all tiles for a single level and send them to the sink.
+/// Returns `(tiles_produced, tiles_skipped)`.
 fn extract_and_emit_level(
     raster: &Raster,
     plan: &PyramidPlan,
@@ -153,31 +181,39 @@ fn extract_and_emit_level(
     sink: &dyn TileSink,
     config: &EngineConfig,
     observer: &dyn EngineObserver,
-) -> Result<u64, EngineError> {
+) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
+    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
 
     if config.concurrency == 0 {
         // Single-threaded path
         let mut count = 0u64;
+        let mut skipped = 0u64;
         for row in 0..level_plan.rows {
             for col in 0..level_plan.cols {
                 let coord = TileCoord::new(level, col, row);
                 let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
+                let blank = use_placeholders && is_blank_tile(&tile_raster);
+                if blank {
+                    skipped += 1;
+                }
                 sink.write_tile(&Tile {
                     coord,
                     raster: tile_raster,
+                    blank,
                 })?;
                 observer.on_event(EngineEvent::TileCompleted { coord });
                 count += 1;
             }
         }
-        Ok(count)
+        Ok((count, skipped))
     } else {
         extract_and_emit_parallel(raster, plan, level, sink, config, observer)
     }
 }
 
 /// Parallel tile extraction using a bounded channel for backpressure.
+/// Returns `(tiles_produced, tiles_skipped)`.
 fn extract_and_emit_parallel(
     raster: &Raster,
     plan: &PyramidPlan,
@@ -185,13 +221,15 @@ fn extract_and_emit_parallel(
     sink: &dyn TileSink,
     config: &EngineConfig,
     observer: &dyn EngineObserver,
-) -> Result<u64, EngineError> {
+) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
     let total_tiles = level_plan.tile_count();
 
     if total_tiles == 0 {
-        return Ok(0);
+        return Ok((0, 0));
     }
+
+    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
 
     // Bounded channel for backpressure: producers block when buffer is full
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Tile, EngineError>>(config.buffer_size);
@@ -221,9 +259,13 @@ fn extract_and_emit_parallel(
             s.spawn(move || {
                 for coord in chunk {
                     let result = extract_tile(&raster, &plan, coord, bg)
-                        .map(|tile_raster| Tile {
-                            coord,
-                            raster: tile_raster,
+                        .map(|tile_raster| {
+                            let blank = use_placeholders && is_blank_tile(&tile_raster);
+                            Tile {
+                                coord,
+                                raster: tile_raster,
+                                blank,
+                            }
                         })
                         .map_err(EngineError::from);
                     if tx.send(result).is_err() {
@@ -237,14 +279,18 @@ fn extract_and_emit_parallel(
 
         // Consumer: receive tiles and write to sink
         let mut count = 0u64;
+        let mut skipped = 0u64;
         for result in rx {
             let tile = result?;
             let coord = tile.coord;
+            if tile.blank {
+                skipped += 1;
+            }
             sink.write_tile(&tile)?;
             observer.on_event(EngineEvent::TileCompleted { coord });
             count += 1;
         }
-        Ok(count)
+        Ok((count, skipped))
     })
 }
 
