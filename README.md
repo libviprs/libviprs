@@ -128,3 +128,8 @@ make loom     # loom concurrency tests
 
 > **Prerequisites:** `make miri` requires the nightly toolchain with the miri component.
 > Install with: `rustup toolchain install nightly --component miri`
+
+
+<p align="center">
+  <img src="" alt="libviprs" width="200">
+</p>
