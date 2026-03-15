@@ -32,3 +32,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+
+  integration-test:
+    name: Integration Tests (libviprs-tests)
+    runs-on: ubuntu-latest
+    steps:
+      # Check out libviprs at the current branch/PR ref into the "libviprs" subdirectory.
+      # libviprs-tests depends on { path = "../libviprs" }, so the two repos must be siblings.
+      - uses: actions/checkout@v4
+        with:
+          path: libviprs
+      - uses: actions/checkout@v4
+        with:
+          repository: libviprs/libviprs-tests
+          path: libviprs-tests
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libviprs-tests
+      - name: Run integration tests
+        working-directory: libviprs-tests
+        run: cargo test
