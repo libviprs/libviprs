@@ -27,6 +27,9 @@ pub struct EngineConfig {
     pub concurrency: usize,
     /// Maximum tiles buffered between producer and sink. Controls backpressure.
     pub buffer_size: usize,
+    /// Background color (RGB) used to pad edge tiles to the full tile size.
+    /// Defaults to white (255, 255, 255).
+    pub background_rgb: [u8; 3],
 }
 
 impl Default for EngineConfig {
@@ -34,6 +37,7 @@ impl Default for EngineConfig {
         Self {
             concurrency: 0,
             buffer_size: 64,
+            background_rgb: [255, 255, 255],
         }
     }
 }
@@ -158,7 +162,7 @@ fn extract_and_emit_level(
         for row in 0..level_plan.rows {
             for col in 0..level_plan.cols {
                 let coord = TileCoord::new(level, col, row);
-                let tile_raster = extract_tile(raster, plan, coord)?;
+                let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
                 sink.write_tile(&Tile {
                     coord,
                     raster: tile_raster,
@@ -212,10 +216,11 @@ fn extract_and_emit_parallel(
             let raster = Arc::clone(&raster);
             let plan = Arc::clone(&plan);
             let chunk = chunk.to_vec();
+            let bg = config.background_rgb;
 
             s.spawn(move || {
                 for coord in chunk {
-                    let result = extract_tile(&raster, &plan, coord)
+                    let result = extract_tile(&raster, &plan, coord, bg)
                         .map(|tile_raster| Tile {
                             coord,
                             raster: tile_raster,
@@ -248,12 +253,47 @@ fn extract_tile(
     raster: &Raster,
     plan: &PyramidPlan,
     coord: TileCoord,
+    background_rgb: [u8; 3],
 ) -> Result<Raster, RasterError> {
     let rect = plan
         .tile_rect(coord)
         .expect("tile_rect returned None for valid coord");
 
-    raster.extract(rect.x, rect.y, rect.width, rect.height)
+    let content = raster.extract(rect.x, rect.y, rect.width, rect.height)?;
+    let ts = plan.tile_size;
+
+    // Pad edge tiles to the full tile size with the background color.
+    // Only pad when there's no overlap — overlap tiles have intentionally
+    // different sizes and must not be resized.
+    if plan.overlap == 0 && (content.width() < ts || content.height() < ts) {
+        let bpp = content.format().bytes_per_pixel();
+        let mut padded = vec![0u8; ts as usize * ts as usize * bpp];
+
+        // Fill with background color (repeat the RGB pattern for each pixel)
+        let bg_pixel: Vec<u8> = match bpp {
+            1 => vec![background_rgb[0]],
+            3 => background_rgb.to_vec(),
+            4 => vec![background_rgb[0], background_rgb[1], background_rgb[2], 255],
+            _ => vec![background_rgb[0]; bpp],
+        };
+        for pixel in padded.chunks_exact_mut(bpp) {
+            pixel.copy_from_slice(&bg_pixel);
+        }
+
+        // Copy content rows into the padded buffer
+        let src_stride = content.width() as usize * bpp;
+        let dst_stride = ts as usize * bpp;
+        for row in 0..content.height() as usize {
+            let src_start = row * src_stride;
+            let dst_start = row * dst_stride;
+            padded[dst_start..dst_start + src_stride]
+                .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
+        }
+
+        Raster::new(ts, ts, content.format(), padded)
+    } else {
+        Ok(content)
+    }
 }
 
 /// Check if a tile is "blank" — all pixels are identical.
@@ -379,9 +419,12 @@ mod tests {
 
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
-            assert_eq!(tile.width, rect.width, "Width mismatch at {:?}", tile.coord);
+            // Edge tiles are padded to the full tile size when overlap=0
+            let expected_w = if rect.width < 256 { 256 } else { rect.width };
+            let expected_h = if rect.height < 256 { 256 } else { rect.height };
+            assert_eq!(tile.width, expected_w, "Width mismatch at {:?}", tile.coord);
             assert_eq!(
-                tile.height, rect.height,
+                tile.height, expected_h,
                 "Height mismatch at {:?}",
                 tile.coord
             );
