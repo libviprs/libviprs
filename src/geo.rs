@@ -657,6 +657,10 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
         // Property test: for any valid origin, scale, and pixel coordinate,
         // pixel_to_geo followed by geo_to_pixel must recover the original pixel.
         // Works because the scale factors are constrained to be non-zero (and thus
