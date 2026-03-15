@@ -6,6 +6,16 @@ use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::source;
 
+/// Errors that can occur during PDF inspection, image extraction, or rendering.
+///
+/// Covers I/O failures, PDF parsing errors, missing or unsupported images,
+/// page-range validation, and (when the `pdfium` feature is enabled) pdfium
+/// rendering failures.
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
+/// for error handling patterns.
 #[derive(Debug, Error)]
 pub enum PdfError {
     #[error("I/O error: {0}")]
@@ -27,14 +37,31 @@ pub enum PdfError {
     Pdfium(String),
 }
 
-/// Information about a PDF document.
+/// Information about a PDF document, including page count and per-page metadata.
+///
+/// Returned by [`pdf_info`]. Use this to inspect a PDF before deciding whether
+/// to extract embedded images or render pages with pdfium.
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
+/// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 #[derive(Debug, Clone)]
 pub struct PdfInfo {
     pub page_count: usize,
     pub pages: Vec<PdfPageInfo>,
 }
 
-/// Information about a single PDF page.
+/// Metadata for a single page within a PDF document.
+///
+/// Dimensions are in PDF points (1 point = 1/72 inch). To convert to pixels
+/// at a given DPI, multiply by `dpi / 72.0`. The `has_images` flag indicates
+/// whether the page contains embedded raster images that can be extracted
+/// with [`extract_page_image`].
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs).
 #[derive(Debug, Clone)]
 pub struct PdfPageInfo {
     pub page_number: usize,
@@ -46,7 +73,18 @@ pub struct PdfPageInfo {
     pub has_images: bool,
 }
 
-/// Get information about a PDF document.
+/// Get information about a PDF document, including page count and per-page
+/// dimensions and image presence.
+///
+/// Use this to inspect a PDF before extracting images or rendering pages.
+/// For scanned blueprints, check [`PdfPageInfo::has_images`] to decide
+/// whether to use [`extract_page_image`] (fast, embedded image extraction)
+/// or [`render_page_pdfium`] (full vector rendering).
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
+/// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
@@ -74,6 +112,15 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
 /// This is the fast path for scanned blueprints: the page typically contains
 /// a single large JPEG or JPEG2000 image. We extract the raw compressed stream
 /// and decode it with the `image` crate, avoiding any PDF rendering.
+///
+/// For vector PDFs that don't contain embedded images, use
+/// [`render_page_pdfium`] instead (requires the `pdfium` feature).
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs),
+/// [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs),
+/// and the [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();

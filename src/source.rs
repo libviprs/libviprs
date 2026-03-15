@@ -6,6 +6,12 @@ use thiserror::Error;
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 
+/// Errors that can occur when decoding an image source.
+///
+/// Wraps the underlying I/O, image-decoding, and raster-construction
+/// errors into a single enum so that callers of [`decode_file`],
+/// [`decode_bytes`], and [`generate_test_raster`] can handle all failure
+/// modes uniformly.
 #[derive(Debug, Error)]
 pub enum SourceError {
     #[error("I/O error: {0}")]
@@ -36,8 +42,17 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 
 /// Decode an image file into a canonical [`Raster`].
 ///
-/// Supports JPEG, PNG, and TIFF. Palette and gray+alpha images are
-/// normalized to RGB/RGBA.
+/// Reads the file at `path`, auto-detects the format (JPEG, PNG, TIFF),
+/// and decodes it into an in-memory [`Raster`] with a canonical
+/// [`PixelFormat`]. Palette and gray+alpha images are promoted to
+/// RGB/RGBA so that downstream code only needs to handle a small set of
+/// uniform formats.
+///
+/// # Example usage
+///
+/// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+///   calls `decode_file` in the `info` command to display image metadata
+///   and in the `pyramid` command to load the input raster.
 pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
     let img = image::open(path)?;
     let (width, height) = img.dimensions();
@@ -64,6 +79,18 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 }
 
 /// Decode from an in-memory buffer (format auto-detected).
+///
+/// Behaves identically to [`decode_file`] but operates on a byte slice
+/// that is already in memory. The image format is inferred from magic
+/// bytes at the start of the buffer. This is the primary entry point
+/// when the input arrives over a pipe or network socket rather than from
+/// a filesystem path.
+///
+/// # Example usage
+///
+/// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+///   calls `decode_bytes` when the user passes `"-"` as the input file,
+///   reading the image data from stdin.
 pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
     let img = image::load_from_memory(bytes)?;
     let (width, height) = img.dimensions();
@@ -88,6 +115,18 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 }
 
 /// Generate a synthetic test image (RGB8 gradient pattern).
+///
+/// Creates a `width x height` [`Raster`] in [`PixelFormat::Rgb8`] filled
+/// with a deterministic gradient: the red channel increases left-to-right,
+/// the green channel increases top-to-bottom, and the blue channel is
+/// a diagonal blend. This is useful for verifying the full pipeline
+/// without needing an external test fixture on disk.
+///
+/// # Example usage
+///
+/// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+///   exposes this as the `test-image` subcommand, generating a gradient
+///   PNG for quick smoke-testing.
 pub fn generate_test_raster(width: u32, height: u32) -> Result<Raster, SourceError> {
     let bpp = PixelFormat::Rgb8.bytes_per_pixel();
     let mut data = vec![0u8; width as usize * height as usize * bpp];

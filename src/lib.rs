@@ -1,3 +1,31 @@
+//! # libviprs — High-performance tile pyramid generation
+//!
+//! libviprs converts large raster images and PDF documents into multi-resolution
+//! tile pyramids suitable for Deep Zoom viewers, slippy-map UIs, and GIS applications.
+//!
+//! ## Core workflow
+//!
+//! 1. **Load** an image with [`decode_file`] / [`decode_bytes`], or extract from
+//!    PDF with [`extract_page_image`] / [`render_page_pdfium`].
+//! 2. **Plan** the pyramid with [`PyramidPlanner`] — choose tile size, overlap,
+//!    and layout ([`Layout::DeepZoom`] or [`Layout::Xyz`]).
+//! 3. **Generate** tiles with [`generate_pyramid`] or [`generate_pyramid_observed`],
+//!    sending output to an [`FsSink`] (filesystem) or [`MemorySink`] (in-memory).
+//! 4. **Configure** blank tile handling with [`BlankTileStrategy`] to either emit
+//!    full tiles or write 1-byte placeholders for uniform-color regions.
+//!
+//! ## Feature flags
+//!
+//! - **`pdfium`** — enables [`render_page_pdfium`] and [`render_page_pdfium_budgeted`]
+//!   for full vector PDF rendering via the pdfium library.
+//!
+//! ## Examples
+//!
+//! See the [libviprs-tests](https://github.com/libviprs/libviprs-tests) repository
+//! for comprehensive integration tests, and
+//! [libviprs-cli](https://github.com/libviprs/libviprs-cli) for a command-line
+//! tool demonstrating every public API.
+
 pub mod engine;
 pub mod geo;
 #[cfg(loom)]

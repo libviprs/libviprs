@@ -10,6 +10,20 @@
 //! Earth curvature effects are negligible.
 
 /// A 2D point in pixel space (column, row from top-left origin).
+///
+/// Represents a position within a raster image where `x` is the column offset
+/// (increasing rightward) and `y` is the row offset (increasing downward).
+/// Coordinates are `f64` to allow sub-pixel precision during interpolation
+/// and affine transform calculations.
+///
+/// This type is the pixel-space counterpart of [`GeoCoord`] and is used
+/// throughout the geo-referencing pipeline to express positions before they
+/// are projected into geographic space via a [`GeoTransform`].
+///
+/// # Example usage
+///
+/// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+///   constructs `PixelCoord` values when verifying geo bounds for tile centers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PixelCoord {
     pub x: f64,
@@ -17,6 +31,22 @@ pub struct PixelCoord {
 }
 
 /// A 2D point in geographic space (longitude, latitude or easting, northing).
+///
+/// Represents a position in a geographic or projected coordinate system.
+/// The interpretation of `x` and `y` depends on the coordinate reference
+/// system in use -- for WGS-84 they are longitude and latitude; for a local
+/// site coordinate system they may be easting and northing in metres.
+///
+/// `GeoCoord` is intentionally unit-agnostic so that the same affine
+/// transform machinery works for both real-world map projections and
+/// arbitrary plan-sheet coordinate systems common in AEC workflows.
+///
+/// # Example usage
+///
+/// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+///   creates `GeoCoord` origins to geo-reference a PDF-extracted raster.
+/// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+///   parses `--geo-origin` flag values into `GeoCoord`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoCoord {
     pub x: f64,
@@ -33,6 +63,14 @@ pub struct GeoCoord {
 ///
 /// This is equivalent to a GDAL-style GeoTransform but stored row-major:
 /// `[a, b, c, d, e, f]`.
+///
+/// # Example usage
+///
+/// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+///   attaches a `GeoTransform` to a PDF-extracted raster and verifies tile
+///   centers fall within the expected geographic bounds.
+/// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+///   builds a `GeoTransform` from the `--geo-origin` and `--geo-scale` flags.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoTransform {
     pub a: f64,
@@ -45,16 +83,33 @@ pub struct GeoTransform {
 
 impl GeoTransform {
     /// Create a transform from the 6 affine coefficients.
+    ///
+    /// The coefficients `(a, b, c, d, e, f)` correspond to the row-major
+    /// representation of the 2x3 affine matrix. Use this constructor when
+    /// you already have raw coefficients (e.g. read from a world file or
+    /// GDAL dataset). For the common no-rotation case, prefer
+    /// [`from_origin_and_scale`](Self::from_origin_and_scale).
     pub fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Self {
         Self { a, b, c, d, e, f }
     }
 
     /// Create a simple scale + translate transform (no rotation or skew).
     ///
+    /// This is the most common constructor for AEC plan sheets where the
+    /// image is axis-aligned and the relationship between pixels and
+    /// geographic units is a uniform scale plus an offset.
+    ///
     /// - `origin`: geographic coordinate of the top-left pixel
     /// - `pixel_size_x`: geographic units per pixel in X (typically positive)
     /// - `pixel_size_y`: geographic units per pixel in Y (typically negative
     ///   for top-down rasters)
+    ///
+    /// # Example usage
+    ///
+    /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+    ///   uses this method to attach a geo-reference to a rasterized PDF page.
+    /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+    ///   calls this via the `--geo-origin` / `--geo-scale` flags.
     pub fn from_origin_and_scale(origin: GeoCoord, pixel_size_x: f64, pixel_size_y: f64) -> Self {
         Self {
             a: pixel_size_x,
@@ -68,8 +123,19 @@ impl GeoTransform {
 
     /// Create a transform from ground control points (GCPs).
     ///
-    /// Requires exactly 3 non-collinear GCPs to solve the 6 affine parameters.
-    /// For over-determined systems (more than 3 GCPs), use `from_gcps_least_squares`.
+    /// Solves the 6 affine parameters exactly from 3 non-collinear GCPs by
+    /// inverting the 3x3 system of equations. Returns `None` if the pixel
+    /// positions are collinear (determinant near zero), because the affine
+    /// is under-constrained in that case.
+    ///
+    /// For over-determined systems (more than 3 GCPs), use
+    /// `from_gcps_least_squares`.
+    ///
+    /// # Example usage
+    ///
+    /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+    ///   demonstrates the equivalent `from_origin_and_scale` path; GCPs are
+    ///   exercised in the unit tests of this module.
     pub fn from_gcps_exact(gcps: &[(PixelCoord, GeoCoord); 3]) -> Option<Self> {
         let [(p0, g0), (p1, g1), (p2, g2)] = gcps;
 
@@ -101,6 +167,17 @@ impl GeoTransform {
     }
 
     /// Transform a pixel coordinate to a geographic coordinate.
+    ///
+    /// Applies the forward affine transform to map a position in raster
+    /// pixel space to the corresponding position in geographic space.
+    /// This is the primary direction used when labelling tile centres with
+    /// their real-world coordinates.
+    ///
+    /// # Example usage
+    ///
+    /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+    ///   calls `pixel_to_geo` to verify that the image centre falls inside
+    ///   the expected geographic bounds.
     pub fn pixel_to_geo(&self, pixel: PixelCoord) -> GeoCoord {
         GeoCoord {
             x: self.a * pixel.x + self.b * pixel.y + self.c,
@@ -110,7 +187,13 @@ impl GeoTransform {
 
     /// Transform a geographic coordinate to a pixel coordinate.
     ///
-    /// Returns `None` if the transform is singular (degenerate).
+    /// Computes the inverse of the forward affine to map a geographic
+    /// position back to raster pixel space. This is useful for hit-testing
+    /// (e.g. "which pixel does this lat/lon correspond to?").
+    ///
+    /// Returns `None` if the transform is singular (degenerate), meaning
+    /// the 2x2 coefficient matrix has a near-zero determinant and cannot
+    /// be inverted.
     pub fn geo_to_pixel(&self, geo: GeoCoord) -> Option<PixelCoord> {
         let det = self.a * self.e - self.b * self.d;
         if det.abs() < 1e-12 {
@@ -125,7 +208,12 @@ impl GeoTransform {
         })
     }
 
-    /// Compute the inverse transform (geo → pixel as a GeoTransform).
+    /// Compute the inverse transform (geo -> pixel as a `GeoTransform`).
+    ///
+    /// Returns a new `GeoTransform` whose forward direction maps geographic
+    /// coordinates to pixel coordinates. This is the full-matrix inverse,
+    /// unlike [`geo_to_pixel`](Self::geo_to_pixel) which returns a single
+    /// point; the inverse transform object can be reused for many lookups.
     ///
     /// Returns `None` if the transform is singular.
     pub fn inverse(&self) -> Option<Self> {
@@ -152,6 +240,17 @@ impl GeoTransform {
     }
 
     /// Compute the geographic bounding box for an image of given pixel dimensions.
+    ///
+    /// Projects all four corner pixels through the forward transform and
+    /// returns the axis-aligned [`GeoBounds`] that encloses them. For
+    /// rotated or skewed transforms the bounding box will be larger than
+    /// the actual image footprint.
+    ///
+    /// # Example usage
+    ///
+    /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+    ///   uses `image_bounds` to verify the geographic extent after
+    ///   geo-referencing a rasterized PDF page.
     pub fn image_bounds(&self, width: u32, height: u32) -> GeoBounds {
         let corners = [
             self.pixel_to_geo(PixelCoord { x: 0.0, y: 0.0 }),
@@ -187,6 +286,17 @@ impl GeoTransform {
     }
 
     /// Compute the geographic coordinate for the center of a tile.
+    ///
+    /// Given a tile position `(tile_x, tile_y)` within a grid of tiles each
+    /// `tile_size` pixels wide and tall, returns the geographic coordinate
+    /// at the centre of that tile. This is used to annotate tiles with their
+    /// real-world location in metadata or debug output.
+    ///
+    /// # Example usage
+    ///
+    /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+    ///   iterates over tiles and calls `tile_center` to verify each centre
+    ///   falls within the expected geographic bounds.
     pub fn tile_center(&self, tile_x: u32, tile_y: u32, tile_size: u32) -> GeoCoord {
         let px = (tile_x as f64 + 0.5) * tile_size as f64;
         let py = (tile_y as f64 + 0.5) * tile_size as f64;
@@ -195,6 +305,17 @@ impl GeoTransform {
 }
 
 /// Axis-aligned geographic bounding box.
+///
+/// Stores the minimum and maximum corners of a rectangle in geographic
+/// coordinate space. Produced by [`GeoTransform::image_bounds`] and used
+/// to test whether a given [`GeoCoord`] falls within the footprint of a
+/// geo-referenced image.
+///
+/// # Example usage
+///
+/// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+///   obtains a `GeoBounds` via `image_bounds` and asserts that interior
+///   tile centres are contained within it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoBounds {
     pub min: GeoCoord,
@@ -202,14 +323,17 @@ pub struct GeoBounds {
 }
 
 impl GeoBounds {
+    /// Return the width of the bounding box (max.x - min.x) in geographic units.
     pub fn width(&self) -> f64 {
         self.max.x - self.min.x
     }
 
+    /// Return the height of the bounding box (max.y - min.y) in geographic units.
     pub fn height(&self) -> f64 {
         self.max.y - self.min.y
     }
 
+    /// Return the centre point of the bounding box.
     pub fn center(&self) -> GeoCoord {
         GeoCoord {
             x: (self.min.x + self.max.x) / 2.0,
@@ -217,6 +341,7 @@ impl GeoBounds {
         }
     }
 
+    /// Test whether `coord` lies inside (or on the boundary of) this box.
     pub fn contains(&self, coord: GeoCoord) -> bool {
         coord.x >= self.min.x
             && coord.x <= self.max.x
@@ -226,12 +351,14 @@ impl GeoBounds {
 }
 
 impl PixelCoord {
+    /// Create a new pixel coordinate from `(x, y)` column/row values.
     pub fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
 }
 
 impl GeoCoord {
+    /// Create a new geographic coordinate from `(x, y)` values.
     pub fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
