@@ -8,6 +8,12 @@ use crate::raster::{Raster, RasterError};
 use crate::resize;
 use crate::sink::{SinkError, Tile, TileSink};
 
+/// Errors that can occur during pyramid generation.
+///
+/// Wraps lower-level raster and sink errors into a single error type so that
+/// callers of [`generate_pyramid`] and [`generate_pyramid_observed`] can handle
+/// all failure modes uniformly. Also covers engine-specific conditions such as
+/// cancellation and worker panics.
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("raster error: {0}")]
@@ -21,6 +27,15 @@ pub enum EngineError {
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.
+///
+/// Sparse images (e.g. scanned documents with large white margins) can produce
+/// many tiles where every pixel is identical. This strategy lets the engine
+/// replace those tiles with tiny placeholders, dramatically reducing output size.
+///
+/// See [`is_blank_tile`] for the detection logic and the
+/// [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
+/// for integration-level examples. In the CLI, the `--skip-blank` flag selects
+/// [`BlankTileStrategy::Placeholder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlankTileStrategy {
     /// Emit blank tiles as full raster data (default). Every tile coordinate
@@ -32,7 +47,23 @@ pub enum BlankTileStrategy {
     Placeholder,
 }
 
-/// Configuration for the execution engine.
+/// Configuration for the pyramid generation engine.
+///
+/// Groups every tunable knob that affects how [`generate_pyramid`] runs:
+/// thread count, channel buffer depth, edge-tile background color, and
+/// blank-tile handling. The [`Default`] implementation provides sensible
+/// values for single-threaded operation.
+///
+/// Builder-style setters ([`with_concurrency`](Self::with_concurrency),
+/// [`with_buffer_size`](Self::with_buffer_size),
+/// [`with_blank_tile_strategy`](Self::with_blank_tile_strategy)) allow
+/// chaining for ergonomic construction.
+///
+/// See the
+/// [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for filesystem-backed usage and the
+/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for command-line construction of this config.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Number of worker threads for tile extraction. 0 = single-threaded (current thread).
@@ -59,39 +90,71 @@ impl Default for EngineConfig {
 }
 
 impl EngineConfig {
+    /// Sets the number of worker threads for parallel tile extraction.
+    ///
+    /// `0` (the default) means single-threaded execution on the calling thread.
+    /// Any positive value spawns that many workers per pyramid level.
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.concurrency = n;
         self
     }
 
+    /// Sets the bounded-channel capacity between producer threads and the sink consumer.
+    ///
+    /// A smaller buffer limits memory usage but may cause producers to block
+    /// more frequently. A larger buffer smooths out sink latency at the cost
+    /// of higher peak memory.
     pub fn with_buffer_size(mut self, n: usize) -> Self {
         self.buffer_size = n;
         self
     }
 
+    /// Sets the strategy for handling blank (uniform-color) tiles.
+    ///
+    /// See [`BlankTileStrategy`] for the available options.
     pub fn with_blank_tile_strategy(mut self, strategy: BlankTileStrategy) -> Self {
         self.blank_tile_strategy = strategy;
         self
     }
 }
 
-/// Result of a completed pyramid generation.
+/// Summary statistics returned after a successful pyramid generation.
+///
+/// Captures tile counts, level counts, and peak memory so that callers can
+/// log, display progress, or assert correctness without inspecting the sink
+/// directly. Every field is populated by [`generate_pyramid`] /
+/// [`generate_pyramid_observed`].
 #[derive(Debug)]
 pub struct EngineResult {
+    /// Total number of tiles written to the sink (including placeholders).
     pub tiles_produced: u64,
     /// Number of tiles that were blank and replaced with placeholders
     /// (only non-zero when `BlankTileStrategy::Placeholder` is used).
     pub tiles_skipped: u64,
+    /// Number of pyramid levels that were processed (always equals the plan's level count).
     pub levels_processed: u32,
     /// Peak tracked memory in bytes (raster buffers only).
     pub peak_memory_bytes: u64,
 }
 
-/// Generate a tile pyramid from a source raster.
+/// Generates a complete tile pyramid from a source raster.
 ///
-/// Processes levels from full resolution (top) down to 1×1.
-/// At each level, tiles are extracted and sent to the sink.
-/// When `concurrency > 0`, tiles within each level are produced in parallel.
+/// This is the primary entry point for pyramid generation. It processes levels
+/// from full resolution (top) down to 1x1, extracting tiles at each level and
+/// writing them to the provided [`TileSink`]. When
+/// [`EngineConfig::concurrency`] is greater than zero, tiles within each level
+/// are produced in parallel using scoped threads with bounded-channel
+/// backpressure.
+///
+/// For progress reporting, use [`generate_pyramid_observed`] instead.
+///
+/// See the
+/// [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for filesystem output,
+/// [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+/// for PDF-sourced pyramids, and the
+/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for end-to-end CLI usage.
 pub fn generate_pyramid(
     source: &Raster,
     plan: &PyramidPlan,
@@ -101,7 +164,17 @@ pub fn generate_pyramid(
     generate_pyramid_observed(source, plan, sink, config, &NoopObserver)
 }
 
-/// Generate a tile pyramid with an observer for progress events.
+/// Generates a tile pyramid with an [`EngineObserver`] for progress events.
+///
+/// Behaves identically to [`generate_pyramid`] but emits [`EngineEvent`]s
+/// (level started/completed, tile completed, finished) to the supplied
+/// observer. This is the function used by the
+/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// to drive its progress bar.
+///
+/// See the
+/// [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
+/// for integration-level examples of observer usage.
 pub fn generate_pyramid_observed(
     source: &Raster,
     plan: &PyramidPlan,
@@ -342,8 +415,16 @@ fn extract_tile(
     }
 }
 
-/// Check if a tile is "blank" — all pixels are identical.
-/// Useful for blank tile skipping optimization.
+/// Returns `true` if every pixel in the tile is identical (i.e. the tile is
+/// a uniform solid color).
+///
+/// Used by the engine when [`BlankTileStrategy::Placeholder`] is active to
+/// decide whether a tile should be replaced with a 1-byte marker instead of
+/// full image data. A single-pixel raster is trivially blank.
+///
+/// See the
+/// [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
+/// for integration-level examples.
 pub fn is_blank_tile(raster: &Raster) -> bool {
     let data = raster.data();
     let bpp = raster.format().bytes_per_pixel();

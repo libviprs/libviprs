@@ -1,9 +1,17 @@
 use crate::raster::{Raster, RasterError};
 
-/// Downscale a raster by 2× using a box filter (area averaging).
+/// Downscale a raster by 2x using a box filter (area averaging).
 ///
-/// Each 2×2 block in the source maps to one pixel in the output.
+/// Each 2x2 block in the source maps to one pixel in the output.
 /// For odd dimensions, the last row/column is averaged with fewer samples.
+/// This is the workhorse of the pyramid builder: each pyramid level is
+/// produced by applying `downscale_half` to the level above it.
+///
+/// # Example usage
+///
+/// - [test_resize_quarter](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
+///   chains two `downscale_half` calls to produce a quarter-size image and
+///   verifies the resulting dimensions.
 pub fn downscale_half(src: &Raster) -> Result<Raster, RasterError> {
     let dst_w = src.width().div_ceil(2);
     let dst_h = src.height().div_ceil(2);
@@ -67,8 +75,19 @@ pub fn downscale_half(src: &Raster) -> Result<Raster, RasterError> {
 
 /// Downscale a raster to arbitrary dimensions using simple bilinear-ish area averaging.
 ///
-/// For pyramid generation, prefer `downscale_half` iteratively — it's faster
-/// and matches the level halving semantics exactly.
+/// Maps each destination pixel to the corresponding rectangular region in the
+/// source and averages all source samples within that region. This handles
+/// non-power-of-two scale factors, unlike [`downscale_half`] which only
+/// supports exact 2x reduction.
+///
+/// For pyramid generation, prefer `downscale_half` iteratively -- it is faster
+/// and matches the level-halving semantics exactly.
+///
+/// # Example usage
+///
+/// - [test_resize_rounding](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
+///   exercises arbitrary-ratio downscaling and checks that output dimensions
+///   are correctly rounded.
 pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, RasterError> {
     if dst_w == 0 || dst_h == 0 {
         return Err(RasterError::ZeroDimension {
