@@ -460,7 +460,9 @@ mod tests {
         let top = plan.levels.last().unwrap();
 
         // Miri-safe: verify path generation and raw tile size
-        let rel = plan.tile_path(TileCoord::new(top.level, 0, 0), "raw").unwrap();
+        let rel = plan
+            .tile_path(TileCoord::new(top.level, 0, 0), "raw")
+            .unwrap();
         assert!(rel.ends_with("0_0.raw"), "unexpected path: {rel}");
         let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
         assert_eq!(raster.data().len(), 8 * 8 * 3);
@@ -481,7 +483,10 @@ mod tests {
             sink.write_tile(&tile).unwrap();
 
             let expected_path = dir.path().join("output_files").join(&rel);
-            assert!(expected_path.exists(), "Tile file not found at {expected_path:?}");
+            assert!(
+                expected_path.exists(),
+                "Tile file not found at {expected_path:?}"
+            );
             let contents = std::fs::read(&expected_path).unwrap();
             assert_eq!(contents.len(), 8 * 8 * 3);
         }
@@ -522,8 +527,7 @@ mod tests {
                     let rect = plan.tile_rect(TileCoord::new(top.level, col, row)).unwrap();
                     let tile = Tile {
                         coord: TileCoord::new(top.level, col, row),
-                        raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8)
-                            .unwrap(),
+                        raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
                         blank: false,
                     };
                     sink.write_tile(&tile).unwrap();
@@ -551,7 +555,9 @@ mod tests {
         let plan = planner.plan();
 
         // Miri-safe: verify manifest content in memory
-        let manifest = plan.dzi_manifest("png").expect("DeepZoom should produce a DZI manifest");
+        let manifest = plan
+            .dzi_manifest("png")
+            .expect("DeepZoom should produce a DZI manifest");
         assert!(manifest.contains("Format=\"png\""));
         assert!(manifest.contains("TileSize=\"256\""));
         assert!(manifest.contains("Overlap=\"1\""));
@@ -588,7 +594,10 @@ mod tests {
         let plan = planner.plan();
 
         // Miri-safe: XYZ layout should not produce a manifest
-        assert!(plan.dzi_manifest("raw").is_none(), "DZI should not exist for XYZ layout");
+        assert!(
+            plan.dzi_manifest("raw").is_none(),
+            "DZI should not exist for XYZ layout"
+        );
 
         #[cfg(not(miri))]
         {
@@ -597,7 +606,10 @@ mod tests {
             sink.finish().unwrap();
 
             let dzi_path = dir.path().join("tiles.dzi");
-            assert!(!dzi_path.exists(), "DZI should not be written for XYZ layout");
+            assert!(
+                !dzi_path.exists(),
+                "DZI should not be written for XYZ layout"
+            );
         }
     }
 
@@ -620,9 +632,14 @@ mod tests {
         let top = plan.levels.last().unwrap();
 
         // Miri-safe: verify XYZ path convention
-        let rel = plan.tile_path(TileCoord::new(top.level, 1, 0), "raw").unwrap();
+        let rel = plan
+            .tile_path(TileCoord::new(top.level, 1, 0), "raw")
+            .unwrap();
         let expected_suffix = format!("{}/1/0.raw", top.level);
-        assert!(rel.ends_with(&expected_suffix), "expected XYZ path ending with {expected_suffix}, got {rel}");
+        assert!(
+            rel.ends_with(&expected_suffix),
+            "expected XYZ path ending with {expected_suffix}, got {rel}"
+        );
 
         #[cfg(not(miri))]
         {
