@@ -454,6 +454,10 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
         // Tests that buffer size always equals w*h*bpp for all formats and dimensions.
         // Works by generating random dimensions and checking the invariant across
         // all 6 PixelFormat variants.
