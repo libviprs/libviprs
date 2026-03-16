@@ -447,37 +447,44 @@ mod tests {
      * Works by creating a DeepZoom sink, writing one tile, and verifying the file
      * exists at the expected path with the correct byte length (8*8*3 for Rgb8).
      * Input: 8x8 Rgb8 tile -> Output: file at {level}/0_0.raw with 192 bytes.
+     *
+     * Split for Miri: filesystem operations (mkdir, write) are blocked under
+     * Miri's isolation mode. The first half tests path generation and buffer
+     * sizing in memory (runs everywhere). The #[cfg(not(miri))] block adds
+     * the actual filesystem round-trip (skipped under Miri).
      */
     #[test]
     fn fs_sink_writes_tile_to_disk() {
-        let dir = tempfile::tempdir().unwrap();
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
         let top = plan.levels.last().unwrap();
 
-        let sink = FsSink::new(
-            dir.path().join("output_files"),
-            plan.clone(),
-            TileFormat::Raw,
-        );
+        // Miri-safe: verify path generation and raw tile size
+        let rel = plan.tile_path(TileCoord::new(top.level, 0, 0), "raw").unwrap();
+        assert!(rel.ends_with("0_0.raw"), "unexpected path: {rel}");
+        let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
+        assert_eq!(raster.data().len(), 8 * 8 * 3);
 
-        let tile = Tile {
-            coord: TileCoord::new(top.level, 0, 0),
-            raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
-            blank: false,
-        };
-        sink.write_tile(&tile).unwrap();
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = FsSink::new(
+                dir.path().join("output_files"),
+                plan.clone(),
+                TileFormat::Raw,
+            );
+            let tile = Tile {
+                coord: TileCoord::new(top.level, 0, 0),
+                raster,
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
 
-        let expected_path = dir
-            .path()
-            .join(format!("output_files/{}/0_0.raw", top.level));
-        assert!(
-            expected_path.exists(),
-            "Tile file not found at {expected_path:?}"
-        );
-
-        let contents = std::fs::read(&expected_path).unwrap();
-        assert_eq!(contents.len(), 8 * 8 * 3);
+            let expected_path = dir.path().join("output_files").join(&rel);
+            assert!(expected_path.exists(), "Tile file not found at {expected_path:?}");
+            let contents = std::fs::read(&expected_path).unwrap();
+            assert_eq!(contents.len(), 8 * 8 * 3);
+        }
     }
 
     /**
@@ -485,31 +492,46 @@ mod tests {
      * Works by writing all tiles for a 512x512 image and verifying the
      * level directory was created under the base path.
      * Input: multi-tile 512x512 pyramid -> Output: tiles/{level}/ directory exists.
+     *
+     * Split for Miri: mkdir is blocked under Miri's isolation mode. The first
+     * half verifies that tile_path produces a valid path for every coordinate
+     * in the grid (runs everywhere). The #[cfg(not(miri))] block tests the
+     * actual directory creation on disk (skipped under Miri).
      */
     #[test]
     fn fs_sink_creates_directory_structure() {
-        let dir = tempfile::tempdir().unwrap();
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
         let top = plan.levels.last().unwrap();
 
-        let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
-
-        // Write tiles at multiple positions
+        // Miri-safe: verify path generation works for all tile coords
         for col in 0..top.cols {
             for row in 0..top.rows {
-                let rect = plan.tile_rect(TileCoord::new(top.level, col, row)).unwrap();
-                let tile = Tile {
-                    coord: TileCoord::new(top.level, col, row),
-                    raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
-                    blank: false,
-                };
-                sink.write_tile(&tile).unwrap();
+                let path = plan.tile_path(TileCoord::new(top.level, col, row), "raw");
+                assert!(path.is_some(), "tile_path returned None for ({col}, {row})");
             }
         }
 
-        // Verify level directory exists
-        assert!(dir.path().join(format!("tiles/{}", top.level)).is_dir());
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
+
+            for col in 0..top.cols {
+                for row in 0..top.rows {
+                    let rect = plan.tile_rect(TileCoord::new(top.level, col, row)).unwrap();
+                    let tile = Tile {
+                        coord: TileCoord::new(top.level, col, row),
+                        raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8)
+                            .unwrap(),
+                        blank: false,
+                    };
+                    sink.write_tile(&tile).unwrap();
+                }
+            }
+
+            assert!(dir.path().join(format!("tiles/{}", top.level)).is_dir());
+        }
     }
 
     /**
@@ -517,46 +539,66 @@ mod tests {
      * Works by calling finish() and verifying the .dzi file contains the
      * expected XML attributes for format, tile size, overlap, and dimensions.
      * Input: 1024x768 image, tile 256, overlap 1 -> Output: .dzi with matching attributes.
+     *
+     * Split for Miri: file writes are blocked under Miri's isolation mode.
+     * The first half calls dzi_manifest() directly and validates the XML
+     * string in memory (runs everywhere). The #[cfg(not(miri))] block
+     * verifies the manifest is written to disk correctly (skipped under Miri).
      */
     #[test]
     fn fs_sink_writes_dzi_manifest() {
-        let dir = tempfile::tempdir().unwrap();
         let planner = PyramidPlanner::new(1024, 768, 256, 1, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
 
-        let sink = FsSink::new(dir.path().join("output_files"), plan, TileFormat::Png);
-        sink.finish().unwrap();
-
-        let dzi_path = dir.path().join("output_files.dzi");
-        assert!(dzi_path.exists(), "DZI manifest not found");
-
-        let manifest = std::fs::read_to_string(&dzi_path).unwrap();
+        // Miri-safe: verify manifest content in memory
+        let manifest = plan.dzi_manifest("png").expect("DeepZoom should produce a DZI manifest");
         assert!(manifest.contains("Format=\"png\""));
         assert!(manifest.contains("TileSize=\"256\""));
         assert!(manifest.contains("Overlap=\"1\""));
         assert!(manifest.contains("Width=\"1024\""));
         assert!(manifest.contains("Height=\"768\""));
+
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = FsSink::new(dir.path().join("output_files"), plan, TileFormat::Png);
+            sink.finish().unwrap();
+
+            let dzi_path = dir.path().join("output_files.dzi");
+            assert!(dzi_path.exists(), "DZI manifest not found");
+
+            let on_disk = std::fs::read_to_string(&dzi_path).unwrap();
+            assert_eq!(on_disk, manifest);
+        }
     }
 
     /**
      * Tests that finish() does not produce a .dzi file for XYZ layouts.
      * Works by creating an XYZ sink, calling finish(), and asserting no .dzi exists.
      * Input: XYZ layout sink -> Output: no .dzi file on disk.
+     *
+     * Split for Miri: file writes are blocked under Miri's isolation mode.
+     * The first half checks that dzi_manifest() returns None for XYZ layouts
+     * (runs everywhere). The #[cfg(not(miri))] block confirms no .dzi file
+     * appears on disk after finish() (skipped under Miri).
      */
     #[test]
     fn fs_sink_no_dzi_for_xyz() {
-        let dir = tempfile::tempdir().unwrap();
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::Xyz).unwrap();
         let plan = planner.plan();
 
-        let sink = FsSink::new(dir.path().join("tiles"), plan, TileFormat::Raw);
-        sink.finish().unwrap();
+        // Miri-safe: XYZ layout should not produce a manifest
+        assert!(plan.dzi_manifest("raw").is_none(), "DZI should not exist for XYZ layout");
 
-        let dzi_path = dir.path().join("tiles.dzi");
-        assert!(
-            !dzi_path.exists(),
-            "DZI should not be written for XYZ layout"
-        );
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = FsSink::new(dir.path().join("tiles"), plan, TileFormat::Raw);
+            sink.finish().unwrap();
+
+            let dzi_path = dir.path().join("tiles.dzi");
+            assert!(!dzi_path.exists(), "DZI should not be written for XYZ layout");
+        }
     }
 
     /**
@@ -564,27 +606,40 @@ mod tests {
      * Works by writing a tile at col=1, row=0 and checking the file lands at
      * tiles/{level}/1/0.raw instead of the DeepZoom col_row naming.
      * Input: tile (level, 1, 0) with XYZ layout -> Output: file at {z}/1/0.raw.
+     *
+     * Split for Miri: mkdir/write are blocked under Miri's isolation mode.
+     * The first half verifies tile_path produces the correct XYZ-style
+     * relative path in memory (runs everywhere). The #[cfg(not(miri))] block
+     * writes the tile to disk and checks the file exists at that path
+     * (skipped under Miri).
      */
     #[test]
     fn fs_sink_xyz_path_structure() {
-        let dir = tempfile::tempdir().unwrap();
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::Xyz).unwrap();
         let plan = planner.plan();
         let top = plan.levels.last().unwrap();
 
-        let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
+        // Miri-safe: verify XYZ path convention
+        let rel = plan.tile_path(TileCoord::new(top.level, 1, 0), "raw").unwrap();
+        let expected_suffix = format!("{}/1/0.raw", top.level);
+        assert!(rel.ends_with(&expected_suffix), "expected XYZ path ending with {expected_suffix}, got {rel}");
 
-        let rect = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
-        let tile = Tile {
-            coord: TileCoord::new(top.level, 1, 0),
-            raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
-            blank: false,
-        };
-        sink.write_tile(&tile).unwrap();
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
 
-        // XYZ layout: {z}/{x}/{y}.ext
-        let expected = dir.path().join(format!("tiles/{}/1/0.raw", top.level));
-        assert!(expected.exists(), "XYZ tile not found at {expected:?}");
+            let rect = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
+            let tile = Tile {
+                coord: TileCoord::new(top.level, 1, 0),
+                raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
+
+            let expected = dir.path().join("tiles").join(&rel);
+            assert!(expected.exists(), "XYZ tile not found at {expected:?}");
+        }
     }
 
     /**
@@ -592,27 +647,40 @@ mod tests {
      * Works by writing a tile with TileFormat::Png and verifying the output
      * file starts with the PNG magic bytes (0x89, 'P', 'N', 'G').
      * Input: 8x8 Rgb8 raster -> Output: file with PNG header bytes.
+     *
+     * Split for Miri: file writes are blocked under Miri's isolation mode.
+     * The first half calls encode_png directly and checks the PNG magic
+     * bytes in the returned buffer (runs everywhere). The #[cfg(not(miri))]
+     * block writes via FsSink and reads the file back from disk to verify
+     * the same magic bytes (skipped under Miri).
      */
     #[test]
     fn fs_sink_encodes_png() {
-        let dir = tempfile::tempdir().unwrap();
-        let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
-        let plan = planner.plan();
-        let top_level = plan.levels.last().unwrap().level;
+        let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
-        let sink = FsSink::new(dir.path().join("out"), plan, TileFormat::Png);
-
-        let tile = Tile {
-            coord: TileCoord::new(top_level, 0, 0),
-            raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
-            blank: false,
-        };
-        sink.write_tile(&tile).unwrap();
-
-        let path = dir.path().join(format!("out/{top_level}/0_0.png"));
-        let bytes = std::fs::read(&path).unwrap();
-        // PNG magic bytes
+        // Miri-safe: verify PNG encoding produces valid magic bytes in memory
+        let bytes = encode_png(&raster).unwrap();
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
+
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
+            let plan = planner.plan();
+            let top_level = plan.levels.last().unwrap().level;
+
+            let sink = FsSink::new(dir.path().join("out"), plan, TileFormat::Png);
+            let tile = Tile {
+                coord: TileCoord::new(top_level, 0, 0),
+                raster,
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
+
+            let path = dir.path().join(format!("out/{top_level}/0_0.png"));
+            let on_disk = std::fs::read(&path).unwrap();
+            assert_eq!(&on_disk[..4], &[0x89, b'P', b'N', b'G']);
+        }
     }
 
     /**
@@ -620,31 +688,44 @@ mod tests {
      * Works by writing a tile with TileFormat::Jpeg and verifying the output
      * file starts with the JPEG SOI marker (0xFF, 0xD8).
      * Input: 8x8 Rgb8 raster, quality 85 -> Output: file with JPEG SOI marker.
+     *
+     * Split for Miri: file writes are blocked under Miri's isolation mode.
+     * The first half calls encode_jpeg directly and checks the JPEG SOI
+     * marker in the returned buffer (runs everywhere). The #[cfg(not(miri))]
+     * block writes via FsSink and reads the file back from disk to verify
+     * the same marker (skipped under Miri).
      */
     #[test]
     fn fs_sink_encodes_jpeg() {
-        let dir = tempfile::tempdir().unwrap();
-        let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
-        let plan = planner.plan();
-        let top_level = plan.levels.last().unwrap().level;
+        let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
-        let sink = FsSink::new(
-            dir.path().join("out"),
-            plan,
-            TileFormat::Jpeg { quality: 85 },
-        );
-
-        let tile = Tile {
-            coord: TileCoord::new(top_level, 0, 0),
-            raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
-            blank: false,
-        };
-        sink.write_tile(&tile).unwrap();
-
-        let path = dir.path().join(format!("out/{top_level}/0_0.jpeg"));
-        let bytes = std::fs::read(&path).unwrap();
-        // JPEG SOI marker
+        // Miri-safe: verify JPEG encoding produces valid SOI marker in memory
+        let bytes = encode_jpeg(&raster, 85).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
+            let plan = planner.plan();
+            let top_level = plan.levels.last().unwrap().level;
+
+            let sink = FsSink::new(
+                dir.path().join("out"),
+                plan,
+                TileFormat::Jpeg { quality: 85 },
+            );
+            let tile = Tile {
+                coord: TileCoord::new(top_level, 0, 0),
+                raster,
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
+
+            let path = dir.path().join(format!("out/{top_level}/0_0.jpeg"));
+            let on_disk = std::fs::read(&path).unwrap();
+            assert_eq!(&on_disk[..2], &[0xFF, 0xD8]);
+        }
     }
 
     /**
@@ -652,33 +733,49 @@ mod tests {
      * Works by writing the same tile to two separate temp directories and comparing
      * the raw file contents byte-for-byte.
      * Input: same 256x256 tile to two sinks -> Output: identical file bytes.
+     *
+     * Split for Miri: tempdir/write are blocked under Miri's isolation mode.
+     * The first half encodes the same raster twice via encode_png and asserts
+     * byte-for-byte equality in memory (runs everywhere). The #[cfg(not(miri))]
+     * block writes via two FsSink instances and compares the files on disk
+     * (skipped under Miri).
      */
     #[test]
     fn fs_sink_deterministic_paths() {
-        let dir1 = tempfile::tempdir().unwrap();
-        let dir2 = tempfile::tempdir().unwrap();
-        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
-        let plan = planner.plan();
-
-        let sink1 = FsSink::new(dir1.path().join("out"), plan.clone(), TileFormat::Raw);
-        let sink2 = FsSink::new(dir2.path().join("out"), plan.clone(), TileFormat::Raw);
-
-        // Same tile to both sinks
-        let top = plan.levels.last().unwrap();
         let data = vec![42u8; 256 * 256 * 3];
         let raster = Raster::new(256, 256, PixelFormat::Rgb8, data).unwrap();
-        let tile = Tile {
-            coord: TileCoord::new(top.level, 0, 0),
-            raster,
-            blank: false,
-        };
 
-        sink1.write_tile(&tile).unwrap();
-        sink2.write_tile(&tile).unwrap();
+        // Miri-safe: encoding the same raster twice should produce identical bytes
+        let enc1 = encode_png(&raster).unwrap();
+        let enc2 = encode_png(&raster).unwrap();
+        assert_eq!(enc1, enc2);
 
-        let bytes1 = std::fs::read(dir1.path().join(format!("out/{}/0_0.raw", top.level))).unwrap();
-        let bytes2 = std::fs::read(dir2.path().join(format!("out/{}/0_0.raw", top.level))).unwrap();
-        assert_eq!(bytes1, bytes2);
+        #[cfg(not(miri))]
+        {
+            let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
+            let plan = planner.plan();
+            let top = plan.levels.last().unwrap();
+
+            let dir1 = tempfile::tempdir().unwrap();
+            let dir2 = tempfile::tempdir().unwrap();
+            let sink1 = FsSink::new(dir1.path().join("out"), plan.clone(), TileFormat::Raw);
+            let sink2 = FsSink::new(dir2.path().join("out"), plan.clone(), TileFormat::Raw);
+
+            let tile = Tile {
+                coord: TileCoord::new(top.level, 0, 0),
+                raster,
+                blank: false,
+            };
+
+            sink1.write_tile(&tile).unwrap();
+            sink2.write_tile(&tile).unwrap();
+
+            let bytes1 =
+                std::fs::read(dir1.path().join(format!("out/{}/0_0.raw", top.level))).unwrap();
+            let bytes2 =
+                std::fs::read(dir2.path().join(format!("out/{}/0_0.raw", top.level))).unwrap();
+            assert_eq!(bytes1, bytes2);
+        }
     }
 
     // -- Encoding edge cases --
