@@ -274,19 +274,35 @@ mod tests {
      * Works by writing a known PNG to a temp file, then decoding it
      * with decode_file and verifying the resulting Raster properties.
      * Input: 8x8 RGB8 PNG on disk → Output: Raster(8, 8, Rgb8).
+     *
+     * Split for Miri: tempdir/write are blocked under Miri's isolation
+     * mode. The first half decodes the PNG bytes in memory via
+     * decode_bytes and checks the resulting Raster dimensions and format
+     * (runs everywhere). The #[cfg(not(miri))] block writes the PNG to
+     * a temp file and decodes it back via decode_file to test the
+     * filesystem round-trip (skipped under Miri).
      */
     #[test]
     fn decode_file_from_disk() {
-        // Write a temp PNG and decode it
         let png = create_test_png(8, 8);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.png");
-        std::fs::write(&path, &png).unwrap();
 
-        let raster = decode_file(&path).unwrap();
+        // Miri-safe: verify decoding from bytes in memory
+        let raster = decode_bytes(&png).unwrap();
         assert_eq!(raster.width(), 8);
         assert_eq!(raster.height(), 8);
         assert_eq!(raster.format(), PixelFormat::Rgb8);
+
+        #[cfg(not(miri))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test.png");
+            std::fs::write(&path, &png).unwrap();
+
+            let from_disk = decode_file(&path).unwrap();
+            assert_eq!(from_disk.width(), 8);
+            assert_eq!(from_disk.height(), 8);
+            assert_eq!(from_disk.format(), PixelFormat::Rgb8);
+        }
     }
 
     /**
@@ -296,6 +312,7 @@ mod tests {
      * Input: Path("/nonexistent/image.png") → Output: Err.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_not_found() {
         let result = decode_file(Path::new("/nonexistent/image.png"));
         assert!(result.is_err());
