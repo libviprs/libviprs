@@ -19,13 +19,17 @@ Cargo.lock
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
+Thumbs.db
 
 # Environment
 .env
 .env.*
 
 # Temporary files
+/tmp/
 *.tmp
 *.bak
 *.log

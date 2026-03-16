@@ -12,7 +12,7 @@
 #[cfg(loom)]
 mod tests {
     use loom::sync::atomic::{AtomicUsize, Ordering};
-    use loom::sync::{Arc, Mutex, Condvar};
+    use loom::sync::{Arc, Condvar, Mutex};
     use loom::thread;
 
     /// A bounded queue simulating the engine's tile channel.
@@ -79,8 +79,12 @@ mod tests {
         }
     }
 
-    // ---- Test 1: Tile queue - no lost tiles under concurrent push/pop ----
-
+    /**
+     * Tests that the bounded tile queue never loses items under concurrent access.
+     * Works by having loom explore all thread interleavings of 2 producers pushing
+     * 3 items total and 1 consumer popping, verifying all 3 are received.
+     * Input: push(1), push(2), push(3) from 2 threads → Output: 3 items popped.
+     */
     #[test]
     fn loom_tile_queue_no_lost_items() {
         loom::model(|| {
@@ -120,8 +124,12 @@ mod tests {
         });
     }
 
-    // ---- Test 2: Level barrier - all producers finish before consumer proceeds ----
-
+    /**
+     * Tests that a level barrier ensures all workers complete before the consumer proceeds.
+     * Works by having 2 workers atomically increment a counter and signal a condvar when
+     * done; loom verifies the consumer always observes the final count under all orderings.
+     * Input: 2 workers increment → Output: completed == 2 after barrier.
+     */
     #[test]
     fn loom_level_barrier() {
         loom::model(|| {
@@ -172,8 +180,12 @@ mod tests {
         });
     }
 
-    // ---- Test 3: Backpressure - producer blocks when queue full, unblocks on drain ----
-
+    /**
+     * Tests that backpressure blocks the producer when the queue is full.
+     * Works by using a capacity-1 queue: the producer's second push must block until
+     * the consumer pops, verified across all loom interleavings.
+     * Input: capacity=1, push(1), push(2) → Output: both items consumed, progress==2.
+     */
     #[test]
     fn loom_backpressure() {
         loom::model(|| {
@@ -208,8 +220,12 @@ mod tests {
         });
     }
 
-    // ---- Test 4: Multiple producers with bounded queue ----
-
+    /**
+     * Tests that multiple producers with a bounded queue deliver all items without loss.
+     * Works by having 2 producers push 10 and 20 into a capacity-1 queue while a consumer
+     * sums all popped values; loom verifies the sum is always 30 under all interleavings.
+     * Input: push(10), push(20) from 2 threads → Output: sum == 30.
+     */
     #[test]
     fn loom_multi_producer_bounded() {
         loom::model(|| {

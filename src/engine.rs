@@ -8,6 +8,12 @@ use crate::raster::{Raster, RasterError};
 use crate::resize;
 use crate::sink::{SinkError, Tile, TileSink};
 
+/// Errors that can occur during pyramid generation.
+///
+/// Wraps lower-level raster and sink errors into a single error type so that
+/// callers of [`generate_pyramid`] and [`generate_pyramid_observed`] can handle
+/// all failure modes uniformly. Also covers engine-specific conditions such as
+/// cancellation and worker panics.
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("raster error: {0}")]
@@ -20,13 +26,56 @@ pub enum EngineError {
     WorkerPanic,
 }
 
-/// Configuration for the execution engine.
+/// Controls how blank (uniform-color) tiles are handled during pyramid generation.
+///
+/// Sparse images (e.g. scanned documents with large white margins) can produce
+/// many tiles where every pixel is identical. This strategy lets the engine
+/// replace those tiles with tiny placeholders, dramatically reducing output size.
+///
+/// See [`is_blank_tile`] for the detection logic and the
+/// [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
+/// for integration-level examples. In the CLI, the `--skip-blank` flag selects
+/// [`BlankTileStrategy::Placeholder`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlankTileStrategy {
+    /// Emit blank tiles as full raster data (default). Every tile coordinate
+    /// produces a complete image file, including tiles that are entirely one color.
+    Emit,
+    /// Replace blank tiles with a 1-byte placeholder marker (`0x00`). Consumers
+    /// can detect these marker files by their size and generate their own blank
+    /// tiles on the fly, saving significant disk space for sparse images.
+    Placeholder,
+}
+
+/// Configuration for the pyramid generation engine.
+///
+/// Groups every tunable knob that affects how [`generate_pyramid`] runs:
+/// thread count, channel buffer depth, edge-tile background color, and
+/// blank-tile handling. The [`Default`] implementation provides sensible
+/// values for single-threaded operation.
+///
+/// Builder-style setters ([`with_concurrency`](Self::with_concurrency),
+/// [`with_buffer_size`](Self::with_buffer_size),
+/// [`with_blank_tile_strategy`](Self::with_blank_tile_strategy)) allow
+/// chaining for ergonomic construction.
+///
+/// See the
+/// [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for filesystem-backed usage and the
+/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for command-line construction of this config.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Number of worker threads for tile extraction. 0 = single-threaded (current thread).
     pub concurrency: usize,
     /// Maximum tiles buffered between producer and sink. Controls backpressure.
     pub buffer_size: usize,
+    /// Background color (RGB) used to pad edge tiles to the full tile size.
+    /// Defaults to white (255, 255, 255).
+    pub background_rgb: [u8; 3],
+    /// How to handle tiles where every pixel is the same color.
+    /// Defaults to `Emit` (write full tile data).
+    pub blank_tile_strategy: BlankTileStrategy,
 }
 
 impl Default for EngineConfig {
@@ -34,36 +83,78 @@ impl Default for EngineConfig {
         Self {
             concurrency: 0,
             buffer_size: 64,
+            background_rgb: [255, 255, 255],
+            blank_tile_strategy: BlankTileStrategy::Emit,
         }
     }
 }
 
 impl EngineConfig {
+    /// Sets the number of worker threads for parallel tile extraction.
+    ///
+    /// `0` (the default) means single-threaded execution on the calling thread.
+    /// Any positive value spawns that many workers per pyramid level.
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.concurrency = n;
         self
     }
 
+    /// Sets the bounded-channel capacity between producer threads and the sink consumer.
+    ///
+    /// A smaller buffer limits memory usage but may cause producers to block
+    /// more frequently. A larger buffer smooths out sink latency at the cost
+    /// of higher peak memory.
     pub fn with_buffer_size(mut self, n: usize) -> Self {
         self.buffer_size = n;
         self
     }
+
+    /// Sets the strategy for handling blank (uniform-color) tiles.
+    ///
+    /// See [`BlankTileStrategy`] for the available options.
+    pub fn with_blank_tile_strategy(mut self, strategy: BlankTileStrategy) -> Self {
+        self.blank_tile_strategy = strategy;
+        self
+    }
 }
 
-/// Result of a completed pyramid generation.
+/// Summary statistics returned after a successful pyramid generation.
+///
+/// Captures tile counts, level counts, and peak memory so that callers can
+/// log, display progress, or assert correctness without inspecting the sink
+/// directly. Every field is populated by [`generate_pyramid`] /
+/// [`generate_pyramid_observed`].
 #[derive(Debug)]
 pub struct EngineResult {
+    /// Total number of tiles written to the sink (including placeholders).
     pub tiles_produced: u64,
+    /// Number of tiles that were blank and replaced with placeholders
+    /// (only non-zero when `BlankTileStrategy::Placeholder` is used).
+    pub tiles_skipped: u64,
+    /// Number of pyramid levels that were processed (always equals the plan's level count).
     pub levels_processed: u32,
     /// Peak tracked memory in bytes (raster buffers only).
     pub peak_memory_bytes: u64,
 }
 
-/// Generate a tile pyramid from a source raster.
+/// Generates a complete tile pyramid from a source raster.
 ///
-/// Processes levels from full resolution (top) down to 1×1.
-/// At each level, tiles are extracted and sent to the sink.
-/// When `concurrency > 0`, tiles within each level are produced in parallel.
+/// This is the primary entry point for pyramid generation. It processes levels
+/// from full resolution (top) down to 1x1, extracting tiles at each level and
+/// writing them to the provided [`TileSink`]. When
+/// [`EngineConfig::concurrency`] is greater than zero, tiles within each level
+/// are produced in parallel using scoped threads with bounded-channel
+/// backpressure.
+///
+/// For progress reporting, use [`generate_pyramid_observed`] instead.
+///
+/// See the
+/// [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+/// for filesystem output,
+/// [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+/// for PDF-sourced pyramids, and the
+/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// for end-to-end CLI usage.
 pub fn generate_pyramid(
     source: &Raster,
     plan: &PyramidPlan,
@@ -73,7 +164,17 @@ pub fn generate_pyramid(
     generate_pyramid_observed(source, plan, sink, config, &NoopObserver)
 }
 
-/// Generate a tile pyramid with an observer for progress events.
+/// Generates a tile pyramid with an [`EngineObserver`] for progress events.
+///
+/// Behaves identically to [`generate_pyramid`] but emits [`EngineEvent`]s
+/// (level started/completed, tile completed, finished) to the supplied
+/// observer. This is the function used by the
+/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+/// to drive its progress bar.
+///
+/// See the
+/// [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
+/// for integration-level examples of observer usage.
 pub fn generate_pyramid_observed(
     source: &Raster,
     plan: &PyramidPlan,
@@ -83,6 +184,7 @@ pub fn generate_pyramid_observed(
 ) -> Result<EngineResult, EngineError> {
     let top_level = plan.levels.len() - 1;
     let mut tiles_produced: u64 = 0;
+    let mut tiles_skipped: u64 = 0;
     let tracker = MemoryTracker::new();
 
     // Track source raster
@@ -114,15 +216,10 @@ pub fn generate_pyramid_observed(
         }
 
         // Extract and emit tiles for this level
-        let level_tiles = extract_and_emit_level(
-            &current,
-            plan,
-            level_idx as u32,
-            sink,
-            config,
-            observer,
-        )?;
+        let (level_tiles, level_skipped) =
+            extract_and_emit_level(&current, plan, level_idx as u32, sink, config, observer)?;
         tiles_produced += level_tiles;
+        tiles_skipped += level_skipped;
 
         observer.on_event(EngineEvent::LevelCompleted {
             level: level.level,
@@ -142,12 +239,14 @@ pub fn generate_pyramid_observed(
 
     Ok(EngineResult {
         tiles_produced,
+        tiles_skipped,
         levels_processed: plan.levels.len() as u32,
         peak_memory_bytes: tracker.peak_bytes(),
     })
 }
 
 /// Extract all tiles for a single level and send them to the sink.
+/// Returns `(tiles_produced, tiles_skipped)`.
 fn extract_and_emit_level(
     raster: &Raster,
     plan: &PyramidPlan,
@@ -155,31 +254,39 @@ fn extract_and_emit_level(
     sink: &dyn TileSink,
     config: &EngineConfig,
     observer: &dyn EngineObserver,
-) -> Result<u64, EngineError> {
+) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
+    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
 
     if config.concurrency == 0 {
         // Single-threaded path
         let mut count = 0u64;
+        let mut skipped = 0u64;
         for row in 0..level_plan.rows {
             for col in 0..level_plan.cols {
                 let coord = TileCoord::new(level, col, row);
-                let tile_raster = extract_tile(raster, plan, coord)?;
+                let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
+                let blank = use_placeholders && is_blank_tile(&tile_raster);
+                if blank {
+                    skipped += 1;
+                }
                 sink.write_tile(&Tile {
                     coord,
                     raster: tile_raster,
+                    blank,
                 })?;
                 observer.on_event(EngineEvent::TileCompleted { coord });
                 count += 1;
             }
         }
-        Ok(count)
+        Ok((count, skipped))
     } else {
         extract_and_emit_parallel(raster, plan, level, sink, config, observer)
     }
 }
 
 /// Parallel tile extraction using a bounded channel for backpressure.
+/// Returns `(tiles_produced, tiles_skipped)`.
 fn extract_and_emit_parallel(
     raster: &Raster,
     plan: &PyramidPlan,
@@ -187,13 +294,15 @@ fn extract_and_emit_parallel(
     sink: &dyn TileSink,
     config: &EngineConfig,
     observer: &dyn EngineObserver,
-) -> Result<u64, EngineError> {
+) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
     let total_tiles = level_plan.tile_count();
 
     if total_tiles == 0 {
-        return Ok(0);
+        return Ok((0, 0));
     }
+
+    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
 
     // Bounded channel for backpressure: producers block when buffer is full
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Tile, EngineError>>(config.buffer_size);
@@ -209,7 +318,7 @@ fn extract_and_emit_parallel(
 
     // Spawn workers
     let concurrency = config.concurrency.min(coords.len());
-    let chunk_size = (coords.len() + concurrency - 1) / concurrency;
+    let chunk_size = coords.len().div_ceil(concurrency);
 
     std::thread::scope(|s| {
         // Spawn producer threads
@@ -218,13 +327,18 @@ fn extract_and_emit_parallel(
             let raster = Arc::clone(&raster);
             let plan = Arc::clone(&plan);
             let chunk = chunk.to_vec();
+            let bg = config.background_rgb;
 
             s.spawn(move || {
                 for coord in chunk {
-                    let result = extract_tile(&raster, &plan, coord)
-                        .map(|tile_raster| Tile {
-                            coord,
-                            raster: tile_raster,
+                    let result = extract_tile(&raster, &plan, coord, bg)
+                        .map(|tile_raster| {
+                            let blank = use_placeholders && is_blank_tile(&tile_raster);
+                            Tile {
+                                coord,
+                                raster: tile_raster,
+                                blank,
+                            }
                         })
                         .map_err(EngineError::from);
                     if tx.send(result).is_err() {
@@ -238,14 +352,18 @@ fn extract_and_emit_parallel(
 
         // Consumer: receive tiles and write to sink
         let mut count = 0u64;
+        let mut skipped = 0u64;
         for result in rx {
             let tile = result?;
             let coord = tile.coord;
+            if tile.blank {
+                skipped += 1;
+            }
             sink.write_tile(&tile)?;
             observer.on_event(EngineEvent::TileCompleted { coord });
             count += 1;
         }
-        Ok(count)
+        Ok((count, skipped))
     })
 }
 
@@ -254,16 +372,59 @@ fn extract_tile(
     raster: &Raster,
     plan: &PyramidPlan,
     coord: TileCoord,
+    background_rgb: [u8; 3],
 ) -> Result<Raster, RasterError> {
     let rect = plan
         .tile_rect(coord)
         .expect("tile_rect returned None for valid coord");
 
-    raster.extract(rect.x, rect.y, rect.width, rect.height)
+    let content = raster.extract(rect.x, rect.y, rect.width, rect.height)?;
+    let ts = plan.tile_size;
+
+    // Pad edge tiles to the full tile size with the background color.
+    // Only pad when there's no overlap — overlap tiles have intentionally
+    // different sizes and must not be resized.
+    if plan.overlap == 0 && (content.width() < ts || content.height() < ts) {
+        let bpp = content.format().bytes_per_pixel();
+        let mut padded = vec![0u8; ts as usize * ts as usize * bpp];
+
+        // Fill with background color (repeat the RGB pattern for each pixel)
+        let bg_pixel: Vec<u8> = match bpp {
+            1 => vec![background_rgb[0]],
+            3 => background_rgb.to_vec(),
+            4 => vec![background_rgb[0], background_rgb[1], background_rgb[2], 255],
+            _ => vec![background_rgb[0]; bpp],
+        };
+        for pixel in padded.chunks_exact_mut(bpp) {
+            pixel.copy_from_slice(&bg_pixel);
+        }
+
+        // Copy content rows into the padded buffer
+        let src_stride = content.width() as usize * bpp;
+        let dst_stride = ts as usize * bpp;
+        for row in 0..content.height() as usize {
+            let src_start = row * src_stride;
+            let dst_start = row * dst_stride;
+            padded[dst_start..dst_start + src_stride]
+                .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
+        }
+
+        Raster::new(ts, ts, content.format(), padded)
+    } else {
+        Ok(content)
+    }
 }
 
-/// Check if a tile is "blank" — all pixels are identical.
-/// Useful for blank tile skipping optimization.
+/// Returns `true` if every pixel in the tile is identical (i.e. the tile is
+/// a uniform solid color).
+///
+/// Used by the engine when [`BlankTileStrategy::Placeholder`] is active to
+/// decide whether a tile should be replaced with a 1-byte marker instead of
+/// full image data. A single-pixel raster is trivially blank.
+///
+/// See the
+/// [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
+/// for integration-level examples.
 pub fn is_blank_tile(raster: &Raster) -> bool {
     let data = raster.data();
     let bpp = raster.format().bytes_per_pixel();
@@ -301,6 +462,12 @@ mod tests {
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
     }
 
+    /**
+     * Tests that single-threaded engine produces the correct total tile count.
+     * Works by running generate_pyramid with concurrency=0 (default) and asserting
+     * both the returned count and the sink's stored count match the plan.
+     * Input: 512x512 RGB gradient, tile_size=256 -> Output: plan.total_tile_count() tiles.
+     */
     #[test]
     fn single_threaded_produces_all_tiles() {
         let src = gradient_raster(512, 512);
@@ -315,6 +482,12 @@ mod tests {
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that multi-threaded engine produces the correct total tile count.
+     * Works by running generate_pyramid with concurrency=4 and verifying the
+     * result and sink agree with the plan's expected tile count.
+     * Input: 512x512 RGB gradient, tile_size=256, 4 threads -> Output: all expected tiles.
+     */
     #[test]
     fn parallel_produces_all_tiles() {
         let src = gradient_raster(512, 512);
@@ -329,6 +502,12 @@ mod tests {
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that every expected (level, col, row) coordinate appears in the output.
+     * Works by sorting the produced tile coordinates and the plan's expected
+     * coordinates, then asserting exact equality between the two sets.
+     * Input: 600x400 non-square image, tile_size=256, concurrency=2.
+     */
     #[test]
     fn all_tile_coords_present() {
         let src = gradient_raster(600, 400);
@@ -349,6 +528,12 @@ mod tests {
         assert_eq!(coords, expected);
     }
 
+    /**
+     * Tests that each produced tile has the width and height specified by the plan.
+     * Works by comparing every tile's dimensions against plan.tile_rect() for
+     * its coordinate, catching off-by-one errors at image/tile boundaries.
+     * Input: 500x300 non-tile-aligned image, tile_size=256.
+     */
     #[test]
     fn tile_dimensions_match_plan() {
         let src = gradient_raster(500, 300);
@@ -361,11 +546,24 @@ mod tests {
 
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
-            assert_eq!(tile.width, rect.width, "Width mismatch at {:?}", tile.coord);
-            assert_eq!(tile.height, rect.height, "Height mismatch at {:?}", tile.coord);
+            // Edge tiles are padded to the full tile size when overlap=0
+            let expected_w = if rect.width < 256 { 256 } else { rect.width };
+            let expected_h = if rect.height < 256 { 256 } else { rect.height };
+            assert_eq!(tile.width, expected_w, "Width mismatch at {:?}", tile.coord);
+            assert_eq!(
+                tile.height, expected_h,
+                "Height mismatch at {:?}",
+                tile.coord
+            );
         }
     }
 
+    /**
+     * Tests that tile pixel data is identical regardless of concurrency level.
+     * Works by generating a reference pyramid single-threaded, then re-running
+     * at concurrency 1, 2, 4, 8, 16 and byte-comparing every tile's data.
+     * Input: 256x256 gradient, tile_size=64 -> Output: identical tiles at all concurrency levels.
+     */
     #[test]
     fn deterministic_across_concurrency_levels() {
         let src = gradient_raster(256, 256);
@@ -386,11 +584,16 @@ mod tests {
             let mut tiles = sink.tiles();
             tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
-            assert_eq!(tiles.len(), ref_tiles.len(), "Tile count mismatch at concurrency={concurrency}");
+            assert_eq!(
+                tiles.len(),
+                ref_tiles.len(),
+                "Tile count mismatch at concurrency={concurrency}"
+            );
 
             for (ref_t, t) in ref_tiles.iter().zip(tiles.iter()) {
                 assert_eq!(ref_t.coord, t.coord);
-                assert_eq!(ref_t.data, t.data,
+                assert_eq!(
+                    ref_t.data, t.data,
                     "Tile data diverged at {:?} with concurrency={concurrency}",
                     t.coord
                 );
@@ -398,6 +601,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that EngineResult.levels_processed matches the plan's level count.
+     * Works by checking the result metadata against plan.level_count(),
+     * ensuring no levels are skipped or double-counted.
+     * Input: 64x64 image, tile_size=256 -> Output: levels_processed == plan.level_count().
+     */
     #[test]
     fn levels_processed_matches_plan() {
         let src = gradient_raster(64, 64);
@@ -409,6 +618,12 @@ mod tests {
         assert_eq!(result.levels_processed, plan.level_count() as u32);
     }
 
+    /**
+     * Tests the edge case where the image is smaller than a single tile.
+     * Works by verifying that each pyramid level produces exactly one tile,
+     * so total tiles equals the number of levels.
+     * Input: 10x10 image, tile_size=256 -> Output: one tile per level.
+     */
     #[test]
     fn small_image_single_tile() {
         let src = gradient_raster(10, 10);
@@ -420,6 +635,12 @@ mod tests {
         assert_eq!(result.tiles_produced, plan.level_count() as u64);
     }
 
+    /**
+     * Tests that the engine completes correctly with a minimal buffer size.
+     * Works by setting buffer_size=1 with 4 concurrent workers, forcing
+     * frequent producer blocking, and verifying no tiles are lost.
+     * Input: 512x512 image, tile_size=128, buffer=1 -> Output: all tiles produced.
+     */
     #[test]
     fn backpressure_small_buffer() {
         let src = gradient_raster(512, 512);
@@ -434,12 +655,24 @@ mod tests {
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 
+    /**
+     * Tests that a raster where every pixel is identical is detected as blank.
+     * Works by creating an 8x8 solid-color raster and asserting is_blank_tile
+     * returns true, since all pixel triplets are (128, 128, 128).
+     * Input: 8x8 solid val=128 -> Output: true.
+     */
     #[test]
     fn is_blank_tile_solid() {
         let r = solid_raster(8, 8, 128);
         assert!(is_blank_tile(&r));
     }
 
+    /**
+     * Tests that a raster with even one differing pixel is not blank.
+     * Works by creating a solid raster then modifying the first byte,
+     * making the first pixel differ from the rest.
+     * Input: 8x8 solid val=128 with data[0]=0 -> Output: false.
+     */
     #[test]
     fn is_blank_tile_not_blank() {
         let mut data = vec![128u8; 8 * 8 * 3];
@@ -448,12 +681,24 @@ mod tests {
         assert!(!is_blank_tile(&r));
     }
 
+    /**
+     * Tests the boundary case of a 1x1 pixel raster for blank detection.
+     * Works because a single-pixel raster has no other pixel to differ from,
+     * so it is trivially blank regardless of its color value.
+     * Input: 1x1 RGB pixel [1,2,3] -> Output: true.
+     */
     #[test]
     fn is_blank_tile_single_pixel() {
         let r = Raster::new(1, 1, PixelFormat::Rgb8, vec![1, 2, 3]).unwrap();
         assert!(is_blank_tile(&r));
     }
 
+    /**
+     * Tests that tiles generated with overlap have dimensions matching the plan.
+     * Works by using overlap=2, which adds border pixels to tiles, then
+     * verifying each tile's width/height against plan.tile_rect().
+     * Input: 600x400 image, tile_size=256, overlap=2 -> Output: correct overlap-adjusted sizes.
+     */
     #[test]
     fn overlap_tiles_have_correct_size() {
         let src = gradient_raster(600, 400);
@@ -471,6 +716,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that parallel engine works correctly when the sink is slow.
+     * Works by using a SlowSink with 1ms delay and a small buffer (2),
+     * stressing the backpressure mechanism under realistic conditions.
+     * Input: 128x128 image, tile_size=64, 4 threads, 1ms sink delay -> Output: all tiles.
+     */
     #[test]
     fn concurrent_with_slow_sink() {
         use crate::sink::SlowSink;
@@ -491,6 +742,12 @@ mod tests {
 
     // -- Observability tests --
 
+    /**
+     * Tests that the observer receives a TileCompleted event for every tile.
+     * Works by counting TileCompleted events from a CollectingObserver and
+     * comparing against the plan's total tile count.
+     * Input: 128x128 image, tile_size=64 -> Output: tile_events == total_tile_count.
+     */
     #[test]
     fn observer_receives_all_tile_events() {
         let src = gradient_raster(128, 128);
@@ -510,6 +767,12 @@ mod tests {
         assert_eq!(tile_events as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that LevelStarted events arrive in top-down order and Finished is last.
+     * Works by extracting level numbers from LevelStarted events and comparing
+     * against a descending sequence, then checking the final event type.
+     * Input: 64x64 image, tile_size=256 -> Output: levels in descending order, Finished last.
+     */
     #[test]
     fn observer_receives_level_events_in_order() {
         let src = gradient_raster(64, 64);
@@ -539,6 +802,12 @@ mod tests {
         assert!(matches!(events.last(), Some(EngineEvent::Finished { .. })));
     }
 
+    /**
+     * Tests that the Finished event carries the correct total tile and level counts.
+     * Works by matching on the last event and asserting its fields equal
+     * the plan's total_tile_count and level_count.
+     * Input: 256x256 image, tile_size=128 -> Output: Finished{total_tiles, levels} match plan.
+     */
     #[test]
     fn observer_finished_event_has_correct_totals() {
         let src = gradient_raster(256, 256);
@@ -552,7 +821,10 @@ mod tests {
         let events = obs.events();
         let finished = events.last().unwrap();
         match finished {
-            EngineEvent::Finished { total_tiles, levels } => {
+            EngineEvent::Finished {
+                total_tiles,
+                levels,
+            } => {
                 assert_eq!(*total_tiles, plan.total_tile_count());
                 assert_eq!(*levels, plan.level_count() as u32);
             }
@@ -560,6 +832,12 @@ mod tests {
         }
     }
 
+    /**
+     * Tests that the observer receives all TileCompleted events under concurrency.
+     * Works by running with concurrency=4 and verifying the TileCompleted count
+     * matches the plan, ensuring thread-safe event delivery.
+     * Input: 256x256 image, tile_size=64, 4 threads -> Output: correct event count.
+     */
     #[test]
     fn observer_works_with_concurrency() {
         let src = gradient_raster(256, 256);
@@ -586,6 +864,12 @@ mod tests {
         assert_eq!(tile_events as u64, plan.total_tile_count());
     }
 
+    /**
+     * Tests that peak memory tracking reports at least the source raster size.
+     * Works by checking that peak_memory_bytes >= source pixel data size,
+     * since the source raster must be held in memory throughout.
+     * Input: 512x512 RGB (786432 bytes) -> Output: peak_memory_bytes >= 786432.
+     */
     #[test]
     fn peak_memory_is_reported() {
         let src = gradient_raster(512, 512);
@@ -604,6 +888,12 @@ mod tests {
         );
     }
 
+    /**
+     * Tests that peak memory stays bounded below 2x the source raster size.
+     * Works because the engine only holds one level raster at a time, so
+     * peak usage should not exceed source + one downscaled copy.
+     * Input: 1024x1024 RGB (3145728 bytes) -> Output: peak < 6291456 bytes.
+     */
     #[test]
     fn peak_memory_is_bounded() {
         // For a 1024x1024 image, peak memory should not be wildly larger
