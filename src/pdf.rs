@@ -6,6 +6,16 @@ use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::source;
 
+/// Errors that can occur during PDF inspection, image extraction, or rendering.
+///
+/// Covers I/O failures, PDF parsing errors, missing or unsupported images,
+/// page-range validation, and (when the `pdfium` feature is enabled) pdfium
+/// rendering failures.
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
+/// for error handling patterns.
 #[derive(Debug, Error)]
 pub enum PdfError {
     #[error("I/O error: {0}")]
@@ -27,14 +37,31 @@ pub enum PdfError {
     Pdfium(String),
 }
 
-/// Information about a PDF document.
+/// Information about a PDF document, including page count and per-page metadata.
+///
+/// Returned by [`pdf_info`]. Use this to inspect a PDF before deciding whether
+/// to extract embedded images or render pages with pdfium.
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
+/// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 #[derive(Debug, Clone)]
 pub struct PdfInfo {
     pub page_count: usize,
     pub pages: Vec<PdfPageInfo>,
 }
 
-/// Information about a single PDF page.
+/// Metadata for a single page within a PDF document.
+///
+/// Dimensions are in PDF points (1 point = 1/72 inch). To convert to pixels
+/// at a given DPI, multiply by `dpi / 72.0`. The `has_images` flag indicates
+/// whether the page contains embedded raster images that can be extracted
+/// with [`extract_page_image`].
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs).
 #[derive(Debug, Clone)]
 pub struct PdfPageInfo {
     pub page_number: usize,
@@ -46,10 +73,20 @@ pub struct PdfPageInfo {
     pub has_images: bool,
 }
 
-/// Get information about a PDF document.
+/// Get information about a PDF document, including page count and per-page
+/// dimensions and image presence.
+///
+/// Use this to inspect a PDF before extracting images or rendering pages.
+/// For scanned blueprints, check [`PdfPageInfo::has_images`] to decide
+/// whether to use [`extract_page_image`] (fast, embedded image extraction)
+/// or [`render_page_pdfium`] (full vector rendering).
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
+/// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
-    let doc =
-        lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
     let page_count = pages_map.len();
     let mut pages = Vec::with_capacity(page_count);
@@ -75,9 +112,17 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
 /// This is the fast path for scanned blueprints: the page typically contains
 /// a single large JPEG or JPEG2000 image. We extract the raw compressed stream
 /// and decode it with the `image` crate, avoiding any PDF rendering.
+///
+/// For vector PDFs that don't contain embedded images, use
+/// [`render_page_pdfium`] instead (requires the `pdfium` feature).
+///
+/// # Examples
+///
+/// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs),
+/// [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs),
+/// and the [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
-    let doc =
-        lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
     let total = pages_map.len();
 
@@ -159,7 +204,10 @@ fn extract_largest_image(
         // Get the image data (may be compressed with filters like DCTDecode/FlateDecode)
         let data = get_image_data(doc, stream)?;
 
-        if best.as_ref().is_none_or(|(best_size, _)| pixel_count > *best_size) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_size, _)| pixel_count > *best_size)
+        {
             best = Some((pixel_count, data));
         }
     }
@@ -183,101 +231,167 @@ enum ImageData {
     Decoded(Raster),
 }
 
+/// Resolve the filter(s) on a PDF stream into a list of filter names.
+///
+/// Handles both single-name filters (`/DCTDecode`) and filter arrays
+/// (`[/FlateDecode /DCTDecode]`).
+fn resolve_filters(stream: &lopdf::Stream) -> Vec<Vec<u8>> {
+    let filter_obj = match stream.dict.get(b"Filter").ok() {
+        Some(f) => f,
+        None => return vec![],
+    };
+
+    // Single name filter
+    if let Ok(name) = filter_obj.as_name() {
+        return vec![name.to_vec()];
+    }
+
+    // Array of filters
+    if let Ok(arr) = filter_obj.as_array() {
+        return arr
+            .iter()
+            .filter_map(|f| f.as_name().ok().map(|n| n.to_vec()))
+            .collect();
+    }
+
+    vec![]
+}
+
 /// Get image data from a PDF stream, handling common filters.
-fn get_image_data(
+///
+/// Supports single filters and chained filter arrays (e.g. `[/FlateDecode /DCTDecode]`).
+fn get_image_data(doc: &lopdf::Document, stream: &lopdf::Stream) -> Result<ImageData, PdfError> {
+    let filters = resolve_filters(stream);
+
+    // Normalize: treat chained [FlateDecode, DCTDecode] as "decompress then JPEG"
+    let terminal_filter: &[u8] = match filters.as_slice() {
+        [] => b"",
+        [single] => single,
+        [first, second] if first.as_slice() == b"FlateDecode" => {
+            // Chained: FlateDecode wrapping another format — decompress first,
+            // then treat the inner data according to the second filter.
+            let decompressed = flate_decompress(&stream.content)?;
+            return dispatch_single_filter(doc, stream, second, decompressed);
+        }
+        _ => {
+            let names: Vec<String> = filters
+                .iter()
+                .map(|f| String::from_utf8_lossy(f).to_string())
+                .collect();
+            return Err(PdfError::UnsupportedFormat(format!(
+                "filter chain: [{}]",
+                names.join(", ")
+            )));
+        }
+    };
+
+    dispatch_single_filter(doc, stream, terminal_filter, stream.content.clone())
+}
+
+/// Handle a single filter applied to image data.
+fn dispatch_single_filter(
     doc: &lopdf::Document,
     stream: &lopdf::Stream,
+    filter: &[u8],
+    data: Vec<u8>,
 ) -> Result<ImageData, PdfError> {
-    let filter: &[u8] = stream
-        .dict
-        .get(b"Filter")
-        .ok()
-        .and_then(|f| f.as_name().ok())
-        .unwrap_or(b"");
-
     match filter {
         b"DCTDecode" => {
             // JPEG data — return raw, let `image` crate decode
-            Ok(ImageData::Encoded(stream.content.clone()))
+            Ok(ImageData::Encoded(data))
         }
         b"FlateDecode" => {
             // Deflate-compressed raw pixels
-            let mut stream_clone = stream.clone();
-            stream_clone
-                .decompress()
-                .map_err(|e| PdfError::Parse(format!("decompress: {e}")))?;
-            let decompressed = stream_clone.content;
-
-            let width = stream
-                .dict
-                .get(b"Width")
-                .ok()
-                .and_then(|w| w.as_i64().ok())
-                .unwrap_or(0) as u32;
-            let height = stream
-                .dict
-                .get(b"Height")
-                .ok()
-                .and_then(|h| h.as_i64().ok())
-                .unwrap_or(0) as u32;
-            let bpc = stream
-                .dict
-                .get(b"BitsPerComponent")
-                .ok()
-                .and_then(|b| b.as_i64().ok())
-                .unwrap_or(8) as u32;
-            let cs = stream
-                .dict
-                .get(b"ColorSpace")
-                .ok()
-                .and_then(|c| resolve_object(doc, c).ok())
-                .and_then(|c| c.as_name().ok().map(|n| n.to_vec()));
-
-            let color_space: &[u8] = cs.as_deref().unwrap_or(b"DeviceRGB");
-
-            let format = match (color_space, bpc) {
-                (b"DeviceGray", 8) => PixelFormat::Gray8,
-                (b"DeviceGray", 16) => PixelFormat::Gray16,
-                (b"DeviceRGB", 8) => PixelFormat::Rgb8,
-                (b"DeviceRGB", 16) => PixelFormat::Rgb16,
-                (b"DeviceCMYK", _) => {
-                    let raster = cmyk_to_rgb_raster(&decompressed, width, height)?;
-                    return Ok(ImageData::Decoded(raster));
-                }
-                _ => {
-                    return Err(PdfError::UnsupportedFormat(format!(
-                        "{} @ {bpc}bpc",
-                        String::from_utf8_lossy(color_space)
-                    )));
-                }
-            };
-
-            let expected = width as usize * height as usize * format.bytes_per_pixel();
-            if decompressed.len() < expected {
-                return Err(PdfError::Decode(format!(
-                    "decompressed size {} < expected {expected}",
-                    decompressed.len()
-                )));
-            }
-            let mut data = decompressed;
-            data.truncate(expected);
-
-            let raster = Raster::new(width, height, format, data)
-                .map_err(PdfError::Raster)?;
-            Ok(ImageData::Decoded(raster))
+            let decompressed = flate_decompress(&data)?;
+            decode_raw_pixels(doc, stream, decompressed)
         }
         b"JPXDecode" => {
             // JPEG 2000 — return raw, let `image` crate attempt decode
-            Ok(ImageData::Encoded(stream.content.clone()))
+            Ok(ImageData::Encoded(data))
         }
         b"" => {
-            // No filter — raw data, try as image
-            Ok(ImageData::Encoded(stream.content.clone()))
+            // No filter — try as encoded image, fall back to raw pixels
+            Ok(ImageData::Encoded(data))
         }
         other => Err(PdfError::UnsupportedFormat(
             String::from_utf8_lossy(other).to_string(),
         )),
     }
+}
+
+/// Decode raw (uncompressed) pixel data using the stream's image metadata.
+fn decode_raw_pixels(
+    doc: &lopdf::Document,
+    stream: &lopdf::Stream,
+    decompressed: Vec<u8>,
+) -> Result<ImageData, PdfError> {
+    let width = stream
+        .dict
+        .get(b"Width")
+        .ok()
+        .and_then(|w| w.as_i64().ok())
+        .unwrap_or(0) as u32;
+    let height = stream
+        .dict
+        .get(b"Height")
+        .ok()
+        .and_then(|h| h.as_i64().ok())
+        .unwrap_or(0) as u32;
+    let bpc = stream
+        .dict
+        .get(b"BitsPerComponent")
+        .ok()
+        .and_then(|b| b.as_i64().ok())
+        .unwrap_or(8) as u32;
+    let cs = stream
+        .dict
+        .get(b"ColorSpace")
+        .ok()
+        .and_then(|c| resolve_object(doc, c).ok())
+        .and_then(|c| c.as_name().ok().map(|n| n.to_vec()));
+
+    let color_space: &[u8] = cs.as_deref().unwrap_or(b"DeviceRGB");
+
+    let format = match (color_space, bpc) {
+        (b"DeviceGray", 8) => PixelFormat::Gray8,
+        (b"DeviceGray", 16) => PixelFormat::Gray16,
+        (b"DeviceRGB", 8) => PixelFormat::Rgb8,
+        (b"DeviceRGB", 16) => PixelFormat::Rgb16,
+        (b"DeviceCMYK", _) => {
+            let raster = cmyk_to_rgb_raster(&decompressed, width, height)?;
+            return Ok(ImageData::Decoded(raster));
+        }
+        _ => {
+            return Err(PdfError::UnsupportedFormat(format!(
+                "{} @ {bpc}bpc",
+                String::from_utf8_lossy(color_space)
+            )));
+        }
+    };
+
+    let expected = width as usize * height as usize * format.bytes_per_pixel();
+    if decompressed.len() < expected {
+        return Err(PdfError::Decode(format!(
+            "decompressed size {} < expected {expected}",
+            decompressed.len()
+        )));
+    }
+    let mut data = decompressed;
+    data.truncate(expected);
+
+    let raster = Raster::new(width, height, format, data).map_err(PdfError::Raster)?;
+    Ok(ImageData::Decoded(raster))
+}
+
+/// Decompress zlib/deflate data.
+fn flate_decompress(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+    use std::io::Read;
+    let mut decoder = flate2::read::ZlibDecoder::new(data);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| PdfError::Decode(format!("flate decompress: {e}")))?;
+    Ok(out)
 }
 
 /// Convert CMYK raw bytes to RGB Raster.
@@ -413,40 +527,30 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 // Pdfium-based rendering (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// Render a PDF page to a raster using PDFium.
-///
-/// This handles vector content (AutoCAD exports, text, paths) that cannot be
-/// extracted as embedded images. Requires the `pdfium` feature and a PDFium
-/// library available at runtime.
+/// Open a pdfium instance with the appropriate bindings.
 #[cfg(feature = "pdfium")]
-pub fn render_page_pdfium(
-    path: &Path,
-    page: usize,
-    dpi: u32,
-) -> Result<Raster, PdfError> {
+fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
     use pdfium_render::prelude::*;
 
-    let pdfium = Pdfium::default();
-    let document = pdfium
-        .load_pdf_from_file(path, None)
+    #[cfg(feature = "pdfium-static")]
+    let bindings =
+        Pdfium::bind_to_statically_linked_library().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+    #[cfg(not(feature = "pdfium-static"))]
+    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+        .or_else(|_| Pdfium::bind_to_system_library())
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let pages = document.pages();
-    let total = pages.len();
-    if page == 0 || page > total as usize {
-        return Err(PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
+    Ok(Pdfium::new(bindings))
+}
 
-    let pdf_page = pages
-        .get(page as u16 - 1)
-        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
-    let scale = dpi as f32 / 72.0;
-    let width = (pdf_page.width().value * scale) as u32;
-    let height = (pdf_page.height().value * scale) as u32;
+/// Render a page at the given pixel dimensions and return a Raster.
+#[cfg(feature = "pdfium")]
+fn render_at_size(
+    pdf_page: &pdfium_render::prelude::PdfPage<'_>,
+    width: u32,
+    height: u32,
+) -> Result<Raster, PdfError> {
+    use pdfium_render::prelude::*;
 
     let config = PdfRenderConfig::new()
         .set_target_width(width as i32)
@@ -464,10 +568,120 @@ pub fn render_page_pdfium(
     Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
 }
 
+/// Render a PDF page to a raster using PDFium.
+///
+/// This handles vector content (AutoCAD exports, text, paths) that cannot be
+/// extracted as embedded images. Requires the `pdfium` feature and a PDFium
+/// library available at runtime.
+#[cfg(feature = "pdfium")]
+pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
+    let pdfium = init_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let pages = document.pages();
+    let total = pages.len();
+    if page == 0 || page > total as usize {
+        return Err(PdfError::PageOutOfRange {
+            page,
+            total: total as usize,
+        });
+    }
+    let pdf_page = pages
+        .get(page as u16 - 1)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let scale = dpi as f32 / 72.0;
+    let width = (pdf_page.width().value * scale) as u32;
+    let height = (pdf_page.height().value * scale) as u32;
+
+    render_at_size(&pdf_page, width, height)
+}
+
+/// Result of a budget-constrained render, including the DPI that was used.
+#[cfg(feature = "pdfium")]
+#[derive(Debug)]
+pub struct BudgetRenderResult {
+    pub raster: Raster,
+    pub dpi_used: u32,
+    pub capped: bool,
+}
+
+/// Render a PDF page to a raster, capping the output size to a maximum pixel
+/// budget to prevent excessive memory use on large documents.
+///
+/// - `max_dpi`: the preferred DPI (e.g. 300). Used when the result fits within
+///   the budget.
+/// - `max_pixels`: maximum total pixel count (width * height). If rendering at
+///   `max_dpi` would exceed this, the DPI is automatically reduced so the
+///   output fits.
+///
+/// Returns the raster along with the actual DPI used and whether it was capped.
+#[cfg(feature = "pdfium")]
+pub fn render_page_pdfium_budgeted(
+    path: &Path,
+    page: usize,
+    max_dpi: u32,
+    max_pixels: u64,
+) -> Result<BudgetRenderResult, PdfError> {
+    let pdfium = init_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let pages = document.pages();
+    let total = pages.len();
+    if page == 0 || page > total as usize {
+        return Err(PdfError::PageOutOfRange {
+            page,
+            total: total as usize,
+        });
+    }
+    let pdf_page = pages
+        .get(page as u16 - 1)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let width_pts = pdf_page.width().value as f64;
+    let height_pts = pdf_page.height().value as f64;
+
+    // Compute the DPI that fits within the pixel budget
+    let scale_at_max = max_dpi as f64 / 72.0;
+    let pixels_at_max = (width_pts * scale_at_max) as u64 * (height_pts * scale_at_max) as u64;
+
+    let (dpi_used, capped) = if pixels_at_max <= max_pixels {
+        (max_dpi, false)
+    } else {
+        // scale = sqrt(max_pixels / (w_pts * h_pts)), then dpi = scale * 72
+        let scale = (max_pixels as f64 / (width_pts * height_pts)).sqrt();
+        let dpi = (scale * 72.0).floor() as u32;
+        (dpi.max(1), true)
+    };
+
+    let scale = dpi_used as f32 / 72.0;
+    let width = (width_pts as f32 * scale) as u32;
+    let height = (height_pts as f32 * scale) as u32;
+
+    let raster = render_at_size(&pdf_page, width, height)?;
+
+    Ok(BudgetRenderResult {
+        raster,
+        dpi_used,
+        capped,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /**
+     * Tests that CMYK-to-RGB conversion produces correct color values.
+     * Works by converting a single pure-cyan pixel (C=255, M=0, Y=0, K=0)
+     * and checking that the resulting RGB raster has R=0, G=255, B=255.
+     * Input: 1x1 CMYK pixel [255, 0, 0, 0].
+     * Output: 1x1 Rgb8 raster with data [0, 255, 255].
+     */
     #[test]
     fn cmyk_to_rgb_basic() {
         // Pure cyan: C=255, M=0, Y=0, K=0 → R=0, G=255, B=255
@@ -477,23 +691,41 @@ mod tests {
         assert_eq!(raster.height(), 1);
         assert_eq!(raster.format(), PixelFormat::Rgb8);
         let data = raster.data();
-        assert_eq!(data[0], 0);   // R
+        assert_eq!(data[0], 0); // R
         assert_eq!(data[1], 255); // G
         assert_eq!(data[2], 255); // B
     }
 
+    /**
+     * Tests that obj_to_f64 correctly converts a lopdf Integer to f64.
+     * Works by creating an Integer(42) object and verifying it returns Some(42.0),
+     * confirming the integer-to-float promotion path.
+     * Input: lopdf::Object::Integer(42). Output: Some(42.0).
+     */
     #[test]
     fn obj_to_f64_integer() {
         let obj = lopdf::Object::Integer(42);
         assert_eq!(obj_to_f64(&obj), Some(42.0));
     }
 
+    /**
+     * Tests that obj_to_f64 correctly passes through a lopdf Real value.
+     * Works by creating a Real(3.14) object and checking the returned f64
+     * is within floating-point tolerance of 2.78.
+     * Input: lopdf::Object::Real(2.78). Output: Some(~2.78).
+     */
     #[test]
     fn obj_to_f64_real() {
-        let obj = lopdf::Object::Real(3.14);
-        assert!((obj_to_f64(&obj).unwrap() - 3.14).abs() < 0.001);
+        let obj = lopdf::Object::Real(2.78);
+        assert!((obj_to_f64(&obj).unwrap() - 2.78).abs() < 0.001);
     }
 
+    /**
+     * Tests that obj_to_f64 returns None for non-numeric PDF object types.
+     * Works by passing a Boolean object, which has no meaningful f64 conversion,
+     * and verifying the function correctly rejects it with None.
+     * Input: lopdf::Object::Boolean(true). Output: None.
+     */
     #[test]
     fn obj_to_f64_other() {
         let obj = lopdf::Object::Boolean(true);

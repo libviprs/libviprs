@@ -2,6 +2,7 @@
 name = "libviprs"
 version = "0.1.0"
 edition = "2024"
+authors = ["Roman Goldmann <roman@devshell.org>"]
 rust-version = "1.85"
 
 [lints.rust]
@@ -10,8 +11,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 [features]
 default = []
 pdfium = ["dep:pdfium-render"]
+pdfium-static = ["pdfium", "pdfium-render/static"]
 
 [dependencies]
+flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 lopdf = "0.36"
 pdfium-render = { version = "0.8", optional = true }
