@@ -859,6 +859,10 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
         // Property test: tiles with no overlap cover every pixel at every level exactly once.
         // Works by checking that the bounding box of all tile rects spans (0,0) to (width,height)
         // and the total tile area equals the level's pixel area (no gaps or overlaps).
