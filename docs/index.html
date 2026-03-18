@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>libviprs — Image Pyramiding Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Source+Code+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root, [data-theme="light"] {
+      --primary: #be6e34;
+      --primary-dark: #6d2c0f;
+      --accent: #d0704d;
+      --bg: #fafaf8;
+      --text: #2d2d2d;
+      --text-light: #555;
+      --code-bg: #f0ede8;
+      --border: #e0dcd4;
+      --white: #fff;
+      --hero-bg: #6d2c0f;
+      --table-header-bg: #f0ede8;
+      --max-width: 860px;
+    }
+
+    [data-theme="dark"] {
+      --primary: #d4894e;
+      --primary-dark: #e0a06a;
+      --accent: #d0704d;
+      --bg: #1a1a1a;
+      --text: #e0e0e0;
+      --text-light: #aaa;
+      --code-bg: #2a2a2a;
+      --border: #3a3a3a;
+      --white: #fff;
+      --hero-bg: #2c1608;
+      --table-header-bg: #2a2a2a;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: "Source Code Pro", "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Alpha ribbon */
+
+    .ribbon {
+      position: absolute;
+      top: 24px;
+      right: -65px;
+      width: 250px;
+      text-align: center;
+      padding: 0.35rem 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #cc3333;
+      color: var(--white);
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      transform: rotate(45deg);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      z-index: 10;
+    }
+
+    /* Hero */
+    .hero {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      overflow: hidden;
+      background: var(--hero-bg);
+      color: var(--white);
+      padding: 3rem 1.5rem 2.5rem;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    .hero-inner {
+      max-width: var(--max-width);
+      margin: 0 auto;
+    }
+
+    .hero-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 1.25rem;
+      margin-bottom: 1rem;
+    }
+
+    .hero-brand img {
+      width: 80px;
+      height: auto;
+      filter: drop-shadow(0 2px 8px rgba(0,0,0,0.3));
+    }
+
+    .hero-brand h1 {
+      font-size: 2.8rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .hero .pronunciation {
+      font-size: 0.95rem;
+      color: var(--white);
+      font-style: italic;
+      margin-bottom: 0.75rem;
+      letter-spacing: 0.5px;
+    }
+
+    .hero p.tagline {
+      font-size: 1.15rem;
+      color: var(--white);
+      max-width: 600px;
+      margin: 0 auto 1.5rem;
+    }
+
+    .hero .badges {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero .badges img { height: 20px; }
+
+    .hero-actions {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .hero-actions a {
+      display: inline-block;
+      padding: 0.55rem 1.4rem;
+      border-radius: 4px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: opacity 0.2s;
+    }
+
+    .hero-actions a:hover { opacity: 0.85; }
+
+    .btn-primary {
+      background: var(--primary);
+      color: var(--white);
+    }
+
+    .btn-outline {
+      border: 1.5px solid rgba(255,255,255,0.5);
+      color: var(--white);
+    }
+
+    /* Main content */
+    main {
+      max-width: var(--max-width);
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem 4rem;
+    }
+
+    section { margin-bottom: 2.5rem; }
+
+    h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--primary-dark);
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 2px solid var(--border);
+    }
+
+    p { margin-bottom: 0.75rem; color: var(--text-light); }
+
+    ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    ul li {
+      position: relative;
+      padding: 0.35rem 0 0.35rem 1.4rem;
+      color: var(--text-light);
+    }
+
+    ul li::before {
+      content: "▸";
+      position: absolute;
+      left: 0;
+      color: var(--primary);
+      font-weight: bold;
+    }
+
+    ul li strong { color: var(--text); }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      font-weight: 600;
+      color: var(--primary-dark);
+      background: var(--code-bg);
+    }
+
+    td code {
+      background: var(--code-bg);
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      font-size: 0.85rem;
+    }
+
+    /* Code blocks */
+    .code-wrap {
+      position: relative;
+      margin-bottom: 0.75rem;
+    }
+
+    .code-wrap .copy-btn {
+      position: absolute;
+      bottom: 0.5rem;
+      right: 0.5rem;
+      background: var(--border);
+      border: none;
+      border-radius: 4px;
+      padding: 0.3rem 0.5rem;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-family: inherit;
+      color: var(--text-light);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .code-wrap:hover .copy-btn { opacity: 1; }
+    .code-wrap .copy-btn:hover { background: var(--primary); color: var(--white); }
+
+    pre {
+      background: var(--code-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin-bottom: 0;
+    }
+
+    code {
+      font-family: "Source Code Pro", "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    /* Syntax highlighting — light */
+    .kw { color: #8839ef; }       /* keywords: use, let */
+    .fn { color: #1e66f5; }       /* function calls */
+    .ty { color: #df8e1d; }       /* types / structs */
+    .str { color: #40a02b; }      /* strings */
+    .num { color: #fe640b; }      /* numbers */
+    .cm { color: #8c8fa1; font-style: italic; }  /* comments */
+    .mc { color: #179299; }       /* macros */
+    .mod { color: #d20f39; }      /* modules / paths */
+
+    /* Syntax highlighting — dark */
+    [data-theme="dark"] .kw { color: #c678dd; }
+    [data-theme="dark"] .fn { color: #61afef; }
+    [data-theme="dark"] .ty { color: #e5c07b; }
+    [data-theme="dark"] .str { color: #98c379; }
+    [data-theme="dark"] .num { color: #d19a66; }
+    [data-theme="dark"] .cm { color: #7f848e; font-style: italic; }
+    [data-theme="dark"] .mc { color: #56b6c2; }
+    [data-theme="dark"] .mod { color: #e06c75; }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 2rem 1.5rem;
+      color: var(--text-light);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+      max-width: var(--max-width);
+      margin: 0 auto;
+    }
+
+    footer a { color: var(--primary); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* Theme toggle */
+    .theme-toggle {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.25);
+      color: var(--white);
+      border-radius: 20px;
+      padding: 0.3rem 0.7rem;
+      font-size: 0.8rem;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.2s;
+      z-index: 11;
+    }
+
+    .theme-toggle:hover {
+      background: rgba(255,255,255,0.25);
+    }
+
+    /* Responsive */
+    @media (max-width: 600px) {
+      .hero-brand h1 { font-size: 2rem; }
+      .hero-brand img { width: 56px; }
+      .hero { padding: 2rem 1rem 1.5rem; }
+      .theme-toggle { top: 0.5rem; left: 0.5rem; font-size: 0.7rem; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="hero">
+  <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode"></button>
+  <div class="ribbon">v0.1-alpha</div>
+  <div class="hero-inner">
+    <div class="hero-brand">
+      <img src="https://raw.githubusercontent.com/libviprs/libviprs/main/images/libviprs-logo-claws.svg" alt="libviprs logo">
+      <h1>libviprs</h1>
+    </div>
+    <p class="pronunciation">/l&#618;b-&#712;va&#618;&#183;p&#601;rz/</p>
+    <p class="tagline">A pure-Rust, thread-safe image pyramiding engine for the AEC/construction domain.</p>
+    <div class="badges">
+      <a href="https://github.com/libviprs/libviprs/actions/workflows/ci.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+      <a href="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml/badge.svg" alt="Merge Gate"></a>
+      <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
+      <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
+    </div>
+    <div class="hero-actions">
+      <a href="https://github.com/libviprs/libviprs" class="btn-primary">GitHub</a>
+      <a href="https://github.com/libviprs/libviprs-dep/releases" class="btn-outline">Downloads</a>
+    </div>
+  </div>
+</div>
+
+<main>
+
+  <section>
+    <p>Takes blueprint PDFs and images, extracts raster data, optionally geo-references it, and generates tile pyramids (DeepZoom, XYZ) suitable for web-based viewers. Inspired by <a href="https://www.libvips.org/" style="color:var(--primary);">libvips</a>, built from scratch.</p>
+  </section>
+
+  <section>
+    <h2>Features</h2>
+    <ul>
+      <li><strong>PDF extraction</strong> — extract embedded raster images from scanned blueprint PDFs via lopdf (zero runtime dependencies)</li>
+      <li><strong>PDF rendering</strong> — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional memory-budgeted rendering</li>
+      <li><strong>Image decoding</strong> — JPEG, PNG, TIFF via the <code>image</code> crate</li>
+      <li><strong>Tile pyramid generation</strong> — multi-threaded engine with backpressure, configurable tile size and overlap</li>
+      <li><strong>Layout formats</strong> — DeepZoom (<code>.dzi</code> + directory tree) and XYZ (<code>z/x/y</code>)</li>
+      <li><strong>Tile encoding</strong> — PNG, JPEG (configurable quality), or raw pixel output</li>
+      <li><strong>Blank tile optimization</strong> — emit full tiles or write 1-byte placeholders for uniform-color regions</li>
+      <li><strong>Edge tile background</strong> — configurable background color for padding partial tiles at image edges</li>
+      <li><strong>Geo-referencing</strong> — affine transform mapping pixel coordinates to geographic coordinates, GCP support</li>
+      <li><strong>Observability</strong> — progress events, per-level callbacks, peak memory tracking</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Quick Start</h2>
+    <div class="code-wrap">
+    <button class="copy-btn" id="copyBtn">&#x2398; Copy</button>
+    <pre><code><span class="kw">use</span> <span class="mod">libviprs</span>::{
+    <span class="ty">extract_page_image</span>, <span class="ty">generate_pyramid</span>, <span class="ty">BlankTileStrategy</span>,
+    <span class="ty">EngineConfig</span>, <span class="ty">FsSink</span>, <span class="ty">Layout</span>, <span class="ty">PyramidPlanner</span>, <span class="ty">TileFormat</span>,
+};
+<span class="kw">use</span> <span class="mod">std</span>::<span class="mod">path</span>::<span class="ty">Path</span>;
+
+<span class="cm">// Extract raster from a scanned blueprint PDF</span>
+<span class="kw">let</span> raster = <span class="fn">extract_page_image</span>(<span class="ty">Path</span>::<span class="fn">new</span>(<span class="str">"blueprint.pdf"</span>), <span class="num">1</span>).<span class="fn">unwrap</span>();
+
+<span class="cm">// Plan the pyramid</span>
+<span class="kw">let</span> planner = <span class="ty">PyramidPlanner</span>::<span class="fn">new</span>(
+    raster.<span class="fn">width</span>(), raster.<span class="fn">height</span>(),
+    <span class="num">256</span>, <span class="num">0</span>, <span class="ty">Layout</span>::<span class="ty">DeepZoom</span>,
+).<span class="fn">unwrap</span>();
+<span class="kw">let</span> plan = planner.<span class="fn">plan</span>();
+
+<span class="cm">// Generate tiles to disk</span>
+<span class="kw">let</span> sink = <span class="ty">FsSink</span>::<span class="fn">new</span>(<span class="str">"output_tiles"</span>, plan.<span class="fn">clone</span>(), <span class="ty">TileFormat</span>::<span class="ty">Png</span>);
+<span class="kw">let</span> config = <span class="ty">EngineConfig</span>::<span class="fn">default</span>()
+    .<span class="fn">with_concurrency</span>(<span class="num">4</span>)
+    .<span class="fn">with_blank_tile_strategy</span>(<span class="ty">BlankTileStrategy</span>::<span class="ty">Placeholder</span>);
+<span class="kw">let</span> result = <span class="fn">generate_pyramid</span>(&amp;raster, &amp;plan, &amp;sink, &amp;config).<span class="fn">unwrap</span>();
+
+<span class="mc">println!</span>(
+    <span class="str">"{} tiles across {} levels ({} blank tiles skipped)"</span>,
+    result.tiles_produced, result.levels_processed, result.tiles_skipped,
+);</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Modules</h2>
+    <table>
+      <thead><tr><th>Module</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>source</code></td><td>Image decoding (JPEG, PNG, TIFF) into canonical Raster</td></tr>
+        <tr><td><code>pdf</code></td><td>PDF parsing (lopdf) and optional rendering (PDFium)</td></tr>
+        <tr><td><code>raster</code></td><td>Pixel buffer, region views, format normalization</td></tr>
+        <tr><td><code>pixel</code></td><td>Pixel format definitions (Gray8, RGB8, RGBA8, 16-bit)</td></tr>
+        <tr><td><code>planner</code></td><td>Tile math, level computation, layout generation</td></tr>
+        <tr><td><code>resize</code></td><td>Downscaling for pyramid levels</td></tr>
+        <tr><td><code>engine</code></td><td>Multi-threaded tile extraction with backpressure</td></tr>
+        <tr><td><code>sink</code></td><td>Tile output (filesystem, memory, slow sink for testing)</td></tr>
+        <tr><td><code>geo</code></td><td>Affine geo-transform, GCP solving, bounding box</td></tr>
+        <tr><td><code>observe</code></td><td>Progress events, memory tracking</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Requirements</h2>
+    <ul>
+      <li><strong>Rust 1.85+</strong> (edition 2024)</li>
+      <li><strong>libpdfium</strong> shared library (only if using the <code>pdfium</code> feature)</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Related Crates</h2>
+    <table>
+      <thead><tr><th>Crate</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>libviprs-cli</code></td><td>Command-line interface (<code>viprs</code> binary)</td></tr>
+        <tr><td><code>libviprs-tests</code></td><td>Integration tests and fixtures</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+</main>
+
+<footer>
+  <p>libviprs is MIT licensed. <a href="https://github.com/libviprs/libviprs">View on GitHub</a></p>
+</footer>
+
+<script>
+  const toggle = document.getElementById('themeToggle');
+  function setTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    toggle.textContent = theme === 'dark' ? '☀ Light' : '☾ Dark';
+    localStorage.setItem('theme', theme);
+  }
+  const saved = localStorage.getItem('theme');
+  if (saved) {
+    setTheme(saved);
+  } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    setTheme('dark');
+  } else {
+    setTheme('light');
+  }
+  toggle.addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme');
+    setTheme(current === 'dark' ? 'light' : 'dark');
+  });
+  document.getElementById('copyBtn').addEventListener('click', function() {
+    const code = document.querySelector('.code-wrap pre code').textContent;
+    navigator.clipboard.writeText(code).then(() => {
+      this.textContent = '✓ Copied';
+      setTimeout(() => { this.innerHTML = '&#x2398; Copy'; }, 1500);
+    });
+  });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    if (!localStorage.getItem('theme')) setTheme(e.matches ? 'dark' : 'light');
+  });
+</script>
+</body>
+</html>
