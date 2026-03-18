@@ -88,6 +88,27 @@ println!(
 - Rust 1.85+ (edition 2024)
 - libpdfium shared library (only if using the `pdfium` feature)
 
+### PDFium setup
+
+The `pdfium` feature requires `libpdfium.so` at runtime. Pre-compiled binaries built from source are available from [libviprs-dep](https://github.com/libviprs/libviprs-dep/releases):
+
+```bash
+# x86_64
+curl -L -o pdfium.tgz \
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7725/pdfium-linux-x64.tgz
+
+# arm64
+curl -L -o pdfium.tgz \
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7725/pdfium-linux-arm64.tgz
+
+# Extract and install
+tar xzf pdfium.tgz
+sudo cp pdfium-linux-*/lib/libpdfium.so /usr/local/lib/
+sudo ldconfig
+```
+
+See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tree/main/pdfium) for building PDFium from source or finding other versions.
+
 ## Related Crates
 
 | Crate | Description |

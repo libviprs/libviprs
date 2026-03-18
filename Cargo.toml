@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Roman Goldmann <roman@devshell.org>"]
 rust-version = "1.85"
+description = "A pure-Rust, thread-safe image pyramiding engine for blueprint PDFs and raster images"
+license = "MIT"
+repository = "https://github.com/libviprs/libviprs"
+homepage = "https://libviprs.org"
+keywords = ["image", "pyramid", "tiles", "deepzoom", "pdf"]
+categories = ["multimedia::images", "graphics"]
+readme = "README.md"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
