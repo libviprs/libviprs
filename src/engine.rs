@@ -245,7 +245,17 @@ pub fn generate_pyramid_observed(
     })
 }
 
-/// Extract all tiles for a single level and send them to the sink.
+/// Extracts every tile for one pyramid level and writes them to the sink.
+///
+/// Dispatches to either the single-threaded loop or the parallel worker pool
+/// depending on [`EngineConfig::concurrency`]. In single-threaded mode, tiles
+/// are extracted and emitted in row-major order on the calling thread. In
+/// parallel mode, the work is delegated to [`extract_and_emit_parallel`].
+///
+/// Each tile is optionally checked for blankness when
+/// [`BlankTileStrategy::Placeholder`] is active, and the observer is notified
+/// after every tile is written.
+///
 /// Returns `(tiles_produced, tiles_skipped)`.
 fn extract_and_emit_level(
     raster: &Raster,
@@ -285,7 +295,19 @@ fn extract_and_emit_level(
     }
 }
 
-/// Parallel tile extraction using a bounded channel for backpressure.
+/// Extracts tiles for one level in parallel using scoped worker threads.
+///
+/// Tile coordinates are divided into roughly equal chunks (one per worker).
+/// Each worker extracts its tiles and sends them through a bounded
+/// `sync_channel`, which provides backpressure — producers block when the
+/// channel is full, preventing unbounded memory growth. A single consumer
+/// on the calling thread drains the channel, writes tiles to the sink, and
+/// notifies the observer.
+///
+/// The bounded channel capacity is set by [`EngineConfig::buffer_size`].
+/// Worker count is capped at `min(concurrency, tile_count)` to avoid
+/// spawning idle threads.
+///
 /// Returns `(tiles_produced, tiles_skipped)`.
 fn extract_and_emit_parallel(
     raster: &Raster,
@@ -367,7 +389,45 @@ fn extract_and_emit_parallel(
     })
 }
 
-/// Extract a single tile from a level raster.
+/// Allocates a `tile_size × tile_size` pixel buffer filled with the
+/// background color.
+///
+/// Used to pad edge tiles and to produce solid-background tiles for
+/// canvas regions that lie outside the source image (e.g. Google layout
+/// with centre). The background RGB triplet is expanded to match the
+/// pixel format's bytes-per-pixel: grayscale uses the red channel,
+/// RGB copies all three, RGBA appends alpha=255, and other formats
+/// repeat the red channel.
+fn make_background_tile(ts: u32, bpp: usize, background_rgb: [u8; 3]) -> Vec<u8> {
+    let mut padded = vec![0u8; ts as usize * ts as usize * bpp];
+    let bg_pixel: Vec<u8> = match bpp {
+        1 => vec![background_rgb[0]],
+        3 => background_rgb.to_vec(),
+        4 => vec![background_rgb[0], background_rgb[1], background_rgb[2], 255],
+        _ => vec![background_rgb[0]; bpp],
+    };
+    for pixel in padded.chunks_exact_mut(bpp) {
+        pixel.copy_from_slice(&bg_pixel);
+    }
+    padded
+}
+
+/// Extracts a single tile's pixel data from the level raster.
+///
+/// For standard DeepZoom/Xyz layouts without centre, the tile rect maps
+/// directly to image coordinates — the region is extracted and edge tiles
+/// are padded to `tile_size` with the background color (only when
+/// `overlap == 0`; overlap tiles keep their natural smaller size).
+///
+/// For Google layout or any plan with `centre == true`, tiles are
+/// addressed in *canvas* space (which may be larger than the image).
+/// The function computes the intersection of the canvas-space tile rect
+/// with the image region (offset by the centre offset), then:
+/// - If the tile is entirely outside the image → returns a solid
+///   background tile.
+/// - If partially overlapping → creates a background tile and blits the
+///   intersecting image region at the correct offset.
+/// - If fully within the image → extracts directly (fast path).
 fn extract_tile(
     raster: &Raster,
     plan: &PyramidPlan,
@@ -378,26 +438,92 @@ fn extract_tile(
         .tile_rect(coord)
         .expect("tile_rect returned None for valid coord");
 
-    let content = raster.extract(rect.x, rect.y, rect.width, rect.height)?;
     let ts = plan.tile_size;
+    let bpp = raster.format().bytes_per_pixel();
+
+    // For Google layout or plans with centre, tiles reference canvas space.
+    // We need to map from canvas coords to image coords.
+    if plan.layout == crate::planner::Layout::Google || plan.centre {
+        let (off_x, off_y) = plan.centre_offset_at_level(coord.level);
+        let img_w = raster.width();
+        let img_h = raster.height();
+
+        // Canvas-space tile rect
+        let tile_x = rect.x;
+        let tile_y = rect.y;
+        let tile_w = rect.width;
+        let tile_h = rect.height;
+
+        // Image region in canvas space
+        let img_left = off_x;
+        let img_top = off_y;
+        let img_right = off_x + img_w;
+        let img_bottom = off_y + img_h;
+
+        // Intersection of tile rect with image region
+        let inter_left = tile_x.max(img_left);
+        let inter_top = tile_y.max(img_top);
+        let inter_right = (tile_x + tile_w).min(img_right);
+        let inter_bottom = (tile_y + tile_h).min(img_bottom);
+
+        if inter_left >= inter_right || inter_top >= inter_bottom {
+            // Tile is entirely outside the image — solid background
+            let padded = make_background_tile(ts, bpp, background_rgb);
+            return Raster::new(ts, ts, raster.format(), padded);
+        }
+
+        let inter_w = inter_right - inter_left;
+        let inter_h = inter_bottom - inter_top;
+
+        // Source coords in image space
+        let src_x = inter_left - off_x;
+        let src_y = inter_top - off_y;
+
+        // Destination offset within the tile
+        let dst_x = inter_left - tile_x;
+        let dst_y = inter_top - tile_y;
+
+        if dst_x == 0 && dst_y == 0 && inter_w == tile_w && inter_h == tile_h {
+            // Fast path: tile entirely within image
+            let content = raster.extract(src_x, src_y, inter_w, inter_h)?;
+            if content.width() == ts && content.height() == ts {
+                return Ok(content);
+            }
+            // Shouldn't happen for Google, but handle gracefully
+            let mut padded = make_background_tile(ts, bpp, background_rgb);
+            let src_stride = content.width() as usize * bpp;
+            let dst_stride = ts as usize * bpp;
+            for row in 0..content.height() as usize {
+                let src_start = row * src_stride;
+                let dst_start = row * dst_stride;
+                padded[dst_start..dst_start + src_stride]
+                    .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
+            }
+            return Raster::new(ts, ts, raster.format(), padded);
+        }
+
+        // Partial overlap: create background tile and blit the intersection
+        let content = raster.extract(src_x, src_y, inter_w, inter_h)?;
+        let mut padded = make_background_tile(ts, bpp, background_rgb);
+        let src_stride = content.width() as usize * bpp;
+        let dst_stride = ts as usize * bpp;
+        for row in 0..inter_h as usize {
+            let src_start = row * src_stride;
+            let dst_start = (row + dst_y as usize) * dst_stride + dst_x as usize * bpp;
+            padded[dst_start..dst_start + src_stride]
+                .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
+        }
+        return Raster::new(ts, ts, raster.format(), padded);
+    }
+
+    // Standard DeepZoom/Xyz path
+    let content = raster.extract(rect.x, rect.y, rect.width, rect.height)?;
 
     // Pad edge tiles to the full tile size with the background color.
     // Only pad when there's no overlap — overlap tiles have intentionally
     // different sizes and must not be resized.
     if plan.overlap == 0 && (content.width() < ts || content.height() < ts) {
-        let bpp = content.format().bytes_per_pixel();
-        let mut padded = vec![0u8; ts as usize * ts as usize * bpp];
-
-        // Fill with background color (repeat the RGB pattern for each pixel)
-        let bg_pixel: Vec<u8> = match bpp {
-            1 => vec![background_rgb[0]],
-            3 => background_rgb.to_vec(),
-            4 => vec![background_rgb[0], background_rgb[1], background_rgb[2], 255],
-            _ => vec![background_rgb[0]; bpp],
-        };
-        for pixel in padded.chunks_exact_mut(bpp) {
-            pixel.copy_from_slice(&bg_pixel);
-        }
+        let mut padded = make_background_tile(ts, bpp, background_rgb);
 
         // Copy content rows into the padded buffer
         let src_stride = content.width() as usize * bpp;
@@ -912,5 +1038,117 @@ mod tests {
             "Peak {} >= 2x source {source_bytes}",
             result.peak_memory_bytes
         );
+    }
+
+    // -- Google layout + centre tests --
+
+    #[test]
+    fn google_centre_produces_all_tiles() {
+        let src = gradient_raster(500, 300);
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+        let sink = MemorySink::new();
+        let config = EngineConfig::default();
+
+        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        assert_eq!(result.tiles_produced, plan.total_tile_count());
+        assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
+    }
+
+    #[test]
+    fn google_centre_all_tiles_full_size() {
+        let src = gradient_raster(500, 300);
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+        let sink = MemorySink::new();
+
+        generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+
+        for tile in sink.tiles() {
+            assert_eq!(tile.width, 256, "Width mismatch at {:?}", tile.coord);
+            assert_eq!(tile.height, 256, "Height mismatch at {:?}", tile.coord);
+        }
+    }
+
+    #[test]
+    fn google_centre_edge_tiles_have_background() {
+        // Small image centred in 256x256 canvas → single tile with background padding
+        let src = solid_raster(10, 10, 200);
+        let planner = PyramidPlanner::new(10, 10, 256, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+        let sink = MemorySink::new();
+
+        generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+
+        // Level 0 should have 1 tile (1x1 grid)
+        let tiles = sink.tiles();
+        let level0: Vec<_> = tiles.iter().filter(|t| t.coord.level == 0).collect();
+        assert_eq!(level0.len(), 1);
+        let tile = &level0[0];
+        assert_eq!(tile.width, 256);
+        assert_eq!(tile.height, 256);
+        // Tile should NOT be entirely the source color (200,200,200) since background is white
+        assert!(
+            !is_blank_tile(
+                &Raster::new(
+                    tile.width,
+                    tile.height,
+                    PixelFormat::Rgb8,
+                    tile.data.clone()
+                )
+                .unwrap()
+            ) || tile.data.chunks(3).all(|px| px == [255, 255, 255])
+        );
+    }
+
+    #[test]
+    fn google_centre_deterministic_across_concurrency() {
+        let src = gradient_raster(400, 300);
+        let planner = PyramidPlanner::new(400, 300, 128, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+
+        let ref_sink = MemorySink::new();
+        generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+
+        let mut ref_tiles = ref_sink.tiles();
+        ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+
+        for concurrency in [1, 2, 4] {
+            let sink = MemorySink::new();
+            let config = EngineConfig::default().with_concurrency(concurrency);
+            generate_pyramid(&src, &plan, &sink, &config).unwrap();
+
+            let mut tiles = sink.tiles();
+            tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+
+            assert_eq!(tiles.len(), ref_tiles.len());
+            for (ref_t, t) in ref_tiles.iter().zip(tiles.iter()) {
+                assert_eq!(ref_t.coord, t.coord);
+                assert_eq!(
+                    ref_t.data, t.data,
+                    "Tile {:?} diverged at concurrency={concurrency}",
+                    t.coord
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn google_no_centre_produces_all_tiles() {
+        let src = gradient_raster(500, 300);
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        let sink = MemorySink::new();
+
+        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 }
