@@ -484,9 +484,14 @@ impl PyramidPlan {
                 "{}/{}_{}.{}",
                 coord.level, coord.col, coord.row, extension
             )),
-            Layout::Xyz | Layout::Google => Some(format!(
+            Layout::Xyz => Some(format!(
                 "{}/{}/{}.{}",
                 coord.level, coord.col, coord.row, extension
+            )),
+            // Google Maps convention: {z}/{y}/{x}.{ext} (row before col)
+            Layout::Google => Some(format!(
+                "{}/{}/{}.{}",
+                coord.level, coord.row, coord.col, extension
             )),
         }
     }
@@ -1035,10 +1040,12 @@ mod tests {
 
     #[test]
     fn google_layout_path_format() {
+        // Google layout uses {z}/{y}/{x}.ext (row before col, matching vips convention)
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::Google).unwrap();
         let plan = planner.plan();
+        // TileCoord(level=1, col=1, row=0) → path "1/0/1.png" (row=0, col=1)
         let path = plan.tile_path(TileCoord::new(1, 1, 0), "png").unwrap();
-        assert_eq!(path, "1/1/0.png");
+        assert_eq!(path, "1/0/1.png");
     }
 
     #[test]
