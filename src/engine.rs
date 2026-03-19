@@ -187,12 +187,22 @@ pub fn generate_pyramid_observed(
     let mut tiles_skipped: u64 = 0;
     let tracker = MemoryTracker::new();
 
-    // Track source raster
-    let source_bytes = source.data().len() as u64;
-    tracker.alloc(source_bytes);
-
-    // Start with the source raster at full resolution
-    let mut current = source.clone();
+    // For Google layout or centred plans, embed the source image into a
+    // canvas-sized raster at the centre offset. This matches vips's approach:
+    // the image is placed in the canvas first, then the entire canvas is
+    // downscaled level-by-level. This ensures boundary pixels are averaged
+    // correctly instead of computing per-level offsets that diverge due to
+    // integer rounding.
+    let mut current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
+        let canvas = embed_in_canvas(source, plan, config.background_rgb)?;
+        let canvas_bytes = canvas.data().len() as u64;
+        tracker.alloc(canvas_bytes);
+        canvas
+    } else {
+        let source_bytes = source.data().len() as u64;
+        tracker.alloc(source_bytes);
+        source.clone()
+    };
 
     // Process from top level (full res) down to level 0 (1×1)
     for level_idx in (0..plan.levels.len()).rev() {
@@ -205,10 +215,12 @@ pub fn generate_pyramid_observed(
             tile_count: level.tile_count(),
         });
 
-        // Downscale if not at the top level
+        // Downscale if not at the top level.
+        // Uses downscale_half (2x2 box filter) to match libvips's
+        // region-shrink=mean algorithm. Each level is ceil(prev/2).
         if level_idx < top_level {
             let old_bytes = current.data().len() as u64;
-            current = resize::downscale_to(&current, level.width, level.height)?;
+            current = resize::downscale_half(&current)?;
             let new_bytes = current.data().len() as u64;
             // Track: freed old level, allocated new
             tracker.dealloc(old_bytes);
@@ -243,6 +255,39 @@ pub fn generate_pyramid_observed(
         levels_processed: plan.levels.len() as u32,
         peak_memory_bytes: tracker.peak_bytes(),
     })
+}
+
+/// Embeds the source image into a canvas-sized raster at the centre offset.
+///
+/// Creates a background-filled raster of `canvas_width × canvas_height` and
+/// blits the source image at `(centre_offset_x, centre_offset_y)`. This
+/// replicates how vips handles `--centre`: the image is placed in the canvas
+/// before any downscaling, so boundary pixels are averaged correctly when
+/// the canvas is halved level-by-level.
+fn embed_in_canvas(
+    source: &Raster,
+    plan: &PyramidPlan,
+    background_rgb: [u8; 3],
+) -> Result<Raster, RasterError> {
+    let cw = plan.canvas_width;
+    let ch = plan.canvas_height;
+    let bpp = source.format().bytes_per_pixel();
+    let mut canvas = make_background_tile(cw, bpp, background_rgb);
+
+    let ox = plan.centre_offset_x as usize;
+    let oy = plan.centre_offset_y as usize;
+    let iw = source.width() as usize;
+    let src_stride = iw * bpp;
+    let dst_stride = cw as usize * bpp;
+
+    for row in 0..source.height() as usize {
+        let src_start = row * src_stride;
+        let dst_start = (row + oy) * dst_stride + ox * bpp;
+        canvas[dst_start..dst_start + src_stride]
+            .copy_from_slice(&source.data()[src_start..src_start + src_stride]);
+    }
+
+    Raster::new(cw, ch, source.format(), canvas)
 }
 
 /// Extracts every tile for one pyramid level and writes them to the sink.
@@ -441,75 +486,43 @@ fn extract_tile(
     let ts = plan.tile_size;
     let bpp = raster.format().bytes_per_pixel();
 
-    // For Google layout or plans with centre, tiles reference canvas space.
-    // We need to map from canvas coords to image coords.
-    if plan.layout == crate::planner::Layout::Google || plan.centre {
-        let (off_x, off_y) = plan.centre_offset_at_level(coord.level);
-        let img_w = raster.width();
-        let img_h = raster.height();
+    // For Google layout or non-centred plans where tiles reference canvas
+    // space (tile rects may extend beyond the raster), extract what we can
+    // and pad the rest with background.
+    if plan.layout == crate::planner::Layout::Google {
+        // For centred plans, the source raster has been embedded in the
+        // canvas by embed_in_canvas(), so the raster IS the canvas and
+        // tiles extract directly. For non-centred plans, the image is
+        // at (0,0) and tiles beyond the image boundary get padding.
+        let rw = raster.width();
+        let rh = raster.height();
 
-        // Canvas-space tile rect
-        let tile_x = rect.x;
-        let tile_y = rect.y;
-        let tile_w = rect.width;
-        let tile_h = rect.height;
+        // Intersection of tile rect with raster bounds
+        let inter_right = (rect.x + rect.width).min(rw);
+        let inter_bottom = (rect.y + rect.height).min(rh);
 
-        // Image region in canvas space
-        let img_left = off_x;
-        let img_top = off_y;
-        let img_right = off_x + img_w;
-        let img_bottom = off_y + img_h;
-
-        // Intersection of tile rect with image region
-        let inter_left = tile_x.max(img_left);
-        let inter_top = tile_y.max(img_top);
-        let inter_right = (tile_x + tile_w).min(img_right);
-        let inter_bottom = (tile_y + tile_h).min(img_bottom);
-
-        if inter_left >= inter_right || inter_top >= inter_bottom {
-            // Tile is entirely outside the image — solid background
+        if rect.x >= rw || rect.y >= rh {
+            // Tile entirely outside raster — solid background
             let padded = make_background_tile(ts, bpp, background_rgb);
             return Raster::new(ts, ts, raster.format(), padded);
         }
 
-        let inter_w = inter_right - inter_left;
-        let inter_h = inter_bottom - inter_top;
+        let inter_w = inter_right - rect.x;
+        let inter_h = inter_bottom - rect.y;
 
-        // Source coords in image space
-        let src_x = inter_left - off_x;
-        let src_y = inter_top - off_y;
-
-        // Destination offset within the tile
-        let dst_x = inter_left - tile_x;
-        let dst_y = inter_top - tile_y;
-
-        if dst_x == 0 && dst_y == 0 && inter_w == tile_w && inter_h == tile_h {
-            // Fast path: tile entirely within image
-            let content = raster.extract(src_x, src_y, inter_w, inter_h)?;
-            if content.width() == ts && content.height() == ts {
-                return Ok(content);
-            }
-            // Shouldn't happen for Google, but handle gracefully
-            let mut padded = make_background_tile(ts, bpp, background_rgb);
-            let src_stride = content.width() as usize * bpp;
-            let dst_stride = ts as usize * bpp;
-            for row in 0..content.height() as usize {
-                let src_start = row * src_stride;
-                let dst_start = row * dst_stride;
-                padded[dst_start..dst_start + src_stride]
-                    .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
-            }
-            return Raster::new(ts, ts, raster.format(), padded);
+        if inter_w == ts && inter_h == ts {
+            // Fast path: tile entirely within raster
+            return raster.extract(rect.x, rect.y, ts, ts);
         }
 
-        // Partial overlap: create background tile and blit the intersection
-        let content = raster.extract(src_x, src_y, inter_w, inter_h)?;
+        // Partial: extract overlap and pad
+        let content = raster.extract(rect.x, rect.y, inter_w, inter_h)?;
         let mut padded = make_background_tile(ts, bpp, background_rgb);
-        let src_stride = content.width() as usize * bpp;
+        let src_stride = inter_w as usize * bpp;
         let dst_stride = ts as usize * bpp;
         for row in 0..inter_h as usize {
             let src_start = row * src_stride;
-            let dst_start = (row + dst_y as usize) * dst_stride + dst_x as usize * bpp;
+            let dst_start = row * dst_stride;
             padded[dst_start..dst_start + src_stride]
                 .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
         }
