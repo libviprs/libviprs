@@ -13,15 +13,16 @@
 
 A pure-Rust, thread-safe image pyramiding engine. Inspired by [libvips](https://www.libvips.org/), built from scratch for the AEC/construction domain.
 
-Takes blueprint PDFs and images, extracts raster data, optionally geo-references it, and generates tile pyramids (DeepZoom, XYZ) suitable for web-based viewers.
+Takes blueprint PDFs and images, extracts raster data, optionally geo-references it, and generates tile pyramids (DeepZoom, XYZ, Google Maps) suitable for web-based viewers.
 
 ## Features
 
-- **PDF extraction** — extract embedded raster images from scanned blueprint PDFs via lopdf (zero runtime dependencies)
+- **PDF extraction** — extract embedded raster images from scanned blueprint PDFs via lopdf (pure Rust, no C dependencies)
 - **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional memory-budgeted rendering (optional `pdfium` feature)
 - **Image decoding** — JPEG, PNG, TIFF via the `image` crate
 - **Tile pyramid generation** — multi-threaded engine with backpressure, configurable tile size and overlap
-- **Layout formats** — DeepZoom (`.dzi` + directory tree) and XYZ (`z/x/y`)
+- **Layout formats** — DeepZoom (`.dzi` + directory tree), XYZ (`z/x/y`), and Google Maps (`z/y/x`, power-of-2 grids)
+- **Centre support** — centre image within the tile grid with even background padding on all sides
 - **Tile encoding** — PNG, JPEG (configurable quality), or raw pixel output
 - **Blank tile optimization** — configurable `BlankTileStrategy` to either emit full tiles or write 1-byte placeholders (`BLANK_TILE_MARKER`) for uniform-color regions, reducing disk usage for sparse images
 - **Edge tile background** — configurable background color (`background_rgb`) for padding partial tiles at image edges (defaults to white)

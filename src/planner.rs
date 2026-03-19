@@ -44,6 +44,9 @@ pub enum Layout {
     DeepZoom,
     /// XYZ / slippy map -- `{z}/{x}/{y}.{ext}`.
     Xyz,
+    /// Google Maps -- power-of-2 tile grids, `{z}/{x}/{y}.{ext}`.
+    /// z=0 is the most zoomed-out level (single tile). No manifest.
+    Google,
 }
 
 /// Configuration builder for pyramid tile generation.
@@ -66,6 +69,7 @@ pub struct PyramidPlanner {
     tile_size: u32,
     overlap: u32,
     layout: Layout,
+    centre: bool,
 }
 
 /// A complete, immutable pyramid plan ready for execution.
@@ -91,6 +95,16 @@ pub struct PyramidPlan {
     pub overlap: u32,
     pub layout: Layout,
     pub levels: Vec<LevelPlan>,
+    /// Padded canvas width at full resolution.
+    pub canvas_width: u32,
+    /// Padded canvas height at full resolution.
+    pub canvas_height: u32,
+    /// Whether the image is centred within the tile grid.
+    pub centre: bool,
+    /// Horizontal centre offset at full resolution (pixels).
+    pub centre_offset_x: u32,
+    /// Vertical centre offset at full resolution (pixels).
+    pub centre_offset_y: u32,
 }
 
 /// Plan for a single pyramid level.
@@ -184,7 +198,14 @@ impl PyramidPlanner {
             tile_size,
             overlap,
             layout,
+            centre: false,
         })
+    }
+
+    /// Enable or disable centring the image within the tile grid.
+    pub fn with_centre(mut self, centre: bool) -> Self {
+        self.centre = centre;
+        self
     }
 
     /// Compute the full pyramid plan.
@@ -199,7 +220,23 @@ impl PyramidPlanner {
     /// * [CLI plan command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
     /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
     pub fn plan(&self) -> PyramidPlan {
+        if self.layout == Layout::Google {
+            return self.plan_google();
+        }
+
         let levels = self.compute_levels();
+
+        let (canvas_width, canvas_height, offset_x, offset_y) = if self.centre {
+            let top = levels.last().unwrap();
+            let grid_w = top.cols * self.tile_size;
+            let grid_h = top.rows * self.tile_size;
+            let ox = (grid_w - self.image_width) / 2;
+            let oy = (grid_h - self.image_height) / 2;
+            (grid_w, grid_h, ox, oy)
+        } else {
+            (self.image_width, self.image_height, 0, 0)
+        };
+
         PyramidPlan {
             image_width: self.image_width,
             image_height: self.image_height,
@@ -207,6 +244,77 @@ impl PyramidPlanner {
             overlap: self.overlap,
             layout: self.layout,
             levels,
+            canvas_width,
+            canvas_height,
+            centre: self.centre,
+            centre_offset_x: offset_x,
+            centre_offset_y: offset_y,
+        }
+    }
+
+    fn plan_google(&self) -> PyramidPlan {
+        let ts = self.tile_size;
+        let cols_needed = ceil_div(self.image_width, ts);
+        let rows_needed = ceil_div(self.image_height, ts);
+        let max_grid = cols_needed.max(rows_needed);
+
+        // n_levels = ceil(log2(max_grid)) + 1, minimum 1
+        let n_levels = if max_grid <= 1 {
+            1
+        } else {
+            (32 - (max_grid - 1).leading_zeros()) + 1
+        };
+
+        // Canvas is ts * 2^(n_levels-1) — square
+        let canvas = ts * (1u32 << (n_levels - 1));
+
+        let (offset_x, offset_y) = if self.centre {
+            (
+                (canvas - self.image_width) / 2,
+                (canvas - self.image_height) / 2,
+            )
+        } else {
+            (0, 0)
+        };
+
+        // Build levels: z=0 is 1x1 grid, z=n_levels-1 is full resolution grid
+        let mut levels = Vec::with_capacity(n_levels as usize);
+        let mut w = self.image_width;
+        let mut h = self.image_height;
+
+        // Collect image dimensions at each level (top-down)
+        let mut img_dims = vec![(w, h)];
+        for _ in 1..n_levels {
+            w = ceil_div(w, 2);
+            h = ceil_div(h, 2);
+            img_dims.push((w, h));
+        }
+        img_dims.reverse(); // level 0 = smallest
+
+        for z in 0..n_levels {
+            let grid = 1u32 << z; // 2^z
+            let (iw, ih) = img_dims[z as usize];
+            levels.push(LevelPlan {
+                level: z,
+                width: iw,
+                height: ih,
+                cols: grid,
+                rows: grid,
+            });
+        }
+
+        PyramidPlan {
+            image_width: self.image_width,
+            image_height: self.image_height,
+            tile_size: ts,
+            overlap: self.overlap,
+            layout: Layout::Google,
+            levels,
+            canvas_width: canvas,
+            canvas_height: canvas,
+            centre: self.centre,
+            centre_offset_x: offset_x,
+            centre_offset_y: offset_y,
         }
     }
 
@@ -311,6 +419,17 @@ impl PyramidPlan {
             return None;
         }
 
+        if self.layout == Layout::Google {
+            // Google layout: tiles cover canvas space, always full tile_size
+            let ts = self.tile_size;
+            return Some(TileRect {
+                x: coord.col * ts,
+                y: coord.row * ts,
+                width: ts,
+                height: ts,
+            });
+        }
+
         let x_start = if coord.col == 0 {
             0
         } else {
@@ -369,6 +488,11 @@ impl PyramidPlan {
                 "{}/{}/{}.{}",
                 coord.level, coord.col, coord.row, extension
             )),
+            // Google Maps convention: {z}/{y}/{x}.{ext} (row before col)
+            Layout::Google => Some(format!(
+                "{}/{}/{}.{}",
+                coord.level, coord.row, coord.col, extension
+            )),
         }
     }
 
@@ -398,6 +522,31 @@ impl PyramidPlan {
             width = self.image_width,
             height = self.image_height,
         ))
+    }
+
+    /// Canvas dimensions at the given level for Google layout.
+    /// For non-Google layouts, returns the level's image dimensions.
+    pub fn canvas_size_at_level(&self, level: u32) -> (u32, u32) {
+        if self.layout == Layout::Google {
+            let ts = self.tile_size;
+            let grid = 1u32 << level;
+            (ts * grid, ts * grid)
+        } else {
+            match self.levels.get(level as usize) {
+                Some(lp) => (lp.width, lp.height),
+                None => (0, 0),
+            }
+        }
+    }
+
+    /// Centre offset scaled to the given level.
+    pub fn centre_offset_at_level(&self, level: u32) -> (u32, u32) {
+        if !self.centre || (self.centre_offset_x == 0 && self.centre_offset_y == 0) {
+            return (0, 0);
+        }
+        let top_level = self.levels.len() as u32 - 1;
+        let shift = top_level - level;
+        (self.centre_offset_x >> shift, self.centre_offset_y >> shift)
     }
 }
 
@@ -850,6 +999,171 @@ mod tests {
             assert_eq!(top.cols, ceil_div(2048, tile_size));
             assert_eq!(top.rows, ceil_div(1536, tile_size));
         }
+    }
+
+    // -- Google layout tests --
+
+    #[test]
+    fn google_layout_single_tile() {
+        // Image smaller than tile_size → 1 level, 1×1 grid
+        let planner = PyramidPlanner::new(100, 80, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        assert_eq!(plan.level_count(), 1);
+        assert_eq!(plan.levels[0].cols, 1);
+        assert_eq!(plan.levels[0].rows, 1);
+        assert_eq!(plan.canvas_width, 256);
+        assert_eq!(plan.canvas_height, 256);
+    }
+
+    #[test]
+    fn google_layout_level_count() {
+        // 3300x5024 at ts=256: max(ceil(3300/256), ceil(5024/256)) = max(13,20) = 20
+        // n_levels = ceil(log2(20)) + 1 = 5 + 1 = 6
+        let planner = PyramidPlanner::new(3300, 5024, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        assert_eq!(plan.level_count(), 6);
+        // Canvas = 256 * 2^5 = 8192
+        assert_eq!(plan.canvas_width, 8192);
+        assert_eq!(plan.canvas_height, 8192);
+    }
+
+    #[test]
+    fn google_layout_power_of_2_grids() {
+        let planner = PyramidPlanner::new(1000, 800, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        for (i, level) in plan.levels.iter().enumerate() {
+            let expected_grid = 1u32 << i;
+            assert_eq!(level.cols, expected_grid, "Level {} cols", i);
+            assert_eq!(level.rows, expected_grid, "Level {} rows", i);
+        }
+    }
+
+    #[test]
+    fn google_layout_path_format() {
+        // Google layout uses {z}/{y}/{x}.ext (row before col, matching vips convention)
+        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        // TileCoord(level=1, col=1, row=0) → path "1/0/1.png" (row=0, col=1)
+        let path = plan.tile_path(TileCoord::new(1, 1, 0), "png").unwrap();
+        assert_eq!(path, "1/0/1.png");
+    }
+
+    #[test]
+    fn google_layout_no_dzi() {
+        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        assert!(plan.dzi_manifest("png").is_none());
+    }
+
+    #[test]
+    fn google_layout_tile_rect_full_size() {
+        // All Google tiles should be full tile_size × tile_size
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        for coord in plan.tile_coords() {
+            let rect = plan.tile_rect(coord).unwrap();
+            assert_eq!(rect.width, 256, "Tile {:?} width", coord);
+            assert_eq!(rect.height, 256, "Tile {:?} height", coord);
+        }
+    }
+
+    #[test]
+    fn google_centre_offsets() {
+        // 500x300 at ts=256: max(2,2)=2, n_levels=2, canvas=512
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+        assert_eq!(plan.canvas_width, 512);
+        assert_eq!(plan.canvas_height, 512);
+        assert_eq!(plan.centre_offset_x, (512 - 500) / 2); // 6
+        assert_eq!(plan.centre_offset_y, (512 - 300) / 2); // 106
+    }
+
+    #[test]
+    fn google_no_centre_offsets_zero() {
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        assert_eq!(plan.centre_offset_x, 0);
+        assert_eq!(plan.centre_offset_y, 0);
+        assert!(!plan.centre);
+    }
+
+    #[test]
+    fn google_layout_image_dims_halve() {
+        // Level width/height should represent the image, not canvas
+        let planner = PyramidPlanner::new(1000, 800, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.width, 1000);
+        assert_eq!(top.height, 800);
+
+        // Each lower level halves
+        for i in (1..plan.levels.len()).rev() {
+            let upper = &plan.levels[i];
+            let lower = &plan.levels[i - 1];
+            assert_eq!(lower.width, ceil_div(upper.width, 2));
+            assert_eq!(lower.height, ceil_div(upper.height, 2));
+        }
+    }
+
+    #[test]
+    fn google_total_tile_count() {
+        // 2 levels: 1×1 + 2×2 = 5
+        let planner = PyramidPlanner::new(300, 300, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        assert_eq!(plan.level_count(), 2);
+        assert_eq!(plan.total_tile_count(), 1 + 4);
+    }
+
+    #[test]
+    fn centre_with_deep_zoom() {
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+        // Grid for 500x300 at ts=256: 2x2, canvas = 512x512
+        let top = plan.levels.last().unwrap();
+        assert_eq!(top.cols, 2);
+        assert_eq!(top.rows, 2);
+        assert_eq!(plan.canvas_width, 512);
+        assert_eq!(plan.canvas_height, 512);
+        assert_eq!(plan.centre_offset_x, 6);
+        assert_eq!(plan.centre_offset_y, 106);
+    }
+
+    #[test]
+    fn canvas_size_at_level_google() {
+        let planner = PyramidPlanner::new(500, 300, 256, 0, Layout::Google).unwrap();
+        let plan = planner.plan();
+        assert_eq!(plan.canvas_size_at_level(0), (256, 256));
+        assert_eq!(plan.canvas_size_at_level(1), (512, 512));
+    }
+
+    #[test]
+    fn centre_offset_at_level_scales() {
+        // 3 levels for Google: 500x300 at ts=128
+        // max(ceil(500/128), ceil(300/128)) = max(4,3) = 4
+        // n_levels = ceil(log2(4)) + 1 = 2 + 1 = 3
+        // canvas = 128 * 4 = 512
+        let planner = PyramidPlanner::new(500, 300, 128, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true);
+        let plan = planner.plan();
+        assert_eq!(plan.level_count(), 3);
+        assert_eq!(plan.canvas_width, 512);
+        // offset_x = (512-500)/2 = 6, offset_y = (512-300)/2 = 106
+        let (ox_top, oy_top) = plan.centre_offset_at_level(2);
+        assert_eq!(ox_top, 6);
+        assert_eq!(oy_top, 106);
+        // Level 1: offset halved
+        let (ox1, oy1) = plan.centre_offset_at_level(1);
+        assert_eq!(ox1, 3);
+        assert_eq!(oy1, 53);
+        // Level 0: offset quartered
+        let (ox0, oy0) = plan.centre_offset_at_level(0);
+        assert_eq!(ox0, 1);
+        assert_eq!(oy0, 26);
     }
 }
 

@@ -42,10 +42,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: libviprs
-      - uses: actions/checkout@v4
-        with:
-          repository: libviprs/libviprs-tests
-          path: libviprs-tests
+      - name: Clone libviprs-tests (matching branch or main)
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          git clone --depth 1 --branch "$BRANCH" https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests 2>/dev/null \
+            || git clone --depth 1 https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
