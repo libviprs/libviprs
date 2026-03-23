@@ -529,7 +529,7 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 
 /// Open a pdfium instance with the appropriate bindings.
 #[cfg(feature = "pdfium")]
-fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
+pub(crate) fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
     use pdfium_render::prelude::*;
 
     #[cfg(feature = "pdfium-static")]
@@ -545,7 +545,7 @@ fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
 
 /// Render a page at the given pixel dimensions and return a Raster.
 #[cfg(feature = "pdfium")]
-fn render_at_size(
+pub(crate) fn render_at_size(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
     width: u32,
     height: u32,
@@ -608,14 +608,24 @@ pub struct BudgetRenderResult {
     pub capped: bool,
 }
 
-/// Render a PDF page to a raster, capping the output size to a maximum pixel
-/// budget to prevent excessive memory use on large documents.
+/// Render a PDF page to a raster with a memory safety net.
 ///
-/// - `max_dpi`: the preferred DPI (e.g. 300). Used when the result fits within
-///   the budget.
-/// - `max_pixels`: maximum total pixel count (width * height). If rendering at
-///   `max_dpi` would exceed this, the DPI is automatically reduced so the
-///   output fits.
+/// Unlike [`render_page_pdfium`] which renders at exactly the requested DPI
+/// regardless of output size, this function caps the total pixel count to
+/// prevent OOM when rendering large-format PDFs (e.g. a 48"x36" AutoCAD
+/// blueprint at 300 DPI = 518 megapixels). It picks whichever constraint
+/// is more restrictive — the requested DPI or the pixel budget — and
+/// reduces DPI automatically if needed.
+///
+/// Use [`render_page_pdfium`] when you control the DPI and know the output
+/// will fit in memory. Use this function in pipelines where the PDF page
+/// size is unknown and you need a memory ceiling.
+///
+/// - `max_dpi`: the preferred DPI (e.g. 300). Used when the result fits
+///   within the budget.
+/// - `max_pixels`: maximum total pixel count (width * height). If rendering
+///   at `max_dpi` would exceed this, the DPI is automatically reduced so
+///   the output fits.
 ///
 /// Returns the raster along with the actual DPI used and whether it was capped.
 #[cfg(feature = "pdfium")]
