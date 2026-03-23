@@ -252,6 +252,108 @@ impl PyramidPlanner {
         }
     }
 
+    /// Estimates the peak heap memory (in bytes) that
+    /// [`generate_pyramid_observed`](crate::generate_pyramid_observed) will
+    /// consume for this planner configuration.
+    ///
+    /// The estimate covers the two largest allocations that coexist at peak:
+    ///
+    /// 1. **Source raster** — the caller-owned RGBA8 image passed by reference
+    ///    to `generate_pyramid_observed`. Size: `image_width × image_height × 4`.
+    ///
+    /// 2. **Canvas raster** — when centring is enabled, the engine embeds the
+    ///    source into a padded canvas before downscaling. For `Google` layout
+    ///    this canvas is square (`2^z × tile_size` per side) and can be
+    ///    significantly larger than the source. For `DeepZoom`/`Xyz` layouts
+    ///    the canvas is rectangular, padded to the tile grid boundary.
+    ///
+    /// These two allocations coexist because the engine receives the source
+    /// by shared reference (`&Raster`) while it allocates the canvas
+    /// internally. The first downscale step frees the canvas and replaces it
+    /// with a quarter-sized copy, so the peak occurs at canvas creation.
+    ///
+    /// The estimate does **not** include PNG encoding buffers, filesystem I/O
+    /// buffers, or process baseline memory — only raster pixel buffers. For
+    /// container memory budgeting, add 200–500 MB of headroom on top of this
+    /// value.
+    ///
+    /// This method is cheap (no heap allocation, no I/O) and can be called
+    /// before rendering to verify that the pipeline will fit in available
+    /// memory, enabling callers to reduce DPI or reject oversized inputs
+    /// before committing to an expensive render.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use libviprs::{PyramidPlanner, Layout};
+    ///
+    /// let planner = PyramidPlanner::new(16820, 11888, 256, 0, Layout::Google)
+    ///     .unwrap()
+    ///     .with_centre(true);
+    ///
+    /// let peak = planner.estimate_peak_memory();
+    /// // 16820×11888 → 66×47 tiles → z=7 → canvas 32768² → ~4.8 GB peak
+    /// assert!(peak > 4_000_000_000);
+    ///
+    /// // Use this to gate rendering:
+    /// let memory_budget: u64 = 1_500_000_000; // 1.5 GB
+    /// if peak > memory_budget {
+    ///     // reduce DPI and retry with smaller dimensions
+    /// }
+    /// ```
+    pub fn estimate_peak_memory(&self) -> u64 {
+        let bytes_per_pixel: u64 = 4; // RGBA8
+        let source_bytes = self.image_width as u64 * self.image_height as u64 * bytes_per_pixel;
+
+        let (canvas_w, canvas_h) = self.canvas_dimensions();
+
+        if !self.centre || (canvas_w == self.image_width && canvas_h == self.image_height) {
+            // No centring or canvas matches source — the engine clones the
+            // source instead of embedding. Peak = source (caller) + clone.
+            source_bytes * 2
+        } else {
+            let canvas_bytes = canvas_w as u64 * canvas_h as u64 * bytes_per_pixel;
+            // Peak = source (caller-owned reference) + canvas (engine-allocated)
+            source_bytes + canvas_bytes
+        }
+    }
+
+    /// Computes the canvas dimensions that [`plan`](Self::plan) would produce,
+    /// without building the full [`PyramidPlan`].
+    ///
+    /// For `Google` layout the canvas is square: `tile_size × 2^(n_levels−1)`
+    /// per side. For `DeepZoom`/`Xyz` layouts the canvas is rectangular,
+    /// padded to the tile grid boundary at the top level.
+    ///
+    /// When centring is disabled, returns the original image dimensions
+    /// (no padding).
+    ///
+    /// This is a pure computation with no allocations.
+    pub fn canvas_dimensions(&self) -> (u32, u32) {
+        if !self.centre {
+            return (self.image_width, self.image_height);
+        }
+
+        if self.layout == Layout::Google {
+            let ts = self.tile_size;
+            let cols_needed = ceil_div(self.image_width, ts);
+            let rows_needed = ceil_div(self.image_height, ts);
+            let max_grid = cols_needed.max(rows_needed);
+            let n_levels = if max_grid <= 1 {
+                1u32
+            } else {
+                (32 - (max_grid - 1).leading_zeros()) + 1
+            };
+            let canvas = ts * (1u32 << (n_levels - 1));
+            (canvas, canvas)
+        } else {
+            // DeepZoom / Xyz: canvas = top-level tile grid × tile_size
+            let cols = ceil_div(self.image_width, self.tile_size);
+            let rows = ceil_div(self.image_height, self.tile_size);
+            (cols * self.tile_size, rows * self.tile_size)
+        }
+    }
+
     fn plan_google(&self) -> PyramidPlan {
         let ts = self.tile_size;
         let cols_needed = ceil_div(self.image_width, ts);
