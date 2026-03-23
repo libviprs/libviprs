@@ -548,6 +548,70 @@ impl PyramidPlan {
         let shift = top_level - level;
         (self.centre_offset_x >> shift, self.centre_offset_y >> shift)
     }
+
+    /// Estimate peak memory for the monolithic engine with a given pixel format.
+    ///
+    /// The monolithic engine holds the full canvas raster while simultaneously
+    /// building the first downscaled level (half width × half height). The peak
+    /// occurs when both coexist momentarily:
+    ///
+    /// `peak = canvas_bytes + canvas_bytes / 4`
+    ///
+    /// This estimate is conservative — it ignores smaller intermediate buffers
+    /// that are freed quickly. Used by [`generate_pyramid_auto`](crate::streaming::generate_pyramid_auto)
+    /// to decide whether the monolithic path fits within the memory budget.
+    pub fn estimate_peak_memory_for_format(&self, format: crate::pixel::PixelFormat) -> u64 {
+        let bpp = format.bytes_per_pixel() as u64;
+        let canvas_bytes = self.canvas_width as u64 * self.canvas_height as u64 * bpp;
+        // Peak = canvas + first downscaled level (1/4 of canvas)
+        canvas_bytes + canvas_bytes / 4
+    }
+
+    /// Estimate peak memory for the streaming engine at a given strip height.
+    ///
+    /// The streaming engine holds multiple live buffers simultaneously:
+    ///
+    /// - At the top level: the current strip (`canvas_w × strip_h × bpp`)
+    ///   plus the strip-pairing accumulator (same size, worst case).
+    /// - At each subsequent level: the downscaled strip (`w/2 × h/2`) plus
+    ///   its own pairing accumulator.
+    ///
+    /// This function walks the geometric series of halving dimensions until
+    /// the level collapses to a single pixel, summing `2 × strip_bytes` per
+    /// level (strip + accumulator) plus the final small-level buffer. A 10%
+    /// safety margin is added for bookkeeping overhead.
+    ///
+    /// Used by [`compute_strip_height`](crate::streaming::compute_strip_height)
+    /// to find the tallest strip that fits within the caller's budget.
+    pub fn estimate_streaming_peak_memory(
+        &self,
+        format: crate::pixel::PixelFormat,
+        strip_height: u32,
+    ) -> u64 {
+        let bpp = format.bytes_per_pixel() as u64;
+        let cw = self.canvas_width as u64;
+        let mut total: u64 = 0;
+        let mut w = cw;
+        let mut h = strip_height as u64;
+
+        // Walk levels: each level holds the current strip plus its pairing
+        // accumulator (waiting for the partner half-strip)
+        loop {
+            let strip_bytes = w * h * bpp;
+            total += strip_bytes * 2;
+            // Downscale dimensions for next level (matching downscale_half's
+            // div_ceil behavior for odd sizes)
+            w = w.div_ceil(2);
+            h = h.div_ceil(2);
+            if h <= 1 || w <= 1 {
+                // Final small level — only the strip itself, no accumulator
+                total += w * h * bpp;
+                break;
+            }
+        }
+        // 10% safety margin for Vec overhead, alignment, and temporary buffers
+        total + total / 10
+    }
 }
 
 impl LevelPlan {

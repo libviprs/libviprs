@@ -529,7 +529,7 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 
 /// Open a pdfium instance with the appropriate bindings.
 #[cfg(feature = "pdfium")]
-fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
+pub(crate) fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
     use pdfium_render::prelude::*;
 
     #[cfg(feature = "pdfium-static")]
@@ -545,7 +545,7 @@ fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
 
 /// Render a page at the given pixel dimensions and return a Raster.
 #[cfg(feature = "pdfium")]
-fn render_at_size(
+pub(crate) fn render_at_size(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
     width: u32,
     height: u32,
