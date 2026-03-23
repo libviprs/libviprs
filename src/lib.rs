@@ -38,6 +38,7 @@ pub mod raster;
 pub mod resize;
 pub mod sink;
 pub mod source;
+pub mod streaming;
 
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, generate_pyramid,
@@ -55,3 +56,9 @@ pub use planner::{
 pub use raster::{Raster, RasterError, RegionView};
 pub use sink::{BLANK_TILE_MARKER, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
+#[cfg(feature = "pdfium")]
+pub use streaming::PdfiumStripSource;
+pub use streaming::{
+    RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
+    estimate_streaming_memory, generate_pyramid_auto, generate_pyramid_streaming,
+};
