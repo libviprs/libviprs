@@ -21,6 +21,38 @@ use crate::planner::TileCoord;
 ///   `TileCompleted` events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
+    // -- Pipeline-level events (emitted by callers for full-pipeline observability) --
+    /// The source file is about to be loaded (decoded, extracted, or rendered).
+    ///
+    /// Callers emit this before starting source acquisition so observers can
+    /// track the full pipeline from input to output. The `source_description`
+    /// is a free-form string identifying the input (e.g. a file path, "stdin",
+    /// or "PDF page 3 at 300 DPI").
+    SourceLoadStarted { source_description: String },
+
+    /// The source raster is ready.
+    ///
+    /// Callers emit this after decoding / rendering completes but before
+    /// planning or tiling begins.
+    SourceLoaded {
+        width: u32,
+        height: u32,
+        format: crate::pixel::PixelFormat,
+        size_bytes: u64,
+    },
+
+    /// The pyramid plan has been created.
+    ///
+    /// Callers emit this after planning so observers know the scope of the
+    /// tiling work ahead.
+    PlanCreated {
+        levels: u32,
+        total_tiles: u64,
+        canvas_width: u32,
+        canvas_height: u32,
+    },
+
+    // -- Tiling-phase events (emitted by the engine) --
     /// A level is about to be processed.
     LevelStarted {
         level: u32,
@@ -32,8 +64,45 @@ pub enum EngineEvent {
     TileCompleted { coord: TileCoord },
     /// A level finished processing.
     LevelCompleted { level: u32, tiles_produced: u64 },
-    /// The entire pyramid is done.
+
+    // -- Streaming-engine events --
+    /// A horizontal strip was rendered / extracted from the source.
+    ///
+    /// Emitted by the streaming engine each time a strip is obtained from
+    /// the [`StripSource`](crate::streaming::StripSource). Observers can
+    /// use `strip_index` / `total_strips` for progress reporting.
+    StripRendered { strip_index: u32, total_strips: u32 },
+
+    // -- MapReduce-engine events --
+    /// A batch of strips is about to be processed in parallel.
+    ///
+    /// Emitted by the MapReduce engine at the start of each batch.
+    /// `strips_in_batch` may be less than the computed in-flight count
+    /// for the final batch.
+    BatchStarted {
+        batch_index: u32,
+        strips_in_batch: u32,
+        total_batches: u32,
+    },
+
+    /// A batch of strips has finished processing (map + reduce).
+    BatchCompleted {
+        batch_index: u32,
+        tiles_produced: u64,
+    },
+
+    // -- Completion events --
+    /// The tiling phase is done.
+    ///
+    /// Emitted by the engine at the end of pyramid generation.
     Finished { total_tiles: u64, levels: u32 },
+
+    /// The entire pipeline is complete, control is returning to the caller.
+    ///
+    /// Callers emit this as the last event after all post-processing
+    /// (manifest writing, cleanup, etc.) is finished. The engine never
+    /// emits this — it is purely a caller-side bookend to `SourceLoadStarted`.
+    PipelineComplete,
 }
 
 /// Trait for receiving engine progress events.
