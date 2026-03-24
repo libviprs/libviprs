@@ -433,6 +433,8 @@ pub fn generate_pyramid_streaming(
     // ===================================================================
     // Phase 1: Strip loop — iterate horizontal bands top-to-bottom
     // ===================================================================
+    let total_strips = ch.div_ceil(strip_height);
+    let mut strip_index: u32 = 0;
     let mut y: u32 = 0;
     while y < ch {
         // Clamp the last strip if the canvas height isn't a multiple of
@@ -444,6 +446,12 @@ pub fn generate_pyramid_streaming(
         // with centring this embeds the source rows into a canvas-width
         // background; for DeepZoom the strip is the raw source rows.
         let strip = obtain_canvas_strip(source, plan, y, sh, &config.engine)?;
+
+        observer.on_event(EngineEvent::StripRendered {
+            strip_index,
+            total_strips,
+        });
+        strip_index += 1;
         let strip_bytes = strip.data().len() as u64;
         tracker.alloc(strip_bytes);
 
@@ -693,7 +701,11 @@ pub fn generate_pyramid_auto(
 ///
 /// Scanning from the top (largest) level downward, the first level whose
 /// full raster fits within the strip budget becomes the threshold.
-fn find_monolithic_threshold(plan: &PyramidPlan, format: PixelFormat, strip_height: u32) -> usize {
+pub(crate) fn find_monolithic_threshold(
+    plan: &PyramidPlan,
+    format: PixelFormat,
+    strip_height: u32,
+) -> usize {
     let bpp = format.bytes_per_pixel() as u64;
     // Reference budget: one full-width strip at the top level
     let strip_budget = plan.canvas_width as u64 * strip_height as u64 * bpp;
@@ -729,7 +741,7 @@ fn find_monolithic_threshold(plan: &PyramidPlan, format: PixelFormat, strip_heig
 ///
 /// - **DeepZoom / Xyz**: the canvas equals the image, so the strip is just
 ///   the raw source rows with no padding or offset.
-fn obtain_canvas_strip(
+pub(crate) fn obtain_canvas_strip(
     source: &dyn StripSource,
     plan: &PyramidPlan,
     y: u32,
@@ -836,7 +848,12 @@ fn embed_strip_in_canvas(
 ///
 /// Handles 1-channel (grayscale), 3-channel (RGB), and 4-channel (RGBA,
 /// alpha = 255) formats. Used for padding tiles and canvas strips.
-fn make_background_buffer(w: u32, h: u32, bpp: usize, background_rgb: [u8; 3]) -> Vec<u8> {
+pub(crate) fn make_background_buffer(
+    w: u32,
+    h: u32,
+    bpp: usize,
+    background_rgb: [u8; 3],
+) -> Vec<u8> {
     let size = w as usize * h as usize * bpp;
     let mut buf = vec![0u8; size];
     let bg_pixel: Vec<u8> = match bpp {
@@ -857,7 +874,7 @@ fn make_background_buffer(w: u32, h: u32, bpp: usize, background_rgb: [u8; 3]) -
 /// is shorter than the expected full-level byte count (e.g. the last strip
 /// was shorter than a full strip height). Rows `[0, filled_rows)` are left
 /// untouched; rows `[filled_rows, h)` are overwritten with the background.
-fn fill_background_rows(
+pub(crate) fn fill_background_rows(
     buf: &mut [u8],
     filled_rows: usize,
     w: u32,
@@ -893,7 +910,7 @@ fn fill_background_rows(
 ///
 /// Returns `(tiles_produced, tiles_skipped)` where `tiles_skipped` counts
 /// tiles marked as blank placeholders.
-fn emit_strip_tiles(
+pub(crate) fn emit_strip_tiles(
     strip: &Raster,
     plan: &PyramidPlan,
     level: u32,
@@ -958,7 +975,7 @@ fn emit_strip_tiles(
 ///
 /// Google tiles are always `tile_size × tile_size`. Regions outside the
 /// source image are filled with background.
-fn extract_tile_from_strip(
+pub(crate) fn extract_tile_from_strip(
     strip: &Raster,
     plan: &PyramidPlan,
     coord: TileCoord,
@@ -1090,7 +1107,7 @@ fn extract_tile_from_strip(
 /// assembled (either from accumulated data or by downscaling the level above).
 /// Delegates to [`emit_strip_tiles`] with `strip_canvas_y = 0`, since the
 /// raster covers the entire level.
-fn emit_full_level_tiles(
+pub(crate) fn emit_full_level_tiles(
     raster: &Raster,
     plan: &PyramidPlan,
     level: u32,
@@ -1130,7 +1147,7 @@ fn emit_full_level_tiles(
 /// leftovers are handled in Phase 2 (unpaired-strip flush) of the main
 /// `generate_pyramid_streaming` function.
 #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
-fn propagate_down(
+pub(crate) fn propagate_down(
     half_strip: Raster,
     level_idx: usize,
     strip_y_at_level: u32,
@@ -1209,7 +1226,7 @@ fn propagate_down(
 /// Used to combine paired half-strips into a single strip before tile
 /// emission and further downscaling. Both rasters must have the same width
 /// and pixel format. The result has height = `top.height() + bottom.height()`.
-fn concat_vertical(top: &Raster, bottom: &Raster) -> Result<Raster, RasterError> {
+pub(crate) fn concat_vertical(top: &Raster, bottom: &Raster) -> Result<Raster, RasterError> {
     debug_assert_eq!(top.width(), bottom.width());
     debug_assert_eq!(top.format(), bottom.format());
 
@@ -1461,6 +1478,43 @@ mod tests {
         assert_eq!(strip.data()[0], 0); // x=0
         assert_eq!(strip.data()[1], 50); // y=50
         assert_eq!(strip.data()[2], 50); // x+y=50
+    }
+
+    #[test]
+    fn streaming_emits_strip_rendered_events() {
+        use crate::observe::CollectingObserver;
+
+        let src = gradient_raster(512, 512);
+        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+
+        let sink = MemorySink::new();
+        let config = StreamingConfig {
+            memory_budget_bytes: 1_000, // Force streaming with small strips
+            engine: EngineConfig::default(),
+        };
+        let observer = CollectingObserver::new();
+        let strip_src = RasterStripSource::new(&src);
+        generate_pyramid_streaming(&strip_src, &plan, &sink, &config, &observer).unwrap();
+
+        let strip_events: Vec<_> = observer
+            .events()
+            .into_iter()
+            .filter(|e| matches!(e, EngineEvent::StripRendered { .. }))
+            .collect();
+        assert!(!strip_events.is_empty(), "expected StripRendered events");
+
+        // Verify sequential indexing and consistent total
+        for (i, e) in strip_events.iter().enumerate() {
+            if let EngineEvent::StripRendered {
+                strip_index,
+                total_strips,
+            } = e
+            {
+                assert_eq!(*strip_index, i as u32);
+                assert_eq!(*total_strips, strip_events.len() as u32);
+            }
+        }
     }
 
     #[test]
