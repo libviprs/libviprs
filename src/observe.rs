@@ -73,6 +73,24 @@ pub enum EngineEvent {
     /// use `strip_index` / `total_strips` for progress reporting.
     StripRendered { strip_index: u32, total_strips: u32 },
 
+    // -- MapReduce-engine events --
+    /// A batch of strips is about to be processed in parallel.
+    ///
+    /// Emitted by the MapReduce engine at the start of each batch.
+    /// `strips_in_batch` may be less than the computed in-flight count
+    /// for the final batch.
+    BatchStarted {
+        batch_index: u32,
+        strips_in_batch: u32,
+        total_batches: u32,
+    },
+
+    /// A batch of strips has finished processing (map + reduce).
+    BatchCompleted {
+        batch_index: u32,
+        tiles_produced: u64,
+    },
+
     // -- Completion events --
     /// The tiling phase is done.
     ///
