@@ -433,6 +433,8 @@ pub fn generate_pyramid_streaming(
     // ===================================================================
     // Phase 1: Strip loop — iterate horizontal bands top-to-bottom
     // ===================================================================
+    let total_strips = ch.div_ceil(strip_height);
+    let mut strip_index: u32 = 0;
     let mut y: u32 = 0;
     while y < ch {
         // Clamp the last strip if the canvas height isn't a multiple of
@@ -444,6 +446,12 @@ pub fn generate_pyramid_streaming(
         // with centring this embeds the source rows into a canvas-width
         // background; for DeepZoom the strip is the raw source rows.
         let strip = obtain_canvas_strip(source, plan, y, sh, &config.engine)?;
+
+        observer.on_event(EngineEvent::StripRendered {
+            strip_index,
+            total_strips,
+        });
+        strip_index += 1;
         let strip_bytes = strip.data().len() as u64;
         tracker.alloc(strip_bytes);
 
@@ -1461,6 +1469,43 @@ mod tests {
         assert_eq!(strip.data()[0], 0); // x=0
         assert_eq!(strip.data()[1], 50); // y=50
         assert_eq!(strip.data()[2], 50); // x+y=50
+    }
+
+    #[test]
+    fn streaming_emits_strip_rendered_events() {
+        use crate::observe::CollectingObserver;
+
+        let src = gradient_raster(512, 512);
+        let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+
+        let sink = MemorySink::new();
+        let config = StreamingConfig {
+            memory_budget_bytes: 1_000, // Force streaming with small strips
+            engine: EngineConfig::default(),
+        };
+        let observer = CollectingObserver::new();
+        let strip_src = RasterStripSource::new(&src);
+        generate_pyramid_streaming(&strip_src, &plan, &sink, &config, &observer).unwrap();
+
+        let strip_events: Vec<_> = observer
+            .events()
+            .into_iter()
+            .filter(|e| matches!(e, EngineEvent::StripRendered { .. }))
+            .collect();
+        assert!(!strip_events.is_empty(), "expected StripRendered events");
+
+        // Verify sequential indexing and consistent total
+        for (i, e) in strip_events.iter().enumerate() {
+            if let EngineEvent::StripRendered {
+                strip_index,
+                total_strips,
+            } = e
+            {
+                assert_eq!(*strip_index, i as u32);
+                assert_eq!(*total_strips, strip_events.len() as u32);
+            }
+        }
     }
 
     #[test]
