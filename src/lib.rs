@@ -39,6 +39,7 @@ pub mod resize;
 pub mod sink;
 pub mod source;
 pub mod streaming;
+pub mod streaming_mapreduce;
 
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, generate_pyramid,
@@ -61,4 +62,8 @@ pub use streaming::PdfiumStripSource;
 pub use streaming::{
     RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory, generate_pyramid_auto, generate_pyramid_streaming,
+};
+pub use streaming_mapreduce::{
+    MapReduceConfig, compute_inflight_strips, estimate_mapreduce_peak_memory,
+    generate_pyramid_mapreduce, generate_pyramid_mapreduce_auto,
 };
