@@ -26,26 +26,42 @@
 //! [libviprs-cli](https://github.com/libviprs/libviprs-cli) for a command-line
 //! tool demonstrating every public API.
 
+pub mod checksum;
+pub mod dedupe;
 pub mod engine;
 pub mod geo;
 #[cfg(loom)]
 mod loom_tests;
+pub mod manifest;
 pub mod observe;
 pub mod pdf;
 pub mod pixel;
 pub mod planner;
 pub mod raster;
 pub mod resize;
+pub mod resume;
+pub mod retry;
 pub mod sink;
+#[cfg(feature = "s3")]
+pub mod sink_object_store;
+#[cfg(feature = "packfile")]
+pub mod sink_packfile;
 pub mod source;
 pub mod streaming;
 pub mod streaming_mapreduce;
 
+pub use checksum::{ChecksumMode, VerifyError, VerifyReport, hash_tile, verify_output};
+pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult, materialize_reference};
 pub use engine::{
-    BlankTileStrategy, EngineConfig, EngineError, EngineResult, generate_pyramid,
-    generate_pyramid_observed, is_blank_tile,
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, generate_pyramid,
+    generate_pyramid_observed, generate_pyramid_resumable, is_blank_tile,
+    is_blank_tile_with_tolerance,
 };
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
+pub use manifest::{
+    ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, ManifestBuilder, ManifestError,
+    ManifestV1, SourceMetadata, SparsePolicy,
+};
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
 #[cfg(feature = "pdfium")]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
@@ -55,7 +71,18 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
-pub use sink::{BLANK_TILE_MARKER, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
+pub use resume::{
+    CHECKPOINT_FILENAME, JobCheckpoint, JobMetadata, ResumeError, ResumeMode, SCHEMA_VERSION,
+    compute_plan_hash, is_tile_completed,
+};
+pub use retry::{FailurePolicy, RetryPolicy, RetryingSink, compute_backoff};
+pub use sink::{
+    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
+};
+#[cfg(feature = "s3")]
+pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink, deep_zoom_key};
+#[cfg(feature = "packfile")]
+pub use sink_packfile::{PackfileFormat, PackfileSink};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
 #[cfg(feature = "pdfium")]
 pub use streaming::PdfiumStripSource;

@@ -80,6 +80,9 @@ impl MapReduceConfig {
             buffer_size: self.buffer_size,
             background_rgb: self.background_rgb,
             blank_tile_strategy: self.blank_tile_strategy,
+            failure_policy: crate::retry::FailurePolicy::default(),
+            checkpoint_every: 0,
+            dedupe_strategy: None,
         }
     }
 }
@@ -553,6 +556,13 @@ pub fn generate_pyramid_mapreduce(
         tiles_skipped,
         levels_processed: plan.levels.len() as u32,
         peak_memory_bytes: tracker.peak_bytes(),
+        bytes_read: 0,
+        bytes_written: 0,
+        retry_count: 0,
+        queue_pressure_peak: 0,
+        duration: std::time::Duration::ZERO,
+        stage_durations: crate::engine::StageDurations::default(),
+        skipped_due_to_failure: 0,
     })
 }
 
