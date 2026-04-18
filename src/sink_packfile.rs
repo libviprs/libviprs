@@ -14,8 +14,6 @@
 //! optional `tar`, `zip`, and `flate2` crates are the only heavy
 //! dependencies pulled in — no system-level tar / gzip binary is required.
 
-#![cfg(feature = "packfile")]
-
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +21,7 @@ use std::sync::Mutex;
 
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
-use crate::sink::{BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, encode_png};
+use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_png};
 
 // ---------------------------------------------------------------------------
 // PackfileFormat
@@ -82,11 +80,14 @@ enum ArchiveWriter {
     /// Uncompressed tar on top of a buffered file.
     Tar(tar::Builder<BufWriter<File>>),
     /// Tar piped through a gzip encoder, then through a buffered file.
-    TarGz(tar::Builder<flate2::write::GzEncoder<BufWriter<File>>>),
+    /// Boxed to keep the enum variants close in size (the gzip encoder is
+    /// large compared to the other writers).
+    TarGz(Box<tar::Builder<flate2::write::GzEncoder<BufWriter<File>>>>),
     /// Zip archive directly on a buffered file (zip needs seek; `File`
     /// provides that, and `BufWriter<File>` does too as long as we flush
-    /// before seek — the zip crate handles that internally).
-    Zip(zip::ZipWriter<BufWriter<File>>),
+    /// before seek — the zip crate handles that internally). Boxed to
+    /// avoid a large size disparity between enum variants.
+    Zip(Box<zip::ZipWriter<BufWriter<File>>>),
 }
 
 impl std::fmt::Debug for PackfileSink {
@@ -130,9 +131,9 @@ impl PackfileSink {
             }
             PackfileFormat::TarGz => {
                 let gz = flate2::write::GzEncoder::new(buffered, flate2::Compression::default());
-                ArchiveWriter::TarGz(tar::Builder::new(gz))
+                ArchiveWriter::TarGz(Box::new(tar::Builder::new(gz)))
             }
-            PackfileFormat::Zip => ArchiveWriter::Zip(zip::ZipWriter::new(buffered)),
+            PackfileFormat::Zip => ArchiveWriter::Zip(Box::new(zip::ZipWriter::new(buffered))),
         };
 
         Ok(Self {
@@ -166,7 +167,7 @@ impl PackfileSink {
 
         // Strip the trailing extensions we know about so that `foo.tar.gz`
         // resolves to `foo`, not `foo.tar`.
-        let stem = if let Some(rest) = file_name.strip_suffix(".tar.gz") {
+        if let Some(rest) = file_name.strip_suffix(".tar.gz") {
             rest.to_string()
         } else if let Some(rest) = file_name.strip_suffix(".tgz") {
             rest.to_string()
@@ -175,9 +176,7 @@ impl PackfileSink {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or(file_name)
-        };
-
-        stem
+        }
     }
 
     /// Build the archive-relative path for a tile. Mirrors DeepZoom layout
@@ -276,24 +275,25 @@ impl TileSink for PackfileSink {
             return Ok(());
         }
 
-        let rel = self
-            .plan
-            .tile_path(tile.coord, self.tile_format.extension())
+        let dzi_path = self
+            .tile_archive_path(tile.coord)
             .ok_or_else(|| SinkError::Other(format!("invalid coord {:?}", tile.coord)))?;
 
         let encoded = self.encode_tile(&tile.raster)?;
-        let stem = self.archive_stem();
 
         // Primary path: DeepZoom-convention `<stem>_files/<level>/<x>_<y>.<ext>`.
         // Used by DeepZoom viewers and OpenSeadragon.
-        let dzi_path = format!("{stem}_files/{rel}");
         self.append_bytes(&dzi_path, &encoded)?;
 
         // Mirror path: `<stem>/<level>/<x>_<y>.<ext>` — mirrors the directory
         // layout that FsSink produces when its base_dir equals the archive stem.
         // This lets consumers who extract the archive and compare against an
         // FsSink-generated tree find tiles at the expected relative paths.
-        let stem_path = format!("{stem}/{rel}");
+        let rel = self
+            .plan
+            .tile_path(tile.coord, self.tile_format.extension())
+            .expect("tile_archive_path succeeded above");
+        let stem_path = format!("{}/{}", self.archive_stem(), rel);
         self.append_bytes(&stem_path, &encoded)?;
 
         Ok(())
@@ -324,7 +324,7 @@ impl TileSink for PackfileSink {
         match writer {
             ArchiveWriter::Tar(mut builder) => {
                 builder.finish()?;
-                let inner = builder.into_inner().map_err(|e| SinkError::Io(e))?;
+                let inner = builder.into_inner().map_err(SinkError::Io)?;
                 let file = inner
                     .into_inner()
                     .map_err(|e| SinkError::Io(e.into_error()))?;
@@ -332,7 +332,7 @@ impl TileSink for PackfileSink {
             }
             ArchiveWriter::TarGz(mut builder) => {
                 builder.finish()?;
-                let gz = builder.into_inner().map_err(|e| SinkError::Io(e))?;
+                let gz = builder.into_inner().map_err(SinkError::Io)?;
                 let inner = gz.finish()?;
                 let file = inner
                     .into_inner()
@@ -418,7 +418,7 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
         raster.height(),
         ct.into(),
     )
-    .map_err(|e| SinkError::Encode(e.to_string()))?;
+    .map_err(|e| SinkError::EncodeMsg(format!("png: {e}")))?;
     Ok(buf)
 }
 

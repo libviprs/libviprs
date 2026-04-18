@@ -50,17 +50,20 @@ pub mod source;
 pub mod streaming;
 pub mod streaming_mapreduce;
 
-pub use checksum::{ChecksumMode, VerifyError, VerifyReport, hash_tile, verify_output};
-pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult, materialize_reference};
+// Curated crate-root surface: types and high-level entry points only.
+// Leaf helpers, constants, and free functions stay behind their module path
+// (e.g. `libviprs::resume::SCHEMA_VERSION`) so `use libviprs::*` does not
+// flood callers with implementation detail.
+pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
+pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, generate_pyramid,
-    generate_pyramid_observed, generate_pyramid_resumable, is_blank_tile,
-    is_blank_tile_with_tolerance,
+    generate_pyramid_observed, generate_pyramid_resumable,
 };
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use manifest::{
-    ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, ManifestBuilder, ManifestError,
-    ManifestV1, SourceMetadata, SparsePolicy,
+    ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
+    ManifestError, ManifestV1, SourceMetadata, SparsePolicy,
 };
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
 #[cfg(feature = "pdfium")]
@@ -71,26 +74,20 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
-pub use resume::{
-    CHECKPOINT_FILENAME, JobCheckpoint, JobMetadata, ResumeError, ResumeMode, SCHEMA_VERSION,
-    compute_plan_hash, is_tile_completed,
-};
-pub use retry::{FailurePolicy, RetryPolicy, RetryingSink, compute_backoff};
-pub use sink::{
-    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
-};
+pub use resume::{JobCheckpoint, JobMetadata, ResumeError, ResumeMode};
+pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
+pub use sink::{CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
 #[cfg(feature = "s3")]
-pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink, deep_zoom_key};
+pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 pub use sink_packfile::{PackfileFormat, PackfileSink};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
 #[cfg(feature = "pdfium")]
 pub use streaming::PdfiumStripSource;
 pub use streaming::{
-    RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
-    estimate_streaming_memory, generate_pyramid_auto, generate_pyramid_streaming,
+    RasterStripSource, StreamingConfig, StripSource, generate_pyramid_auto,
+    generate_pyramid_streaming,
 };
 pub use streaming_mapreduce::{
-    MapReduceConfig, compute_inflight_strips, estimate_mapreduce_peak_memory,
-    generate_pyramid_mapreduce, generate_pyramid_mapreduce_auto,
+    MapReduceConfig, generate_pyramid_mapreduce, generate_pyramid_mapreduce_auto,
 };

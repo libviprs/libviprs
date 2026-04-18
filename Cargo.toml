@@ -23,25 +23,25 @@ incompatible_msrv = "warn"
 default = []
 pdfium = ["dep:pdfium-render"]
 pdfium-static = ["pdfium", "pdfium-render/static"]
-s3 = ["dep:object_store", "dep:tokio"]
+# `s3` gates the ObjectStoreSink module. The in-tree sink uses a hand-rolled
+# `ObjectStore` trait and is wired for user-injected backends. A real S3 client
+# path (object_store + tokio) will land in a follow-up PR; until then the
+# feature pulls in no extra crates.
+s3 = []
 tracing = ["dep:tracing"]
 packfile = ["dep:tar", "dep:zip"]
-checksum = []
-dedupe = []
 
 [dependencies]
 blake3 = "1.8.4"
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 lopdf = "0.36"
-object_store = { version = "0.11", optional = true, features = ["aws"] }
 pdfium-render = { version = "0.8", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
 tar = { version = "0.4.45", optional = true }
 thiserror = "2"
-tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread", "macros"] }
 tracing = { version = "0.1", optional = true }
 zip = { version = "7.2.0", optional = true }
 

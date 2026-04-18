@@ -16,9 +16,10 @@
 //!   beyond the single atomic read in the happy path.
 //! * Backoff is computed by the free function [`compute_backoff`], which is
 //!   deterministic (jitter-free) so unit tests can pin exact values.
-//! * Jitter is produced from a cheap pseudo-random source built on
-//!   [`std::hash::DefaultHasher`] seeded by a per-sink monotonic counter and
-//!   high-resolution clock — no external `rand` dependency.
+//! * Jitter is produced from a cheap xorshift64 PRNG seeded once per
+//!   process (via `RandomState::new().hash_one(&())`) and mixed with a
+//!   per-sink monotonic counter — no external `rand` dependency and no
+//!   per-call syscalls after the first invocation.
 //!
 //! # Example
 //!
@@ -34,12 +35,45 @@
 //! `EngineConfig` to decide how to interpret a terminal error from
 //! `write_tile`.
 
-use std::hash::{BuildHasher, Hasher, RandomState};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::sink::{SinkError, Tile, TileSink};
+
+// ---------------------------------------------------------------------------
+// Process-wide PRNG seed
+// ---------------------------------------------------------------------------
+
+/// Returns a per-process random seed drawn once from OS entropy via
+/// [`std::hash::RandomState`]. Subsequent calls reuse the cached value, so
+/// jitter sampling is syscall-free after the first invocation.
+fn process_seed() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        use std::hash::{BuildHasher, RandomState};
+        RandomState::new().hash_one(()) // one OS-entropy draw per process
+    })
+}
+
+/// Cheap xorshift64-based pseudo-random nanosecond value in `[0, max_nanos)`.
+///
+/// Combines the per-process seed with a monotonic per-sink counter to
+/// de-correlate jitter across both calls and sinks without touching the OS
+/// on every invocation. Good enough for jitter; not cryptographic.
+fn sample_jitter(max_nanos: u64, jitter_tick: &AtomicU64) -> u64 {
+    if max_nanos == 0 {
+        return 0;
+    }
+    let tick = jitter_tick.fetch_add(1, Ordering::Relaxed);
+    let mut x = process_seed().wrapping_add(tick.wrapping_mul(0x9E3779B97F4A7C15));
+    // xorshift64
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x % max_nanos
+}
 
 // ---------------------------------------------------------------------------
 // RetryPolicy
@@ -58,6 +92,7 @@ use crate::sink::{SinkError, Tile, TileSink};
 ///   `[0, backoff / 2]` is added to each sleep. Jitter helps de-synchronise
 ///   many parallel workers hammering the same flaky endpoint.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     pub max_retries: u32,
     pub initial_backoff: Duration,
@@ -78,6 +113,44 @@ impl Default for RetryPolicy {
     }
 }
 
+impl RetryPolicy {
+    /// Construct a policy with explicit retry count and initial backoff,
+    /// defaulting the remaining fields. Combine with the `with_*` builders
+    /// to tune `multiplier`, `max_backoff`, and `jitter`.
+    pub fn new(max_retries: u32, initial_backoff: Duration) -> Self {
+        Self {
+            max_retries,
+            initial_backoff,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_max_retries(mut self, n: u32) -> Self {
+        self.max_retries = n;
+        self
+    }
+
+    pub fn with_initial_backoff(mut self, d: Duration) -> Self {
+        self.initial_backoff = d;
+        self
+    }
+
+    pub fn with_multiplier(mut self, m: f32) -> Self {
+        self.multiplier = m;
+        self
+    }
+
+    pub fn with_max_backoff(mut self, d: Duration) -> Self {
+        self.max_backoff = d;
+        self
+    }
+
+    pub fn with_jitter(mut self, enabled: bool) -> Self {
+        self.jitter = enabled;
+        self
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FailurePolicy
 // ---------------------------------------------------------------------------
@@ -91,6 +164,7 @@ impl Default for RetryPolicy {
 ///   exhaustion, account the tile in
 ///   `EngineResult::skipped_due_to_failure` and continue.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FailurePolicy {
     FailFast,
     RetryThenFail(RetryPolicy),
@@ -192,13 +266,13 @@ impl<S: TileSink> RetryingSink<S> {
 
     /// Total number of retry attempts observed by this sink so far.
     pub fn retry_count(&self) -> u64 {
-        self.retry_count.load(Ordering::SeqCst)
+        self.retry_count.load(Ordering::Relaxed)
     }
 
     /// Total number of tiles the engine marked as skipped via this sink
     /// under a `RetryThenSkip` failure policy.
     pub fn skipped_due_to_failure(&self) -> u64 {
-        self.skipped_due_to_failure.load(Ordering::SeqCst)
+        self.skipped_due_to_failure.load(Ordering::Relaxed)
     }
 
     /// Accessor for the wrapped sink — useful for integration tests that
@@ -211,7 +285,7 @@ impl<S: TileSink> RetryingSink<S> {
     /// Bump the skip counter. Called by the engine, not by the retry loop.
     #[doc(hidden)]
     pub fn note_skipped(&self) {
-        self.skipped_due_to_failure.fetch_add(1, Ordering::SeqCst);
+        self.skipped_due_to_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Borrow the retry policy this sink was configured with.
@@ -223,51 +297,15 @@ impl<S: TileSink> RetryingSink<S> {
     fn backoff_sleep(&self, attempt: u32) {
         let base = compute_backoff(&self.policy, attempt);
         let total = if self.policy.jitter {
-            let max_jitter = base / 2;
-            base + self.sample_jitter(max_jitter)
+            let max_jitter_nanos = (base / 2).as_nanos() as u64;
+            let jitter_nanos = sample_jitter(max_jitter_nanos, &self.jitter_tick);
+            base + Duration::from_nanos(jitter_nanos)
         } else {
             base
         };
         if !total.is_zero() {
             thread::sleep(total);
         }
-    }
-
-    /// Cheap pseudo-random `Duration` in `[0, max]`. Derives entropy from a
-    /// per-sink counter XORed with a high-resolution clock reading, hashed
-    /// through the standard library's default hasher. Good enough for
-    /// jitter — not cryptographic.
-    fn sample_jitter(&self, max: Duration) -> Duration {
-        if max.is_zero() {
-            return Duration::ZERO;
-        }
-        let tick = self.jitter_tick.fetch_add(1, Ordering::Relaxed);
-        let now = Instant::now();
-        // Instant isn't convertible to a u64 directly, but an `Instant`
-        // hash on nightly isn't stable either — so we mix the elapsed
-        // time-since-start into the state via the elapsed duration nanos.
-        //
-        // To avoid a global `OnceLock<Instant>` we just hash the address
-        // of a stack-local alongside the tick; it's ample entropy for a
-        // jitter value.
-        let stack_anchor = &tick as *const _ as usize as u64;
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u64(tick);
-        hasher.write_u64(stack_anchor);
-        // `Instant::elapsed_since` is unstable; instead use the low bits
-        // of the Instant by re-reading a freshly-constructed one and
-        // comparing — but since Instant is opaque we fall back to hashing
-        // the debug representation's bit pattern via a transient Duration.
-        let since_epoch_ish = now.elapsed().as_nanos() as u64;
-        hasher.write_u64(since_epoch_ish);
-        let rand_u64 = hasher.finish();
-
-        let max_nanos = max.as_nanos() as u64;
-        if max_nanos == 0 {
-            return Duration::ZERO;
-        }
-        let jitter_nanos = rand_u64 % max_nanos.saturating_add(1);
-        Duration::from_nanos(jitter_nanos)
     }
 }
 
@@ -284,7 +322,7 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
                 let mut last_err = first_err;
                 for attempt in 0..self.policy.max_retries {
                     self.backoff_sleep(attempt);
-                    self.retry_count.fetch_add(1, Ordering::SeqCst);
+                    self.retry_count.fetch_add(1, Ordering::Relaxed);
                     match self.inner.write_tile(tile) {
                         Ok(()) => return Ok(()),
                         Err(e) => last_err = e,
@@ -304,16 +342,16 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
     }
 
     fn sink_retry_count(&self) -> u64 {
-        self.retry_count.load(Ordering::SeqCst) + self.inner.sink_retry_count()
+        self.retry_count.load(Ordering::Relaxed) + self.inner.sink_retry_count()
     }
 
     fn sink_skipped_due_to_failure(&self) -> u64 {
-        self.skipped_due_to_failure.load(Ordering::SeqCst)
+        self.skipped_due_to_failure.load(Ordering::Relaxed)
             + self.inner.sink_skipped_due_to_failure()
     }
 
     fn note_sink_skipped(&self) {
-        self.skipped_due_to_failure.fetch_add(1, Ordering::SeqCst);
+        self.skipped_due_to_failure.fetch_add(1, Ordering::Relaxed);
         // Forward so inner wrappers (e.g. another RetryingSink) can also
         // observe the skip. An actual terminal sink ignores the hook via the
         // default no-op implementation.
@@ -335,7 +373,16 @@ mod tests {
     use crate::pixel::PixelFormat;
     use crate::planner::TileCoord;
     use crate::raster::Raster;
+    use crate::sink::MemorySink;
     use std::sync::atomic::AtomicU32;
+
+    // Compile-time assertion that `RetryingSink<S>` is `Send + Sync` for a
+    // concrete `Send + Sync` inner sink. If this ever breaks, the engine's
+    // parallel use of `RetryingSink` will stop compiling — catch it here.
+    const _: fn() = || {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<RetryingSink<MemorySink>>();
+    };
 
     fn dummy_tile() -> Tile {
         let raster = Raster::new(1, 1, PixelFormat::Rgb8, vec![0, 0, 0]).unwrap();
