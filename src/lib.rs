@@ -58,7 +58,7 @@ pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, generate_pyramid,
-    generate_pyramid_observed, generate_pyramid_resumable,
+    generate_pyramid_observed, generate_pyramid_resumable, is_blank_tile,
 };
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use manifest::{
@@ -76,7 +76,9 @@ pub use planner::{
 pub use raster::{Raster, RasterError, RegionView};
 pub use resume::{JobCheckpoint, JobMetadata, ResumeError, ResumeMode};
 pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
-pub use sink::{CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink};
+pub use sink::{
+    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
+};
 #[cfg(feature = "s3")]
 pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
