@@ -35,6 +35,14 @@ pub enum PdfError {
     #[cfg(feature = "pdfium")]
     #[error("pdfium error: {0}")]
     Pdfium(String),
+    #[error(
+        "budget exceeded: worst-case strip {strip_bytes} bytes > budget {budget_bytes} bytes (at DPI {dpi})"
+    )]
+    BudgetExceeded {
+        strip_bytes: u64,
+        budget_bytes: u64,
+        dpi: u32,
+    },
 }
 
 /// Information about a PDF document, including page count and per-page metadata.
@@ -529,9 +537,25 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 
 /// Open a pdfium instance with the appropriate bindings.
 #[cfg(feature = "pdfium")]
-pub(crate) fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> {
+pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, PdfError> {
     use pdfium_render::prelude::*;
+    use std::sync::{Mutex, OnceLock};
 
+    // Pdfium's FPDF_InitLibrary must be called exactly once per process —
+    // calling it twice while a prior instance is alive deadlocks inside the
+    // C library on macOS. Keep a single process-wide instance behind a
+    // OnceLock; the init path is serialised by INIT_GUARD so concurrent first
+    // callers can't both invoke FPDF_InitLibrary.
+    static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
+    static INIT_GUARD: Mutex<()> = Mutex::new(());
+
+    if let Some(p) = PDFIUM.get() {
+        return Ok(p);
+    }
+    let _guard = INIT_GUARD.lock().unwrap();
+    if let Some(p) = PDFIUM.get() {
+        return Ok(p);
+    }
     #[cfg(feature = "pdfium-static")]
     let bindings =
         Pdfium::bind_to_statically_linked_library().map_err(|e| PdfError::Pdfium(e.to_string()))?;
@@ -539,8 +563,9 @@ pub(crate) fn init_pdfium() -> Result<pdfium_render::prelude::Pdfium, PdfError> 
     let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
         .or_else(|_| Pdfium::bind_to_system_library())
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
-    Ok(Pdfium::new(bindings))
+    let pdfium = Pdfium::new(bindings);
+    let _ = PDFIUM.set(pdfium);
+    Ok(PDFIUM.get().expect("PDFIUM was just set"))
 }
 
 /// Render a page at the given pixel dimensions and return a Raster.
