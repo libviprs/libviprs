@@ -48,6 +48,28 @@ use crate::raster::{Raster, RasterError};
 use crate::resize;
 use crate::sink::{Tile, TileSink};
 
+/// Policy for handling a configured memory budget that cannot accommodate the
+/// minimum aligned strip (`canvas_width × 2 × tile_size × bpp`).
+///
+/// The streaming engine performs a pre-flight check against the worst-case
+/// strip and surfaces this policy when the budget is insufficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BudgetPolicy {
+    /// Return [`EngineError::BudgetExceeded`] without doing any work.
+    #[default]
+    Error,
+    /// Reduce the source's effective DPI (only meaningful for sources whose
+    /// resolution is reconfigurable, such as [`PdfiumStripSource`]) until the
+    /// worst-case strip fits within the budget. Returns
+    /// [`crate::pdf::PdfError::BudgetExceeded`] if even `min_dpi` cannot fit
+    /// — guarantees termination on tiny budgets.
+    AutoAdjustDpi {
+        /// Lower bound for DPI reduction. The reduction loop refuses to go
+        /// below this value.
+        min_dpi: u32,
+    },
+}
+
 /// Configuration for the streaming pyramid engine.
 ///
 /// Wraps the standard [`EngineConfig`] with an additional memory budget that
@@ -60,11 +82,25 @@ pub struct StreamingConfig {
     ///
     /// [`compute_strip_height`] divides this by the per-unit cost to find the
     /// tallest strip that fits. If the budget is too small for even the minimum
-    /// strip (2 × tile_size rows), the engine falls back to that minimum rather
-    /// than refusing to run.
+    /// strip (2 × tile_size rows), the engine surfaces a typed error per
+    /// [`Self::budget_policy`] rather than silently exceeding the limit.
     pub memory_budget_bytes: u64,
     /// Standard engine settings: background colour, blank tile strategy, etc.
     pub engine: EngineConfig,
+    /// What to do when [`memory_budget_bytes`](Self::memory_budget_bytes) is
+    /// too small for the minimum aligned strip. Defaults to
+    /// [`BudgetPolicy::Error`].
+    pub budget_policy: BudgetPolicy,
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            memory_budget_bytes: u64::MAX,
+            engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
+        }
+    }
 }
 
 /// Provider of horizontal pixel bands for the streaming engine.
@@ -143,117 +179,356 @@ impl<'a> StripSource for RasterStripSource<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// PdfiumStripSource — PDF strip rendering via pdfium
+// PdfiumStripSource — true source-side PDF strip streaming
 // ---------------------------------------------------------------------------
 
-/// [`StripSource`] backed by pdfium rendering.
+/// [`StripSource`] backed by pdfium with per-strip matrix rendering.
 ///
-/// Renders the PDF page lazily on first `render_strip` call and caches the
-/// full raster. Subsequent strip requests extract from the cached raster.
+/// Each [`render_strip`](StripSource::render_strip) call dispatches to
+/// `FPDF_RenderPageBitmapWithMatrix`, allocating only a `canvas_width ×
+/// strip_h × 4` bitmap (BGRA → RGBA conversion in place). No full-page raster
+/// is ever materialised on the source side, so peak source memory is
+/// `O(canvas_width × max_strip_h)` instead of the page area.
 ///
-/// This avoids re-rendering the PDF for every strip while still enabling
-/// the streaming pyramid engine to process the image in horizontal bands.
-/// The memory win comes from the pyramid generation side (no canvas-sized
-/// allocation), not from the PDF rendering itself.
+/// Dimensions are queried from pdfium at construction time and cached, so
+/// callers cannot mis-predict them — closing libviprs#41's panic surface.
 ///
-/// For truly massive PDF pages where even a single full render is too large,
-/// a matrix-based sub-page rendering approach using
-/// `FPDF_RenderPageBitmapWithMatrix` would be needed. This is documented
-/// as a future optimisation path.
+/// Pdfium is not thread-safe; the inner mutex serialises strip renders.
 #[cfg(feature = "pdfium")]
 pub struct PdfiumStripSource {
-    raster: std::sync::Mutex<Option<Raster>>,
+    inner: std::sync::Mutex<PdfiumInner>,
+    width: u32,
+    height: u32,
+    /// Display width in PDF points (post-/Rotate). Used to compose the
+    /// rotation-aware matrix in [`render_strip_inner`].
+    disp_w_pts: f32,
+    /// Display height in PDF points (post-/Rotate).
+    disp_h_pts: f32,
+    dpi: u32,
+}
+
+#[cfg(feature = "pdfium")]
+struct PdfiumInner {
+    pdfium: &'static pdfium_render::prelude::Pdfium,
     path: std::path::PathBuf,
     page: usize,
-    dpi: u32,
-    full_width: u32,
-    full_height: u32,
+}
+
+#[cfg(feature = "pdfium")]
+impl std::fmt::Debug for PdfiumStripSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdfiumStripSource")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("dpi", &self.dpi)
+            .finish()
+    }
 }
 
 #[cfg(feature = "pdfium")]
 impl PdfiumStripSource {
-    /// Create a new `PdfiumStripSource` for the given PDF page.
+    /// Open a PDF page as a strip source at the given DPI.
     ///
-    /// Does not render the page immediately — the render is deferred until
-    /// the first call to [`render_strip`](StripSource::render_strip).
+    /// Probes pdfium for the rotation-aware page dimensions and stores them
+    /// for [`width`](StripSource::width)/[`height`](StripSource::height).
+    /// No raster is rendered yet — strips are produced on demand by
+    /// [`render_strip`](StripSource::render_strip).
     ///
     /// # Arguments
     ///
     /// * `path` — Path to the PDF file.
     /// * `page` — 1-based page number.
     /// * `dpi` — Render resolution in dots per inch.
-    /// * `full_width` — Expected full-resolution pixel width.
-    /// * `full_height` — Expected full-resolution pixel height.
     pub fn new(
         path: impl Into<std::path::PathBuf>,
         page: usize,
         dpi: u32,
-        full_width: u32,
-        full_height: u32,
-    ) -> Self {
-        Self {
-            raster: std::sync::Mutex::new(None),
-            path: path.into(),
-            page,
+    ) -> Result<Self, crate::pdf::PdfError> {
+        let path = path.into();
+        let pdfium = crate::pdf::init_pdfium()?;
+        let (width, height, disp_w_pts, disp_h_pts) = probe_page_dims(pdfium, &path, page, dpi)?;
+        Ok(Self {
+            inner: std::sync::Mutex::new(PdfiumInner { pdfium, path, page }),
+            width,
+            height,
+            disp_w_pts,
+            disp_h_pts,
             dpi,
-            full_width,
-            full_height,
-        }
+        })
     }
 
-    /// Lazily render the PDF page, caching the result.
-    fn ensure_rendered(&self) -> Result<(), EngineError> {
-        let mut guard = self.raster.lock().unwrap();
-        if guard.is_some() {
-            return Ok(());
-        }
-        let raster = crate::pdf::render_page_pdfium(&self.path, self.page, self.dpi)
-            .map_err(|e| EngineError::Sink(crate::sink::SinkError::Other(e.to_string())))?;
-        *guard = Some(raster);
-        Ok(())
+    /// Open a PDF page with a worst-case strip budget check.
+    ///
+    /// Computes the worst-case minimum aligned strip
+    /// (`width × min_strip_height × 4` bytes for RGBA8) and applies the
+    /// caller's [`BudgetPolicy`]:
+    ///
+    /// - [`BudgetPolicy::Error`] — error if the strip exceeds the budget at
+    ///   `dpi_hint`.
+    /// - [`BudgetPolicy::AutoAdjustDpi`] — proportionally reduce DPI until
+    ///   the worst-case strip fits, or error at the `min_dpi` floor.
+    pub fn new_with_budget(
+        path: impl Into<std::path::PathBuf>,
+        page: usize,
+        dpi_hint: u32,
+        min_strip_height: u32,
+        budget_bytes: u64,
+        policy: BudgetPolicy,
+    ) -> Result<Self, crate::pdf::PdfError> {
+        let path = path.into();
+        let pdfium = crate::pdf::init_pdfium()?;
+        let resolved_dpi = match policy {
+            BudgetPolicy::Error => {
+                let (width, _, _, _) = probe_page_dims(pdfium, &path, page, dpi_hint)?;
+                let strip_bytes = width as u64 * min_strip_height as u64 * 4;
+                if strip_bytes > budget_bytes {
+                    return Err(crate::pdf::PdfError::BudgetExceeded {
+                        strip_bytes,
+                        budget_bytes,
+                        dpi: dpi_hint,
+                    });
+                }
+                dpi_hint
+            }
+            BudgetPolicy::AutoAdjustDpi { min_dpi } => resolve_dpi_under_budget(
+                pdfium,
+                &path,
+                page,
+                dpi_hint,
+                min_dpi,
+                min_strip_height,
+                budget_bytes,
+            )?,
+        };
+        let (width, height, disp_w_pts, disp_h_pts) =
+            probe_page_dims(pdfium, &path, page, resolved_dpi)?;
+        Ok(Self {
+            inner: std::sync::Mutex::new(PdfiumInner { pdfium, path, page }),
+            width,
+            height,
+            disp_w_pts,
+            disp_h_pts,
+            dpi: resolved_dpi,
+        })
     }
 
-    /// Get a reference to the cached raster, extracting a strip from it.
-    fn extract_strip(&self, y_offset: u32, height: u32) -> Result<Raster, EngineError> {
-        let guard = self.raster.lock().unwrap();
-        let raster = guard
-            .as_ref()
-            .expect("ensure_rendered must be called first");
-        let h = height.min(raster.height().saturating_sub(y_offset));
-        if h == 0 {
-            let bpp = raster.format().bytes_per_pixel();
-            let data = vec![255u8; self.full_width as usize * height as usize * bpp];
-            return Raster::new(self.full_width, height, raster.format(), data)
-                .map_err(EngineError::from);
+    /// The DPI this source actually renders at. May differ from a constructor
+    /// `dpi_hint` after [`BudgetPolicy::AutoAdjustDpi`] reduction.
+    pub fn dpi(&self) -> u32 {
+        self.dpi
+    }
+
+    fn render_strip_inner(
+        &self,
+        y_offset: u32,
+        height: u32,
+    ) -> Result<Raster, crate::pdf::PdfError> {
+        use pdfium_render::prelude::*;
+
+        let inner = self.inner.lock().unwrap();
+        let document = inner
+            .pdfium
+            .load_pdf_from_file(&inner.path, None)
+            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+        let pages = document.pages();
+        let total = pages.len();
+        if inner.page == 0 || inner.page > total as usize {
+            return Err(crate::pdf::PdfError::PageOutOfRange {
+                page: inner.page,
+                total: total as usize,
+            });
         }
-        raster
-            .extract(0, y_offset, raster.width(), h)
-            .map_err(EngineError::from)
+        let pdf_page = pages
+            .get(inner.page as u16 - 1)
+            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+
+        let strip_h = height.min(self.height.saturating_sub(y_offset));
+        if strip_h == 0 {
+            // Above the page — return a fully transparent strip so callers
+            // get a uniform shape regardless of position.
+            let data = vec![0u8; self.width as usize * height as usize * 4];
+            return Raster::new(self.width, height, PixelFormat::Rgba8, data)
+                .map_err(crate::pdf::PdfError::from);
+        }
+
+        // FPDF_RenderPageBitmapWithMatrix does NOT honor the page's intrinsic
+        // /Rotate; we have to compose the rotation prefix ourselves. Without
+        // this, /Rotate 90/180/270 pages render in their un-rotated user-space
+        // orientation, mangled into a rotation-aware-sized bitmap.
+        let rotation = pdf_page
+            .rotation()
+            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+
+        // Matrix maps PDF user-space points → strip bitmap pixels (top-left
+        // origin). For each rotation case we derived (a,b,c,d,e,f) so that
+        //   (sx, sy) = (a*x_u + c*y_u + e, b*x_u + d*y_u + f)
+        // places the page content correctly into the (display-oriented) strip.
+        // disp_w_pts/disp_h_pts are post-rotation page dims; the strip's row 0
+        // is full-page row `y_offset`, so f always carries `- y_offset`.
+        //
+        // Per-rotation derivation (W_u, H_u = un-rotated user-space dims;
+        // display dims swap for 90/270):
+        //   /Rotate 0:   display = user                  → (s, 0, 0, -s, 0, H*s - yo)
+        //   /Rotate 90:  display.x = y_u, .y = W_u - x_u → (0, s, s, 0, 0, -yo)
+        //   /Rotate 180: display = (W_u-x_u, H_u-y_u)    → (-s, 0, 0, s, W*s, -yo)
+        //   /Rotate 270: display.x = H_u - y_u, .y = x_u → (0, -s, -s, 0, W_d*s, H_d*s - yo)
+        let s = self.dpi as f32 / 72.0;
+        let disp_w_px = self.disp_w_pts * s;
+        let disp_h_px = self.disp_h_pts * s;
+        let yo = y_offset as f32;
+        let (a, b, c, d, e, f) = match rotation {
+            PdfPageRenderRotation::None => (s, 0.0, 0.0, -s, 0.0, disp_h_px - yo),
+            PdfPageRenderRotation::Degrees90 => (0.0, s, s, 0.0, 0.0, -yo),
+            PdfPageRenderRotation::Degrees180 => (-s, 0.0, 0.0, s, disp_w_px, -yo),
+            PdfPageRenderRotation::Degrees270 => (0.0, -s, -s, 0.0, disp_w_px, disp_h_px - yo),
+        };
+
+        let bindings = inner.pdfium.bindings();
+        let mut bitmap = PdfBitmap::empty(
+            self.width as Pixels,
+            strip_h as Pixels,
+            PdfBitmapFormat::BGRA,
+            bindings,
+        )
+        .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+
+        let config = PdfRenderConfig::new()
+            .set_fixed_size(self.width as Pixels, strip_h as Pixels)
+            .render_form_data(false)
+            .transform(a, b, c, d, e, f)
+            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+
+        pdf_page
+            .render_into_bitmap_with_config(&mut bitmap, &config)
+            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+
+        // pdfium-render's as_rgba_bytes() handles BGRA → RGBA per the
+        // bitmap's actual format; safer than swapping bytes manually.
+        let data = bitmap.as_rgba_bytes();
+
+        Raster::new(self.width, strip_h, PixelFormat::Rgba8, data)
+            .map_err(crate::pdf::PdfError::from)
+    }
+}
+
+#[cfg(feature = "pdfium")]
+fn probe_page_dims(
+    pdfium: &pdfium_render::prelude::Pdfium,
+    path: &std::path::Path,
+    page: usize,
+    dpi: u32,
+) -> Result<(u32, u32, f32, f32), crate::pdf::PdfError> {
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+    let pages = document.pages();
+    let total = pages.len();
+    if page == 0 || page > total as usize {
+        return Err(crate::pdf::PdfError::PageOutOfRange {
+            page,
+            total: total as usize,
+        });
+    }
+    let pdf_page = pages
+        .get(page as u16 - 1)
+        .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+    let scale = dpi as f32 / 72.0;
+    // Pdfium's FPDF_GetPageWidthF/HeightF return the display dimensions —
+    // already swapped for /Rotate 90/270 — which is what the form-data
+    // baseline targets via `set_target_width`. We truncate via `as u32` to
+    // match `render_page_pdfium`'s width/height computation byte-for-byte.
+    let w_pts = pdf_page.width().value;
+    let h_pts = pdf_page.height().value;
+    let width = (w_pts * scale) as u32;
+    let height = (h_pts * scale) as u32;
+    Ok((width, height, w_pts, h_pts))
+}
+
+#[cfg(feature = "pdfium")]
+fn resolve_dpi_under_budget(
+    pdfium: &pdfium_render::prelude::Pdfium,
+    path: &std::path::Path,
+    page: usize,
+    dpi_hint: u32,
+    min_dpi: u32,
+    min_strip_height: u32,
+    budget_bytes: u64,
+) -> Result<u32, crate::pdf::PdfError> {
+    if min_dpi == 0 {
+        return Err(crate::pdf::PdfError::Pdfium(
+            "min_dpi must be at least 1".into(),
+        ));
+    }
+    // Anchor: probe once at dpi_hint to get the natural width-per-DPI ratio,
+    // then solve `width * min_strip_height * 4 ≤ budget` for the largest DPI
+    // that fits, capped above by dpi_hint and below by min_dpi.
+    let (anchor_w, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint)?;
+    if anchor_w == 0 {
+        return Err(crate::pdf::PdfError::Pdfium(
+            "page width is 0; cannot resolve DPI".into(),
+        ));
+    }
+    let strip_at_hint = anchor_w as u64 * min_strip_height as u64 * 4;
+    if strip_at_hint <= budget_bytes {
+        return Ok(dpi_hint);
+    }
+    // width(dpi) ≈ width(dpi_hint) * dpi / dpi_hint; solve for dpi.
+    // Resolved DPI = dpi_hint * (budget / strip_at_hint).
+    let ratio = budget_bytes as f64 / strip_at_hint as f64;
+    let resolved = (dpi_hint as f64 * ratio).floor() as u32;
+    let resolved = resolved.max(1);
+    if resolved < min_dpi {
+        return Err(crate::pdf::PdfError::BudgetExceeded {
+            strip_bytes: strip_at_hint,
+            budget_bytes,
+            dpi: dpi_hint,
+        });
+    }
+    // Verify: width may round differently than the linear estimate suggests.
+    let (verified_w, _, _, _) = probe_page_dims(pdfium, path, page, resolved)?;
+    let verified_strip = verified_w as u64 * min_strip_height as u64 * 4;
+    if verified_strip > budget_bytes {
+        // Step down by 1 DPI in case rounding pushed us just over.
+        let stepped = resolved.saturating_sub(1).max(1);
+        if stepped < min_dpi {
+            return Err(crate::pdf::PdfError::BudgetExceeded {
+                strip_bytes: verified_strip,
+                budget_bytes,
+                dpi: resolved,
+            });
+        }
+        let (vw2, _, _, _) = probe_page_dims(pdfium, path, page, stepped)?;
+        let strip2 = vw2 as u64 * min_strip_height as u64 * 4;
+        if strip2 > budget_bytes {
+            return Err(crate::pdf::PdfError::BudgetExceeded {
+                strip_bytes: strip2,
+                budget_bytes,
+                dpi: stepped,
+            });
+        }
+        Ok(stepped)
+    } else {
+        Ok(resolved)
     }
 }
 
 #[cfg(feature = "pdfium")]
 impl StripSource for PdfiumStripSource {
     fn render_strip(&self, y_offset: u32, height: u32) -> Result<Raster, EngineError> {
-        self.ensure_rendered()?;
-        self.extract_strip(y_offset, height)
+        self.render_strip_inner(y_offset, height)
+            .map_err(|e| EngineError::Sink(crate::sink::SinkError::Other(e.to_string())))
     }
 
     fn width(&self) -> u32 {
-        self.full_width
+        self.width
     }
 
     fn height(&self) -> u32 {
-        self.full_height
+        self.height
     }
 
     fn format(&self) -> PixelFormat {
-        // Default to RGBA8 since pdfium renders to RGBA
-        let guard = self.raster.lock().unwrap();
-        guard
-            .as_ref()
-            .map(|r| r.format())
-            .unwrap_or(PixelFormat::Rgba8)
+        PixelFormat::Rgba8
     }
 }
 
@@ -374,20 +649,27 @@ pub fn generate_pyramid_streaming(
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     let format = source.format();
-    let strip_height = match compute_strip_height(plan, format, config.memory_budget_bytes) {
-        Some(h) => h,
-        None => {
-            // Budget too small for even one aligned unit — fall back to the
-            // minimum (2 × tile_size). The engine will still work, just with
-            // potentially higher memory than the budget intended.
-            2 * plan.tile_size
-        }
-    };
+    let bpp = format.bytes_per_pixel();
+
+    // Pre-flight: the worst-case strip is one minimum aligned unit (2 ×
+    // tile_size rows) at canvas width. If the budget cannot fit it, the
+    // engine cannot honour the budget no matter how it slices the work, so
+    // surface that early instead of silently exceeding the limit.
+    let min_strip_height = 2 * plan.tile_size;
+    let worst_case_strip_bytes = plan.canvas_width as u64 * min_strip_height as u64 * bpp as u64;
+    if worst_case_strip_bytes > config.memory_budget_bytes {
+        return Err(EngineError::BudgetExceeded {
+            strip_bytes: worst_case_strip_bytes,
+            budget_bytes: config.memory_budget_bytes,
+        });
+    }
+
+    let strip_height =
+        compute_strip_height(plan, format, config.memory_budget_bytes).unwrap_or(min_strip_height);
 
     let ch = plan.canvas_height;
     let top_level = plan.levels.len() - 1;
     let tracker = MemoryTracker::new();
-    let bpp = format.bytes_per_pixel();
 
     let mut tiles_produced: u64 = 0;
     let mut tiles_skipped: u64 = 0;
@@ -1339,6 +1621,7 @@ mod tests {
         let config = StreamingConfig {
             memory_budget_bytes: u64::MAX,
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         let mut tiles = sink.tiles();
@@ -1362,6 +1645,7 @@ mod tests {
         let config = StreamingConfig {
             memory_budget_bytes: 1_000_000, // 1 MB — force streaming
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         let strip_src = RasterStripSource::new(&src);
         let result =
@@ -1386,6 +1670,7 @@ mod tests {
         let config = StreamingConfig {
             memory_budget_bytes: 2_000_000,
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         let strip_src = RasterStripSource::new(&src);
         let result =
@@ -1413,6 +1698,7 @@ mod tests {
         let config = StreamingConfig {
             memory_budget_bytes: u64::MAX,
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         let mut tiles = sink.tiles();
@@ -1432,9 +1718,13 @@ mod tests {
         let plan = planner.plan();
 
         let sink = MemorySink::new();
+        // Budget too small to fit the monolithic peak (multiple times the
+        // canvas) but large enough to fit one minimum aligned strip
+        // (512 × 512 × 3 ≈ 786 KB).
         let config = StreamingConfig {
-            memory_budget_bytes: 1_000, // Extremely small — forces streaming
+            memory_budget_bytes: 800_000,
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         let result = generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
@@ -1489,9 +1779,12 @@ mod tests {
         let plan = planner.plan();
 
         let sink = MemorySink::new();
+        // Budget large enough for one minimum aligned strip (512 × 512 × 3 ≈
+        // 786 KB) but small enough that several strips will be needed.
         let config = StreamingConfig {
-            memory_budget_bytes: 1_000, // Force streaming with small strips
+            memory_budget_bytes: 800_000,
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         let observer = CollectingObserver::new();
         let strip_src = RasterStripSource::new(&src);
@@ -1525,9 +1818,12 @@ mod tests {
         let plan = planner.plan();
 
         let sink = MemorySink::new();
+        // Budget large enough for one minimum aligned strip
+        // (500 × 512 × 3 ≈ 768 KB) but small enough to exercise streaming.
         let config = StreamingConfig {
-            memory_budget_bytes: 500_000,
+            memory_budget_bytes: 800_000,
             engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
         };
         let strip_src = RasterStripSource::new(&src);
         let result =
