@@ -163,18 +163,13 @@ impl RetryPolicy {
 /// * [`FailurePolicy::RetryThenSkip`] — retry per the embedded policy; on
 ///   exhaustion, account the tile in
 ///   `EngineResult::skipped_due_to_failure` and continue.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub enum FailurePolicy {
+    #[default]
     FailFast,
     RetryThenFail(RetryPolicy),
     RetryThenSkip(RetryPolicy),
-}
-
-impl Default for FailurePolicy {
-    fn default() -> Self {
-        Self::FailFast
-    }
 }
 
 // ---------------------------------------------------------------------------

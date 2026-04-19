@@ -40,10 +40,11 @@ use crate::manifest::ChecksumAlgo;
 // ---------------------------------------------------------------------------
 
 /// Selects how tiles are content-addressed prior to being written to disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DedupeStrategy {
     /// No deduplication — every tile is written to its own file. Default.
+    #[default]
     None,
     /// Only blank (uniform-colour) tiles are deduplicated. Non-blank tiles
     /// are written individually.
@@ -54,12 +55,6 @@ pub enum DedupeStrategy {
         /// Hash algorithm used to derive the shared-key filename.
         algo: ChecksumAlgo,
     },
-}
-
-impl Default for DedupeStrategy {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 // ---------------------------------------------------------------------------
