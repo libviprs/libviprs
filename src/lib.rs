@@ -85,8 +85,8 @@ pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
 #[cfg(feature = "pdfium")]
 pub use streaming::PdfiumStripSource;
 pub use streaming::{
-    RasterStripSource, StreamingConfig, StripSource, generate_pyramid_auto,
-    generate_pyramid_streaming,
+    BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
+    estimate_streaming_memory, generate_pyramid_auto, generate_pyramid_streaming,
 };
 pub use streaming_mapreduce::{
     MapReduceConfig, generate_pyramid_mapreduce, generate_pyramid_mapreduce_auto,
