@@ -83,6 +83,7 @@ impl MapReduceConfig {
             failure_policy: crate::retry::FailurePolicy::default(),
             checkpoint_every: 0,
             dedupe_strategy: None,
+            checkpoint_root: None,
         }
     }
 }

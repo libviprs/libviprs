@@ -1,42 +1,12 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
 use thiserror::Error;
-
-thread_local! {
-    /// Thread-local hint for the most recently constructed `FsSink`'s base
-    /// directory. Provides a best-effort fallback when the engine needs to
-    /// locate the on-disk root of a sink that is wrapped in a user-supplied
-    /// adapter (e.g. a `RecordingSink` test wrapper) that does not override
-    /// [`TileSink::checkpoint_root`].
-    ///
-    /// The registry is thread-local and LIFO — the most recently created
-    /// `FsSink` wins. This matches the `cargo test` execution model (each
-    /// test runs in its own thread and creates its own `FsSink` first), and
-    /// degrades gracefully in production: the primary lookup
-    /// (`sink.checkpoint_root()`) succeeds for any directly-owned `FsSink`,
-    /// so the fallback is only ever consulted when the trait path fails.
-    static LAST_FS_SINK_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// Best-effort lookup for the most recently-created `FsSink` base directory
-/// on the current thread. Used by the engine's resume layer to locate the
-/// on-disk checkpoint when the user passes a wrapper sink that does not
-/// forward [`TileSink::checkpoint_root`].
-pub fn last_fs_sink_root_hint() -> Option<PathBuf> {
-    LAST_FS_SINK_ROOT.with(|slot| slot.borrow().clone())
-}
-
-fn register_fs_sink_root(root: &Path) {
-    LAST_FS_SINK_ROOT.with(|slot| {
-        *slot.borrow_mut() = Some(root.to_path_buf());
-    });
-}
 
 // -- Namespace re-exports --------------------------------------------------
 //
@@ -66,13 +36,36 @@ pub use crate::sink_packfile::{PackfileFormat, PackfileSink};
 /// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 /// for error handling patterns.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SinkError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Legacy free-form encode error. Prefer [`SinkError::Encode`] with the
+    /// typed `format` + `source` pair for new call sites.
     #[error("image encode error: {0}")]
-    Encode(String),
+    EncodeMsg(String),
+    /// Typed variant for image-encoder failures. The `format` field is the
+    /// human-readable target format (e.g. `"png"` / `"jpeg"`) and `source` is
+    /// the underlying [`image::ImageError`].
+    #[error("encoding tile to {format:?} failed: {source}")]
+    Encode {
+        format: String,
+        #[source]
+        source: image::ImageError,
+    },
+    /// Used for all catch-all string errors that haven't yet been promoted to
+    /// a typed variant. New code should prefer the typed variants below.
     #[error("sink error: {0}")]
     Other(String),
+    /// A tile coordinate fell outside the plan's level bounds. Raised from
+    /// [`FsSink::write_tile`] when [`PyramidPlan::tile_path`] returns `None`.
+    #[error("tile coord {coord:?} is outside level bounds")]
+    InvalidCoord { coord: TileCoord },
+    /// A sink that requires the active [`crate::engine::EngineConfig`] was
+    /// invoked without one. Sinks that need this should be constructed via
+    /// [`TileSink::record_engine_config`] before the tile loop starts.
+    #[error("engine config not available on sink (construct via with_engine_config)")]
+    MissingEngineConfig,
     /// A per-tile checksum did not match the expected digest. Engine-level
     /// code promotes this to [`crate::engine::EngineError::ChecksumMismatch`]
     /// so callers see the dedicated error variant rather than a generic
@@ -165,6 +158,13 @@ pub trait TileSink: Send + Sync {
     fn checkpoint_root(&self) -> Option<&Path> {
         None
     }
+
+    /// Engine hook: tell the sink how many pyramid levels will appear in
+    /// this run, so sinks that keep per-level counters can pre-size their
+    /// backing storage before the tile loop starts. Default is a no-op.
+    /// [`FsSink`] already sizes its counters from the plan in
+    /// [`FsSink::new`], so calling this is idempotent there.
+    fn init_level_count(&self, _levels: usize) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +342,14 @@ impl TileFormat {
 ///
 /// `Debug` is implemented manually because the internal [`DedupeIndex`] does
 /// not derive `Debug`.
+///
+/// # Lock order
+///
+/// `pixel_format` (OnceLock, no lock) -> `per_level_counts` (atomics, no
+/// lock) -> `tile_digests` -> `manifest_refs` -> `pending_first` ->
+/// `completed_tiles` -> `engine_config` -> dedupe mutexes. **Do not nest**
+/// locks in a different order; the hot write path acquires only the
+/// tile-local mutexes it needs and never reaches back up the chain.
 pub struct FsSink {
     base_dir: PathBuf,
     plan: PyramidPlan,
@@ -356,8 +364,9 @@ pub struct FsSink {
     resume_enabled: bool,
     /// Running per-tile checksum table, populated only when `checksums` is
     /// non-[`ChecksumMode::None`]. Keyed by the relative tile path inside
-    /// `base_dir`.
-    tile_digests: Mutex<BTreeMap<String, String>>,
+    /// `base_dir`. Stores the raw 32-byte digest to keep the hot path
+    /// allocation-free; the manifest writer hex-encodes once at emit time.
+    tile_digests: Mutex<BTreeMap<String, [u8; 32]>>,
     /// Tile rel-path -> shared file rel-path (e.g. `_shared/blank_abc.png`).
     /// Populated by the dedupe write path; emitted into the manifest's
     /// `blank_references` field.
@@ -367,15 +376,20 @@ pub struct FsSink {
     /// first tile's bytes into `_shared/` and then link both tile paths to
     /// the shared file.
     pending_first: Mutex<HashMap<String, PendingFirst>>,
-    /// Per-level tile counters: `level -> (produced, skipped)`. `skipped`
-    /// tracks blank placeholders or deduped references.
-    per_level_counts: Mutex<HashMap<u32, (u64, u64)>>,
+    /// Per-level tile counters, indexed by level. Each entry is
+    /// `[produced, skipped]` atomically-updated from the hot path. `skipped`
+    /// tracks blank placeholders or deduped references. The Vec is sized
+    /// eagerly at construction from the plan so per-tile writes are pure
+    /// atomics (no lock, no growth).
+    per_level_counts: Vec<[AtomicU64; 2]>,
     /// Captured from the first tile's raster so the manifest can record
-    /// `source.pixel_format`.
-    pixel_format: Mutex<Option<crate::pixel::PixelFormat>>,
+    /// `source.pixel_format`. Written once at first tile; readers use
+    /// `.get()`.
+    pixel_format: OnceLock<crate::pixel::PixelFormat>,
     /// Completed tile coordinates. Populated when resume is enabled so
     /// [`FsSink::finish`] can write a [`JobMetadata`](crate::resume::JobMetadata)
-    /// checkpoint.
+    /// checkpoint. Capacity is pre-reserved from the plan's total tile
+    /// count at construction so per-tile pushes never reallocate.
     completed_tiles: Mutex<Vec<TileCoord>>,
     /// Set to true the first time we observe `tile.blank == true` or a
     /// blank tile is detected while deduping. Used to infer
@@ -428,7 +442,23 @@ impl FsSink {
     /// pyramid plan and tile encoding format.
     pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan, format: TileFormat) -> Self {
         let base_dir = base_dir.into();
-        register_fs_sink_root(&base_dir);
+        // Pre-size the per-level atomic counter vector so that the hot
+        // write path can index by `level as usize` without any lock or
+        // allocation. `levels.len()` matches the highest level index + 1
+        // for every layout libviprs supports.
+        let level_slots = plan.levels.len().max(1);
+        let mut per_level_counts: Vec<[AtomicU64; 2]> = Vec::with_capacity(level_slots);
+        for _ in 0..level_slots {
+            per_level_counts.push([AtomicU64::new(0), AtomicU64::new(0)]);
+        }
+        // Pre-reserve the completed-tiles Vec so resume-mode runs don't
+        // reallocate under the mutex on every tile.
+        let total_tiles: u64 = plan
+            .levels
+            .iter()
+            .map(|lp| (lp.cols as u64) * (lp.rows as u64))
+            .sum();
+        let completed_cap = usize::try_from(total_tiles).unwrap_or(0);
         Self {
             base_dir,
             plan,
@@ -442,9 +472,9 @@ impl FsSink {
             tile_digests: Mutex::new(BTreeMap::new()),
             manifest_refs: Mutex::new(HashMap::new()),
             pending_first: Mutex::new(HashMap::new()),
-            per_level_counts: Mutex::new(HashMap::new()),
-            pixel_format: Mutex::new(None),
-            completed_tiles: Mutex::new(Vec::new()),
+            per_level_counts,
+            pixel_format: OnceLock::new(),
+            completed_tiles: Mutex::new(Vec::with_capacity(completed_cap)),
             saw_blank: AtomicBool::new(false),
             engine_config: Mutex::new(None),
         }
@@ -572,7 +602,7 @@ impl TileSink for FsSink {
         let rel_string = self
             .plan
             .tile_path(tile.coord, self.format.extension())
-            .ok_or_else(|| SinkError::Other(format!("invalid coord {:?}", tile.coord)))?;
+            .ok_or(SinkError::InvalidCoord { coord: tile.coord })?;
         let abs_path = self.base_dir.join(&rel_string);
 
         if let Some(parent) = abs_path.parent() {
@@ -588,12 +618,9 @@ impl TileSink for FsSink {
 
         // Capture the pixel format from the very first tile we see so the
         // manifest can record `source.pixel_format` without extra plumbing.
-        {
-            let mut slot = self.pixel_format.lock().unwrap();
-            if slot.is_none() {
-                *slot = Some(tile.raster.format());
-            }
-        }
+        // `OnceLock::set` silently ignores subsequent writes; no lock is
+        // held on the hot path after the first tile.
+        let _ = self.pixel_format.set(tile.raster.format());
 
         if tile.blank {
             self.saw_blank.store(true, Ordering::Relaxed);
@@ -612,21 +639,22 @@ impl TileSink for FsSink {
 
         // Per-level counter bookkeeping. Deduped tiles count as "skipped"
         // because their tile path does not carry unique content; blank
-        // placeholders also count as skipped.
-        {
-            let mut counts = self.per_level_counts.lock().unwrap();
-            let entry = counts.entry(tile.coord.level).or_insert((0, 0));
-            entry.0 += 1; // produced
+        // placeholders also count as skipped. Pure atomics on the hot
+        // path — the Vec was pre-sized in `FsSink::new` from the plan.
+        if let Some(slot) = self.per_level_counts.get(tile.coord.level as usize) {
+            slot[0].fetch_add(1, Ordering::Relaxed);
             if tile.blank || dedup_used {
-                entry.1 += 1; // skipped
+                slot[1].fetch_add(1, Ordering::Relaxed);
             }
         }
 
         // Record checksum for manifest emission. Keyed by the plan-relative
-        // tile path so it round-trips through `verify_output`.
+        // tile path so it round-trips through `verify_output`. Stored as a
+        // raw 32-byte digest; hex conversion happens once at manifest-
+        // write time to keep the hot path allocation-light.
         if self.checksums != crate::checksum::ChecksumMode::None {
             if let Some(algo) = self.checksum_algo {
-                let digest = crate::checksum::hash_tile(&bytes, algo);
+                let digest = hash_tile_raw(&bytes, algo);
                 let mut map = self.tile_digests.lock().unwrap();
                 map.insert(rel_string.clone(), digest);
             }
@@ -842,19 +870,19 @@ impl FsSink {
         let Some(algo) = self.checksum_algo else {
             return Ok(());
         };
-        for (rel, expected) in &snapshot {
+        for (rel, expected_bytes) in &snapshot {
             let abs = self.base_dir.join(rel);
             let bytes = match std::fs::read(&abs) {
                 Ok(b) => b,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(SinkError::Io(e)),
             };
-            let got = crate::checksum::hash_tile(&bytes, algo);
-            if !got.eq_ignore_ascii_case(expected) {
+            let got_bytes = hash_tile_raw(&bytes, algo);
+            if got_bytes != *expected_bytes {
                 return Err(SinkError::ChecksumMismatch {
                     tile_rel_path: rel.clone(),
-                    expected: expected.clone(),
-                    got,
+                    expected: hex_encode_32(expected_bytes),
+                    got: hex_encode_32(&got_bytes),
                 });
             }
         }
@@ -895,8 +923,8 @@ impl FsSink {
         // -- source metadata ------------------------------------------------
         let pixel_format = self
             .pixel_format
-            .lock()
-            .unwrap()
+            .get()
+            .copied()
             .unwrap_or(crate::pixel::PixelFormat::Rgb8);
         let source = SourceMetadata {
             width: self.plan.image_width,
@@ -906,13 +934,23 @@ impl FsSink {
         };
 
         // -- per-level metadata --------------------------------------------
-        let counts = self.per_level_counts.lock().unwrap().clone();
+        // Snapshot the atomic counters once per level. Relaxed is fine:
+        // by the time finish() runs, all writer threads have joined.
         let levels: Vec<LevelMetadata> = self
             .plan
             .levels
             .iter()
             .map(|lp| {
-                let (produced_raw, skipped_raw) = counts.get(&lp.level).copied().unwrap_or((0, 0));
+                let (produced_raw, skipped_raw) = self
+                    .per_level_counts
+                    .get(lp.level as usize)
+                    .map(|slot| {
+                        (
+                            slot[0].load(Ordering::Relaxed),
+                            slot[1].load(Ordering::Relaxed),
+                        )
+                    })
+                    .unwrap_or((0, 0));
                 // Tests assert `tiles_produced + tiles_skipped == cols * rows`.
                 // `produced_raw` from write_tile counts every tile call (both
                 // blank and non-blank), so we split it into "produced" (non
@@ -954,23 +992,33 @@ impl FsSink {
         };
 
         // -- checksums ------------------------------------------------------
-        let tile_digests = self.tile_digests.lock().unwrap().clone();
+        // Hex-encode once at manifest-write time. Write-path stores raw
+        // 32-byte digests to keep the hot path allocation-light.
         let emit_checksums =
             self.checksum_algo.is_some() && self.checksums != crate::checksum::ChecksumMode::None;
         let checksums = if emit_checksums {
-            self.checksum_algo.map(|algo| Checksums {
-                algo,
-                per_tile: tile_digests,
-            })
+            let raw = self.tile_digests.lock().unwrap();
+            let per_tile: BTreeMap<String, String> = raw
+                .iter()
+                .map(|(k, v)| (k.clone(), hex_encode_32(v)))
+                .collect();
+            self.checksum_algo.map(|algo| Checksums { algo, per_tile })
         } else {
             None
         };
 
         // -- blank references ----------------------------------------------
-        let blank_references = self.manifest_refs.lock().unwrap().clone();
+        // sink keeps refs as HashMap for O(1) insert on the hot path; convert
+        // to the deterministic BTreeMap shape the manifest requires.
+        let blank_references: std::collections::BTreeMap<String, String> = self
+            .manifest_refs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-        let manifest = ManifestV1 {
-            schema_version: ManifestV1::SCHEMA_VERSION.to_string(),
+        let manifest_v1 = ManifestV1 {
             generation,
             source,
             levels,
@@ -980,10 +1028,10 @@ impl FsSink {
             blank_references,
         };
 
-        // Use compact JSON (no pretty-print) to keep total output bytes
-        // small on whitespace-heavy runs — callers that want a human-
-        // readable form can re-emit via `ManifestV1::to_json_string`.
-        let json = serde_json::to_vec(&manifest).expect("ManifestV1 serialization must not fail");
+        // Serialize through the tagged `Manifest` envelope so `schema_version`
+        // appears on-disk and future versions can be added without breakage.
+        let json = serde_json::to_vec(&manifest_v1.into_manifest())
+            .expect("Manifest serialization must not fail");
 
         // Preferred location: sibling file next to the DZI / base dir.
         // A single byte-identical copy is also dropped inside `base_dir` for
@@ -1014,7 +1062,7 @@ impl FsSink {
         let plan_hash = compute_plan_hash(&self.plan);
         let timestamp = now_rfc3339();
         let meta = JobMetadata {
-            schema_version: SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION.to_string(),
             plan_hash,
             completed_tiles: completed,
             levels_completed: self
@@ -1022,8 +1070,16 @@ impl FsSink {
                 .levels
                 .iter()
                 .filter_map(|lp| {
-                    let counts = self.per_level_counts.lock().unwrap();
-                    let (produced, skipped) = counts.get(&lp.level).copied().unwrap_or((0, 0));
+                    let (produced, skipped) = self
+                        .per_level_counts
+                        .get(lp.level as usize)
+                        .map(|slot| {
+                            (
+                                slot[0].load(Ordering::Relaxed),
+                                slot[1].load(Ordering::Relaxed),
+                            )
+                        })
+                        .unwrap_or((0, 0));
                     let level_total = (lp.cols as u64) * (lp.rows as u64);
                     if produced + skipped >= level_total {
                         Some(lp.level)
@@ -1084,6 +1140,42 @@ fn secs_to_ymd_hms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Digest helpers (hot-path storage uses raw 32-byte digests)
+// ---------------------------------------------------------------------------
+
+/// Hash `bytes` with `algo` and return the raw 32-byte digest. Both
+/// supported algorithms (Blake3, SHA-256) produce exactly 32 bytes, so we
+/// can store them as fixed-size arrays on the hot path instead of paying
+/// for a `String` allocation per tile.
+fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] {
+    use crate::manifest::ChecksumAlgo;
+    match algo {
+        ChecksumAlgo::Blake3 => *blake3::hash(bytes).as_bytes(),
+        ChecksumAlgo::Sha256 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(bytes);
+            let out = hasher.finalize();
+            let mut buf = [0u8; 32];
+            buf.copy_from_slice(&out);
+            buf
+        }
+    }
+}
+
+/// Lower-case hex encoding of a 32-byte digest, matching the format
+/// produced by [`crate::checksum::hash_tile`] (so on-disk manifests stay
+/// byte-identical to pre-refactor output).
+fn hex_encode_32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    use std::fmt::Write;
+    for b in bytes {
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
@@ -1124,7 +1216,10 @@ pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
         raster.height(),
         ct.into(),
     )
-    .map_err(|e| SinkError::Encode(e.to_string()))?;
+    .map_err(|e| SinkError::Encode {
+        format: "png".to_string(),
+        source: e,
+    })?;
     Ok(buf)
 }
 
@@ -1140,7 +1235,10 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
         raster.height(),
         ct.into(),
     )
-    .map_err(|e| SinkError::Encode(e.to_string()))?;
+    .map_err(|e| SinkError::Encode {
+        format: "jpeg".to_string(),
+        source: e,
+    })?;
     Ok(buf)
 }
 

@@ -2,20 +2,35 @@
 //!
 //! Emits a `manifest.json` alongside the DZI XML that records generation
 //! settings, source metadata, per-level counts, sparse policy, and optional
-//! per-tile checksums. The top-level struct carries a `schema_version` field
-//! to support forward-compatible evolution.
+//! per-tile checksums. The top-level [`Manifest`] is a serde-tagged enum on
+//! `schema_version` so future schema bumps reject old-reader parses cleanly
+//! instead of silently falling through with default values.
 //!
-//! This module is intentionally self-contained: helper adapters for
-//! serializing the existing `Layout`, `TileFormat`, `BlankTileStrategy`, and
-//! `PixelFormat` enums (which do not derive serde traits upstream) live here.
+//! # Canonical wire format
+//!
+//! The upstream enums [`Layout`], [`TileFormat`], [`PixelFormat`], and
+//! [`BlankTileStrategy`] do not derive serde, so this module owns thin
+//! adapter modules that define the canonical on-disk representation:
+//!
+//! - `Layout`: `"deep_zoom"`, `"xyz"`, `"google"` (snake_case only).
+//! - `TileFormat`: `{"kind": "png"}`, `{"kind": "jpeg", "quality": N}`,
+//!   `{"kind": "raw"}`.
+//! - `PixelFormat`: `"gray8"`, `"gray16"`, `"rgb8"`, `"rgba8"`, `"rgb16"`,
+//!   `"rgba16"`.
+//! - `BlankTileStrategy`: `{"kind": "emit"}`, `{"kind": "placeholder"}`,
+//!   `{"kind": "placeholder_with_tolerance", "tolerance": N}`.
+//!
+//! Alternate spellings (PascalCase, etc.) are rejected. A follow-up can
+//! delete these adapters once the upstream types derive serde.
+//!
 //! Forward compatibility is preserved by NOT using `#[serde(deny_unknown_fields)]`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::engine::BlankTileStrategy;
@@ -27,7 +42,7 @@ use crate::sink::TileFormat;
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors that can occur while reading or writing a [`ManifestV1`].
+/// Errors that can occur while reading or writing a [`Manifest`].
 #[derive(Debug, Error)]
 pub enum ManifestError {
     /// Underlying I/O failure (file not found, permission denied, etc.).
@@ -39,6 +54,14 @@ pub enum ManifestError {
 }
 
 // ---------------------------------------------------------------------------
+// Type aliases
+// ---------------------------------------------------------------------------
+
+/// Deterministic map type used for `blank_references`. `BTreeMap` keeps
+/// serialization order reproducible across runs.
+pub type BlankReferences = BTreeMap<String, String>;
+
+// ---------------------------------------------------------------------------
 // ChecksumAlgo
 // ---------------------------------------------------------------------------
 
@@ -46,7 +69,8 @@ pub enum ManifestError {
 ///
 /// Serializes as a lowercase string (`"blake3"` / `"sha256"`) so the
 /// manifest.json is human-readable and stable across releases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChecksumAlgo {
     /// BLAKE3 cryptographic hash. Hex digest is 64 characters.
     Blake3,
@@ -89,25 +113,6 @@ impl ChecksumAlgo {
     }
 }
 
-impl Serialize for ChecksumAlgo {
-    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        ser.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ChecksumAlgo {
-    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(de)?;
-        match s.as_str() {
-            "blake3" => Ok(Self::Blake3),
-            "sha256" => Ok(Self::Sha256),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown checksum algorithm: {other}"
-            ))),
-        }
-    }
-}
-
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -119,7 +124,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Serde adapters for upstream enums (which do not derive Serialize/Deserialize)
+// Serde adapters for upstream enums (which do not derive Serialize/Deserialize).
+//
+// These are kept in place because the upstream types live in other modules
+// (`planner.rs`, `sink.rs`, `engine.rs`, `pixel.rs`) and deriving serde on
+// them would require edits outside this file. Each adapter accepts ONLY the
+// canonical snake_case form on deserialize; alternate spellings are rejected.
+// Once the upstream types derive serde, these adapters can be deleted and the
+// fields can use direct serde attributes.
 // ---------------------------------------------------------------------------
 
 mod layout_serde {
@@ -138,9 +150,9 @@ mod layout_serde {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Layout, D::Error> {
         let s = String::deserialize(d)?;
         match s.as_str() {
-            "deep_zoom" | "DeepZoom" | "deepzoom" => Ok(Layout::DeepZoom),
-            "xyz" | "Xyz" | "XYZ" => Ok(Layout::Xyz),
-            "google" | "Google" => Ok(Layout::Google),
+            "deep_zoom" => Ok(Layout::DeepZoom),
+            "xyz" => Ok(Layout::Xyz),
+            "google" => Ok(Layout::Google),
             other => Err(serde::de::Error::custom(format!("unknown layout: {other}"))),
         }
     }
@@ -178,30 +190,53 @@ mod tile_format_serde {
 }
 
 mod blank_strategy_serde {
+    //! Canonical wire format for [`BlankTileStrategy`]:
+    //! - `{"kind": "emit"}`
+    //! - `{"kind": "placeholder"}`
+    //! - `{"kind": "placeholder_with_tolerance", "tolerance": N}`
+    //!
+    //! `tolerance` maps to the upstream `max_channel_delta` field. It defaults
+    //! to 0 when missing so manifests produced by older writers (or older
+    //! `"placeholder"`-as-string values round-tripped through tooling) still
+    //! parse cleanly.
     use super::BlankTileStrategy;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Repr {
+        Emit,
+        Placeholder,
+        PlaceholderWithTolerance {
+            #[serde(default)]
+            tolerance: u8,
+        },
+    }
 
     pub fn serialize<S: Serializer>(v: &BlankTileStrategy, s: S) -> Result<S::Ok, S::Error> {
-        // `PlaceholderWithTolerance` serializes as `"placeholder"` to remain
-        // forward compatible with readers that do not yet understand the new
-        // variant; the tolerance value is recorded in `SparsePolicy.tolerance`.
-        let name = match v {
-            BlankTileStrategy::Emit => "emit",
-            BlankTileStrategy::Placeholder => "placeholder",
-            BlankTileStrategy::PlaceholderWithTolerance { .. } => "placeholder",
+        let r = match *v {
+            BlankTileStrategy::Emit => Repr::Emit,
+            BlankTileStrategy::Placeholder => Repr::Placeholder,
+            BlankTileStrategy::PlaceholderWithTolerance { max_channel_delta } => {
+                Repr::PlaceholderWithTolerance {
+                    tolerance: max_channel_delta,
+                }
+            }
         };
-        s.serialize_str(name)
+        r.serialize(s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BlankTileStrategy, D::Error> {
-        let s = String::deserialize(d)?;
-        match s.as_str() {
-            "emit" | "Emit" => Ok(BlankTileStrategy::Emit),
-            "placeholder" | "Placeholder" => Ok(BlankTileStrategy::Placeholder),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown blank_tile_strategy: {other}"
-            ))),
-        }
+        let r = Repr::deserialize(d)?;
+        Ok(match r {
+            Repr::Emit => BlankTileStrategy::Emit,
+            Repr::Placeholder => BlankTileStrategy::Placeholder,
+            Repr::PlaceholderWithTolerance { tolerance } => {
+                BlankTileStrategy::PlaceholderWithTolerance {
+                    max_channel_delta: tolerance,
+                }
+            }
+        })
     }
 }
 
@@ -224,12 +259,12 @@ mod pixel_format_serde {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PixelFormat, D::Error> {
         let s = String::deserialize(d)?;
         match s.as_str() {
-            "gray8" | "Gray8" => Ok(PixelFormat::Gray8),
-            "gray16" | "Gray16" => Ok(PixelFormat::Gray16),
-            "rgb8" | "Rgb8" => Ok(PixelFormat::Rgb8),
-            "rgba8" | "Rgba8" => Ok(PixelFormat::Rgba8),
-            "rgb16" | "Rgb16" => Ok(PixelFormat::Rgb16),
-            "rgba16" | "Rgba16" => Ok(PixelFormat::Rgba16),
+            "gray8" => Ok(PixelFormat::Gray8),
+            "gray16" => Ok(PixelFormat::Gray16),
+            "rgb8" => Ok(PixelFormat::Rgb8),
+            "rgba8" => Ok(PixelFormat::Rgba8),
+            "rgb16" => Ok(PixelFormat::Rgb16),
+            "rgba16" => Ok(PixelFormat::Rgba16),
             other => Err(serde::de::Error::custom(format!(
                 "unknown pixel_format: {other}"
             ))),
@@ -246,6 +281,7 @@ mod pixel_format_serde {
 /// Captured at the moment the manifest is emitted so downstream consumers can
 /// reproduce or verify the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct GenerationSettings {
     /// Width/height of each tile in pixels (square tiles).
     pub tile_size: u32,
@@ -272,6 +308,7 @@ pub struct GenerationSettings {
 
 /// Metadata describing the source raster the pyramid was built from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SourceMetadata {
     /// Source image width in pixels.
     pub width: u32,
@@ -292,6 +329,7 @@ pub struct SourceMetadata {
 
 /// Per-level counts and dimensions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LevelMetadata {
     /// Zero-based level index (0 == smallest / most zoomed out for DeepZoom).
     pub level_index: u32,
@@ -311,6 +349,7 @@ pub struct LevelMetadata {
 
 /// Sparse-tile handling policy active during generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SparsePolicy {
     /// Per-channel tolerance used when detecting "blank" (uniform) tiles.
     /// 0 means exact-match only.
@@ -327,11 +366,27 @@ pub struct SparsePolicy {
 ///
 /// Uses `BTreeMap` so the serialized order is deterministic across runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Checksums {
     /// Hash algorithm used to compute each digest.
     pub algo: ChecksumAlgo,
     /// Map from relative tile path to lowercase hex digest.
     pub per_tile: BTreeMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// BlankReference
+// ---------------------------------------------------------------------------
+
+/// Single blank-tile dedupe reference entry (reserved for future richer
+/// metadata than the current `BTreeMap<String, String>` wire format).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BlankReference {
+    /// Canonical relative path within the pyramid root.
+    pub path: String,
+    /// Digest (or other dedupe key) identifying the shared payload.
+    pub digest: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -341,15 +396,12 @@ pub struct Checksums {
 /// Versioned pyramid manifest (schema v1).
 ///
 /// Emitted by [`FsSink`](crate::sink::FsSink) when a [`ManifestBuilder`] is
-/// attached via `with_manifest(...)`. Consumers should inspect the
-/// [`ManifestV1::schema_version`] field before interpreting the payload and
-/// tolerate unknown future fields (which this struct explicitly preserves by
-/// not setting `deny_unknown_fields`).
+/// attached via `with_manifest(...)`. Consumers should route through
+/// [`Manifest`] (the tagged enum wrapper) so that future schema bumps can be
+/// distinguished rather than silently accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ManifestV1 {
-    /// Schema discriminator. Always `"1"` for this struct.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: String,
     /// Engine/pipeline settings that produced the pyramid.
     pub generation: GenerationSettings,
     /// Source raster metadata.
@@ -366,25 +418,20 @@ pub struct ManifestV1 {
     pub created_at: String,
     /// Optional dedupe interop: map of canonical blank-tile reference paths to
     /// the digest (or equivalent key) of the shared blank payload.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub blank_references: HashMap<String, String>,
-}
-
-fn default_schema_version() -> String {
-    "1".to_string()
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blank_references: BlankReferences,
 }
 
 impl ManifestV1 {
     /// The schema version literal this module emits.
     pub const SCHEMA_VERSION: &'static str = "1";
 
-    /// Construct an empty manifest with the current schema version.
+    /// Construct an empty manifest.
     ///
-    /// Every field is zero/default; callers are expected to fill in real
-    /// values before emitting.
+    /// Every optional field is zero/default; callers are expected to fill in
+    /// real values before emitting.
     pub fn new(generation: GenerationSettings, source: SourceMetadata) -> Self {
         Self {
-            schema_version: Self::SCHEMA_VERSION.to_string(),
             generation,
             source,
             levels: Vec::new(),
@@ -394,41 +441,105 @@ impl ManifestV1 {
             },
             checksums: None,
             created_at: String::new(),
-            blank_references: HashMap::new(),
+            blank_references: BTreeMap::new(),
         }
     }
 
-    /// Serialize this manifest to a JSON string.
+    /// Wrap this `ManifestV1` in the versioned [`Manifest`] enum.
+    pub fn into_manifest(self) -> Manifest {
+        Manifest::V1(self)
+    }
+
+    /// Serialize this manifest (as a v1) to a JSON string.
     ///
-    /// All maps inside the manifest are `BTreeMap`, so iteration order is
-    /// deterministic across runs. Any fields whose order is structural (the
-    /// struct field order and the `Vec<LevelMetadata>`) are controlled by the
-    /// engine producing the manifest.
-    pub fn to_json_string(&self) -> String {
-        // Unwrap is safe: ManifestV1 only contains types with infallible
-        // Serialize implementations.
-        serde_json::to_string_pretty(self).expect("ManifestV1 serialization must not fail")
+    /// Delegates to [`Manifest::to_json_string`] via a clone-and-wrap step for
+    /// backward compatibility with call sites that still hold a `ManifestV1`.
+    pub fn to_json_string(&self) -> Result<String, ManifestError> {
+        self.clone().into_manifest().to_json_string()
     }
 
     /// Serialize and write this manifest to `path`, creating parent
     /// directories as needed.
-    pub fn write_to(&self, path: &Path) -> io::Result<()> {
+    pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
+        self.clone().into_manifest().write_to(path)
+    }
+
+    /// Read and parse a `ManifestV1` from `path`.
+    ///
+    /// Unknown fields are silently ignored (forward compatibility). Returns an
+    /// error if the on-disk schema version is not `"1"`.
+    pub fn read_from(path: &Path) -> Result<Self, ManifestError> {
+        match Manifest::read_from(path)? {
+            Manifest::V1(m) => Ok(m),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest (versioned wrapper)
+// ---------------------------------------------------------------------------
+
+/// Versioned pyramid manifest.
+///
+/// The `schema_version` JSON field is the serde tag: `"1"` maps to
+/// [`Manifest::V1`]. Unknown versions produce a deserialization error, which
+/// is the intentional contrast with the forward-compatible "unknown inner
+/// fields are ignored" policy on [`ManifestV1`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "schema_version")]
+pub enum Manifest {
+    /// Schema v1.
+    #[serde(rename = "1")]
+    V1(ManifestV1),
+}
+
+impl Manifest {
+    /// Returns the inner v1 payload by reference.
+    pub fn as_v1(&self) -> &ManifestV1 {
+        match self {
+            Manifest::V1(m) => m,
+        }
+    }
+
+    /// Consumes the wrapper and returns the inner v1 payload.
+    pub fn into_v1(self) -> ManifestV1 {
+        match self {
+            Manifest::V1(m) => m,
+        }
+    }
+
+    /// Serialize this manifest to a pretty JSON string.
+    pub fn to_json_string(&self) -> Result<String, ManifestError> {
+        serde_json::to_string_pretty(self).map_err(ManifestError::Json)
+    }
+
+    /// Serialize and write this manifest to `path`, creating parent
+    /// directories as needed.
+    pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
         }
-        let json = self.to_json_string();
-        fs::write(path, json)
+        let json = self.to_json_string()?;
+        fs::write(path, json)?;
+        Ok(())
     }
 
-    /// Read and parse a `ManifestV1` from `path`.
-    ///
-    /// Unknown fields are silently ignored (forward compatibility).
+    /// Read and parse a `Manifest` from `path`.
     pub fn read_from(path: &Path) -> Result<Self, ManifestError> {
         let bytes = fs::read(path)?;
-        let value: Self = serde_json::from_slice(&bytes)?;
-        Ok(value)
+        Self::from_json_slice(&bytes)
+    }
+
+    /// Parse a `Manifest` from a byte slice.
+    pub fn from_json_slice(bytes: &[u8]) -> Result<Self, ManifestError> {
+        serde_json::from_slice(bytes).map_err(ManifestError::Json)
+    }
+
+    /// Parse a `Manifest` from any `io::Read`.
+    pub fn from_json_reader<R: io::Read>(reader: R) -> Result<Self, ManifestError> {
+        serde_json::from_reader(reader).map_err(ManifestError::Json)
     }
 }
 
@@ -531,7 +642,6 @@ mod tests {
 
     fn sample_manifest() -> ManifestV1 {
         ManifestV1 {
-            schema_version: "1".to_string(),
             generation: GenerationSettings {
                 tile_size: 256,
                 overlap: 0,
@@ -560,28 +670,42 @@ mod tests {
             },
             checksums: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
-            blank_references: HashMap::new(),
+            blank_references: BTreeMap::new(),
         }
     }
 
     #[test]
     fn round_trips_through_json() {
-        let m = sample_manifest();
-        let s = m.to_json_string();
-        let parsed: ManifestV1 = serde_json::from_str(&s).unwrap();
+        let m = sample_manifest().into_manifest();
+        let s = m.to_json_string().unwrap();
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
         assert_eq!(parsed, m);
     }
 
     #[test]
     fn ignores_unknown_fields() {
-        let mut v: serde_json::Value =
-            serde_json::from_str(&sample_manifest().to_json_string()).unwrap();
+        let m = sample_manifest().into_manifest();
+        let mut v: serde_json::Value = serde_json::from_str(&m.to_json_string().unwrap()).unwrap();
         v.as_object_mut()
             .unwrap()
             .insert("future".into(), serde_json::json!("ignored"));
         let bumped = serde_json::to_string(&v).unwrap();
-        let parsed: ManifestV1 = serde_json::from_str(&bumped).unwrap();
-        assert_eq!(parsed.schema_version, "1");
+        let parsed: Manifest = serde_json::from_str(&bumped).unwrap();
+        match parsed {
+            Manifest::V1(_) => {}
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_schema_version() {
+        let m = sample_manifest().into_manifest();
+        let mut v: serde_json::Value = serde_json::from_str(&m.to_json_string().unwrap()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("schema_version".into(), serde_json::json!("99"));
+        let bumped = serde_json::to_string(&v).unwrap();
+        let parsed: Result<Manifest, _> = serde_json::from_str(&bumped);
+        assert!(parsed.is_err(), "unknown schema_version must fail to parse");
     }
 
     #[test]
@@ -624,5 +748,46 @@ mod tests {
         assert!(b.wants_source_hash());
         assert_eq!(b.dedupe_override(), Some(true));
         assert_eq!(b.tolerance_override(), Some(4));
+    }
+
+    #[test]
+    fn blank_strategy_with_tolerance_round_trips() {
+        let m_in = ManifestV1 {
+            generation: GenerationSettings {
+                tile_size: 256,
+                overlap: 0,
+                layout: Layout::Xyz,
+                format: TileFormat::Png,
+                concurrency: 1,
+                background_rgb: [0, 0, 0],
+                blank_strategy: BlankTileStrategy::PlaceholderWithTolerance {
+                    max_channel_delta: 7,
+                },
+            },
+            source: SourceMetadata {
+                width: 10,
+                height: 10,
+                pixel_format: PixelFormat::Rgb8,
+                bytes_hash: None,
+            },
+            levels: Vec::new(),
+            sparse_policy: SparsePolicy {
+                tolerance: 7,
+                dedupe: true,
+            },
+            checksums: None,
+            created_at: String::new(),
+            blank_references: BTreeMap::new(),
+        };
+        let wire = m_in.to_json_string().unwrap();
+        let parsed = Manifest::from_json_slice(wire.as_bytes())
+            .unwrap()
+            .into_v1();
+        assert_eq!(
+            parsed.generation.blank_strategy,
+            BlankTileStrategy::PlaceholderWithTolerance {
+                max_channel_delta: 7,
+            }
+        );
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -22,6 +23,7 @@ use crate::sink::{SinkError, Tile, TileSink};
 /// all failure modes uniformly. Also covers engine-specific conditions such as
 /// cancellation and worker panics.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EngineError {
     #[error("raster error: {0}")]
     Raster(#[from] RasterError),
@@ -45,6 +47,13 @@ pub enum EngineError {
     /// A resumable job could not be initialised or advanced.
     #[error("resume failed: {0}")]
     ResumeFailed(#[from] ResumeError),
+    /// `ResumeMode::Verify` was requested but no on-disk checkpoint root could
+    /// be resolved from either [`EngineConfig::checkpoint_root`] or
+    /// [`TileSink::checkpoint_root`]. Verify mode requires an on-disk sink
+    /// (or an explicit `checkpoint_root` on the config) to read back the
+    /// previously-written tiles.
+    #[error("Verify mode requires an on-disk sink or EngineConfig::checkpoint_root")]
+    VerifyRequiresOnDiskSink,
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.
@@ -58,6 +67,7 @@ pub enum EngineError {
 /// for integration-level examples. In the CLI, the `--skip-blank` flag selects
 /// [`BlankTileStrategy::Placeholder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BlankTileStrategy {
     /// Emit blank tiles as full raster data (default). Every tile coordinate
     /// produces a complete image file, including tiles that are entirely one color.
@@ -90,6 +100,7 @@ pub enum BlankTileStrategy {
 /// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for command-line construction of this config.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EngineConfig {
     /// Number of worker threads for tile extraction. 0 = single-threaded (current thread).
     pub concurrency: usize,
@@ -107,6 +118,10 @@ pub struct EngineConfig {
     pub checkpoint_every: u64,
     /// Optional engine-level content-addressed deduplication strategy.
     pub dedupe_strategy: Option<crate::dedupe::DedupeStrategy>,
+    /// Explicit on-disk root for resume checkpoints and Verify-mode reads.
+    /// If None, falls back to `sink.checkpoint_root()`.
+    /// Required when the sink is an opaque user wrapper that does not forward checkpoint_root().
+    pub checkpoint_root: Option<PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -119,6 +134,7 @@ impl Default for EngineConfig {
             failure_policy: FailurePolicy::default(),
             checkpoint_every: 0,
             dedupe_strategy: None,
+            checkpoint_root: None,
         }
     }
 }
@@ -181,6 +197,16 @@ impl EngineConfig {
         self.dedupe_strategy = Some(strategy);
         self
     }
+
+    /// Configure an explicit on-disk root for resume checkpoints and
+    /// Verify-mode reads. When unset, the engine falls back to
+    /// [`TileSink::checkpoint_root`]. Supplying this is the preferred way
+    /// to drive resume/verify against an opaque user-wrapped sink that does
+    /// not forward `checkpoint_root()`.
+    pub fn with_checkpoint_root(mut self, root: PathBuf) -> Self {
+        self.checkpoint_root = Some(root);
+        self
+    }
 }
 
 /// Per-stage duration breakdown for a single pyramid run.
@@ -190,6 +216,7 @@ impl EngineConfig {
 /// durations (end-to-end time is reported via [`EngineResult::duration`]
 /// instead).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StageDurations {
     /// Time spent planning / validating the pyramid layout.
     pub planning: Duration,
@@ -210,6 +237,7 @@ pub struct StageDurations {
 /// directly. Every field is populated by [`generate_pyramid`] /
 /// [`generate_pyramid_observed`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EngineResult {
     /// Total number of tiles written to the sink (including placeholders).
     pub tiles_produced: u64,
@@ -311,6 +339,12 @@ fn run_pyramid(
     // background / blank-strategy into the emitted manifest without a
     // secondary plumbing path.
     sink.record_engine_config(config);
+
+    // Let the sink preallocate per-level bookkeeping (e.g. `FsSink` uses
+    // this to size its per-level counter atomics up-front rather than
+    // locking-and-growing on the first tile of each level). The default
+    // trait impl is a no-op, so unaware sinks silently ignore the hint.
+    sink.init_level_count(plan.levels.len());
 
     let top_level = plan.levels.len() - 1;
     let mut tiles_produced: u64 = 0;
@@ -525,10 +559,15 @@ impl CheckpointState {
         }
         // Flush periodically. `checkpoint_every == 0` disables this path and
         // leaves only the final flush (done by `run_pyramid` on success).
+        //
+        // `Relaxed` is sufficient: `flush()` takes the `meta` mutex
+        // internally, which provides the happens-before edge between the
+        // worker that appended the tile and the thread that serialises
+        // the snapshot. The counter itself is a pure cadence gauge.
         if self.checkpoint_every > 0 {
-            let n = self.pending_since_flush.fetch_add(1, Ordering::SeqCst) + 1;
+            let n = self.pending_since_flush.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= self.checkpoint_every {
-                self.pending_since_flush.store(0, Ordering::SeqCst);
+                self.pending_since_flush.store(0, Ordering::Relaxed);
                 self.flush()?;
             }
         }
@@ -688,7 +727,7 @@ fn run_overwrite(
     // If the sink exposes an on-disk root, wipe its stale contents so
     // pre-existing garbage (files from an aborted run, a checkpoint with
     // the wrong plan_hash, etc.) does not survive into the new run.
-    if let Some(root) = resolve_checkpoint_root(sink) {
+    if let Some(root) = resolve_checkpoint_root(config, sink) {
         wipe_directory(&root).map_err(|e| EngineError::ResumeFailed(ResumeError::from(e)))?;
     }
 
@@ -697,17 +736,19 @@ fn run_overwrite(
     run_pyramid_with_cp(source, plan, sink, config, cp.as_ref(), &skip, false)
 }
 
-/// Resolve the on-disk checkpoint root for a sink, falling back to the
-/// thread-local [`crate::sink::last_fs_sink_root_hint`] when the outer sink
-/// does not override [`TileSink::checkpoint_root`]. This lets the resume
-/// layer work with user-supplied wrapper sinks (e.g. `RecordingSink`
-/// wrappers in the test suite) that forward `write_tile` / `finish` to an
-/// inner `FsSink` but do not re-export the on-disk root.
-fn resolve_checkpoint_root(sink: &dyn TileSink) -> Option<std::path::PathBuf> {
-    if let Some(root) = sink.checkpoint_root() {
-        return Some(root.to_path_buf());
-    }
-    crate::sink::last_fs_sink_root_hint()
+/// Resolve the on-disk checkpoint root. Prefers the explicit
+/// [`EngineConfig::checkpoint_root`] when set; otherwise consults
+/// [`TileSink::checkpoint_root`]. Returns `None` when neither is available
+/// (e.g. a pure in-memory sink with no config override).
+///
+/// The explicit config path exists so that callers wrapping [`FsSink`] in
+/// an opaque user sink (e.g. recording / tee / retry wrappers) can still
+/// drive resume and Verify without needing each wrapper to forward
+/// `checkpoint_root()` through its trait impl.
+fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -> Option<PathBuf> {
+    cfg.checkpoint_root
+        .clone()
+        .or_else(|| sink.checkpoint_root().map(|p| p.to_path_buf()))
 }
 
 /// Resume-from-checkpoint branch of [`generate_pyramid_resumable`].
@@ -719,22 +760,27 @@ fn run_resume(
 ) -> Result<EngineResult, EngineError> {
     let expected_hash = compute_plan_hash(plan);
 
-    let (existing_completed, existing_levels) = if let Some(root) = resolve_checkpoint_root(sink) {
-        match JobCheckpoint::load(&root) {
-            Some(meta) => {
-                if meta.plan_hash != expected_hash {
-                    return Err(EngineError::PlanHashMismatch {
-                        expected: meta.plan_hash.clone(),
-                        got: expected_hash,
-                    });
+    let (existing_completed, existing_levels) =
+        if let Some(root) = resolve_checkpoint_root(config, sink) {
+            // `JobCheckpoint::load` returns `Result<Option<_>, ResumeError>`:
+            // `?` surfaces real corruption as an engine error (via
+            // `EngineError::ResumeFailed`) rather than silently degrading
+            // to "no checkpoint". A missing file is still `Ok(None)`.
+            match JobCheckpoint::load(&root)? {
+                Some(meta) => {
+                    if meta.plan_hash != expected_hash {
+                        return Err(EngineError::PlanHashMismatch {
+                            expected: meta.plan_hash.clone(),
+                            got: expected_hash,
+                        });
+                    }
+                    (meta.completed_tiles, meta.levels_completed)
                 }
-                (meta.completed_tiles, meta.levels_completed)
+                None => (Vec::new(), Vec::new()),
             }
-            None => (Vec::new(), Vec::new()),
-        }
-    } else {
-        (Vec::new(), Vec::new())
-    };
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
     let skip: HashSet<TileCoord> = existing_completed.iter().copied().collect();
     let cp = cp_for_sink(sink, plan, config, existing_completed, existing_levels);
@@ -751,10 +797,10 @@ fn cp_for_sink(
     completed_tiles: Vec<TileCoord>,
     levels_completed: Vec<u32>,
 ) -> Option<CheckpointState> {
-    let root = resolve_checkpoint_root(sink)?;
+    let root = resolve_checkpoint_root(config, sink)?;
     let now = now_rfc3339_engine();
     let meta = JobMetadata {
-        schema_version: SCHEMA_VERSION,
+        schema_version: SCHEMA_VERSION.to_string(),
         plan_hash: compute_plan_hash(plan),
         completed_tiles,
         levels_completed,
@@ -802,11 +848,8 @@ fn run_verify(
     config: &EngineConfig,
 ) -> Result<EngineResult, EngineError> {
     let started = Instant::now();
-    let root_buf = resolve_checkpoint_root(sink).ok_or_else(|| {
-        EngineError::Sink(SinkError::Other(
-            "Verify mode requires a sink with an on-disk root".into(),
-        ))
-    })?;
+    let root_buf =
+        resolve_checkpoint_root(config, sink).ok_or(EngineError::VerifyRequiresOnDiskSink)?;
     let root = root_buf.as_path();
 
     // Try every known tile-file extension until we find one that matches.
@@ -1085,15 +1128,6 @@ fn extract_and_emit_level(
                         continue;
                     }
                 }
-                #[cfg(feature = "tracing")]
-                let _tile_span = tracing::trace_span!(
-                    target: "libviprs",
-                    "tile",
-                    x = coord.col,
-                    y = coord.row,
-                    level = coord.level
-                )
-                .entered();
                 let encode_start = Instant::now();
                 let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
                 ctx.stage_encode
@@ -1142,6 +1176,16 @@ fn extract_and_emit_level(
                     }
                 }
                 observer.on_event(EngineEvent::TileCompleted { coord });
+                #[cfg(feature = "tracing")]
+                if tracing::enabled!(target: "libviprs::tile", tracing::Level::TRACE) {
+                    tracing::trace!(
+                        target: "libviprs::tile",
+                        x = coord.col,
+                        y = coord.row,
+                        level = coord.level,
+                        "tile done"
+                    );
+                }
                 count += 1;
             }
         }
@@ -1250,8 +1294,12 @@ fn extract_and_emit_parallel(
                     // tile and attempting to hand it off. The peak is
                     // bounded by the worker count (plus up to one on the
                     // consumer side while it writes to the sink).
-                    let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = queue_peak.fetch_max(cur, Ordering::SeqCst);
+                    //
+                    // Pure gauge — no happens-before needed between the
+                    // counter and any tile payload, so `Relaxed` is safe
+                    // (and avoids a useless full fence in the hot loop).
+                    let cur = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = queue_peak.fetch_max(cur, Ordering::Relaxed);
 
                     let encode_start = Instant::now();
                     let result = extract_tile(&raster, &plan, coord, bg)
@@ -1270,8 +1318,9 @@ fn extract_and_emit_parallel(
                     // Balance the counter as soon as the tile leaves the
                     // producer — either the consumer has taken ownership
                     // (and the channel buffers it briefly) or the consumer
-                    // is gone and we're about to exit.
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    // is gone and we're about to exit. `Relaxed` matches
+                    // the corresponding `fetch_add` above.
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
                     if send_failed {
                         break; // Consumer dropped
                     }
@@ -1315,6 +1364,16 @@ fn extract_and_emit_parallel(
                 }
             }
             observer.on_event(EngineEvent::TileCompleted { coord });
+            #[cfg(feature = "tracing")]
+            if tracing::enabled!(target: "libviprs::tile", tracing::Level::TRACE) {
+                tracing::trace!(
+                    target: "libviprs::tile",
+                    x = coord.col,
+                    y = coord.row,
+                    level = coord.level,
+                    "tile done"
+                );
+            }
             count += 1;
         }
         Ok((count, skipped))

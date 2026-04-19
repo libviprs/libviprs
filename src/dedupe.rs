@@ -28,7 +28,7 @@
 //! `blank_<hex-hash>`. This is asserted by
 //! `libviprs-tests/tests/phase3_dedupe_blanks.rs::determinism_of_dedupe_hashes`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -41,6 +41,7 @@ use crate::manifest::ChecksumAlgo;
 
 /// Selects how tiles are content-addressed prior to being written to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DedupeStrategy {
     /// No deduplication — every tile is written to its own file. Default.
     None,
@@ -67,6 +68,7 @@ impl Default for DedupeStrategy {
 
 /// Outcome of a [`DedupeIndex::record`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DedupeDecision {
     /// This content hash was not previously seen. The caller must write
     /// `bytes` to `shared_path` and then materialize a reference at the
@@ -93,15 +95,62 @@ pub enum DedupeDecision {
 // Index
 // ---------------------------------------------------------------------------
 
+/// Compact, `Ord`-able tag for the hash algorithm component of the `seen`
+/// map's key. `ChecksumAlgo` itself doesn't derive `Ord` and we can't touch
+/// `manifest.rs` on this branch, so we project it onto a single byte.
+type AlgoTag = u8;
+
+const ALGO_TAG_BLAKE3: AlgoTag = 1;
+const ALGO_TAG_SHA256: AlgoTag = 2;
+
+fn algo_tag(a: ChecksumAlgo) -> AlgoTag {
+    match a {
+        ChecksumAlgo::Blake3 => ALGO_TAG_BLAKE3,
+        ChecksumAlgo::Sha256 => ALGO_TAG_SHA256,
+    }
+}
+
+/// Inner shared state for [`DedupeIndex`], wrapped in a single mutex so the
+/// `seen` / `refs` maps always observe a coherent invariant (Mara Bos B5:
+/// readers that held two independent locks could see `refs` populated before
+/// `seen` caught up, briefly violating "refs is a subset of seen's producible
+/// keys"). Coalescing into one lock takes the same number of lock operations
+/// as the previous two-mutex layout.
+///
+/// The `seen` map is keyed by `(algo_tag, raw_digest_bytes)` rather than hex
+/// strings: Blake3 and SHA-256 both produce 32-byte digests, so a single
+/// `[u8; 32]` representation avoids the ~2 GB of per-tile `String`
+/// allocations BurntSushi flagged on a 10M-tile run. The `algo_tag`
+/// component of the key prevents collisions between two runs where different
+/// algorithms happen to produce the same byte pattern (they won't in
+/// practice, but bundling the algo is free and makes the invariant
+/// explicit). We use a local [`AlgoTag`] (a `u8`) rather than
+/// `ChecksumAlgo` directly because the latter doesn't derive `Ord` and this
+/// branch is restricted to editing `dedupe.rs`.
+///
+/// `BTreeMap` is used instead of `HashMap` (dtolnay #5) so
+/// `references()`-derived output — which is serialized into
+/// `manifest.json`'s `blank_references` field — iterates in a deterministic
+/// order regardless of hash-state randomization.
+#[derive(Debug, Default)]
+struct DedupeState {
+    /// `(algo_tag, digest) -> shared_key` for first-write / reference
+    /// decisions.
+    seen: BTreeMap<(AlgoTag, [u8; 32]), String>,
+    /// `tile_path -> shared_key` for manifest emission.
+    refs: BTreeMap<String, String>,
+}
+
 /// In-memory mapping from content-hash to shared-key. One instance per
 /// generation run; not persisted across restarts (resume-mode sinks rebuild
 /// the index by walking `_shared/`).
+#[non_exhaustive]
 pub struct DedupeIndex {
     strategy: DedupeStrategy,
-    /// Content-hash (hex) -> shared_key.
-    seen: Mutex<HashMap<String, String>>,
-    /// Tile path -> shared_key (for manifest emission).
-    refs: Mutex<HashMap<String, String>>,
+    /// Single mutex guarding both the hash->shared-key map and the
+    /// path->shared-key map, so callers never observe one updated without
+    /// the other.
+    state: Mutex<DedupeState>,
 }
 
 impl DedupeIndex {
@@ -109,8 +158,7 @@ impl DedupeIndex {
     pub fn new(strategy: DedupeStrategy) -> Self {
         Self {
             strategy,
-            seen: Mutex::new(HashMap::new()),
-            refs: Mutex::new(HashMap::new()),
+            state: Mutex::new(DedupeState::default()),
         }
     }
 
@@ -119,24 +167,39 @@ impl DedupeIndex {
         self.strategy
     }
 
-    /// Compute the content hash using the algorithm dictated by `strategy`.
-    /// For [`DedupeStrategy::Blanks`] this is always blake3 (fast, unkeyed);
-    /// for [`DedupeStrategy::All`] the caller-chosen algorithm is used.
-    fn hash_content(&self, bytes: &[u8]) -> String {
+    /// Algorithm used to produce the raw digest for `hash_content_raw`.
+    /// [`DedupeStrategy::Blanks`] and [`DedupeStrategy::None`] always hash
+    /// with Blake3 (fast, unkeyed); [`DedupeStrategy::All`] honours the
+    /// caller-chosen algorithm.
+    fn effective_algo(&self) -> ChecksumAlgo {
         match self.strategy {
-            DedupeStrategy::None => {
-                // No hashing needed, but callers shouldn't invoke `record`
-                // in this mode. We still produce a stable hex string so the
-                // returned decision is self-consistent.
-                let h = blake3::hash(bytes);
-                hex_lower(h.as_bytes())
-            }
-            DedupeStrategy::Blanks => {
-                let h = blake3::hash(bytes);
-                hex_lower(h.as_bytes())
-            }
-            DedupeStrategy::All { algo } => algo.hash(bytes),
+            DedupeStrategy::None | DedupeStrategy::Blanks => ChecksumAlgo::Blake3,
+            DedupeStrategy::All { algo } => algo,
         }
+    }
+
+    /// Compute the content hash using the algorithm dictated by `strategy`,
+    /// returning the raw 32-byte digest alongside the algorithm that
+    /// produced it. Keeping raw bytes avoids the per-tile `String`
+    /// allocation that `ChecksumAlgo::hash` would incur.
+    fn hash_content_raw(&self, bytes: &[u8]) -> (ChecksumAlgo, [u8; 32]) {
+        let algo = self.effective_algo();
+        let digest = match algo {
+            ChecksumAlgo::Blake3 => {
+                let h = blake3::hash(bytes);
+                *h.as_bytes()
+            }
+            ChecksumAlgo::Sha256 => {
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(bytes);
+                let out = hasher.finalize();
+                let mut buf = [0u8; 32];
+                buf.copy_from_slice(&out);
+                buf
+            }
+        };
+        (algo, digest)
     }
 
     /// Record a tile whose byte contents are `bytes` at the planned path
@@ -153,31 +216,28 @@ impl DedupeIndex {
             .and_then(|e| e.to_str())
             .unwrap_or("bin");
 
-        let hash = self.hash_content(bytes);
-        let shared_key = format!("blank_{hash}");
+        let (algo, digest) = self.hash_content_raw(bytes);
+        let hash_hex = hex_lower(&digest);
+        let shared_key = format!("blank_{hash_hex}");
         let shared_path = Self::shared_path(&shared_key, ext);
 
-        // Record the reference for manifest emission unconditionally — the
-        // sink may choose to suppress it when it successfully symlinked or
-        // hardlinked (that's a sink decision, not ours).
-        {
-            let mut refs = self.refs.lock().expect("dedupe refs mutex poisoned");
-            refs.insert(path.to_string(), shared_key.clone());
-        }
+        // Single lock: update `refs` and `seen` atomically so readers never
+        // observe one populated without the other (Mara B5).
+        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        state.refs.insert(path.to_string(), shared_key.clone());
 
-        // First-write vs. reference.
-        let mut seen = self.seen.lock().expect("dedupe seen mutex poisoned");
-        if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hash) {
-            e.insert(shared_key.clone());
-            DedupeDecision::WriteNew {
+        match state.seen.entry((algo_tag(algo), digest)) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(shared_key.clone());
+                DedupeDecision::WriteNew {
+                    shared_key,
+                    shared_path,
+                }
+            }
+            std::collections::btree_map::Entry::Occupied(_) => DedupeDecision::Reference {
                 shared_key,
                 shared_path,
-            }
-        } else {
-            DedupeDecision::Reference {
-                shared_key,
-                shared_path,
-            }
+            },
         }
     }
 
@@ -185,17 +245,28 @@ impl DedupeIndex {
     /// a symlink / hardlink and no manifest pointer is required). No-op if
     /// the path was never recorded.
     pub fn forget_reference(&self, path: &str) {
-        let mut refs = self.refs.lock().expect("dedupe refs mutex poisoned");
-        refs.remove(path);
+        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        state.refs.remove(path);
     }
 
-    /// Record an already-known shared key for a given shared-key filename,
-    /// used by resume-mode sinks when walking an existing `_shared/`
-    /// directory so that subsequent `record` calls don't emit `WriteNew`
-    /// for content that's already physically present on disk.
+    /// Record an already-known shared key for a given content hash, used by
+    /// resume-mode sinks when walking an existing `_shared/` directory so
+    /// that subsequent `record` calls don't emit `WriteNew` for content
+    /// that's already physically present on disk.
+    ///
+    /// `hash_hex` must be the lowercase hex of the 32-byte digest produced
+    /// by the index's effective algorithm. Invalid or wrong-length hex is
+    /// silently ignored — the index will simply emit `WriteNew` on first
+    /// encounter, which is benign (the sink's rename-into-_shared path
+    /// already tolerates an existing target).
     pub fn seed_shared_key(&self, hash_hex: String, shared_key: String) {
-        let mut seen = self.seen.lock().expect("dedupe seen mutex poisoned");
-        seen.insert(hash_hex, shared_key);
+        let digest = match decode_hex_32(&hash_hex) {
+            Some(d) => d,
+            None => return,
+        };
+        let algo = self.effective_algo();
+        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        state.seen.insert((algo_tag(algo), digest), shared_key);
     }
 
     /// Compute the on-disk relative path for a shared blob.
@@ -207,17 +278,25 @@ impl DedupeIndex {
 
     /// Consume-style snapshot of the current tile-path -> shared-key map for
     /// `manifest.json::blank_references` emission.
-    pub fn references(&self) -> HashMap<String, String> {
-        self.refs
+    ///
+    /// Returns a `BTreeMap` so callers that serialize the result get
+    /// deterministic key order (dtolnay #5).
+    pub fn references(&self) -> BTreeMap<String, String> {
+        self.state
             .lock()
-            .expect("dedupe refs mutex poisoned")
+            .expect("dedupe state mutex poisoned")
+            .refs
             .clone()
     }
 
     /// Total number of distinct content hashes seen so far. Useful for
     /// diagnostics and tests.
     pub fn distinct_count(&self) -> usize {
-        self.seen.lock().expect("dedupe seen mutex poisoned").len()
+        self.state
+            .lock()
+            .expect("dedupe state mutex poisoned")
+            .seen
+            .len()
     }
 }
 
@@ -228,6 +307,7 @@ impl DedupeIndex {
 /// Outcome of [`materialize_reference`]: which strategy was ultimately used
 /// to point `tile_path` at `shared_path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LinkResult {
     /// A symbolic link was created at `tile_path` pointing at `shared_path`.
     Symlink,
@@ -340,7 +420,15 @@ fn pathdiff(to: &Path, from: &Path) -> Option<PathBuf> {
 
 /// Materialize a reference at `tile_path` that resolves to `shared_path`.
 ///
-/// Tries, in order: symlink, hardlink, 1-byte placeholder + manifest entry.
+/// Per-platform fallback order (BurntSushi honourable mention):
+///
+/// * **Unix**: symlink → hardlink → 1-byte placeholder + manifest entry.
+///   Symlinks work unprivileged on unix; hardlinks can fail across mount
+///   points, so they come second.
+/// * **Windows**: hardlink → symlink → 1-byte placeholder + manifest entry.
+///   Symlink creation requires admin / Developer Mode on Windows, while
+///   hardlinks work unprivileged. Since `tile_path` and `shared_path` both
+///   live under the sink base dir, hardlinks almost always succeed there.
 ///
 /// The parent directory of `tile_path` must already exist; the caller is
 /// responsible for `std::fs::create_dir_all`. Any pre-existing file at
@@ -353,12 +441,28 @@ pub fn materialize_reference(tile_path: &Path, shared_path: &Path) -> LinkResult
         let _ = std::fs::remove_file(tile_path);
     }
 
-    if try_symlink(shared_path, tile_path).is_ok() {
-        return LinkResult::Symlink;
+    #[cfg(windows)]
+    {
+        // Windows: hardlink first (works without admin), then symlink.
+        if try_hardlink(shared_path, tile_path).is_ok() {
+            return LinkResult::Hardlink;
+        }
+        if try_symlink(shared_path, tile_path).is_ok() {
+            return LinkResult::Symlink;
+        }
     }
-    if try_hardlink(shared_path, tile_path).is_ok() {
-        return LinkResult::Hardlink;
+
+    #[cfg(not(windows))]
+    {
+        // Unix (and other unix-like targets): symlink first, then hardlink.
+        if try_symlink(shared_path, tile_path).is_ok() {
+            return LinkResult::Symlink;
+        }
+        if try_hardlink(shared_path, tile_path).is_ok() {
+            return LinkResult::Hardlink;
+        }
     }
+
     // Final fallback: placeholder file.
     match std::fs::write(tile_path, PLACEHOLDER_MARKER) {
         Ok(()) => LinkResult::ManifestOnly,
@@ -372,6 +476,11 @@ pub fn materialize_reference(tile_path: &Path, shared_path: &Path) -> LinkResult
     }
 }
 
+/// Lowercase-hex encode a byte slice. Duplicated (as of this writing) in
+/// `manifest.rs` and `checksum.rs`; dtolnay flagged the three copies as a
+/// consolidation opportunity. Deferred to a follow-up because promoting the
+/// helper to `pub(crate)` requires touching a file outside this branch's
+/// scope.
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -380,6 +489,33 @@ fn hex_lower(bytes: &[u8]) -> String {
         s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
+}
+
+/// Decode a lowercase or uppercase hex string into a fixed 32-byte digest.
+/// Returns `None` if the input isn't exactly 64 hex characters. Used by
+/// [`DedupeIndex::seed_shared_key`] to convert a caller-supplied hex hash
+/// back into the raw-byte form now stored in `DedupeState::seen`.
+fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in bytes.chunks_exact(2).enumerate() {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        b'A'..=b'F' => Some(10 + (b - b'A')),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -521,5 +657,23 @@ mod tests {
         idx.seed_shared_key(hash.clone(), format!("blank_{hash}"));
         let decision = idx.record("a.png", b"payload");
         assert!(matches!(decision, DedupeDecision::Reference { .. }));
+    }
+
+    #[test]
+    fn decode_hex_32_roundtrip() {
+        let bytes = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff, 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07, 0x08,
+        ];
+        let hex = hex_lower(&bytes);
+        let back = decode_hex_32(&hex).expect("valid hex round-trips");
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn decode_hex_32_rejects_bad_length() {
+        assert!(decode_hex_32("").is_none());
+        assert!(decode_hex_32("abcd").is_none());
     }
 }

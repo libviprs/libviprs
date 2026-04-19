@@ -9,13 +9,19 @@
 //! implementation: the Phase 3 TDD suite exclusively uses test doubles via
 //! [`ObjectStoreConfig::with_object_store`]. Construction without an injected
 //! backend returns an error in [`ObjectStoreSink::new`].
-
-#![cfg(feature = "s3")]
+//!
+//! Retry behaviour is **not** built into [`ObjectStoreSink`]. Callers who want
+//! automatic retries compose one externally:
+//!
+//! ```ignore
+//! use libviprs::retry::{FailurePolicy, RetryPolicy, RetryingSink};
+//! let sink = RetryingSink::new(
+//!     ObjectStoreSink::new(cfg, plan, fmt)?,
+//!     RetryPolicy::default(),
+//! );
+//! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::Duration;
 
 use crate::pixel::PixelFormat;
 use crate::planner::{PyramidPlan, TileCoord};
@@ -34,12 +40,6 @@ pub trait ObjectStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// RetryPolicy (re-exported from retry module to avoid duplication)
-// ---------------------------------------------------------------------------
-
-pub use crate::retry::RetryPolicy;
-
-// ---------------------------------------------------------------------------
 // ObjectStoreConfig
 // ---------------------------------------------------------------------------
 
@@ -48,17 +48,23 @@ pub use crate::retry::RetryPolicy;
 ///
 /// Instances are built via the fluent [`ObjectStoreConfig::s3`] seed and the
 /// `.with_*` methods.
+///
+/// Retry behaviour is **not** configured here — wrap the resulting sink in
+/// [`crate::retry::RetryingSink`] if you need automatic retries.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ObjectStoreConfig {
     pub endpoint: String,
     pub bucket: String,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
-    pub retry: RetryPolicy,
     pub key_prefix: String,
     pub image_name: String,
     pub multipart_threshold: usize,
-    pub store: Option<Arc<dyn ObjectStore>>,
+    /// Injected object-storage backend. Kept private so the only supported
+    /// mutation path is [`ObjectStoreConfig::with_object_store`]; tests and
+    /// production code both go through that builder.
+    store: Option<Arc<dyn ObjectStore>>,
 }
 
 impl std::fmt::Debug for ObjectStoreConfig {
@@ -74,7 +80,6 @@ impl std::fmt::Debug for ObjectStoreConfig {
                 "secret_key",
                 &self.secret_key.as_ref().map(|_| "<redacted>"),
             )
-            .field("retry", &self.retry)
             .field("key_prefix", &self.key_prefix)
             .field("image_name", &self.image_name)
             .field("multipart_threshold", &self.multipart_threshold)
@@ -91,7 +96,6 @@ impl ObjectStoreConfig {
             bucket: bucket.into(),
             access_key: None,
             secret_key: None,
-            retry: RetryPolicy::default(),
             key_prefix: String::new(),
             image_name: "image".to_string(),
             // Default multipart threshold: 8 MiB, matching common S3 defaults.
@@ -111,11 +115,6 @@ impl ObjectStoreConfig {
         self
     }
 
-    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
-        self.retry = retry;
-        self
-    }
-
     pub fn with_key_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.key_prefix = prefix.into();
         self
@@ -131,6 +130,9 @@ impl ObjectStoreConfig {
         self
     }
 
+    /// Inject an [`ObjectStore`] backend — the only supported way to attach a
+    /// backend to the config. The Phase 3 TDD suite uses in-memory test
+    /// doubles here; a production integration wires up the real S3 client.
     pub fn with_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.store = Some(store);
         self
@@ -211,7 +213,10 @@ fn encode_jpeg_local(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError>
         raster.height(),
         ct.into(),
     )
-    .map_err(|e| SinkError::Encode(e.to_string()))?;
+    .map_err(|e| SinkError::Encode {
+        format: "jpeg".into(),
+        source: e,
+    })?;
     Ok(buf)
 }
 
@@ -230,14 +235,20 @@ fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError
 /// A [`TileSink`] that uploads encoded tiles to an S3-compatible object store.
 ///
 /// Tile keys follow the plan's layout (Deep Zoom, XYZ, or Google) rooted at
-/// `<key_prefix>/<image_name>…`. The backend is either injected via
-/// [`ObjectStoreConfig::with_object_store`] (test path) or provided internally
-/// (real S3 path — not wired up in this build).
+/// `<key_prefix>/<image_name>…`. The backend is injected via
+/// [`ObjectStoreConfig::with_object_store`]; a built-in ureq-based S3 client
+/// is not wired into this build (see the TODO stub in [`ObjectStoreSink::new`]).
+///
+/// This sink performs **no** retries of its own — if the underlying store's
+/// `put` fails, the error is returned verbatim. Callers wanting automatic
+/// retry should wrap this sink in [`crate::retry::RetryingSink`] with the
+/// appropriate [`crate::retry::RetryPolicy`] and
+/// [`crate::retry::FailurePolicy`].
+#[non_exhaustive]
 pub struct ObjectStoreSink {
     cfg: ObjectStoreConfig,
     plan: PyramidPlan,
     format: TileFormat,
-    retry_count: AtomicU64,
 }
 
 impl std::fmt::Debug for ObjectStoreSink {
@@ -245,7 +256,6 @@ impl std::fmt::Debug for ObjectStoreSink {
         f.debug_struct("ObjectStoreSink")
             .field("cfg", &self.cfg)
             .field("format", &self.format)
-            .field("retry_count", &self.retry_count.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -253,37 +263,30 @@ impl std::fmt::Debug for ObjectStoreSink {
 impl ObjectStoreSink {
     /// Construct a new sink.
     ///
-    /// Requires `cfg.store` to be populated via
+    /// Requires a backend to have been attached to `cfg` via
     /// [`ObjectStoreConfig::with_object_store`]. The internal ureq-based S3
-    /// signer is not wired up in this build, so calling `new` without an
-    /// injected backend returns [`SinkError::Other`].
+    /// signer is not wired up in this build (tracking: Phase 3 TODO — add a
+    /// native HTTP path so production callers don't need to inject a
+    /// backend), so calling `new` without an injected backend returns
+    /// [`SinkError::Other`] with a message pointing at the injection API.
     pub fn new(
         cfg: ObjectStoreConfig,
         plan: PyramidPlan,
         format: TileFormat,
     ) -> Result<Self, SinkError> {
         if cfg.store.is_none() {
+            // Phase 3 TODO: wire up a built-in ureq-based S3 client so this
+            // branch becomes unreachable. For now, all callers (tests and
+            // production) must inject a backend via `.with_object_store(...)`.
             return Err(SinkError::Other(
-                "ObjectStoreSink requires an injected ObjectStore backend via \
-                 ObjectStoreConfig::with_object_store; the built-in S3 client \
-                 path is not compiled into this build"
+                "ObjectStoreSink: no backend attached. Call \
+                 ObjectStoreConfig::with_object_store(Arc<dyn ObjectStore>) \
+                 to inject an ObjectStore implementation (the built-in S3 \
+                 HTTP client is not compiled into this build)."
                     .into(),
             ));
         }
-        Ok(Self {
-            cfg,
-            plan,
-            format,
-            retry_count: AtomicU64::new(0),
-        })
-    }
-
-    /// Number of retry attempts made across every tile handled by this sink.
-    ///
-    /// Counts *only* the retries — the initial attempt for each tile is not
-    /// included. A value of zero means every tile was stored on its first try.
-    pub fn retry_count(&self) -> u64 {
-        self.retry_count.load(Ordering::Relaxed)
+        Ok(Self { cfg, plan, format })
     }
 
     /// List all object keys currently stored in the backing store under this
@@ -335,47 +338,6 @@ impl ObjectStoreSink {
         };
         Some(key)
     }
-
-    /// Attempt `store.put(key, bytes)` with exponential-backoff retries per
-    /// the configured [`RetryPolicy`]. The initial attempt is always made;
-    /// up to `max_retries` additional attempts follow on failure. Every retry
-    /// (i.e. every attempt *after* the first) is tallied into `retry_count`.
-    fn put_with_retry(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
-        let store =
-            self.cfg.store.as_ref().ok_or_else(|| {
-                SinkError::Other("ObjectStoreSink: backend is not configured".into())
-            })?;
-
-        let mut backoff = self.cfg.retry.initial_backoff;
-        let mut last_err: Option<SinkError> = None;
-
-        // Total attempts = 1 initial + max_retries retries.
-        let total_attempts = self.cfg.retry.max_retries.saturating_add(1);
-        for attempt in 0..total_attempts {
-            match store.put(key, bytes) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    last_err = Some(e);
-                    // If this was the final attempt, don't sleep; fall through.
-                    if attempt + 1 < total_attempts {
-                        self.retry_count.fetch_add(1, Ordering::Relaxed);
-                        // Sleep, then scale the backoff. Guard against
-                        // non-finite multipliers just in case.
-                        thread::sleep(backoff);
-                        let next_ms =
-                            (backoff.as_secs_f64() * 1000.0 * self.cfg.retry.multiplier as f64)
-                                .max(0.0);
-                        if next_ms.is_finite() {
-                            backoff = Duration::from_micros((next_ms * 1000.0) as u64);
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(last_err
-            .unwrap_or_else(|| SinkError::Other(format!("object-store put failed for key {key}"))))
-    }
 }
 
 impl TileSink for ObjectStoreSink {
@@ -395,7 +357,13 @@ impl TileSink for ObjectStoreSink {
         // Tests assert on observed byte length, not on a chunking boundary.
         let _ = self.cfg.multipart_threshold;
 
-        self.put_with_retry(&key, &payload)
+        // Retries (if any) are handled by wrapping this sink in
+        // `RetryingSink` — see module-level docs.
+        let store =
+            self.cfg.store.as_ref().ok_or_else(|| {
+                SinkError::Other("ObjectStoreSink: backend is not configured".into())
+            })?;
+        store.put(&key, &payload)
     }
 
     fn finish(&self) -> Result<(), SinkError> {
@@ -439,14 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_policy_default_matches_spec() {
-        let p = RetryPolicy::default();
-        assert_eq!(p.max_retries, 3);
-        assert_eq!(p.initial_backoff, Duration::from_millis(50));
-        assert!((p.multiplier - 2.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn config_builder_sets_fields() {
         let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket")
             .with_access_key("ak", "sk")
@@ -460,5 +420,20 @@ mod tests {
         assert_eq!(cfg.key_prefix, "p");
         assert_eq!(cfg.image_name, "img");
         assert_eq!(cfg.multipart_threshold, 1024);
+    }
+
+    #[test]
+    fn new_without_backend_mentions_with_object_store() {
+        use crate::planner::{Layout, PyramidPlanner};
+        let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket");
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom)
+            .expect("planner params are valid")
+            .plan();
+        let err = ObjectStoreSink::new(cfg, plan, TileFormat::Png).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("with_object_store"),
+            "error should point callers to the injection API: {msg}"
+        );
     }
 }

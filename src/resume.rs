@@ -93,75 +93,52 @@ pub enum ResumeMode {
 /// `schema_version` is stored as a [`String`] so we can read back old
 /// checkpoints, compare them against [`SCHEMA_VERSION`], and return a
 /// structured error if they disagree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct JobMetadata {
-    /// On-disk schema version. Always equal to [`SCHEMA_VERSION`] ("1") for
-    /// checkpoints produced by this crate version. Stored as `&'static str`
-    /// so test fixtures can use a plain string literal.
-    pub schema_version: &'static str,
+    /// On-disk schema version. Equal to [`SCHEMA_VERSION`] ("1") for
+    /// checkpoints produced by this crate version. Stored as a plain
+    /// [`String`] so the value read from disk is preserved verbatim and can
+    /// be compared against the binary's expected version.
+    pub schema_version: String,
     /// Lowercase hex Blake3 digest of the plan's canonical byte
     /// representation (see [`compute_plan_hash`]).
     pub plan_hash: String,
     /// Coordinates of every tile that has been successfully written and
     /// flushed since the job started.
+    ///
+    /// Uses the [`tile_coord_vec_serde`] adapter because [`TileCoord`] in
+    /// `crate::planner` does not itself implement [`Serialize`] /
+    /// [`Deserialize`].
+    #[serde(with = "tile_coord_vec_serde")]
     pub completed_tiles: Vec<TileCoord>,
     /// Level indices that have been fully completed (every tile in the level
     /// is present in `completed_tiles`). Populated eagerly so resumption can
     /// skip whole levels without re-checking each tile.
+    #[serde(default)]
     pub levels_completed: Vec<u32>,
     /// RFC 3339 timestamp captured when the job first started (Overwrite
     /// mode) or when an existing checkpoint was first resumed.
+    #[serde(default)]
     pub started_at: String,
     /// RFC 3339 timestamp of the most recent checkpoint write.
+    #[serde(default)]
     pub last_checkpoint_at: String,
 }
 
-// Manual Serialize / Deserialize so the `&'static str` schema_version field
-// doesn't force the whole struct into `Deserialize<'static>`.
-impl Serialize for JobMetadata {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("JobMetadata", 6)?;
-        st.serialize_field("schema_version", self.schema_version)?;
-        st.serialize_field("plan_hash", &self.plan_hash)?;
-        let shadow: Vec<tile_coord_vec_serde::CoordShadow> = self
-            .completed_tiles
-            .iter()
-            .map(tile_coord_vec_serde::CoordShadow::from)
-            .collect();
-        st.serialize_field("completed_tiles", &shadow)?;
-        st.serialize_field("levels_completed", &self.levels_completed)?;
-        st.serialize_field("started_at", &self.started_at)?;
-        st.serialize_field("last_checkpoint_at", &self.last_checkpoint_at)?;
-        st.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for JobMetadata {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(default)]
-            #[allow(dead_code)]
-            schema_version: Option<String>,
-            plan_hash: String,
-            completed_tiles: Vec<tile_coord_vec_serde::CoordShadow>,
-            #[serde(default)]
-            levels_completed: Vec<u32>,
-            #[serde(default)]
-            started_at: String,
-            #[serde(default)]
-            last_checkpoint_at: String,
+impl JobMetadata {
+    /// Construct a fresh [`JobMetadata`] tagged with the current
+    /// [`SCHEMA_VERSION`]. All other fields default to empty / zero values;
+    /// callers fill them in as the job progresses.
+    pub fn new(plan_hash: String, started_at: String) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            plan_hash,
+            completed_tiles: Vec::new(),
+            levels_completed: Vec::new(),
+            last_checkpoint_at: started_at.clone(),
+            started_at,
         }
-        let raw = Raw::deserialize(d)?;
-        Ok(Self {
-            schema_version: SCHEMA_VERSION,
-            plan_hash: raw.plan_hash,
-            completed_tiles: raw.completed_tiles.into_iter().map(Into::into).collect(),
-            levels_completed: raw.levels_completed,
-            started_at: raw.started_at,
-            last_checkpoint_at: raw.last_checkpoint_at,
-        })
     }
 }
 
@@ -171,7 +148,6 @@ impl<'de> Deserialize<'de> for JobMetadata {
 /// [`Serialize`] / [`Deserialize`] directly — wiring serde into that module
 /// is out of scope for the resume module. Instead we serialise each coord as
 /// a small `{ level, col, row }` JSON object via a local shadow struct.
-#[allow(dead_code)]
 pub(super) mod tile_coord_vec_serde {
     use super::TileCoord;
     use serde::de::{SeqAccess, Visitor};
@@ -259,11 +235,26 @@ pub enum ResumeError {
         actual: String,
     },
     /// The checkpoint's `schema_version` does not match [`SCHEMA_VERSION`].
-    #[error(
-        "checkpoint schema mismatch: expected '{}', file is not compatible",
-        SCHEMA_VERSION
-    )]
-    SchemaMismatch,
+    #[error("checkpoint schema mismatch: binary speaks version {expected}, file declares {found}")]
+    SchemaMismatch {
+        /// Schema version this binary knows how to read.
+        expected: &'static str,
+        /// Schema version declared by the on-disk checkpoint.
+        found: String,
+    },
+    /// The checkpoint file exists but does not deserialise as valid JSON.
+    ///
+    /// Distinct from [`ResumeError::Io`] so callers can tell "couldn't read
+    /// the file" from "read the file but couldn't parse it" — the latter
+    /// indicates a corrupt or truncated checkpoint.
+    #[error("checkpoint at {path} is corrupt: {source}")]
+    Corrupt {
+        /// Absolute path of the malformed checkpoint file.
+        path: PathBuf,
+        /// Underlying serde_json parse error.
+        #[source]
+        source: serde_json::Error,
+    },
     /// Underlying filesystem error.
     #[error("checkpoint I/O error: {0}")]
     Io(#[from] io::Error),
@@ -288,13 +279,34 @@ impl JobCheckpoint {
 
     /// Load and deserialise the checkpoint from `dir`.
     ///
-    /// Returns `None` if the file does not exist, cannot be read, or fails to
-    /// deserialise. Callers that need to distinguish "no checkpoint" from
-    /// "corrupt checkpoint" should read the file directly.
-    pub fn load(dir: &Path) -> Option<JobMetadata> {
+    /// * `Ok(None)` — the checkpoint file does not exist.
+    /// * `Ok(Some(meta))` — the file exists, parses cleanly, and its
+    ///   `schema_version` matches [`SCHEMA_VERSION`].
+    /// * `Err(ResumeError::Io)` — the file exists but could not be read.
+    /// * `Err(ResumeError::Corrupt)` — the file exists but does not parse as
+    ///   valid JSON for [`JobMetadata`].
+    /// * `Err(ResumeError::SchemaMismatch)` — the file parsed but declares a
+    ///   `schema_version` this binary does not understand.
+    ///
+    /// Corrupt and mismatched checkpoints are surfaced as errors rather than
+    /// swallowed as `None` so callers do not silently overwrite a file that
+    /// might be recoverable.
+    pub fn load(dir: &Path) -> Result<Option<JobMetadata>, ResumeError> {
         let path = Self::checkpoint_path(dir);
-        let bytes = std::fs::read(&path).ok()?;
-        serde_json::from_slice::<JobMetadata>(&bytes).ok()
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(ResumeError::Io(e)),
+        };
+        let meta: JobMetadata = serde_json::from_slice(&bytes)
+            .map_err(|source| ResumeError::Corrupt { path, source })?;
+        if meta.schema_version != SCHEMA_VERSION {
+            return Err(ResumeError::SchemaMismatch {
+                expected: SCHEMA_VERSION,
+                found: meta.schema_version,
+            });
+        }
+        Ok(Some(meta))
     }
 
     /// Persist `meta` to `<dir>/.libviprs-job.json` atomically.
@@ -303,6 +315,7 @@ impl JobCheckpoint {
     /// the final path. On POSIX filesystems this rename is atomic, so a crash
     /// mid-write cannot leave a torn checkpoint — the old file either remains
     /// intact or is fully replaced by the new one.
+    // TODO(windows): `std::fs::rename` is not atomic-replace on Windows; switch to `ReplaceFileW` (dtolnay #9).
     pub fn save(dir: &Path, meta: &JobMetadata) -> io::Result<()> {
         // Make sure the target directory exists; callers typically create it,
         // but checkpointing should not fail just because the sink has not yet
@@ -424,7 +437,7 @@ mod tests {
 
     fn sample_meta(hash: &str) -> JobMetadata {
         JobMetadata {
-            schema_version: SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION.to_string(),
             plan_hash: hash.to_string(),
             completed_tiles: vec![TileCoord::new(0, 0, 0), TileCoord::new(1, 1, 0)],
             levels_completed: vec![0],
@@ -451,14 +464,50 @@ mod tests {
         let hash = compute_plan_hash(&plan);
         let meta = sample_meta(&hash);
         JobCheckpoint::save(dir.path(), &meta).unwrap();
-        let loaded = JobCheckpoint::load(dir.path()).unwrap();
+        let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
         assert_eq!(loaded, meta);
     }
 
     #[test]
     fn load_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(JobCheckpoint::load(dir.path()).is_none());
+        assert!(JobCheckpoint::load(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_rejects_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = JobCheckpoint::checkpoint_path(dir.path());
+        std::fs::write(&path, b"{not valid json").unwrap();
+        match JobCheckpoint::load(dir.path()) {
+            Err(ResumeError::Corrupt { path: p, .. }) => assert_eq!(p, path),
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_schema_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = JobCheckpoint::checkpoint_path(dir.path());
+        std::fs::write(
+            &path,
+            br#"{
+                "schema_version": "999",
+                "plan_hash": "deadbeef",
+                "completed_tiles": [],
+                "levels_completed": [],
+                "started_at": "",
+                "last_checkpoint_at": ""
+            }"#,
+        )
+        .unwrap();
+        match JobCheckpoint::load(dir.path()) {
+            Err(ResumeError::SchemaMismatch { expected, found }) => {
+                assert_eq!(expected, SCHEMA_VERSION);
+                assert_eq!(found, "999");
+            }
+            other => panic!("expected SchemaMismatch, got {other:?}"),
+        }
     }
 
     #[test]
