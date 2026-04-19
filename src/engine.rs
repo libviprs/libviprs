@@ -24,6 +24,8 @@ pub enum EngineError {
     Cancelled,
     #[error("worker panicked")]
     WorkerPanic,
+    #[error("budget exceeded: worst-case strip {strip_bytes} bytes > budget {budget_bytes} bytes")]
+    BudgetExceeded { strip_bytes: u64, budget_bytes: u64 },
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.
