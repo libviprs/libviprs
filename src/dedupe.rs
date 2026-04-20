@@ -611,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn materialize_reference_creates_a_readable_tile() {
         let tmp = tempfile::tempdir().unwrap();
         let shared_dir = tmp.path().join("_shared");

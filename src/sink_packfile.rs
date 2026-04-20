@@ -450,6 +450,7 @@ mod tests {
     /// resulting stem mirrors what the test suite expects (`output.tar` →
     /// `"output"`, `pyramid.tar.gz` → `"pyramid"`).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn archive_stem_handles_common_suffixes() {
         let plan = make_plan(64, 64, 32);
 
@@ -476,6 +477,7 @@ mod tests {
     /// `tile_archive_path` emits the expected DeepZoom layout string
     /// `<stem>_files/<level>/<x>_<y>.<ext>`.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn tile_archive_path_uses_deep_zoom_layout() {
         let plan = make_plan(128, 128, 64);
         let top_level = plan.levels.last().unwrap().level;
@@ -498,6 +500,7 @@ mod tests {
     /// `build_manifest_json` emits well-formed JSON containing the expected
     /// structural fields.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn manifest_json_contains_structural_fields() {
         let plan = make_plan(128, 128, 64);
 
@@ -522,6 +525,7 @@ mod tests {
     /// Smoke: writing a single tile + calling `finish()` on a tar sink
     /// produces a non-empty archive file.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn end_to_end_tar_smoke() {
         let plan = make_plan(64, 64, 32);
         let top = plan.levels.last().unwrap();
