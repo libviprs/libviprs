@@ -201,9 +201,10 @@ pub fn compute_backoff(policy: &RetryPolicy, attempt: u32) -> Duration {
         scaled
     };
 
-    // Safe: `clamped` is non-negative and bounded by `max_nanos`, which fits
-    // in u128 by construction (it came from a Duration).
-    let nanos = clamped as u128;
+    // Round to the nearest nanosecond before casting: `f64` cannot exactly
+    // represent every product of `initial * multiplier^attempt`, so a naive
+    // truncating cast can produce 39_999_999 ns where 40_000_000 is intended.
+    let nanos = clamped.round() as u128;
     duration_from_nanos_u128(nanos)
 }
 
