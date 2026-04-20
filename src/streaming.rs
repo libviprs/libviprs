@@ -935,6 +935,13 @@ pub fn generate_pyramid_streaming(
         tiles_skipped,
         levels_processed: plan.levels.len() as u32,
         peak_memory_bytes: tracker.peak_bytes(),
+        bytes_read: 0,
+        bytes_written: 0,
+        retry_count: 0,
+        queue_pressure_peak: 0,
+        duration: std::time::Duration::ZERO,
+        stage_durations: crate::engine::StageDurations::default(),
+        skipped_due_to_failure: 0,
     })
 }
 
@@ -1203,7 +1210,7 @@ pub(crate) fn emit_strip_tiles(
 ) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
     let ts = plan.tile_size;
-    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
+    let blank_strategy = config.blank_tile_strategy;
 
     let first_row = strip_canvas_y / ts;
     let last_row = (strip_canvas_y + strip.height()).div_ceil(ts);
@@ -1217,7 +1224,15 @@ pub(crate) fn emit_strip_tiles(
             let coord = TileCoord::new(level, col, row);
             let tile_raster =
                 extract_tile_from_strip(strip, plan, coord, strip_canvas_y, config.background_rgb)?;
-            let blank = use_placeholders && crate::engine::is_blank_tile(&tile_raster);
+            let blank = matches!(
+                blank_strategy,
+                BlankTileStrategy::Placeholder | BlankTileStrategy::PlaceholderWithTolerance { .. }
+            ) && match blank_strategy {
+                BlankTileStrategy::PlaceholderWithTolerance { max_channel_delta } => {
+                    crate::engine::is_blank_tile_with_tolerance(&tile_raster, max_channel_delta)
+                }
+                _ => crate::engine::is_blank_tile(&tile_raster),
+            };
             if blank {
                 skipped += 1;
             }
