@@ -458,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let plan = sample_plan();
@@ -469,12 +470,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn load_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(JobCheckpoint::load(dir.path()).unwrap().is_none());
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn load_rejects_corrupt_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = JobCheckpoint::checkpoint_path(dir.path());
@@ -486,6 +489,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn load_rejects_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let path = JobCheckpoint::checkpoint_path(dir.path());
@@ -511,6 +515,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_is_atomic_no_tmp_left_behind() {
         let dir = tempfile::tempdir().unwrap();
         let plan = sample_plan();
