@@ -29,6 +29,8 @@
 pub mod checksum;
 pub mod dedupe;
 pub mod engine;
+pub mod engine_builder;
+pub mod extensions;
 pub mod geo;
 #[cfg(loom)]
 mod loom_tests;
@@ -60,6 +62,7 @@ pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, generate_pyramid,
     generate_pyramid_observed, generate_pyramid_resumable, is_blank_tile,
 };
+pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,

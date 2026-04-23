@@ -56,6 +56,20 @@ pub enum EngineError {
     VerifyRequiresOnDiskSink,
     #[error("budget exceeded: worst-case strip {strip_bytes} bytes > budget {budget_bytes} bytes")]
     BudgetExceeded { strip_bytes: u64, budget_bytes: u64 },
+    /// The [`EngineKind`](crate::EngineKind) requested through
+    /// [`EngineBuilder::with_engine`](crate::EngineBuilder::with_engine) is
+    /// not compatible with the supplied source. For example,
+    /// [`EngineKind::Monolithic`](crate::EngineKind::Monolithic) requires an
+    /// in-memory [`Raster`]; pairing it with a [`StripSource`](crate::streaming::StripSource)
+    /// would require materialising the entire source up front, which is
+    /// exactly what a strip source is built to avoid. The builder surfaces
+    /// this condition as a typed error instead of silently pulling the
+    /// source into memory.
+    #[error("engine kind {kind:?} incompatible with supplied source: {reason}")]
+    IncompatibleSource {
+        kind: crate::EngineKind,
+        reason: &'static str,
+    },
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.

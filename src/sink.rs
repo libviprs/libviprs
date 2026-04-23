@@ -172,6 +172,48 @@ pub trait TileSink: Send + Sync {
     fn init_level_count(&self, _levels: usize) {}
 }
 
+/// Forwarding impl so `Box<dyn TileSink>` (and `Box<T>` where `T: TileSink`)
+/// satisfies [`TileSink`] itself.
+///
+/// Required so callers can unify match arms that return different concrete
+/// sink types under `Box<dyn TileSink>` and feed the boxed form to
+/// [`EngineBuilder::new`](crate::EngineBuilder::new):
+///
+/// ```ignore
+/// let sink: Box<dyn TileSink> = match mode {
+///     "mem" => Box::new(MemorySink::new()),
+///     "fs"  => Box::new(FsSink::new(dir, plan)),
+///     _ => unreachable!(),
+/// };
+/// EngineBuilder::new(&src, plan, sink).run()?;
+/// ```
+impl<T: TileSink + ?Sized> TileSink for Box<T> {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        (**self).write_tile(tile)
+    }
+    fn finish(&self) -> Result<(), SinkError> {
+        (**self).finish()
+    }
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        (**self).record_engine_config(config)
+    }
+    fn sink_retry_count(&self) -> u64 {
+        (**self).sink_retry_count()
+    }
+    fn sink_skipped_due_to_failure(&self) -> u64 {
+        (**self).sink_skipped_due_to_failure()
+    }
+    fn note_sink_skipped(&self) {
+        (**self).note_sink_skipped()
+    }
+    fn checkpoint_root(&self) -> Option<&Path> {
+        (**self).checkpoint_root()
+    }
+    fn init_level_count(&self, levels: usize) {
+        (**self).init_level_count(levels)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MemorySink
 // ---------------------------------------------------------------------------
