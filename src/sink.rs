@@ -214,6 +214,45 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     }
 }
 
+/// Forwarding impl so `&T` satisfies [`TileSink`] wherever `T` does.
+///
+/// Parallels the [`Box<T>`] impl above. Lets callers feed the
+/// [`EngineBuilder`](crate::EngineBuilder) a borrowed sink when they need
+/// to keep ownership (e.g. the CLI, which uses the same sink for both the
+/// builder path and the resumable free function):
+///
+/// ```ignore
+/// let sink = FsSink::new(dir, plan);
+/// EngineBuilder::new(&raster, plan.clone(), &sink).run()?;
+/// // `sink` still usable here.
+/// ```
+impl<T: TileSink + ?Sized> TileSink for &T {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        (*self).write_tile(tile)
+    }
+    fn finish(&self) -> Result<(), SinkError> {
+        (*self).finish()
+    }
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        (*self).record_engine_config(config)
+    }
+    fn sink_retry_count(&self) -> u64 {
+        (*self).sink_retry_count()
+    }
+    fn sink_skipped_due_to_failure(&self) -> u64 {
+        (*self).sink_skipped_due_to_failure()
+    }
+    fn note_sink_skipped(&self) {
+        (*self).note_sink_skipped()
+    }
+    fn checkpoint_root(&self) -> Option<&Path> {
+        (*self).checkpoint_root()
+    }
+    fn init_level_count(&self, levels: usize) {
+        (*self).init_level_count(levels)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MemorySink
 // ---------------------------------------------------------------------------
