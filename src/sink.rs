@@ -444,8 +444,40 @@ impl std::fmt::Debug for FsSink {
 
 impl FsSink {
     /// Creates a new filesystem sink rooted at `base_dir` with the given
-    /// pyramid plan and tile encoding format.
-    pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan, format: TileFormat) -> Self {
+    /// pyramid plan. The tile encoding format defaults to
+    /// [`TileFormat::Png`]; override it via [`FsSink::with_format`] when
+    /// writing JPEG or Raw tiles:
+    ///
+    /// ```ignore
+    /// FsSink::new(dir, plan).with_format(TileFormat::Jpeg { quality: 85 });
+    /// ```
+    pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan) -> Self {
+        Self::new_with_format_inner(base_dir, plan, TileFormat::Png)
+    }
+
+    /// Deprecated three-argument constructor that takes the tile format as a
+    /// positional parameter.
+    ///
+    /// Retained as a migration alias; new code should prefer
+    /// [`FsSink::new`] followed by [`FsSink::with_format`] when a non-PNG
+    /// format is needed.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use FsSink::new(dir, plan).with_format(format) instead"
+    )]
+    pub fn new_with_format(
+        base_dir: impl Into<PathBuf>,
+        plan: PyramidPlan,
+        format: TileFormat,
+    ) -> Self {
+        Self::new_with_format_inner(base_dir, plan, format)
+    }
+
+    fn new_with_format_inner(
+        base_dir: impl Into<PathBuf>,
+        plan: PyramidPlan,
+        format: TileFormat,
+    ) -> Self {
         let base_dir = base_dir.into();
         // Pre-size the per-level atomic counter vector so that the hot
         // write path can index by `level as usize` without any lock or
@@ -545,12 +577,12 @@ impl FsSink {
 
     /// Override the tile encoding format after construction.
     ///
-    /// Lets callers configure the format through the builder chain rather
-    /// than via the `new` constructor's positional argument, matching the
-    /// per-component builder convention used elsewhere in the crate:
+    /// Overrides the tile encoding format set by [`FsSink::new`] (which
+    /// defaults to [`TileFormat::Png`]). Chain with the other `with_*`
+    /// methods to configure the full sink in builder style:
     ///
     /// ```ignore
-    /// FsSink::new(dir, plan, TileFormat::Png)
+    /// FsSink::new(dir, plan)
     ///     .with_format(TileFormat::Jpeg { quality: 85 })
     ///     .with_dedupe(DedupeStrategy::Blanks);
     /// ```
@@ -1362,11 +1394,8 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(
-                dir.path().join("output_files"),
-                plan.clone(),
-                TileFormat::Raw,
-            );
+            let sink = FsSink::new(dir.path().join("output_files"), plan.clone())
+                .with_format(TileFormat::Raw);
             let tile = Tile {
                 coord: TileCoord::new(top.level, 0, 0),
                 raster,
@@ -1412,7 +1441,8 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
+            let sink =
+                FsSink::new(dir.path().join("tiles"), plan.clone()).with_format(TileFormat::Raw);
 
             for col in 0..top.cols {
                 for row in 0..top.rows {
@@ -1459,7 +1489,7 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("output_files"), plan, TileFormat::Png);
+            let sink = FsSink::new(dir.path().join("output_files"), plan);
             sink.finish().unwrap();
 
             let dzi_path = dir.path().join("output_files.dzi");
@@ -1494,7 +1524,7 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("tiles"), plan, TileFormat::Raw);
+            let sink = FsSink::new(dir.path().join("tiles"), plan).with_format(TileFormat::Raw);
             sink.finish().unwrap();
 
             let dzi_path = dir.path().join("tiles.dzi");
@@ -1536,7 +1566,8 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
+            let sink =
+                FsSink::new(dir.path().join("tiles"), plan.clone()).with_format(TileFormat::Raw);
 
             let rect = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
             let tile = Tile {
@@ -1578,7 +1609,7 @@ mod tests {
             let plan = planner.plan();
             let top_level = plan.levels.last().unwrap().level;
 
-            let sink = FsSink::new(dir.path().join("out"), plan, TileFormat::Png);
+            let sink = FsSink::new(dir.path().join("out"), plan);
             let tile = Tile {
                 coord: TileCoord::new(top_level, 0, 0),
                 raster,
@@ -1619,11 +1650,8 @@ mod tests {
             let plan = planner.plan();
             let top_level = plan.levels.last().unwrap().level;
 
-            let sink = FsSink::new(
-                dir.path().join("out"),
-                plan,
-                TileFormat::Jpeg { quality: 85 },
-            );
+            let sink = FsSink::new(dir.path().join("out"), plan)
+                .with_format(TileFormat::Jpeg { quality: 85 });
             let tile = Tile {
                 coord: TileCoord::new(top_level, 0, 0),
                 raster,
@@ -1667,8 +1695,10 @@ mod tests {
 
             let dir1 = tempfile::tempdir().unwrap();
             let dir2 = tempfile::tempdir().unwrap();
-            let sink1 = FsSink::new(dir1.path().join("out"), plan.clone(), TileFormat::Raw);
-            let sink2 = FsSink::new(dir2.path().join("out"), plan.clone(), TileFormat::Raw);
+            let sink1 =
+                FsSink::new(dir1.path().join("out"), plan.clone()).with_format(TileFormat::Raw);
+            let sink2 =
+                FsSink::new(dir2.path().join("out"), plan.clone()).with_format(TileFormat::Raw);
 
             let tile = Tile {
                 coord: TileCoord::new(top.level, 0, 0),
