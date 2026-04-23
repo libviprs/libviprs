@@ -45,9 +45,8 @@ use thiserror::Error;
 
 use crate::planner::{Layout, PyramidPlan, TileCoord};
 
-// Re-export the engine entry point from `libviprs::resume::*` so tests can
-// grab it from the same module that owns the checkpoint types.
-pub use crate::engine::generate_pyramid_resumable;
+// `generate_pyramid_resumable` is now the exclusive purview of
+// `EngineBuilder::with_resume` — no crate-external entry point.
 
 /// Current on-disk schema version for [`JobMetadata`].
 ///

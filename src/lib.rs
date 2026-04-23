@@ -59,8 +59,7 @@ pub mod streaming_mapreduce;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use engine::{
-    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations,
-    generate_pyramid_resumable, is_blank_tile,
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
 };
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};

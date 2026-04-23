@@ -220,6 +220,12 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// old `generate_pyramid_observed(source, plan, sink, &config, obs)`
     /// free function. Individual `.with_*` setters called after
     /// `with_config` take precedence.
+    ///
+    /// Also threads the config's `checkpoint_every` and `checkpoint_root`
+    /// into a default [`ResumePolicy::overwrite`] if no explicit policy has
+    /// been attached yet — matching the behaviour of the old
+    /// `generate_pyramid_resumable` path where those knobs lived directly
+    /// on the `EngineConfig`.
     pub fn with_config(mut self, config: EngineConfig) -> Self {
         self.concurrency = Some(config.concurrency);
         self.buffer_size = Some(config.buffer_size);
@@ -228,6 +234,22 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         self.failure_policy = Some(config.failure_policy);
         if let Some(ds) = config.dedupe_strategy {
             self.dedupe = Some(ds);
+        }
+        // Carry the checkpoint knobs into an existing ResumePolicy (if set)
+        // so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
+        // don't silently lose the cadence / root that used to live on the
+        // config.
+        if config.checkpoint_every != 0 || config.checkpoint_root.is_some() {
+            let mut policy = self.resume.unwrap_or_else(ResumePolicy::overwrite);
+            if config.checkpoint_every != 0 && policy.checkpoint_every() == 0 {
+                policy = policy.with_checkpoint_every(config.checkpoint_every);
+            }
+            if policy.checkpoint_root().is_none() {
+                if let Some(root) = config.checkpoint_root {
+                    policy = policy.with_checkpoint_root(root);
+                }
+            }
+            self.resume = Some(policy);
         }
         self
     }
@@ -350,7 +372,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             blank_strategy,
             failure_policy,
             dedupe,
-            resume: _resume, // not wired into the existing free fns yet
+            resume,
             memory_budget_bytes,
             budget_policy,
             extensions: _extensions, // libviprs itself reads zero extensions
@@ -358,7 +380,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
         // Build the EngineConfig once; the three engines accept slight
         // variations of it but all share the same underlying knob list.
-        let engine_cfg = build_engine_config(
+        let mut engine_cfg = build_engine_config(
             concurrency,
             buffer_size,
             background_rgb,
@@ -373,6 +395,43 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         };
 
         let kind = resolve_engine_kind(engine_kind, &source);
+
+        // Resume path: dispatch to generate_pyramid_resumable when a
+        // ResumePolicy is set. Only Monolithic + Raster is supported today
+        // — streaming and map-reduce resume land in a follow-up.
+        if let Some(policy) = resume {
+            if !matches!(kind, EngineKind::Monolithic) {
+                return Err(EngineError::IncompatibleSource {
+                    kind,
+                    reason: "ResumePolicy requires EngineKind::Monolithic (or Auto with a Raster source); streaming / map-reduce resume is not yet supported",
+                });
+            }
+            let raster = match source {
+                EngineSource::Raster(r) => r,
+                EngineSource::Strip(_) => {
+                    return Err(EngineError::IncompatibleSource {
+                        kind,
+                        reason: "ResumePolicy requires an in-memory Raster source",
+                    });
+                }
+            };
+            // Thread checkpoint frequency and root from the ResumePolicy
+            // into the EngineConfig that generate_pyramid_resumable reads.
+            if policy.checkpoint_every() > 0 {
+                engine_cfg = engine_cfg.with_checkpoint_every(policy.checkpoint_every());
+            }
+            if let Some(root) = policy.checkpoint_root() {
+                engine_cfg = engine_cfg.with_checkpoint_root(root.to_path_buf());
+            }
+            let result = crate::engine::generate_pyramid_resumable(
+                raster,
+                &plan,
+                &sink,
+                &engine_cfg,
+                policy.mode(),
+            )?;
+            return Ok((result, sink));
+        }
 
         let result = match (kind, source) {
             (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
