@@ -125,6 +125,23 @@ impl RetryPolicy {
         }
     }
 
+    /// Construct a policy that never retries (shorthand for `max_retries = 0`).
+    ///
+    /// Use this when you want [`FailurePolicy::FailFast`]-style behaviour but
+    /// still want to feed a `RetryPolicy` value through an API that requires
+    /// one (e.g. a `match` arm returning `RetryPolicy` from every branch).
+    pub fn fail_fast() -> Self {
+        Self {
+            max_retries: 0,
+            ..Self::default()
+        }
+    }
+
+    /// Short-form alias for [`RetryPolicy::with_max_retries`].
+    pub fn with_max(self, n: u32) -> Self {
+        self.with_max_retries(n)
+    }
+
     pub fn with_max_retries(mut self, n: u32) -> Self {
         self.max_retries = n;
         self
