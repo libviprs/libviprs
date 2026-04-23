@@ -213,6 +213,25 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         self
     }
 
+    /// Apply every field of an existing [`EngineConfig`] in one call.
+    ///
+    /// Convenience for callers that already have a fully-constructed
+    /// [`EngineConfig`] — typically because they're migrating from the
+    /// old `generate_pyramid_observed(source, plan, sink, &config, obs)`
+    /// free function. Individual `.with_*` setters called after
+    /// `with_config` take precedence.
+    pub fn with_config(mut self, config: EngineConfig) -> Self {
+        self.concurrency = Some(config.concurrency);
+        self.buffer_size = Some(config.buffer_size);
+        self.background_rgb = Some(config.background_rgb);
+        self.blank_strategy = Some(config.blank_tile_strategy);
+        self.failure_policy = Some(config.failure_policy);
+        if let Some(ds) = config.dedupe_strategy {
+            self.dedupe = Some(ds);
+        }
+        self
+    }
+
     /// Set the [`FailurePolicy`] the engine consults when a tile write
     /// terminally fails. Overrides any earlier [`EngineBuilder::with_retry`]
     /// call.

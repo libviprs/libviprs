@@ -533,32 +533,7 @@ impl FsSink {
     /// FsSink::new(dir, plan).with_format(TileFormat::Jpeg { quality: 85 });
     /// ```
     pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan) -> Self {
-        Self::new_with_format_inner(base_dir, plan, TileFormat::Png)
-    }
-
-    /// Deprecated three-argument constructor that takes the tile format as a
-    /// positional parameter.
-    ///
-    /// Retained as a migration alias; new code should prefer
-    /// [`FsSink::new`] followed by [`FsSink::with_format`] when a non-PNG
-    /// format is needed.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use FsSink::new(dir, plan).with_format(format) instead"
-    )]
-    pub fn new_with_format(
-        base_dir: impl Into<PathBuf>,
-        plan: PyramidPlan,
-        format: TileFormat,
-    ) -> Self {
-        Self::new_with_format_inner(base_dir, plan, format)
-    }
-
-    fn new_with_format_inner(
-        base_dir: impl Into<PathBuf>,
-        plan: PyramidPlan,
-        format: TileFormat,
-    ) -> Self {
+        let format = TileFormat::Png;
         let base_dir = base_dir.into();
         // Pre-size the per-level atomic counter vector so that the hot
         // write path can index by `level as usize` without any lock or

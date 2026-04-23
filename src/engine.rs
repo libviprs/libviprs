@@ -299,15 +299,6 @@ pub struct EngineResult {
 /// for PDF-sourced pyramids, and the
 /// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for end-to-end CLI usage.
-pub fn generate_pyramid(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-) -> Result<EngineResult, EngineError> {
-    generate_pyramid_observed(source, plan, sink, config, &NoopObserver)
-}
-
 /// Generates a tile pyramid with an [`EngineObserver`] for progress events.
 ///
 /// Behaves identically to [`generate_pyramid`] but emits [`EngineEvent`]s
@@ -319,7 +310,7 @@ pub fn generate_pyramid(
 /// See the
 /// [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
 /// for integration-level examples of observer usage.
-pub fn generate_pyramid_observed(
+pub(crate) fn generate_pyramid_observed(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
@@ -1601,7 +1592,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
@@ -1621,7 +1612,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default().with_concurrency(4);
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
@@ -1641,7 +1632,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default().with_concurrency(2);
 
-        generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         let tiles = sink.tiles();
         let mut coords: Vec<_> = tiles.iter().map(|t| t.coord).collect();
@@ -1667,7 +1658,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
@@ -1696,7 +1687,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
 
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -1704,7 +1702,7 @@ mod tests {
         for concurrency in [1, 2, 4, 8, 16] {
             let sink = MemorySink::new();
             let config = EngineConfig::default().with_concurrency(concurrency);
-            generate_pyramid(&src, &plan, &sink, &config).unwrap();
+            generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
             let mut tiles = sink.tiles();
             tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -1739,7 +1737,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
         assert_eq!(result.levels_processed, plan.level_count() as u32);
     }
 
@@ -1756,7 +1756,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
         assert_eq!(result.tiles_produced, plan.level_count() as u64);
     }
 
@@ -1776,7 +1778,7 @@ mod tests {
             .with_concurrency(4)
             .with_buffer_size(1);
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 
@@ -1832,7 +1834,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
@@ -1860,7 +1862,7 @@ mod tests {
             .with_concurrency(4)
             .with_buffer_size(2);
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
@@ -2002,7 +2004,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
 
         // Peak should be at least the source raster size
         let source_bytes = 512 * 512 * 3;
@@ -2028,7 +2032,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
 
         let source_bytes = 1024u64 * 1024 * 3;
         // Should be less than 2x source (current level + some overhead)
@@ -2051,7 +2057,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
@@ -2065,7 +2071,8 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+            .unwrap();
 
         for tile in sink.tiles() {
             assert_eq!(tile.width, 256, "Width mismatch at {:?}", tile.coord);
@@ -2083,7 +2090,8 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+            .unwrap();
 
         // Level 0 should have 1 tile (1x1 grid)
         let tiles = sink.tiles();
@@ -2115,7 +2123,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
 
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -2123,7 +2138,7 @@ mod tests {
         for concurrency in [1, 2, 4] {
             let sink = MemorySink::new();
             let config = EngineConfig::default().with_concurrency(concurrency);
-            generate_pyramid(&src, &plan, &sink, &config).unwrap();
+            generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
             let mut tiles = sink.tiles();
             tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -2147,7 +2162,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 }

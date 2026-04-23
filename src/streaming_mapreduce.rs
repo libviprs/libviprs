@@ -36,8 +36,10 @@ use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::raster::Raster;
 use crate::resize;
 use crate::sink::{Tile, TileSink};
+#[cfg(test)]
+use crate::streaming::RasterStripSource;
 use crate::streaming::{
-    RasterStripSource, StripSource, compute_strip_height, emit_full_level_tiles, emit_strip_tiles,
+    StripSource, compute_strip_height, emit_full_level_tiles, emit_strip_tiles,
     fill_background_rows, find_monolithic_threshold, obtain_canvas_strip, propagate_down,
 };
 
@@ -274,7 +276,7 @@ fn emit_strip_tiles_parallel(
 /// Produces byte-identical output to the sequential streaming engine and
 /// the monolithic engine. The reduce phase uses the same `propagate_down`
 /// logic and monolithic flush.
-pub fn generate_pyramid_mapreduce(
+pub(crate) fn generate_pyramid_mapreduce(
     source: &dyn StripSource,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
@@ -567,25 +569,6 @@ pub fn generate_pyramid_mapreduce(
     })
 }
 
-/// Auto-selecting entry point: monolithic if budget allows, MapReduce otherwise.
-pub fn generate_pyramid_mapreduce_auto(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &MapReduceConfig,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    let mono_peak = plan.estimate_peak_memory_for_format(source.format());
-
-    if mono_peak <= config.memory_budget_bytes {
-        let engine_cfg = config.engine_config();
-        crate::engine::generate_pyramid_observed(source, plan, sink, &engine_cfg, observer)
-    } else {
-        let strip_source = RasterStripSource::new(source);
-        generate_pyramid_mapreduce(&strip_source, plan, sink, config, observer)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -644,7 +627,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        crate::engine::generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -675,8 +665,14 @@ mod tests {
             ..MapReduceConfig::default()
         };
         let sink = MemorySink::new();
-        let result =
-            generate_pyramid_mapreduce_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        let result = generate_pyramid_mapreduce(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 }
