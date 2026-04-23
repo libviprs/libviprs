@@ -32,7 +32,7 @@ use crate::extensions::Extensions;
 use crate::observe::{EngineObserver, NoopObserver};
 use crate::planner::PyramidPlan;
 use crate::raster::Raster;
-use crate::resume::ResumePolicy;
+use crate::resume::{ResumeMode, ResumePolicy};
 use crate::retry::{FailurePolicy, RetryPolicy};
 use crate::sink::TileSink;
 use crate::streaming::{
@@ -396,41 +396,116 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
         let kind = resolve_engine_kind(engine_kind, &source);
 
-        // Resume path: dispatch to generate_pyramid_resumable when a
-        // ResumePolicy is set. Only Monolithic + Raster is supported today
-        // — streaming and map-reduce resume land in a follow-up.
+        // Resume path: route through the resumable engine (Monolithic) or
+        // wrap the sink in a resume-aware filter (Streaming / MapReduce).
+        // Verify mode still requires a Raster source — the verify loop
+        // regenerates every level via downscale_half, which needs the full
+        // source raster in memory.
         if let Some(policy) = resume {
-            if !matches!(kind, EngineKind::Monolithic) {
-                return Err(EngineError::IncompatibleSource {
-                    kind,
-                    reason: "ResumePolicy requires EngineKind::Monolithic (or Auto with a Raster source); streaming / map-reduce resume is not yet supported",
-                });
-            }
-            let raster = match source {
-                EngineSource::Raster(r) => r,
-                EngineSource::Strip(_) => {
-                    return Err(EngineError::IncompatibleSource {
-                        kind,
-                        reason: "ResumePolicy requires an in-memory Raster source",
-                    });
-                }
-            };
             // Thread checkpoint frequency and root from the ResumePolicy
-            // into the EngineConfig that generate_pyramid_resumable reads.
+            // into the EngineConfig that the inner path reads.
             if policy.checkpoint_every() > 0 {
                 engine_cfg = engine_cfg.with_checkpoint_every(policy.checkpoint_every());
             }
             if let Some(root) = policy.checkpoint_root() {
                 engine_cfg = engine_cfg.with_checkpoint_root(root.to_path_buf());
             }
-            let result = crate::engine::generate_pyramid_resumable(
-                raster,
-                &plan,
-                &sink,
-                &engine_cfg,
-                policy.mode(),
-                observer_ref,
-            )?;
+
+            // Monolithic + Raster — existing resumable engine handles wipe,
+            // skip-set load, checkpoint state, and verify.
+            if matches!(kind, EngineKind::Monolithic) {
+                let raster = match source {
+                    EngineSource::Raster(r) => r,
+                    EngineSource::Strip(_) => {
+                        return Err(EngineError::IncompatibleSource {
+                            kind,
+                            reason: "ResumePolicy requires an in-memory Raster source for the Monolithic engine",
+                        });
+                    }
+                };
+                let result = crate::engine::generate_pyramid_resumable(
+                    raster,
+                    &plan,
+                    &sink,
+                    &engine_cfg,
+                    policy.mode(),
+                    observer_ref,
+                )?;
+                return Ok((result, sink));
+            }
+
+            // Verify with a streaming engine requires regenerating every
+            // level via downscale_half — that needs the full raster, which
+            // is exactly what a strip source is built to avoid. Stream
+            // sources can't cheaply satisfy Verify, so we reject it
+            // explicitly and steer the caller to Monolithic.
+            if matches!(policy.mode(), ResumeMode::Verify) {
+                return Err(EngineError::IncompatibleSource {
+                    kind,
+                    reason: "ResumePolicy::verify() requires EngineKind::Monolithic (verify walks every level from the source raster); use Monolithic for Verify runs",
+                });
+            }
+
+            // Streaming / MapReduce + Overwrite or Resume.
+            // Pattern:
+            //   1. Optionally wipe the output (Overwrite) or load the
+            //      checkpoint (Resume) to get the skip set.
+            //   2. Construct a CheckpointState rooted at the sink.
+            //   3. Wrap the user sink in a resume-aware filter that
+            //      short-circuits write_tile for already-completed coords
+            //      and advances the checkpoint for every real write.
+            //   4. Run the streaming / map-reduce engine against the
+            //      wrapped sink.
+            //   5. Flush the checkpoint on success.
+            let (skip, cp) = prepare_resume_state(&sink, &plan, &engine_cfg, policy.mode())?;
+            let wrapped = resume::ResumeAwareSink {
+                inner: &sink,
+                skip: &skip,
+                cp: cp.as_ref(),
+            };
+            let result = match (kind, source) {
+                (EngineKind::Streaming, EngineSource::Raster(raster)) => {
+                    let strip = RasterStripSource::new(raster);
+                    let cfg =
+                        build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
+                    generate_pyramid_streaming(&strip, &plan, &wrapped, &cfg, observer_ref)?
+                }
+                (EngineKind::Streaming, EngineSource::Strip(strip)) => {
+                    let cfg =
+                        build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
+                    generate_pyramid_streaming(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
+                }
+                (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
+                    let strip = RasterStripSource::new(raster);
+                    let cfg = build_mapreduce_config(
+                        memory_budget_bytes,
+                        concurrency,
+                        buffer_size,
+                        background_rgb,
+                        blank_strategy,
+                    );
+                    generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)?
+                }
+                (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
+                    let cfg = build_mapreduce_config(
+                        memory_budget_bytes,
+                        concurrency,
+                        buffer_size,
+                        background_rgb,
+                        blank_strategy,
+                    );
+                    generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
+                }
+                (EngineKind::Auto, _) => {
+                    unreachable!("Auto should have been resolved before match")
+                }
+                (EngineKind::Monolithic, _) => {
+                    unreachable!("Monolithic + resume handled in the branch above")
+                }
+            };
+            if let Some(cp) = cp.as_ref() {
+                cp.flush().map_err(EngineError::ResumeFailed)?;
+            }
             return Ok((result, sink));
         }
 
@@ -572,4 +647,139 @@ fn resolve_engine_kind(kind: EngineKind, source: &EngineSource<'_>) -> EngineKin
         (EngineKind::Auto, EngineSource::Strip(_)) => EngineKind::Streaming,
         (k, _) => k,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resume support for streaming / map-reduce engines
+// ---------------------------------------------------------------------------
+
+/// Prepare the (skip_set, checkpoint_state) pair for a streaming or
+/// map-reduce resume run. Matches the Monolithic engine's Overwrite /
+/// Resume behaviour:
+///
+/// - [`ResumeMode::Overwrite`] — wipe the output root and start with an
+///   empty skip set and a fresh checkpoint state.
+/// - [`ResumeMode::Resume`] — load the existing checkpoint (if any) and
+///   build the skip set from its `completed_tiles`. Surfaces
+///   [`EngineError::PlanHashMismatch`] when the on-disk checkpoint was
+///   produced from a different plan.
+fn prepare_resume_state(
+    sink: &dyn TileSink,
+    plan: &PyramidPlan,
+    config: &EngineConfig,
+    mode: ResumeMode,
+) -> Result<
+    (
+        std::collections::HashSet<crate::planner::TileCoord>,
+        Option<crate::engine::CheckpointState>,
+    ),
+    EngineError,
+> {
+    match mode {
+        ResumeMode::Overwrite => {
+            if let Some(root) = crate::engine::resolve_checkpoint_root(config, sink) {
+                crate::engine::wipe_directory(&root)
+                    .map_err(|e| EngineError::ResumeFailed(crate::resume::ResumeError::from(e)))?;
+            }
+            let cp = crate::engine::cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
+            Ok((std::collections::HashSet::new(), cp))
+        }
+        ResumeMode::Resume => {
+            let expected_hash = crate::resume::compute_plan_hash(plan);
+            let (completed, levels) =
+                if let Some(root) = crate::engine::resolve_checkpoint_root(config, sink) {
+                    match crate::resume::JobCheckpoint::load(&root)? {
+                        Some(meta) => {
+                            if meta.plan_hash != expected_hash {
+                                return Err(EngineError::PlanHashMismatch {
+                                    expected: meta.plan_hash.clone(),
+                                    got: expected_hash,
+                                });
+                            }
+                            (meta.completed_tiles, meta.levels_completed)
+                        }
+                        None => (Vec::new(), Vec::new()),
+                    }
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+            let skip: std::collections::HashSet<crate::planner::TileCoord> =
+                completed.iter().copied().collect();
+            let cp = crate::engine::cp_for_sink(sink, plan, config, completed, levels);
+            Ok((skip, cp))
+        }
+        ResumeMode::Verify => unreachable!("Verify is rejected above for non-Monolithic engines"),
+    }
+}
+
+mod resume {
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::atomic::AtomicU64;
+
+    use crate::engine::{CheckpointState, EngineConfig};
+    use crate::planner::TileCoord;
+    use crate::sink::{SinkError, Tile, TileSink};
+
+    /// Transparent wrapper that filters `write_tile` calls against a resume
+    /// skip set and advances an optional [`CheckpointState`] on every tile
+    /// that reaches the inner sink.
+    ///
+    /// Applied in front of the user-provided sink when the streaming or
+    /// map-reduce engines are asked to run in resume mode. Keeps those
+    /// engines themselves oblivious to resume semantics — the filtering
+    /// happens at the one natural bottleneck (every tile ultimately lands
+    /// in `write_tile`).
+    pub(super) struct ResumeAwareSink<'a, S: TileSink + ?Sized> {
+        pub(super) inner: &'a S,
+        pub(super) skip: &'a HashSet<TileCoord>,
+        pub(super) cp: Option<&'a CheckpointState>,
+    }
+
+    impl<'a, S: TileSink + ?Sized> TileSink for ResumeAwareSink<'a, S> {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            if self.skip.contains(&tile.coord) {
+                return Ok(());
+            }
+            self.inner.write_tile(tile)?;
+            if let Some(cp) = self.cp {
+                cp.mark_tile_completed(tile.coord)
+                    .map_err(|e| SinkError::Other(format!("checkpoint: {e}")))?;
+            }
+            Ok(())
+        }
+
+        fn finish(&self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+
+        fn record_engine_config(&self, config: &EngineConfig) {
+            self.inner.record_engine_config(config)
+        }
+
+        fn sink_retry_count(&self) -> u64 {
+            self.inner.sink_retry_count()
+        }
+
+        fn sink_skipped_due_to_failure(&self) -> u64 {
+            self.inner.sink_skipped_due_to_failure()
+        }
+
+        fn note_sink_skipped(&self) {
+            self.inner.note_sink_skipped()
+        }
+
+        fn checkpoint_root(&self) -> Option<&Path> {
+            self.inner.checkpoint_root()
+        }
+
+        fn init_level_count(&self, levels: usize) {
+            self.inner.init_level_count(levels)
+        }
+    }
+
+    // Silence "field never read" lints on the AtomicU64 placeholder if
+    // future refactors drop these fields.
+    #[allow(dead_code)]
+    fn _unused_marker(_: AtomicU64) {}
 }

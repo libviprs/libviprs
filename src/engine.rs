@@ -530,7 +530,7 @@ struct EmitContext<'a> {
 /// increasing counter tracks how many tiles have been appended *since the
 /// last flush* so the "every N tiles" cadence can be implemented without
 /// poking the filesystem on every write.
-struct CheckpointState {
+pub(crate) struct CheckpointState {
     /// The directory where `.libviprs-job.json` lives — typically the sink's
     /// `base_dir`. Every call to [`CheckpointState::flush`] writes there.
     root: std::path::PathBuf,
@@ -561,7 +561,7 @@ impl CheckpointState {
     /// Append a successful write to the metadata. When `checkpoint_every`
     /// tiles have accumulated since the last flush, also persist the
     /// checkpoint to disk so a crash can resume from the latest boundary.
-    fn mark_tile_completed(&self, coord: TileCoord) -> Result<(), ResumeError> {
+    pub(crate) fn mark_tile_completed(&self, coord: TileCoord) -> Result<(), ResumeError> {
         {
             let mut meta = self.meta.lock().unwrap();
             meta.completed_tiles.push(coord);
@@ -595,7 +595,7 @@ impl CheckpointState {
 
     /// Serialise the current metadata to `<root>/.libviprs-job.json`. Atomic
     /// via the tmp+rename dance inside [`JobCheckpoint::save`].
-    fn flush(&self) -> Result<(), ResumeError> {
+    pub(crate) fn flush(&self) -> Result<(), ResumeError> {
         let snapshot = {
             let mut meta = self.meta.lock().unwrap();
             meta.last_checkpoint_at = now_rfc3339_engine();
@@ -765,7 +765,7 @@ fn run_overwrite(
 /// an opaque user sink (e.g. recording / tee / retry wrappers) can still
 /// drive resume and Verify without needing each wrapper to forward
 /// `checkpoint_root()` through its trait impl.
-fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -> Option<PathBuf> {
+pub(crate) fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -> Option<PathBuf> {
     cfg.checkpoint_root
         .clone()
         .or_else(|| sink.checkpoint_root().map(|p| p.to_path_buf()))
@@ -820,7 +820,7 @@ fn run_resume(
 /// Build a `CheckpointState` rooted at the sink's checkpoint directory, or
 /// `None` if the sink does not expose a filesystem root (no on-disk
 /// checkpoint is possible in that case).
-fn cp_for_sink(
+pub(crate) fn cp_for_sink(
     sink: &dyn TileSink,
     plan: &PyramidPlan,
     config: &EngineConfig,
@@ -1088,7 +1088,7 @@ fn read_manifest(root: &std::path::Path) -> Option<serde_json::Value> {
 /// a pre-existing but partially-populated directory can still be wiped
 /// cleanly. The directory itself is retained. Caller should have verified
 /// the path is a directory they own.
-fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         return Ok(());
