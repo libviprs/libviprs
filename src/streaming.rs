@@ -641,7 +641,7 @@ pub fn estimate_streaming_memory(
 ///
 /// Propagates errors from the source, sink, raster operations, and the
 /// 2×2 downscale filter.
-pub fn generate_pyramid_streaming(
+pub(crate) fn generate_pyramid_streaming(
     source: &dyn StripSource,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
@@ -943,34 +943,6 @@ pub fn generate_pyramid_streaming(
         stage_durations: crate::engine::StageDurations::default(),
         skipped_due_to_failure: 0,
     })
-}
-
-/// Auto-selecting entry point that chooses between monolithic and streaming.
-///
-/// Compares the estimated peak memory of the monolithic engine against the
-/// configured budget. If the monolithic path fits, it delegates to
-/// [`generate_pyramid_observed`](crate::engine::generate_pyramid_observed)
-/// for maximum throughput. Otherwise, wraps the source raster in a
-/// [`RasterStripSource`] and calls [`generate_pyramid_streaming`].
-///
-/// This is the recommended entry point when the caller has an in-memory
-/// [`Raster`] and wants automatic memory management without committing
-/// to a specific engine implementation.
-pub fn generate_pyramid_auto(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &StreamingConfig,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    let mono_peak = plan.estimate_peak_memory_for_format(source.format());
-
-    if mono_peak <= config.memory_budget_bytes {
-        crate::engine::generate_pyramid_observed(source, plan, sink, &config.engine, observer)
-    } else {
-        let strip_source = RasterStripSource::new(source);
-        generate_pyramid_streaming(&strip_source, plan, sink, config, observer)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,7 +1599,14 @@ mod tests {
 
         // Monolithic
         let ref_sink = MemorySink::new();
-        crate::engine::generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1638,7 +1617,14 @@ mod tests {
             engine: EngineConfig::default(),
             budget_policy: BudgetPolicy::Error,
         };
-        generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        generate_pyramid_streaming(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
         let mut tiles = sink.tiles();
         tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1705,7 +1691,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        crate::engine::generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1715,7 +1708,14 @@ mod tests {
             engine: EngineConfig::default(),
             budget_policy: BudgetPolicy::Error,
         };
-        generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        generate_pyramid_streaming(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
         let mut tiles = sink.tiles();
         tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1741,7 +1741,14 @@ mod tests {
             engine: EngineConfig::default(),
             budget_policy: BudgetPolicy::Error,
         };
-        let result = generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        let result = generate_pyramid_streaming(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
