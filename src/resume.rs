@@ -84,6 +84,98 @@ pub enum ResumeMode {
     Verify,
 }
 
+/// Fluent builder bundling a [`ResumeMode`] with its checkpoint-persistence
+/// knobs.
+///
+/// `ResumePolicy` is the user-facing type threaded through `EngineBuilder`.
+/// Three mutually-exclusive factories anchor the mode:
+///
+/// * [`ResumePolicy::overwrite`] — fresh run; any existing checkpoint is
+///   wiped. Matches [`ResumeMode::Overwrite`] and is the `Default`.
+/// * [`ResumePolicy::resume`] — skip tiles already recorded in the on-disk
+///   checkpoint. Matches [`ResumeMode::Resume`].
+/// * [`ResumePolicy::verify`] — read-only audit of existing tiles. Matches
+///   [`ResumeMode::Verify`].
+///
+/// After picking a factory, chain `.with_checkpoint_every(n)` to flush the
+/// checkpoint file every `n` completed tiles (default `0` = never) and
+/// `.with_checkpoint_root(path)` to place the checkpoint somewhere other
+/// than the sink's base directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePolicy {
+    mode: ResumeMode,
+    checkpoint_every: u64,
+    checkpoint_root: Option<PathBuf>,
+}
+
+impl Default for ResumePolicy {
+    fn default() -> Self {
+        Self {
+            mode: ResumeMode::Overwrite,
+            checkpoint_every: 0,
+            checkpoint_root: None,
+        }
+    }
+}
+
+impl ResumePolicy {
+    /// Start a fresh run. Equivalent to [`ResumeMode::Overwrite`].
+    pub fn overwrite() -> Self {
+        Self {
+            mode: ResumeMode::Overwrite,
+            ..Self::default()
+        }
+    }
+
+    /// Continue an interrupted run from the on-disk checkpoint. Equivalent
+    /// to [`ResumeMode::Resume`].
+    pub fn resume() -> Self {
+        Self {
+            mode: ResumeMode::Resume,
+            ..Self::default()
+        }
+    }
+
+    /// Audit an existing output directory against the plan without writing
+    /// anything. Equivalent to [`ResumeMode::Verify`].
+    pub fn verify() -> Self {
+        Self {
+            mode: ResumeMode::Verify,
+            ..Self::default()
+        }
+    }
+
+    /// Flush the checkpoint file every `n` completed tiles. `0` (the
+    /// default) defers the checkpoint write until the end of the run.
+    pub fn with_checkpoint_every(mut self, n: u64) -> Self {
+        self.checkpoint_every = n;
+        self
+    }
+
+    /// Override the checkpoint directory. When unset, the engine falls back
+    /// to the sink's `checkpoint_root()` (typically the output base dir).
+    pub fn with_checkpoint_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.checkpoint_root = Some(path.into());
+        self
+    }
+
+    /// The resume mode this policy lowers to.
+    pub fn mode(&self) -> ResumeMode {
+        self.mode
+    }
+
+    /// The configured checkpoint frequency (`0` means "only at the end").
+    pub fn checkpoint_every(&self) -> u64 {
+        self.checkpoint_every
+    }
+
+    /// The configured checkpoint root, if one was set via
+    /// [`ResumePolicy::with_checkpoint_root`].
+    pub fn checkpoint_root(&self) -> Option<&Path> {
+        self.checkpoint_root.as_deref()
+    }
+}
+
 /// On-disk checkpoint describing the state of a pyramid generation job.
 ///
 /// Produced and consumed by [`JobCheckpoint::save`] / [`JobCheckpoint::load`].

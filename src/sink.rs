@@ -76,6 +76,11 @@ pub enum SinkError {
         expected: String,
         got: String,
     },
+    /// A required field was not set on a sink builder before `build()` was
+    /// called. The payload is the fully-qualified field name, e.g.
+    /// `"PackfileSinkBuilder::plan"`.
+    #[error("required builder field not set: {0}")]
+    MissingField(&'static str),
 }
 
 /// Single-byte marker written in place of blank tiles when using
@@ -535,6 +540,22 @@ impl FsSink {
     /// `.libviprs-job.json` checkpoint alongside the pyramid.
     pub fn with_resume(mut self, enabled: bool) -> Self {
         self.resume_enabled = enabled;
+        self
+    }
+
+    /// Override the tile encoding format after construction.
+    ///
+    /// Lets callers configure the format through the builder chain rather
+    /// than via the `new` constructor's positional argument, matching the
+    /// per-component builder convention used elsewhere in the crate:
+    ///
+    /// ```ignore
+    /// FsSink::new(dir, plan, TileFormat::Png)
+    ///     .with_format(TileFormat::Jpeg { quality: 85 })
+    ///     .with_dedupe(DedupeStrategy::Blanks);
+    /// ```
+    pub fn with_format(mut self, format: TileFormat) -> Self {
+        self.format = format;
         self
     }
 

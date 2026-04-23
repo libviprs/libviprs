@@ -74,7 +74,7 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
-pub use resume::{JobCheckpoint, JobMetadata, ResumeError, ResumeMode};
+pub use resume::{JobCheckpoint, JobMetadata, ResumeError, ResumeMode, ResumePolicy};
 pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use sink::{
     BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
@@ -82,7 +82,7 @@ pub use sink::{
 #[cfg(feature = "s3")]
 pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
-pub use sink_packfile::{PackfileFormat, PackfileSink};
+pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
 #[cfg(feature = "pdfium")]
 pub use streaming::PdfiumStripSource;
