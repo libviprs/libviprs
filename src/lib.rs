@@ -49,8 +49,10 @@ pub mod sink_object_store;
 #[cfg(feature = "packfile")]
 pub mod sink_packfile;
 pub mod source;
+pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
+pub mod verify;
 
 // Curated crate-root surface: types and high-level entry points only.
 // Leaf helpers, constants, and free functions stay behind their module path
