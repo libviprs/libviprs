@@ -710,7 +710,7 @@ fn parse_tile_rel_path(rel: &str) -> Option<TileCoord> {
 ///   tile in the plan, read the on-disk bytes, and return an error if a
 ///   tile is missing or (when the manifest includes checksums) if its bytes
 ///   hash to something other than the recorded digest.
-pub fn generate_pyramid_resumable(
+pub(crate) fn generate_pyramid_resumable(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
