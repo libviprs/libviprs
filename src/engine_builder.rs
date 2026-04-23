@@ -396,14 +396,19 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
         let kind = resolve_engine_kind(engine_kind, &source);
 
-        // Resume path: route through the resumable engine (Monolithic) or
-        // wrap the sink in a resume-aware filter (Streaming / MapReduce).
-        // Verify mode still requires a Raster source — the verify loop
-        // regenerates every level via downscale_half, which needs the full
-        // source raster in memory.
+        // Unified resume path: every engine kind now flows through the
+        // same (skip, cp) + ResumeAwareSink pipeline. Verify is a
+        // read-only sibling that delegates to dedicated verify helpers
+        // (raster_verify or verify_from_strip_source) and never touches
+        // the checkpoint.
+        //
+        // Invariants preserved:
+        //   * Monolithic + Strip is rejected with IncompatibleSource.
+        //   * policy.checkpoint_every() / policy.checkpoint_root() are
+        //     threaded into engine_cfg before prepare_resume_state runs.
+        //   * cp.flush() runs on every non-Verify success; Verify is
+        //     read-only and has no checkpoint to persist.
         if let Some(policy) = resume {
-            // Thread checkpoint frequency and root from the ResumePolicy
-            // into the EngineConfig that the inner path reads.
             if policy.checkpoint_every() > 0 {
                 engine_cfg = engine_cfg.with_checkpoint_every(policy.checkpoint_every());
             }
@@ -411,59 +416,65 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 engine_cfg = engine_cfg.with_checkpoint_root(root.to_path_buf());
             }
 
-            // Monolithic + Raster — existing resumable engine handles wipe,
-            // skip-set load, checkpoint state, and verify.
-            if matches!(kind, EngineKind::Monolithic) {
-                let raster = match source {
-                    EngineSource::Raster(r) => r,
-                    EngineSource::Strip(_) => {
-                        return Err(EngineError::IncompatibleSource {
-                            kind,
-                            reason: "ResumePolicy requires an in-memory Raster source for the Monolithic engine",
-                        });
-                    }
-                };
-                let result = crate::engine::generate_pyramid_resumable(
-                    raster,
-                    &plan,
-                    &sink,
-                    &engine_cfg,
-                    policy.mode(),
-                    observer_ref,
-                )?;
-                return Ok((result, sink));
-            }
-
-            // Verify with a streaming engine requires regenerating every
-            // level via downscale_half — that needs the full raster, which
-            // is exactly what a strip source is built to avoid. Stream
-            // sources can't cheaply satisfy Verify, so we reject it
-            // explicitly and steer the caller to Monolithic.
-            if matches!(policy.mode(), ResumeMode::Verify) {
+            if matches!(kind, EngineKind::Monolithic) && matches!(source, EngineSource::Strip(_)) {
                 return Err(EngineError::IncompatibleSource {
-                    kind,
-                    reason: "ResumePolicy::verify() requires EngineKind::Monolithic (verify walks every level from the source raster); use Monolithic for Verify runs",
+                    kind: EngineKind::Monolithic,
+                    reason: "Monolithic engine requires an in-memory Raster source",
                 });
             }
 
-            // Streaming / MapReduce + Overwrite or Resume.
-            // Pattern:
-            //   1. Optionally wipe the output (Overwrite) or load the
-            //      checkpoint (Resume) to get the skip set.
-            //   2. Construct a CheckpointState rooted at the sink.
-            //   3. Wrap the user sink in a resume-aware filter that
-            //      short-circuits write_tile for already-completed coords
-            //      and advances the checkpoint for every real write.
-            //   4. Run the streaming / map-reduce engine against the
-            //      wrapped sink.
-            //   5. Flush the checkpoint on success.
+            // Verify: read-only, no skip set, no checkpoint. Route by
+            // engine kind to the matching verify helper.
+            if matches!(policy.mode(), ResumeMode::Verify) {
+                let result = match (kind, source) {
+                    (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
+                        crate::verify::raster_verify(
+                            raster,
+                            &plan,
+                            &sink,
+                            &engine_cfg,
+                            observer_ref,
+                        )?
+                    }
+                    (EngineKind::Streaming, EngineSource::Raster(raster))
+                    | (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
+                        let strip = RasterStripSource::new(raster);
+                        crate::verify::verify_from_strip_source(
+                            &strip,
+                            &plan,
+                            &sink,
+                            &engine_cfg,
+                            observer_ref,
+                        )?
+                    }
+                    (EngineKind::Streaming, EngineSource::Strip(strip))
+                    | (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
+                        crate::verify::verify_from_strip_source(
+                            strip.as_ref(),
+                            &plan,
+                            &sink,
+                            &engine_cfg,
+                            observer_ref,
+                        )?
+                    }
+                    (EngineKind::Monolithic, EngineSource::Strip(_)) => {
+                        unreachable!("Monolithic + Strip rejected above")
+                    }
+                    (EngineKind::Auto, _) => {
+                        unreachable!("Auto should have been resolved before match")
+                    }
+                };
+                return Ok((result, sink));
+            }
+
+            // Overwrite / Resume: shared (skip, cp) setup + ResumeAwareSink.
             let (skip, cp) = prepare_resume_state(&sink, &plan, &engine_cfg, policy.mode())?;
-            let wrapped = resume::ResumeAwareSink {
-                inner: &sink,
-                skip: &skip,
-                cp: cp.as_ref(),
-            };
-            let result = match (kind, source) {
+            let wrapped = resume::ResumeAwareSink::new(&sink, &skip, cp.as_ref());
+
+            let mut result = match (kind, source) {
+                (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
+                    generate_pyramid_observed(raster, &plan, &wrapped, &engine_cfg, observer_ref)?
+                }
                 (EngineKind::Streaming, EngineSource::Raster(raster)) => {
                     let strip = RasterStripSource::new(raster);
                     let cfg =
@@ -496,13 +507,25 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     );
                     generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
                 }
+                (EngineKind::Monolithic, EngineSource::Strip(_)) => {
+                    unreachable!("Monolithic + Strip rejected above")
+                }
                 (EngineKind::Auto, _) => {
                     unreachable!("Auto should have been resolved before match")
                 }
-                (EngineKind::Monolithic, _) => {
-                    unreachable!("Monolithic + resume handled in the branch above")
-                }
             };
+
+            // Adjust tiles_produced down by the number of tiles the
+            // resume wrapper short-circuited. This restores the
+            // pre-unification contract that `tiles_produced` reports
+            // "tiles actually written this run" rather than "tiles the
+            // engine visited" — the difference matters for Resume runs
+            // where most or all tiles skip the write path.
+            let skipped = wrapped.skipped_count();
+            if skipped > 0 {
+                result.tiles_produced = result.tiles_produced.saturating_sub(skipped);
+            }
+
             if let Some(cp) = cp.as_ref() {
                 cp.flush().map_err(EngineError::ResumeFailed)?;
             }
@@ -715,7 +738,7 @@ fn prepare_resume_state(
 mod resume {
     use std::collections::HashSet;
     use std::path::Path;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::engine::{CheckpointState, EngineConfig};
     use crate::planner::TileCoord;
@@ -734,11 +757,36 @@ mod resume {
         pub(super) inner: &'a S,
         pub(super) skip: &'a HashSet<TileCoord>,
         pub(super) cp: Option<&'a CheckpointState>,
+        /// Running count of skipped writes, used after `.run()` to adjust
+        /// [`crate::engine::EngineResult::tiles_produced`] down so that
+        /// callers see "tiles actually written this run" rather than
+        /// "tiles the engine visited".
+        pub(super) skipped: AtomicU64,
+    }
+
+    impl<'a, S: TileSink + ?Sized> ResumeAwareSink<'a, S> {
+        pub(super) fn new(
+            inner: &'a S,
+            skip: &'a HashSet<TileCoord>,
+            cp: Option<&'a CheckpointState>,
+        ) -> Self {
+            Self {
+                inner,
+                skip,
+                cp,
+                skipped: AtomicU64::new(0),
+            }
+        }
+
+        pub(super) fn skipped_count(&self) -> u64 {
+            self.skipped.load(Ordering::Relaxed)
+        }
     }
 
     impl<'a, S: TileSink + ?Sized> TileSink for ResumeAwareSink<'a, S> {
         fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
             if self.skip.contains(&tile.coord) {
+                self.skipped.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
             self.inner.write_tile(tile)?;

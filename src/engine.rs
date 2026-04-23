@@ -12,9 +12,7 @@ use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::{Raster, RasterError};
 use crate::resize;
-use crate::resume::{
-    JobCheckpoint, JobMetadata, ResumeError, ResumeMode, SCHEMA_VERSION, compute_plan_hash,
-};
+use crate::resume::{JobCheckpoint, JobMetadata, ResumeError, SCHEMA_VERSION, compute_plan_hash};
 use crate::retry::FailurePolicy;
 use crate::sink::{SinkError, Tile, TileSink};
 
@@ -696,66 +694,6 @@ fn parse_tile_rel_path(rel: &str) -> Option<TileCoord> {
     }
 }
 
-/// Resumable pyramid generation.
-///
-/// Runs `generate_pyramid` under one of three on-disk-state regimes:
-///
-/// * [`ResumeMode::Overwrite`] — wipe any stale contents of the sink's root
-///   directory (`sink.checkpoint_root()`), then generate the pyramid from
-///   scratch, writing a fresh checkpoint on every `config.checkpoint_every`
-///   tiles and one final flush at the end.
-/// * [`ResumeMode::Resume`] — load the existing `.libviprs-job.json`, verify
-///   its `plan_hash` against the current plan (bails with
-///   [`EngineError::PlanHashMismatch`] if they disagree), then generate only
-///   the tiles that are not yet recorded as complete.
-/// * [`ResumeMode::Verify`] — do not write anything to the sink. Walk every
-///   tile in the plan, read the on-disk bytes, and return an error if a
-///   tile is missing or (when the manifest includes checksums) if its bytes
-///   hash to something other than the recorded digest.
-pub(crate) fn generate_pyramid_resumable(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-    mode: ResumeMode,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    match mode {
-        ResumeMode::Overwrite => run_overwrite(source, plan, sink, config, observer),
-        ResumeMode::Resume => run_resume(source, plan, sink, config, observer),
-        ResumeMode::Verify => run_verify(source, plan, sink, config, observer),
-    }
-}
-
-/// Start-from-scratch branch of [`generate_pyramid_resumable`].
-fn run_overwrite(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    // If the sink exposes an on-disk root, wipe its stale contents so
-    // pre-existing garbage (files from an aborted run, a checkpoint with
-    // the wrong plan_hash, etc.) does not survive into the new run.
-    if let Some(root) = resolve_checkpoint_root(config, sink) {
-        wipe_directory(&root).map_err(|e| EngineError::ResumeFailed(ResumeError::from(e)))?;
-    }
-
-    let cp = cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
-    let skip = HashSet::new();
-    run_pyramid_with_cp(
-        source,
-        plan,
-        sink,
-        config,
-        cp.as_ref(),
-        &skip,
-        false,
-        observer,
-    )
-}
-
 /// Resolve the on-disk checkpoint root. Prefers the explicit
 /// [`EngineConfig::checkpoint_root`] when set; otherwise consults
 /// [`TileSink::checkpoint_root`]. Returns `None` when neither is available
@@ -769,52 +707,6 @@ pub(crate) fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -
     cfg.checkpoint_root
         .clone()
         .or_else(|| sink.checkpoint_root().map(|p| p.to_path_buf()))
-}
-
-/// Resume-from-checkpoint branch of [`generate_pyramid_resumable`].
-fn run_resume(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    let expected_hash = compute_plan_hash(plan);
-
-    let (existing_completed, existing_levels) =
-        if let Some(root) = resolve_checkpoint_root(config, sink) {
-            // `JobCheckpoint::load` returns `Result<Option<_>, ResumeError>`:
-            // `?` surfaces real corruption as an engine error (via
-            // `EngineError::ResumeFailed`) rather than silently degrading
-            // to "no checkpoint". A missing file is still `Ok(None)`.
-            match JobCheckpoint::load(&root)? {
-                Some(meta) => {
-                    if meta.plan_hash != expected_hash {
-                        return Err(EngineError::PlanHashMismatch {
-                            expected: meta.plan_hash.clone(),
-                            got: expected_hash,
-                        });
-                    }
-                    (meta.completed_tiles, meta.levels_completed)
-                }
-                None => (Vec::new(), Vec::new()),
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-    let skip: HashSet<TileCoord> = existing_completed.iter().copied().collect();
-    let cp = cp_for_sink(sink, plan, config, existing_completed, existing_levels);
-    run_pyramid_with_cp(
-        source,
-        plan,
-        sink,
-        config,
-        cp.as_ref(),
-        &skip,
-        true,
-        observer,
-    )
 }
 
 /// Build a `CheckpointState` rooted at the sink's checkpoint directory, or
@@ -845,37 +737,19 @@ pub(crate) fn cp_for_sink(
     ))
 }
 
-/// Common pyramid-run body used by both `Overwrite` and `Resume`.
+/// Verify mode for the monolithic raster path: walks every tile in the
+/// plan, reads the on-disk bytes via `sink.checkpoint_root()` joined with
+/// the plan's tile path, and returns an error if any tile is missing or
+/// (when the manifest records checksums) if the bytes do not match the
+/// recorded digest.
 ///
-/// The `treat_skip_as_produced` flag keeps [`EngineResult::tiles_produced`]
-/// meaningful across both modes: a fresh Overwrite returns the total count,
-/// while Resume returns only the count of tiles written on *this* run
-/// (the tests use the difference to assert exactly how much rework happened).
-#[allow(clippy::too_many_arguments)]
-fn run_pyramid_with_cp(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-    cp: Option<&CheckpointState>,
-    skip: &HashSet<TileCoord>,
-    _treat_skip_as_produced: bool,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    let skip_ref = if skip.is_empty() { None } else { Some(skip) };
-    run_pyramid(source, plan, sink, config, observer, skip_ref, cp)
-}
-
-/// Verify-mode branch: walks every tile in the plan, reads the on-disk bytes
-/// via `sink.checkpoint_root()` joined with the plan's tile path, and
-/// returns an error if any tile is missing or (when the manifest records
-/// checksums) if the bytes do not match the recorded digest.
-///
-/// Verify does NOT call `sink.write_tile`; the test suite asserts that
+/// Does NOT call `sink.write_tile`; the test suite asserts that
 /// `tiles_produced == 0` and that no files are mutated. Emits
 /// `LevelStarted` / `TileCompleted` / `LevelCompleted` / `Finished`
 /// events so progress observers see verify runs as first-class.
-fn run_verify(
+///
+/// Strip-source equivalents live in [`crate::stream_verify`].
+pub(crate) fn raster_verify(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
@@ -886,6 +760,20 @@ fn run_verify(
     let root_buf =
         resolve_checkpoint_root(config, sink).ok_or(EngineError::VerifyRequiresOnDiskSink)?;
     let root = root_buf.as_path();
+
+    // If a checkpoint exists, its `plan_hash` must match the plan we're
+    // verifying against — otherwise we'd walk every tile just to report a
+    // byte mismatch on the first one, which is strictly less useful than
+    // failing fast with the structural error.
+    if let Some(meta) = JobCheckpoint::load(root)? {
+        let expected = compute_plan_hash(plan);
+        if meta.plan_hash != expected {
+            return Err(EngineError::PlanHashMismatch {
+                expected: meta.plan_hash,
+                got: expected,
+            });
+        }
+    }
 
     // Try every known tile-file extension until we find one that matches.
     // The sink's active format isn't visible from this layer, so we probe
@@ -2213,13 +2101,17 @@ mod tests {
     }
 
     /// Observer should see LevelStarted / TileCompleted / LevelCompleted /
-    /// Finished events from the resumable path, not just the non-resumable
-    /// one. Runs all three ResumeModes against a CollectingObserver and
-    /// asserts each one drives at least the expected shape of events.
+    /// Finished events from every resume path, not just the non-resumable
+    /// one. Runs all three ResumeModes via `EngineBuilder::with_resume`
+    /// against a CollectingObserver and asserts each one drives at least
+    /// the expected shape of events.
     #[test]
     fn resumable_emits_observer_events() {
+        use std::sync::Arc;
+
         use crate::observe::CollectingObserver;
-        use crate::resume::ResumeMode;
+        use crate::resume::ResumePolicy;
+        use crate::{EngineBuilder, EngineKind};
         use tempfile::tempdir;
 
         let src = gradient_raster(128, 96);
@@ -2230,16 +2122,13 @@ mod tests {
             .with_format(crate::sink::TileFormat::Raw);
 
         // --- Overwrite --------------------------------------------------
-        let obs = CollectingObserver::new();
-        generate_pyramid_resumable(
-            &src,
-            &plan,
-            &sink,
-            &EngineConfig::default(),
-            ResumeMode::Overwrite,
-            &obs,
-        )
-        .unwrap();
+        let obs = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite())
+            .with_observer_arc(obs.clone())
+            .run()
+            .unwrap();
         let events = obs.events();
         let tile_events = events
             .iter()
@@ -2257,16 +2146,13 @@ mod tests {
         assert_eq!(finished, 1, "Overwrite: finished event");
 
         // --- Resume (no-op since everything is already complete) --------
-        let obs = CollectingObserver::new();
-        generate_pyramid_resumable(
-            &src,
-            &plan,
-            &sink,
-            &EngineConfig::default(),
-            ResumeMode::Resume,
-            &obs,
-        )
-        .unwrap();
+        let obs = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .with_observer_arc(obs.clone())
+            .run()
+            .unwrap();
         // Resume with a full checkpoint short-circuits without per-tile
         // work, so we only require the engine to have produced *some*
         // observer activity (the Finished event at minimum).
@@ -2276,16 +2162,13 @@ mod tests {
         );
 
         // --- Verify -----------------------------------------------------
-        let obs = CollectingObserver::new();
-        generate_pyramid_resumable(
-            &src,
-            &plan,
-            &sink,
-            &EngineConfig::default(),
-            ResumeMode::Verify,
-            &obs,
-        )
-        .unwrap();
+        let obs = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::verify())
+            .with_observer_arc(obs.clone())
+            .run()
+            .unwrap();
         let events = obs.events();
         let tile_events = events
             .iter()
