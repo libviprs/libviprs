@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::observe::{EngineEvent, EngineObserver, MemoryTracker, NoopObserver};
+#[cfg(test)]
+use crate::observe::NoopObserver;
+use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::{Raster, RasterError};
 use crate::resize;
@@ -716,11 +718,12 @@ pub(crate) fn generate_pyramid_resumable(
     sink: &dyn TileSink,
     config: &EngineConfig,
     mode: ResumeMode,
+    observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     match mode {
-        ResumeMode::Overwrite => run_overwrite(source, plan, sink, config),
-        ResumeMode::Resume => run_resume(source, plan, sink, config),
-        ResumeMode::Verify => run_verify(source, plan, sink, config),
+        ResumeMode::Overwrite => run_overwrite(source, plan, sink, config, observer),
+        ResumeMode::Resume => run_resume(source, plan, sink, config, observer),
+        ResumeMode::Verify => run_verify(source, plan, sink, config, observer),
     }
 }
 
@@ -730,6 +733,7 @@ fn run_overwrite(
     plan: &PyramidPlan,
     sink: &dyn TileSink,
     config: &EngineConfig,
+    observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     // If the sink exposes an on-disk root, wipe its stale contents so
     // pre-existing garbage (files from an aborted run, a checkpoint with
@@ -740,7 +744,16 @@ fn run_overwrite(
 
     let cp = cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
     let skip = HashSet::new();
-    run_pyramid_with_cp(source, plan, sink, config, cp.as_ref(), &skip, false)
+    run_pyramid_with_cp(
+        source,
+        plan,
+        sink,
+        config,
+        cp.as_ref(),
+        &skip,
+        false,
+        observer,
+    )
 }
 
 /// Resolve the on-disk checkpoint root. Prefers the explicit
@@ -764,6 +777,7 @@ fn run_resume(
     plan: &PyramidPlan,
     sink: &dyn TileSink,
     config: &EngineConfig,
+    observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     let expected_hash = compute_plan_hash(plan);
 
@@ -791,7 +805,16 @@ fn run_resume(
 
     let skip: HashSet<TileCoord> = existing_completed.iter().copied().collect();
     let cp = cp_for_sink(sink, plan, config, existing_completed, existing_levels);
-    run_pyramid_with_cp(source, plan, sink, config, cp.as_ref(), &skip, true)
+    run_pyramid_with_cp(
+        source,
+        plan,
+        sink,
+        config,
+        cp.as_ref(),
+        &skip,
+        true,
+        observer,
+    )
 }
 
 /// Build a `CheckpointState` rooted at the sink's checkpoint directory, or
@@ -828,6 +851,7 @@ fn cp_for_sink(
 /// meaningful across both modes: a fresh Overwrite returns the total count,
 /// while Resume returns only the count of tiles written on *this* run
 /// (the tests use the difference to assert exactly how much rework happened).
+#[allow(clippy::too_many_arguments)]
 fn run_pyramid_with_cp(
     source: &Raster,
     plan: &PyramidPlan,
@@ -836,9 +860,10 @@ fn run_pyramid_with_cp(
     cp: Option<&CheckpointState>,
     skip: &HashSet<TileCoord>,
     _treat_skip_as_produced: bool,
+    observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     let skip_ref = if skip.is_empty() { None } else { Some(skip) };
-    run_pyramid(source, plan, sink, config, &NoopObserver, skip_ref, cp)
+    run_pyramid(source, plan, sink, config, observer, skip_ref, cp)
 }
 
 /// Verify-mode branch: walks every tile in the plan, reads the on-disk bytes
@@ -847,12 +872,15 @@ fn run_pyramid_with_cp(
 /// checksums) if the bytes do not match the recorded digest.
 ///
 /// Verify does NOT call `sink.write_tile`; the test suite asserts that
-/// `tiles_produced == 0` and that no files are mutated.
+/// `tiles_produced == 0` and that no files are mutated. Emits
+/// `LevelStarted` / `TileCompleted` / `LevelCompleted` / `Finished`
+/// events so progress observers see verify runs as first-class.
 fn run_verify(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
     config: &EngineConfig,
+    observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     let started = Instant::now();
     let root_buf =
@@ -950,9 +978,16 @@ fn run_verify(
         if level_idx < top_level {
             current = resize::downscale_half(&current)?;
         }
+        observer.on_event(EngineEvent::LevelStarted {
+            level: level.level,
+            width: level.width,
+            height: level.height,
+            tile_count: level.tile_count(),
+        });
         for row in 0..level.rows {
             for col in 0..level.cols {
                 let coord = TileCoord::new(level_idx as u32, col, row);
+                observer.on_event(EngineEvent::TileCompleted { coord });
                 let expected = extract_tile(&current, plan, coord, bg)?;
                 let expected_bytes = expected.data();
 
@@ -1000,7 +1035,16 @@ fn run_verify(
                 // manifest-checksum branch.
             }
         }
+        observer.on_event(EngineEvent::LevelCompleted {
+            level: level.level,
+            tiles_produced: level.tile_count(),
+        });
     }
+
+    observer.on_event(EngineEvent::Finished {
+        total_tiles: plan.total_tile_count(),
+        levels: plan.levels.len() as u32,
+    });
 
     Ok(EngineResult {
         tiles_produced: 0,
@@ -2166,5 +2210,96 @@ mod tests {
             generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
                 .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+
+    /// Observer should see LevelStarted / TileCompleted / LevelCompleted /
+    /// Finished events from the resumable path, not just the non-resumable
+    /// one. Runs all three ResumeModes against a CollectingObserver and
+    /// asserts each one drives at least the expected shape of events.
+    #[test]
+    fn resumable_emits_observer_events() {
+        use crate::observe::CollectingObserver;
+        use crate::resume::ResumeMode;
+        use tempfile::tempdir;
+
+        let src = gradient_raster(128, 96);
+        let planner = PyramidPlanner::new(128, 96, 64, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let dir = tempdir().unwrap();
+        let sink = crate::sink::FsSink::new(dir.path().join("tiles"), plan.clone())
+            .with_format(crate::sink::TileFormat::Raw);
+
+        // --- Overwrite --------------------------------------------------
+        let obs = CollectingObserver::new();
+        generate_pyramid_resumable(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            ResumeMode::Overwrite,
+            &obs,
+        )
+        .unwrap();
+        let events = obs.events();
+        let tile_events = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
+            .count();
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::Finished { .. }))
+            .count();
+        assert_eq!(
+            tile_events as u64,
+            plan.total_tile_count(),
+            "Overwrite: tile events"
+        );
+        assert_eq!(finished, 1, "Overwrite: finished event");
+
+        // --- Resume (no-op since everything is already complete) --------
+        let obs = CollectingObserver::new();
+        generate_pyramid_resumable(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            ResumeMode::Resume,
+            &obs,
+        )
+        .unwrap();
+        // Resume with a full checkpoint short-circuits without per-tile
+        // work, so we only require the engine to have produced *some*
+        // observer activity (the Finished event at minimum).
+        assert!(
+            !obs.events().is_empty(),
+            "Resume mode produced no observer events"
+        );
+
+        // --- Verify -----------------------------------------------------
+        let obs = CollectingObserver::new();
+        generate_pyramid_resumable(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            ResumeMode::Verify,
+            &obs,
+        )
+        .unwrap();
+        let events = obs.events();
+        let tile_events = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
+            .count();
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::Finished { .. }))
+            .count();
+        assert_eq!(
+            tile_events as u64,
+            plan.total_tile_count(),
+            "Verify: tile events"
+        );
+        assert_eq!(finished, 1, "Verify: finished event");
     }
 }
