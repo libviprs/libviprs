@@ -429,6 +429,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 &sink,
                 &engine_cfg,
                 policy.mode(),
+                observer_ref,
             )?;
             return Ok((result, sink));
         }
