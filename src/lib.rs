@@ -29,6 +29,8 @@
 pub mod checksum;
 pub mod dedupe;
 pub mod engine;
+pub mod engine_builder;
+pub mod extensions;
 pub mod geo;
 #[cfg(loom)]
 mod loom_tests;
@@ -47,8 +49,10 @@ pub mod sink_object_store;
 #[cfg(feature = "packfile")]
 pub mod sink_packfile;
 pub mod source;
+pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
+pub mod verify;
 
 // Curated crate-root surface: types and high-level entry points only.
 // Leaf helpers, constants, and free functions stay behind their module path
@@ -57,9 +61,9 @@ pub mod streaming_mapreduce;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use engine::{
-    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, generate_pyramid,
-    generate_pyramid_observed, generate_pyramid_resumable, is_blank_tile,
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
 };
+pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
@@ -74,7 +78,7 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
-pub use resume::{JobCheckpoint, JobMetadata, ResumeError, ResumeMode};
+pub use resume::{JobCheckpoint, JobMetadata, ResumeError, ResumeMode, ResumePolicy};
 pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use sink::{
     BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
@@ -82,14 +86,12 @@ pub use sink::{
 #[cfg(feature = "s3")]
 pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
-pub use sink_packfile::{PackfileFormat, PackfileSink};
+pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
 #[cfg(feature = "pdfium")]
 pub use streaming::PdfiumStripSource;
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
-    estimate_streaming_memory, generate_pyramid_auto, generate_pyramid_streaming,
+    estimate_streaming_memory,
 };
-pub use streaming_mapreduce::{
-    MapReduceConfig, generate_pyramid_mapreduce, generate_pyramid_mapreduce_auto,
-};
+pub use streaming_mapreduce::MapReduceConfig;

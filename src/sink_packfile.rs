@@ -101,6 +101,29 @@ impl std::fmt::Debug for PackfileSink {
 }
 
 impl PackfileSink {
+    /// Start a fluent builder rooted at `path`.
+    ///
+    /// Call [`PackfileSinkBuilder::plan`] (required), then any combination of
+    /// [`PackfileSinkBuilder::format`] (default: [`PackfileFormat::Tar`])
+    /// and [`PackfileSinkBuilder::tile_format`] (default:
+    /// [`TileFormat::Png`]), then [`PackfileSinkBuilder::build`]:
+    ///
+    /// ```ignore
+    /// PackfileSink::builder("out.zip")
+    ///     .plan(plan)
+    ///     .format(PackfileFormat::Zip)
+    ///     .tile_format(TileFormat::Jpeg { quality: 85 })
+    ///     .build()?;
+    /// ```
+    pub fn builder(path: impl Into<PathBuf>) -> PackfileSinkBuilder {
+        PackfileSinkBuilder {
+            out_path: path.into(),
+            format: PackfileFormat::Tar,
+            tile_format: TileFormat::Png,
+            plan: None,
+        }
+    }
+
     /// Create a new packfile sink, opening `path` for writing and wrapping it
     /// in the requested archive format.
     ///
@@ -256,6 +279,64 @@ impl PackfileSink {
             width = self.plan.image_width,
             height = self.plan.image_height,
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PackfileSinkBuilder
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for [`PackfileSink`].
+///
+/// Produced by [`PackfileSink::builder`]. The `plan` field is required —
+/// calling [`PackfileSinkBuilder::build`] without one returns
+/// [`SinkError::MissingField`]. The archive and tile formats default to
+/// [`PackfileFormat::Tar`] and [`TileFormat::Png`] respectively so the
+/// minimum-viable call is:
+///
+/// ```ignore
+/// PackfileSink::builder("out.tar").plan(plan).build()?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct PackfileSinkBuilder {
+    out_path: PathBuf,
+    format: PackfileFormat,
+    tile_format: TileFormat,
+    plan: Option<PyramidPlan>,
+}
+
+impl PackfileSinkBuilder {
+    /// Set the archive container format. Defaults to [`PackfileFormat::Tar`].
+    pub fn format(mut self, format: PackfileFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Set the per-tile encoding format. Defaults to [`TileFormat::Png`].
+    pub fn tile_format(mut self, tile_format: TileFormat) -> Self {
+        self.tile_format = tile_format;
+        self
+    }
+
+    /// Attach the pyramid plan. Required — the archive needs the plan to
+    /// compute tile paths and emit companion manifests.
+    pub fn plan(mut self, plan: PyramidPlan) -> Self {
+        self.plan = Some(plan);
+        self
+    }
+
+    /// Finalise the configuration and open the archive for writing.
+    ///
+    /// # Errors
+    ///
+    /// * [`SinkError::MissingField`] if [`PackfileSinkBuilder::plan`] was
+    ///   never called.
+    /// * [`SinkError::Io`] if the output file cannot be created.
+    pub fn build(self) -> Result<PackfileSink, SinkError> {
+        let plan = self
+            .plan
+            .ok_or(SinkError::MissingField("PackfileSinkBuilder::plan"))?;
+        PackfileSink::new(self.out_path, self.format, plan, self.tile_format)
     }
 }
 

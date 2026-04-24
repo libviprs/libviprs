@@ -421,7 +421,14 @@ fn cmyk_to_rgb_raster(cmyk_data: &[u8], width: u32, height: u32) -> Result<Raste
     Raster::new(width, height, PixelFormat::Rgb8, rgb).map_err(PdfError::Raster)
 }
 
-/// Get page dimensions in points from MediaBox.
+/// Get page dimensions in points, in the *displayed* orientation.
+///
+/// Reads `/MediaBox` and applies the effective `/Rotate` from the page
+/// dictionary (inheriting through the `/Parent` chain per PDF 1.7
+/// §7.7.3.3). For `/Rotate 90` or `270`, width and height are swapped so
+/// the returned `(w, h)` matches what viewers and the pdfium form-data
+/// render path report. `/Rotate 0` and `180` preserve the MediaBox
+/// orientation. Missing `/Rotate` behaves as `0`.
 fn get_page_dimensions(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> (f64, f64) {
     let obj = match doc.get_object(page_id) {
         Ok(o) => o,
@@ -439,11 +446,69 @@ fn get_page_dimensions(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> (f64,
             let y0 = obj_to_f64(&media_box[1]).unwrap_or(0.0);
             let x1 = obj_to_f64(&media_box[2]).unwrap_or(0.0);
             let y1 = obj_to_f64(&media_box[3]).unwrap_or(0.0);
-            return ((x1 - x0).abs(), (y1 - y0).abs());
+            let w = (x1 - x0).abs();
+            let h = (y1 - y0).abs();
+            return apply_rotate_to_dims(w, h, resolve_rotate(doc, page_id));
         }
     }
 
     (0.0, 0.0)
+}
+
+/// Swap `(w, h)` when `rotate` is `90` or `270` (mod 360). Returns
+/// `(w, h)` unchanged for `0`, `180`, or any non-multiple-of-90 value.
+fn apply_rotate_to_dims(w: f64, h: f64, rotate: i64) -> (f64, f64) {
+    // PDF spec: /Rotate must be a multiple of 90. `rem_euclid` normalises
+    // negative or out-of-range values (seen in malformed PDFs) into
+    // `[0, 360)` before the swap decision.
+    let normalised = rotate.rem_euclid(360);
+    if normalised == 90 || normalised == 270 {
+        (h, w)
+    } else {
+        (w, h)
+    }
+}
+
+/// Resolve the effective `/Rotate` value for a page.
+///
+/// Walks the `/Parent` chain per PDF 1.7 §7.7.3.3: the page's own dict
+/// first, then each ancestor `Pages` node, returning the first numeric
+/// `/Rotate` encountered. Returns `0` if none is found or the traversal
+/// hits a malformed node / self-referential loop.
+fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
+    let mut current = page_id;
+    // Cap the walk defensively — page trees more than a few dozen levels
+    // deep are pathological, and this stops an adversarial self-referential
+    // `/Parent` from spinning forever even if the ID-equality guard below
+    // misses it (e.g. alternating pairs of ids).
+    for _ in 0..64 {
+        let Ok(obj) = doc.get_object(current) else {
+            return 0;
+        };
+        let Ok(dict) = obj.as_dict() else {
+            return 0;
+        };
+        if let Ok(rotate_obj) = dict.get(b"Rotate") {
+            if let Ok(resolved) = resolve_object(doc, rotate_obj) {
+                if let Some(v) = obj_to_f64(resolved) {
+                    return v as i64;
+                }
+            }
+        }
+        // `/Parent` is an indirect reference to the parent Pages node.
+        // Pull the object id straight from the Reference — don't call
+        // `resolve_object`, which would hand back the dict itself and
+        // lose the id we need to walk upward.
+        let parent_id = match dict.get(b"Parent") {
+            Ok(lopdf::Object::Reference(id)) => *id,
+            _ => return 0,
+        };
+        if parent_id == current {
+            return 0;
+        }
+        current = parent_id;
+    }
+    0
 }
 
 /// Check whether a page has any Image XObjects.
@@ -765,5 +830,132 @@ mod tests {
     fn obj_to_f64_other() {
         let obj = lopdf::Object::Boolean(true);
         assert_eq!(obj_to_f64(&obj), None);
+    }
+
+    // -----------------------------------------------------------------
+    // /Rotate handling (issue #50)
+    //
+    // These tests pin the contract that `get_page_dimensions` returns
+    // display-oriented dimensions: a landscape MediaBox with /Rotate 90
+    // is reported as portrait, /Rotate 0 and /Rotate 180 preserve the
+    // raw MediaBox orientation, and /Rotate is inheritable through the
+    // Pages tree. Each test builds a minimal in-memory PDF via lopdf
+    // so the contract is exercised end-to-end through the same parser
+    // path `pdf_info` uses at runtime.
+    // -----------------------------------------------------------------
+
+    /// Build a minimal 1-page document with the given MediaBox +
+    /// `page_rotate` on the leaf page and `pages_rotate` on the parent
+    /// Pages node. `None` for either means the key is absent.
+    fn build_rotated_doc(
+        media_box: [f64; 4],
+        page_rotate: Option<i64>,
+        pages_rotate: Option<i64>,
+    ) -> (lopdf::Document, lopdf::ObjectId) {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let content = Stream::new(dictionary! {}, b"q 0 g 0 0 10 10 re f Q".to_vec());
+        let content_id = doc.add_object(content);
+
+        let mut page_dict = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![
+                media_box[0].into(),
+                media_box[1].into(),
+                media_box[2].into(),
+                media_box[3].into(),
+            ],
+            "Contents" => content_id,
+            "Resources" => dictionary! {},
+        };
+        if let Some(r) = page_rotate {
+            page_dict.set("Rotate", Object::Integer(r));
+        }
+        let page_id = doc.add_object(page_dict);
+
+        let mut pages_dict = dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1i64,
+        };
+        if let Some(r) = pages_rotate {
+            pages_dict.set("Rotate", Object::Integer(r));
+        }
+        doc.objects.insert(pages_id, Object::Dictionary(pages_dict));
+
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        (doc, page_id)
+    }
+
+    #[test]
+    fn get_page_dimensions_no_rotate_is_identity() {
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], None, None);
+        assert_eq!(get_page_dimensions(&doc, page_id), (1000.0, 500.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_rotate_zero_is_identity() {
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], Some(0), None);
+        assert_eq!(get_page_dimensions(&doc, page_id), (1000.0, 500.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_rotate_90_swaps() {
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], Some(90), None);
+        assert_eq!(get_page_dimensions(&doc, page_id), (500.0, 1000.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_rotate_180_preserves() {
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], Some(180), None);
+        assert_eq!(get_page_dimensions(&doc, page_id), (1000.0, 500.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_rotate_270_swaps() {
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], Some(270), None);
+        assert_eq!(get_page_dimensions(&doc, page_id), (500.0, 1000.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_negative_rotate_normalises() {
+        // /Rotate -90 is equivalent to 270 under rem_euclid normalisation.
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], Some(-90), None);
+        assert_eq!(get_page_dimensions(&doc, page_id), (500.0, 1000.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_rotate_inherited_from_parent_pages() {
+        // /Rotate on the parent Pages node, absent on the page itself.
+        // PDF 1.7 §7.7.3.3 mandates inheritance; the page must pick up
+        // the parent's rotation.
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], None, Some(90));
+        assert_eq!(get_page_dimensions(&doc, page_id), (500.0, 1000.0));
+    }
+
+    #[test]
+    fn get_page_dimensions_page_rotate_overrides_parent() {
+        // When both the page and the parent Pages node declare /Rotate,
+        // the page's value wins — the walk stops at the first /Rotate it
+        // encounters.
+        let (doc, page_id) = build_rotated_doc([0.0, 0.0, 1000.0, 500.0], Some(0), Some(90));
+        assert_eq!(get_page_dimensions(&doc, page_id), (1000.0, 500.0));
+    }
+
+    #[test]
+    fn apply_rotate_to_dims_multiples() {
+        assert_eq!(apply_rotate_to_dims(1000.0, 500.0, 0), (1000.0, 500.0));
+        assert_eq!(apply_rotate_to_dims(1000.0, 500.0, 90), (500.0, 1000.0));
+        assert_eq!(apply_rotate_to_dims(1000.0, 500.0, 180), (1000.0, 500.0));
+        assert_eq!(apply_rotate_to_dims(1000.0, 500.0, 270), (500.0, 1000.0));
+        assert_eq!(apply_rotate_to_dims(1000.0, 500.0, 360), (1000.0, 500.0));
+        assert_eq!(apply_rotate_to_dims(1000.0, 500.0, -90), (500.0, 1000.0));
     }
 }
