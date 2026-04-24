@@ -76,6 +76,11 @@ pub enum SinkError {
         expected: String,
         got: String,
     },
+    /// A required field was not set on a sink builder before `build()` was
+    /// called. The payload is the fully-qualified field name, e.g.
+    /// `"PackfileSinkBuilder::plan"`.
+    #[error("required builder field not set: {0}")]
+    MissingField(&'static str),
 }
 
 /// Single-byte marker written in place of blank tiles when using
@@ -165,6 +170,87 @@ pub trait TileSink: Send + Sync {
     /// [`FsSink`] already sizes its counters from the plan in
     /// [`FsSink::new`], so calling this is idempotent there.
     fn init_level_count(&self, _levels: usize) {}
+}
+
+/// Forwarding impl so `Box<dyn TileSink>` (and `Box<T>` where `T: TileSink`)
+/// satisfies [`TileSink`] itself.
+///
+/// Required so callers can unify match arms that return different concrete
+/// sink types under `Box<dyn TileSink>` and feed the boxed form to
+/// [`EngineBuilder::new`](crate::EngineBuilder::new):
+///
+/// ```ignore
+/// let sink: Box<dyn TileSink> = match mode {
+///     "mem" => Box::new(MemorySink::new()),
+///     "fs"  => Box::new(FsSink::new(dir, plan)),
+///     _ => unreachable!(),
+/// };
+/// EngineBuilder::new(&src, plan, sink).run()?;
+/// ```
+impl<T: TileSink + ?Sized> TileSink for Box<T> {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        (**self).write_tile(tile)
+    }
+    fn finish(&self) -> Result<(), SinkError> {
+        (**self).finish()
+    }
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        (**self).record_engine_config(config)
+    }
+    fn sink_retry_count(&self) -> u64 {
+        (**self).sink_retry_count()
+    }
+    fn sink_skipped_due_to_failure(&self) -> u64 {
+        (**self).sink_skipped_due_to_failure()
+    }
+    fn note_sink_skipped(&self) {
+        (**self).note_sink_skipped()
+    }
+    fn checkpoint_root(&self) -> Option<&Path> {
+        (**self).checkpoint_root()
+    }
+    fn init_level_count(&self, levels: usize) {
+        (**self).init_level_count(levels)
+    }
+}
+
+/// Forwarding impl so `&T` satisfies [`TileSink`] wherever `T` does.
+///
+/// Parallels the [`Box<T>`] impl above. Lets callers feed the
+/// [`EngineBuilder`](crate::EngineBuilder) a borrowed sink when they need
+/// to keep ownership (e.g. the CLI, which uses the same sink for both the
+/// builder path and the resumable free function):
+///
+/// ```ignore
+/// let sink = FsSink::new(dir, plan);
+/// EngineBuilder::new(&raster, plan.clone(), &sink).run()?;
+/// // `sink` still usable here.
+/// ```
+impl<T: TileSink + ?Sized> TileSink for &T {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        (*self).write_tile(tile)
+    }
+    fn finish(&self) -> Result<(), SinkError> {
+        (*self).finish()
+    }
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        (*self).record_engine_config(config)
+    }
+    fn sink_retry_count(&self) -> u64 {
+        (*self).sink_retry_count()
+    }
+    fn sink_skipped_due_to_failure(&self) -> u64 {
+        (*self).sink_skipped_due_to_failure()
+    }
+    fn note_sink_skipped(&self) {
+        (*self).note_sink_skipped()
+    }
+    fn checkpoint_root(&self) -> Option<&Path> {
+        (*self).checkpoint_root()
+    }
+    fn init_level_count(&self, levels: usize) {
+        (*self).init_level_count(levels)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,8 +525,15 @@ impl std::fmt::Debug for FsSink {
 
 impl FsSink {
     /// Creates a new filesystem sink rooted at `base_dir` with the given
-    /// pyramid plan and tile encoding format.
-    pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan, format: TileFormat) -> Self {
+    /// pyramid plan. The tile encoding format defaults to
+    /// [`TileFormat::Png`]; override it via [`FsSink::with_format`] when
+    /// writing JPEG or Raw tiles:
+    ///
+    /// ```ignore
+    /// FsSink::new(dir, plan).with_format(TileFormat::Jpeg { quality: 85 });
+    /// ```
+    pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan) -> Self {
+        let format = TileFormat::Png;
         let base_dir = base_dir.into();
         // Pre-size the per-level atomic counter vector so that the hot
         // write path can index by `level as usize` without any lock or
@@ -535,6 +628,22 @@ impl FsSink {
     /// `.libviprs-job.json` checkpoint alongside the pyramid.
     pub fn with_resume(mut self, enabled: bool) -> Self {
         self.resume_enabled = enabled;
+        self
+    }
+
+    /// Override the tile encoding format after construction.
+    ///
+    /// Overrides the tile encoding format set by [`FsSink::new`] (which
+    /// defaults to [`TileFormat::Png`]). Chain with the other `with_*`
+    /// methods to configure the full sink in builder style:
+    ///
+    /// ```ignore
+    /// FsSink::new(dir, plan)
+    ///     .with_format(TileFormat::Jpeg { quality: 85 })
+    ///     .with_dedupe(DedupeStrategy::Blanks);
+    /// ```
+    pub fn with_format(mut self, format: TileFormat) -> Self {
+        self.format = format;
         self
     }
 
@@ -1341,11 +1450,8 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(
-                dir.path().join("output_files"),
-                plan.clone(),
-                TileFormat::Raw,
-            );
+            let sink = FsSink::new(dir.path().join("output_files"), plan.clone())
+                .with_format(TileFormat::Raw);
             let tile = Tile {
                 coord: TileCoord::new(top.level, 0, 0),
                 raster,
@@ -1391,7 +1497,8 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
+            let sink =
+                FsSink::new(dir.path().join("tiles"), plan.clone()).with_format(TileFormat::Raw);
 
             for col in 0..top.cols {
                 for row in 0..top.rows {
@@ -1438,7 +1545,7 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("output_files"), plan, TileFormat::Png);
+            let sink = FsSink::new(dir.path().join("output_files"), plan);
             sink.finish().unwrap();
 
             let dzi_path = dir.path().join("output_files.dzi");
@@ -1473,7 +1580,7 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("tiles"), plan, TileFormat::Raw);
+            let sink = FsSink::new(dir.path().join("tiles"), plan).with_format(TileFormat::Raw);
             sink.finish().unwrap();
 
             let dzi_path = dir.path().join("tiles.dzi");
@@ -1515,7 +1622,8 @@ mod tests {
         #[cfg(not(miri))]
         {
             let dir = tempfile::tempdir().unwrap();
-            let sink = FsSink::new(dir.path().join("tiles"), plan.clone(), TileFormat::Raw);
+            let sink =
+                FsSink::new(dir.path().join("tiles"), plan.clone()).with_format(TileFormat::Raw);
 
             let rect = plan.tile_rect(TileCoord::new(top.level, 1, 0)).unwrap();
             let tile = Tile {
@@ -1557,7 +1665,7 @@ mod tests {
             let plan = planner.plan();
             let top_level = plan.levels.last().unwrap().level;
 
-            let sink = FsSink::new(dir.path().join("out"), plan, TileFormat::Png);
+            let sink = FsSink::new(dir.path().join("out"), plan);
             let tile = Tile {
                 coord: TileCoord::new(top_level, 0, 0),
                 raster,
@@ -1598,11 +1706,8 @@ mod tests {
             let plan = planner.plan();
             let top_level = plan.levels.last().unwrap().level;
 
-            let sink = FsSink::new(
-                dir.path().join("out"),
-                plan,
-                TileFormat::Jpeg { quality: 85 },
-            );
+            let sink = FsSink::new(dir.path().join("out"), plan)
+                .with_format(TileFormat::Jpeg { quality: 85 });
             let tile = Tile {
                 coord: TileCoord::new(top_level, 0, 0),
                 raster,
@@ -1646,8 +1751,10 @@ mod tests {
 
             let dir1 = tempfile::tempdir().unwrap();
             let dir2 = tempfile::tempdir().unwrap();
-            let sink1 = FsSink::new(dir1.path().join("out"), plan.clone(), TileFormat::Raw);
-            let sink2 = FsSink::new(dir2.path().join("out"), plan.clone(), TileFormat::Raw);
+            let sink1 =
+                FsSink::new(dir1.path().join("out"), plan.clone()).with_format(TileFormat::Raw);
+            let sink2 =
+                FsSink::new(dir2.path().join("out"), plan.clone()).with_format(TileFormat::Raw);
 
             let tile = Tile {
                 coord: TileCoord::new(top.level, 0, 0),
