@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::observe::{EngineEvent, EngineObserver, MemoryTracker, NoopObserver};
+#[cfg(test)]
+use crate::observe::NoopObserver;
+use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::{Raster, RasterError};
 use crate::resize;
-use crate::resume::{
-    JobCheckpoint, JobMetadata, ResumeError, ResumeMode, SCHEMA_VERSION, compute_plan_hash,
-};
+use crate::resume::{JobCheckpoint, JobMetadata, ResumeError, SCHEMA_VERSION, compute_plan_hash};
 use crate::retry::FailurePolicy;
 use crate::sink::{SinkError, Tile, TileSink};
 
@@ -56,6 +56,20 @@ pub enum EngineError {
     VerifyRequiresOnDiskSink,
     #[error("budget exceeded: worst-case strip {strip_bytes} bytes > budget {budget_bytes} bytes")]
     BudgetExceeded { strip_bytes: u64, budget_bytes: u64 },
+    /// The [`EngineKind`](crate::EngineKind) requested through
+    /// [`EngineBuilder::with_engine`](crate::EngineBuilder::with_engine) is
+    /// not compatible with the supplied source. For example,
+    /// [`EngineKind::Monolithic`](crate::EngineKind::Monolithic) requires an
+    /// in-memory [`Raster`]; pairing it with a [`StripSource`](crate::streaming::StripSource)
+    /// would require materialising the entire source up front, which is
+    /// exactly what a strip source is built to avoid. The builder surfaces
+    /// this condition as a typed error instead of silently pulling the
+    /// source into memory.
+    #[error("engine kind {kind:?} incompatible with supplied source: {reason}")]
+    IncompatibleSource {
+        kind: crate::EngineKind,
+        reason: &'static str,
+    },
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.
@@ -285,15 +299,6 @@ pub struct EngineResult {
 /// for PDF-sourced pyramids, and the
 /// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for end-to-end CLI usage.
-pub fn generate_pyramid(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-) -> Result<EngineResult, EngineError> {
-    generate_pyramid_observed(source, plan, sink, config, &NoopObserver)
-}
-
 /// Generates a tile pyramid with an [`EngineObserver`] for progress events.
 ///
 /// Behaves identically to [`generate_pyramid`] but emits [`EngineEvent`]s
@@ -305,7 +310,7 @@ pub fn generate_pyramid(
 /// See the
 /// [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
 /// for integration-level examples of observer usage.
-pub fn generate_pyramid_observed(
+pub(crate) fn generate_pyramid_observed(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
@@ -523,7 +528,7 @@ struct EmitContext<'a> {
 /// increasing counter tracks how many tiles have been appended *since the
 /// last flush* so the "every N tiles" cadence can be implemented without
 /// poking the filesystem on every write.
-struct CheckpointState {
+pub(crate) struct CheckpointState {
     /// The directory where `.libviprs-job.json` lives — typically the sink's
     /// `base_dir`. Every call to [`CheckpointState::flush`] writes there.
     root: std::path::PathBuf,
@@ -554,7 +559,7 @@ impl CheckpointState {
     /// Append a successful write to the metadata. When `checkpoint_every`
     /// tiles have accumulated since the last flush, also persist the
     /// checkpoint to disk so a crash can resume from the latest boundary.
-    fn mark_tile_completed(&self, coord: TileCoord) -> Result<(), ResumeError> {
+    pub(crate) fn mark_tile_completed(&self, coord: TileCoord) -> Result<(), ResumeError> {
         {
             let mut meta = self.meta.lock().unwrap();
             meta.completed_tiles.push(coord);
@@ -588,7 +593,7 @@ impl CheckpointState {
 
     /// Serialise the current metadata to `<root>/.libviprs-job.json`. Atomic
     /// via the tmp+rename dance inside [`JobCheckpoint::save`].
-    fn flush(&self) -> Result<(), ResumeError> {
+    pub(crate) fn flush(&self) -> Result<(), ResumeError> {
         let snapshot = {
             let mut meta = self.meta.lock().unwrap();
             meta.last_checkpoint_at = now_rfc3339_engine();
@@ -689,55 +694,6 @@ fn parse_tile_rel_path(rel: &str) -> Option<TileCoord> {
     }
 }
 
-/// Resumable pyramid generation.
-///
-/// Runs `generate_pyramid` under one of three on-disk-state regimes:
-///
-/// * [`ResumeMode::Overwrite`] — wipe any stale contents of the sink's root
-///   directory (`sink.checkpoint_root()`), then generate the pyramid from
-///   scratch, writing a fresh checkpoint on every `config.checkpoint_every`
-///   tiles and one final flush at the end.
-/// * [`ResumeMode::Resume`] — load the existing `.libviprs-job.json`, verify
-///   its `plan_hash` against the current plan (bails with
-///   [`EngineError::PlanHashMismatch`] if they disagree), then generate only
-///   the tiles that are not yet recorded as complete.
-/// * [`ResumeMode::Verify`] — do not write anything to the sink. Walk every
-///   tile in the plan, read the on-disk bytes, and return an error if a
-///   tile is missing or (when the manifest includes checksums) if its bytes
-///   hash to something other than the recorded digest.
-pub fn generate_pyramid_resumable(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-    mode: ResumeMode,
-) -> Result<EngineResult, EngineError> {
-    match mode {
-        ResumeMode::Overwrite => run_overwrite(source, plan, sink, config),
-        ResumeMode::Resume => run_resume(source, plan, sink, config),
-        ResumeMode::Verify => run_verify(source, plan, sink, config),
-    }
-}
-
-/// Start-from-scratch branch of [`generate_pyramid_resumable`].
-fn run_overwrite(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-) -> Result<EngineResult, EngineError> {
-    // If the sink exposes an on-disk root, wipe its stale contents so
-    // pre-existing garbage (files from an aborted run, a checkpoint with
-    // the wrong plan_hash, etc.) does not survive into the new run.
-    if let Some(root) = resolve_checkpoint_root(config, sink) {
-        wipe_directory(&root).map_err(|e| EngineError::ResumeFailed(ResumeError::from(e)))?;
-    }
-
-    let cp = cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
-    let skip = HashSet::new();
-    run_pyramid_with_cp(source, plan, sink, config, cp.as_ref(), &skip, false)
-}
-
 /// Resolve the on-disk checkpoint root. Prefers the explicit
 /// [`EngineConfig::checkpoint_root`] when set; otherwise consults
 /// [`TileSink::checkpoint_root`]. Returns `None` when neither is available
@@ -747,52 +703,16 @@ fn run_overwrite(
 /// an opaque user sink (e.g. recording / tee / retry wrappers) can still
 /// drive resume and Verify without needing each wrapper to forward
 /// `checkpoint_root()` through its trait impl.
-fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -> Option<PathBuf> {
+pub(crate) fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -> Option<PathBuf> {
     cfg.checkpoint_root
         .clone()
         .or_else(|| sink.checkpoint_root().map(|p| p.to_path_buf()))
 }
 
-/// Resume-from-checkpoint branch of [`generate_pyramid_resumable`].
-fn run_resume(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
-) -> Result<EngineResult, EngineError> {
-    let expected_hash = compute_plan_hash(plan);
-
-    let (existing_completed, existing_levels) =
-        if let Some(root) = resolve_checkpoint_root(config, sink) {
-            // `JobCheckpoint::load` returns `Result<Option<_>, ResumeError>`:
-            // `?` surfaces real corruption as an engine error (via
-            // `EngineError::ResumeFailed`) rather than silently degrading
-            // to "no checkpoint". A missing file is still `Ok(None)`.
-            match JobCheckpoint::load(&root)? {
-                Some(meta) => {
-                    if meta.plan_hash != expected_hash {
-                        return Err(EngineError::PlanHashMismatch {
-                            expected: meta.plan_hash.clone(),
-                            got: expected_hash,
-                        });
-                    }
-                    (meta.completed_tiles, meta.levels_completed)
-                }
-                None => (Vec::new(), Vec::new()),
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-    let skip: HashSet<TileCoord> = existing_completed.iter().copied().collect();
-    let cp = cp_for_sink(sink, plan, config, existing_completed, existing_levels);
-    run_pyramid_with_cp(source, plan, sink, config, cp.as_ref(), &skip, true)
-}
-
 /// Build a `CheckpointState` rooted at the sink's checkpoint directory, or
 /// `None` if the sink does not expose a filesystem root (no on-disk
 /// checkpoint is possible in that case).
-fn cp_for_sink(
+pub(crate) fn cp_for_sink(
     sink: &dyn TileSink,
     plan: &PyramidPlan,
     config: &EngineConfig,
@@ -817,42 +737,43 @@ fn cp_for_sink(
     ))
 }
 
-/// Common pyramid-run body used by both `Overwrite` and `Resume`.
+/// Verify mode for the monolithic raster path: walks every tile in the
+/// plan, reads the on-disk bytes via `sink.checkpoint_root()` joined with
+/// the plan's tile path, and returns an error if any tile is missing or
+/// (when the manifest records checksums) if the bytes do not match the
+/// recorded digest.
 ///
-/// The `treat_skip_as_produced` flag keeps [`EngineResult::tiles_produced`]
-/// meaningful across both modes: a fresh Overwrite returns the total count,
-/// while Resume returns only the count of tiles written on *this* run
-/// (the tests use the difference to assert exactly how much rework happened).
-fn run_pyramid_with_cp(
+/// Does NOT call `sink.write_tile`; the test suite asserts that
+/// `tiles_produced == 0` and that no files are mutated. Emits
+/// `LevelStarted` / `TileCompleted` / `LevelCompleted` / `Finished`
+/// events so progress observers see verify runs as first-class.
+///
+/// Strip-source equivalents live in [`crate::stream_verify`].
+pub(crate) fn raster_verify(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
     config: &EngineConfig,
-    cp: Option<&CheckpointState>,
-    skip: &HashSet<TileCoord>,
-    _treat_skip_as_produced: bool,
-) -> Result<EngineResult, EngineError> {
-    let skip_ref = if skip.is_empty() { None } else { Some(skip) };
-    run_pyramid(source, plan, sink, config, &NoopObserver, skip_ref, cp)
-}
-
-/// Verify-mode branch: walks every tile in the plan, reads the on-disk bytes
-/// via `sink.checkpoint_root()` joined with the plan's tile path, and
-/// returns an error if any tile is missing or (when the manifest records
-/// checksums) if the bytes do not match the recorded digest.
-///
-/// Verify does NOT call `sink.write_tile`; the test suite asserts that
-/// `tiles_produced == 0` and that no files are mutated.
-fn run_verify(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &EngineConfig,
+    observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     let started = Instant::now();
     let root_buf =
         resolve_checkpoint_root(config, sink).ok_or(EngineError::VerifyRequiresOnDiskSink)?;
     let root = root_buf.as_path();
+
+    // If a checkpoint exists, its `plan_hash` must match the plan we're
+    // verifying against — otherwise we'd walk every tile just to report a
+    // byte mismatch on the first one, which is strictly less useful than
+    // failing fast with the structural error.
+    if let Some(meta) = JobCheckpoint::load(root)? {
+        let expected = compute_plan_hash(plan);
+        if meta.plan_hash != expected {
+            return Err(EngineError::PlanHashMismatch {
+                expected: meta.plan_hash,
+                got: expected,
+            });
+        }
+    }
 
     // Try every known tile-file extension until we find one that matches.
     // The sink's active format isn't visible from this layer, so we probe
@@ -945,9 +866,16 @@ fn run_verify(
         if level_idx < top_level {
             current = resize::downscale_half(&current)?;
         }
+        observer.on_event(EngineEvent::LevelStarted {
+            level: level.level,
+            width: level.width,
+            height: level.height,
+            tile_count: level.tile_count(),
+        });
         for row in 0..level.rows {
             for col in 0..level.cols {
                 let coord = TileCoord::new(level_idx as u32, col, row);
+                observer.on_event(EngineEvent::TileCompleted { coord });
                 let expected = extract_tile(&current, plan, coord, bg)?;
                 let expected_bytes = expected.data();
 
@@ -995,7 +923,16 @@ fn run_verify(
                 // manifest-checksum branch.
             }
         }
+        observer.on_event(EngineEvent::LevelCompleted {
+            level: level.level,
+            tiles_produced: level.tile_count(),
+        });
     }
+
+    observer.on_event(EngineEvent::Finished {
+        total_tiles: plan.total_tile_count(),
+        levels: plan.levels.len() as u32,
+    });
 
     Ok(EngineResult {
         tiles_produced: 0,
@@ -1039,7 +976,7 @@ fn read_manifest(root: &std::path::Path) -> Option<serde_json::Value> {
 /// a pre-existing but partially-populated directory can still be wiped
 /// cleanly. The directory itself is retained. Caller should have verified
 /// the path is a directory they own.
-fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         return Ok(());
@@ -1587,7 +1524,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
@@ -1607,7 +1544,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default().with_concurrency(4);
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
@@ -1627,7 +1564,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default().with_concurrency(2);
 
-        generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         let tiles = sink.tiles();
         let mut coords: Vec<_> = tiles.iter().map(|t| t.coord).collect();
@@ -1653,7 +1590,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
@@ -1682,7 +1619,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
 
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -1690,7 +1634,7 @@ mod tests {
         for concurrency in [1, 2, 4, 8, 16] {
             let sink = MemorySink::new();
             let config = EngineConfig::default().with_concurrency(concurrency);
-            generate_pyramid(&src, &plan, &sink, &config).unwrap();
+            generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
             let mut tiles = sink.tiles();
             tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -1725,7 +1669,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
         assert_eq!(result.levels_processed, plan.level_count() as u32);
     }
 
@@ -1742,7 +1688,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
         assert_eq!(result.tiles_produced, plan.level_count() as u64);
     }
 
@@ -1762,7 +1710,7 @@ mod tests {
             .with_concurrency(4)
             .with_buffer_size(1);
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 
@@ -1818,7 +1766,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
         for tile in sink.tiles() {
             let rect = plan.tile_rect(tile.coord).unwrap();
@@ -1846,7 +1794,7 @@ mod tests {
             .with_concurrency(4)
             .with_buffer_size(2);
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
@@ -1988,7 +1936,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
 
         // Peak should be at least the source raster size
         let source_bytes = 512 * 512 * 3;
@@ -2014,7 +1964,9 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
 
         let source_bytes = 1024u64 * 1024 * 3;
         // Should be less than 2x source (current level + some overhead)
@@ -2037,7 +1989,7 @@ mod tests {
         let sink = MemorySink::new();
         let config = EngineConfig::default();
 
-        let result = generate_pyramid(&src, &plan, &sink, &config).unwrap();
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
@@ -2051,7 +2003,8 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+            .unwrap();
 
         for tile in sink.tiles() {
             assert_eq!(tile.width, 256, "Width mismatch at {:?}", tile.coord);
@@ -2069,7 +2022,8 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+            .unwrap();
 
         // Level 0 should have 1 tile (1x1 grid)
         let tiles = sink.tiles();
@@ -2101,7 +2055,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
 
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -2109,7 +2070,7 @@ mod tests {
         for concurrency in [1, 2, 4] {
             let sink = MemorySink::new();
             let config = EngineConfig::default().with_concurrency(concurrency);
-            generate_pyramid(&src, &plan, &sink, &config).unwrap();
+            generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
 
             let mut tiles = sink.tiles();
             tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
@@ -2133,7 +2094,95 @@ mod tests {
         let plan = planner.plan();
         let sink = MemorySink::new();
 
-        let result = generate_pyramid(&src, &plan, &sink, &EngineConfig::default()).unwrap();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &EngineConfig::default(), &NoopObserver)
+                .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+
+    /// Observer should see LevelStarted / TileCompleted / LevelCompleted /
+    /// Finished events from every resume path, not just the non-resumable
+    /// one. Runs all three ResumeModes via `EngineBuilder::with_resume`
+    /// against a CollectingObserver and asserts each one drives at least
+    /// the expected shape of events.
+    #[test]
+    fn resumable_emits_observer_events() {
+        use std::sync::Arc;
+
+        use crate::observe::CollectingObserver;
+        use crate::resume::ResumePolicy;
+        use crate::{EngineBuilder, EngineKind};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(128, 96);
+        let planner = PyramidPlanner::new(128, 96, 64, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let dir = tempdir().unwrap();
+        let sink = crate::sink::FsSink::new(dir.path().join("tiles"), plan.clone())
+            .with_format(crate::sink::TileFormat::Raw);
+
+        // --- Overwrite --------------------------------------------------
+        let obs = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite())
+            .with_observer_arc(obs.clone())
+            .run()
+            .unwrap();
+        let events = obs.events();
+        let tile_events = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
+            .count();
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::Finished { .. }))
+            .count();
+        assert_eq!(
+            tile_events as u64,
+            plan.total_tile_count(),
+            "Overwrite: tile events"
+        );
+        assert_eq!(finished, 1, "Overwrite: finished event");
+
+        // --- Resume (no-op since everything is already complete) --------
+        let obs = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .with_observer_arc(obs.clone())
+            .run()
+            .unwrap();
+        // Resume with a full checkpoint short-circuits without per-tile
+        // work, so we only require the engine to have produced *some*
+        // observer activity (the Finished event at minimum).
+        assert!(
+            !obs.events().is_empty(),
+            "Resume mode produced no observer events"
+        );
+
+        // --- Verify -----------------------------------------------------
+        let obs = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::verify())
+            .with_observer_arc(obs.clone())
+            .run()
+            .unwrap();
+        let events = obs.events();
+        let tile_events = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
+            .count();
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::Finished { .. }))
+            .count();
+        assert_eq!(
+            tile_events as u64,
+            plan.total_tile_count(),
+            "Verify: tile events"
+        );
+        assert_eq!(finished, 1, "Verify: finished event");
     }
 }

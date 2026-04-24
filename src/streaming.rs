@@ -182,36 +182,31 @@ impl<'a> StripSource for RasterStripSource<'a> {
 // PdfiumStripSource — true source-side PDF strip streaming
 // ---------------------------------------------------------------------------
 
-/// [`StripSource`] backed by pdfium with per-strip matrix rendering.
+/// [`StripSource`] backed by pdfium.
 ///
-/// Each [`render_strip`](StripSource::render_strip) call dispatches to
-/// `FPDF_RenderPageBitmapWithMatrix`, allocating only a `canvas_width ×
-/// strip_h × 4` bitmap (BGRA → RGBA conversion in place). No full-page raster
-/// is ever materialised on the source side, so peak source memory is
-/// `O(canvas_width × max_strip_h)` instead of the page area.
+/// At construction time, the full display-oriented page is rendered once via
+/// [`render_page_pdfium`](crate::pdf::render_page_pdfium). Each
+/// [`render_strip`](StripSource::render_strip) call then slices the cached
+/// raster — O(1) per strip, no additional pdfium calls. Dimensions are
+/// taken directly from the rendered raster so
+/// [`StripSource::width`]/[`StripSource::height`] match the output byte-for-byte.
 ///
-/// Dimensions are queried from pdfium at construction time and cached, so
-/// callers cannot mis-predict them — closing libviprs#41's panic surface.
-///
-/// Pdfium is not thread-safe; the inner mutex serialises strip renders.
+/// This currently trades source-side memory (`O(canvas_w × canvas_h)`) for
+/// correctness: pdfium's matrix render path does not auto-apply the page's
+/// intrinsic `/Rotate`, and hand-composed rotation matrices produced
+/// 180°-off output for `/Rotate 90/270` pages in practice. The form-data
+/// render path that `render_page_pdfium` uses does rotate automatically, so
+/// we fall back to full-page render + slice. See
+/// [`render_strip_inner`](Self::render_strip_inner) for details.
 #[cfg(feature = "pdfium")]
 pub struct PdfiumStripSource {
-    inner: std::sync::Mutex<PdfiumInner>,
     width: u32,
     height: u32,
-    /// Display width in PDF points (post-/Rotate). Used to compose the
-    /// rotation-aware matrix in [`render_strip_inner`].
-    disp_w_pts: f32,
-    /// Display height in PDF points (post-/Rotate).
-    disp_h_pts: f32,
     dpi: u32,
-}
-
-#[cfg(feature = "pdfium")]
-struct PdfiumInner {
-    pdfium: &'static pdfium_render::prelude::Pdfium,
-    path: std::path::PathBuf,
-    page: usize,
+    /// Full display-oriented raster, rendered at construction time and
+    /// sliced per-strip. See [`render_strip_inner`] for why we cache the
+    /// full page instead of rendering strip-by-strip.
+    full_raster: Raster,
 }
 
 #[cfg(feature = "pdfium")]
@@ -229,10 +224,9 @@ impl std::fmt::Debug for PdfiumStripSource {
 impl PdfiumStripSource {
     /// Open a PDF page as a strip source at the given DPI.
     ///
-    /// Probes pdfium for the rotation-aware page dimensions and stores them
-    /// for [`width`](StripSource::width)/[`height`](StripSource::height).
-    /// No raster is rendered yet — strips are produced on demand by
-    /// [`render_strip`](StripSource::render_strip).
+    /// Renders the full display-oriented page via pdfium and caches it.
+    /// Subsequent [`render_strip`](StripSource::render_strip) calls slice
+    /// the cached raster.
     ///
     /// # Arguments
     ///
@@ -245,15 +239,21 @@ impl PdfiumStripSource {
         dpi: u32,
     ) -> Result<Self, crate::pdf::PdfError> {
         let path = path.into();
-        let pdfium = crate::pdf::init_pdfium()?;
-        let (width, height, disp_w_pts, disp_h_pts) = probe_page_dims(pdfium, &path, page, dpi)?;
+        // Render eagerly and use the actual raster dimensions. Pdfium's
+        // `set_target_width`/`set_maximum_height` path rounds a few pixels
+        // differently than our `probe_page_dims` truncation at higher DPIs;
+        // using the cached raster's real width/height keeps
+        // `StripSource::width`/`height` in lockstep with what `render_strip`
+        // will hand back. See `render_strip_inner` for why we render the
+        // full page in the first place.
+        let full = crate::pdf::render_page_pdfium(&path, page, dpi)?;
+        let width = full.width();
+        let height = full.height();
         Ok(Self {
-            inner: std::sync::Mutex::new(PdfiumInner { pdfium, path, page }),
             width,
             height,
-            disp_w_pts,
-            disp_h_pts,
             dpi,
+            full_raster: full,
         })
     }
 
@@ -300,15 +300,14 @@ impl PdfiumStripSource {
                 budget_bytes,
             )?,
         };
-        let (width, height, disp_w_pts, disp_h_pts) =
-            probe_page_dims(pdfium, &path, page, resolved_dpi)?;
+        let full = crate::pdf::render_page_pdfium(&path, page, resolved_dpi)?;
+        let width = full.width();
+        let height = full.height();
         Ok(Self {
-            inner: std::sync::Mutex::new(PdfiumInner { pdfium, path, page }),
             width,
             height,
-            disp_w_pts,
-            disp_h_pts,
             dpi: resolved_dpi,
+            full_raster: full,
         })
     }
 
@@ -323,90 +322,25 @@ impl PdfiumStripSource {
         y_offset: u32,
         height: u32,
     ) -> Result<Raster, crate::pdf::PdfError> {
-        use pdfium_render::prelude::*;
-
-        let inner = self.inner.lock().unwrap();
-        let document = inner
-            .pdfium
-            .load_pdf_from_file(&inner.path, None)
-            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-        let pages = document.pages();
-        let total = pages.len();
-        if inner.page == 0 || inner.page > total as usize {
-            return Err(crate::pdf::PdfError::PageOutOfRange {
-                page: inner.page,
-                total: total as usize,
-            });
-        }
-        let pdf_page = pages
-            .get(inner.page as u16 - 1)
-            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-
+        // Pdfium's matrix-based render path (FPDF_RenderPageBitmapWithMatrix)
+        // does not auto-apply the page's intrinsic /Rotate — hand-composed
+        // rotation matrices produced 180°-off output for /Rotate 90/270
+        // pages across every variant we tried. Rather than chase pdfium's
+        // matrix conventions, we render the full display-oriented raster
+        // once via `render_page_pdfium` (the form-data path that pdfium
+        // does rotate automatically) and slice strips out of the cached
+        // buffer. This trades peak memory for correctness; a future
+        // iteration can switch back to a true single-strip render once
+        // pdfium's matrix convention is pinned down.
         let strip_h = height.min(self.height.saturating_sub(y_offset));
         if strip_h == 0 {
-            // Above the page — return a fully transparent strip so callers
-            // get a uniform shape regardless of position.
             let data = vec![0u8; self.width as usize * height as usize * 4];
             return Raster::new(self.width, height, PixelFormat::Rgba8, data)
                 .map_err(crate::pdf::PdfError::from);
         }
 
-        // FPDF_RenderPageBitmapWithMatrix does NOT honor the page's intrinsic
-        // /Rotate; we have to compose the rotation prefix ourselves. Without
-        // this, /Rotate 90/180/270 pages render in their un-rotated user-space
-        // orientation, mangled into a rotation-aware-sized bitmap.
-        let rotation = pdf_page
-            .rotation()
-            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-
-        // Matrix maps PDF user-space points → strip bitmap pixels (top-left
-        // origin). For each rotation case we derived (a,b,c,d,e,f) so that
-        //   (sx, sy) = (a*x_u + c*y_u + e, b*x_u + d*y_u + f)
-        // places the page content correctly into the (display-oriented) strip.
-        // disp_w_pts/disp_h_pts are post-rotation page dims; the strip's row 0
-        // is full-page row `y_offset`, so f always carries `- y_offset`.
-        //
-        // Per-rotation derivation (W_u, H_u = un-rotated user-space dims;
-        // display dims swap for 90/270):
-        //   /Rotate 0:   display = user                  → (s, 0, 0, -s, 0, H*s - yo)
-        //   /Rotate 90:  display.x = y_u, .y = W_u - x_u → (0, s, s, 0, 0, -yo)
-        //   /Rotate 180: display = (W_u-x_u, H_u-y_u)    → (-s, 0, 0, s, W*s, -yo)
-        //   /Rotate 270: display.x = H_u - y_u, .y = x_u → (0, -s, -s, 0, W_d*s, H_d*s - yo)
-        let s = self.dpi as f32 / 72.0;
-        let disp_w_px = self.disp_w_pts * s;
-        let disp_h_px = self.disp_h_pts * s;
-        let yo = y_offset as f32;
-        let (a, b, c, d, e, f) = match rotation {
-            PdfPageRenderRotation::None => (s, 0.0, 0.0, -s, 0.0, disp_h_px - yo),
-            PdfPageRenderRotation::Degrees90 => (0.0, s, s, 0.0, 0.0, -yo),
-            PdfPageRenderRotation::Degrees180 => (-s, 0.0, 0.0, s, disp_w_px, -yo),
-            PdfPageRenderRotation::Degrees270 => (0.0, -s, -s, 0.0, disp_w_px, disp_h_px - yo),
-        };
-
-        let bindings = inner.pdfium.bindings();
-        let mut bitmap = PdfBitmap::empty(
-            self.width as Pixels,
-            strip_h as Pixels,
-            PdfBitmapFormat::BGRA,
-            bindings,
-        )
-        .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-
-        let config = PdfRenderConfig::new()
-            .set_fixed_size(self.width as Pixels, strip_h as Pixels)
-            .render_form_data(false)
-            .transform(a, b, c, d, e, f)
-            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-
-        pdf_page
-            .render_into_bitmap_with_config(&mut bitmap, &config)
-            .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-
-        // pdfium-render's as_rgba_bytes() handles BGRA → RGBA per the
-        // bitmap's actual format; safer than swapping bytes manually.
-        let data = bitmap.as_rgba_bytes();
-
-        Raster::new(self.width, strip_h, PixelFormat::Rgba8, data)
+        self.full_raster
+            .extract(0, y_offset, self.width, strip_h)
             .map_err(crate::pdf::PdfError::from)
     }
 }
@@ -641,7 +575,7 @@ pub fn estimate_streaming_memory(
 ///
 /// Propagates errors from the source, sink, raster operations, and the
 /// 2×2 downscale filter.
-pub fn generate_pyramid_streaming(
+pub(crate) fn generate_pyramid_streaming(
     source: &dyn StripSource,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
@@ -943,34 +877,6 @@ pub fn generate_pyramid_streaming(
         stage_durations: crate::engine::StageDurations::default(),
         skipped_due_to_failure: 0,
     })
-}
-
-/// Auto-selecting entry point that chooses between monolithic and streaming.
-///
-/// Compares the estimated peak memory of the monolithic engine against the
-/// configured budget. If the monolithic path fits, it delegates to
-/// [`generate_pyramid_observed`](crate::engine::generate_pyramid_observed)
-/// for maximum throughput. Otherwise, wraps the source raster in a
-/// [`RasterStripSource`] and calls [`generate_pyramid_streaming`].
-///
-/// This is the recommended entry point when the caller has an in-memory
-/// [`Raster`] and wants automatic memory management without committing
-/// to a specific engine implementation.
-pub fn generate_pyramid_auto(
-    source: &Raster,
-    plan: &PyramidPlan,
-    sink: &dyn TileSink,
-    config: &StreamingConfig,
-    observer: &dyn EngineObserver,
-) -> Result<EngineResult, EngineError> {
-    let mono_peak = plan.estimate_peak_memory_for_format(source.format());
-
-    if mono_peak <= config.memory_budget_bytes {
-        crate::engine::generate_pyramid_observed(source, plan, sink, &config.engine, observer)
-    } else {
-        let strip_source = RasterStripSource::new(source);
-        generate_pyramid_streaming(&strip_source, plan, sink, config, observer)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,7 +1533,14 @@ mod tests {
 
         // Monolithic
         let ref_sink = MemorySink::new();
-        crate::engine::generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1638,7 +1551,14 @@ mod tests {
             engine: EngineConfig::default(),
             budget_policy: BudgetPolicy::Error,
         };
-        generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        generate_pyramid_streaming(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
         let mut tiles = sink.tiles();
         tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1705,7 +1625,14 @@ mod tests {
         let plan = planner.plan();
 
         let ref_sink = MemorySink::new();
-        crate::engine::generate_pyramid(&src, &plan, &ref_sink, &EngineConfig::default()).unwrap();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
         let mut ref_tiles = ref_sink.tiles();
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1715,7 +1642,14 @@ mod tests {
             engine: EngineConfig::default(),
             budget_policy: BudgetPolicy::Error,
         };
-        generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        generate_pyramid_streaming(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
         let mut tiles = sink.tiles();
         tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -1741,7 +1675,14 @@ mod tests {
             engine: EngineConfig::default(),
             budget_policy: BudgetPolicy::Error,
         };
-        let result = generate_pyramid_auto(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        let result = generate_pyramid_streaming(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
