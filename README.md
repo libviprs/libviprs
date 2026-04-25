@@ -20,7 +20,7 @@ Takes blueprint PDFs and images, extracts raster data, optionally geo-references
 - **PDF extraction** — extract embedded raster images from scanned blueprint PDFs via lopdf (pure Rust, no C dependencies)
 - **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional memory-budgeted rendering (optional `pdfium` feature)
 - **Image decoding** — JPEG, PNG, TIFF via the `image` crate
-- **Tile pyramid generation** — multi-threaded engine with backpressure, configurable tile size and overlap
+- **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap
 - **Layout formats** — DeepZoom (`.dzi` + directory tree), XYZ (`z/x/y`), and Google Maps (`z/y/x`, power-of-2 grids)
 - **Centre support** — centre image within the tile grid with even background padding on all sides
 - **Tile encoding** — PNG, JPEG (configurable quality), or raw pixel output
@@ -33,8 +33,8 @@ Takes blueprint PDFs and images, extracts raster data, optionally geo-references
 
 ```rust
 use libviprs::{
-    extract_page_image, generate_pyramid, BlankTileStrategy,
-    EngineConfig, FsSink, Layout, PyramidPlanner, TileFormat,
+    extract_page_image, BlankTileStrategy, EngineBuilder, EngineKind,
+    FsSink, Layout, PyramidPlanner, TileFormat,
 };
 use std::path::Path;
 
@@ -51,11 +51,13 @@ let planner = PyramidPlanner::new(
 let plan = planner.plan();
 
 // Generate tiles to disk
-let sink = FsSink::new("output_tiles", plan.clone(), TileFormat::Png);
-let config = EngineConfig::default()
+let sink = FsSink::new("output_tiles", plan.clone()).with_format(TileFormat::Png);
+let result = EngineBuilder::new(&raster, plan, sink)
+    .with_engine(EngineKind::Auto)
     .with_concurrency(4)
-    .with_blank_tile_strategy(BlankTileStrategy::Placeholder);
-let result = generate_pyramid(&raster, &plan, &sink, &config).unwrap();
+    .with_blank_strategy(BlankTileStrategy::Placeholder)
+    .run()
+    .unwrap();
 
 println!(
     "{} tiles across {} levels ({} blank tiles skipped)",
@@ -73,16 +75,31 @@ println!(
 | `pixel` | Pixel format definitions (Gray8, RGB8, RGBA8, 16-bit variants) |
 | `planner` | Tile math, level computation, layout generation |
 | `resize` | Downscaling for pyramid levels |
-| `engine` | Multi-threaded tile extraction with backpressure, blank tile detection |
+| `engine` | Monolithic in-memory tile extraction with backpressure, blank tile detection |
+| `engine_builder` | Typed `EngineBuilder` / `EngineKind` entry point routing to Monolithic, Streaming, or MapReduce engines |
+| `streaming` | Sequential strip engine, `StripSource` trait, `RasterStripSource`, memory-budget helpers |
+| `streaming_mapreduce` | Parallel strip engine and `MapReduceConfig` |
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
+| `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
+| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `s3`) |
+| `resume` | Job checkpoints and resume policy for restart-safe runs |
+| `retry` | Failure / retry policy and `RetryingSink` wrapper |
+| `dedupe` | Content-addressed tile deduplication |
+| `manifest` | `Manifest` v1 schema and `ManifestBuilder` describing the produced pyramid |
+| `checksum` | Tile checksum modes and verification reports |
+| `stream_verify` | Verify pyramid output against the original source |
 | `geo` | Affine geo-transform, GCP solving, bounding box computation |
-| `observe` | Progress events, memory tracking |
+| `observe` | Progress events, lifecycle observers, memory tracking |
 
 ## Features
 
 | Feature | Default | Description |
 |---|---|---|
-| `pdfium` | off | Enables `render_page_pdfium()` and `render_page_pdfium_budgeted()` for vector PDF rendering. Requires libpdfium at runtime. |
+| `pdfium` | off | Enables `render_page_pdfium()`, `render_page_pdfium_budgeted()`, and `PdfiumStripSource` for vector PDF rendering. Requires libpdfium at runtime. |
+| `pdfium-static` | off | Implies `pdfium` and links libpdfium statically via `pdfium-render/static`. |
+| `s3` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). |
+| `tracing` | off | Emits structured `tracing` spans and events from the engine pipeline. |
+| `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |
 
 ## Requirements
 
