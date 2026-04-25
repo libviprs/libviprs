@@ -33,35 +33,74 @@ Takes blueprint PDFs and images, extracts raster data, optionally geo-references
 
 ```rust
 use libviprs::{
-    extract_page_image, BlankTileStrategy, EngineBuilder, EngineKind,
-    FsSink, Layout, PyramidPlanner, TileFormat,
+    extract_page_image,
+    BlankTileStrategy,
+    EngineBuilder,
+    EngineKind,
+    FsSink,
+    Layout,
+    PyramidPlanner,
+    TileFormat,
 };
 use std::path::Path;
 
-// Extract raster from a scanned blueprint PDF
-let raster = extract_page_image(Path::new("blueprint.pdf"), 1).unwrap();
-
-// Plan the pyramid
-let planner = PyramidPlanner::new(
-    raster.width(), raster.height(),
-    256,  // tile size
-    0,    // overlap
-    Layout::DeepZoom,
+// ──────────────────────────────────────────────────────────────────────
+// 1. Decode the source.
+//    extract_page_image pulls the embedded raster out of a scanned PDF;
+//    use libviprs::decode_file for plain image inputs (PNG/JPEG/TIFF).
+// ──────────────────────────────────────────────────────────────────────
+let raster = extract_page_image(
+    Path::new("blueprint.pdf"),  // input path (PDF here; any image works too)
+    1,                           // 1-based PDF page number
 ).unwrap();
+
+// ──────────────────────────────────────────────────────────────────────
+// 2. Plan the pyramid.
+//    PyramidPlanner computes per-level dimensions, tile counts, and
+//    canvas size — no pixels are touched yet.
+// ──────────────────────────────────────────────────────────────────────
+let planner = PyramidPlanner::new(
+    raster.width(),    // source width in pixels
+    raster.height(),   // source height in pixels
+    256,               // tile size (DeepZoom default; 512 for HiDPI)
+    0,                 // pixel overlap between adjacent tiles
+    Layout::DeepZoom,  // tile naming convention (also: Xyz, Google)
+).unwrap();
+
 let plan = planner.plan();
 
-// Generate tiles to disk
-let sink = FsSink::new("output_tiles", plan.clone()).with_format(TileFormat::Png);
-let result = EngineBuilder::new(&raster, plan, sink)
-    .with_engine(EngineKind::Auto)
-    .with_concurrency(4)
-    .with_blank_strategy(BlankTileStrategy::Placeholder)
-    .run()
-    .unwrap();
+// ──────────────────────────────────────────────────────────────────────
+// 3. Configure where the tiles get written.
+//    FsSink writes to a local directory; libviprs also ships
+//    ObjectStoreSink (S3) and PackfileSink (.tar/.tar.gz/.zip).
+// ──────────────────────────────────────────────────────────────────────
+let sink = FsSink::new(
+    "output_tiles",  // output directory (created if missing)
+    plan.clone(),    // pyramid plan tile paths are derived from
+)
+.with_format(TileFormat::Png);  // also: TileFormat::Jpeg { quality: u8 } | Raw
+
+// ──────────────────────────────────────────────────────────────────────
+// 4. Run the engine.
+//    EngineKind::Auto picks monolithic / streaming / mapreduce based on
+//    the source kind and any with_memory_budget value supplied.
+// ──────────────────────────────────────────────────────────────────────
+let result = EngineBuilder::new(
+    &raster,  // source raster from step 1
+    plan,     // pyramid plan from step 2
+    sink,     // tile sink from step 3
+)
+.with_engine(EngineKind::Auto)                        // auto-select engine
+.with_concurrency(4)                                   // worker threads for tile extraction
+.with_blank_strategy(BlankTileStrategy::Placeholder)   // collapse uniform tiles into 1-byte placeholders
+.run()
+.unwrap();
 
 println!(
     "{} tiles across {} levels ({} blank tiles skipped)",
-    result.tiles_produced, result.levels_processed, result.tiles_skipped,
+    result.tiles_produced,    // total tile files written
+    result.levels_processed,  // number of pyramid levels
+    result.tiles_skipped,     // tiles emitted as blank placeholders
 );
 ```
 
