@@ -5,6 +5,22 @@ All notable changes to libviprs are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-04-25
+
+Documentation-only patch: the README and crate-root rustdoc shipped on
+crates.io with 0.3.0 still showed the removed `generate_pyramid` /
+`EngineConfig` entry points. 0.3.1 reships the same code with the README,
+`src/lib.rs` rustdoc, `CHANGELOG.md`, and `MIGRATION.md` aligned with the
+0.3.0 `EngineBuilder` API.
+
+### Changed
+
+- `README.md` — usage example uses `EngineBuilder` and 2-arg `FsSink::new`
+  + `.with_format(...)`; modules and features tables extended for 0.3.0.
+- `src/lib.rs` crate-root rustdoc — workflow step 3 references
+  `EngineBuilder` / `EngineKind` / `EngineObserver`; cargo features
+  documented (`pdfium`, `pdfium-static`, `s3`, `tracing`, `packfile`).
+
 ## [0.3.0] — 2026-04-25
 
 The headline change in 0.3.0 is `EngineBuilder`: the five free-function entry
