@@ -24,6 +24,8 @@
 ///
 /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 ///   constructs `PixelCoord` values when verifying geo bounds for tile centers.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-geo-origin)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PixelCoord {
     pub x: f64,
@@ -47,6 +49,8 @@ pub struct PixelCoord {
 ///   creates `GeoCoord` origins to geo-reference a PDF-extracted raster.
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   parses `--geo-origin` flag values into `GeoCoord`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-geo-origin)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoCoord {
     pub x: f64,
@@ -71,6 +75,9 @@ pub struct GeoCoord {
 ///   centers fall within the expected geographic bounds.
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   builds a `GeoTransform` from the `--geo-origin` and `--geo-scale` flags.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-geo-origin)
+/// (and [`--geo-scale`](https://libviprs.org/cli/#flag-geo-scale))
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoTransform {
     pub a: f64,
@@ -316,6 +323,8 @@ impl GeoTransform {
 /// - [pdf_to_georeferenced_pyramid_memory](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 ///   obtains a `GeoBounds` via `image_bounds` and asserts that interior
 ///   tile centres are contained within it.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-geo-origin)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoBounds {
     pub min: GeoCoord,

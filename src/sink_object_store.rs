@@ -51,6 +51,8 @@ pub trait ObjectStore: Send + Sync {
 ///
 /// Retry behaviour is **not** configured here — wrap the resulting sink in
 /// [`crate::retry::RetryingSink`] if you need automatic retries.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ObjectStoreConfig {
@@ -244,6 +246,10 @@ fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError
 /// retry should wrap this sink in [`crate::retry::RetryingSink`] with the
 /// appropriate [`crate::retry::RetryPolicy`] and
 /// [`crate::retry::FailurePolicy`].
+///
+/// On the CLI this sink is selected by passing an `s3://…` URI to `--sink`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 #[non_exhaustive]
 pub struct ObjectStoreSink {
     cfg: ObjectStoreConfig,

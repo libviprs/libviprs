@@ -49,6 +49,8 @@ use crate::streaming_mapreduce::{MapReduceConfig, generate_pyramid_mapreduce};
 ///
 /// `#[non_exhaustive]` so future engine variants (e.g. `Gpu`, `Distributed`,
 /// `Remote`) can be added as minor-version additions.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum EngineKind {
@@ -122,6 +124,9 @@ where
 /// Generic over the sink type so `.run()` is monomorphic for single-sink
 /// callers; use `EngineBuilder<'a, Box<dyn TileSink>>` when different match
 /// arms need to return different concrete sinks.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
+/// for an end-to-end runnable program built from these setters.
 pub struct EngineBuilder<'a, S: TileSink> {
     source: EngineSource<'a>,
     plan: PyramidPlan,
@@ -208,6 +213,8 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
     /// Select which engine implementation [`EngineBuilder::run`] will
     /// dispatch to. Defaults to [`EngineKind::Auto`].
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel).
     pub fn with_engine(mut self, kind: EngineKind) -> Self {
         self.engine_kind = kind;
         self
@@ -257,12 +264,16 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// Set the [`FailurePolicy`] the engine consults when a tile write
     /// terminally fails. Overrides any earlier [`EngineBuilder::with_retry`]
     /// call.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max).
     pub fn with_failure_policy(mut self, policy: FailurePolicy) -> Self {
         self.failure_policy = Some(policy);
         self
     }
 
     /// Shorthand for `with_failure_policy(FailurePolicy::RetryThenFail(policy))`.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max).
     pub fn with_retry(self, policy: RetryPolicy) -> Self {
         self.with_failure_policy(FailurePolicy::RetryThenFail(policy))
     }
@@ -270,6 +281,10 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// Control resume / verify behaviour. Only the engine's resumable path
     /// consults this; see [`ResumePolicy`] for the mode selector and the
     /// checkpoint-persistence knobs.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume),
+    /// plus the related [`--overwrite`](https://libviprs.org/cli/#flag-overwrite)
+    /// and [`--verify`](https://libviprs.org/cli/#flag-verify) flags.
     pub fn with_resume(mut self, policy: ResumePolicy) -> Self {
         self.resume = Some(policy);
         self
@@ -277,12 +292,16 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
     /// Select a content-addressed deduplication strategy. See
     /// [`DedupeStrategy`] for variants.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks).
     pub fn with_dedupe(mut self, strategy: DedupeStrategy) -> Self {
         self.dedupe = Some(strategy);
         self
     }
 
     /// Control how blank (uniform-colour) tiles are handled.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-skip-blank).
     pub fn with_blank_strategy(mut self, strategy: BlankTileStrategy) -> Self {
         self.blank_strategy = Some(strategy);
         self
@@ -295,12 +314,16 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     }
 
     /// Worker-thread concurrency (0 = single-threaded on the caller's thread).
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-concurrency).
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.concurrency = Some(n);
         self
     }
 
     /// Capacity of the producer→sink bounded channel.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-buffer-size).
     pub fn with_buffer_size(mut self, n: usize) -> Self {
         self.buffer_size = Some(n);
         self
@@ -308,6 +331,8 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
     /// Soft memory budget in bytes. Drives strip-height selection in the
     /// streaming and map-reduce engines.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget).
     pub fn with_memory_budget(mut self, bytes: u64) -> Self {
         self.memory_budget_bytes = Some(bytes);
         self
@@ -315,6 +340,8 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
     /// Decide what happens when the requested budget is too tight for the
     /// worst-case minimum aligned strip.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget).
     pub fn with_budget_policy(mut self, policy: BudgetPolicy) -> Self {
         self.budget_policy = Some(policy);
         self
