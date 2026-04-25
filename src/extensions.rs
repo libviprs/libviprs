@@ -42,6 +42,8 @@ type BoxedAny = Box<dyn Any + Send + Sync>;
 /// one was present. The internal [`HashMap`] is lazily allocated so an
 /// [`EngineBuilder`](crate::EngineBuilder) that never sets an extension
 /// pays no heap cost.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
 #[derive(Default)]
 pub struct Extensions {
     map: Option<HashMap<TypeId, BoxedAny>>,

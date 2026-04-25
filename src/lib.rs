@@ -41,6 +41,9 @@
 //! for comprehensive integration tests, and
 //! [libviprs-cli](https://github.com/libviprs/libviprs-cli) for a command-line
 //! tool demonstrating every public API.
+//!
+//! **See also:** the [interactive CLI documentation](https://libviprs.org/cli/)
+//! bundles every public knob into runnable examples.
 
 pub mod checksum;
 pub mod dedupe;

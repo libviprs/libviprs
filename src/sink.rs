@@ -128,6 +128,8 @@ pub struct Tile {
 /// for filesystem sink integration tests and
 /// [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for how the CLI wires up a sink.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
 pub trait TileSink: Send + Sync {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError>;
     fn finish(&self) -> Result<(), SinkError> {
@@ -388,9 +390,15 @@ impl TileSink for SlowSink {
 /// for format selection and
 /// [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for how the CLI maps user flags to a `TileFormat`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileFormat {
     Png,
+    /// JPEG-encoded tiles. The `quality` knob trades off filesize against
+    /// visual fidelity (1–100, higher = better quality, larger files).
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-quality)
     Jpeg {
         quality: u8,
     },
@@ -425,6 +433,8 @@ impl TileFormat {
 /// for integration tests and
 /// [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for how the `pyramid` command constructs an `FsSink`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 ///
 /// `Debug` is implemented manually because the internal [`DedupeIndex`] does
 /// not derive `Debug`.
@@ -576,6 +586,9 @@ impl FsSink {
     /// Attach a [`ManifestBuilder`](crate::manifest::ManifestBuilder) so the
     /// sink emits a `manifest.json` alongside the pyramid when
     /// [`FsSink::finish`] is called.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
+    /// (and [checksum-algo](https://libviprs.org/cli/#flag-checksum-algo)).
     pub fn with_manifest(mut self, builder: crate::manifest::ManifestBuilder) -> Self {
         // If the builder specifies a checksum algorithm and the caller has
         // not separately configured checksums, default to EmitOnly so the
@@ -595,6 +608,9 @@ impl FsSink {
     /// Argument order: `(mode, algo)` to mirror `.with_checksums(Verify,
     /// Blake3)` call-site readability (the mode is usually the focus of the
     /// test/config, with the algorithm as a secondary choice).
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
+    /// (and [checksum-algo](https://libviprs.org/cli/#flag-checksum-algo)).
     pub fn with_checksums(
         mut self,
         mode: crate::checksum::ChecksumMode,
@@ -614,6 +630,8 @@ impl FsSink {
 
     /// Attach a [`DedupeStrategy`](crate::dedupe::DedupeStrategy) so the sink
     /// can coalesce identical blank tiles under a shared reference.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
     pub fn with_dedupe(mut self, strategy: crate::dedupe::DedupeStrategy) -> Self {
         if strategy != crate::dedupe::DedupeStrategy::None {
             self.dedupe_index = Some(crate::dedupe::DedupeIndex::new(strategy));
@@ -626,6 +644,8 @@ impl FsSink {
 
     /// Enable resume metadata. When set, [`FsSink::finish`] writes a small
     /// `.libviprs-job.json` checkpoint alongside the pyramid.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
     pub fn with_resume(mut self, enabled: bool) -> Self {
         self.resume_enabled = enabled;
         self
@@ -642,6 +662,8 @@ impl FsSink {
     ///     .with_format(TileFormat::Jpeg { quality: 85 })
     ///     .with_dedupe(DedupeStrategy::Blanks);
     /// ```
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
     pub fn with_format(mut self, format: TileFormat) -> Self {
         self.format = format;
         self
@@ -1314,6 +1336,8 @@ fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorT
 ///
 /// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 /// for encoding in the context of tile output.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
 pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf));

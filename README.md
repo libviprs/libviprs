@@ -15,19 +15,23 @@ A pure-Rust, thread-safe image pyramiding engine. Inspired by [libvips](https://
 
 Takes blueprint PDFs and images, extracts raster data, optionally geo-references it, and generates tile pyramids (DeepZoom, XYZ, Google Maps) suitable for web-based viewers.
 
+**Try it interactively:** the [CLI docs page](https://libviprs.org/cli/) lets you tick flags and copy a complete Rust program — start from the [pyramid base setup](https://libviprs.org/cli/#pyramid-base-setup) and toggle features in the [generator panel](https://libviprs.org/cli/#cli-generator).
+
 ## Features
 
 - **PDF extraction** — extract embedded raster images from scanned blueprint PDFs via lopdf (pure Rust, no C dependencies)
-- **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional memory-budgeted rendering (optional `pdfium` feature)
+- **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional [memory-budgeted rendering](https://libviprs.org/cli/#flag-memory-budget) (optional `pdfium` feature)
 - **Image decoding** — JPEG, PNG, TIFF via the `image` crate
-- **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap
+- **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap (see [`--parallel`](https://libviprs.org/cli/#flag-parallel))
 - **Layout formats** — DeepZoom (`.dzi` + directory tree), XYZ (`z/x/y`), and Google Maps (`z/y/x`, power-of-2 grids)
 - **Centre support** — centre image within the tile grid with even background padding on all sides
 - **Tile encoding** — PNG, JPEG (configurable quality), or raw pixel output
 - **Blank tile optimization** — configurable `BlankTileStrategy` to either emit full tiles or write 1-byte placeholders (`BLANK_TILE_MARKER`) for uniform-color regions, reducing disk usage for sparse images
 - **Edge tile background** — configurable background color (`background_rgb`) for padding partial tiles at image edges (defaults to white)
-- **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support
-- **Observability** — progress events, per-level callbacks, peak memory tracking
+- **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support ([`--geo-reference`](https://libviprs.org/cli/#flag-geo-reference))
+- **Restart-safe runs** — checkpoint and [resume](https://libviprs.org/cli/#flag-resume) interrupted jobs, with content-addressed [tile dedupe](https://libviprs.org/cli/#flag-dedupe) and per-tile [checksums](https://libviprs.org/cli/#flag-checksums)
+- **Sinks** — filesystem, [packfile](https://libviprs.org/cli/#flag-packfile) (tar/zip), and [S3-compatible](https://libviprs.org/cli/#flag-s3) object stores
+- **Observability** — progress events, per-level callbacks, peak memory tracking, optional structured [tracing](https://libviprs.org/cli/#flag-tracing)
 
 ## Usage
 
@@ -64,6 +68,8 @@ println!(
     result.tiles_produced, result.levels_processed, result.tiles_skipped,
 );
 ```
+
+> See [interactive example](https://libviprs.org/cli/#cli-generator) — tick flags on the CLI docs page to generate a tailored version of this snippet.
 
 ## Modules
 

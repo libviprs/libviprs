@@ -19,6 +19,8 @@ use crate::planner::TileCoord;
 /// - [level_started_before_tile_completed](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
 ///   verifies the ordering invariant between `LevelStarted` and
 ///   `TileCompleted` events.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
     // -- Pipeline-level events (emitted by callers for full-pipeline observability) --
@@ -119,6 +121,8 @@ pub enum EngineEvent {
 ///   and inspect all events emitted during a test pyramid build.
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   implements this trait to print live progress to stderr.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 pub trait EngineObserver: Send + Sync {
     fn on_event(&self, event: EngineEvent);
 }
@@ -149,6 +153,8 @@ impl EngineObserver for NoopObserver {
 ///   then inspect the captured events.
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   wraps a `CollectingObserver` for its `--verbose` mode.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug)]
 pub struct CollectingObserver {
     events: std::sync::Mutex<Vec<EngineEvent>>,
@@ -197,6 +203,8 @@ impl EngineObserver for CollectingObserver {
 /// - [peak_memory_bounded_for_medium_image](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
 ///   attaches a `MemoryTracker` to an engine run and asserts the peak stays
 ///   below an expected ceiling.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug, Clone)]
 pub struct MemoryTracker {
     current: Arc<AtomicU64>,

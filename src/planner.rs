@@ -38,6 +38,8 @@ pub enum PlannerError {
 /// # Example usage
 ///
 /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-layout)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layout {
     /// Deep Zoom Image -- `{level}/{col}_{row}.{ext}`, plus `.dzi` manifest.
@@ -62,6 +64,8 @@ pub enum Layout {
 ///
 /// * [CLI plan command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#plan)
 #[derive(Debug, Clone)]
 pub struct PyramidPlanner {
     image_width: u32,
@@ -87,6 +91,8 @@ pub struct PyramidPlanner {
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#plan)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PyramidPlan {
     pub image_width: u32,
@@ -173,6 +179,8 @@ impl PyramidPlanner {
     ///
     /// Returns [`PlannerError`] if any dimension is zero, tile size is zero,
     /// or overlap is not strictly less than tile size.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-tile-size)
     pub fn new(
         image_width: u32,
         image_height: u32,
@@ -203,6 +211,8 @@ impl PyramidPlanner {
     }
 
     /// Enable or disable centring the image within the tile grid.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-centre)
     pub fn with_centre(mut self, centre: bool) -> Self {
         self.centre = centre;
         self
@@ -301,6 +311,8 @@ impl PyramidPlanner {
     ///     // reduce DPI and retry with smaller dimensions
     /// }
     /// ```
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-limit)
     pub fn estimate_peak_memory(&self) -> u64 {
         let bytes_per_pixel: u64 = 4; // RGBA8
         let source_bytes = self.image_width as u64 * self.image_height as u64 * bytes_per_pixel;
@@ -662,6 +674,8 @@ impl PyramidPlan {
     /// This estimate is conservative — it ignores smaller intermediate buffers
     /// that are freed quickly. Used by [`generate_pyramid_auto`](crate::streaming::generate_pyramid_auto)
     /// to decide whether the monolithic path fits within the memory budget.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-limit)
     pub fn estimate_peak_memory_for_format(&self, format: crate::pixel::PixelFormat) -> u64 {
         let bpp = format.bytes_per_pixel() as u64;
         let canvas_bytes = self.canvas_width as u64 * self.canvas_height as u64 * bpp;

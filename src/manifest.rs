@@ -69,6 +69,11 @@ pub type BlankReferences = BTreeMap<String, String>;
 ///
 /// Serializes as a lowercase string (`"blake3"` / `"sha256"`) so the
 /// manifest.json is human-readable and stable across releases.
+///
+/// Selected from the CLI via [`--checksum-algo`](https://libviprs.org/cli/#flag-checksum-algo),
+/// which accepts `blake3` (default) or `sha256`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-checksum-algo)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChecksumAlgo {
@@ -485,6 +490,11 @@ impl ManifestV1 {
 /// [`Manifest::V1`]. Unknown versions produce a deserialization error, which
 /// is the intentional contrast with the forward-compatible "unknown inner
 /// fields are ignored" policy on [`ManifestV1`].
+///
+/// Manifest emission is enabled from the CLI via
+/// [`--manifest-emit-checksums`](https://libviprs.org/cli/#flag-manifest-emit-checksums).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "schema_version")]
 pub enum Manifest {
@@ -552,6 +562,9 @@ impl Manifest {
 /// The builder is cheap to construct and clone, carries no references, and is
 /// consumed by `FsSink::with_manifest(...)` to configure the manifest emitter.
 ///
+/// The CLI exposes the equivalent toggle as
+/// [`--manifest-emit-checksums`](https://libviprs.org/cli/#flag-manifest-emit-checksums).
+///
 /// # Example
 ///
 /// ```ignore
@@ -560,6 +573,8 @@ impl Manifest {
 ///     .with_checksums(ChecksumAlgo::Blake3)
 ///     .with_dedupe(true);
 /// ```
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestBuilder {
     checksums: Option<ChecksumAlgo>,

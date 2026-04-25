@@ -91,6 +91,9 @@ fn sample_jitter(max_nanos: u64, jitter_tick: &AtomicU64) -> u64 {
 /// * `jitter` — when `true`, a uniformly-distributed random slice in
 ///   `[0, backoff / 2]` is added to each sleep. Jitter helps de-synchronise
 ///   many parallel workers hammering the same flaky endpoint.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max)
+/// (and [`--retry-backoff`](https://libviprs.org/cli/#flag-retry-backoff) for the backoff arg)
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
@@ -180,12 +183,25 @@ impl RetryPolicy {
 /// * [`FailurePolicy::RetryThenSkip`] — retry per the embedded policy; on
 ///   exhaustion, account the tile in
 ///   `EngineResult::skipped_due_to_failure` and continue.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub enum FailurePolicy {
+    /// Propagate the first error; no retries.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
     #[default]
     FailFast,
+    /// Retry per the embedded policy; propagate the last error if every
+    /// retry is exhausted.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
     RetryThenFail(RetryPolicy),
+    /// Retry per the embedded policy; on exhaustion, skip the tile and
+    /// continue.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
     RetryThenSkip(RetryPolicy),
 }
 
@@ -256,6 +272,8 @@ fn duration_from_nanos_u128(nanos: u128) -> Duration {
 ///   (not by `RetryingSink` itself) when `RetryThenSkip` drops a tile.
 ///   Exposed here so the engine can stash the running total without a
 ///   second data structure.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max)
 pub struct RetryingSink<S: TileSink> {
     inner: S,
     policy: RetryPolicy,

@@ -40,6 +40,12 @@ use crate::manifest::ChecksumAlgo;
 // ---------------------------------------------------------------------------
 
 /// Selects how tiles are content-addressed prior to being written to disk.
+///
+/// CLI users pick a strategy via
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks) (blanks-only)
+/// or [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all) (every tile).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DedupeStrategy {
@@ -48,9 +54,13 @@ pub enum DedupeStrategy {
     None,
     /// Only blank (uniform-colour) tiles are deduplicated. Non-blank tiles
     /// are written individually.
+    ///
+    /// CLI: [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks).
     Blanks,
     /// Every tile is content-addressed; identical tiles share a single
     /// physical file regardless of whether they're blank.
+    ///
+    /// CLI: [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all).
     All {
         /// Hash algorithm used to derive the shared-key filename.
         algo: ChecksumAlgo,
@@ -62,6 +72,11 @@ pub enum DedupeStrategy {
 // ---------------------------------------------------------------------------
 
 /// Outcome of a [`DedupeIndex::record`] call.
+///
+/// Drives the on-disk layout produced by the CLI's
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks) flag.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DedupeDecision {
@@ -139,6 +154,11 @@ struct DedupeState {
 /// In-memory mapping from content-hash to shared-key. One instance per
 /// generation run; not persisted across restarts (resume-mode sinks rebuild
 /// the index by walking `_shared/`).
+///
+/// Constructed under the hood when the CLI runs with
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[non_exhaustive]
 pub struct DedupeIndex {
     strategy: DedupeStrategy,
@@ -301,6 +321,11 @@ impl DedupeIndex {
 
 /// Outcome of [`materialize_reference`]: which strategy was ultimately used
 /// to point `tile_path` at `shared_path`.
+///
+/// Reflects the link/placeholder fallback chain triggered by
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LinkResult {

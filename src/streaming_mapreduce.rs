@@ -48,6 +48,10 @@ use crate::streaming::{
 /// Controls memory budget, per-strip tile concurrency, channel backpressure,
 /// and tile handling options. The budget determines how many strips can be
 /// in flight simultaneously during the Map phase.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
+/// (memory budget is documented at
+/// [`#flag-memory-budget`](https://libviprs.org/cli/#flag-memory-budget))
 #[derive(Debug, Clone)]
 pub struct MapReduceConfig {
     /// Soft memory budget in bytes (covers all in-flight strips + accumulators).
@@ -134,6 +138,8 @@ fn estimate_mono_buffer_cost(plan: &PyramidPlan, format: PixelFormat) -> u64 {
 /// Compute the number of in-flight strips that fit within a memory budget.
 ///
 /// Returns at least 1.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
 pub fn compute_inflight_strips(
     plan: &PyramidPlan,
     format: PixelFormat,
@@ -153,6 +159,8 @@ pub fn compute_inflight_strips(
 }
 
 /// Estimate peak memory for the MapReduce streaming engine.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
 pub fn estimate_mapreduce_peak_memory(
     plan: &PyramidPlan,
     format: PixelFormat,

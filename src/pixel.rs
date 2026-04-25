@@ -21,6 +21,9 @@
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 /// * [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
+/// (pyramid overview at [`#pyramid`](https://libviprs.org/cli/#pyramid))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
     /// Single-channel 8-bit grayscale.

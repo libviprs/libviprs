@@ -53,6 +53,8 @@ use crate::sink::{Tile, TileSink};
 ///
 /// The streaming engine performs a pre-flight check against the worst-case
 /// strip and surfaces this policy when the budget is insufficient.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BudgetPolicy {
     /// Return [`EngineError::BudgetExceeded`] without doing any work.
@@ -76,6 +78,8 @@ pub enum BudgetPolicy {
 /// controls strip height selection. The budget is a soft upper bound — the
 /// engine uses it to maximise strip height (and therefore throughput) while
 /// keeping estimated peak memory below the target.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 #[derive(Debug, Clone)]
 pub struct StreamingConfig {
     /// Soft memory budget in bytes.
@@ -198,6 +202,8 @@ impl<'a> StripSource for RasterStripSource<'a> {
 /// render path that `render_page_pdfium` uses does rotate automatically, so
 /// we fall back to full-page render + slice. See
 /// [`render_strip_inner`](Self::render_strip_inner) for details.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub struct PdfiumStripSource {
     width: u32,
@@ -490,6 +496,8 @@ impl StripSource for PdfiumStripSource {
 ///
 /// `Some(strip_height)` — the largest aligned strip height within budget,
 /// capped at the canvas height. `None` if the budget is insufficient.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 pub fn compute_strip_height(plan: &PyramidPlan, format: PixelFormat, budget: u64) -> Option<u32> {
     let ch = plan.canvas_height as u64;
     let ts = plan.tile_size;
@@ -532,6 +540,8 @@ pub fn compute_strip_height(plan: &PyramidPlan, format: PixelFormat, budget: u64
 ///
 /// Use this to validate that a chosen strip height stays within budget,
 /// or to display estimated memory usage to callers before committing.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 pub fn estimate_streaming_memory(
     plan: &PyramidPlan,
     format: PixelFormat,
