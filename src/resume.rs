@@ -72,6 +72,8 @@ pub const CHECKPOINT_FILENAME: &str = ".libviprs-job.json";
 /// * [`ResumeMode::Verify`] — do not write anything. Walk the plan and check
 ///   that every tile is present and internally consistent on disk. Useful for
 ///   post-hoc validation of a finished job.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ResumeMode {
     /// Discard pre-existing output and regenerate every tile.
@@ -100,6 +102,8 @@ pub enum ResumeMode {
 /// checkpoint file every `n` completed tiles (default `0` = never) and
 /// `.with_checkpoint_root(path)` to place the checkpoint somewhere other
 /// than the sink's base directory.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumePolicy {
     mode: ResumeMode,
@@ -119,6 +123,8 @@ impl Default for ResumePolicy {
 
 impl ResumePolicy {
     /// Start a fresh run. Equivalent to [`ResumeMode::Overwrite`].
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-overwrite)
     pub fn overwrite() -> Self {
         Self {
             mode: ResumeMode::Overwrite,
@@ -128,6 +134,8 @@ impl ResumePolicy {
 
     /// Continue an interrupted run from the on-disk checkpoint. Equivalent
     /// to [`ResumeMode::Resume`].
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
     pub fn resume() -> Self {
         Self {
             mode: ResumeMode::Resume,
@@ -137,6 +145,8 @@ impl ResumePolicy {
 
     /// Audit an existing output directory against the plan without writing
     /// anything. Equivalent to [`ResumeMode::Verify`].
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-verify)
     pub fn verify() -> Self {
         Self {
             mode: ResumeMode::Verify,
@@ -184,6 +194,8 @@ impl ResumePolicy {
 /// `schema_version` is stored as a [`String`] so we can read back old
 /// checkpoints, compare them against [`SCHEMA_VERSION`], and return a
 /// structured error if they disagree.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct JobMetadata {
@@ -314,6 +326,8 @@ pub(super) mod tile_coord_vec_serde {
 /// `Io(io::Error)` wraps filesystem failures from the underlying
 /// [`std::fs`] calls; `PlanHashMismatch` and `SchemaMismatch` surface
 /// semantic incompatibilities that make it unsafe to resume.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Error)]
 pub enum ResumeError {
     /// The checkpoint's `plan_hash` disagrees with the current plan's hash.
@@ -357,6 +371,8 @@ pub enum ResumeError {
 /// type is purely a namespace for `load` / `save` / `checkpoint_path` rather
 /// than a live handle. Callers that want to hold onto the last-known metadata
 /// should keep their own [`JobMetadata`] around.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 pub struct JobCheckpoint;
 
 impl JobCheckpoint {

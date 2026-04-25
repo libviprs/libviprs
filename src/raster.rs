@@ -51,6 +51,8 @@ pub enum RasterError {
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
 #[derive(Debug, Clone)]
 pub struct Raster {
     width: u32,

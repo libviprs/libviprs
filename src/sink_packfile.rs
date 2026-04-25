@@ -34,6 +34,8 @@ use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_png};
 /// * [`PackfileFormat::Tar`] — uncompressed POSIX tar.
 /// * [`PackfileFormat::TarGz`] — POSIX tar wrapped in a gzip stream (`.tar.gz`).
 /// * [`PackfileFormat::Zip`] — standard ZIP archive with per-entry compression.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackfileFormat {
     /// Plain uncompressed tar archive.
@@ -58,6 +60,10 @@ pub enum PackfileFormat {
 ///   checksum and sign.
 ///
 /// See [`PackfileFormat`] for the supported container formats.
+///
+/// On the CLI this sink is selected by passing a `packfile://…` URI to `--sink`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 pub struct PackfileSink {
     /// Final archive path (used to derive the archive stem for DZI / tile
     /// prefixes).

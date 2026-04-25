@@ -16,6 +16,8 @@ use crate::source;
 ///
 /// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
 /// for error handling patterns.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[derive(Debug, Error)]
 pub enum PdfError {
     #[error("I/O error: {0}")]
@@ -54,6 +56,8 @@ pub enum PdfError {
 ///
 /// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
 /// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#info)
 #[derive(Debug, Clone)]
 pub struct PdfInfo {
     pub page_count: usize,
@@ -70,6 +74,8 @@ pub struct PdfInfo {
 /// # Examples
 ///
 /// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#info)
 #[derive(Debug, Clone)]
 pub struct PdfPageInfo {
     pub page_number: usize,
@@ -93,6 +99,8 @@ pub struct PdfPageInfo {
 ///
 /// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs)
 /// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#info)
 pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
@@ -129,6 +137,10 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
 /// See [pdf_ops tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_ops.rs),
 /// [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs),
 /// and the [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-page) (the
+/// `--page` flag selects which page to extract; the [full pyramid flow](https://libviprs.org/cli/#pyramid)
+/// uses this when the page has embedded images).
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
@@ -663,6 +675,8 @@ pub(crate) fn render_at_size(
 /// This handles vector content (AutoCAD exports, text, paths) that cannot be
 /// extracted as embedded images. Requires the `pdfium` feature and a PDFium
 /// library available at runtime.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
     let pdfium = init_pdfium()?;
@@ -690,6 +704,8 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
 }
 
 /// Result of a budget-constrained render, including the DPI that was used.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 #[derive(Debug)]
 pub struct BudgetRenderResult {
@@ -718,6 +734,8 @@ pub struct BudgetRenderResult {
 ///   the output fits.
 ///
 /// Returns the raster along with the actual DPI used and whether it was capped.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub fn render_page_pdfium_budgeted(
     path: &Path,

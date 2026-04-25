@@ -45,6 +45,13 @@ fn checksum_algo_from_manifest_str(s: &str) -> Option<ChecksumAlgo> {
 // ---------------------------------------------------------------------------
 
 /// How a sink should treat checksums.
+///
+/// The CLI surfaces this via
+/// [`--manifest-emit-checksums`](https://libviprs.org/cli/#flag-manifest-emit-checksums)
+/// (and, when verification is requested,
+/// [`--verify`](https://libviprs.org/cli/#flag-verify)).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChecksumMode {
     /// Do not compute or emit any per-tile checksums.
@@ -85,6 +92,11 @@ pub fn hash_tile(bytes: &[u8], algo: ChecksumAlgo) -> String {
 // ---------------------------------------------------------------------------
 
 /// Summary of what [`verify_output`] found.
+///
+/// Produced by the CLI's [`--verify`](https://libviprs.org/cli/#flag-verify)
+/// post-hoc check.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-verify)
 #[derive(Debug, Clone, Default)]
 pub struct VerifyReport {
     /// Total number of tile entries considered (== size of the manifest's
@@ -99,6 +111,10 @@ pub struct VerifyReport {
 }
 
 /// Errors produced by [`verify_output`].
+///
+/// Surfaced by the CLI's [`--verify`](https://libviprs.org/cli/#flag-verify) flag.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-verify)
 #[derive(Debug, Error)]
 pub enum VerifyError {
     #[error("manifest.json not found (checked {sibling} and {inside})")]

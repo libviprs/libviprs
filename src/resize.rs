@@ -210,6 +210,8 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
 /// - [test_resize_rounding](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
 ///   exercises arbitrary-ratio downscaling and checks that output dimensions
 ///   are correctly rounded.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-match-page-size)
 pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, RasterError> {
     if dst_w == 0 || dst_h == 0 {
         return Err(RasterError::ZeroDimension {

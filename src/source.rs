@@ -12,6 +12,8 @@ use crate::raster::Raster;
 /// errors into a single enum so that callers of [`decode_file`],
 /// [`decode_bytes`], and [`generate_test_raster`] can handle all failure
 /// modes uniformly.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
 #[derive(Debug, Error)]
 pub enum SourceError {
     #[error("I/O error: {0}")]
@@ -53,6 +55,9 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   calls `decode_file` in the `info` command to display image metadata
 ///   and in the `pyramid` command to load the input raster.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid) (general
+/// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
     let img = image::open(path)?;
     let (width, height) = img.dimensions();
@@ -91,6 +96,9 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   calls `decode_bytes` when the user passes `"-"` as the input file,
 ///   reading the image data from stdin.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid) (general
+/// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
     let img = image::load_from_memory(bytes)?;
     let (width, height) = img.dimensions();
@@ -127,6 +135,8 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   exposes this as the `test-image` subcommand, generating a gradient
 ///   PNG for quick smoke-testing.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#test-image)
 pub fn generate_test_raster(width: u32, height: u32) -> Result<Raster, SourceError> {
     let bpp = PixelFormat::Rgb8.bytes_per_pixel();
     let mut data = vec![0u8; width as usize * height as usize * bpp];

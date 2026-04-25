@@ -115,6 +115,9 @@ pub enum BlankTileStrategy {
 /// for filesystem-backed usage and the
 /// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 /// for command-line construction of this config.
+///
+/// **See also:** the [interactive CLI generator](https://libviprs.org/cli/#cli-generator)
+/// composes a runnable program from these same knobs.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineConfig {
@@ -160,6 +163,8 @@ impl EngineConfig {
     ///
     /// `0` (the default) means single-threaded execution on the calling thread.
     /// Any positive value spawns that many workers per pyramid level.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-concurrency).
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.concurrency = n;
         self
@@ -170,6 +175,8 @@ impl EngineConfig {
     /// A smaller buffer limits memory usage but may cause producers to block
     /// more frequently. A larger buffer smooths out sink latency at the cost
     /// of higher peak memory.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-buffer-size).
     pub fn with_buffer_size(mut self, n: usize) -> Self {
         self.buffer_size = n;
         self
@@ -178,6 +185,9 @@ impl EngineConfig {
     /// Sets the strategy for handling blank (uniform-color) tiles.
     ///
     /// See [`BlankTileStrategy`] for the available options.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-skip-blank)
+    /// (and the related [`--blank-tolerance`](https://libviprs.org/cli/#flag-blank-tolerance) flag).
     pub fn with_blank_tile_strategy(mut self, strategy: BlankTileStrategy) -> Self {
         self.blank_tile_strategy = strategy;
         self
@@ -190,6 +200,8 @@ impl EngineConfig {
     /// (`FailFast` / `RetryThenFail`) or is accounted into
     /// [`EngineResult::skipped_due_to_failure`] and the run continues
     /// (`RetryThenSkip`).
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy).
     pub fn with_failure_policy(mut self, policy: FailurePolicy) -> Self {
         self.failure_policy = policy;
         self
@@ -209,6 +221,9 @@ impl EngineConfig {
     /// In the Phase 2b stub this records the strategy on the config but does
     /// not yet drive engine-level deduplication (sinks that accept a
     /// [`DedupeStrategy`] continue to apply their own per-sink dedupe).
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
+    /// (and the related [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all) flag).
     pub fn with_dedupe_strategy(mut self, strategy: crate::dedupe::DedupeStrategy) -> Self {
         self.dedupe_strategy = Some(strategy);
         self
