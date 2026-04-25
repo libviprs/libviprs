@@ -9,15 +9,31 @@
 //!    PDF with [`extract_page_image`] / [`render_page_pdfium`].
 //! 2. **Plan** the pyramid with [`PyramidPlanner`] — choose tile size, overlap,
 //!    and layout ([`Layout::DeepZoom`] or [`Layout::Xyz`]).
-//! 3. **Generate** tiles with [`generate_pyramid`] or [`generate_pyramid_observed`],
-//!    sending output to an [`FsSink`] (filesystem) or [`MemorySink`] (in-memory).
-//! 4. **Configure** blank tile handling with [`BlankTileStrategy`] to either emit
+//! 3. **Run** the pipeline with [`EngineBuilder::new`]`(source, plan, sink)`,
+//!    chaining setters (e.g. `.with_engine(...)`, `.with_observer(...)`,
+//!    `.with_concurrency(...)`) and finishing with `.run()`. The `source` is
+//!    anything implementing [`IntoEngineSource`] — a `&Raster` or any
+//!    [`StripSource`] — and the sink is typically an [`FsSink`] (filesystem) or
+//!    [`MemorySink`] (in-memory).
+//! 4. **Select an engine** with [`EngineKind`]: `Auto` (default; picks based on
+//!    source kind and memory budget), `Monolithic` (in-memory),
+//!    `Streaming` (sequential strip), or `MapReduce` (parallel strip).
+//! 5. **Observe progress** by passing an [`EngineObserver`] to
+//!    `.with_observer(...)`; lifecycle, level, tile, and batch updates arrive as
+//!    [`EngineEvent`] variants (see the [`observe`] module).
+//! 6. **Configure** blank tile handling with [`BlankTileStrategy`] to either emit
 //!    full tiles or write 1-byte placeholders for uniform-color regions.
 //!
 //! ## Feature flags
 //!
-//! - **`pdfium`** — enables [`render_page_pdfium`] and [`render_page_pdfium_budgeted`]
-//!   for full vector PDF rendering via the pdfium library.
+//! - **`pdfium`** — enables [`render_page_pdfium`], [`render_page_pdfium_budgeted`],
+//!   and [`PdfiumStripSource`] for full vector PDF rendering via the pdfium library.
+//! - **`pdfium-static`** — implies `pdfium` and statically links libpdfium.
+//! - **`s3`** — gates the [`sink_object_store`] module ([`ObjectStoreSink`])
+//!   against a user-injected [`ObjectStore`] backend.
+//! - **`tracing`** — emits structured spans and events via the `tracing` crate.
+//! - **`packfile`** — gates [`PackfileSink`] for writing tiles into tar or zip
+//!   archives.
 //!
 //! ## Examples
 //!
