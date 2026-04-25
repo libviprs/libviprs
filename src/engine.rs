@@ -2106,6 +2106,7 @@ mod tests {
     /// against a CollectingObserver and asserts each one drives at least
     /// the expected shape of events.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resumable_emits_observer_events() {
         use std::sync::Arc;
 
