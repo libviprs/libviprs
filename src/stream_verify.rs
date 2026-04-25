@@ -479,6 +479,7 @@ mod tests {
     /// path, reports zero tiles produced, and flags every level as
     /// processed.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn stream_verify_happy_path_raw() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("tiles");
@@ -502,6 +503,7 @@ mod tests {
     /// a `SinkError::Other` wrapped in `EngineError::Sink`, matching the
     /// contract of `engine::run_verify`.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn stream_verify_reports_missing_tile() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("tiles");
@@ -545,6 +547,7 @@ mod tests {
     /// detected as `EngineError::ChecksumMismatch` with the offending
     /// `TileCoord` populated.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn stream_verify_detects_raw_corruption() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("tiles");
