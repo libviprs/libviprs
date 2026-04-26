@@ -60,9 +60,10 @@ pub enum PdfError {
 ///
 /// Construct via [`Self::try_from_degrees`] for parsing, or directly
 /// match on the four variants when handling all rotations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageRotation {
     /// No rotation. The page renders in its authored orientation.
+    #[default]
     Zero,
     /// 90° clockwise. Portrait page renders as landscape; the page's
     /// top edge becomes the displayed right edge.
@@ -104,12 +105,6 @@ impl PageRotation {
             Self::Half => 180,
             Self::ThreeQuarter => 270,
         }
-    }
-}
-
-impl Default for PageRotation {
-    fn default() -> Self {
-        Self::Zero
     }
 }
 
