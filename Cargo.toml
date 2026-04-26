@@ -49,3 +49,17 @@ zip = { version = "7.2.0", optional = true }
 loom = "0.7"
 proptest = "1"
 tempfile = "3"
+
+# Use libviprs/pdfium-render with proper per-call thread-safety locking
+# in `ThreadSafePdfiumBindings`. Upstream pdfium-render 0.8.37's
+# wrapper acquires the pdfium global mutex only once on
+# `FPDF_InitLibrary` and bypasses it for every other method, which
+# segfaults under any concurrent access pattern when a single
+# `Pdfium` instance is shared across threads (the common pattern when
+# callers use a process-wide singleton). The fork rewrites every
+# method to acquire the lock per-call.
+#
+# Tracking issue: ajrcarey/pdfium-render upstream PR pending. Once
+# merged + released, this patch can be dropped.
+[patch.crates-io]
+pdfium-render = { git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/per-call-thread-safety" }
