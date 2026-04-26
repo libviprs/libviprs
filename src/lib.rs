@@ -91,7 +91,7 @@ pub use manifest::{
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
 #[cfg(feature = "pdfium")]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
-pub use pdf::{PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
+pub use pdf::{PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
 pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
@@ -107,10 +107,10 @@ pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
-#[cfg(feature = "pdfium")]
-pub use streaming::PdfiumStripSource;
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory,
 };
+#[cfg(feature = "pdfium")]
+pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::MapReduceConfig;
