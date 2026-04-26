@@ -91,7 +91,7 @@ pub use manifest::{
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
 #[cfg(feature = "pdfium")]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
-pub use pdf::{PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
+pub use pdf::{PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
 pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
