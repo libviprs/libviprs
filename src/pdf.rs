@@ -708,32 +708,31 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 // Pdfium-based rendering (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// Process-wide lock for FPDF API access.
+/// Process-wide lock for FPDF API access — defence-in-depth thread
+/// safety at the libviprs boundary.
 ///
-/// pdfium-render 0.8's `thread_safe` feature only acquires a mutex on
-/// `FPDF_InitLibrary` / `FPDF_DestroyLibrary`; every other FPDF call
-/// delegates to the inner bindings without further synchronization
-/// (see `bindings/thread_safe.rs:170-172` upstream — `FPDF_LoadDocument`
-/// is a one-line delegate, no lock acquired). Pdfium itself is not
-/// thread-safe, so any concurrent FPDF call from a different thread
-/// hits unsynchronized state inside the C library and segfaults.
+/// pdfium itself is not thread-safe at the C library level. The
+/// `pdfium-render` `sync` feature wraps every FPDF call in a global
+/// mutex, but **only** when libviprs's `[patch.crates-io]` directive
+/// is honoured, which requires the consumer crate (libviprs-tests,
+/// libviprs-cli, downstream users) to either share a workspace with
+/// libviprs or replicate the patch directive. Cargo does not
+/// propagate `[patch.crates-io]` from a path-dependency.
 ///
-/// We compensate by holding this libviprs-side lock around every entry
-/// point that issues FPDF calls. The lock is process-wide because
-/// pdfium's global state is process-wide; document or page handles
-/// from different `PdfiumStripSource` instances still share the
-/// underlying C state, so per-source locking would not be sufficient.
+/// To keep libviprs correct without depending on consumer-side
+/// patch hygiene, every FPDF entry point in this crate acquires this
+/// process-wide lock first. If the consumer also has the patched
+/// fork active (the recommended setup), the result is double-locking
+/// — a few extra nanoseconds per call, no correctness or deadlock
+/// concern (the locks are independent `Mutex<()>` instances acquired
+/// in a fixed order). If the patch is missing, this lock alone keeps
+/// concurrent renders safe.
 ///
 /// **Performance note:** With this lock held, multi-threaded
-/// `render_strip` calls serialize. That matches the underlying reality
-/// (pdfium itself is single-threaded), so no parallelism is lost — a
-/// per-call lock simply makes that explicit and safe instead of
-/// implicit and crashing.
-///
-/// **Future:** The libviprs/pdfium-render fork contains a proper
-/// per-method-locked `ThreadSafePdfiumBindings`. Once libviprs depends
-/// on that fork via `[patch.crates-io]`, this lock can be removed and
-/// `with_pdfium_lock` callers will be able to inline.
+/// `render_strip` calls serialise. That matches the underlying
+/// reality (pdfium itself is single-threaded), so no parallelism is
+/// lost — this lock simply makes the serialisation explicit and safe
+/// instead of implicit and crashing.
 #[cfg(feature = "pdfium")]
 static PDFIUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -945,10 +944,10 @@ pub(crate) fn strip_matrix(
 /// call, avoiding the per-strip PDF reparse that path-based one-shot
 /// rendering would pay.
 ///
-/// **The caller must hold [`pdfium_lock`]** for the duration of this
-/// call — the function issues FPDF calls (matrix render plus bitmap
-/// allocation/deallocation) that share global pdfium state with every
-/// other thread, and pdfium's C library is not thread-safe.
+/// FPDF calls underneath this function are serialised by
+/// `pdfium-render`'s `ThreadSafePdfiumBindings` (active via the
+/// `sync` feature plus the `[patch.crates-io]` directive in
+/// `libviprs/Cargo.toml`).
 ///
 /// `dpi`, `rotation`, `y_offset`, `strip_height` semantics match the
 /// matrix derivation documented at [`strip_matrix`].

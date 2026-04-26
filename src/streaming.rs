@@ -216,41 +216,38 @@ enum PdfiumSourceState {
     Streaming(StreamingState),
 }
 
-/// Per-source streaming state. Holds a parsed [`PdfDocument`] so subsequent
-/// `render_strip` calls don't reparse the PDF on every invocation.
+/// Per-source streaming state. Holds a parsed [`PdfDocument`] so
+/// subsequent `render_strip` calls don't reparse the PDF on every
+/// invocation.
 ///
-/// The document is stored in an [`Option`] so [`Drop`] can `take()` it
-/// while holding [`crate::pdf::pdfium_lock`]. Without that ordering, the
-/// document's `FPDF_CloseDocument` would run after our user-defined
-/// `drop` returns and after the lock guard has been released, racing
-/// with any other thread that's mid-render.
+/// The document is stored in an [`Option`] for explicit drop ordering —
+/// [`Drop`] takes it before any caller would expect it gone, which
+/// keeps the cached-handle lifecycle obvious to readers. The actual
+/// FPDF synchronisation that protects `FPDF_CloseDocument` against
+/// concurrent renders lives in `pdfium-render`'s
+/// `ThreadSafePdfiumBindings` wrapper (active via the `sync` feature
+/// plus the `[patch.crates-io]` patched fork pinned in
+/// `libviprs/Cargo.toml`).
 ///
 /// Lifetime is `'static` because the document borrows from
-/// [`crate::pdf::init_pdfium`]'s `OnceLock`-backed `&'static Pdfium`. With
-/// the pdfium-render `sync` feature on,
-/// `PdfDocument<'static>` is `Send + Sync`.
+/// [`crate::pdf::init_pdfium`]'s `OnceLock`-backed `&'static Pdfium`.
+/// With the pdfium-render `sync` feature on, `PdfDocument<'static>` is
+/// `Send + Sync`.
 #[cfg(feature = "pdfium")]
 struct StreamingState {
-    /// Always `Some(_)` outside `Drop`. Wrapped in `Option` purely so
-    /// `take()` can give the document a deterministic drop site under
-    /// the pdfium lock.
+    /// Always `Some(_)` outside `Drop`. Wrapped in `Option` for
+    /// readable drop ordering inside the `Drop` impl.
     document: Option<pdfium_render::prelude::PdfDocument<'static>>,
     /// 0-based page index for pdfium-render's `PdfPages::get`. Stored
     /// pre-converted so the hot path doesn't re-validate `page > 0`.
     page_index: u16,
-    /// Page's intrinsic `/Rotate` ∈ `{0, 90, 180, 270}`, normalised at
-    /// construction.
+    /// Page's intrinsic `/Rotate`, normalised at construction.
     rotation: crate::pdf::PageRotation,
 }
 
 #[cfg(feature = "pdfium")]
 impl Drop for StreamingState {
     fn drop(&mut self) {
-        // Hold the global pdfium lock while the cached document drops.
-        // `FPDF_CloseDocument` is an FPDF call and must not race with
-        // any concurrent render on a different source — `take()` here
-        // forces the drop to land while `_lock` is still in scope.
-        let _lock = crate::pdf::pdfium_lock();
         drop(self.document.take());
     }
 }
@@ -409,9 +406,12 @@ impl PdfiumStripSource {
     ///
     /// # Concurrency
     ///
-    /// pdfium itself is not thread-safe. libviprs serialises every
-    /// FPDF call through a process-wide [`crate::pdf::pdfium_lock`],
-    /// so concurrent `render_strip` calls from multiple threads (e.g.
+    /// pdfium itself is not thread-safe. The `pdfium-render` `sync`
+    /// feature, plus the `[patch.crates-io]` directive in
+    /// `libviprs/Cargo.toml` that pins the patched fork at
+    /// `libviprs/pdfium-render` branch `libviprs/per-call-thread-safety`,
+    /// serialise every FPDF call through a process-wide mutex. So
+    /// concurrent `render_strip` calls from multiple threads (e.g.
     /// under `EngineKind::MapReduce`) are correct but produce no
     /// parallelism. This is a property of the underlying C library;
     /// no parallelism is "lost" relative to a hypothetical safer
@@ -516,7 +516,7 @@ impl PdfiumStripSource {
 /// document handle is cached in `StreamingState` so subsequent renders
 /// pay no parse cost.
 ///
-/// Acquires [`crate::pdf::pdfium_lock`] internally for the duration
+/// Acquires `pdfium-render`'s thread-safety lock internally for the duration
 /// of the FPDF calls. Caller must not be holding the lock.
 #[cfg(feature = "pdfium")]
 fn load_streaming_source(
@@ -565,7 +565,7 @@ fn load_streaming_source(
 /// Shared budget-policy resolution used by both the cached and streaming
 /// `*_with_budget` constructors.
 ///
-/// Acquires [`crate::pdf::pdfium_lock`] internally so the inner calls
+/// Acquires `pdfium-render`'s thread-safety lock internally so the inner calls
 /// to [`probe_page_dims`] / [`resolve_dpi_under_budget`] (which assume
 /// the lock is held) can run safely. Callers do not need to acquire
 /// the lock first.
@@ -607,7 +607,7 @@ fn resolve_budget_dpi(
 
 /// Probe a PDF page's dimensions without rendering.
 ///
-/// **Caller must hold [`crate::pdf::pdfium_lock`]** — this function
+/// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// issues FPDF calls (load + page get + dim getter) that require
 /// process-wide pdfium serialization.
 #[cfg(feature = "pdfium")]
@@ -647,7 +647,7 @@ fn probe_page_dims(
 /// strip fits within `budget_bytes`, or error if even `min_dpi` would
 /// not fit.
 ///
-/// **Caller must hold [`crate::pdf::pdfium_lock`]** — this function
+/// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// calls [`probe_page_dims`] internally, which is not standalone-locked.
 #[cfg(feature = "pdfium")]
 fn resolve_dpi_under_budget(
