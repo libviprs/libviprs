@@ -931,6 +931,7 @@ pub(crate) fn strip_matrix(
 /// - [`PdfError::Pdfium`] — pdfium load / page get / matrix-validity /
 ///   render error, including unsupported `/Rotate` values not in
 ///   `{0, 90, 180, 270}`.
+///
 /// Render a single horizontal strip from an **already-loaded** [`PdfPage`].
 ///
 /// This is the hot-path entry used by [`crate::PdfiumStripSource`] in

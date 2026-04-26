@@ -213,7 +213,13 @@ pub enum PdfiumRenderMode {
 #[cfg(feature = "pdfium")]
 enum PdfiumSourceState {
     CachedFullPage { full_raster: Raster },
-    Streaming(StreamingState),
+    // Boxed so the enum size is bounded by the smaller variant. The
+    // `StreamingState` payload is ~368 bytes (it carries a `PdfDocument`
+    // handle plus its drop-ordered `Option`); the heap indirection here
+    // avoids inflating every `PdfiumSourceState` value to that size,
+    // including `CachedFullPage` ones that don't need the streaming
+    // machinery at all.
+    Streaming(Box<StreamingState>),
 }
 
 /// Per-source streaming state. Holds a parsed [`PdfDocument`] so
@@ -554,11 +560,11 @@ fn load_streaming_source(
         width,
         height,
         dpi,
-        state: PdfiumSourceState::Streaming(StreamingState {
+        state: PdfiumSourceState::Streaming(Box::new(StreamingState {
             document: Some(document),
             page_index: (page as u16).saturating_sub(1),
             rotation,
-        }),
+        })),
     })
 }
 
