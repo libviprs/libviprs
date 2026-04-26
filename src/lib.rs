@@ -107,10 +107,10 @@ pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
-#[cfg(feature = "pdfium")]
-pub use streaming::PdfiumStripSource;
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory,
 };
+#[cfg(feature = "pdfium")]
+pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::MapReduceConfig;

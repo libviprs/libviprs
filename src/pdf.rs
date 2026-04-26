@@ -523,6 +523,33 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
     0
 }
 
+/// Resolve the effective `/Rotate` value for a 1-based page number.
+///
+/// Loads the PDF via `lopdf` and walks the page's `/Parent` chain to find
+/// the inherited `/Rotate` entry (per PDF 1.7 §7.7.3.3). The result is
+/// normalised into `[0, 360)`. Pages without a `/Rotate` entry, malformed
+/// values, and self-referential parent chains all resolve to `0`.
+///
+/// This is the path-based companion of the private [`resolve_rotate`]
+/// helper. Callers driving pdfium's matrix render path need the page's
+/// intrinsic `/Rotate` to compose the right device transform —
+/// `FPDF_RenderPageBitmapWithMatrix` does not auto-apply it the way the
+/// form-data render path does.
+///
+/// # Errors
+///
+/// - [`PdfError::Parse`] — PDF could not be opened or parsed by `lopdf`.
+/// - [`PdfError::PageOutOfRange`] — `page == 0` or `page > total_pages`.
+pub fn page_rotate(path: &Path, page: usize) -> Result<i64, PdfError> {
+    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    let pages_map = doc.get_pages();
+    let total = pages_map.len();
+    let &page_id = pages_map
+        .get(&(page as u32))
+        .ok_or(PdfError::PageOutOfRange { page, total })?;
+    Ok(resolve_rotate(&doc, page_id).rem_euclid(360))
+}
+
 /// Check whether a page has any Image XObjects.
 fn page_has_images(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> bool {
     let Ok(obj) = doc.get_object(page_id) else {
@@ -701,6 +728,131 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
     let height = (pdf_page.height().value * scale) as u32;
 
     render_at_size(&pdf_page, width, height)
+}
+
+/// Render a single horizontal strip of a PDF page directly via pdfium's
+/// matrix render path, allocating only a strip-sized bitmap.
+///
+/// `y_offset` and `strip_height` are in display-oriented pixel coordinates
+/// (top-left origin, y-down) — the same coordinate system the engine and
+/// `StripSource` callers already speak. `rotation` is the page's intrinsic
+/// `/Rotate` (call [`page_rotate`] to obtain it once per source).
+///
+/// # Coordinate composition
+///
+/// `FPDF_RenderPageBitmapWithMatrix` does not auto-apply the page's
+/// `/Rotate`; only the form-data render path does. We compose the
+/// per-rotation device matrix manually so the rendered strip lands at
+/// rows `[0, strip_height)` of the output bitmap. For each `/Rotate`
+/// value, the matrix maps pre-rotation page coordinates (y-up, origin
+/// bottom-left, units = points) into bitmap pixel coordinates (y-down,
+/// origin top-left, units = pixels):
+///
+/// | `/Rotate` | `[a, b, c, d, e, f]`                                        |
+/// |-----------|-------------------------------------------------------------|
+/// | 0         | `[s,  0,  0, -s, 0,             s·page_h_pt − y_off]`       |
+/// | 90        | `[0,  s,  s,  0, 0,             −y_off]`                    |
+/// | 180       | `[−s, 0,  0,  s, s·page_w_pt,   −y_off]`                    |
+/// | 270       | `[0, −s, −s,  0, s·page_h_pt,   s·page_w_pt − y_off]`       |
+///
+/// `s = dpi / 72`. `page_w_pt` / `page_h_pt` are pre-rotation page
+/// dimensions in points (swapped from `pdf_page.width()/height()` for
+/// `/Rotate 90/270`, since pdfium-render's getters return display-oriented
+/// dims — see comment at `pdf.rs:376-379`). The full per-rotation
+/// derivation lives in libviprs#70 and is pinned by the rotation cross-
+/// product test
+/// (`libviprs-tests/tests/pdfium_streaming_rotation_matrix.rs`).
+///
+/// # Errors
+///
+/// - [`PdfError::PageOutOfRange`] — `page == 0` or `page > total_pages`.
+/// - [`PdfError::Pdfium`] — pdfium load / page get / matrix-validity /
+///   render error, including unsupported `/Rotate` values not in
+///   `{0, 90, 180, 270}`.
+#[cfg(feature = "pdfium")]
+pub(crate) fn render_page_strip_pdfium(
+    path: &Path,
+    page: usize,
+    dpi: u32,
+    rotation: i64,
+    y_offset: u32,
+    strip_height: u32,
+) -> Result<Raster, PdfError> {
+    use pdfium_render::prelude::*;
+
+    let pdfium = init_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let pages = document.pages();
+    let total = pages.len();
+    if page == 0 || page > total as usize {
+        return Err(PdfError::PageOutOfRange {
+            page,
+            total: total as usize,
+        });
+    }
+    let pdf_page = pages
+        .get(page as u16 - 1)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let scale = dpi as f32 / 72.0;
+    // Display-oriented dims; pdf_page.width()/height() return post-/Rotate
+    // values per `pdf.rs:376-379`.
+    let display_w_pt = pdf_page.width().value;
+    let display_h_pt = pdf_page.height().value;
+    let display_w_px = (display_w_pt * scale) as u32;
+    let display_h_px = (display_h_pt * scale) as u32;
+
+    // Mirror cached-mode clamping (streaming.rs:341-346): if the requested
+    // strip extends past the page, the bitmap is shorter; if it starts
+    // past the page, return a zero raster of the requested height to
+    // keep the StripSource contract.
+    let strip_h = strip_height.min(display_h_px.saturating_sub(y_offset));
+    if strip_h == 0 {
+        let data = vec![0u8; display_w_px as usize * strip_height as usize * 4];
+        return Raster::new(display_w_px, strip_height, PixelFormat::Rgba8, data)
+            .map_err(PdfError::from);
+    }
+
+    let normalised = rotation.rem_euclid(360);
+    let (page_w_pt, page_h_pt) = match normalised {
+        0 | 180 => (display_w_pt, display_h_pt),
+        90 | 270 => (display_h_pt, display_w_pt),
+        _ => {
+            return Err(PdfError::Pdfium(format!(
+                "unsupported page /Rotate value: {normalised} (must be 0/90/180/270)"
+            )));
+        }
+    };
+    let s = scale;
+    let y_off = y_offset as f32;
+    let (a, b, c, d, e, f) = match normalised {
+        0 => (s, 0.0, 0.0, -s, 0.0, s * page_h_pt - y_off),
+        90 => (0.0, s, s, 0.0, 0.0, -y_off),
+        180 => (-s, 0.0, 0.0, s, s * page_w_pt, -y_off),
+        270 => (0.0, -s, -s, 0.0, s * page_h_pt, s * page_w_pt - y_off),
+        _ => unreachable!("normalised is checked above"),
+    };
+    let matrix = PdfMatrix::new(a, b, c, d, e, f);
+
+    let config = PdfRenderConfig::new()
+        .set_fixed_size(display_w_px as i32, strip_h as i32)
+        .clip(0, 0, display_w_px as i32, strip_h as i32)
+        .apply_matrix(matrix)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let bitmap = pdf_page
+        .render_with_config(&config)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let img = bitmap.as_image();
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let data = rgba.into_raw();
+
+    Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
 }
 
 /// Result of a budget-constrained render, including the DPI that was used.

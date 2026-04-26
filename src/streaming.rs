@@ -186,22 +186,64 @@ impl<'a> StripSource for RasterStripSource<'a> {
 // PdfiumStripSource — true source-side PDF strip streaming
 // ---------------------------------------------------------------------------
 
-/// [`StripSource`] backed by pdfium.
+/// Render-mode tag for [`PdfiumStripSource`].
 ///
-/// At construction time, the full display-oriented page is rendered once via
-/// [`render_page_pdfium`](crate::pdf::render_page_pdfium). Each
-/// [`render_strip`](StripSource::render_strip) call then slices the cached
-/// raster — O(1) per strip, no additional pdfium calls. Dimensions are
-/// taken directly from the rendered raster so
-/// [`StripSource::width`]/[`StripSource::height`] match the output byte-for-byte.
+/// Selects how the source produces strips:
 ///
-/// This currently trades source-side memory (`O(canvas_w × canvas_h)`) for
-/// correctness: pdfium's matrix render path does not auto-apply the page's
-/// intrinsic `/Rotate`, and hand-composed rotation matrices produced
-/// 180°-off output for `/Rotate 90/270` pages in practice. The form-data
-/// render path that `render_page_pdfium` uses does rotate automatically, so
-/// we fall back to full-page render + slice. See
-/// [`render_strip_inner`](Self::render_strip_inner) for details.
+/// - [`CachedFullPage`](Self::CachedFullPage) — render the full display-
+///   oriented page once at construction and slice subsequent strips from
+///   that cached buffer. O(1) per [`render_strip`](StripSource::render_strip)
+///   after the first, but resident memory is `width × height × 4` bytes
+///   for the source's lifetime.
+/// - [`Streaming`](Self::Streaming) — render each strip on demand via
+///   pdfium's matrix render path. The source holds only path / page /
+///   rotation metadata between calls; peak memory is bounded by the
+///   strip in flight.
+///
+/// Pick streaming for sources whose full page would exceed your memory
+/// budget (large-format blueprints, scanned posters), and cached when the
+/// full page comfortably fits and per-strip pdfium overhead matters.
+#[cfg(feature = "pdfium")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfiumRenderMode {
+    CachedFullPage,
+    Streaming,
+}
+
+#[cfg(feature = "pdfium")]
+enum PdfiumSourceState {
+    CachedFullPage {
+        full_raster: Raster,
+    },
+    Streaming {
+        path: std::path::PathBuf,
+        page: usize,
+        rotation: i64,
+    },
+}
+
+/// [`StripSource`] backed by pdfium, in either cached or streaming mode.
+///
+/// The constructor chosen determines the mode:
+///
+/// - [`new`](Self::new) / [`new_with_budget`](Self::new_with_budget) —
+///   [`PdfiumRenderMode::CachedFullPage`]. Renders the full display-
+///   oriented page once via [`render_page_pdfium`](crate::pdf::render_page_pdfium)
+///   and slices subsequent strips from the cached buffer.
+/// - [`new_streaming`](Self::new_streaming) /
+///   [`new_streaming_with_budget`](Self::new_streaming_with_budget) —
+///   [`PdfiumRenderMode::Streaming`]. Renders each strip on demand via
+///   [`render_page_strip_pdfium`](crate::pdf::render_page_strip_pdfium),
+///   keeping source-side peak memory bounded by the strip in flight.
+///
+/// Both modes honour the same [`StripSource`] contract: `render_strip(y, h)`
+/// returns a raster of width [`width()`](StripSource::width) and height
+/// `≤ h`, sourced from rows `[y, y + h)` of the display-oriented page.
+/// Output bytes between modes are not pixel-identical because pdfium's
+/// form-data and matrix render paths use independent rasterisers; both
+/// satisfy the engine's region-correctness requirement (see the test
+/// suite at `libviprs-tests/tests/streaming_pdfium_matrix.rs` and
+/// `pdfium_streaming_render.rs`).
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
@@ -209,10 +251,7 @@ pub struct PdfiumStripSource {
     width: u32,
     height: u32,
     dpi: u32,
-    /// Full display-oriented raster, rendered at construction time and
-    /// sliced per-strip. See [`render_strip_inner`] for why we cache the
-    /// full page instead of rendering strip-by-strip.
-    full_raster: Raster,
+    state: PdfiumSourceState,
 }
 
 #[cfg(feature = "pdfium")]
@@ -222,13 +261,14 @@ impl std::fmt::Debug for PdfiumStripSource {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("dpi", &self.dpi)
+            .field("mode", &self.mode())
             .finish()
     }
 }
 
 #[cfg(feature = "pdfium")]
 impl PdfiumStripSource {
-    /// Open a PDF page as a strip source at the given DPI.
+    /// Open a PDF page as a [`PdfiumRenderMode::CachedFullPage`] strip source.
     ///
     /// Renders the full display-oriented page via pdfium and caches it.
     /// Subsequent [`render_strip`](StripSource::render_strip) calls slice
@@ -250,8 +290,7 @@ impl PdfiumStripSource {
         // differently than our `probe_page_dims` truncation at higher DPIs;
         // using the cached raster's real width/height keeps
         // `StripSource::width`/`height` in lockstep with what `render_strip`
-        // will hand back. See `render_strip_inner` for why we render the
-        // full page in the first place.
+        // will hand back.
         let full = crate::pdf::render_page_pdfium(&path, page, dpi)?;
         let width = full.width();
         let height = full.height();
@@ -259,11 +298,12 @@ impl PdfiumStripSource {
             width,
             height,
             dpi,
-            full_raster: full,
+            state: PdfiumSourceState::CachedFullPage { full_raster: full },
         })
     }
 
-    /// Open a PDF page with a worst-case strip budget check.
+    /// Open a [`PdfiumRenderMode::CachedFullPage`] source with a worst-case
+    /// strip budget check.
     ///
     /// Computes the worst-case minimum aligned strip
     /// (`width × min_strip_height × 4` bytes for RGBA8) and applies the
@@ -282,30 +322,14 @@ impl PdfiumStripSource {
         policy: BudgetPolicy,
     ) -> Result<Self, crate::pdf::PdfError> {
         let path = path.into();
-        let pdfium = crate::pdf::init_pdfium()?;
-        let resolved_dpi = match policy {
-            BudgetPolicy::Error => {
-                let (width, _, _, _) = probe_page_dims(pdfium, &path, page, dpi_hint)?;
-                let strip_bytes = width as u64 * min_strip_height as u64 * 4;
-                if strip_bytes > budget_bytes {
-                    return Err(crate::pdf::PdfError::BudgetExceeded {
-                        strip_bytes,
-                        budget_bytes,
-                        dpi: dpi_hint,
-                    });
-                }
-                dpi_hint
-            }
-            BudgetPolicy::AutoAdjustDpi { min_dpi } => resolve_dpi_under_budget(
-                pdfium,
-                &path,
-                page,
-                dpi_hint,
-                min_dpi,
-                min_strip_height,
-                budget_bytes,
-            )?,
-        };
+        let resolved_dpi = resolve_budget_dpi(
+            &path,
+            page,
+            dpi_hint,
+            min_strip_height,
+            budget_bytes,
+            policy,
+        )?;
         let full = crate::pdf::render_page_pdfium(&path, page, resolved_dpi)?;
         let width = full.width();
         let height = full.height();
@@ -313,7 +337,75 @@ impl PdfiumStripSource {
             width,
             height,
             dpi: resolved_dpi,
-            full_raster: full,
+            state: PdfiumSourceState::CachedFullPage { full_raster: full },
+        })
+    }
+
+    /// Open a PDF page as a [`PdfiumRenderMode::Streaming`] strip source.
+    ///
+    /// Each [`render_strip`](StripSource::render_strip) call dispatches
+    /// directly to pdfium's matrix render path; no full-page raster is
+    /// held by the source. Construction probes dimensions and the page's
+    /// intrinsic `/Rotate` once.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Path to the PDF file.
+    /// * `page` — 1-based page number.
+    /// * `dpi` — Render resolution in dots per inch.
+    pub fn new_streaming(
+        path: impl Into<std::path::PathBuf>,
+        page: usize,
+        dpi: u32,
+    ) -> Result<Self, crate::pdf::PdfError> {
+        let path = path.into();
+        let pdfium = crate::pdf::init_pdfium()?;
+        let (width, height, _, _) = probe_page_dims(pdfium, &path, page, dpi)?;
+        let rotation = crate::pdf::page_rotate(&path, page)?;
+        Ok(Self {
+            width,
+            height,
+            dpi,
+            state: PdfiumSourceState::Streaming {
+                path,
+                page,
+                rotation,
+            },
+        })
+    }
+
+    /// Open a [`PdfiumRenderMode::Streaming`] source with a worst-case
+    /// strip budget check. See [`new_with_budget`](Self::new_with_budget)
+    /// for the policy semantics.
+    pub fn new_streaming_with_budget(
+        path: impl Into<std::path::PathBuf>,
+        page: usize,
+        dpi_hint: u32,
+        min_strip_height: u32,
+        budget_bytes: u64,
+        policy: BudgetPolicy,
+    ) -> Result<Self, crate::pdf::PdfError> {
+        let path = path.into();
+        let resolved_dpi = resolve_budget_dpi(
+            &path,
+            page,
+            dpi_hint,
+            min_strip_height,
+            budget_bytes,
+            policy,
+        )?;
+        let pdfium = crate::pdf::init_pdfium()?;
+        let (width, height, _, _) = probe_page_dims(pdfium, &path, page, resolved_dpi)?;
+        let rotation = crate::pdf::page_rotate(&path, page)?;
+        Ok(Self {
+            width,
+            height,
+            dpi: resolved_dpi,
+            state: PdfiumSourceState::Streaming {
+                path,
+                page,
+                rotation,
+            },
         })
     }
 
@@ -323,31 +415,76 @@ impl PdfiumStripSource {
         self.dpi
     }
 
+    /// The render mode this source was constructed in.
+    pub fn mode(&self) -> PdfiumRenderMode {
+        match self.state {
+            PdfiumSourceState::CachedFullPage { .. } => PdfiumRenderMode::CachedFullPage,
+            PdfiumSourceState::Streaming { .. } => PdfiumRenderMode::Streaming,
+        }
+    }
+
     fn render_strip_inner(
         &self,
         y_offset: u32,
         height: u32,
     ) -> Result<Raster, crate::pdf::PdfError> {
-        // Pdfium's matrix-based render path (FPDF_RenderPageBitmapWithMatrix)
-        // does not auto-apply the page's intrinsic /Rotate — hand-composed
-        // rotation matrices produced 180°-off output for /Rotate 90/270
-        // pages across every variant we tried. Rather than chase pdfium's
-        // matrix conventions, we render the full display-oriented raster
-        // once via `render_page_pdfium` (the form-data path that pdfium
-        // does rotate automatically) and slice strips out of the cached
-        // buffer. This trades peak memory for correctness; a future
-        // iteration can switch back to a true single-strip render once
-        // pdfium's matrix convention is pinned down.
-        let strip_h = height.min(self.height.saturating_sub(y_offset));
-        if strip_h == 0 {
-            let data = vec![0u8; self.width as usize * height as usize * 4];
-            return Raster::new(self.width, height, PixelFormat::Rgba8, data)
-                .map_err(crate::pdf::PdfError::from);
+        match &self.state {
+            PdfiumSourceState::CachedFullPage { full_raster } => {
+                let strip_h = height.min(self.height.saturating_sub(y_offset));
+                if strip_h == 0 {
+                    let data = vec![0u8; self.width as usize * height as usize * 4];
+                    return Raster::new(self.width, height, PixelFormat::Rgba8, data)
+                        .map_err(crate::pdf::PdfError::from);
+                }
+                full_raster
+                    .extract(0, y_offset, self.width, strip_h)
+                    .map_err(crate::pdf::PdfError::from)
+            }
+            PdfiumSourceState::Streaming {
+                path,
+                page,
+                rotation,
+            } => crate::pdf::render_page_strip_pdfium(
+                path, *page, self.dpi, *rotation, y_offset, height,
+            ),
         }
+    }
+}
 
-        self.full_raster
-            .extract(0, y_offset, self.width, strip_h)
-            .map_err(crate::pdf::PdfError::from)
+/// Shared budget-policy resolution used by both the cached and streaming
+/// `*_with_budget` constructors.
+#[cfg(feature = "pdfium")]
+fn resolve_budget_dpi(
+    path: &std::path::Path,
+    page: usize,
+    dpi_hint: u32,
+    min_strip_height: u32,
+    budget_bytes: u64,
+    policy: BudgetPolicy,
+) -> Result<u32, crate::pdf::PdfError> {
+    let pdfium = crate::pdf::init_pdfium()?;
+    match policy {
+        BudgetPolicy::Error => {
+            let (width, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint)?;
+            let strip_bytes = width as u64 * min_strip_height as u64 * 4;
+            if strip_bytes > budget_bytes {
+                return Err(crate::pdf::PdfError::BudgetExceeded {
+                    strip_bytes,
+                    budget_bytes,
+                    dpi: dpi_hint,
+                });
+            }
+            Ok(dpi_hint)
+        }
+        BudgetPolicy::AutoAdjustDpi { min_dpi } => resolve_dpi_under_budget(
+            pdfium,
+            path,
+            page,
+            dpi_hint,
+            min_dpi,
+            min_strip_height,
+            budget_bytes,
+        ),
     }
 }
 
