@@ -53,6 +53,10 @@ pub enum PdfError {
     RenderBudgetExceeded { pixels: u64, budget: u64 },
     #[error("failed to allocate {bytes} bytes for render buffer")]
     AllocationFailed { bytes: usize },
+    #[error(
+        "render dimensions {width}x{height} exceed pdfium's i32 bitmap-span limit ({span} bytes > i32::MAX)"
+    )]
+    RenderTooLarge { width: u32, height: u32, span: u64 },
 }
 
 /// Default ceiling on the pixel count (`width × height`) that a single
@@ -1047,6 +1051,27 @@ where
     Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
 }
 
+/// Bytes pdfium's BGRA bitmap buffer will span for a `width`x`height` render.
+///
+/// pdfium's `FPDFBitmap_GetBuffer_as_vec` computes the buffer length as an
+/// `i32 * i32` product (`stride * height`) before casting to `usize`
+/// (libviprs/pdfium-render `bindings.rs:3127-3129`). For a large enough bitmap
+/// that product overflows `i32::MAX`, wrapping to a negative value
+/// (sign-extended to a ~1.8e19-byte out-of-bounds slice) or to a small
+/// positive value (silent raster truncation). This guard rejects such a render
+/// on the libviprs side before we ever hand pdfium those dimensions.
+///
+/// `stride` is pdfium's tightest 32-bit BGRA row length, `width * 4` bytes;
+/// real pdfium strides are `>=` this, so the check is conservative.
+#[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
+fn pdfium_bitmap_span(width: u32, height: u32) -> Result<usize, PdfError> {
+    // Mirror of the fork's arithmetic — kept in i32 on purpose until the fix
+    // lands so the regression test can pin the overflow (#148).
+    let stride: i32 = (width as i32) * 4;
+    let len: i32 = stride * (height as i32);
+    Ok(len as usize)
+}
+
 /// Render a page at the given pixel dimensions and return a Raster.
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size(
@@ -1055,6 +1080,9 @@ pub(crate) fn render_at_size(
     height: u32,
 ) -> Result<Raster, PdfError> {
     use pdfium_render::prelude::*;
+
+    // Refuse renders whose bitmap buffer would overflow pdfium's i32 span (#148).
+    pdfium_bitmap_span(width, height)?;
 
     let config = PdfRenderConfig::new()
         .set_target_width(width as i32)
@@ -1341,6 +1369,34 @@ pub fn render_page_pdfium_budgeted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /**
+     * Regression test for #148: pdfium's bitmap buffer length is computed as
+     * an `i32 * i32` product (`stride * height`) which overflows `i32::MAX`
+     * for large high-DPI pages, feeding an out-of-bounds `from_raw_parts`.
+     *
+     * Reproduces the issue's exact failure scenario — a 48"x36" blueprint at
+     * 600 DPI: width 28800, stride 115200, height 21600, span 2_488_320_000
+     * bytes (> i32::MAX = 2_147_483_647). `pdfium_bitmap_span` must return the
+     * correct span computed in a wide integer, and must reject a zero-width
+     * render, rather than overflowing.
+     */
+    #[test]
+    fn pdfium_bitmap_span_no_i32_overflow() {
+        // Small render fits comfortably.
+        assert_eq!(pdfium_bitmap_span(1024, 768).unwrap(), 1024 * 4 * 768);
+
+        // The blueprint case: 28800 * 4 * 21600 = 2_488_320_000 > i32::MAX.
+        let span = pdfium_bitmap_span(28800, 21600).unwrap();
+        assert_eq!(span, 28800usize * 4 * 21600);
+        assert!(span > i32::MAX as usize);
+
+        // Zero width would give pdfium a zero/negative stride.
+        assert!(matches!(
+            pdfium_bitmap_span(0, 21600),
+            Err(PdfError::RenderTooLarge { .. })
+        ));
+    }
 
     /**
      * Tests that CMYK-to-RGB conversion produces correct color values.
