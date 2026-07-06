@@ -182,6 +182,19 @@ pub trait TileSink: Send + Sync {
     fn content_format(&self) -> Option<TileFormat> {
         None
     }
+
+    /// Engine hook: whether this sink (or a wrapper around it) already runs
+    /// its own retry loop inside `write_tile`.
+    ///
+    /// [`crate::EngineBuilder`] consults this before automatically wrapping a
+    /// sink in [`crate::retry::RetryingSink`] for a configured retry policy,
+    /// so a caller that pre-wrapped their sink in `RetryingSink` is not
+    /// double-wrapped (which would inflate `retry_count` and double-count
+    /// `skipped_due_to_failure`). Default is `false`; `RetryingSink` overrides
+    /// to `true`, and transparent decorators forward the inner sink's answer.
+    fn applies_retry_policy(&self) -> bool {
+        false
+    }
 }
 
 /// Forwarding impl so `Box<dyn TileSink>` (and `Box<T>` where `T: TileSink`)
@@ -227,6 +240,9 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     fn content_format(&self) -> Option<TileFormat> {
         (**self).content_format()
     }
+    fn applies_retry_policy(&self) -> bool {
+        (**self).applies_retry_policy()
+    }
 }
 
 /// Forwarding impl so `&T` satisfies [`TileSink`] wherever `T` does.
@@ -268,6 +284,9 @@ impl<T: TileSink + ?Sized> TileSink for &T {
     }
     fn content_format(&self) -> Option<TileFormat> {
         (*self).content_format()
+    }
+    fn applies_retry_policy(&self) -> bool {
+        (*self).applies_retry_policy()
     }
 }
 
