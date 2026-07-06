@@ -735,7 +735,8 @@ fn prepare_resume_state(
             Ok((std::collections::HashSet::new(), cp))
         }
         ResumeMode::Resume => {
-            let expected_hash = crate::resume::compute_plan_hash(plan);
+            let contract = crate::resume::PlanContract::from_engine(config, sink);
+            let expected_hash = crate::resume::compute_plan_hash(plan, &contract);
             let (completed, levels) =
                 if let Some(root) = crate::engine::resolve_checkpoint_root(config, sink) {
                     match crate::resume::JobCheckpoint::load(&root)? {
