@@ -254,6 +254,17 @@ struct StreamingState {
 #[cfg(feature = "pdfium")]
 impl Drop for StreamingState {
     fn drop(&mut self) {
+        // Closing the document issues `FPDF_CloseDocument`. Like every
+        // other FPDF entry point in this crate (see the invariant at
+        // `crate::pdf::pdfium_lock`), teardown must acquire the
+        // process-wide lock first: with the unpatched `pdfium-render`
+        // (Cargo does not propagate `[patch.crates-io]` downstream), a
+        // close racing a concurrent render inside the non-thread-safe C
+        // library corrupts the heap.
+        //
+        // Checklist: any pdfium-render object whose `Drop` issues FPDF
+        // calls must die inside a `pdfium_lock()` scope.
+        let _lock = crate::pdf::pdfium_lock();
         drop(self.document.take());
     }
 }
@@ -2066,5 +2077,52 @@ mod tests {
         let result =
             generate_pyramid_streaming(&strip_src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+
+    // Regression: `StreamingState::drop` must close its document under
+    // `pdfium_lock()`. The unpatched `pdfium-render` bypasses per-call
+    // locking, so a teardown (`FPDF_CloseDocument`) racing a concurrent
+    // render inside the non-thread-safe C library corrupts the heap.
+    //
+    // This exercises the synchronisation directly without a live pdfium
+    // handle: a `StreamingState` whose `document` is `None` still must
+    // acquire `PDFIUM_LOCK` in `Drop`. We hold the lock on this thread and
+    // assert that a `Drop` running on another thread blocks until we
+    // release it. On the pre-fix code the `Drop` never touches the lock,
+    // so the teardown completes while the lock is held and the first
+    // timeout assertion fails.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn streaming_state_drop_acquires_pdfium_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let guard = crate::pdf::pdfium_lock();
+
+        let state = StreamingState {
+            document: None,
+            page_index: 0,
+            rotation: crate::pdf::PageRotation::Zero,
+        };
+
+        let (tx, rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            drop(state); // must block here until the main thread releases the lock
+            tx.send(()).unwrap();
+        });
+
+        // While we hold the lock, a lock-respecting Drop cannot finish.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "StreamingState::drop completed while PDFIUM_LOCK was held — \
+             Drop did not acquire pdfium_lock(), leaving FPDF_CloseDocument \
+             unsynchronised against concurrent renders"
+        );
+
+        // Release the lock; the teardown must now proceed.
+        drop(guard);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("StreamingState::drop did not complete after lock release");
+        handle.join().unwrap();
     }
 }
