@@ -1065,11 +1065,19 @@ where
 /// real pdfium strides are `>=` this, so the check is conservative.
 #[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
 fn pdfium_bitmap_span(width: u32, height: u32) -> Result<usize, PdfError> {
-    // Mirror of the fork's arithmetic — kept in i32 on purpose until the fix
-    // lands so the regression test can pin the overflow (#148).
-    let stride: i32 = (width as i32) * 4;
-    let len: i32 = stride * (height as i32);
-    Ok(len as usize)
+    // Compute in u64 so the multiply itself cannot overflow, then reject any
+    // span pdfium's i32 buffer-length arithmetic could not represent. A zero
+    // width yields a zero/negative stride, which is equally unusable.
+    let stride = u64::from(width) * 4;
+    let span = stride * u64::from(height);
+    if width == 0 || span > i32::MAX as u64 {
+        return Err(PdfError::RenderTooLarge {
+            width,
+            height,
+            span,
+        });
+    }
+    Ok(span as usize)
 }
 
 /// Render a page at the given pixel dimensions and return a Raster.
@@ -1383,13 +1391,23 @@ mod tests {
      */
     #[test]
     fn pdfium_bitmap_span_no_i32_overflow() {
-        // Small render fits comfortably.
-        assert_eq!(pdfium_bitmap_span(1024, 768).unwrap(), 1024 * 4 * 768);
+        // A large-but-representable render still succeeds, with the span
+        // computed without overflow: 20000 * 4 * 20000 = 1_600_000_000 < i32::MAX.
+        assert_eq!(
+            pdfium_bitmap_span(20000, 20000).unwrap(),
+            20000usize * 4 * 20000
+        );
 
-        // The blueprint case: 28800 * 4 * 21600 = 2_488_320_000 > i32::MAX.
-        let span = pdfium_bitmap_span(28800, 21600).unwrap();
-        assert_eq!(span, 28800usize * 4 * 21600);
-        assert!(span > i32::MAX as usize);
+        // The blueprint case — 28800 * 4 * 21600 = 2_488_320_000 > i32::MAX —
+        // is refused instead of overflowing pdfium's i32 buffer length and
+        // feeding an out-of-bounds from_raw_parts read.
+        assert!(matches!(
+            pdfium_bitmap_span(28800, 21600),
+            Err(PdfError::RenderTooLarge {
+                span: 2_488_320_000,
+                ..
+            })
+        ));
 
         // Zero width would give pdfium a zero/negative stride.
         assert!(matches!(
