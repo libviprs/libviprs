@@ -141,6 +141,14 @@ pub struct EngineConfig {
     /// If None, falls back to `sink.checkpoint_root()`.
     /// Required when the sink is an opaque user wrapper that does not forward checkpoint_root().
     pub checkpoint_root: Option<PathBuf>,
+    /// Optional content digest identifying the source raster this run reads
+    /// from. When set, it is folded into the resume plan hash so that
+    /// resuming an on-disk checkpoint against a *different* source (even one
+    /// with identical dimensions) is rejected instead of silently
+    /// interleaving two images. `None` (the default) leaves source identity
+    /// out of the hash, preserving the geometry-only behaviour for callers
+    /// that do not compute a digest.
+    pub source_content_hash: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -154,6 +162,7 @@ impl Default for EngineConfig {
             checkpoint_every: 0,
             dedupe_strategy: None,
             checkpoint_root: None,
+            source_content_hash: None,
         }
     }
 }
@@ -236,6 +245,19 @@ impl EngineConfig {
     /// not forward `checkpoint_root()`.
     pub fn with_checkpoint_root(mut self, root: PathBuf) -> Self {
         self.checkpoint_root = Some(root);
+        self
+    }
+
+    /// Records a content digest for the source raster so that resume can
+    /// reject a checkpoint produced from a different source.
+    ///
+    /// The digest is opaque to the engine — any string that uniquely
+    /// identifies the source bytes works (e.g. the hex BLAKE3 digest exposed
+    /// via [`crate::manifest::SourceMetadata::bytes_hash`]). It is folded
+    /// into [`crate::resume::compute_plan_hash`]; two runs that pass
+    /// different digests will not resume one another's checkpoints.
+    pub fn with_source_content_hash(mut self, digest: impl Into<String>) -> Self {
+        self.source_content_hash = Some(digest.into());
         self
     }
 }
@@ -736,9 +758,10 @@ pub(crate) fn cp_for_sink(
 ) -> Option<CheckpointState> {
     let root = resolve_checkpoint_root(config, sink)?;
     let now = now_rfc3339_engine();
+    let contract = crate::resume::PlanContract::from_engine(config, sink);
     let meta = JobMetadata {
         schema_version: SCHEMA_VERSION.to_string(),
-        plan_hash: compute_plan_hash(plan),
+        plan_hash: compute_plan_hash(plan, &contract),
         completed_tiles,
         levels_completed,
         started_at: now.clone(),
@@ -781,7 +804,8 @@ pub(crate) fn raster_verify(
     // byte mismatch on the first one, which is strictly less useful than
     // failing fast with the structural error.
     if let Some(meta) = JobCheckpoint::load(root)? {
-        let expected = compute_plan_hash(plan);
+        let contract = crate::resume::PlanContract::from_engine(config, sink);
+        let expected = compute_plan_hash(plan, &contract);
         if meta.plan_hash != expected {
             return Err(EngineError::PlanHashMismatch {
                 expected: meta.plan_hash,
@@ -2200,5 +2224,48 @@ mod tests {
             "Verify: tile events"
         );
         assert_eq!(finished, 1, "Verify: finished event");
+    }
+
+    /// Resume must reject a run whose output contract changed, not just its
+    /// geometry. Here run 1 writes a full PNG pyramid + checkpoint; run 2
+    /// resumes the same directory but asks for JPEG tiles. Because the tile
+    /// format is part of the content contract, the resume gate must fail
+    /// with [`EngineError::PlanHashMismatch`] instead of silently keeping
+    /// the `.png` tiles under a manifest that now declares `.jpeg`.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn resume_rejects_tile_format_change() {
+        use crate::resume::ResumePolicy;
+        use crate::sink::{FsSink, TileFormat};
+        use crate::{EngineBuilder, EngineKind};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(128, 96);
+        let plan = PyramidPlanner::new(128, 96, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("tiles");
+
+        // Run 1: full pyramid as PNG, writing a resume checkpoint.
+        let sink_png = FsSink::new(root.clone(), plan.clone()).with_format(TileFormat::Png);
+        EngineBuilder::new(&src, plan.clone(), &sink_png)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite())
+            .run()
+            .unwrap();
+
+        // Run 2: resume the SAME directory but with a different tile format.
+        let sink_jpeg =
+            FsSink::new(root.clone(), plan.clone()).with_format(TileFormat::Jpeg { quality: 80 });
+        let err = EngineBuilder::new(&src, plan.clone(), &sink_jpeg)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run()
+            .expect_err("resume with a changed tile format must be rejected");
+        assert!(
+            matches!(err, EngineError::PlanHashMismatch { .. }),
+            "expected PlanHashMismatch on tile-format change, got {err:?}"
+        );
     }
 }

@@ -90,6 +90,7 @@ impl MapReduceConfig {
             checkpoint_every: 0,
             dedupe_strategy: None,
             checkpoint_root: None,
+            source_content_hash: None,
         }
     }
 }

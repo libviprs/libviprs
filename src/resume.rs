@@ -13,19 +13,23 @@
 //!
 //! # Plan hashing
 //!
-//! A run may resume only if the current [`PyramidPlan`] matches the plan that
-//! was originally used to produce the checkpoint. [`compute_plan_hash`]
-//! serialises the plan's load-bearing fields into a canonical byte layout and
-//! hashes them with Blake3. Any change to tile size, overlap, layout, level
-//! count, or per-level dimensions changes the hash — so a mismatched plan is
-//! detected before a single tile is written.
+//! A run may resume only if the current [`PyramidPlan`] and its output
+//! *content contract* match the ones originally used to produce the
+//! checkpoint. [`compute_plan_hash`] serialises the plan's load-bearing
+//! geometry together with a [`PlanContract`] (tile format, padding colour,
+//! blank-tile strategy, dedupe layout, and an optional source digest) into a
+//! canonical byte layout and hashes them with Blake3. Any change to tile
+//! size, overlap, layout, level count, per-level dimensions, or the content
+//! contract changes the hash — so a mismatched run is detected before a
+//! single tile is written.
 //!
 //! # Intended use
 //!
 //! ```ignore
-//! use libviprs::resume::{JobCheckpoint, JobMetadata, compute_plan_hash};
+//! use libviprs::resume::{JobCheckpoint, JobMetadata, PlanContract, compute_plan_hash};
 //!
-//! let hash = compute_plan_hash(&plan);
+//! let contract = PlanContract::from_engine(&config, &sink);
+//! let hash = compute_plan_hash(&plan, &contract);
 //! let meta = JobMetadata {
 //!     schema_version: "1".to_string(),
 //!     plan_hash: hash,
@@ -43,7 +47,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::dedupe::DedupeStrategy;
+use crate::engine::{BlankTileStrategy, EngineConfig};
+use crate::manifest::ChecksumAlgo;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
+use crate::sink::{TileFormat, TileSink};
 
 // `generate_pyramid_resumable` is now the exclusive purview of
 // `EngineBuilder::with_resume` — no crate-external entry point.
@@ -469,10 +477,58 @@ pub fn is_tile_completed(meta: &JobMetadata, coord: &TileCoord) -> bool {
     meta.completed_tiles.iter().any(|c| c == coord)
 }
 
-/// Compute the plan hash that identifies a [`PyramidPlan`] on disk.
+/// The output *content contract* of a run: the non-geometry choices that
+/// change the bytes a resume would produce, and therefore must invalidate a
+/// checkpoint when they change.
 ///
-/// Hashes the plan's load-bearing fields — not any run-time state — in a
-/// fixed canonical byte layout so that the hash is stable across:
+/// [`compute_plan_hash`] folds these into the plan hash alongside the plan
+/// geometry so that resuming a checkpoint whose format, padding colour,
+/// blank-tile handling, dedupe layout, or source content differs is rejected
+/// with [`crate::engine::EngineError::PlanHashMismatch`] instead of silently
+/// mixing two incompatible outputs on disk.
+///
+/// Build one with [`PlanContract::from_engine`] so that the value derived at
+/// checkpoint-write time and the value derived at the resume gate agree for
+/// the same run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanContract<'a> {
+    /// Tile encoding the sink commits to, when it has one. `None` for sinks
+    /// that do not pin a single on-disk format.
+    pub format: Option<TileFormat>,
+    /// Background RGB used to pad edge tiles.
+    pub background_rgb: [u8; 3],
+    /// Blank-tile handling strategy.
+    pub blank_strategy: BlankTileStrategy,
+    /// Content-addressed dedupe strategy.
+    pub dedupe: DedupeStrategy,
+    /// Optional content digest identifying the source raster. Folded in only
+    /// when present, so callers that do not compute one keep the historical
+    /// geometry+format behaviour.
+    pub source_digest: Option<&'a str>,
+}
+
+impl<'a> PlanContract<'a> {
+    /// Derive the contract from the engine config and sink that drive a run.
+    ///
+    /// Both the checkpoint writer and the resume gate call this against the
+    /// same `config`/`sink`, guaranteeing they hash identical bytes for a
+    /// legitimate resume and divergent bytes when any contract input changed.
+    pub fn from_engine(config: &'a EngineConfig, sink: &dyn TileSink) -> Self {
+        Self {
+            format: sink.content_format(),
+            background_rgb: config.background_rgb,
+            blank_strategy: config.blank_tile_strategy,
+            dedupe: config.dedupe_strategy.unwrap_or_default(),
+            source_digest: config.source_content_hash.as_deref(),
+        }
+    }
+}
+
+/// Compute the plan hash that identifies a run's on-disk output on disk.
+///
+/// Hashes the plan's load-bearing geometry *and* the [`PlanContract`] — the
+/// non-geometry content contract — in a fixed canonical byte layout so that
+/// the hash is stable across:
 ///
 /// * process restarts,
 /// * struct-field reordering in future revisions of [`PyramidPlan`] (as long
@@ -483,10 +539,17 @@ pub fn is_tile_completed(meta: &JobMetadata, coord: &TileCoord) -> bool {
 /// field as a fixed-width little-endian integer (or a single tag byte for
 /// enums), in the order declared below. The result is the lowercase hex
 /// Blake3 digest of those bytes.
-pub fn compute_plan_hash(plan: &PyramidPlan) -> String {
+///
+/// Two runs whose geometry is identical but whose format, padding colour,
+/// blank-tile strategy, dedupe layout, or source digest differ produce
+/// different hashes, so the resume gate rejects a changed content contract
+/// rather than resuming into a mixed output.
+pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> String {
     // Domain separator — ties this hash to a specific canonicalisation so
     // the same bytes cannot accidentally match some other hash contract.
-    const DOMAIN: &[u8] = b"libviprs/plan/v1";
+    // Bumped to v2 when the content contract was folded in, so v1 (geometry
+    // only) checkpoints no longer match and are treated as a plan mismatch.
+    const DOMAIN: &[u8] = b"libviprs/plan/v2";
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN);
@@ -515,7 +578,64 @@ pub fn compute_plan_hash(plan: &PyramidPlan) -> String {
         hasher.update(&lvl.rows.to_le_bytes());
     }
 
+    // Content contract. A single tag byte (plus any payload) per field, so
+    // that changing the format, padding colour, blank-tile handling, dedupe
+    // layout, or source content changes the digest.
+    let (fmt_tag, fmt_quality) = format_tag(contract.format);
+    hasher.update(&[fmt_tag, fmt_quality]);
+    hasher.update(&contract.background_rgb);
+    let (blank_tag, blank_delta) = blank_strategy_tag(contract.blank_strategy);
+    hasher.update(&[blank_tag, blank_delta]);
+    hasher.update(&[dedupe_tag(contract.dedupe)]);
+    match contract.source_digest {
+        Some(d) => {
+            hasher.update(&[1u8]);
+            hasher.update(&(d.len() as u64).to_le_bytes());
+            hasher.update(d.as_bytes());
+        }
+        None => {
+            hasher.update(&[0u8]);
+        }
+    }
+
     hasher.finalize().to_hex().to_string()
+}
+
+/// Tag byte (and quality payload) for a [`TileFormat`].
+///
+/// Kept in one place so that adding a new format forces an explicit decision
+/// about its byte, mirroring [`layout_tag`]. The second byte carries JPEG
+/// quality (0 for formats without a quality knob).
+fn format_tag(format: Option<TileFormat>) -> (u8, u8) {
+    match format {
+        None => (0, 0),
+        Some(TileFormat::Png) => (1, 0),
+        Some(TileFormat::Jpeg { quality }) => (2, quality),
+        Some(TileFormat::Raw) => (3, 0),
+    }
+}
+
+/// Tag byte (and tolerance payload) for a [`BlankTileStrategy`].
+fn blank_strategy_tag(strategy: BlankTileStrategy) -> (u8, u8) {
+    match strategy {
+        BlankTileStrategy::Emit => (1, 0),
+        BlankTileStrategy::Placeholder => (2, 0),
+        BlankTileStrategy::PlaceholderWithTolerance { max_channel_delta } => (3, max_channel_delta),
+    }
+}
+
+/// Tag byte for a [`DedupeStrategy`], including its checksum algorithm.
+fn dedupe_tag(dedupe: DedupeStrategy) -> u8 {
+    match dedupe {
+        DedupeStrategy::None => 0,
+        DedupeStrategy::Blanks => 1,
+        DedupeStrategy::All {
+            algo: ChecksumAlgo::Blake3,
+        } => 2,
+        DedupeStrategy::All {
+            algo: ChecksumAlgo::Sha256,
+        } => 3,
+    }
 }
 
 /// Single-byte discriminator for a [`Layout`] value.
@@ -540,6 +660,18 @@ mod tests {
         PyramidPlanner::new(128, 128, 64, 0, Layout::DeepZoom)
             .unwrap()
             .plan()
+    }
+
+    /// A baseline content contract for the plan-hash tests. Individual tests
+    /// mutate one field to assert the hash reacts to that change.
+    fn sample_contract() -> PlanContract<'static> {
+        PlanContract {
+            format: Some(TileFormat::Png),
+            background_rgb: [255, 255, 255],
+            blank_strategy: BlankTileStrategy::Emit,
+            dedupe: DedupeStrategy::None,
+            source_digest: None,
+        }
     }
 
     fn sample_meta(hash: &str) -> JobMetadata {
@@ -569,7 +701,7 @@ mod tests {
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let plan = sample_plan();
-        let hash = compute_plan_hash(&plan);
+        let hash = compute_plan_hash(&plan, &sample_contract());
         let meta = sample_meta(&hash);
         JobCheckpoint::save(dir.path(), &meta).unwrap();
         let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
@@ -626,7 +758,7 @@ mod tests {
     fn save_is_atomic_no_tmp_left_behind() {
         let dir = tempfile::tempdir().unwrap();
         let plan = sample_plan();
-        let meta = sample_meta(&compute_plan_hash(&plan));
+        let meta = sample_meta(&compute_plan_hash(&plan, &sample_contract()));
         JobCheckpoint::save(dir.path(), &meta).unwrap();
         let tmp = tmp_path_for(&JobCheckpoint::checkpoint_path(dir.path()));
         assert!(!tmp.exists(), "tmp file should be renamed, not linger");
@@ -636,7 +768,10 @@ mod tests {
     #[test]
     fn plan_hash_is_deterministic() {
         let plan = sample_plan();
-        assert_eq!(compute_plan_hash(&plan), compute_plan_hash(&plan));
+        assert_eq!(
+            compute_plan_hash(&plan, &sample_contract()),
+            compute_plan_hash(&plan, &sample_contract())
+        );
     }
 
     #[test]
@@ -647,7 +782,10 @@ mod tests {
         let b = PyramidPlanner::new(128, 128, 32, 0, Layout::DeepZoom)
             .unwrap()
             .plan();
-        assert_ne!(compute_plan_hash(&a), compute_plan_hash(&b));
+        assert_ne!(
+            compute_plan_hash(&a, &sample_contract()),
+            compute_plan_hash(&b, &sample_contract())
+        );
     }
 
     #[test]
@@ -658,7 +796,10 @@ mod tests {
         let b = PyramidPlanner::new(256, 256, 64, 0, Layout::Xyz)
             .unwrap()
             .plan();
-        assert_ne!(compute_plan_hash(&a), compute_plan_hash(&b));
+        assert_ne!(
+            compute_plan_hash(&a, &sample_contract()),
+            compute_plan_hash(&b, &sample_contract())
+        );
     }
 
     #[test]
@@ -669,12 +810,117 @@ mod tests {
         let b = PyramidPlanner::new(256, 256, 64, 1, Layout::DeepZoom)
             .unwrap()
             .plan();
-        assert_ne!(compute_plan_hash(&a), compute_plan_hash(&b));
+        assert_ne!(
+            compute_plan_hash(&a, &sample_contract()),
+            compute_plan_hash(&b, &sample_contract())
+        );
+    }
+
+    #[test]
+    fn plan_hash_changes_with_tile_format() {
+        let plan = sample_plan();
+        let png = PlanContract {
+            format: Some(TileFormat::Png),
+            ..sample_contract()
+        };
+        let jpeg = PlanContract {
+            format: Some(TileFormat::Jpeg { quality: 80 }),
+            ..sample_contract()
+        };
+        assert_ne!(
+            compute_plan_hash(&plan, &png),
+            compute_plan_hash(&plan, &jpeg),
+            "changing the tile format must invalidate the checkpoint"
+        );
+    }
+
+    #[test]
+    fn plan_hash_changes_with_jpeg_quality() {
+        let plan = sample_plan();
+        let q80 = PlanContract {
+            format: Some(TileFormat::Jpeg { quality: 80 }),
+            ..sample_contract()
+        };
+        let q40 = PlanContract {
+            format: Some(TileFormat::Jpeg { quality: 40 }),
+            ..sample_contract()
+        };
+        assert_ne!(
+            compute_plan_hash(&plan, &q80),
+            compute_plan_hash(&plan, &q40)
+        );
+    }
+
+    #[test]
+    fn plan_hash_changes_with_background() {
+        let plan = sample_plan();
+        let white = sample_contract();
+        let black = PlanContract {
+            background_rgb: [0, 0, 0],
+            ..sample_contract()
+        };
+        assert_ne!(
+            compute_plan_hash(&plan, &white),
+            compute_plan_hash(&plan, &black)
+        );
+    }
+
+    #[test]
+    fn plan_hash_changes_with_blank_strategy() {
+        let plan = sample_plan();
+        let emit = sample_contract();
+        let placeholder = PlanContract {
+            blank_strategy: BlankTileStrategy::Placeholder,
+            ..sample_contract()
+        };
+        assert_ne!(
+            compute_plan_hash(&plan, &emit),
+            compute_plan_hash(&plan, &placeholder)
+        );
+    }
+
+    #[test]
+    fn plan_hash_changes_with_dedupe_strategy() {
+        let plan = sample_plan();
+        let none = sample_contract();
+        let blanks = PlanContract {
+            dedupe: DedupeStrategy::Blanks,
+            ..sample_contract()
+        };
+        assert_ne!(
+            compute_plan_hash(&plan, &none),
+            compute_plan_hash(&plan, &blanks)
+        );
+    }
+
+    #[test]
+    fn plan_hash_changes_with_source_digest() {
+        // Two runs over same-dimension sources: identical geometry and
+        // contract but different source content must not resume one another.
+        let plan = sample_plan();
+        let src_a = PlanContract {
+            source_digest: Some("aaaaaaaa"),
+            ..sample_contract()
+        };
+        let src_b = PlanContract {
+            source_digest: Some("bbbbbbbb"),
+            ..sample_contract()
+        };
+        assert_ne!(
+            compute_plan_hash(&plan, &src_a),
+            compute_plan_hash(&plan, &src_b),
+            "a different source digest must invalidate the checkpoint"
+        );
+        // Absent digest differs from any present digest (opt-in behaviour).
+        assert_ne!(
+            compute_plan_hash(&plan, &sample_contract()),
+            compute_plan_hash(&plan, &src_a)
+        );
     }
 
     #[test]
     fn plan_hash_is_lowercase_hex() {
-        let hash = compute_plan_hash(&sample_plan());
+        let hash = compute_plan_hash(&sample_plan(), &sample_contract());
         assert_eq!(hash.len(), 64, "Blake3 produces a 32-byte / 64-hex digest");
         assert!(
             hash.chars()
