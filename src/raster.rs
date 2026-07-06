@@ -34,6 +34,23 @@ pub enum RasterError {
         raster_w: u32,
         raster_h: u32,
     },
+    #[error("size overflow: {width}x{height} with {bpp} bytes per pixel exceeds usize::MAX")]
+    SizeOverflow { width: u32, height: u32, bpp: usize },
+}
+
+/// Compute `width * height * bpp` as a `usize`, checking for overflow.
+///
+/// The multiplication is performed in `u64` so it never wraps for `u32`
+/// dimensions, then narrowed to `usize`. On 32-bit targets a product that
+/// exceeds `usize::MAX` yields [`RasterError::SizeOverflow`] rather than
+/// wrapping, so behaviour is identical on 32- and 64-bit targets.
+fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError> {
+    let overflow = || RasterError::SizeOverflow { width, height, bpp };
+    (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|wh| wh.checked_mul(bpp as u64))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(overflow)
 }
 
 /// An owned raster image buffer with known dimensions and pixel format.
@@ -81,7 +98,7 @@ impl Raster {
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
-        let expected = width as usize * height as usize * format.bytes_per_pixel();
+        let expected = buffer_len(width, height, format.bytes_per_pixel())?;
         if data.len() != expected {
             return Err(RasterError::BufferSizeMismatch {
                 width,
@@ -112,8 +129,15 @@ impl Raster {
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
-        let size = width as usize * height as usize * format.bytes_per_pixel();
-        Self::new(width, height, format, vec![0u8; size])
+        // Compute the size once and reuse it for both the allocation and the
+        // (implicit) length invariant, avoiding a second multiplication.
+        let size = buffer_len(width, height, format.bytes_per_pixel())?;
+        Ok(Self {
+            width,
+            height,
+            format,
+            data: vec![0u8; size],
+        })
     }
 
     /// Image width in pixels.
@@ -193,7 +217,7 @@ impl Raster {
     pub fn extract(&self, x: u32, y: u32, w: u32, h: u32) -> Result<Raster, RasterError> {
         let view = self.region(x, y, w, h)?;
         let bpp = self.format.bytes_per_pixel();
-        let mut out = Vec::with_capacity(w as usize * h as usize * bpp);
+        let mut out = Vec::with_capacity(buffer_len(w, h, bpp)?);
         for row in view.rows() {
             out.extend_from_slice(row);
         }
@@ -447,6 +471,31 @@ mod tests {
     fn zeroed_raster_is_all_zeros() {
         let r = Raster::zeroed(5, 5, PixelFormat::Rgba8).unwrap();
         assert!(r.data().iter().all(|&b| b == 0));
+    }
+
+    /**
+     * Tests that near-u32::MAX dimensions do not overflow width*height*bpp
+     * arithmetic. The product w*h*bpp exceeds usize::MAX, so construction must
+     * surface a typed error rather than panicking (debug) or wrapping to a
+     * small value (release) and letting an inconsistent Raster escape.
+     * Input: zeroed/new at u32::MAX x u32::MAX Rgba16 → Output: typed error.
+     */
+    #[test]
+    fn near_u32_max_dimensions_return_error_not_panic() {
+        // zeroed must not panic/wrap while computing the buffer size.
+        let result = Raster::zeroed(u32::MAX, u32::MAX, PixelFormat::Rgba16);
+        assert!(
+            matches!(result, Err(RasterError::SizeOverflow { .. })),
+            "expected SizeOverflow from zeroed, got {result:?}"
+        );
+
+        // new must reject the dimensions before its length check wraps: a short
+        // buffer must not be accepted as matching a wrapped `expected`.
+        let result = Raster::new(u32::MAX, u32::MAX, PixelFormat::Rgba16, vec![0u8; 8]);
+        assert!(
+            matches!(result, Err(RasterError::SizeOverflow { .. })),
+            "expected SizeOverflow from new, not an Ok with a short buffer, got {result:?}"
+        );
     }
 }
 
