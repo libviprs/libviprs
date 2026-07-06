@@ -448,6 +448,31 @@ mod tests {
         let r = Raster::zeroed(5, 5, PixelFormat::Rgba8).unwrap();
         assert!(r.data().iter().all(|&b| b == 0));
     }
+
+    /**
+     * Tests that near-u32::MAX dimensions do not overflow width*height*bpp
+     * arithmetic. The product w*h*bpp exceeds usize::MAX, so construction must
+     * surface a typed error rather than panicking (debug) or wrapping to a
+     * small value (release) and letting an inconsistent Raster escape.
+     * Input: zeroed/new at u32::MAX x u32::MAX Rgba16 → Output: typed error.
+     */
+    #[test]
+    fn near_u32_max_dimensions_return_error_not_panic() {
+        // zeroed must not panic/wrap while computing the buffer size.
+        let result = Raster::zeroed(u32::MAX, u32::MAX, PixelFormat::Rgba16);
+        assert!(
+            result.is_err(),
+            "expected overflow error from zeroed, got Ok"
+        );
+
+        // new must reject the dimensions before its length check wraps: a short
+        // buffer must not be accepted as matching a wrapped `expected`.
+        let result = Raster::new(u32::MAX, u32::MAX, PixelFormat::Rgba16, vec![0u8; 8]);
+        assert!(
+            result.is_err(),
+            "expected overflow error from new, not an Ok with a short buffer"
+        );
+    }
 }
 
 #[cfg(test)]
