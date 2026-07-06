@@ -2268,4 +2268,55 @@ mod tests {
             "expected PlanHashMismatch on tile-format change, got {err:?}"
         );
     }
+
+    /**
+     * Tests that a centred non-square canvas embeds and renders successfully.
+     * `embed_in_canvas` must allocate a `canvas_width × canvas_height` buffer;
+     * a square allocation makes `Raster::new` reject any non-square canvas with
+     * `BufferSizeMismatch`. Works by building a centred DeepZoom plan whose
+     * canvas is 1024x256, embedding the source directly, and running the full
+     * pyramid to the sink.
+     * Input: 1000x200 image, tile_size=256, centre=true -> canvas 1024x256.
+     */
+    #[test]
+    fn centred_non_square_canvas_renders() {
+        let src = gradient_raster(1000, 200);
+        let plan = PyramidPlanner::new(1000, 200, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .with_centre(true)
+            .plan();
+
+        // Sanity: the plan really is a non-square centred canvas that offsets
+        // the image on both axes (so embed_in_canvas is exercised).
+        assert_ne!(
+            plan.canvas_width, plan.canvas_height,
+            "expected a non-square canvas"
+        );
+        assert!(plan.centre_offset_x > 0 && plan.centre_offset_y > 0);
+
+        // Direct embed must succeed and produce a canvas-sized raster.
+        let canvas =
+            embed_in_canvas(&src, &plan, EngineConfig::default().background_rgb).unwrap();
+        assert_eq!(canvas.width(), plan.canvas_width);
+        assert_eq!(canvas.height(), plan.canvas_height);
+
+        // The source pixels must survive at the centre offset, and the
+        // background must fill the padding above the image.
+        let bpp = src.format().bytes_per_pixel();
+        let ox = plan.centre_offset_x as usize;
+        let oy = plan.centre_offset_y as usize;
+        let dst_stride = plan.canvas_width as usize * bpp;
+        let embedded = &canvas.data()[oy * dst_stride + ox * bpp
+            ..oy * dst_stride + ox * bpp + bpp];
+        let src_first = &src.data()[..bpp];
+        assert_eq!(embedded, src_first, "source pixel lost at centre offset");
+
+        // End-to-end: the whole pyramid renders without error.
+        let sink = MemorySink::new();
+        let config = EngineConfig::default();
+        let result =
+            generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        assert_eq!(result.tiles_produced, plan.total_tile_count());
+        assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
+    }
 }
