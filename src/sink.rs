@@ -761,10 +761,16 @@ impl TileSink for FsSink {
         // tile bytes directly at the planned path.
         let dedup_used = if self.should_dedupe_tile(tile) {
             self.saw_blank.store(true, Ordering::Relaxed);
+            // `dedupe_write` records the digest of the bytes it actually
+            // materializes at each tile path (a full payload for the first
+            // occurrence, a 1-byte placeholder for references / hardlink
+            // fallbacks), so no digest is recorded for the dedupe path here.
             self.dedupe_write(&rel_string, &abs_path, &bytes)?;
             true
         } else {
             std::fs::write(&abs_path, &bytes)?;
+            // Non-dedupe path: the full encoded bytes are what lands on disk.
+            self.record_tile_digest(&rel_string, &bytes);
             false
         };
 
@@ -776,18 +782,6 @@ impl TileSink for FsSink {
             slot[0].fetch_add(1, Ordering::Relaxed);
             if tile.blank || dedup_used {
                 slot[1].fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        // Record checksum for manifest emission. Keyed by the plan-relative
-        // tile path so it round-trips through `verify_output`. Stored as a
-        // raw 32-byte digest; hex conversion happens once at manifest-
-        // write time to keep the hot path allocation-light.
-        if self.checksums != crate::checksum::ChecksumMode::None {
-            if let Some(algo) = self.checksum_algo {
-                let digest = hash_tile_raw(&bytes, algo);
-                let mut map = self.tile_digests.lock().unwrap();
-                map.insert(rel_string.clone(), digest);
             }
         }
 
@@ -866,6 +860,27 @@ impl FsSink {
     /// This layout minimises on-disk bytes (most duplicates collapse to
     /// 1-byte placeholders) while guaranteeing at least one real hardlink
     /// per shared file for inode-level verification.
+    /// Record (or overwrite) the checksum for a tile path, keyed by its
+    /// plan-relative path. `materialized` must be the exact bytes that end up
+    /// on disk at that path — for deduped placeholders that is the 1-byte
+    /// sentinel, not the full encoded payload — so that `ChecksumMode::Verify`
+    /// and the post-hoc `verify_output` re-hash of the on-disk file both agree
+    /// with the recorded digest (issue #92).
+    ///
+    /// A no-op when checksums are disabled or no algorithm has been selected.
+    fn record_tile_digest(&self, rel: &str, materialized: &[u8]) {
+        if self.checksums == crate::checksum::ChecksumMode::None {
+            return;
+        }
+        if let Some(algo) = self.checksum_algo {
+            let digest = hash_tile_raw(materialized, algo);
+            self.tile_digests
+                .lock()
+                .unwrap()
+                .insert(rel.to_string(), digest);
+        }
+    }
+
     fn dedupe_write(
         &self,
         rel_string: &str,
@@ -889,6 +904,8 @@ impl FsSink {
                 // metadata so a future second hit can promote this file
                 // into `_shared/`.
                 std::fs::write(abs_path, bytes)?;
+                // The full encoded payload lives at the tile path.
+                self.record_tile_digest(rel_string, bytes);
 
                 let shared_rel_string = shared_path.to_string_lossy().replace('\\', "/");
                 let shared_abs_path = self.base_dir.join(&shared_path);
@@ -951,12 +968,22 @@ impl FsSink {
                     }
                     match std::fs::hard_link(&shared_abs_path, &p.tile_abs_path) {
                         Ok(()) => {
-                            // Hardlink succeeded; no manifest entry needed
-                            // for this path.
+                            // Hardlink succeeded; the promoted tile path now
+                            // resolves to the shared file (the full payload),
+                            // so its digest stays that of the full bytes. The
+                            // digest was already recorded when this tile went
+                            // through `WriteNew`, but re-record defensively in
+                            // case the two occurrences differ in encoding while
+                            // sharing a dedupe key. No manifest entry needed.
+                            self.record_tile_digest(&p.tile_rel_path, &p.bytes);
                         }
                         Err(_) => {
-                            // Fall back to placeholder + manifest entry.
+                            // Fall back to placeholder + manifest entry. The
+                            // tile path now holds the 1-byte sentinel, so its
+                            // recorded digest must describe that sentinel — not
+                            // the full payload captured during `WriteNew`.
                             let _ = std::fs::write(&p.tile_abs_path, [0u8]);
+                            self.record_tile_digest(&p.tile_rel_path, &[0u8]);
                             self.manifest_refs
                                 .lock()
                                 .unwrap()
@@ -984,6 +1011,10 @@ impl FsSink {
                     let _ = std::fs::remove_file(abs_path);
                 }
                 std::fs::write(abs_path, [0u8])?;
+                // The tile path holds only the 1-byte sentinel; record the
+                // digest of what is actually on disk so Verify/verify_output
+                // agree (issue #92).
+                self.record_tile_digest(rel_string, &[0u8]);
                 self.manifest_refs
                     .lock()
                     .unwrap()
