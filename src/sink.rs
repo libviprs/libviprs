@@ -1835,4 +1835,69 @@ mod tests {
         let bytes = encode_jpeg(&raster, 90).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
     }
+
+    /**
+     * Regression for issue #92: when dedupe promotes identical uniform tiles
+     * under the default `BlankTileStrategy::Emit`, the second (and any hardlink
+     * fallback) tile path is materialized as a 1-byte placeholder, but the
+     * digest table used to record the digest of the full encoded bytes. That
+     * made `ChecksumMode::Verify` re-read the placeholder, hash something
+     * different, and fail a perfectly healthy run; `EmitOnly` shipped digests
+     * that could never verify.
+     *
+     * This test drives two identical uniform tiles through a Verify + dedupe
+     * sink and asserts finish() succeeds, then re-runs the post-hoc
+     * `verify_output` over the emitted manifest and asserts no tile mismatches.
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn verify_dedupe_emit_uniform_tiles_digests_match_disk() {
+        use crate::checksum::ChecksumMode;
+        use crate::dedupe::DedupeStrategy;
+        use crate::manifest::ChecksumAlgo;
+
+        // 16x8 @ tile 8 => the full-resolution level is 2 tiles wide, 1 tall.
+        let planner = PyramidPlanner::new(16, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert!(
+            top.cols >= 2,
+            "test needs a level with at least two tiles, got cols={}",
+            top.cols
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("output_files");
+        let sink = FsSink::new(base.clone(), plan.clone())
+            .with_format(TileFormat::Png)
+            .with_checksums(ChecksumMode::Verify, ChecksumAlgo::Blake3)
+            .with_dedupe(DedupeStrategy::Blanks);
+
+        // Two identical uniform (all-zero) tiles at the same level. Under the
+        // default Emit strategy `tile.blank` stays false, but the raster is
+        // uniform so `should_dedupe_tile` still routes both through dedupe.
+        for col in 0..2 {
+            let rect = plan.tile_rect(TileCoord::new(top.level, col, 0)).unwrap();
+            let tile = Tile {
+                coord: TileCoord::new(top.level, col, 0),
+                raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
+        }
+
+        // finish() runs the on-disk Verify pass. Before the fix this returned
+        // SinkError::ChecksumMismatch on the deduped placeholder tile.
+        sink.finish()
+            .expect("Verify + dedupe over identical uniform tiles must pass");
+
+        // Capstone: the emitted manifest's per-tile digests must verify against
+        // the bytes actually on disk (placeholders included).
+        let report = crate::checksum::verify_output(&base).unwrap();
+        assert!(
+            report.tiles_mismatched.is_empty(),
+            "unexpected mismatches: {:?}",
+            report.tiles_mismatched
+        );
+    }
 }
