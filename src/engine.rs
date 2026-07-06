@@ -1050,7 +1050,7 @@ fn embed_in_canvas(
     let cw = plan.canvas_width;
     let ch = plan.canvas_height;
     let bpp = source.format().bytes_per_pixel();
-    let mut canvas = make_background_tile(cw, bpp, background_rgb);
+    let mut canvas = make_background_tile(cw, ch, bpp, background_rgb);
 
     let ox = plan.centre_offset_x as usize;
     let oy = plan.centre_offset_y as usize;
@@ -1358,17 +1358,16 @@ fn extract_and_emit_parallel(
     })
 }
 
-/// Allocates a `tile_size × tile_size` pixel buffer filled with the
-/// background color.
+/// Allocates a `width × height` pixel buffer filled with the background
+/// color.
 ///
-/// Used to pad edge tiles and to produce solid-background tiles for
-/// canvas regions that lie outside the source image (e.g. Google layout
-/// with centre). The background RGB triplet is expanded to match the
-/// pixel format's bytes-per-pixel: grayscale uses the red channel,
-/// RGB copies all three, RGBA appends alpha=255, and other formats
-/// repeat the red channel.
-fn make_background_tile(ts: u32, bpp: usize, background_rgb: [u8; 3]) -> Vec<u8> {
-    let mut padded = vec![0u8; ts as usize * ts as usize * bpp];
+/// Used to pad edge tiles (square, `tile_size × tile_size`) and to build
+/// the full-resolution centre canvas (which may be non-square). The
+/// background RGB triplet is expanded to match the pixel format's
+/// bytes-per-pixel: grayscale uses the red channel, RGB copies all three,
+/// RGBA appends alpha=255, and other formats repeat the red channel.
+fn make_background_tile(width: u32, height: u32, bpp: usize, background_rgb: [u8; 3]) -> Vec<u8> {
+    let mut padded = vec![0u8; width as usize * height as usize * bpp];
     let bg_pixel: Vec<u8> = match bpp {
         1 => vec![background_rgb[0]],
         3 => background_rgb.to_vec(),
@@ -1427,7 +1426,7 @@ fn extract_tile(
 
         if rect.x >= rw || rect.y >= rh {
             // Tile entirely outside raster — solid background
-            let padded = make_background_tile(ts, bpp, background_rgb);
+            let padded = make_background_tile(ts, ts, bpp, background_rgb);
             return Raster::new(ts, ts, raster.format(), padded);
         }
 
@@ -1441,7 +1440,7 @@ fn extract_tile(
 
         // Partial: extract overlap and pad
         let content = raster.extract(rect.x, rect.y, inter_w, inter_h)?;
-        let mut padded = make_background_tile(ts, bpp, background_rgb);
+        let mut padded = make_background_tile(ts, ts, bpp, background_rgb);
         let src_stride = inter_w as usize * bpp;
         let dst_stride = ts as usize * bpp;
         for row in 0..inter_h as usize {
@@ -1460,7 +1459,7 @@ fn extract_tile(
     // Only pad when there's no overlap — overlap tiles have intentionally
     // different sizes and must not be resized.
     if plan.overlap == 0 && (content.width() < ts || content.height() < ts) {
-        let mut padded = make_background_tile(ts, bpp, background_rgb);
+        let mut padded = make_background_tile(ts, ts, bpp, background_rgb);
 
         // Copy content rows into the padded buffer
         let src_stride = content.width() as usize * bpp;
