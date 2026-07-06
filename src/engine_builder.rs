@@ -33,7 +33,7 @@ use crate::observe::{EngineObserver, NoopObserver};
 use crate::planner::PyramidPlan;
 use crate::raster::Raster;
 use crate::resume::{ResumeMode, ResumePolicy};
-use crate::retry::{FailurePolicy, RetryPolicy};
+use crate::retry::{FailurePolicy, RetryPolicy, RetryingSink};
 use crate::sink::TileSink;
 use crate::streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, generate_pyramid_streaming,
@@ -421,6 +421,37 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             None => &NoopObserver,
         };
 
+        // #119: route writes through `RetryingSink` when the configured
+        // failure policy carries a `RetryPolicy`. Previously the engine only
+        // inspected the `FailurePolicy` *variant* and never read the embedded
+        // policy, so `EngineBuilder::with_retry` / `--on-failure retry=N,D`
+        // performed zero retries. Wrapping here engages the retry loop inside
+        // `write_tile` for every engine kind (monolithic / streaming /
+        // map-reduce) on both the plain and resume paths; the engine then
+        // sees only the terminal outcome, so its existing `RetryThenSkip`
+        // accounting kicks in only after retries are exhausted.
+        //
+        // The wrapper borrows the sink, so the original `sink` is still
+        // returned to the caller (for `run_collect` inspection) and continues
+        // to record every tile that lands.
+        //
+        // A sink the caller already wrapped in `RetryingSink` reports
+        // `applies_retry_policy() == true`; we skip re-wrapping it so retries
+        // and skip-accounting are not double-counted.
+        let retrying: Option<RetryingSink<&S>> = match &engine_cfg.failure_policy {
+            FailurePolicy::RetryThenFail(p) | FailurePolicy::RetryThenSkip(p)
+                if !sink.applies_retry_policy() =>
+            {
+                Some(RetryingSink::new(&sink, p.clone()))
+            }
+            _ => None,
+        };
+        // The concrete sink the engine drives its writes through.
+        let engine_sink: &dyn TileSink = match &retrying {
+            Some(r) => r,
+            None => &sink,
+        };
+
         let kind = resolve_engine_kind(engine_kind, &source);
 
         // Unified resume path: every engine kind now flows through the
@@ -496,7 +527,10 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
             // Overwrite / Resume: shared (skip, cp) setup + ResumeAwareSink.
             let (skip, cp) = prepare_resume_state(&sink, &plan, &engine_cfg, policy.mode())?;
-            let wrapped = resume::ResumeAwareSink::new(&sink, &skip, cp.as_ref());
+            // Route resume writes through the retry wrapper (when configured)
+            // so a transient failure is retried before the resume checkpoint
+            // records the tile as complete.
+            let wrapped = resume::ResumeAwareSink::new(engine_sink, &skip, cp.as_ref());
 
             let mut result = match (kind, source) {
                 (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
@@ -561,7 +595,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
         let result = match (kind, source) {
             (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
-                generate_pyramid_observed(raster, &plan, &sink, &engine_cfg, observer_ref)?
+                generate_pyramid_observed(raster, &plan, engine_sink, &engine_cfg, observer_ref)?
             }
             (EngineKind::Monolithic, EngineSource::Strip(_)) => {
                 return Err(EngineError::IncompatibleSource {
@@ -572,11 +606,11 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             (EngineKind::Streaming, EngineSource::Raster(raster)) => {
                 let source = RasterStripSource::new(raster);
                 let cfg = build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                generate_pyramid_streaming(&source, &plan, &sink, &cfg, observer_ref)?
+                generate_pyramid_streaming(&source, &plan, engine_sink, &cfg, observer_ref)?
             }
             (EngineKind::Streaming, EngineSource::Strip(source)) => {
                 let cfg = build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                generate_pyramid_streaming(source.as_ref(), &plan, &sink, &cfg, observer_ref)?
+                generate_pyramid_streaming(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
             }
             (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
                 let source = RasterStripSource::new(raster);
@@ -587,7 +621,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     background_rgb,
                     blank_strategy,
                 );
-                generate_pyramid_mapreduce(&source, &plan, &sink, &cfg, observer_ref)?
+                generate_pyramid_mapreduce(&source, &plan, engine_sink, &cfg, observer_ref)?
             }
             (EngineKind::MapReduce, EngineSource::Strip(source)) => {
                 let cfg = build_mapreduce_config(
@@ -597,7 +631,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     background_rgb,
                     blank_strategy,
                 );
-                generate_pyramid_mapreduce(source.as_ref(), &plan, &sink, &cfg, observer_ref)?
+                generate_pyramid_mapreduce(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
             }
             (EngineKind::Auto, _) => {
                 // `resolve_engine_kind` already flattened Auto to a concrete
@@ -851,6 +885,10 @@ mod resume {
 
         fn init_level_count(&self, levels: usize) {
             self.inner.init_level_count(levels)
+        }
+
+        fn applies_retry_policy(&self) -> bool {
+            self.inner.applies_retry_policy()
         }
     }
 

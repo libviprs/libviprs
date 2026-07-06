@@ -392,6 +392,25 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
     fn checkpoint_root(&self) -> Option<&std::path::Path> {
         self.inner.checkpoint_root()
     }
+
+    fn init_level_count(&self, levels: usize) {
+        // Transparent decorator: forward the pre-sizing hint so wrapped sinks
+        // (e.g. `FsSink`) still preallocate their per-level bookkeeping when
+        // the engine drives writes through this retry wrapper.
+        self.inner.init_level_count(levels);
+    }
+
+    fn content_format(&self) -> Option<crate::sink::TileFormat> {
+        // Forward so resume plan-hashing sees the wrapped sink's on-disk
+        // format even when a retry policy is configured.
+        self.inner.content_format()
+    }
+
+    fn applies_retry_policy(&self) -> bool {
+        // This decorator runs the retry loop itself, so a caller that
+        // pre-wrapped their sink must not be wrapped again by the builder.
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
