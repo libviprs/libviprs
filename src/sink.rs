@@ -172,6 +172,16 @@ pub trait TileSink: Send + Sync {
     /// [`FsSink`] already sizes its counters from the plan in
     /// [`FsSink::new`], so calling this is idempotent there.
     fn init_level_count(&self, _levels: usize) {}
+
+    /// Engine hook: the tile encoding the sink writes, when it has one.
+    ///
+    /// Folded into the resume plan hash so that resuming a checkpoint with a
+    /// changed output format is rejected instead of silently mixing formats
+    /// on disk (see [`crate::resume::compute_plan_hash`]). Sinks that do not
+    /// commit to a single on-disk format return `None` (the default).
+    fn content_format(&self) -> Option<TileFormat> {
+        None
+    }
 }
 
 /// Forwarding impl so `Box<dyn TileSink>` (and `Box<T>` where `T: TileSink`)
@@ -214,6 +224,9 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     fn init_level_count(&self, levels: usize) {
         (**self).init_level_count(levels)
     }
+    fn content_format(&self) -> Option<TileFormat> {
+        (**self).content_format()
+    }
 }
 
 /// Forwarding impl so `&T` satisfies [`TileSink`] wherever `T` does.
@@ -252,6 +265,9 @@ impl<T: TileSink + ?Sized> TileSink for &T {
     }
     fn init_level_count(&self, levels: usize) {
         (*self).init_level_count(levels)
+    }
+    fn content_format(&self) -> Option<TileFormat> {
+        (*self).content_format()
     }
 }
 
@@ -841,6 +857,10 @@ impl TileSink for FsSink {
     fn checkpoint_root(&self) -> Option<&Path> {
         Some(&self.base_dir)
     }
+
+    fn content_format(&self) -> Option<TileFormat> {
+        Some(self.format)
+    }
 }
 
 impl FsSink {
@@ -1221,7 +1241,19 @@ impl FsSink {
         use crate::resume::{JobCheckpoint, JobMetadata, SCHEMA_VERSION, compute_plan_hash};
 
         let completed = self.completed_tiles.lock().unwrap().clone();
-        let plan_hash = compute_plan_hash(&self.plan);
+        // Derive the content contract from the same engine config the resume
+        // gate will see, so a legitimate resume matches while a changed
+        // format/background/strategy/source is rejected. Falls back to the
+        // default config when no snapshot was recorded (e.g. a sink written
+        // without an engine run).
+        let eng_cfg = self
+            .engine_config
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        let contract = crate::resume::PlanContract::from_engine(&eng_cfg, self);
+        let plan_hash = compute_plan_hash(&self.plan, &contract);
         let timestamp = now_rfc3339();
         let meta = JobMetadata {
             schema_version: SCHEMA_VERSION.to_string(),
