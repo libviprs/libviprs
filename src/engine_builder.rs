@@ -859,3 +859,132 @@ mod resume {
     #[allow(dead_code)]
     fn _unused_marker(_: AtomicU64) {}
 }
+
+// ---------------------------------------------------------------------------
+// Retry-wiring tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod retry_wiring_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::{MemorySink, SinkError, Tile};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A sink that fails its first `fails` `write_tile` calls with a transient
+    /// error, then forwards every subsequent call to an inner [`MemorySink`].
+    /// Models an object store that intermittently rejects writes.
+    struct FlakySink {
+        inner: MemorySink,
+        fails_left: AtomicU32,
+    }
+
+    impl FlakySink {
+        fn new(fails: u32) -> Self {
+            Self {
+                inner: MemorySink::new(),
+                fails_left: AtomicU32::new(fails),
+            }
+        }
+
+        fn written(&self) -> usize {
+            self.inner.tile_count()
+        }
+    }
+
+    impl TileSink for FlakySink {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            loop {
+                let cur = self.fails_left.load(Ordering::SeqCst);
+                if cur == 0 {
+                    break;
+                }
+                if self
+                    .fails_left
+                    .compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return Err(SinkError::Other("transient".into()));
+                }
+            }
+            self.inner.write_tile(tile)
+        }
+    }
+
+    fn small_source() -> Raster {
+        // 4x4 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 4 * 4 * 3];
+        Raster::new(4, 4, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn small_plan() -> PyramidPlan {
+        PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    fn fast_policy(max_retries: u32) -> RetryPolicy {
+        RetryPolicy::new(max_retries, std::time::Duration::from_micros(1))
+            .with_multiplier(1.0)
+            .with_max_backoff(std::time::Duration::from_micros(10))
+            .with_jitter(false)
+    }
+
+    // A transient write failure under `RetryThenFail` must be retried through
+    // the builder, not propagated on the first error. Fails on unwired code
+    // (the whole run errors out); passes once the RetryingSink is engaged.
+    #[test]
+    fn builder_retry_then_fail_recovers_transient_failures() {
+        let source = small_source();
+        let plan = small_plan();
+        let sink = FlakySink::new(2);
+
+        let (result, sink) = EngineBuilder::new(&source, plan, sink)
+            .with_retry(fast_policy(5))
+            .run_collect()
+            .expect("transient failures must be retried, not propagated");
+
+        assert!(
+            result.retry_count >= 2,
+            "expected the configured retry policy to drive at least 2 retries, got {}",
+            result.retry_count
+        );
+        assert_eq!(
+            result.skipped_due_to_failure, 0,
+            "RetryThenFail must not skip any tile"
+        );
+        assert!(sink.written() > 0, "every tile must ultimately be written");
+    }
+
+    // Under `RetryThenSkip`, a tile must only be skipped after its retries are
+    // exhausted. With enough retry budget the transient failures are absorbed
+    // and nothing is skipped. Fails on unwired code (tiles dropped on the
+    // first error, skip counter non-zero, retry_count zero).
+    #[test]
+    fn builder_retry_then_skip_only_skips_after_exhaustion() {
+        let source = small_source();
+        let plan = small_plan();
+        let sink = FlakySink::new(2);
+
+        let (result, sink) = EngineBuilder::new(&source, plan, sink)
+            .with_failure_policy(FailurePolicy::RetryThenSkip(fast_policy(5)))
+            .run_collect()
+            .expect("run should succeed");
+
+        assert!(
+            result.retry_count >= 2,
+            "expected retries to be driven before skipping, got {}",
+            result.retry_count
+        );
+        assert_eq!(
+            result.skipped_due_to_failure, 0,
+            "no tile should be skipped while retry budget remains"
+        );
+        assert!(
+            sink.written() > 0,
+            "tiles recovered by retry must land in the sink"
+        );
+    }
+}
