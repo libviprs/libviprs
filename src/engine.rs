@@ -2201,4 +2201,47 @@ mod tests {
         );
         assert_eq!(finished, 1, "Verify: finished event");
     }
+
+    /// Resume must reject a run whose output contract changed, not just its
+    /// geometry. Here run 1 writes a full PNG pyramid + checkpoint; run 2
+    /// resumes the same directory but asks for JPEG tiles. Because the tile
+    /// format is part of the content contract, the resume gate must fail
+    /// with [`EngineError::PlanHashMismatch`] instead of silently keeping
+    /// the `.png` tiles under a manifest that now declares `.jpeg`.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn resume_rejects_tile_format_change() {
+        use crate::resume::ResumePolicy;
+        use crate::sink::{FsSink, TileFormat};
+        use crate::{EngineBuilder, EngineKind};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(128, 96);
+        let plan = PyramidPlanner::new(128, 96, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("tiles");
+
+        // Run 1: full pyramid as PNG, writing a resume checkpoint.
+        let sink_png = FsSink::new(root.clone(), plan.clone()).with_format(TileFormat::Png);
+        EngineBuilder::new(&src, plan.clone(), &sink_png)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite())
+            .run()
+            .unwrap();
+
+        // Run 2: resume the SAME directory but with a different tile format.
+        let sink_jpeg =
+            FsSink::new(root.clone(), plan.clone()).with_format(TileFormat::Jpeg { quality: 80 });
+        let err = EngineBuilder::new(&src, plan.clone(), &sink_jpeg)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run()
+            .expect_err("resume with a changed tile format must be rejected");
+        assert!(
+            matches!(err, EngineError::PlanHashMismatch { .. }),
+            "expected PlanHashMismatch on tile-format change, got {err:?}"
+        );
+    }
 }
