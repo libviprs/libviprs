@@ -254,6 +254,17 @@ struct StreamingState {
 #[cfg(feature = "pdfium")]
 impl Drop for StreamingState {
     fn drop(&mut self) {
+        // Closing the document issues `FPDF_CloseDocument`. Like every
+        // other FPDF entry point in this crate (see the invariant at
+        // `crate::pdf::pdfium_lock`), teardown must acquire the
+        // process-wide lock first: with the unpatched `pdfium-render`
+        // (Cargo does not propagate `[patch.crates-io]` downstream), a
+        // close racing a concurrent render inside the non-thread-safe C
+        // library corrupts the heap.
+        //
+        // Checklist: any pdfium-render object whose `Drop` issues FPDF
+        // calls must die inside a `pdfium_lock()` scope.
+        let _lock = crate::pdf::pdfium_lock();
         drop(self.document.take());
     }
 }
