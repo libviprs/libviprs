@@ -1029,7 +1029,10 @@ impl FsSink {
                             // tile path now holds the 1-byte sentinel, so its
                             // recorded digest must describe that sentinel — not
                             // the full payload captured during `WriteNew`.
-                            let _ = std::fs::write(&p.tile_abs_path, [0u8]);
+                            // Propagate the write error: an ENOSPC/EACCES here
+                            // would otherwise leave no file at the tile path
+                            // yet report success (issue #93).
+                            std::fs::write(&p.tile_abs_path, [0u8])?;
                             self.record_tile_digest(&p.tile_rel_path, &[0u8]);
                             self.manifest_refs
                                 .lock()
@@ -1083,7 +1086,20 @@ impl FsSink {
             let abs = self.base_dir.join(rel);
             let bytes = match std::fs::read(&abs) {
                 Ok(b) => b,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // A recorded tile that is gone from disk is a verification
+                    // failure — a tile that was recorded then deleted (or
+                    // never durably written) must not pass silently (issue
+                    // #93). The sole exemption is a manifest-referenced blank
+                    // whose real content lives in `_shared/`; its 1-byte
+                    // sentinel may legitimately be absent.
+                    if self.manifest_refs.lock().unwrap().contains_key(rel) {
+                        continue;
+                    }
+                    return Err(SinkError::MissingTile {
+                        tile_rel_path: rel.clone(),
+                    });
+                }
                 Err(e) => return Err(SinkError::Io(e)),
             };
             let got_bytes = hash_tile_raw(&bytes, algo);
