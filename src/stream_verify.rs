@@ -234,7 +234,14 @@ pub(crate) fn verify_from_strip_source(
     let cw = plan.canvas_width;
     let ch = plan.canvas_height;
     let dst_stride = cw as usize * bpp;
-    let mut canvas = vec![0u8; dst_stride * ch as usize];
+    // Allocate the top-level canvas through the checked/fallible raster
+    // constructor: `canvas_width × canvas_height` derive from the (untrusted)
+    // plan, so a `vec![0u8; …]` here would abort the process on an
+    // over-budget or unsatisfiable size. `Raster::zeroed` enforces the
+    // allocation budget and uses `try_reserve`, surfacing a typed
+    // `EngineError::Raster` instead (issue #73).
+    let mut canvas_raster = Raster::zeroed(cw, ch, format)?;
+    let canvas = canvas_raster.data_mut();
 
     // Strip height: `obtain_canvas_strip` contract only requires that
     // strips be requested in increasing Y with monotonically incrementing
@@ -265,7 +272,7 @@ pub(crate) fn verify_from_strip_source(
         y += sh;
     }
 
-    let mut current = Raster::new(cw, ch, format, canvas)?;
+    let mut current = canvas_raster;
 
     // Sanity check: the assembled raster must match the top plan level's
     // recorded dimensions, otherwise the downstream downscale chain will
