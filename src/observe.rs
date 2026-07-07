@@ -22,6 +22,7 @@ use crate::planner::TileCoord;
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EngineEvent {
     // -- Pipeline-level events (emitted by callers for full-pipeline observability) --
     /// The source file is about to be loaded (decoded, extracted, or rendered).

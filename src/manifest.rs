@@ -44,6 +44,7 @@ use crate::sink::TileFormat;
 
 /// Errors that can occur while reading or writing a [`Manifest`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ManifestError {
     /// Underlying I/O failure (file not found, permission denied, etc.).
     #[error("manifest I/O error: {0}")]
