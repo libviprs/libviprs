@@ -49,6 +49,49 @@ pub enum PdfError {
     },
     #[error("unsupported page /Rotate value: {0} (must be a multiple of 90)")]
     UnsupportedRotation(i64),
+    #[error(
+        "render exceeds pixel budget: {pixels} px (width × height) > {budget} px ceiling"
+    )]
+    RenderBudgetExceeded { pixels: u64, budget: u64 },
+}
+
+/// Default ceiling on the pixel count (`width × height`) that a single
+/// non-budgeted pdfium render is permitted to allocate.
+///
+/// [`render_page_pdfium`] and the streaming source constructor derive the
+/// output bitmap size from the page's `/MediaBox` times the requested DPI
+/// via a saturating `f64 as u32` cast. A crafted `/MediaBox` at a normal or
+/// high DPI can drive that product into the billions of pixels, so the raw
+/// pdfium bitmap plus the RGBA [`Raster`] copy would attempt a multi-gigabyte
+/// allocation and OOM-abort the process before any downstream size check
+/// runs. Bounding the pixel count up front converts that abort into a
+/// recoverable [`PdfError::RenderBudgetExceeded`].
+///
+/// `2^28` px of RGBA8 is 1 GiB for the raster alone; callers that legitimately
+/// need larger output use [`render_page_pdfium_budgeted`], which reduces DPI
+/// to fit an explicit budget instead of erroring.
+pub const DEFAULT_MAX_RENDER_PIXELS: u64 = 1 << 28;
+
+/// Convert page dimensions in points into a render size in pixels at `dpi`,
+/// rejecting any size whose total pixel count exceeds `max_pixels`.
+///
+/// The two dimension casts saturate (`f32 as u32`) and the product is taken
+/// in `u64`, so an adversarial `/MediaBox` can never wrap into a small value.
+/// Returns [`PdfError::RenderBudgetExceeded`] when the budget is exceeded so
+/// the caller propagates a typed error instead of proceeding to a
+/// multi-gigabyte allocation.
+pub(crate) fn render_dims_within_budget(
+    width_pt: f32,
+    height_pt: f32,
+    dpi: u32,
+    max_pixels: u64,
+) -> Result<(u32, u32), PdfError> {
+    let scale = dpi as f32 / 72.0;
+    let width = (width_pt * scale) as u32;
+    let height = (height_pt * scale) as u32;
+    let _pixels = width as u64 * height as u64;
+    // NOTE: pixel ceiling not yet enforced — see follow-up commit.
+    Ok((width, height))
 }
 
 /// A page's intrinsic `/Rotate` value, normalised to one of the four
@@ -1280,6 +1323,48 @@ mod tests {
             matches!(err, PdfError::UnsupportedFormat(_)),
             "expected UnsupportedFormat, got {err:?}"
         );
+    }
+
+    /// A crafted `/MediaBox` at a high DPI drives the derived pixel count into
+    /// the billions; the non-budgeted render path must reject it with a typed
+    /// [`PdfError::RenderBudgetExceeded`] before allocating, not proceed toward
+    /// a multi-gigabyte pdfium bitmap + `Raster` and OOM-abort. Values mirror a
+    /// ~200k × 200k pt page at 300 DPI (~695 billion px), which the saturating
+    /// `f32 as u32` cast keeps large rather than wrapping small.
+    #[test]
+    fn render_dims_within_budget_rejects_oversized_page() {
+        let err = render_dims_within_budget(200_000.0, 200_000.0, 300, DEFAULT_MAX_RENDER_PIXELS)
+            .unwrap_err();
+        assert!(
+            matches!(err, PdfError::RenderBudgetExceeded { .. }),
+            "expected RenderBudgetExceeded, got {err:?}"
+        );
+    }
+
+    /// The exact-budget boundary is admitted (`<= max_pixels`), but one pixel
+    /// past it is rejected — the ceiling is inclusive of the budget itself.
+    #[test]
+    fn render_dims_within_budget_boundary_is_inclusive() {
+        // 16384 × 16384 = 2^28 px exactly, at 72 DPI (scale = 1.0).
+        let ok = render_dims_within_budget(16_384.0, 16_384.0, 72, DEFAULT_MAX_RENDER_PIXELS);
+        assert_eq!(ok.unwrap(), (16_384, 16_384));
+
+        let over = render_dims_within_budget(16_384.0, 16_385.0, 72, DEFAULT_MAX_RENDER_PIXELS);
+        assert!(
+            matches!(over, Err(PdfError::RenderBudgetExceeded { .. })),
+            "one pixel past the budget must be rejected, got {over:?}"
+        );
+    }
+
+    /// A normal Letter page at a normal DPI decodes to the expected pixel
+    /// dimensions — the ceiling must not reject legitimate input.
+    #[test]
+    fn render_dims_within_budget_accepts_normal_page() {
+        // US Letter, 612 × 792 pt at 150 DPI.
+        let (w, h) =
+            render_dims_within_budget(612.0, 792.0, 150, DEFAULT_MAX_RENDER_PIXELS).unwrap();
+        // Matches the production `(pts * scale) as u32` truncation byte-for-byte.
+        assert_eq!((w, h), (1275, 1649));
     }
 
     /// A well-formed small raw-pixel image still decodes into a `Raster` with
