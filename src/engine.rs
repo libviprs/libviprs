@@ -2300,6 +2300,150 @@ mod tests {
         assert_eq!(finished, 1, "Verify: finished event");
     }
 
+    /// Overwrite must clear the sink's OWN output directory (removing stale
+    /// tiles) while leaving the unrelated contents of a caller-supplied
+    /// `checkpoint_root` untouched. The previous behaviour wiped whatever
+    /// `resolve_checkpoint_root` resolved to — which prefers the config's
+    /// `checkpoint_root` — deleting the user's metadata dir and leaving the
+    /// stale tiles behind (issue #123).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn overwrite_clears_sink_not_user_checkpoint_root() {
+        use crate::resume::{CHECKPOINT_FILENAME, ResumePolicy};
+        use crate::{EngineBuilder, EngineKind};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(128, 96);
+        let planner = PyramidPlanner::new(128, 96, 64, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+
+        // The sink writes tiles here. Pre-populate it with a stale tile plus
+        // our ownership marker so Overwrite is entitled to clear it.
+        let out = tempdir().unwrap();
+        let out_dir = out.path().join("tiles");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join(CHECKPOINT_FILENAME), b"{}").unwrap();
+        let stale = out_dir.join("stale_tile.raw");
+        std::fs::write(&stale, b"old bytes").unwrap();
+
+        // A SEPARATE, user-supplied checkpoint_root holding unrelated files
+        // the caller expects to keep.
+        let ckpt = tempdir().unwrap();
+        let ckpt_dir = ckpt.path().to_path_buf();
+        let sentinel = ckpt_dir.join("keep-me.txt");
+        std::fs::write(&sentinel, b"precious").unwrap();
+
+        let sink = crate::sink::FsSink::new(out_dir.clone(), plan.clone())
+            .with_format(crate::sink::TileFormat::Raw);
+
+        let policy = ResumePolicy::overwrite().with_checkpoint_root(ckpt_dir.clone());
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(policy)
+            .run()
+            .unwrap();
+
+        assert!(
+            sentinel.exists(),
+            "Overwrite wiped an unrelated file in the user's checkpoint_root"
+        );
+        assert!(
+            !stale.exists(),
+            "Overwrite left a stale tile in the sink's own output directory"
+        );
+        assert!(
+            out_dir.read_dir().unwrap().next().is_some(),
+            "Overwrite produced no output in the sink dir"
+        );
+    }
+
+    /// `with_config` must never fabricate a destructive Overwrite policy just
+    /// because the config carried checkpoint knobs. With no explicit resume
+    /// mode attached, the run must be non-destructive and leave the
+    /// checkpoint_root's contents intact (issue #123).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn with_config_does_not_fabricate_destructive_overwrite() {
+        use crate::{EngineBuilder, EngineKind};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(128, 96);
+        let planner = PyramidPlanner::new(128, 96, 64, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+
+        let out = tempdir().unwrap();
+        let out_dir = out.path().join("tiles");
+
+        let ckpt = tempdir().unwrap();
+        let sentinel = ckpt.path().join("keep-me.txt");
+        std::fs::write(&sentinel, b"precious").unwrap();
+
+        let mut cfg = EngineConfig::default();
+        cfg.checkpoint_every = 4;
+        cfg.checkpoint_root = Some(ckpt.path().to_path_buf());
+
+        let sink = crate::sink::FsSink::new(out_dir.clone(), plan.clone())
+            .with_format(crate::sink::TileFormat::Raw);
+
+        // No explicit resume policy — only `with_config` carrying the knobs.
+        EngineBuilder::new(&src, plan.clone(), &sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(cfg)
+            .run()
+            .unwrap();
+
+        assert!(
+            sentinel.exists(),
+            "with_config implicitly enabled a destructive Overwrite and wiped the checkpoint_root"
+        );
+    }
+
+    /// The wipe helper must refuse a directory it does not own — one that is
+    /// neither empty nor holds our `.libviprs-job.json` marker — so a
+    /// mis-pointed sink dir can never delete unrelated user files (issue #123).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn wipe_directory_refuses_non_owned_dir() {
+        use tempfile::tempdir;
+
+        let d = tempdir().unwrap();
+        let foreign = d.path().join("not-ours.txt");
+        std::fs::write(&foreign, b"data").unwrap();
+
+        let res = wipe_directory(d.path());
+        assert!(
+            res.is_err(),
+            "wipe_directory must refuse a directory it does not own"
+        );
+        assert!(
+            foreign.exists(),
+            "wipe_directory deleted a file in a non-owned directory"
+        );
+    }
+
+    /// The wipe helper still fully clears a directory it DOES own — one that
+    /// carries our marker — including nested tile dirs and the marker itself.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn wipe_directory_clears_owned_dir() {
+        use crate::resume::CHECKPOINT_FILENAME;
+        use tempfile::tempdir;
+
+        let d = tempdir().unwrap();
+        std::fs::write(d.path().join(CHECKPOINT_FILENAME), b"{}").unwrap();
+        std::fs::write(d.path().join("0_0.raw"), b"tile").unwrap();
+        std::fs::create_dir(d.path().join("1")).unwrap();
+        std::fs::write(d.path().join("1").join("0_0.raw"), b"tile").unwrap();
+
+        wipe_directory(d.path()).unwrap();
+        assert!(d.path().exists(), "the directory itself must be retained");
+        assert_eq!(
+            d.path().read_dir().unwrap().count(),
+            0,
+            "an owned directory must be fully cleared"
+        );
+    }
+
     /// Resume must reject a run whose output contract changed, not just its
     /// geometry. Here run 1 writes a full PNG pyramid + checkpoint; run 2
     /// resumes the same directory but asks for JPEG tiles. Because the tile
