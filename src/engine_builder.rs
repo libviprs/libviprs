@@ -532,20 +532,23 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // records the tile as complete.
             let wrapped = resume::ResumeAwareSink::new(engine_sink, &skip, cp.as_ref());
 
-            let mut result = match (kind, source) {
+            // Capture the run outcome rather than propagating it with `?`
+            // straight away: the checkpoint must be flushed on *both* the
+            // success and the error path (see the flush below).
+            let run_result: Result<EngineResult, EngineError> = match (kind, source) {
                 (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
-                    generate_pyramid_observed(raster, &plan, &wrapped, &engine_cfg, observer_ref)?
+                    generate_pyramid_observed(raster, &plan, &wrapped, &engine_cfg, observer_ref)
                 }
                 (EngineKind::Streaming, EngineSource::Raster(raster)) => {
                     let strip = RasterStripSource::new(raster);
                     let cfg =
                         build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                    generate_pyramid_streaming(&strip, &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_streaming(&strip, &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::Streaming, EngineSource::Strip(strip)) => {
                     let cfg =
                         build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                    generate_pyramid_streaming(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_streaming(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
                     let strip = RasterStripSource::new(raster);
@@ -556,7 +559,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         background_rgb,
                         blank_strategy,
                     );
-                    generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
                     let cfg = build_mapreduce_config(
@@ -566,7 +569,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         background_rgb,
                         blank_strategy,
                     );
-                    generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::Monolithic, EngineSource::Strip(_)) => {
                     unreachable!("Monolithic + Strip rejected above")
@@ -575,6 +578,26 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     unreachable!("Auto should have been resolved before match")
                 }
             };
+
+            // Persist the checkpoint whether the run succeeded or failed.
+            // On the error path this is the only chance to make completed
+            // tiles durable: an interrupted run (kill -9 / OOM / preemption
+            // surfaced as a sink error, or an exhausted retry budget) would
+            // otherwise drop the in-memory `CheckpointState` here and force a
+            // later `--resume` to re-render everything. On the failure path a
+            // checkpoint I/O error is swallowed so the original engine error
+            // — the reason the run stopped — is what propagates to the
+            // caller.
+            if let Some(cp) = cp.as_ref() {
+                match &run_result {
+                    Ok(_) => cp.flush().map_err(EngineError::ResumeFailed)?,
+                    Err(_) => {
+                        let _ = cp.flush();
+                    }
+                }
+            }
+
+            let mut result = run_result?;
 
             // Adjust tiles_produced down by the number of tiles the
             // resume wrapper short-circuited. This restores the
@@ -585,10 +608,6 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             let skipped = wrapped.skipped_count();
             if skipped > 0 {
                 result.tiles_produced = result.tiles_produced.saturating_sub(skipped);
-            }
-
-            if let Some(cp) = cp.as_ref() {
-                cp.flush().map_err(EngineError::ResumeFailed)?;
             }
             return Ok((result, sink));
         }
@@ -1023,6 +1042,120 @@ mod retry_wiring_tests {
         assert!(
             sink.written() > 0,
             "tiles recovered by retry must land in the sink"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint durability on the error path
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod checkpoint_durability_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::{JobCheckpoint, ResumePolicy};
+    use crate::sink::{MemorySink, SinkError, Tile, TileSink};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A sink that forwards its first `ok` `write_tile` calls to an inner
+    /// [`MemorySink`] and then fails every subsequent call with a permanent
+    /// error. Models a process that is killed / runs out of disk part-way
+    /// through emitting a pyramid.
+    struct FailAfterSink {
+        inner: MemorySink,
+        ok_left: AtomicU32,
+    }
+
+    impl FailAfterSink {
+        fn new(ok: u32) -> Self {
+            Self {
+                inner: MemorySink::new(),
+                ok_left: AtomicU32::new(ok),
+            }
+        }
+    }
+
+    impl TileSink for FailAfterSink {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            if self.ok_left.load(Ordering::SeqCst) == 0 {
+                return Err(SinkError::Other("permanent failure".into()));
+            }
+            self.ok_left.fetch_sub(1, Ordering::SeqCst);
+            self.inner.write_tile(tile)
+        }
+    }
+
+    fn solid_source() -> Raster {
+        // 8x8 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn solid_plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    // A run that dies mid-way must still leave an on-disk checkpoint that
+    // records the tiles it completed, so a later `--resume` skips them
+    // instead of re-rendering everything. Before the fix the checkpoint was
+    // flushed only on the success path, so an interrupted run left nothing
+    // on disk and `JobCheckpoint::load` returned `None`. The high cadence
+    // here guarantees no periodic flush fired, isolating the error-path
+    // flush as the only way the two completed tiles can reach disk.
+    #[test]
+    fn interrupted_resume_run_persists_completed_tiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+        let sink = FailAfterSink::new(2);
+
+        let outcome = EngineBuilder::new(&source, plan, sink)
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(dir.path())
+                    .with_checkpoint_every(1_000_000),
+            )
+            .run_collect();
+
+        assert!(
+            outcome.is_err(),
+            "the permanent sink failure must abort the run"
+        );
+
+        let meta = JobCheckpoint::load(dir.path())
+            .expect("checkpoint load must not error")
+            .expect("an interrupted run must leave a checkpoint on disk");
+        assert_eq!(
+            meta.completed_tiles.len(),
+            2,
+            "the checkpoint must record exactly the tiles completed before the failure"
+        );
+    }
+
+    // The Resume factory must default to a non-zero flush cadence so that a
+    // long run periodically persists progress even when the caller never sets
+    // an explicit cadence. Overwrite / Verify keep the "final flush only"
+    // default of 0.
+    #[test]
+    fn resume_policy_defaults_to_nonzero_cadence() {
+        assert!(
+            ResumePolicy::resume().checkpoint_every() > 0,
+            "Resume mode must default to a non-zero checkpoint cadence"
+        );
+        assert_eq!(
+            ResumePolicy::overwrite().checkpoint_every(),
+            0,
+            "Overwrite must keep the final-flush-only default"
+        );
+        assert_eq!(
+            ResumePolicy::verify().checkpoint_every(),
+            0,
+            "Verify must keep the final-flush-only default"
         );
     }
 }
