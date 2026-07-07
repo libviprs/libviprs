@@ -12,6 +12,7 @@ use thiserror::Error;
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RasterError {
     #[error(
         "dimensions {width}x{height} with format {format:?} require {expected} bytes, got {actual}"

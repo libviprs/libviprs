@@ -15,6 +15,7 @@ use crate::raster::Raster;
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SourceError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

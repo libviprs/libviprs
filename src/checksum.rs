@@ -196,6 +196,7 @@ pub struct VerifyReport {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-verify)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VerifyError {
     #[error("manifest.json not found (checked {sibling} and {inside})")]
     ManifestNotFound { sibling: PathBuf, inside: PathBuf },
