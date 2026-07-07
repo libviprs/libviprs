@@ -1026,3 +1026,117 @@ mod retry_wiring_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Checkpoint durability on the error path
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod checkpoint_durability_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::{JobCheckpoint, ResumePolicy};
+    use crate::sink::{MemorySink, SinkError, Tile, TileSink};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A sink that forwards its first `ok` `write_tile` calls to an inner
+    /// [`MemorySink`] and then fails every subsequent call with a permanent
+    /// error. Models a process that is killed / runs out of disk part-way
+    /// through emitting a pyramid.
+    struct FailAfterSink {
+        inner: MemorySink,
+        ok_left: AtomicU32,
+    }
+
+    impl FailAfterSink {
+        fn new(ok: u32) -> Self {
+            Self {
+                inner: MemorySink::new(),
+                ok_left: AtomicU32::new(ok),
+            }
+        }
+    }
+
+    impl TileSink for FailAfterSink {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            if self.ok_left.load(Ordering::SeqCst) == 0 {
+                return Err(SinkError::Other("permanent failure".into()));
+            }
+            self.ok_left.fetch_sub(1, Ordering::SeqCst);
+            self.inner.write_tile(tile)
+        }
+    }
+
+    fn solid_source() -> Raster {
+        // 8x8 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn solid_plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    // A run that dies mid-way must still leave an on-disk checkpoint that
+    // records the tiles it completed, so a later `--resume` skips them
+    // instead of re-rendering everything. Before the fix the checkpoint was
+    // flushed only on the success path, so an interrupted run left nothing
+    // on disk and `JobCheckpoint::load` returned `None`. The high cadence
+    // here guarantees no periodic flush fired, isolating the error-path
+    // flush as the only way the two completed tiles can reach disk.
+    #[test]
+    fn interrupted_resume_run_persists_completed_tiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+        let sink = FailAfterSink::new(2);
+
+        let outcome = EngineBuilder::new(&source, plan, sink)
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(dir.path())
+                    .with_checkpoint_every(1_000_000),
+            )
+            .run_collect();
+
+        assert!(
+            outcome.is_err(),
+            "the permanent sink failure must abort the run"
+        );
+
+        let meta = JobCheckpoint::load(dir.path())
+            .expect("checkpoint load must not error")
+            .expect("an interrupted run must leave a checkpoint on disk");
+        assert_eq!(
+            meta.completed_tiles.len(),
+            2,
+            "the checkpoint must record exactly the tiles completed before the failure"
+        );
+    }
+
+    // The Resume factory must default to a non-zero flush cadence so that a
+    // long run periodically persists progress even when the caller never sets
+    // an explicit cadence. Overwrite / Verify keep the "final flush only"
+    // default of 0.
+    #[test]
+    fn resume_policy_defaults_to_nonzero_cadence() {
+        assert!(
+            ResumePolicy::resume().checkpoint_every() > 0,
+            "Resume mode must default to a non-zero checkpoint cadence"
+        );
+        assert_eq!(
+            ResumePolicy::overwrite().checkpoint_every(),
+            0,
+            "Overwrite must keep the final-flush-only default"
+        );
+        assert_eq!(
+            ResumePolicy::verify().checkpoint_every(),
+            0,
+            "Verify must keep the final-flush-only default"
+        );
+    }
+}
