@@ -30,6 +30,8 @@ pub enum PdfError {
     UnsupportedFormat(String),
     #[error("image decode error: {0}")]
     Decode(String),
+    #[error("decompressed stream exceeded {limit}-byte cap (possible zip bomb)")]
+    DecompressionLimitExceeded { limit: usize },
     #[error("raster error: {0}")]
     Raster(#[from] crate::raster::RasterError),
     #[error("page {page} out of range (document has {total} pages)")]
@@ -386,7 +388,8 @@ fn get_image_data(doc: &lopdf::Document, stream: &lopdf::Stream) -> Result<Image
         [first, second] if first.as_slice() == b"FlateDecode" => {
             // Chained: FlateDecode wrapping another format — decompress first,
             // then treat the inner data according to the second filter.
-            let decompressed = flate_decompress(&stream.content)?;
+            let cap = max_decompressed_bytes(stream)?;
+            let decompressed = flate_decompress(&stream.content, cap)?;
             return dispatch_single_filter(doc, stream, second, decompressed);
         }
         _ => {
@@ -418,7 +421,8 @@ fn dispatch_single_filter(
         }
         b"FlateDecode" => {
             // Deflate-compressed raw pixels
-            let decompressed = flate_decompress(&data)?;
+            let cap = max_decompressed_bytes(stream)?;
+            let decompressed = flate_decompress(&data, cap)?;
             decode_raw_pixels(doc, stream, decompressed)
         }
         b"JPXDecode" => {
@@ -500,14 +504,60 @@ fn decode_raw_pixels(
     Ok(ImageData::Decoded(raster))
 }
 
-/// Decompress zlib/deflate data.
-fn flate_decompress(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+/// Widest per-pixel byte footprint we support decoding: CMYK (4 components)
+/// at 16 bits-per-component = 8 bytes/pixel. Used to bound `/FlateDecode`
+/// output relative to a stream's *declared* `/Width`×`/Height` so a crafted
+/// stream cannot inflate past what its own dimensions could ever justify.
+const MAX_BYTES_PER_PIXEL: usize = 8;
+
+/// Fixed slack added to the declared-pixel bound to tolerate row/byte
+/// alignment padding and encoder framing (e.g. a JPEG re-wrapped in
+/// `[/FlateDecode /DCTDecode]`) without letting output grow without limit.
+const FLATE_SLACK_BYTES: usize = 4096;
+
+/// Compute the maximum permissible `/FlateDecode` output for `stream`, derived
+/// from its validated `/Width`×`/Height` times the widest supported per-pixel
+/// size, plus fixed slack.
+///
+/// The dimensions are validated by [`read_dimension`] (each within
+/// `1..=MAX_PDF_DIM`) and the products are computed with checked arithmetic,
+/// so a malformed or overflowing size yields a typed error instead of a
+/// wrapped-small cap that a zip bomb could slip under.
+fn max_decompressed_bytes(stream: &lopdf::Stream) -> Result<usize, PdfError> {
+    let width = read_dimension(stream, b"Width")?;
+    let height = read_dimension(stream, b"Height")?;
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(MAX_BYTES_PER_PIXEL))
+        .and_then(|bytes| bytes.checked_add(FLATE_SLACK_BYTES))
+        .ok_or_else(|| {
+            PdfError::UnsupportedFormat(format!(
+                "decompression bound for {width}x{height} overflows"
+            ))
+        })
+}
+
+/// Decompress zlib/deflate data, capping the output at `max_output` bytes.
+///
+/// A `/FlateDecode` stream can inflate by orders of magnitude; without a bound
+/// a few-KB stream can expand to gigabytes and OOM-abort via the infallible
+/// allocation path (a zip bomb). The decoder is wrapped in a `Take` limited to
+/// one byte past the cap so an over-limit stream is detected and rejected with
+/// a typed [`PdfError::DecompressionLimitExceeded`] rather than decompressed in
+/// full.
+fn flate_decompress(data: &[u8], max_output: usize) -> Result<Vec<u8>, PdfError> {
     use std::io::Read;
-    let mut decoder = flate2::read::ZlibDecoder::new(data);
+    let decoder = flate2::read::ZlibDecoder::new(data);
     let mut out = Vec::new();
+    // Read at most one byte beyond the cap: if that extra byte materialises the
+    // stream exceeds the bound and is rejected below.
     decoder
+        .take(max_output as u64 + 1)
         .read_to_end(&mut out)
         .map_err(|e| PdfError::Decode(format!("flate decompress: {e}")))?;
+    if out.len() > max_output {
+        return Err(PdfError::DecompressionLimitExceeded { limit: max_output });
+    }
     Ok(out)
 }
 
@@ -1666,5 +1716,73 @@ mod tests {
         ] {
             assert_eq!(PageRotation::try_from_degrees(r.as_degrees()).unwrap(), r);
         }
+    }
+
+    /// Compress `bytes` with zlib so a decompression bomb can be crafted in a
+    /// test: a large run of identical bytes deflates to a tiny stream.
+    fn zlib_compress(bytes: &[u8]) -> Vec<u8> {
+        use flate2::{Compression, write::ZlibEncoder};
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// A few-hundred-byte `/FlateDecode` stream that inflates far past the
+    /// per-image cap must yield a typed `DecompressionLimitExceeded` error
+    /// rather than allocating gigabytes (the pre-fix `read_to_end` path had no
+    /// output bound and OOM-aborted).
+    #[test]
+    fn flate_decompress_rejects_zip_bomb() {
+        // 4 MiB of zeros compresses to a few hundred bytes.
+        let bomb = zlib_compress(&vec![0u8; 4 << 20]);
+        assert!(
+            bomb.len() < FLATE_SLACK_BYTES,
+            "compressed bomb should be tiny, got {}",
+            bomb.len()
+        );
+        // Cap derived from a 1x1 declared image (1 * 1 * bpp + slack).
+        let cap = MAX_BYTES_PER_PIXEL + FLATE_SLACK_BYTES;
+        let err = flate_decompress(&bomb, cap).unwrap_err();
+        assert!(
+            matches!(err, PdfError::DecompressionLimitExceeded { .. }),
+            "expected DecompressionLimitExceeded, got {err:?}"
+        );
+    }
+
+    /// Output that fits within the cap decompresses normally and round-trips.
+    #[test]
+    fn flate_decompress_allows_within_cap() {
+        let original = b"the quick brown fox".to_vec();
+        let compressed = zlib_compress(&original);
+        let out = flate_decompress(&compressed, MAX_BYTES_PER_PIXEL + FLATE_SLACK_BYTES).unwrap();
+        assert_eq!(out, original);
+    }
+
+    /// The cap is derived from the stream's declared dimensions, so a bomb
+    /// reached through the real `get_image_data` terminal-`FlateDecode` path is
+    /// rejected with a typed error (not an OOM) before any raster is built.
+    #[test]
+    fn get_image_data_rejects_flate_bomb() {
+        use lopdf::{Stream, dictionary};
+        let doc = lopdf::Document::with_version("1.5");
+        let bomb = zlib_compress(&vec![0u8; 4 << 20]);
+        let stream = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1i64,
+                "Height" => 1i64,
+                "BitsPerComponent" => 8i64,
+                "ColorSpace" => "DeviceRGB",
+                "Filter" => "FlateDecode",
+            },
+            bomb,
+        );
+        let err = get_image_data(&doc, &stream).unwrap_err();
+        assert!(
+            matches!(err, PdfError::DecompressionLimitExceeded { .. }),
+            "expected DecompressionLimitExceeded, got {err:?}"
+        );
     }
 }
