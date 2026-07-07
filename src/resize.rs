@@ -453,6 +453,27 @@ mod tests {
     }
 
     /**
+     * Tests that a saturated-dimension target is rejected with a typed error
+     * rather than overflowing the output-buffer size arithmetic.
+     *
+     * `downscale_to` derives its output allocation from the free `u32` target
+     * dimensions. A crafted request such as `u32::MAX x u32::MAX` drives
+     * `dst_w * dst_h * bpp` past `usize::MAX`: in debug the multiplication
+     * panics, and in release it wraps to a small value, under-allocates, and
+     * then slice-panics on the first write. Either way the process is taken
+     * down by untrusted input. The checked path must return an `Err` before
+     * allocating.
+     *
+     * Input: downscale_to(4x4 Rgba8, u32::MAX, u32::MAX) -> Err (no panic/abort).
+     */
+    #[test]
+    fn downscale_to_saturated_dimensions_rejected() {
+        let src = solid_raster(4, 4, &[10, 20, 30, 40], PixelFormat::Rgba8);
+        let result = downscale_to(&src, u32::MAX, u32::MAX);
+        assert!(result.is_err(), "expected Err for saturated target, got Ok");
+    }
+
+    /**
      * Tests that downscaling a solid-color image preserves the color exactly.
      * Works by area-averaging a uniform RGB image to an arbitrary smaller size
      * and verifying every output pixel matches the original color.
