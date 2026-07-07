@@ -414,22 +414,30 @@ pub(crate) fn generate_pyramid_mapreduce(
             let half_bytes = half.data().len() as u64;
             tracker.alloc(half_bytes);
 
-            // Propagate half-strip into lower levels
-            propagate_down(
-                half,
-                top_level - 1,
-                y / 2,
-                &mut accumulators,
-                &mut mono_accumulators,
-                monolithic_threshold,
-                plan,
-                sink,
-                &engine_cfg,
-                observer,
-                &tracker,
-                &mut tiles_produced,
-                &mut tiles_skipped,
-            )?;
+            // Propagate half-strip into lower levels.
+            //
+            // A single-level plan (top_level == 0) has no level below the
+            // top: the top-level tiles were already emitted above, so there
+            // is nothing left to reduce. Guard the recursion to avoid the
+            // `top_level - 1` underflow (debug panic / release usize::MAX ->
+            // out-of-bounds index into `accumulators`).
+            if top_level > 0 {
+                propagate_down(
+                    half,
+                    top_level - 1,
+                    y / 2,
+                    &mut accumulators,
+                    &mut mono_accumulators,
+                    monolithic_threshold,
+                    plan,
+                    sink,
+                    &engine_cfg,
+                    observer,
+                    &tracker,
+                    &mut tiles_produced,
+                    &mut tiles_skipped,
+                )?;
+            }
         }
 
         strip_index_offset += batch_specs.len() as u32;
