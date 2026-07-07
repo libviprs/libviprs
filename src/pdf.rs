@@ -214,6 +214,42 @@ pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> 
     extract_largest_image(&doc, page_id, page)
 }
 
+/// Maximum permitted PDF image dimension, in pixels per axis.
+///
+/// Mirrors libvips' `VIPS_MAX_COORD` (10,000,000). `/Width` and `/Height`
+/// come from untrusted PDF input; any value outside `1..=MAX_PDF_DIM` is
+/// rejected before any arithmetic so that a wrapping `as u32`/`as usize`
+/// cast or an overflowing size product can never escape into a `Raster`.
+const MAX_PDF_DIM: i64 = 10_000_000;
+
+/// Read and validate an image dimension (`/Width` or `/Height`) from a
+/// stream dictionary.
+///
+/// Returns the value as `u32` only when it is present, integer-typed, and
+/// within `1..=MAX_PDF_DIM`. A missing, non-integer, zero, negative, or
+/// oversized value yields [`PdfError::UnsupportedFormat`] rather than a
+/// wrapping cast that would defeat later size checks.
+fn read_dimension(stream: &lopdf::Stream, key: &[u8]) -> Result<u32, PdfError> {
+    let raw = stream
+        .dict
+        .get(key)
+        .ok()
+        .and_then(|v| v.as_i64().ok())
+        .ok_or_else(|| {
+            PdfError::UnsupportedFormat(format!(
+                "missing or non-integer /{}",
+                String::from_utf8_lossy(key)
+            ))
+        })?;
+    if !(1..=MAX_PDF_DIM).contains(&raw) {
+        return Err(PdfError::UnsupportedFormat(format!(
+            "/{} = {raw} out of range 1..={MAX_PDF_DIM}",
+            String::from_utf8_lossy(key)
+        )));
+    }
+    Ok(raw as u32)
+}
+
 /// Extract the largest XObject Image from the page's resources.
 fn extract_largest_image(
     doc: &lopdf::Document,
@@ -263,24 +299,22 @@ fn extract_largest_image(
             continue;
         }
 
-        // Get image dimensions for size comparison
-        let width = stream
-            .dict
-            .get(b"Width")
-            .ok()
-            .and_then(|w| w.as_i64().ok())
-            .unwrap_or(0) as usize;
-        let height = stream
-            .dict
-            .get(b"Height")
-            .ok()
-            .and_then(|h| h.as_i64().ok())
-            .unwrap_or(0) as usize;
-        let pixel_count = width * height;
-
-        if pixel_count == 0 {
-            continue;
-        }
+        // Get image dimensions for size comparison. Validated dimensions are
+        // each within `1..=MAX_PDF_DIM`, so their product fits comfortably in
+        // `u64`; a malformed (missing/negative/oversized) dimension makes this
+        // XObject ineligible for selection rather than tripping a wrapping
+        // multiply.
+        let (width, height) = match (
+            read_dimension(stream, b"Width"),
+            read_dimension(stream, b"Height"),
+        ) {
+            (Ok(w), Ok(h)) => (w, h),
+            _ => continue,
+        };
+        let pixel_count = match (width as usize).checked_mul(height as usize) {
+            Some(p) => p,
+            None => continue,
+        };
 
         // Get the image data (may be compressed with filters like DCTDecode/FlateDecode)
         let data = get_image_data(doc, stream)?;
@@ -407,18 +441,8 @@ fn decode_raw_pixels(
     stream: &lopdf::Stream,
     decompressed: Vec<u8>,
 ) -> Result<ImageData, PdfError> {
-    let width = stream
-        .dict
-        .get(b"Width")
-        .ok()
-        .and_then(|w| w.as_i64().ok())
-        .unwrap_or(0) as u32;
-    let height = stream
-        .dict
-        .get(b"Height")
-        .ok()
-        .and_then(|h| h.as_i64().ok())
-        .unwrap_or(0) as u32;
+    let width = read_dimension(stream, b"Width")?;
+    let height = read_dimension(stream, b"Height")?;
     let bpc = stream
         .dict
         .get(b"BitsPerComponent")
@@ -451,7 +475,18 @@ fn decode_raw_pixels(
         }
     };
 
-    let expected = width as usize * height as usize * format.bytes_per_pixel();
+    // Dimensions are already bounded by `MAX_PDF_DIM`, but compute the byte
+    // count with checked arithmetic so the size guard can never be defeated by
+    // a wrapped-small `expected` on any target width.
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(format.bytes_per_pixel()))
+        .ok_or_else(|| {
+            PdfError::UnsupportedFormat(format!(
+                "image size {width}x{height} @ {} bpp overflows",
+                format.bytes_per_pixel()
+            ))
+        })?;
     if decompressed.len() < expected {
         return Err(PdfError::Decode(format!(
             "decompressed size {} < expected {expected}",
@@ -478,12 +513,22 @@ fn flate_decompress(data: &[u8]) -> Result<Vec<u8>, PdfError> {
 
 /// Convert CMYK raw bytes to RGB Raster.
 fn cmyk_to_rgb_raster(cmyk_data: &[u8], width: u32, height: u32) -> Result<Raster, PdfError> {
+    // `width`/`height` reach here already bounded by `MAX_PDF_DIM`, but keep
+    // the input-size and output-capacity products checked so a malformed
+    // stream can never wrap `pixel_count * 4` (guard) or `pixel_count * 3`
+    // (allocation) into a small value.
     let pixel_count = width as usize * height as usize;
-    if cmyk_data.len() < pixel_count * 4 {
+    let cmyk_len = pixel_count
+        .checked_mul(4)
+        .ok_or_else(|| PdfError::UnsupportedFormat(format!("CMYK size {width}x{height} overflows")))?;
+    let rgb_len = pixel_count
+        .checked_mul(3)
+        .ok_or_else(|| PdfError::UnsupportedFormat(format!("RGB size {width}x{height} overflows")))?;
+    if cmyk_data.len() < cmyk_len {
         return Err(PdfError::Decode("CMYK data too short".to_string()));
     }
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for chunk in cmyk_data[..pixel_count * 4].chunks_exact(4) {
+    let mut rgb = Vec::with_capacity(rgb_len);
+    for chunk in cmyk_data[..cmyk_len].chunks_exact(4) {
         let c = chunk[0] as f32 / 255.0;
         let m = chunk[1] as f32 / 255.0;
         let y = chunk[2] as f32 / 255.0;
