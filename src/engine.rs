@@ -1378,8 +1378,10 @@ fn extract_and_emit_parallel(
 
     let blank_strategy = config.blank_tile_strategy;
 
-    // Bounded channel for backpressure: producers block when buffer is full
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Tile, EngineError>>(config.buffer_size);
+    // Bounded channel for backpressure: producers block when buffer is full.
+    // Routed through `crate::sync_queue` so the loom suite can model-check the
+    // exact send/recv/teardown protocol this path relies on.
+    let (tx, rx) = crate::sync_queue::bounded::<Result<Tile, EngineError>>(config.buffer_size);
     // Queue-pressure gauge — producers bump when they send, consumer drops
     // when it receives. The peak gives us a coarse upper bound on in-flight
     // work, matching the `queue_pressure_peak` field on EngineResult.

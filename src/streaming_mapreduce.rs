@@ -236,7 +236,10 @@ fn emit_strip_tiles_parallel(
         return Ok((0, 0));
     }
 
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Tile, EngineError>>(config.buffer_size);
+    // Routed through `crate::sync_queue` (loom-modellable under `--cfg loom`)
+    // rather than `std::sync::mpsc::sync_channel` directly, so the shipped
+    // backpressure/teardown protocol is what the loom suite exercises.
+    let (tx, rx) = crate::sync_queue::bounded::<Result<Tile, EngineError>>(config.buffer_size);
 
     // Workers run under `std::thread::scope` and therefore cannot outlive
     // this frame, so they borrow `strip` and `plan` directly. The previous
