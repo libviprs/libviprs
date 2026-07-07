@@ -123,9 +123,9 @@ pub(crate) fn budgeted_render_dpi(
     max_pixels: u64,
 ) -> (u32, bool) {
     let scale_at_max = max_dpi as f64 / 72.0;
-    let pixels_at_max = (width_pts * scale_at_max) as u64 * (height_pts * scale_at_max) as u64;
+    let pixels_at_max = (width_pts * scale_at_max) * (height_pts * scale_at_max);
 
-    if pixels_at_max <= max_pixels {
+    if pixels_at_max <= max_pixels as f64 {
         (max_dpi, false)
     } else {
         // scale = sqrt(max_pixels / (w_pts * h_pts)), then dpi = scale * 72
