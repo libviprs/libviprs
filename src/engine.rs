@@ -916,6 +916,18 @@ pub(crate) fn raster_verify(
     // `run_pyramid` because Verify must not touch the sink — the test
     // suite asserts the output directory is unchanged.
     let bg = config.background_rgb;
+
+    // Tile paths whose raw content is a 1-byte placeholder pointing at a
+    // deduped payload under `_shared/` (issue #93). These are legitimate
+    // markers even when the regenerated tile is not itself blank.
+    let blank_ref_paths: std::collections::HashSet<String> = read_manifest(root)
+        .and_then(|m| {
+            m.get("blank_references")
+                .and_then(|v| v.as_object())
+                .map(|o| o.keys().cloned().collect())
+        })
+        .unwrap_or_default();
+
     let mut current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
         embed_in_canvas(source, plan, bg)?
     } else {
@@ -966,9 +978,27 @@ pub(crate) fn raster_verify(
                     std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
 
                 if ext == "raw" {
-                    // Raw tiles are byte-exact: any mismatch (truncation,
-                    // flipped byte, padding drift) is corruption.
-                    if on_disk != expected_bytes {
+                    if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
+                        // A 1-byte placeholder: either a blank-tile marker
+                        // (`BlankTileStrategy::Placeholder*`) or a dedupe
+                        // reference whose payload lives in `_shared/`. Validate
+                        // the regenerated tile's blankness / manifest reference
+                        // instead of byte-comparing the marker (issue #94).
+                        let is_dedupe_ref = plan
+                            .tile_path(coord, &ext)
+                            .is_some_and(|rel| blank_ref_paths.contains(&rel));
+                        if !is_dedupe_ref
+                            && !regenerated_tile_matches_marker(&expected, config)
+                        {
+                            return Err(EngineError::ChecksumMismatch {
+                                tile: coord,
+                                expected: "blank tile (placeholder marker)".to_string(),
+                                got: "regenerated tile is not blank".to_string(),
+                            });
+                        }
+                    } else if on_disk != expected_bytes {
+                        // Raw tiles are byte-exact: any mismatch (truncation,
+                        // flipped byte, padding drift) is corruption.
                         return Err(EngineError::ChecksumMismatch {
                             tile: coord,
                             expected: format!("{} bytes (raw)", expected_bytes.len()),
@@ -1542,6 +1572,27 @@ pub fn is_blank_tile_with_tolerance(raster: &Raster, max_channel_delta: u8) -> b
             d <= max_channel_delta
         })
     })
+}
+
+/// Decides whether a 1-byte [`crate::sink::BLANK_TILE_MARKER`] on disk is a
+/// legitimate stand-in for the regenerated `expected` tile during raw-format
+/// Verify.
+///
+/// The sink writes the marker only for tiles it considered blank under the
+/// active [`BlankTileStrategy`], so Verify must re-apply the *same* blankness
+/// predicate rather than byte-comparing the marker against the full
+/// regenerated tile (issue #94). Under [`BlankTileStrategy::Emit`] no marker
+/// should ever have been written by the strategy itself, but dedupe can still
+/// emit markers independently; those are resolved by the caller via
+/// `blank_references`, and the strict [`is_blank_tile`] check here is a safe
+/// last resort.
+pub(crate) fn regenerated_tile_matches_marker(expected: &Raster, config: &EngineConfig) -> bool {
+    match config.blank_tile_strategy {
+        BlankTileStrategy::Placeholder | BlankTileStrategy::Emit => is_blank_tile(expected),
+        BlankTileStrategy::PlaceholderWithTolerance { max_channel_delta } => {
+            is_blank_tile_with_tolerance(expected, max_channel_delta)
+        }
+    }
 }
 
 #[cfg(test)]
