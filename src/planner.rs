@@ -11,6 +11,7 @@ use thiserror::Error;
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PlannerError {
     #[error("zero dimension: {width}x{height}")]
     ZeroDimension { width: u32, height: u32 },
@@ -41,6 +42,7 @@ pub enum PlannerError {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-layout)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Layout {
     /// Deep Zoom Image -- `{level}/{col}_{row}.{ext}`, plus `.dzi` manifest.
     DeepZoom,

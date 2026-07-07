@@ -358,6 +358,7 @@ pub(super) mod tile_coord_vec_serde {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ResumeError {
     /// The checkpoint's `plan_hash` disagrees with the current plan's hash.
     /// Resuming would produce incoherent output, so the engine refuses.
