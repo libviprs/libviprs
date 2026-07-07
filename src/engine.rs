@@ -1066,8 +1066,14 @@ fn read_manifest(root: &std::path::Path) -> Option<serde_json::Value> {
 
 /// Remove every entry under `dir`, ignoring errors for individual entries so
 /// a pre-existing but partially-populated directory can still be wiped
-/// cleanly. The directory itself is retained. Caller should have verified
-/// the path is a directory they own.
+/// cleanly. The directory itself is retained.
+///
+/// Refuses to wipe a directory this crate does not own: a destructive
+/// Overwrite must only clear output we plausibly produced, never an
+/// arbitrary directory a caller mis-pointed the sink at. A directory is
+/// considered owned when it is empty or already holds our checkpoint marker
+/// ([`crate::resume::CHECKPOINT_FILENAME`]). Anything else yields
+/// [`std::io::ErrorKind::PermissionDenied`] and is left untouched.
 pub(crate) fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -1076,6 +1082,30 @@ pub(crate) fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
+
+    // Ownership guard: only proceed when the directory is empty or carries
+    // our marker. A single pass records both facts.
+    let mut is_empty = true;
+    let mut owned = false;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        is_empty = false;
+        if entry.file_name() == crate::resume::CHECKPOINT_FILENAME {
+            owned = true;
+            break;
+        }
+    }
+    if !is_empty && !owned {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to Overwrite-wipe {}: directory is not empty and holds no {} marker",
+                dir.display(),
+                crate::resume::CHECKPOINT_FILENAME
+            ),
+        ));
+    }
+
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
@@ -2378,9 +2408,11 @@ mod tests {
         let sentinel = ckpt.path().join("keep-me.txt");
         std::fs::write(&sentinel, b"precious").unwrap();
 
-        let mut cfg = EngineConfig::default();
-        cfg.checkpoint_every = 4;
-        cfg.checkpoint_root = Some(ckpt.path().to_path_buf());
+        let cfg = EngineConfig {
+            checkpoint_every: 4,
+            checkpoint_root: Some(ckpt.path().to_path_buf()),
+            ..EngineConfig::default()
+        };
 
         let sink = crate::sink::FsSink::new(out_dir.clone(), plan.clone())
             .with_format(crate::sink::TileFormat::Raw);
