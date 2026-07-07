@@ -203,7 +203,7 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
 /// may hold more than `u32::MAX` samples, so the product is computed in `u64`.
 #[inline]
 fn source_region_area(sx0: u32, sx1: u32, sy0: u32, sy1: u32) -> u64 {
-    ((sx1 - sx0) * (sy1 - sy0)) as u64
+    (sx1 - sx0) as u64 * (sy1 - sy0) as u64
 }
 
 /// Downscale a raster to arbitrary dimensions using simple bilinear-ish area averaging.
