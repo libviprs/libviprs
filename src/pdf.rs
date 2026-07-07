@@ -305,6 +305,7 @@ fn extract_largest_image(
 
 /// Decoded image data from a PDF stream — either encoded bytes (JPEG etc.)
 /// that need further decoding, or an already-decoded Raster (from FlateDecode).
+#[derive(Debug)]
 enum ImageData {
     /// Encoded image bytes (JPEG, PNG, JPEG2000) — pass to `decode_bytes`.
     Encoded(Vec<u8>),
@@ -1115,6 +1116,84 @@ mod tests {
      * confirming the integer-to-float promotion path.
      * Input: lopdf::Object::Integer(42). Output: Some(42.0).
      */
+    /// Build a minimal raw-pixel image stream dictionary with the given
+    /// `/Width` and `/Height` (as raw `i64`, so out-of-range and negative
+    /// values can be injected) using `DeviceRGB` @ 16bpc and `FlateDecode`.
+    fn crafted_image_stream(width: i64, height: i64) -> lopdf::Stream {
+        use lopdf::{Stream, dictionary};
+        Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => width,
+                "Height" => height,
+                "BitsPerComponent" => 16i64,
+                "ColorSpace" => "DeviceRGB",
+                "Filter" => "FlateDecode",
+            },
+            Vec::new(),
+        )
+    }
+
+    /// A `/Width u32::MAX /Height u32::MAX` `Rgb16` image must be rejected with
+    /// a typed error before any size product is computed. On the pre-fix code
+    /// `expected = width * height * bpp` overflows and panics in debug (wraps
+    /// in release, letting a bogus `Raster` escape); after the fix the
+    /// out-of-range dimension is rejected up front.
+    #[test]
+    fn decode_raw_pixels_rejects_oversized_dims() {
+        let doc = lopdf::Document::with_version("1.5");
+        let stream = crafted_image_stream(u32::MAX as i64, u32::MAX as i64);
+        let err = decode_raw_pixels(&doc, &stream, vec![0u8; 16]).unwrap_err();
+        assert!(
+            matches!(err, PdfError::UnsupportedFormat(_)),
+            "expected UnsupportedFormat, got {err:?}"
+        );
+    }
+
+    /// A negative `/Width` (which the old `as u32`/`as usize` casts wrapped
+    /// into an ~1.8e19 value) must be rejected as a typed error, not wrapped.
+    #[test]
+    fn decode_raw_pixels_rejects_negative_dims() {
+        let doc = lopdf::Document::with_version("1.5");
+        let stream = crafted_image_stream(-1, 16);
+        let err = decode_raw_pixels(&doc, &stream, vec![0u8; 16]).unwrap_err();
+        assert!(
+            matches!(err, PdfError::UnsupportedFormat(_)),
+            "expected UnsupportedFormat, got {err:?}"
+        );
+    }
+
+    /// A well-formed small raw-pixel image still decodes into a `Raster` with
+    /// the declared dimensions — the hardening must not reject valid input.
+    #[test]
+    fn decode_raw_pixels_accepts_valid_small_image() {
+        use lopdf::{Stream, dictionary};
+        let doc = lopdf::Document::with_version("1.5");
+        let stream = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2i64,
+                "Height" => 1i64,
+                "BitsPerComponent" => 8i64,
+                "ColorSpace" => "DeviceRGB",
+            },
+            Vec::new(),
+        );
+        // 2x1 Rgb8 = 6 bytes.
+        let data = vec![10, 20, 30, 40, 50, 60];
+        let decoded = decode_raw_pixels(&doc, &stream, data).unwrap();
+        match decoded {
+            ImageData::Decoded(raster) => {
+                assert_eq!(raster.width(), 2);
+                assert_eq!(raster.height(), 1);
+                assert_eq!(raster.format(), PixelFormat::Rgb8);
+            }
+            ImageData::Encoded(_) => panic!("expected decoded raster"),
+        }
+    }
+
     #[test]
     fn obj_to_f64_integer() {
         let obj = lopdf::Object::Integer(42);
