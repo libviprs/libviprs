@@ -161,13 +161,22 @@ pub(crate) fn verify_from_strip_source(
                         let Some(expected_s) = expected.as_str() else {
                             continue;
                         };
-                        let abs = root.join(rel);
-                        let bytes = match std::fs::read(&abs) {
-                            Ok(b) => b,
+                        // Reject traversal / absolute / prefixed manifest keys
+                        // before any filesystem access, and stream the tile
+                        // through the hasher to cap memory (see #79).
+                        let abs = match crate::checksum::safe_manifest_join(root, rel) {
+                            Some(p) => p,
+                            None => {
+                                return Err(EngineError::Sink(SinkError::Other(format!(
+                                    "Verify: manifest tile path escapes checkpoint root: {rel}"
+                                ))));
+                            }
+                        };
+                        let got = match crate::checksum::hash_file(&abs, algo) {
+                            Ok(g) => g,
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                             Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
                         };
-                        let got = crate::checksum::hash_tile(&bytes, algo);
                         if !got.eq_ignore_ascii_case(expected_s) {
                             return Err(EngineError::ChecksumMismatch {
                                 tile: parse_tile_rel_path(rel)
