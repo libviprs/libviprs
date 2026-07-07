@@ -1726,6 +1726,57 @@ mod tests {
     use crate::planner::{Layout, PyramidPlanner};
     use crate::sink::MemorySink;
 
+    /// Issue #127 (acceptance criterion 1): checkpoint I/O per flush must be
+    /// bounded, i.e. NOT proportional to the total number of completed tiles.
+    ///
+    /// Today `CheckpointState::flush` re-serialises the entire
+    /// `completed_tiles` vector into `.libviprs-job.json` on every flush, so
+    /// the on-disk checkpoint grows linearly with the number of completed
+    /// tiles and the per-flush write cost is O(n) — cumulatively O(n^2/k).
+    ///
+    /// This ratchet asserts the header size stays bounded regardless of how
+    /// many tiles have been recorded. It is `#[ignore]`d because the fix
+    /// requires moving the coordinate log out of the single JSON header
+    /// (append-only segments / per-level bitmaps), which changes the on-disk
+    /// contract currently frozen by the `libviprs-tests` integration suite
+    /// (raw-parses `.libviprs-job.json` for `completed_tiles`, and asserts a
+    /// single checkpoint file). Landing criterion 1 therefore needs a
+    /// coordinated update to that shared suite. Un-ignore to reproduce the
+    /// unbounded-I/O behaviour on the current code.
+    #[test]
+    #[ignore = "issue #127 criterion 1: needs segmented checkpoint format + coordinated libviprs-tests update"]
+    fn checkpoint_flush_io_is_bounded_per_flush() {
+        use crate::resume::{JobCheckpoint, JobMetadata, CHECKPOINT_FILENAME};
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 1);
+
+        let header = dir.path().join(CHECKPOINT_FILENAME);
+
+        cp.mark_tile_completed(TileCoord::new(0, 0, 0)).unwrap();
+        let size_after_few = std::fs::metadata(&header).unwrap().len();
+
+        for i in 0..5_000u32 {
+            cp.mark_tile_completed(TileCoord::new(0, i % 2, i / 2)).unwrap();
+        }
+        let size_after_many = std::fs::metadata(&header).unwrap().len();
+
+        // The header must not balloon as more tiles are recorded.
+        assert!(
+            size_after_many <= size_after_few + 512,
+            "per-flush checkpoint I/O is unbounded: header grew from {size_after_few} to \
+             {size_after_many} bytes as completed-tile count increased"
+        );
+
+        // And the recorded set must still be fully recoverable.
+        let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
+        assert!(loaded.completed_tiles.len() >= 5_000);
+    }
+
     /// Issue #140: a checkpoint-write failure must surface as *one* variant
     /// regardless of the code path. The monolithic tile loop maps
     /// `ResumeError` straight to `EngineError::ResumeFailed`; the resume-wrapper
