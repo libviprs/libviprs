@@ -454,6 +454,21 @@ impl JobCheckpoint {
     /// intact or is fully replaced by the new one.
     // TODO(windows): `std::fs::rename` is not atomic-replace on Windows; switch to `ReplaceFileW` (dtolnay #9).
     pub fn save(dir: &Path, meta: &JobMetadata) -> io::Result<()> {
+        Self::save_with(dir, meta, &RealDurability)
+    }
+
+    /// [`JobCheckpoint::save`] with an injectable [`Durability`] backend.
+    ///
+    /// Production callers go through [`JobCheckpoint::save`], which supplies
+    /// [`RealDurability`] (issuing genuine `fsync` calls). Tests inject a
+    /// recorder to assert the durability ordering — in particular that the
+    /// tile data a checkpoint certifies is fsynced *before* the checkpoint is
+    /// renamed into place and its directory is fsynced.
+    pub(crate) fn save_with(
+        dir: &Path,
+        meta: &JobMetadata,
+        durability: &dyn Durability,
+    ) -> io::Result<()> {
         // Make sure the target directory exists; callers typically create it,
         // but checkpointing should not fail just because the sink has not yet
         // materialised a sub-tree.
@@ -466,7 +481,9 @@ impl JobCheckpoint {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Scope the file handle so it's closed before the rename — some
-        // filesystems refuse to rename over an open file handle.
+        // filesystems refuse to rename over an open file handle. The
+        // checkpoint payload itself is fsynced here so its bytes are durable
+        // before the rename publishes it.
         {
             let mut f = std::fs::File::create(&tmp_path)?;
             f.write_all(&bytes)?;
@@ -474,7 +491,53 @@ impl JobCheckpoint {
         }
 
         std::fs::rename(&tmp_path, &final_path)?;
+
+        // Fsync the containing directory so the rename itself is durable. A
+        // synced checkpoint file whose *directory entry* is still in the page
+        // cache can vanish on power loss, taking the resume record with it.
+        durability.sync_dir(dir)?;
         Ok(())
+    }
+}
+
+/// Durability backend used by the checkpoint/sink write paths to issue
+/// `fsync`-equivalent calls.
+///
+/// The production implementation ([`RealDurability`]) performs genuine
+/// `File::sync_all` on files and directories. The trait exists so tests can
+/// inject a recorder and assert the *ordering* of durability operations
+/// (tile data must be synced before the checkpoint that certifies it), which
+/// is otherwise invisible in on-disk state.
+pub(crate) trait Durability {
+    /// Flush a file's data and metadata to stable storage.
+    fn sync_file(&self, path: &Path) -> io::Result<()>;
+    /// Flush a directory entry (e.g. a completed rename) to stable storage.
+    fn sync_dir(&self, path: &Path) -> io::Result<()>;
+}
+
+/// Real filesystem durability: opens the target and calls `sync_all`.
+pub(crate) struct RealDurability;
+
+impl Durability for RealDurability {
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        let f = std::fs::File::open(path)?;
+        f.sync_all()
+    }
+
+    fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        // Fsyncing a directory handle is a POSIX construct. On non-Unix
+        // platforms opening a directory as a file fails, and the ordering
+        // guarantee is provided differently, so this is a no-op there.
+        #[cfg(unix)]
+        {
+            let f = std::fs::File::open(path)?;
+            f.sync_all()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(())
+        }
     }
 }
 
