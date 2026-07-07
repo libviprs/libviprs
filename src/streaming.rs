@@ -492,7 +492,7 @@ impl PdfiumStripSource {
             PdfiumSourceState::CachedFullPage { full_raster } => {
                 let strip_h = height.min(self.height.saturating_sub(y_offset));
                 if strip_h == 0 {
-                    let data = vec![0u8; self.width as usize * height as usize * 4];
+                    let data = crate::pdf::alloc_zeroed_rgba(self.width, height)?;
                     return Raster::new(self.width, height, PixelFormat::Rgba8, data)
                         .map_err(crate::pdf::PdfError::from);
                 }
@@ -560,8 +560,15 @@ fn load_streaming_source(
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
 
     // Match `render_page_pdfium`'s width/height truncation byte-for-byte
-    // (pdf.rs:728-729 and the comment at pdf.rs:376-379) so cached and
-    // streaming sources report identical dimensions.
+    // (the comment at pdf.rs:376-379) so cached and streaming sources report
+    // identical dimensions.
+    //
+    // Streaming mode deliberately does *not* take the full-page pixel ceiling
+    // that the cached path applies: it never materialises the whole page as a
+    // single bitmap — each `render_strip` renders only a strip-sized bitmap —
+    // so a large page is handled by streaming, not rejected. The per-strip
+    // allocation is bounded by `alloc_zeroed_rgba`'s checked/`try_reserve`
+    // path in `render_page_strip_with_page` and `render_strip_inner`.
     let scale = dpi as f32 / 72.0;
     let width = (pdf_page.width().value * scale) as u32;
     let height = (pdf_page.height().value * scale) as u32;
