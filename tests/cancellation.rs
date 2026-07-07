@@ -95,11 +95,14 @@ fn midrun_cancel_stops_before_completion() {
         after: 3,
     };
 
-    let (result, sink) = EngineBuilder::new(&src, plan, MemorySink::new())
+    // Borrow the sink so we still own it (and its partial tile count) after
+    // the run stops with an error.
+    let sink = MemorySink::new();
+    let result = EngineBuilder::new(&src, plan, &sink)
         .with_engine(EngineKind::Monolithic)
         .with_cancel(cancel)
         .with_observer(obs)
-        .run_collect();
+        .run();
 
     assert!(
         matches!(result, Err(EngineError::Cancelled)),
