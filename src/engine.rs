@@ -70,6 +70,29 @@ pub enum EngineError {
         kind: crate::EngineKind,
         reason: &'static str,
     },
+    /// The supplied [`PyramidPlan`](crate::PyramidPlan) describes an image
+    /// whose dimensions do not match the source raster it was paired with.
+    /// The engine validates this at entry so a mismatch surfaces as a typed
+    /// error instead of an out-of-bounds slice copy inside the tiling /
+    /// canvas-embedding path (a library-level denial of service on untrusted
+    /// input).
+    #[error(
+        "plan/source dimension mismatch: plan describes {plan_width}x{plan_height} \
+         but source is {source_width}x{source_height}"
+    )]
+    PlanSourceMismatch {
+        plan_width: u32,
+        plan_height: u32,
+        source_width: u32,
+        source_height: u32,
+    },
+    /// The supplied [`PyramidPlan`](crate::PyramidPlan) is structurally
+    /// invalid (for example, it has no levels). A plan is normally produced by
+    /// [`PyramidPlanner::plan`](crate::PyramidPlanner::plan), which upholds
+    /// these invariants; the engine re-checks them at entry so a malformed
+    /// plan cannot trigger an arithmetic underflow or a silent zero-tile run.
+    #[error("invalid plan: {reason}")]
+    InvalidPlan { reason: &'static str },
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.
