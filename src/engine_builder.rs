@@ -229,10 +229,12 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// `with_config` take precedence.
     ///
     /// Also threads the config's `checkpoint_every` and `checkpoint_root`
-    /// into a default [`ResumePolicy::overwrite`] if no explicit policy has
-    /// been attached yet — matching the behaviour of the old
-    /// `generate_pyramid_resumable` path where those knobs lived directly
-    /// on the `EngineConfig`.
+    /// into an *existing* [`ResumePolicy`] — but only when one has already
+    /// been attached (via [`EngineBuilder::with_resume`]). It never fabricates
+    /// a policy: [`ResumeMode::Overwrite`] is destructive (it wipes the sink
+    /// dir), so carrying a checkpoint cadence or root on the config must not
+    /// silently enable it. Callers that want a resumable run choose the mode
+    /// explicitly; without one, the checkpoint knobs are simply inert.
     pub fn with_config(mut self, config: EngineConfig) -> Self {
         self.concurrency = Some(config.concurrency);
         self.buffer_size = Some(config.buffer_size);
@@ -242,12 +244,12 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         if let Some(ds) = config.dedupe_strategy {
             self.dedupe = Some(ds);
         }
-        // Carry the checkpoint knobs into an existing ResumePolicy (if set)
-        // so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
+        // Carry the checkpoint knobs into an EXPLICITLY-chosen ResumePolicy
+        // only, so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
         // don't silently lose the cadence / root that used to live on the
-        // config.
-        if config.checkpoint_every != 0 || config.checkpoint_root.is_some() {
-            let mut policy = self.resume.unwrap_or_else(ResumePolicy::overwrite);
+        // config. If no policy was attached we leave `resume` as `None`
+        // rather than conjuring a destructive Overwrite (issue #123).
+        if let Some(mut policy) = self.resume.take() {
             if config.checkpoint_every != 0 && policy.checkpoint_every() == 0 {
                 policy = policy.with_checkpoint_every(config.checkpoint_every);
             }
@@ -780,9 +782,35 @@ fn prepare_resume_state(
 > {
     match mode {
         ResumeMode::Overwrite => {
-            if let Some(root) = crate::engine::resolve_checkpoint_root(config, sink) {
-                crate::engine::wipe_directory(&root)
+            // Wipe only the sink's OWN output directory. Stale tiles live
+            // there, so that is the one place a fresh Overwrite must clear.
+            // We deliberately do NOT wipe `config.checkpoint_root`: a caller
+            // supplies it to keep metadata out of the output, and it may hold
+            // unrelated files that must survive.
+            if let Some(sink_dir) = sink.checkpoint_root() {
+                crate::engine::wipe_directory(sink_dir)
                     .map_err(|e| EngineError::ResumeFailed(crate::resume::ResumeError::from(e)))?;
+            }
+            // When an explicit checkpoint_root sits apart from the sink dir,
+            // it only ever holds our own `.libviprs-job.json`. Remove just
+            // that file so a stale checkpoint can't make this fresh run look
+            // resumable — leaving every other entry in place.
+            if let Some(root) = &config.checkpoint_root {
+                let same_as_sink = sink
+                    .checkpoint_root()
+                    .is_some_and(|s| s == root.as_path());
+                if !same_as_sink {
+                    let marker = root.join(crate::resume::CHECKPOINT_FILENAME);
+                    match std::fs::remove_file(&marker) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            return Err(EngineError::ResumeFailed(
+                                crate::resume::ResumeError::from(e),
+                            ));
+                        }
+                    }
+                }
             }
             let cp = crate::engine::cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
             Ok((std::collections::HashSet::new(), cp))
