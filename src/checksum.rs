@@ -30,15 +30,9 @@ use thiserror::Error;
 
 pub use crate::manifest::ChecksumAlgo;
 
-/// Parse the lowercase-string form (`"blake3"` / `"sha256"`) used in the
-/// manifest JSON. Returns `None` for unknown names.
-fn checksum_algo_from_manifest_str(s: &str) -> Option<ChecksumAlgo> {
-    match s {
-        "blake3" => Some(ChecksumAlgo::Blake3),
-        "sha256" => Some(ChecksumAlgo::Sha256),
-        _ => None,
-    }
-}
+// The lowercase manifest-string parser lives on `ChecksumAlgo`
+// (`ChecksumAlgo::from_manifest_str`) so every verify path shares one
+// definition and treats an unknown algorithm identically. See issue #95.
 
 // ---------------------------------------------------------------------------
 // ChecksumMode
@@ -297,7 +291,7 @@ pub fn verify_output(dir: &Path) -> Result<VerifyReport, VerifyError> {
         .get("algo")
         .and_then(|v| v.as_str())
         .ok_or(VerifyError::MissingField("checksums.algo"))?;
-    let algo = checksum_algo_from_manifest_str(algo_str)
+    let algo = ChecksumAlgo::from_manifest_str(algo_str)
         .ok_or_else(|| VerifyError::UnknownAlgo(algo_str.to_string()))?;
 
     let per_tile = checksums
@@ -463,13 +457,13 @@ mod tests {
         assert_eq!(j, "\"sha256\"");
 
         assert_eq!(
-            checksum_algo_from_manifest_str("blake3"),
+            ChecksumAlgo::from_manifest_str("blake3"),
             Some(ChecksumAlgo::Blake3)
         );
         assert_eq!(
-            checksum_algo_from_manifest_str("sha256"),
+            ChecksumAlgo::from_manifest_str("sha256"),
             Some(ChecksumAlgo::Sha256)
         );
-        assert_eq!(checksum_algo_from_manifest_str("md5"), None);
+        assert_eq!(ChecksumAlgo::from_manifest_str("md5"), None);
     }
 }

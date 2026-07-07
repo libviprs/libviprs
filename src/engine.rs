@@ -916,12 +916,18 @@ pub(crate) fn raster_verify(
                 checksums.get("algo").and_then(|v| v.as_str()),
                 checksums.get("per_tile").and_then(|v| v.as_object()),
             ) {
-                let algo = match algo_str {
-                    "blake3" => Some(crate::manifest::ChecksumAlgo::Blake3),
-                    "sha256" => Some(crate::manifest::ChecksumAlgo::Sha256),
-                    _ => None,
-                };
-                if let Some(algo) = algo {
+                // Route through the single shared parser. An unknown / future
+                // / typo'd algorithm is a hard verification failure here, not
+                // something to silently skip — otherwise a manifest stamped
+                // with a bogus algo would pass with zero digests checked
+                // (issue #95).
+                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str)
+                    .ok_or_else(|| {
+                        EngineError::Sink(SinkError::Other(format!(
+                            "Verify: unknown checksum algorithm {algo_str:?} in manifest"
+                        )))
+                    })?;
+                {
                     // A recorded tile that is gone from disk is a verification
                     // failure, not something to skip — unless it is a
                     // manifest-referenced blank whose content lives in
@@ -2728,5 +2734,60 @@ mod tests {
 
         raster_verify(&src, &plan, &sink, &cfg, &NoopObserver)
             .expect("raw placeholder pyramid must verify");
+    }
+
+    /// Issue #95: the monolithic `raster_verify` path must FAIL when the
+    /// manifest records an unknown checksum algorithm, rather than mapping it
+    /// to `None` and skipping the per-tile digest phase (which reported an
+    /// intact pyramid as verified with zero digests checked).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn raster_verify_rejects_unknown_algo() {
+        use crate::checksum::ChecksumMode;
+        use crate::manifest::{ChecksumAlgo, ManifestBuilder};
+        use crate::sink::{FsSink, TileFormat};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(256, 256);
+        let plan = PyramidPlanner::new(256, 256, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let out = tempdir().unwrap();
+        let out_dir = out.path().join("tiles");
+        let sink = FsSink::new(out_dir.clone(), plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_manifest(ManifestBuilder::new())
+            .with_checksums(ChecksumMode::EmitOnly, ChecksumAlgo::Blake3);
+
+        let cfg = EngineConfig::default();
+        generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver).unwrap();
+
+        // Re-stamp both emitted manifest copies with a bogus algorithm,
+        // leaving the correct per-tile digests intact.
+        for path in [
+            out.path().join("tiles.manifest.json"),
+            out_dir.join("manifest.json"),
+        ] {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            v.get_mut("checksums")
+                .and_then(|c| c.as_object_mut())
+                .expect("manifest must record a checksums table")
+                .insert("algo".into(), serde_json::json!("totally-bogus-algo"));
+            std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        }
+
+        let err = raster_verify(&src, &plan, &sink, &cfg, &NoopObserver)
+            .expect_err("verify must reject a manifest with an unknown checksum algorithm");
+        match err {
+            EngineError::Sink(SinkError::Other(msg)) => assert!(
+                msg.contains("unknown checksum algorithm"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected SinkError::Other for unknown algo, got {other:?}"),
+        }
     }
 }
