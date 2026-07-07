@@ -93,6 +93,13 @@ pub enum ResumeMode {
     Verify,
 }
 
+/// Default flush cadence seeded by [`ResumePolicy::resume`]: persist the
+/// checkpoint every 1000 completed tiles. Chosen as a balance between crash
+/// granularity (at most ~1000 tiles re-rendered after an interruption) and
+/// filesystem churn (one small JSON rewrite per 1000 writes). Overwrite and
+/// Verify keep the "final flush only" default of `0`.
+pub const DEFAULT_RESUME_CHECKPOINT_EVERY: u64 = 1000;
+
 /// Fluent builder bundling a [`ResumeMode`] with its checkpoint-persistence
 /// knobs.
 ///
@@ -107,9 +114,11 @@ pub enum ResumeMode {
 ///   [`ResumeMode::Verify`].
 ///
 /// After picking a factory, chain `.with_checkpoint_every(n)` to flush the
-/// checkpoint file every `n` completed tiles (default `0` = never) and
+/// checkpoint file every `n` completed tiles (`0` = final flush only) and
 /// `.with_checkpoint_root(path)` to place the checkpoint somewhere other
-/// than the sink's base directory.
+/// than the sink's base directory. [`ResumePolicy::resume`] seeds a non-zero
+/// cadence ([`DEFAULT_RESUME_CHECKPOINT_EVERY`]); Overwrite and Verify start
+/// at `0`.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,10 +152,20 @@ impl ResumePolicy {
     /// Continue an interrupted run from the on-disk checkpoint. Equivalent
     /// to [`ResumeMode::Resume`].
     ///
+    /// Unlike [`ResumePolicy::overwrite`] / [`ResumePolicy::verify`], this
+    /// factory seeds a non-zero flush cadence
+    /// ([`DEFAULT_RESUME_CHECKPOINT_EVERY`]) so that a long run periodically
+    /// persists progress even when the caller never sets an explicit cadence
+    /// — the whole point of Resume mode is that an interruption does not
+    /// throw away completed work. Override it with
+    /// [`ResumePolicy::with_checkpoint_every`] (including `0` to defer the
+    /// write to the end of the run).
+    ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
     pub fn resume() -> Self {
         Self {
             mode: ResumeMode::Resume,
+            checkpoint_every: DEFAULT_RESUME_CHECKPOINT_EVERY,
             ..Self::default()
         }
     }
@@ -162,8 +181,10 @@ impl ResumePolicy {
         }
     }
 
-    /// Flush the checkpoint file every `n` completed tiles. `0` (the
-    /// default) defers the checkpoint write until the end of the run.
+    /// Flush the checkpoint file every `n` completed tiles. `0` defers the
+    /// checkpoint write until the end of the run. Overrides the cadence
+    /// seeded by the factory (notably the non-zero
+    /// [`DEFAULT_RESUME_CHECKPOINT_EVERY`] set by [`ResumePolicy::resume`]).
     pub fn with_checkpoint_every(mut self, n: u64) -> Self {
         self.checkpoint_every = n;
         self

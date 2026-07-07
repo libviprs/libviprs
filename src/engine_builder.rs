@@ -532,20 +532,23 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // records the tile as complete.
             let wrapped = resume::ResumeAwareSink::new(engine_sink, &skip, cp.as_ref());
 
-            let mut result = match (kind, source) {
+            // Capture the run outcome rather than propagating it with `?`
+            // straight away: the checkpoint must be flushed on *both* the
+            // success and the error path (see the flush below).
+            let run_result: Result<EngineResult, EngineError> = match (kind, source) {
                 (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
-                    generate_pyramid_observed(raster, &plan, &wrapped, &engine_cfg, observer_ref)?
+                    generate_pyramid_observed(raster, &plan, &wrapped, &engine_cfg, observer_ref)
                 }
                 (EngineKind::Streaming, EngineSource::Raster(raster)) => {
                     let strip = RasterStripSource::new(raster);
                     let cfg =
                         build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                    generate_pyramid_streaming(&strip, &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_streaming(&strip, &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::Streaming, EngineSource::Strip(strip)) => {
                     let cfg =
                         build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                    generate_pyramid_streaming(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_streaming(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
                     let strip = RasterStripSource::new(raster);
@@ -556,7 +559,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         background_rgb,
                         blank_strategy,
                     );
-                    generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
                     let cfg = build_mapreduce_config(
@@ -566,7 +569,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         background_rgb,
                         blank_strategy,
                     );
-                    generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)?
+                    generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
                 }
                 (EngineKind::Monolithic, EngineSource::Strip(_)) => {
                     unreachable!("Monolithic + Strip rejected above")
@@ -575,6 +578,26 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     unreachable!("Auto should have been resolved before match")
                 }
             };
+
+            // Persist the checkpoint whether the run succeeded or failed.
+            // On the error path this is the only chance to make completed
+            // tiles durable: an interrupted run (kill -9 / OOM / preemption
+            // surfaced as a sink error, or an exhausted retry budget) would
+            // otherwise drop the in-memory `CheckpointState` here and force a
+            // later `--resume` to re-render everything. On the failure path a
+            // checkpoint I/O error is swallowed so the original engine error
+            // — the reason the run stopped — is what propagates to the
+            // caller.
+            if let Some(cp) = cp.as_ref() {
+                match &run_result {
+                    Ok(_) => cp.flush().map_err(EngineError::ResumeFailed)?,
+                    Err(_) => {
+                        let _ = cp.flush();
+                    }
+                }
+            }
+
+            let mut result = run_result?;
 
             // Adjust tiles_produced down by the number of tiles the
             // resume wrapper short-circuited. This restores the
@@ -585,10 +608,6 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             let skipped = wrapped.skipped_count();
             if skipped > 0 {
                 result.tiles_produced = result.tiles_produced.saturating_sub(skipped);
-            }
-
-            if let Some(cp) = cp.as_ref() {
-                cp.flush().map_err(EngineError::ResumeFailed)?;
             }
             return Ok((result, sink));
         }
