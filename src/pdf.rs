@@ -19,6 +19,7 @@ use crate::source;
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PdfError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -36,7 +37,6 @@ pub enum PdfError {
     Raster(#[from] crate::raster::RasterError),
     #[error("page {page} out of range (document has {total} pages)")]
     PageOutOfRange { page: usize, total: usize },
-    #[cfg(feature = "pdfium")]
     #[error("pdfium error: {0}")]
     Pdfium(String),
     #[error(

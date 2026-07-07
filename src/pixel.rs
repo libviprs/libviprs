@@ -25,6 +25,7 @@
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
 /// (pyramid overview at [`#pyramid`](https://libviprs.org/cli/#pyramid))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PixelFormat {
     /// Single-channel 8-bit grayscale.
     Gray8,
