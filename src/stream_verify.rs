@@ -220,6 +220,17 @@ pub(crate) fn verify_from_strip_source(
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
+    // Tile paths whose raw content is a 1-byte placeholder pointing at a
+    // deduped payload under `_shared/` (issue #93). Legitimate markers even
+    // when the regenerated tile is not itself blank.
+    let blank_ref_paths: std::collections::HashSet<String> = read_manifest(root)
+        .and_then(|m| {
+            m.get("blank_references")
+                .and_then(|v| v.as_object())
+                .map(|o| o.keys().cloned().collect())
+        })
+        .unwrap_or_default();
+
     let cw = plan.canvas_width;
     let ch = plan.canvas_height;
     let dst_stride = cw as usize * bpp;
@@ -309,15 +320,35 @@ pub(crate) fn verify_from_strip_source(
                 let on_disk =
                     std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
 
-                if ext == "raw" && on_disk != expected_bytes {
-                    return Err(EngineError::ChecksumMismatch {
-                        tile: coord,
-                        expected: format!("{} bytes (raw)", expected_bytes.len()),
-                        got: format!(
-                            "{} bytes on disk differ from regenerated tile",
-                            on_disk.len()
-                        ),
-                    });
+                if ext == "raw" {
+                    if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
+                        // A 1-byte placeholder: either a blank-tile marker
+                        // (`BlankTileStrategy::Placeholder*`) or a dedupe
+                        // reference whose payload lives in `_shared/`. Validate
+                        // the regenerated tile's blankness / manifest reference
+                        // instead of byte-comparing the marker (issue #94).
+                        let is_dedupe_ref = plan
+                            .tile_path(coord, ext)
+                            .is_some_and(|rel| blank_ref_paths.contains(&rel));
+                        if !is_dedupe_ref
+                            && !crate::engine::regenerated_tile_matches_marker(&expected, config)
+                        {
+                            return Err(EngineError::ChecksumMismatch {
+                                tile: coord,
+                                expected: "blank tile (placeholder marker)".to_string(),
+                                got: "regenerated tile is not blank".to_string(),
+                            });
+                        }
+                    } else if on_disk != expected_bytes {
+                        return Err(EngineError::ChecksumMismatch {
+                            tile: coord,
+                            expected: format!("{} bytes (raw)", expected_bytes.len()),
+                            got: format!(
+                                "{} bytes on disk differ from regenerated tile",
+                                on_disk.len()
+                            ),
+                        });
+                    }
                 }
                 // Encoded formats (png/jpeg) fall through: existence
                 // check already passed, and fresh re-encoding is not
