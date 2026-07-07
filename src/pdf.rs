@@ -49,6 +49,85 @@ pub enum PdfError {
     },
     #[error("unsupported page /Rotate value: {0} (must be a multiple of 90)")]
     UnsupportedRotation(i64),
+    #[error(
+        "render exceeds pixel budget: {pixels} px (width × height) > {budget} px ceiling"
+    )]
+    RenderBudgetExceeded { pixels: u64, budget: u64 },
+    #[error("failed to allocate {bytes} bytes for render buffer")]
+    AllocationFailed { bytes: usize },
+}
+
+/// Default ceiling on the pixel count (`width × height`) that a single
+/// non-budgeted pdfium render is permitted to allocate.
+///
+/// [`render_page_pdfium`] and the streaming source constructor derive the
+/// output bitmap size from the page's `/MediaBox` times the requested DPI
+/// via a saturating `f64 as u32` cast. A crafted `/MediaBox` at a normal or
+/// high DPI can drive that product into the billions of pixels, so the raw
+/// pdfium bitmap plus the RGBA [`Raster`] copy would attempt a multi-gigabyte
+/// allocation and OOM-abort the process before any downstream size check
+/// runs. Bounding the pixel count up front converts that abort into a
+/// recoverable [`PdfError::RenderBudgetExceeded`].
+///
+/// The ceiling is a backstop against clearly-adversarial sizes (a crafted
+/// `/MediaBox` at a high DPI reaches hundreds of billions of pixels), not a
+/// tight bound: legitimate large-format renders — e.g. a 48"×36" AutoCAD
+/// blueprint at 300 DPI is ~518 megapixels — must still succeed. `2^30` px is
+/// 4 GiB for the RGBA raster alone; callers that need a tighter, DPI-reducing
+/// bound use [`render_page_pdfium_budgeted`] with an explicit `max_pixels`.
+pub const DEFAULT_MAX_RENDER_PIXELS: u64 = 1 << 30;
+
+/// Convert page dimensions in points into a render size in pixels at `dpi`,
+/// rejecting any size whose total pixel count exceeds `max_pixels`.
+///
+/// The two dimension casts saturate (`f32 as u32`) and the product is taken
+/// in `u64`, so an adversarial `/MediaBox` can never wrap into a small value.
+/// Returns [`PdfError::RenderBudgetExceeded`] when the budget is exceeded so
+/// the caller propagates a typed error instead of proceeding to a
+/// multi-gigabyte allocation.
+#[cfg(any(feature = "pdfium", test))]
+pub(crate) fn render_dims_within_budget(
+    width_pt: f32,
+    height_pt: f32,
+    dpi: u32,
+    max_pixels: u64,
+) -> Result<(u32, u32), PdfError> {
+    let scale = dpi as f32 / 72.0;
+    let width = (width_pt * scale) as u32;
+    let height = (height_pt * scale) as u32;
+    let pixels = width as u64 * height as u64;
+    if pixels > max_pixels {
+        return Err(PdfError::RenderBudgetExceeded {
+            pixels,
+            budget: max_pixels,
+        });
+    }
+    Ok((width, height))
+}
+
+/// Allocate a zeroed RGBA8 buffer of `width × height` pixels using fallible
+/// allocation, so an adversarial size yields a typed error rather than an
+/// allocator abort.
+///
+/// The byte length is computed with checked arithmetic to reject a `usize`
+/// overflow up front (`width × height × 4` can exceed `usize::MAX` for
+/// adversarial `u32` dimensions on 64-bit targets), and [`Vec::try_reserve`]
+/// turns an allocation failure into [`PdfError::AllocationFailed`] instead of
+/// aborting.
+#[cfg(any(feature = "pdfium", test))]
+pub(crate) fn alloc_zeroed_rgba(width: u32, height: u32) -> Result<Vec<u8>, PdfError> {
+    let len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or(PdfError::RenderBudgetExceeded {
+            pixels: u64::from(width).saturating_mul(u64::from(height)),
+            budget: DEFAULT_MAX_RENDER_PIXELS,
+        })?;
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve(len)
+        .map_err(|_| PdfError::AllocationFailed { bytes: len })?;
+    buf.resize(len, 0);
+    Ok(buf)
 }
 
 /// A page's intrinsic `/Rotate` value, normalised to one of the four
@@ -952,9 +1031,12 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
         .get(page as u16 - 1)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let scale = dpi as f32 / 72.0;
-    let width = (pdf_page.width().value * scale) as u32;
-    let height = (pdf_page.height().value * scale) as u32;
+    let (width, height) = render_dims_within_budget(
+        pdf_page.width().value,
+        pdf_page.height().value,
+        dpi,
+        DEFAULT_MAX_RENDER_PIXELS,
+    )?;
 
     render_at_size(&pdf_page, width, height)
 }
@@ -1095,7 +1177,7 @@ pub(crate) fn render_page_strip_with_page(
     // keep the StripSource contract.
     let strip_h = strip_height.min(display_h_px.saturating_sub(y_offset));
     if strip_h == 0 {
-        let data = vec![0u8; display_w_px as usize * strip_height as usize * 4];
+        let data = alloc_zeroed_rgba(display_w_px, strip_height)?;
         return Raster::new(display_w_px, strip_height, PixelFormat::Rgba8, data)
             .map_err(PdfError::from);
     }
@@ -1280,6 +1362,72 @@ mod tests {
             matches!(err, PdfError::UnsupportedFormat(_)),
             "expected UnsupportedFormat, got {err:?}"
         );
+    }
+
+    /// A crafted `/MediaBox` at a high DPI drives the derived pixel count into
+    /// the billions; the non-budgeted render path must reject it with a typed
+    /// [`PdfError::RenderBudgetExceeded`] before allocating, not proceed toward
+    /// a multi-gigabyte pdfium bitmap + `Raster` and OOM-abort. Values mirror a
+    /// ~200k × 200k pt page at 300 DPI (~695 billion px), which the saturating
+    /// `f32 as u32` cast keeps large rather than wrapping small.
+    #[test]
+    fn render_dims_within_budget_rejects_oversized_page() {
+        let err = render_dims_within_budget(200_000.0, 200_000.0, 300, DEFAULT_MAX_RENDER_PIXELS)
+            .unwrap_err();
+        assert!(
+            matches!(err, PdfError::RenderBudgetExceeded { .. }),
+            "expected RenderBudgetExceeded, got {err:?}"
+        );
+    }
+
+    /// The exact-budget boundary is admitted (`<= max_pixels`), but one pixel
+    /// past it is rejected — the ceiling is inclusive of the budget itself.
+    #[test]
+    fn render_dims_within_budget_boundary_is_inclusive() {
+        // 32768 × 32768 = 2^30 px exactly, at 72 DPI (scale = 1.0).
+        let ok = render_dims_within_budget(32_768.0, 32_768.0, 72, DEFAULT_MAX_RENDER_PIXELS);
+        assert_eq!(ok.unwrap(), (32_768, 32_768));
+
+        let over = render_dims_within_budget(32_768.0, 32_769.0, 72, DEFAULT_MAX_RENDER_PIXELS);
+        assert!(
+            matches!(over, Err(PdfError::RenderBudgetExceeded { .. })),
+            "one pixel past the budget must be rejected, got {over:?}"
+        );
+    }
+
+    /// A normal Letter page at a normal DPI decodes to the expected pixel
+    /// dimensions — the ceiling must not reject legitimate input.
+    #[test]
+    fn render_dims_within_budget_accepts_normal_page() {
+        // US Letter, 612 × 792 pt at 150 DPI.
+        let (w, h) =
+            render_dims_within_budget(612.0, 792.0, 150, DEFAULT_MAX_RENDER_PIXELS).unwrap();
+        // Matches the production `(pts * scale) as u32` truncation byte-for-byte.
+        assert_eq!((w, h), (1275, 1649));
+    }
+
+    /// The zero-strip fill (`width × height × 4`) overflows `usize` for
+    /// adversarial `u32` dimensions; the fallible allocator must surface a
+    /// typed error rather than panic on the overflowing multiply or abort in
+    /// the infallible `vec![0u8; ..]` path.
+    #[test]
+    fn alloc_zeroed_rgba_rejects_overflowing_dims() {
+        let err = alloc_zeroed_rgba(u32::MAX, u32::MAX).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PdfError::RenderBudgetExceeded { .. } | PdfError::AllocationFailed { .. }
+            ),
+            "expected a typed error, got {err:?}"
+        );
+    }
+
+    /// A small in-bounds request yields a correctly sized, zero-filled buffer.
+    #[test]
+    fn alloc_zeroed_rgba_allocates_small_buffer() {
+        let buf = alloc_zeroed_rgba(2, 3).unwrap();
+        assert_eq!(buf.len(), 2 * 3 * 4);
+        assert!(buf.iter().all(|&b| b == 0));
     }
 
     /// A well-formed small raw-pixel image still decodes into a `Raster` with
