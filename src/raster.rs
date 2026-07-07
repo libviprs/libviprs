@@ -37,6 +37,73 @@ pub enum RasterError {
     },
     #[error("size overflow: {width}x{height} with {bpp} bytes per pixel exceeds usize::MAX")]
     SizeOverflow { width: u32, height: u32, bpp: usize },
+    #[error(
+        "dimensions {width}x{height} with format {format:?} need {bytes} bytes, exceeding the {budget}-byte allocation budget"
+    )]
+    ByteBudgetExceeded {
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        bytes: u64,
+        budget: u64,
+    },
+    #[error("failed to allocate {bytes} bytes for {width}x{height} raster")]
+    AllocationFailed {
+        width: u32,
+        height: u32,
+        bytes: usize,
+    },
+}
+
+/// Default ceiling, in bytes, on a single raster buffer allocation sized from
+/// untrusted dimensions.
+///
+/// Dimensions flow unclamped from file headers (`/MediaBox`, TIFF/PNG IHDR)
+/// into buffer allocations. A crafted `50000 × 50000 × Rgba16` (~20 GB) is
+/// below the `usize`-overflow threshold [`buffer_len`] guards against, yet far
+/// above host memory: an infallible `vec![0u8; size]` would call
+/// `handle_alloc_error` and abort the process (a remote DoS) with no chance to
+/// return a [`Result`]. [`Raster::new`] and [`Raster::zeroed`] reject any size
+/// past this budget with [`RasterError::ByteBudgetExceeded`] before allocating.
+///
+/// The ceiling is a backstop against clearly-adversarial sizes, not a tight
+/// bound: legitimate large-format rasters must still succeed. `8 GiB` sits well
+/// above the `4 GiB` an RGBA8 render at the [`DEFAULT_MAX_RENDER_PIXELS`]
+/// (`2^30` px) pixel ceiling produces, while still rejecting the multi-tens-of-
+/// gigabyte requests an attacker uses to force an abort. Callers that need a
+/// tighter (or looser) bound use the `*_with_budget` constructors with an
+/// explicit `max_bytes`.
+///
+/// [`DEFAULT_MAX_RENDER_PIXELS`]: crate::pdf::DEFAULT_MAX_RENDER_PIXELS
+pub const DEFAULT_MAX_ALLOC_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Allocate a zeroed buffer of `width × height × bpp` bytes using fallible
+/// allocation, rejecting an over-budget size before touching the allocator and
+/// converting an allocation failure into a typed error rather than aborting.
+fn alloc_zeroed_checked(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    max_bytes: u64,
+) -> Result<Vec<u8>, RasterError> {
+    let size = buffer_len(width, height, format.bytes_per_pixel())?;
+    if size as u64 > max_bytes {
+        return Err(RasterError::ByteBudgetExceeded {
+            width,
+            height,
+            format,
+            bytes: size as u64,
+            budget: max_bytes,
+        });
+    }
+    let mut data: Vec<u8> = Vec::new();
+    data.try_reserve_exact(size).map_err(|_| RasterError::AllocationFailed {
+        width,
+        height,
+        bytes: size,
+    })?;
+    data.resize(size, 0);
+    Ok(data)
 }
 
 /// Compute `width * height * bpp` as a `usize`, checking for overflow.
@@ -96,10 +163,44 @@ impl Raster {
         format: PixelFormat,
         data: Vec<u8>,
     ) -> Result<Self, RasterError> {
+        Self::new_with_budget(width, height, format, data, DEFAULT_MAX_ALLOC_BYTES)
+    }
+
+    /// Like [`Raster::new`], but rejects a declared size exceeding `max_bytes`
+    /// with [`RasterError::ByteBudgetExceeded`].
+    ///
+    /// The buffer is already allocated by the caller, so this cannot make that
+    /// allocation fallible; it enforces the budget on the *declared* dimensions
+    /// so an attacker cannot smuggle an over-budget raster in through the
+    /// pre-allocated path. The budget is checked before the length comparison
+    /// so oversized dimensions are rejected as [`RasterError::ByteBudgetExceeded`]
+    /// regardless of the buffer supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::ZeroDimension`] if width or height is 0,
+    /// [`RasterError::ByteBudgetExceeded`] if the size exceeds `max_bytes`, or
+    /// [`RasterError::BufferSizeMismatch`] if the buffer length is wrong.
+    pub fn new_with_budget(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        data: Vec<u8>,
+        max_bytes: u64,
+    ) -> Result<Self, RasterError> {
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
         let expected = buffer_len(width, height, format.bytes_per_pixel())?;
+        if expected as u64 > max_bytes {
+            return Err(RasterError::ByteBudgetExceeded {
+                width,
+                height,
+                format,
+                bytes: expected as u64,
+                budget: max_bytes,
+            });
+        }
         if data.len() != expected {
             return Err(RasterError::BufferSizeMismatch {
                 width,
@@ -125,19 +226,41 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// Returns [`RasterError::ZeroDimension`] if width or height is 0.
+    /// Returns [`RasterError::ZeroDimension`] if width or height is 0,
+    /// [`RasterError::ByteBudgetExceeded`] if the size exceeds
+    /// [`DEFAULT_MAX_ALLOC_BYTES`], or [`RasterError::AllocationFailed`] if the
+    /// allocator cannot satisfy the (in-budget) request — never an abort.
     pub fn zeroed(width: u32, height: u32, format: PixelFormat) -> Result<Self, RasterError> {
+        Self::zeroed_with_budget(width, height, format, DEFAULT_MAX_ALLOC_BYTES)
+    }
+
+    /// Like [`Raster::zeroed`], but rejects a size exceeding `max_bytes` with
+    /// [`RasterError::ByteBudgetExceeded`] before allocating.
+    ///
+    /// The allocation itself is fallible ([`Vec::try_reserve_exact`]), so an
+    /// in-budget request the host still cannot satisfy surfaces as
+    /// [`RasterError::AllocationFailed`] rather than aborting the process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::ZeroDimension`] if width or height is 0,
+    /// [`RasterError::ByteBudgetExceeded`] if the size exceeds `max_bytes`, or
+    /// [`RasterError::AllocationFailed`] on allocator failure.
+    pub fn zeroed_with_budget(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        max_bytes: u64,
+    ) -> Result<Self, RasterError> {
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
-        // Compute the size once and reuse it for both the allocation and the
-        // (implicit) length invariant, avoiding a second multiplication.
-        let size = buffer_len(width, height, format.bytes_per_pixel())?;
+        let data = alloc_zeroed_checked(width, height, format, max_bytes)?;
         Ok(Self {
             width,
             height,
             format,
-            data: vec![0u8; size],
+            data,
         })
     }
 
@@ -218,7 +341,17 @@ impl Raster {
     pub fn extract(&self, x: u32, y: u32, w: u32, h: u32) -> Result<Raster, RasterError> {
         let view = self.region(x, y, w, h)?;
         let bpp = self.format.bytes_per_pixel();
-        let mut out = Vec::with_capacity(buffer_len(w, h, bpp)?);
+        let size = buffer_len(w, h, bpp)?;
+        // The sub-region is bounded by `self`, so it is already within budget;
+        // use fallible reservation so an allocator failure surfaces as a typed
+        // error instead of aborting.
+        let mut out: Vec<u8> = Vec::new();
+        out.try_reserve_exact(size)
+            .map_err(|_| RasterError::AllocationFailed {
+                width: w,
+                height: h,
+                bytes: size,
+            })?;
         for row in view.rows() {
             out.extend_from_slice(row);
         }
@@ -497,6 +630,55 @@ mod tests {
             matches!(result, Err(RasterError::SizeOverflow { .. })),
             "expected SizeOverflow from new, not an Ok with a short buffer, got {result:?}"
         );
+    }
+
+    /**
+     * Tests that a multi-gigabyte allocation request driven from untrusted
+     * dimensions is rejected with a typed error instead of aborting the process.
+     * 50000 x 50000 x Rgba16 is ~20 GB — below the usize-overflow threshold
+     * (so `buffer_len` succeeds) but far above the allocation budget, so an
+     * infallible `vec![0u8; size]` would call `handle_alloc_error` and SIGABRT.
+     * Input: zeroed(50000,50000,Rgba16) → Output: Err(ByteBudgetExceeded).
+     */
+    #[test]
+    fn zeroed_multi_gb_request_returns_budget_error_not_abort() {
+        let result = Raster::zeroed(50_000, 50_000, PixelFormat::Rgba16);
+        assert!(
+            matches!(result, Err(RasterError::ByteBudgetExceeded { .. })),
+            "expected ByteBudgetExceeded from zeroed, got {result:?}"
+        );
+    }
+
+    /**
+     * Tests that Raster::new also rejects an over-budget declared size before
+     * accepting an already-allocated buffer, so an attacker cannot smuggle a
+     * multi-GB raster in through the pre-allocated path either. The buffer is
+     * intentionally short (the budget check must fire before the size check).
+     * Input: new(50000,50000,Rgba16, short buffer) → Output: Err(ByteBudgetExceeded).
+     */
+    #[test]
+    fn new_over_budget_dimensions_rejected() {
+        let result = Raster::new(50_000, 50_000, PixelFormat::Rgba16, vec![0u8; 8]);
+        assert!(
+            matches!(result, Err(RasterError::ByteBudgetExceeded { .. })),
+            "expected ByteBudgetExceeded from new, got {result:?}"
+        );
+    }
+
+    /**
+     * Tests that the budget is configurable: a size that exceeds a caller-set
+     * budget is rejected, while the same size succeeds under a budget that
+     * admits it. Uses `zeroed_with_budget` with a tiny 100-byte budget against
+     * a 10x10 Gray8 (100-byte) raster (admitted at 100, rejected at 99).
+     * Input: zeroed_with_budget(10,10,Gray8, 99|100) → Output: Err | Ok.
+     */
+    #[test]
+    fn zeroed_with_budget_is_configurable() {
+        assert!(matches!(
+            Raster::zeroed_with_budget(10, 10, PixelFormat::Gray8, 99),
+            Err(RasterError::ByteBudgetExceeded { .. })
+        ));
+        assert!(Raster::zeroed_with_budget(10, 10, PixelFormat::Gray8, 100).is_ok());
     }
 }
 
