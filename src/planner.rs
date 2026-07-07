@@ -95,7 +95,14 @@ pub struct PyramidPlanner {
 /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#plan)
+///
+/// The struct is `#[non_exhaustive]`: it can only be constructed inside this
+/// crate (in practice via [`PyramidPlanner::plan`]), so external code cannot
+/// fabricate a plan with invariant-violating fields (for example an empty
+/// `levels` list or dimensions that do not describe any real source). Read
+/// access to the fields is unaffected. See issue #132.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PyramidPlan {
     pub image_width: u32,
     pub image_height: u32,
