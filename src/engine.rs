@@ -1709,6 +1709,34 @@ mod tests {
     use crate::planner::{Layout, PyramidPlanner};
     use crate::sink::MemorySink;
 
+    /// Issue #140: a checkpoint-write failure must surface as *one* variant
+    /// regardless of the code path. The monolithic tile loop maps
+    /// `ResumeError` straight to `EngineError::ResumeFailed`; the resume-wrapper
+    /// sink can only return a `SinkError`, so it now carries the typed
+    /// `SinkError::Checkpoint`. `promote_sink_error` must lift that back to the
+    /// same `EngineError::ResumeFailed` variant the monolithic path produces —
+    /// otherwise the identical failure is reported as two different errors.
+    #[test]
+    fn checkpoint_failure_unifies_to_resume_failed() {
+        let resume = || ResumeError::SchemaMismatch {
+            expected: "1",
+            found: "99".to_string(),
+        };
+
+        // Path A: monolithic loop maps ResumeError -> EngineError directly.
+        let monolithic: EngineError = EngineError::from(resume());
+        assert!(matches!(monolithic, EngineError::ResumeFailed(_)));
+
+        // Path B: resume-wrapper sink returns SinkError::Checkpoint, which the
+        // engine promotes on the way out.
+        let via_sink = promote_sink_error(SinkError::Checkpoint(resume()));
+        assert!(
+            matches!(via_sink, EngineError::ResumeFailed(_)),
+            "checkpoint failure via the sink path must promote to the same \
+             EngineError::ResumeFailed variant as the monolithic path, got {via_sink:?}"
+        );
+    }
+
     fn gradient_raster(w: u32, h: u32) -> Raster {
         let bpp = PixelFormat::Rgb8.bytes_per_pixel();
         let mut data = vec![0u8; w as usize * h as usize * bpp];
