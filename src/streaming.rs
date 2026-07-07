@@ -995,21 +995,29 @@ pub(crate) fn generate_pyramid_streaming(
         // Step 4: Push the half-strip into the recursive propagation tree.
         // It will be paired with another half-strip at the next level, or
         // appended to a monolithic accumulator if the level is small enough.
-        propagate_down(
-            half,
-            top_level - 1,
-            y / 2,
-            &mut accumulators,
-            &mut mono_accumulators,
-            monolithic_threshold,
-            plan,
-            sink,
-            &config.engine,
-            observer,
-            &tracker,
-            &mut tiles_produced,
-            &mut tiles_skipped,
-        )?;
+        //
+        // A single-level plan (top_level == 0) has no level below the top:
+        // the top-level tiles were already emitted in Step 2, so there is
+        // nothing left to propagate. Guard the recursion to avoid the
+        // `top_level - 1` underflow (debug panic / release usize::MAX ->
+        // out-of-bounds index into `accumulators`).
+        if top_level > 0 {
+            propagate_down(
+                half,
+                top_level - 1,
+                y / 2,
+                &mut accumulators,
+                &mut mono_accumulators,
+                monolithic_threshold,
+                plan,
+                sink,
+                &config.engine,
+                observer,
+                &tracker,
+                &mut tiles_produced,
+                &mut tiles_skipped,
+            )?;
+        }
 
         y += sh;
     }
@@ -2131,5 +2139,84 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(5))
             .expect("StreamingState::drop did not complete after lock release");
         handle.join().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single-level plan underflow guard (issue #102)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod single_level_tests {
+    use super::*;
+    use crate::observe::NoopObserver;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+
+    fn gradient(w: u32, h: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                data[off] = (x % 256) as u8;
+                data[off + 1] = (y % 256) as u8;
+                data[off + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn run(plan: &crate::planner::PyramidPlan, src: &Raster) -> MemorySink {
+        let sink = MemorySink::new();
+        let config = StreamingConfig {
+            memory_budget_bytes: u64::MAX,
+            engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
+        };
+        generate_pyramid_streaming(
+            &RasterStripSource::new(src),
+            plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .expect("single-level plan must run to completion without underflow panic");
+        sink
+    }
+
+    // A Google-layout image no larger than one tile collapses to a single
+    // pyramid level (top_level == 0). The streaming engine must emit the
+    // top-level tiles and stop, not recurse into propagate_down with an
+    // underflowed `top_level - 1`.
+    #[test]
+    fn google_single_tile_image_runs_to_completion() {
+        let src = gradient(256, 256);
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
+    }
+
+    // A 1x1 source collapses to a single level under any layout.
+    #[test]
+    fn deepzoom_one_by_one_source_runs_to_completion() {
+        let src = gradient(1, 1);
+        let plan = PyramidPlanner::new(1, 1, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
     }
 }

@@ -414,22 +414,30 @@ pub(crate) fn generate_pyramid_mapreduce(
             let half_bytes = half.data().len() as u64;
             tracker.alloc(half_bytes);
 
-            // Propagate half-strip into lower levels
-            propagate_down(
-                half,
-                top_level - 1,
-                y / 2,
-                &mut accumulators,
-                &mut mono_accumulators,
-                monolithic_threshold,
-                plan,
-                sink,
-                &engine_cfg,
-                observer,
-                &tracker,
-                &mut tiles_produced,
-                &mut tiles_skipped,
-            )?;
+            // Propagate half-strip into lower levels.
+            //
+            // A single-level plan (top_level == 0) has no level below the
+            // top: the top-level tiles were already emitted above, so there
+            // is nothing left to reduce. Guard the recursion to avoid the
+            // `top_level - 1` underflow (debug panic / release usize::MAX ->
+            // out-of-bounds index into `accumulators`).
+            if top_level > 0 {
+                propagate_down(
+                    half,
+                    top_level - 1,
+                    y / 2,
+                    &mut accumulators,
+                    &mut mono_accumulators,
+                    monolithic_threshold,
+                    plan,
+                    sink,
+                    &engine_cfg,
+                    observer,
+                    &tracker,
+                    &mut tiles_produced,
+                    &mut tiles_skipped,
+                )?;
+            }
         }
 
         strip_index_offset += batch_specs.len() as u32;
@@ -680,5 +688,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single-level plan underflow guard (issue #102)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod single_level_tests {
+    use super::*;
+    use crate::observe::NoopObserver;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlan, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+
+    fn gradient(w: u32, h: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                data[off] = (x % 256) as u8;
+                data[off + 1] = (y % 256) as u8;
+                data[off + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn run(plan: &PyramidPlan, src: &Raster) -> MemorySink {
+        let sink = MemorySink::new();
+        // Small budget forces the streaming/reduce path rather than a
+        // monolithic fallback, so the strip loop and propagate_down run.
+        let config = MapReduceConfig {
+            memory_budget_bytes: 100_000,
+            ..MapReduceConfig::default()
+        };
+        generate_pyramid_mapreduce(
+            &RasterStripSource::new(src),
+            plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .expect("single-level plan must run to completion without underflow panic");
+        sink
+    }
+
+    #[test]
+    fn google_single_tile_image_runs_to_completion() {
+        let src = gradient(256, 256);
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
+    }
+
+    #[test]
+    fn deepzoom_one_by_one_source_runs_to_completion() {
+        let src = gradient(1, 1);
+        let plan = PyramidPlanner::new(1, 1, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
     }
 }
