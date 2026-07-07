@@ -995,21 +995,29 @@ pub(crate) fn generate_pyramid_streaming(
         // Step 4: Push the half-strip into the recursive propagation tree.
         // It will be paired with another half-strip at the next level, or
         // appended to a monolithic accumulator if the level is small enough.
-        propagate_down(
-            half,
-            top_level - 1,
-            y / 2,
-            &mut accumulators,
-            &mut mono_accumulators,
-            monolithic_threshold,
-            plan,
-            sink,
-            &config.engine,
-            observer,
-            &tracker,
-            &mut tiles_produced,
-            &mut tiles_skipped,
-        )?;
+        //
+        // A single-level plan (top_level == 0) has no level below the top:
+        // the top-level tiles were already emitted in Step 2, so there is
+        // nothing left to propagate. Guard the recursion to avoid the
+        // `top_level - 1` underflow (debug panic / release usize::MAX ->
+        // out-of-bounds index into `accumulators`).
+        if top_level > 0 {
+            propagate_down(
+                half,
+                top_level - 1,
+                y / 2,
+                &mut accumulators,
+                &mut mono_accumulators,
+                monolithic_threshold,
+                plan,
+                sink,
+                &config.engine,
+                observer,
+                &tracker,
+                &mut tiles_produced,
+                &mut tiles_skipped,
+            )?;
+        }
 
         y += sh;
     }
