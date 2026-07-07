@@ -53,6 +53,15 @@ pub enum RasterError {
         height: u32,
         bytes: usize,
     },
+    #[error(
+        "upscale not supported: target {dst_w}x{dst_h} exceeds source {src_w}x{src_h} (downscale-only)"
+    )]
+    UpscaleNotSupported {
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+    },
 }
 
 /// Default ceiling, in bytes, on a single raster buffer allocation sized from
