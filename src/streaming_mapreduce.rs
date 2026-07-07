@@ -300,9 +300,12 @@ fn emit_strip_tiles_parallel(
 /// Generate a tile pyramid using the MapReduce streaming engine.
 ///
 /// Processes strips in parallel batches. Within each batch, strip rendering
-/// can happen concurrently (when `tile_concurrency > 0` and batch size > 1),
-/// while tile emission and propagation remain sequential to preserve the
-/// deterministic strip ordering required by `propagate_down`.
+/// can happen concurrently (when `tile_concurrency > 0`, batch size > 1, and
+/// the source opts in via [`StripSource::permits_concurrent_strips`]); sources
+/// that require the default sequential, increasing-`y` access pattern are
+/// rendered one strip at a time. Tile emission and propagation remain
+/// sequential regardless, to preserve the deterministic strip ordering required
+/// by `propagate_down`.
 ///
 /// # Pixel parity
 ///
@@ -400,8 +403,18 @@ pub(crate) fn generate_pyramid_mapreduce(
 
         let mut batch_tiles: u64 = 0;
 
-        // MAP: render all strips in this batch (parallel when beneficial)
-        let rendered_strips = if config.tile_concurrency > 0 && batch_specs.len() > 1 {
+        // MAP: render all strips in this batch (parallel when beneficial).
+        //
+        // Concurrent rendering issues `render_strip` from several threads at
+        // once and therefore out of `y` order. That only honours the
+        // `StripSource` contract for sources that opt in via
+        // `permits_concurrent_strips`; a default (cursor-based) source is
+        // promised sequential, strictly-increasing-`y` access, so it must take
+        // the sequential branch even when concurrency is enabled (issue #105).
+        let rendered_strips = if config.tile_concurrency > 0
+            && batch_specs.len() > 1
+            && source.permits_concurrent_strips()
+        {
             let mut strips: Vec<Option<Raster>> = vec![None; batch_specs.len()];
             std::thread::scope(|s| -> Result<(), EngineError> {
                 let mut handles = Vec::with_capacity(batch_specs.len());
