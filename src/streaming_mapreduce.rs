@@ -142,13 +142,24 @@ fn estimate_mono_buffer_cost(plan: &PyramidPlan, format: PixelFormat) -> u64 {
 
 /// Compute the number of in-flight strips that fit within a memory budget.
 ///
-/// Returns at least 1.
+/// The budget must accommodate *every* live buffer the Map phase holds at
+/// once: all `K` decoded strips, the per-level accumulators and monolithic
+/// buffer (`fixed_cost`), and the bounded tile channel backlog
+/// (`channel_bytes`). Charging the channel and all `K` strips — rather than a
+/// single strip — is what keeps the real RSS within the configured ceiling
+/// (issue #103); previously only the accumulators were charged, so `K` strips
+/// plus the channel could push the peak toward 2× budget.
+///
+/// Returns at least 1. When even a single strip does not fit, callers rely on
+/// the pre-flight [`EngineError::BudgetExceeded`] check in
+/// [`generate_pyramid_mapreduce`] to reject the budget up front.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
 pub fn compute_inflight_strips(
     plan: &PyramidPlan,
     format: PixelFormat,
     strip_height: u32,
+    channel_bytes: u64,
     memory_budget_bytes: u64,
 ) -> u32 {
     let bpp = format.bytes_per_pixel() as u64;
@@ -157,25 +168,35 @@ pub fn compute_inflight_strips(
         return 1;
     }
     let fixed_cost = estimate_accumulator_cost(plan, format, strip_height)
-        + estimate_mono_buffer_cost(plan, format);
+        + estimate_mono_buffer_cost(plan, format)
+        + channel_bytes;
     let available = memory_budget_bytes.saturating_sub(fixed_cost);
     let k = available / strip_cost;
-    k.max(1) as u32
+    // Clamp before the `u32` cast so a huge budget cannot wrap to a small (or
+    // zero) strip count, which would make the batch loop's `chunks(K)` panic.
+    k.min(u32::MAX as u64).max(1) as u32
 }
 
 /// Estimate peak memory for the MapReduce streaming engine.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
+///
+/// `channel_bytes` charges the bounded tile channel backlog (up to
+/// `buffer_size + concurrency` decoded tiles held in flight during parallel
+/// tile emission). It is included so the estimate reflects every live buffer,
+/// not just the strips and accumulators (issue #103).
 pub fn estimate_mapreduce_peak_memory(
     plan: &PyramidPlan,
     format: PixelFormat,
     strip_height: u32,
     inflight_strips: u32,
+    channel_bytes: u64,
 ) -> u64 {
     let bpp = format.bytes_per_pixel() as u64;
     let strip_cost = plan.canvas_width as u64 * strip_height as u64 * bpp;
     let fixed_cost = estimate_accumulator_cost(plan, format, strip_height)
-        + estimate_mono_buffer_cost(plan, format);
+        + estimate_mono_buffer_cost(plan, format)
+        + channel_bytes;
     let peak = inflight_strips as u64 * strip_cost + fixed_cost;
     peak + peak / 10
 }
@@ -299,9 +320,35 @@ pub(crate) fn generate_pyramid_mapreduce(
     let bpp = format.bytes_per_pixel();
     let engine_cfg = config.engine_config();
 
-    let strip_height = compute_strip_height(plan, format, config.memory_budget_bytes)
-        .unwrap_or(2 * plan.tile_size);
-    let inflight = compute_inflight_strips(plan, format, strip_height, config.memory_budget_bytes);
+    // Pre-flight (parity with the sequential engine, `streaming.rs`): the
+    // worst-case strip is one minimum aligned unit (2 × tile_size rows) at
+    // canvas width. If the budget cannot fit it, the engine cannot honour the
+    // budget no matter how it slices the work, so reject it up front instead
+    // of silently proceeding with an over-budget minimum strip (issue #103).
+    let min_strip_height = 2 * plan.tile_size;
+    let worst_case_strip_bytes = plan.canvas_width as u64 * min_strip_height as u64 * bpp as u64;
+    if worst_case_strip_bytes > config.memory_budget_bytes {
+        return Err(EngineError::BudgetExceeded {
+            strip_bytes: worst_case_strip_bytes,
+            budget_bytes: config.memory_budget_bytes,
+        });
+    }
+
+    let strip_height =
+        compute_strip_height(plan, format, config.memory_budget_bytes).unwrap_or(min_strip_height);
+
+    // The parallel tile-emission path (`emit_strip_tiles_parallel`) holds up to
+    // `buffer_size` decoded tiles in its bounded channel, plus one per worker
+    // in flight. Charge that backlog against the budget so the in-flight strip
+    // count leaves room for it and the peak estimate stays honest (issue #103).
+    let channel_bytes = if config.tile_concurrency > 0 {
+        let tile_bytes = plan.tile_size as u64 * plan.tile_size as u64 * bpp as u64;
+        (config.buffer_size as u64 + config.tile_concurrency as u64) * tile_bytes
+    } else {
+        0
+    };
+    let inflight =
+        compute_inflight_strips(plan, format, strip_height, channel_bytes, config.memory_budget_bytes);
 
     let ch = plan.canvas_height;
     let top_level = plan.levels.len() - 1;
@@ -378,6 +425,16 @@ pub(crate) fn generate_pyramid_mapreduce(
                 .collect::<Result<Vec<_>, _>>()?
         };
 
+        // All strips in this batch are now materialised simultaneously (the
+        // Map phase renders them concurrently, or sequentially into one Vec).
+        // Charge every one against the tracker here so the reported peak
+        // reflects the whole in-flight batch, not just the single strip being
+        // reduced. Each strip is released again after it is downscaled below,
+        // so the tracked total falls back as the batch drains (issue #103).
+        for strip in &rendered_strips {
+            tracker.alloc(strip.data().len() as u64);
+        }
+
         // REDUCE: for each rendered strip, emit tiles and propagate (sequential)
         for (i, strip) in rendered_strips.into_iter().enumerate() {
             let &(y, _) = &batch_specs[i];
@@ -389,7 +446,6 @@ pub(crate) fn generate_pyramid_mapreduce(
             });
 
             let strip_bytes = strip.data().len() as u64;
-            tracker.alloc(strip_bytes);
 
             // Emit tiles at the top level
             let (tp, ts_skip) = if config.tile_concurrency > 0 {
@@ -621,7 +677,7 @@ mod tests {
     fn compute_inflight_strips_at_least_one() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let k = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 1);
+        let k = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 1);
         assert!(k >= 1);
     }
 
@@ -629,8 +685,8 @@ mod tests {
     fn compute_inflight_strips_grows_with_budget() {
         let planner = PyramidPlanner::new(4096, 4096, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let small = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 1_000_000);
-        let large = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 100_000_000);
+        let small = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 1_000_000);
+        let large = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 100_000_000);
         assert!(large >= small);
     }
 
@@ -638,8 +694,8 @@ mod tests {
     fn estimate_mapreduce_peak_monotonic() {
         let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let est_1 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 1);
-        let est_4 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 4);
+        let est_1 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 1, 0);
+        let est_4 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 4, 0);
         assert!(est_4 > est_1);
     }
 
@@ -662,8 +718,10 @@ mod tests {
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
         let mr_sink = MemorySink::new();
+        // Budget fits the minimum aligned strip (256×256×3 = 196_608 bytes) so
+        // the run is admitted; it still exercises the streaming/reduce path.
         let config = MapReduceConfig {
-            memory_budget_bytes: 100_000,
+            memory_budget_bytes: 1_000_000,
             ..MapReduceConfig::default()
         };
         let strip_src = RasterStripSource::new(&src);
@@ -706,6 +764,72 @@ mod tests {
         assert!(
             matches!(err, EngineError::BudgetExceeded { .. }),
             "expected BudgetExceeded, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn estimate_accounts_for_channel_backlog() {
+        // The peak estimate must grow by (at least) the charged channel
+        // backlog — previously the channel-held tiles were invisible to the
+        // estimate, so the reported peak understated real RSS (issue #103).
+        let plan = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let without = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 2, 0);
+        let with = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 2, 4_000_000);
+        assert!(with > without);
+        assert!(with - without >= 4_000_000);
+    }
+
+    #[test]
+    fn inflight_strips_shrink_when_channel_charged() {
+        // Charging the channel backlog leaves less room for in-flight strips,
+        // so K must be non-increasing as the channel charge grows — this is
+        // what keeps K strips + channel within the ceiling (issue #103).
+        let plan = PyramidPlanner::new(8192, 8192, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let budget = 200_000_000u64;
+        let k_no_channel = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, budget);
+        let k_big_channel =
+            compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 100_000_000, budget);
+        assert!(k_no_channel > 1, "test needs a case where several strips fit");
+        assert!(k_big_channel <= k_no_channel);
+        assert!(k_big_channel >= 1);
+    }
+
+    #[test]
+    fn mapreduce_real_peak_within_budget() {
+        // End-to-end: with the in-flight strips now charged (both by the
+        // budgeter and the memory tracker), a constrained run keeps its real
+        // tracked peak within the configured budget instead of spiking toward
+        // 2× budget mid-batch (issue #103).
+        let src = gradient_raster(1024, 1024);
+        let plan = PyramidPlanner::new(1024, 1024, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let budget = 12_000_000u64;
+        let sink = MemorySink::new();
+        let config = MapReduceConfig {
+            memory_budget_bytes: budget,
+            ..MapReduceConfig::default()
+        };
+        let result = generate_pyramid_mapreduce(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap();
+        assert!(
+            result.peak_memory_bytes > 0,
+            "tracker should record the in-flight strips"
+        );
+        assert!(
+            result.peak_memory_bytes <= budget,
+            "real peak {} exceeded budget {budget}",
+            result.peak_memory_bytes,
         );
     }
 
@@ -760,10 +884,11 @@ mod single_level_tests {
 
     fn run(plan: &PyramidPlan, src: &Raster) -> MemorySink {
         let sink = MemorySink::new();
-        // Small budget forces the streaming/reduce path rather than a
-        // monolithic fallback, so the strip loop and propagate_down run.
+        // Modest budget that still fits a minimum aligned strip for these
+        // single-tile plans, so the strip loop and propagate_down run without
+        // tripping the pre-flight budget check.
         let config = MapReduceConfig {
-            memory_budget_bytes: 100_000,
+            memory_budget_bytes: 1_000_000,
             ..MapReduceConfig::default()
         };
         generate_pyramid_mapreduce(
