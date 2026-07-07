@@ -566,12 +566,62 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
 
 /// True if `coord` appears in `meta.completed_tiles`.
 ///
-/// Linear scan. Callers that need repeated lookups against a large checkpoint
-/// should build their own `HashSet<TileCoord>` once from
-/// `meta.completed_tiles`; for typical pyramid sizes this straightforward
-/// implementation is fast enough.
+/// Linear scan — O(n) in the number of completed tiles. Fine for a single
+/// ad-hoc probe, but a resume that tests *every* planned tile against a large
+/// checkpoint this way is O(n²). For repeated membership queries build a
+/// [`CompletedTileSet`] once (hashing the coordinates up front) and use its
+/// O(1) [`CompletedTileSet::contains`].
 pub fn is_tile_completed(meta: &JobMetadata, coord: &TileCoord) -> bool {
     meta.completed_tiles.iter().any(|c| c == coord)
+}
+
+/// O(1)-membership view over the tiles a checkpoint records as completed.
+///
+/// [`is_tile_completed`] scans `completed_tiles` linearly, so probing every
+/// planned tile against a large checkpoint during a resume is quadratic. A
+/// `CompletedTileSet` hashes the coordinates once; each
+/// [`contains`](CompletedTileSet::contains) query is then O(1), which keeps a
+/// resume's skip decision linear in the number of tiles rather than
+/// quadratic. Duplicate coordinates in the checkpoint collapse to a single
+/// entry.
+///
+/// Build one from a loaded [`JobMetadata`] via
+/// [`CompletedTileSet::from_metadata`], or collect it directly from an
+/// iterator of [`TileCoord`]s.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompletedTileSet {
+    tiles: std::collections::HashSet<TileCoord>,
+}
+
+impl CompletedTileSet {
+    /// Build the set from a checkpoint's `completed_tiles`, hashing each
+    /// coordinate once so later membership tests are O(1).
+    pub fn from_metadata(meta: &JobMetadata) -> Self {
+        meta.completed_tiles.iter().copied().collect()
+    }
+
+    /// O(1) membership test: `true` iff `coord` was recorded as completed.
+    pub fn contains(&self, coord: &TileCoord) -> bool {
+        self.tiles.contains(coord)
+    }
+
+    /// Number of distinct completed coordinates.
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// `true` when no completed tiles are recorded.
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+}
+
+impl FromIterator<TileCoord> for CompletedTileSet {
+    fn from_iter<I: IntoIterator<Item = TileCoord>>(iter: I) -> Self {
+        Self {
+            tiles: iter.into_iter().collect(),
+        }
+    }
 }
 
 /// The output *content contract* of a run: the non-geometry choices that
