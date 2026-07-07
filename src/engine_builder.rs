@@ -1186,4 +1186,52 @@ mod checkpoint_durability_tests {
             "Verify must keep the final-flush-only default"
         );
     }
+
+    // A plan whose declared image dimensions do not match the source raster
+    // must be rejected with a typed error at the engine entry point, not blow
+    // up inside `embed_in_canvas`'s slice copy. Here a centred Google plan for
+    // a 300x300 image (canvas 512x512, centre offset 106) is paired with a
+    // larger 500x500 source; the embed loop writes source rows past the end of
+    // the canvas buffer and panics on pre-fix code. After the fix the run
+    // returns `EngineError::PlanSourceMismatch` cleanly.
+    #[test]
+    fn run_collect_rejects_plan_source_dimension_mismatch() {
+        let source = Raster::new(500, 500, PixelFormat::Rgb8, vec![10u8; 500 * 500 * 3]).unwrap();
+        let plan = PyramidPlanner::new(300, 300, 256, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true)
+            .plan();
+
+        let result = EngineBuilder::new(&source, plan, MemorySink::new()).run_collect();
+
+        match result {
+            Err(EngineError::PlanSourceMismatch {
+                plan_width,
+                plan_height,
+                source_width,
+                source_height,
+            }) => {
+                assert_eq!((plan_width, plan_height), (300, 300));
+                assert_eq!((source_width, source_height), (500, 500));
+            }
+            other => panic!("expected PlanSourceMismatch, got {other:?}"),
+        }
+    }
+
+    // A hand-mutated plan with an empty level list underflows `levels.len() - 1`
+    // (debug panic / release silent zero-tile "success"). The engine must
+    // reject it with a typed error before it reaches that arithmetic.
+    #[test]
+    fn run_collect_rejects_plan_with_no_levels() {
+        let source = solid_source();
+        let mut plan = solid_plan();
+        plan.levels.clear();
+
+        let result = EngineBuilder::new(&source, plan, MemorySink::new()).run_collect();
+
+        assert!(
+            matches!(result, Err(EngineError::InvalidPlan { .. })),
+            "expected InvalidPlan for an empty-levels plan, got {result:?}"
+        );
+    }
 }
