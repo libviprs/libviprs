@@ -234,7 +234,7 @@ mod imp {
 
 #[cfg(all(test, not(loom)))]
 mod tests {
-    use super::{bounded, SendError};
+    use super::{SendError, bounded};
     use std::thread;
     use std::time::Duration;
 
