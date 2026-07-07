@@ -220,6 +220,17 @@ pub(crate) fn verify_from_strip_source(
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
+    // Tile paths whose raw content is a 1-byte placeholder pointing at a
+    // deduped payload under `_shared/` (issue #93). Legitimate markers even
+    // when the regenerated tile is not itself blank.
+    let blank_ref_paths: std::collections::HashSet<String> = read_manifest(root)
+        .and_then(|m| {
+            m.get("blank_references")
+                .and_then(|v| v.as_object())
+                .map(|o| o.keys().cloned().collect())
+        })
+        .unwrap_or_default();
+
     let cw = plan.canvas_width;
     let ch = plan.canvas_height;
     let dst_stride = cw as usize * bpp;
@@ -309,15 +320,35 @@ pub(crate) fn verify_from_strip_source(
                 let on_disk =
                     std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
 
-                if ext == "raw" && on_disk != expected_bytes {
-                    return Err(EngineError::ChecksumMismatch {
-                        tile: coord,
-                        expected: format!("{} bytes (raw)", expected_bytes.len()),
-                        got: format!(
-                            "{} bytes on disk differ from regenerated tile",
-                            on_disk.len()
-                        ),
-                    });
+                if ext == "raw" {
+                    if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
+                        // A 1-byte placeholder: either a blank-tile marker
+                        // (`BlankTileStrategy::Placeholder*`) or a dedupe
+                        // reference whose payload lives in `_shared/`. Validate
+                        // the regenerated tile's blankness / manifest reference
+                        // instead of byte-comparing the marker (issue #94).
+                        let is_dedupe_ref = plan
+                            .tile_path(coord, ext)
+                            .is_some_and(|rel| blank_ref_paths.contains(&rel));
+                        if !is_dedupe_ref
+                            && !crate::engine::regenerated_tile_matches_marker(&expected, config)
+                        {
+                            return Err(EngineError::ChecksumMismatch {
+                                tile: coord,
+                                expected: "blank tile (placeholder marker)".to_string(),
+                                got: "regenerated tile is not blank".to_string(),
+                            });
+                        }
+                    } else if on_disk != expected_bytes {
+                        return Err(EngineError::ChecksumMismatch {
+                            tile: coord,
+                            expected: format!("{} bytes (raw)", expected_bytes.len()),
+                            got: format!(
+                                "{} bytes on disk differ from regenerated tile",
+                                on_disk.len()
+                            ),
+                        });
+                    }
                 }
                 // Encoded formats (png/jpeg) fall through: existence
                 // check already passed, and fresh re-encoding is not
@@ -612,5 +643,51 @@ mod tests {
             }
             other => panic!("expected ChecksumMismatch, got {other:?}"),
         }
+    }
+
+    /// Raw-format strip Verify must recognize the 1-byte `BLANK_TILE_MARKER`
+    /// that `BlankTileStrategy::Placeholder` writes, rather than
+    /// byte-comparing it against the regenerated full tile (issue #94). A
+    /// fully-uniform source yields an all-placeholder pyramid.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_raw_placeholder_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (w, h, ts) = (256u32, 256u32, 128u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let src = Raster::new(
+            w,
+            h,
+            PixelFormat::Rgb8,
+            vec![7u8; w as usize * h as usize * bpp],
+        )
+        .unwrap();
+        let plan = PyramidPlanner::new(w, h, ts, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let sink = FsSink::new(&out, plan.clone()).with_format(TileFormat::Raw);
+        // Match the background to the solid fill so every edge-padded tile is
+        // also uniform, producing an all-placeholder pyramid.
+        let mut cfg = EngineConfig::default()
+            .with_blank_tile_strategy(crate::engine::BlankTileStrategy::Placeholder);
+        cfg.background_rgb = [7, 7, 7];
+        crate::engine::generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver)
+            .unwrap();
+
+        // Setup sanity: at least the first tile is a 1-byte marker on disk.
+        let first = plan.tile_coords().next().unwrap();
+        let rel = plan.tile_path(first, "raw").unwrap();
+        let on_disk = std::fs::read(out.join(&rel)).unwrap();
+        assert_eq!(
+            on_disk,
+            vec![crate::sink::BLANK_TILE_MARKER],
+            "placeholder run should write a 1-byte marker on disk"
+        );
+
+        let strip_src = RasterStripSource::new(&src);
+        verify_from_strip_source(&strip_src, &plan, &sink, &cfg, &NoopObserver)
+            .expect("raw placeholder pyramid must verify via strip path");
     }
 }

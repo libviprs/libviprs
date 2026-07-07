@@ -916,6 +916,18 @@ pub(crate) fn raster_verify(
     // `run_pyramid` because Verify must not touch the sink — the test
     // suite asserts the output directory is unchanged.
     let bg = config.background_rgb;
+
+    // Tile paths whose raw content is a 1-byte placeholder pointing at a
+    // deduped payload under `_shared/` (issue #93). These are legitimate
+    // markers even when the regenerated tile is not itself blank.
+    let blank_ref_paths: std::collections::HashSet<String> = read_manifest(root)
+        .and_then(|m| {
+            m.get("blank_references")
+                .and_then(|v| v.as_object())
+                .map(|o| o.keys().cloned().collect())
+        })
+        .unwrap_or_default();
+
     let mut current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
         embed_in_canvas(source, plan, bg)?
     } else {
@@ -966,9 +978,27 @@ pub(crate) fn raster_verify(
                     std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
 
                 if ext == "raw" {
-                    // Raw tiles are byte-exact: any mismatch (truncation,
-                    // flipped byte, padding drift) is corruption.
-                    if on_disk != expected_bytes {
+                    if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
+                        // A 1-byte placeholder: either a blank-tile marker
+                        // (`BlankTileStrategy::Placeholder*`) or a dedupe
+                        // reference whose payload lives in `_shared/`. Validate
+                        // the regenerated tile's blankness / manifest reference
+                        // instead of byte-comparing the marker (issue #94).
+                        let is_dedupe_ref = plan
+                            .tile_path(coord, &ext)
+                            .is_some_and(|rel| blank_ref_paths.contains(&rel));
+                        if !is_dedupe_ref
+                            && !regenerated_tile_matches_marker(&expected, config)
+                        {
+                            return Err(EngineError::ChecksumMismatch {
+                                tile: coord,
+                                expected: "blank tile (placeholder marker)".to_string(),
+                                got: "regenerated tile is not blank".to_string(),
+                            });
+                        }
+                    } else if on_disk != expected_bytes {
+                        // Raw tiles are byte-exact: any mismatch (truncation,
+                        // flipped byte, padding drift) is corruption.
                         return Err(EngineError::ChecksumMismatch {
                             tile: coord,
                             expected: format!("{} bytes (raw)", expected_bytes.len()),
@@ -1542,6 +1572,27 @@ pub fn is_blank_tile_with_tolerance(raster: &Raster, max_channel_delta: u8) -> b
             d <= max_channel_delta
         })
     })
+}
+
+/// Decides whether a 1-byte [`crate::sink::BLANK_TILE_MARKER`] on disk is a
+/// legitimate stand-in for the regenerated `expected` tile during raw-format
+/// Verify.
+///
+/// The sink writes the marker only for tiles it considered blank under the
+/// active [`BlankTileStrategy`], so Verify must re-apply the *same* blankness
+/// predicate rather than byte-comparing the marker against the full
+/// regenerated tile (issue #94). Under [`BlankTileStrategy::Emit`] no marker
+/// should ever have been written by the strategy itself, but dedupe can still
+/// emit markers independently; those are resolved by the caller via
+/// `blank_references`, and the strict [`is_blank_tile`] check here is a safe
+/// last resort.
+pub(crate) fn regenerated_tile_matches_marker(expected: &Raster, config: &EngineConfig) -> bool {
+    match config.blank_tile_strategy {
+        BlankTileStrategy::Placeholder | BlankTileStrategy::Emit => is_blank_tile(expected),
+        BlankTileStrategy::PlaceholderWithTolerance { max_channel_delta } => {
+            is_blank_tile_with_tolerance(expected, max_channel_delta)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2340,5 +2391,47 @@ mod tests {
             generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
+    }
+
+    /// Raw-format Verify must recognize the 1-byte `BLANK_TILE_MARKER` that
+    /// `BlankTileStrategy::Placeholder` writes for blank tiles, rather than
+    /// byte-comparing the marker against the regenerated full tile (issue
+    /// #94). A fully-uniform source produces an all-placeholder pyramid, so
+    /// every on-disk tile is a marker.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn raster_verify_accepts_raw_placeholder_markers() {
+        use crate::sink::{FsSink, TileFormat};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (w, h, ts) = (256u32, 256u32, 128u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let data = vec![7u8; w as usize * h as usize * bpp];
+        let src = Raster::new(w, h, PixelFormat::Rgb8, data).unwrap();
+        let plan = PyramidPlanner::new(w, h, ts, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let sink = FsSink::new(&out, plan.clone()).with_format(TileFormat::Raw);
+        // Match the background to the solid fill so every edge-padded tile is
+        // also uniform, producing an all-placeholder pyramid.
+        let mut cfg =
+            EngineConfig::default().with_blank_tile_strategy(BlankTileStrategy::Placeholder);
+        cfg.background_rgb = [7, 7, 7];
+        generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver).unwrap();
+
+        // Setup sanity: the run really did emit 1-byte markers on disk.
+        let first = plan.tile_coords().next().unwrap();
+        let rel = plan.tile_path(first, "raw").unwrap();
+        let on_disk = std::fs::read(out.join(&rel)).unwrap();
+        assert_eq!(
+            on_disk,
+            vec![crate::sink::BLANK_TILE_MARKER],
+            "placeholder run should write a 1-byte marker on disk"
+        );
+
+        raster_verify(&src, &plan, &sink, &cfg, &NoopObserver)
+            .expect("raw placeholder pyramid must verify");
     }
 }
