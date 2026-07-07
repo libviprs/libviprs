@@ -27,8 +27,6 @@
 //! - [`generate_pyramid_mapreduce_auto`] — auto-selects monolithic or MapReduce
 //!   based on the budget vs. estimated monolithic peak memory.
 
-use std::sync::Arc;
-
 use crate::engine::{BlankTileStrategy, EngineConfig, EngineError, EngineResult, is_blank_tile};
 use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::pixel::PixelFormat;
@@ -213,25 +211,24 @@ fn emit_strip_tiles_parallel(
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Tile, EngineError>>(config.buffer_size);
 
-    let strip_arc = Arc::new(strip.clone());
-    let plan_arc = Arc::new(plan.clone());
-
+    // Workers run under `std::thread::scope` and therefore cannot outlive
+    // this frame, so they borrow `strip` and `plan` directly. The previous
+    // `Arc::new(strip.clone())` held a full extra copy of the strip alive for
+    // the whole emission — memory the budget estimate never accounted for.
     let concurrency = config.tile_concurrency.min(coords.len());
     let chunk_size = coords.len().div_ceil(concurrency);
 
     std::thread::scope(|s| {
         for chunk in coords.chunks(chunk_size) {
             let tx = tx.clone();
-            let strip_arc = Arc::clone(&strip_arc);
-            let plan_arc = Arc::clone(&plan_arc);
             let chunk = chunk.to_vec();
             let bg = config.background_rgb;
 
             s.spawn(move || {
                 for coord in chunk {
                     let result = crate::streaming::extract_tile_from_strip(
-                        &strip_arc,
-                        &plan_arc,
+                        strip,
+                        plan,
                         coord,
                         strip_canvas_y,
                         bg,
