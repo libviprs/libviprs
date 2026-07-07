@@ -1282,9 +1282,12 @@ fn extract_and_emit_parallel(
     // work, matching the `queue_pressure_peak` field on EngineResult.
     let in_flight = Arc::new(AtomicU32::new(0));
 
-    // Share the raster across worker threads (read-only)
-    let raster = Arc::new(raster.clone());
-    let plan = Arc::new(plan.clone());
+    // Workers run under `std::thread::scope`, so they cannot outlive this
+    // frame; share the raster and plan by borrow rather than deep-cloning
+    // them into an `Arc`. The old clone held a full extra copy of the level
+    // raster alive for the whole emission (a hidden ~1x-source spike the
+    // MemoryTracker never charged); borrowing keeps the real peak in line
+    // with `peak_memory_bytes`.
 
     // Collect tile coordinates for this level, honouring the resume
     // checkpoint: tiles flagged as already complete are elided here so
@@ -1312,8 +1315,6 @@ fn extract_and_emit_parallel(
         // Spawn producer threads
         for chunk in coords.chunks(chunk_size) {
             let tx = tx.clone();
-            let raster = Arc::clone(&raster);
-            let plan = Arc::clone(&plan);
             let in_flight = Arc::clone(&in_flight);
             let chunk = chunk.to_vec();
             let bg = config.background_rgb;
@@ -1333,7 +1334,7 @@ fn extract_and_emit_parallel(
                     let _ = queue_peak.fetch_max(cur, Ordering::Relaxed);
 
                     let encode_start = Instant::now();
-                    let result = extract_tile(&raster, &plan, coord, bg)
+                    let result = extract_tile(raster, plan, coord, bg)
                         .map(|tile_raster| {
                             let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
                             Tile {
