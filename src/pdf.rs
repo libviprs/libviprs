@@ -872,6 +872,23 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
     Ok(PDFIUM.get().expect("PDFIUM was just set"))
 }
 
+/// Convert a rendered pdfium bitmap into an RGBA [`Raster`].
+///
+/// `as_image` is the bitmap conversion closure (in production,
+/// `|| bitmap.as_image()`); it is passed as a closure so the panic-prone
+/// step can be isolated. See the fix in [`Self`]'s callers for why.
+#[cfg(feature = "pdfium")]
+fn bitmap_to_raster<F>(as_image: F) -> Result<Raster, PdfError>
+where
+    F: FnOnce() -> image::DynamicImage,
+{
+    let img = as_image();
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let data = rgba.into_raw();
+    Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
+}
+
 /// Render a page at the given pixel dimensions and return a Raster.
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size(
@@ -889,12 +906,7 @@ pub(crate) fn render_at_size(
         .render_with_config(&config)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let img = bitmap.as_image();
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    let data = rgba.into_raw();
-
-    Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
+    bitmap_to_raster(|| bitmap.as_image())
 }
 
 /// Render a PDF page to a raster using PDFium.
@@ -1085,12 +1097,7 @@ pub(crate) fn render_page_strip_with_page(
         .render_with_config(&config)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let img = bitmap.as_image();
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    let data = rgba.into_raw();
-
-    Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
+    bitmap_to_raster(|| bitmap.as_image())
 }
 
 /// Result of a budget-constrained render, including the DPI that was used.
@@ -1287,6 +1294,44 @@ mod tests {
             }
             ImageData::Encoded(_) => panic!("expected decoded raster"),
         }
+    }
+
+    /// A dimension/length mismatch from pdfium — the case where
+    /// `PdfBitmap::as_image()`'s terminal `RgbaImage::from_raw(w, h,
+    /// bytes).map(...).unwrap()` finds `bytes.len() != w * h * 4` and
+    /// panics — must surface as a typed [`PdfError::Pdfium`], not unwind
+    /// out of the render worker and abort a MapReduce thread. The closure
+    /// reproduces that exact terminal expression: a 2x2 RGBA image needs
+    /// 16 bytes; it is handed 3, so `from_raw` returns `None` and the
+    /// `.unwrap()` panics.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn bitmap_to_raster_surfaces_dimension_mismatch_as_error() {
+        use image::{DynamicImage, RgbaImage};
+        let result = bitmap_to_raster(|| {
+            RgbaImage::from_raw(2, 2, vec![0u8; 3])
+                .map(DynamicImage::ImageRgba8)
+                .unwrap()
+        });
+        match result {
+            Err(PdfError::Pdfium(_)) => {}
+            other => panic!("expected Err(PdfError::Pdfium), got {other:?}"),
+        }
+    }
+
+    /// A well-formed bitmap must still convert into a `Raster` with the
+    /// declared dimensions — the panic guard must not reject valid input.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn bitmap_to_raster_accepts_valid_image() {
+        use image::{DynamicImage, RgbaImage};
+        let raster = bitmap_to_raster(|| {
+            DynamicImage::ImageRgba8(RgbaImage::from_raw(2, 2, vec![255u8; 16]).unwrap())
+        })
+        .unwrap();
+        assert_eq!(raster.width(), 2);
+        assert_eq!(raster.height(), 2);
+        assert_eq!(raster.format(), PixelFormat::Rgba8);
     }
 
     #[test]
