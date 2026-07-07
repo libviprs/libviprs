@@ -89,6 +89,14 @@ pub enum SinkError {
     /// #93).
     #[error("recorded tile missing from disk: {tile_rel_path}")]
     MissingTile { tile_rel_path: String },
+    /// Persisting the resume checkpoint failed while writing a tile through the
+    /// resume-aware sink wrapper. A sink can only surface a [`SinkError`], so
+    /// this variant carries the underlying [`crate::resume::ResumeError`]
+    /// verbatim; the engine promotes it back to
+    /// [`crate::engine::EngineError::ResumeFailed`] so a checkpoint failure is
+    /// reported with the same variant regardless of code path (issue #140).
+    #[error("checkpoint write failed: {0}")]
+    Checkpoint(#[source] crate::resume::ResumeError),
 }
 
 /// Single-byte marker written in place of blank tiles when using

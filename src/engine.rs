@@ -29,6 +29,14 @@ pub enum EngineError {
     Raster(#[from] RasterError),
     #[error("sink error: {0}")]
     Sink(#[from] SinkError),
+    /// A [`StripSource`](crate::streaming::StripSource) failed to produce a
+    /// strip. This wraps the source's own typed error (e.g. a
+    /// [`PdfError`](crate::pdf::PdfError), or any external source's error)
+    /// while preserving the [`std::error::Error::source`] chain, instead of
+    /// stringifying it into a [`SinkError::Other`] and mis-attributing a
+    /// source failure to storage (issue #140).
+    #[error("source error: {0}")]
+    Source(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("engine cancelled")]
     Cancelled,
     #[error("worker panicked")]
@@ -747,6 +755,11 @@ fn promote_sink_error(err: SinkError) -> EngineError {
                 got,
             }
         }
+        // A checkpoint-write failure that reached us via the resume-aware sink
+        // wrapper must surface with the same variant as the monolithic path,
+        // which maps `ResumeError` straight to `EngineError::ResumeFailed`
+        // (issue #140).
+        SinkError::Checkpoint(e) => EngineError::ResumeFailed(e),
         other => EngineError::Sink(other),
     }
 }
