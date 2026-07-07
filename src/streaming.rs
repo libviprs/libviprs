@@ -124,11 +124,26 @@ impl Default for StreamingConfig {
 ///
 /// - `render_strip(y, h)` must return a raster of width [`width()`](Self::width)
 ///   and height ≤ `h`, starting at row `y` in the full-resolution image.
-/// - The engine calls strips in strictly increasing `y` order, but may request
-///   different heights for the last strip if the image height is not a multiple
-///   of the strip height.
-/// - Implementations must be `Send + Sync` so they can be shared across threads
-///   in future parallel-strip extensions.
+/// - The engine may request different heights for the last strip if the image
+///   height is not a multiple of the strip height.
+/// - Implementations must be `Send + Sync` so they can be shared across threads.
+///
+/// ## Access ordering and concurrency
+///
+/// By default the engine calls [`render_strip`](Self::render_strip)
+/// **sequentially, in strictly increasing `y` order** — one call completes
+/// before the next begins, and each `y_offset` is greater than the previous
+/// one. This is the pattern a cursor-based source (a streamed TIFF decoder, a
+/// network byte stream) can rely on, and it holds across *every* engine,
+/// including the parallel MapReduce engine.
+///
+/// A source that is safe to call from multiple threads and in any `y` order —
+/// a random-access source such as [`RasterStripSource`] or
+/// [`PdfiumStripSource`] — may override
+/// [`permits_concurrent_strips`](Self::permits_concurrent_strips) to return
+/// `true`. Only then may the MapReduce MAP phase render several strips
+/// concurrently (and therefore out of `y` order) within a batch. Sources that
+/// leave the default in place are never called concurrently or out of order.
 pub trait StripSource: Send + Sync {
     /// Render or extract the horizontal band starting at `y_offset` with up to
     /// `height` rows, in full-resolution image coordinates.
@@ -139,6 +154,18 @@ pub trait StripSource: Send + Sync {
     fn height(&self) -> u32;
     /// Pixel format of every strip returned by [`render_strip`](Self::render_strip).
     fn format(&self) -> PixelFormat;
+
+    /// Whether the engine may call [`render_strip`](Self::render_strip)
+    /// concurrently from multiple threads and out of `y` order.
+    ///
+    /// Defaults to `false`, guaranteeing the sequential, strictly-increasing-`y`
+    /// access pattern described in the [trait contract](StripSource#access-ordering-and-concurrency).
+    /// Random-access sources whose `render_strip` is cheap and thread-safe from
+    /// any offset may override this to `true` to let the MapReduce engine render
+    /// strips in parallel batches; cursor-based sources must leave it `false`.
+    fn permits_concurrent_strips(&self) -> bool {
+        false
+    }
 }
 
 /// [`StripSource`] backed by an in-memory [`Raster`].
@@ -179,6 +206,12 @@ impl<'a> StripSource for RasterStripSource<'a> {
 
     fn format(&self) -> PixelFormat {
         self.raster.format()
+    }
+
+    fn permits_concurrent_strips(&self) -> bool {
+        // Random access: `extract` copies from an immutable `&Raster`, so any
+        // offset is safe from any thread, in any order.
+        true
     }
 }
 
@@ -758,6 +791,14 @@ impl StripSource for PdfiumStripSource {
 
     fn format(&self) -> PixelFormat {
         PixelFormat::Rgba8
+    }
+
+    fn permits_concurrent_strips(&self) -> bool {
+        // Both modes are safe for concurrent, out-of-order access:
+        // `CachedFullPage` slices an immutable cached raster, and `Streaming`
+        // holds the process-wide `pdfium_lock()` for the whole matrix render,
+        // serialising every FPDF call regardless of thread or offset.
+        true
     }
 }
 
