@@ -105,6 +105,36 @@ pub(crate) fn render_dims_within_budget(
     Ok((width, height))
 }
 
+/// Choose the render DPI so the rasterized page fits within `max_pixels`,
+/// preferring `max_dpi` when the page already fits. Returns
+/// `(dpi_used, capped)`, where `capped` is true when the DPI was reduced to
+/// honor the budget.
+///
+/// The pixel estimate is taken in `f64`: an adversarial `/MediaBox` large
+/// enough to overflow a `u64` product would otherwise wrap to a small value
+/// that slips under `max_pixels`, skipping the reduction branch and running
+/// the render at full DPI — the exact OOM the budget exists to prevent. In
+/// `f64` an overflowing product saturates toward `inf` and compares correctly.
+#[cfg(any(feature = "pdfium", test))]
+pub(crate) fn budgeted_render_dpi(
+    width_pts: f64,
+    height_pts: f64,
+    max_dpi: u32,
+    max_pixels: u64,
+) -> (u32, bool) {
+    let scale_at_max = max_dpi as f64 / 72.0;
+    let pixels_at_max = (width_pts * scale_at_max) * (height_pts * scale_at_max);
+
+    if pixels_at_max <= max_pixels as f64 {
+        (max_dpi, false)
+    } else {
+        // scale = sqrt(max_pixels / (w_pts * h_pts)), then dpi = scale * 72
+        let scale = (max_pixels as f64 / (width_pts * height_pts)).sqrt();
+        let dpi = (scale * 72.0).floor() as u32;
+        (dpi.max(1), true)
+    }
+}
+
 /// Allocate a zeroed RGBA8 buffer of `width × height` pixels using fallible
 /// allocation, so an adversarial size yields a typed error rather than an
 /// allocator abort.
@@ -1259,18 +1289,8 @@ pub fn render_page_pdfium_budgeted(
     let width_pts = pdf_page.width().value as f64;
     let height_pts = pdf_page.height().value as f64;
 
-    // Compute the DPI that fits within the pixel budget
-    let scale_at_max = max_dpi as f64 / 72.0;
-    let pixels_at_max = (width_pts * scale_at_max) as u64 * (height_pts * scale_at_max) as u64;
-
-    let (dpi_used, capped) = if pixels_at_max <= max_pixels {
-        (max_dpi, false)
-    } else {
-        // scale = sqrt(max_pixels / (w_pts * h_pts)), then dpi = scale * 72
-        let scale = (max_pixels as f64 / (width_pts * height_pts)).sqrt();
-        let dpi = (scale * 72.0).floor() as u32;
-        (dpi.max(1), true)
-    };
+    // Compute the DPI that fits within the pixel budget.
+    let (dpi_used, capped) = budgeted_render_dpi(width_pts, height_pts, max_dpi, max_pixels);
 
     let scale = dpi_used as f32 / 72.0;
     let width = (width_pts as f32 * scale) as u32;
@@ -1404,6 +1424,42 @@ mod tests {
             render_dims_within_budget(612.0, 792.0, 150, DEFAULT_MAX_RENDER_PIXELS).unwrap();
         // Matches the production `(pts * scale) as u32` truncation byte-for-byte.
         assert_eq!((w, h), (1275, 1649));
+    }
+
+    /// An adversarial page whose pixel estimate overflows a `u64` product
+    /// must still trip the DPI-reduction branch. Estimated in `u64`, the
+    /// product `2^62 × 2^34 = 2^96` wraps to `0` and slips under the budget,
+    /// bypassing the cap and rendering at full DPI. Estimated in `f64` the
+    /// product is `~7.9e28`, far above the `2^30` budget, so the render must
+    /// be capped.
+    #[test]
+    fn budgeted_render_dpi_overflow_cannot_bypass_budget() {
+        // At max_dpi = 72 the scale is 1.0, so the device-pixel dimensions
+        // equal the point dimensions: 2^62 × 2^34 device px.
+        let width_pts = (1u64 << 62) as f64;
+        let height_pts = (1u64 << 34) as f64;
+        let (dpi_used, capped) =
+            budgeted_render_dpi(width_pts, height_pts, 72, DEFAULT_MAX_RENDER_PIXELS);
+        assert!(
+            capped,
+            "overflowing pixel estimate must still trigger DPI reduction"
+        );
+        assert!(
+            dpi_used < 72,
+            "capped DPI must be below the requested max, got {dpi_used}"
+        );
+    }
+
+    /// A normal Letter page at 300 DPI (~2550 × 3300 ≈ 8.4M px) sits well
+    /// under the `2^30` budget and must render at the requested DPI with no
+    /// capping — the overflow-safe estimate must not over-reduce legitimate
+    /// input.
+    #[test]
+    fn budgeted_render_dpi_normal_page_uses_max_dpi() {
+        let (dpi_used, capped) =
+            budgeted_render_dpi(612.0, 792.0, 300, DEFAULT_MAX_RENDER_PIXELS);
+        assert_eq!(dpi_used, 300);
+        assert!(!capped, "a page within budget must not be capped");
     }
 
     /// The zero-strip fill (`width × height × 4`) overflows `usize` for
