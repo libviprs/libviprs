@@ -745,7 +745,7 @@ fn resolve_dpi_under_budget(
 impl StripSource for PdfiumStripSource {
     fn render_strip(&self, y_offset: u32, height: u32) -> Result<Raster, EngineError> {
         self.render_strip_inner(y_offset, height)
-            .map_err(|e| EngineError::Sink(crate::sink::SinkError::Other(e.to_string())))
+            .map_err(|e| EngineError::Source(Box::new(e)))
     }
 
     fn width(&self) -> u32 {

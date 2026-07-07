@@ -29,6 +29,14 @@ pub enum EngineError {
     Raster(#[from] RasterError),
     #[error("sink error: {0}")]
     Sink(#[from] SinkError),
+    /// A [`StripSource`](crate::streaming::StripSource) failed to produce a
+    /// strip. This wraps the source's own typed error (e.g. a
+    /// [`PdfError`](crate::pdf::PdfError), or any external source's error)
+    /// while preserving the [`std::error::Error::source`] chain, instead of
+    /// stringifying it into a [`SinkError::Other`] and mis-attributing a
+    /// source failure to storage (issue #140).
+    #[error("source error: {0}")]
+    Source(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("engine cancelled")]
     Cancelled,
     #[error("worker panicked")]
@@ -747,6 +755,11 @@ fn promote_sink_error(err: SinkError) -> EngineError {
                 got,
             }
         }
+        // A checkpoint-write failure that reached us via the resume-aware sink
+        // wrapper must surface with the same variant as the monolithic path,
+        // which maps `ResumeError` straight to `EngineError::ResumeFailed`
+        // (issue #140).
+        SinkError::Checkpoint(e) => EngineError::ResumeFailed(e),
         other => EngineError::Sink(other),
     }
 }
@@ -1708,6 +1721,34 @@ mod tests {
     use crate::pixel::PixelFormat;
     use crate::planner::{Layout, PyramidPlanner};
     use crate::sink::MemorySink;
+
+    /// Issue #140: a checkpoint-write failure must surface as *one* variant
+    /// regardless of the code path. The monolithic tile loop maps
+    /// `ResumeError` straight to `EngineError::ResumeFailed`; the resume-wrapper
+    /// sink can only return a `SinkError`, so it now carries the typed
+    /// `SinkError::Checkpoint`. `promote_sink_error` must lift that back to the
+    /// same `EngineError::ResumeFailed` variant the monolithic path produces —
+    /// otherwise the identical failure is reported as two different errors.
+    #[test]
+    fn checkpoint_failure_unifies_to_resume_failed() {
+        let resume = || ResumeError::SchemaMismatch {
+            expected: "1",
+            found: "99".to_string(),
+        };
+
+        // Path A: monolithic loop maps ResumeError -> EngineError directly.
+        let monolithic: EngineError = EngineError::from(resume());
+        assert!(matches!(monolithic, EngineError::ResumeFailed(_)));
+
+        // Path B: resume-wrapper sink returns SinkError::Checkpoint, which the
+        // engine promotes on the way out.
+        let via_sink = promote_sink_error(SinkError::Checkpoint(resume()));
+        assert!(
+            matches!(via_sink, EngineError::ResumeFailed(_)),
+            "checkpoint failure via the sink path must promote to the same \
+             EngineError::ResumeFailed variant as the monolithic path, got {via_sink:?}"
+        );
+    }
 
     fn gradient_raster(w: u32, h: u32) -> Raster {
         let bpp = PixelFormat::Rgb8.bytes_per_pixel();
