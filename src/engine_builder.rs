@@ -975,7 +975,7 @@ mod resume {
             self.inner.write_tile(tile)?;
             if let Some(cp) = self.cp {
                 cp.mark_tile_completed(tile.coord)
-                    .map_err(|e| SinkError::Other(format!("checkpoint: {e}")))?;
+                    .map_err(SinkError::Checkpoint)?;
             }
             Ok(())
         }
