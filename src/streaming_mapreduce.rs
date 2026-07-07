@@ -679,6 +679,37 @@ mod tests {
     }
 
     #[test]
+    fn mapreduce_rejects_budget_too_small_for_strip() {
+        // A 512×512 RGB8 image with tile_size 256 has a minimum aligned strip
+        // of 2×256 = 512 rows → 512×512×3 = 786_432 bytes. A budget below that
+        // cannot honour the memory ceiling, so the engine must reject it up
+        // front with `BudgetExceeded` — parity with the sequential streaming
+        // engine — instead of silently proceeding with an over-budget minimum
+        // strip.
+        let src = gradient_raster(512, 512);
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = MapReduceConfig {
+            memory_budget_bytes: 100_000,
+            ..MapReduceConfig::default()
+        };
+        let sink = MemorySink::new();
+        let err = generate_pyramid_mapreduce(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EngineError::BudgetExceeded { .. }),
+            "expected BudgetExceeded, got {err:?}",
+        );
+    }
+
+    #[test]
     fn mapreduce_auto_selects_monolithic_for_large_budget() {
         let src = gradient_raster(256, 256);
         let planner = PyramidPlanner::new(256, 256, 128, 0, Layout::DeepZoom).unwrap();
