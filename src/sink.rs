@@ -81,6 +81,14 @@ pub enum SinkError {
     /// `"PackfileSinkBuilder::plan"`.
     #[error("required builder field not set: {0}")]
     MissingField(&'static str),
+    /// A tile whose digest was recorded during `write_tile` had no
+    /// corresponding file on disk at verification time. A recorded tile that
+    /// vanished (deleted, or never durably written) is a verification
+    /// failure rather than something to skip silently, unless it is a
+    /// manifest-referenced blank whose content lives in `_shared/` (issue
+    /// #93).
+    #[error("recorded tile missing from disk: {tile_rel_path}")]
+    MissingTile { tile_rel_path: String },
 }
 
 /// Single-byte marker written in place of blank tiles when using
@@ -1021,7 +1029,10 @@ impl FsSink {
                             // tile path now holds the 1-byte sentinel, so its
                             // recorded digest must describe that sentinel — not
                             // the full payload captured during `WriteNew`.
-                            let _ = std::fs::write(&p.tile_abs_path, [0u8]);
+                            // Propagate the write error: an ENOSPC/EACCES here
+                            // would otherwise leave no file at the tile path
+                            // yet report success (issue #93).
+                            std::fs::write(&p.tile_abs_path, [0u8])?;
                             self.record_tile_digest(&p.tile_rel_path, &[0u8]);
                             self.manifest_refs
                                 .lock()
@@ -1075,7 +1086,20 @@ impl FsSink {
             let abs = self.base_dir.join(rel);
             let bytes = match std::fs::read(&abs) {
                 Ok(b) => b,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // A recorded tile that is gone from disk is a verification
+                    // failure — a tile that was recorded then deleted (or
+                    // never durably written) must not pass silently (issue
+                    // #93). The sole exemption is a manifest-referenced blank
+                    // whose real content lives in `_shared/`; its 1-byte
+                    // sentinel may legitimately be absent.
+                    if self.manifest_refs.lock().unwrap().contains_key(rel) {
+                        continue;
+                    }
+                    return Err(SinkError::MissingTile {
+                        tile_rel_path: rel.clone(),
+                    });
+                }
                 Err(e) => return Err(SinkError::Io(e)),
             };
             let got_bytes = hash_tile_raw(&bytes, algo);
@@ -1981,5 +2005,73 @@ mod tests {
             "unexpected mismatches: {:?}",
             report.tiles_mismatched
         );
+    }
+
+    /**
+     * Regression for issue #93: a tile whose digest was recorded during
+     * `write_tile` and then removed from disk (deleted, or never durably
+     * written) must fail `ChecksumMode::Verify`. Before the fix the on-disk
+     * verifier skipped `NotFound` silently, so a recorded-then-deleted tile
+     * passed verification and the run reported success over missing content.
+     *
+     * A manifest-referenced blank (whose real bytes live in `_shared/`) is
+     * still exempt: its 1-byte sentinel may be absent without being a failure.
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn verify_recorded_tile_deleted_from_disk_fails() {
+        use crate::checksum::ChecksumMode;
+        use crate::manifest::ChecksumAlgo;
+
+        let planner = PyramidPlanner::new(8, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        let coord = TileCoord::new(top.level, 0, 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("output_files");
+        let sink = FsSink::new(base.clone(), plan.clone())
+            .with_format(TileFormat::Png)
+            .with_checksums(ChecksumMode::Verify, ChecksumAlgo::Blake3);
+
+        let rect = plan.tile_rect(coord).unwrap();
+        let tile = Tile {
+            coord,
+            raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+            blank: false,
+        };
+        sink.write_tile(&tile).unwrap();
+
+        // The digest is now recorded and the file exists. A healthy verify
+        // passes.
+        sink.verify_digests_on_disk()
+            .expect("verify must pass while the recorded tile is present");
+
+        // Delete the recorded tile from disk, then verify again: this must be
+        // reported as a failure, not silently skipped.
+        let rel = plan
+            .tile_path(coord, TileFormat::Png.extension())
+            .unwrap();
+        let abs = base.join(&rel);
+        assert!(abs.exists(), "recorded tile should exist before deletion");
+        std::fs::remove_file(&abs).unwrap();
+
+        let err = sink
+            .verify_digests_on_disk()
+            .expect_err("verify must fail when a recorded tile is missing");
+        match err {
+            SinkError::MissingTile { tile_rel_path } => {
+                assert_eq!(tile_rel_path, rel);
+            }
+            other => panic!("expected MissingTile, got {other:?}"),
+        }
+
+        // Exemption: a manifest-referenced blank may be absent without failing.
+        sink.manifest_refs
+            .lock()
+            .unwrap()
+            .insert(rel.clone(), "_shared/deadbeef.png".to_string());
+        sink.verify_digests_on_disk()
+            .expect("manifest-referenced blank may be absent");
     }
 }

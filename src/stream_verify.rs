@@ -157,6 +157,13 @@ pub(crate) fn verify_from_strip_source(
                     _ => None,
                 };
                 if let Some(algo) = algo {
+                    // A recorded tile that is gone from disk is a verification
+                    // failure, not something to skip — unless it is a
+                    // manifest-referenced blank whose content lives in
+                    // `_shared/` (issue #93).
+                    let blank_refs = manifest
+                        .get("blank_references")
+                        .and_then(|v| v.as_object());
                     for (rel, expected) in per_tile {
                         let Some(expected_s) = expected.as_str() else {
                             continue;
@@ -174,7 +181,14 @@ pub(crate) fn verify_from_strip_source(
                         };
                         let got = match crate::checksum::hash_file(&abs, algo) {
                             Ok(g) => g,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                if blank_refs.is_some_and(|m| m.contains_key(rel)) {
+                                    continue;
+                                }
+                                return Err(EngineError::Sink(SinkError::MissingTile {
+                                    tile_rel_path: rel.clone(),
+                                }));
+                            }
                             Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
                         };
                         if !got.eq_ignore_ascii_case(expected_s) {
