@@ -2050,4 +2050,33 @@ mod tests {
             "expected DecompressionLimitExceeded, got {err:?}"
         );
     }
+
+    /// The pdfium library must never be resolved from the current working
+    /// directory. With no explicit `PDFIUM_PATH` configured, resolution
+    /// yields `None` so the caller falls back to the system library search
+    /// path — it must not hand back `./` (or any relative cwd marker),
+    /// which is the CWE-427 injection vector.
+    #[test]
+    fn pdfium_path_never_defaults_to_cwd() {
+        use std::path::PathBuf;
+
+        // Unset → system fallback (None), never the current directory.
+        assert_eq!(resolve_pdfium_path(None), None);
+        // Empty value is treated as unset, not as "./".
+        assert_eq!(resolve_pdfium_path(Some(std::ffi::OsString::new())), None);
+
+        // Whatever a caller supplies, the resolver must not silently
+        // substitute a relative cwd marker.
+        for raw in ["/opt/pdfium/lib", "/usr/local/lib/libpdfium.dylib"] {
+            let resolved = resolve_pdfium_path(Some(raw.into()))
+                .expect("an explicit PDFIUM_PATH resolves to Some");
+            assert_eq!(resolved, PathBuf::from(raw));
+            assert_ne!(resolved, PathBuf::from("./"));
+            assert_ne!(resolved, PathBuf::from("."));
+            assert!(
+                resolved.is_absolute(),
+                "an explicit absolute PDFIUM_PATH stays absolute, not cwd-relative"
+            );
+        }
+    }
 }
