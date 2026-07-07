@@ -151,12 +151,18 @@ pub(crate) fn verify_from_strip_source(
             let algo_str = checksums.get("algo").and_then(|v| v.as_str());
             let per_tile = checksums.get("per_tile").and_then(|v| v.as_object());
             if let (Some(algo_str), Some(per_tile)) = (algo_str, per_tile) {
-                let algo = match algo_str {
-                    "blake3" => Some(crate::manifest::ChecksumAlgo::Blake3),
-                    "sha256" => Some(crate::manifest::ChecksumAlgo::Sha256),
-                    _ => None,
-                };
-                if let Some(algo) = algo {
+                // Route through the single shared parser. An unknown / future
+                // / typo'd algorithm is a hard verification failure here, not
+                // something to silently skip — otherwise a manifest stamped
+                // with a bogus algo would pass with zero digests checked
+                // (issue #95).
+                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str)
+                    .ok_or_else(|| {
+                        EngineError::Sink(SinkError::Other(format!(
+                            "Verify: unknown checksum algorithm {algo_str:?} in manifest"
+                        )))
+                    })?;
+                {
                     // A recorded tile that is gone from disk is a verification
                     // failure, not something to skip — unless it is a
                     // manifest-referenced blank whose content lives in
@@ -535,6 +541,101 @@ mod tests {
         )
         .unwrap();
         (sink, plan, src)
+    }
+
+    /// Like [`build_raw_pyramid`] but attaches a manifest with a per-tile
+    /// checksum table (BLAKE3) so the manifest-checksum branch of verify is
+    /// exercised. Returns the same pieces plus the pyramid output dir so the
+    /// caller can tamper the emitted `manifest.json`.
+    fn build_raw_pyramid_with_checksums(
+        dir: &std::path::Path,
+        w: u32,
+        h: u32,
+        tile_size: u32,
+    ) -> (FsSink, PyramidPlan, Raster) {
+        use crate::checksum::ChecksumMode;
+        use crate::manifest::{ChecksumAlgo, ManifestBuilder};
+        let src = gradient(w, h);
+        let plan = PyramidPlanner::new(w, h, tile_size, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let sink = FsSink::new(dir, plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_manifest(ManifestBuilder::new())
+            .with_checksums(ChecksumMode::EmitOnly, ChecksumAlgo::Blake3);
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        (sink, plan, src)
+    }
+
+    /// Overwrite the `checksums.algo` field of every emitted `manifest.json`
+    /// (sibling `<dir>.manifest.json` and the in-dir copy) with `algo`,
+    /// leaving the `per_tile` table intact.
+    fn rewrite_manifest_algo(dir: &std::path::Path, algo: &str) {
+        let mut targets = Vec::new();
+        if let (Some(parent), Some(stem)) = (dir.parent(), dir.file_name()) {
+            let mut name = stem.to_os_string();
+            name.push(".manifest.json");
+            targets.push(parent.join(name));
+        }
+        targets.push(dir.join("manifest.json"));
+
+        let mut rewritten = 0;
+        for path in targets {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            v.get_mut("checksums")
+                .and_then(|c| c.as_object_mut())
+                .expect("manifest must record a checksums table")
+                .insert("algo".into(), serde_json::json!(algo));
+            std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+            rewritten += 1;
+        }
+        assert!(rewritten > 0, "no manifest.json was found to rewrite");
+    }
+
+    /// Issue #95: a manifest stamped with an unknown checksum algorithm must
+    /// FAIL streaming verify, not be silently skipped. Before the fix the
+    /// manifest-checksum branch mapped an unrecognised algo to `None` and
+    /// skipped the entire per-tile digest phase, so an intact pyramid whose
+    /// manifest was re-stamped with a bogus algo reported success with zero
+    /// digests checked.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_rejects_unknown_algo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_raw_pyramid_with_checksums(&out, 256, 256, 128);
+
+        // Re-stamp the manifest with a future / typo'd algorithm the engine
+        // does not support, keeping the (correct) per-tile digests in place.
+        rewrite_manifest_algo(&out, "totally-bogus-algo");
+
+        let strip_src = RasterStripSource::new(&src);
+        let err = verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .expect_err("verify must reject a manifest with an unknown checksum algorithm");
+
+        match err {
+            EngineError::Sink(SinkError::Other(msg)) => assert!(
+                msg.contains("unknown checksum algorithm"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected SinkError::Other for unknown algo, got {other:?}"),
+        }
     }
 
     /// Happy path: an intact raw pyramid verifies cleanly via the stream
