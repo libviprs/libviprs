@@ -1386,7 +1386,36 @@ impl FsSink {
             last_checkpoint_at: timestamp,
         };
 
-        JobCheckpoint::save(&self.base_dir, &meta).map_err(SinkError::Io)?;
+        // Durability ordering (issue #122): fsync the tile data written since
+        // the last flush *before* the checkpoint that certifies it is
+        // published. Otherwise a power loss can leave the synced checkpoint
+        // pointing at tiles whose bytes were still in the page cache, and
+        // resume would skip those coordinates forever.
+        let to_sync: Vec<PathBuf> = {
+            let mut guard = self.unsynced_tiles.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        let mut seen = std::collections::HashSet::new();
+        for path in &to_sync {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            match self.durability.sync_file(path) {
+                Ok(()) => {}
+                // A path can legitimately be absent by flush time — e.g. a
+                // dedupe first-occurrence file promoted into `_shared/` and
+                // replaced by a hardlink. The surviving link/target is synced
+                // via its own tracked entry, so a missing path here is not a
+                // durability failure.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SinkError::Io(e)),
+            }
+        }
+
+        // `save_with` fsyncs the checkpoint payload and then its directory,
+        // so the rename that publishes the checkpoint is itself durable.
+        JobCheckpoint::save_with(&self.base_dir, &meta, &*self.durability)
+            .map_err(SinkError::Io)?;
         Ok(())
     }
 }
