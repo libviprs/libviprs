@@ -498,6 +498,55 @@ mod tests {
             "expected SizeOverflow from new, not an Ok with a short buffer, got {result:?}"
         );
     }
+
+    /**
+     * Tests that a multi-gigabyte allocation request driven from untrusted
+     * dimensions is rejected with a typed error instead of aborting the process.
+     * 50000 x 50000 x Rgba16 is ~20 GB — below the usize-overflow threshold
+     * (so `buffer_len` succeeds) but far above the allocation budget, so an
+     * infallible `vec![0u8; size]` would call `handle_alloc_error` and SIGABRT.
+     * Input: zeroed(50000,50000,Rgba16) → Output: Err(ByteBudgetExceeded).
+     */
+    #[test]
+    fn zeroed_multi_gb_request_returns_budget_error_not_abort() {
+        let result = Raster::zeroed(50_000, 50_000, PixelFormat::Rgba16);
+        assert!(
+            matches!(result, Err(RasterError::ByteBudgetExceeded { .. })),
+            "expected ByteBudgetExceeded from zeroed, got {result:?}"
+        );
+    }
+
+    /**
+     * Tests that Raster::new also rejects an over-budget declared size before
+     * accepting an already-allocated buffer, so an attacker cannot smuggle a
+     * multi-GB raster in through the pre-allocated path either. The buffer is
+     * intentionally short (the budget check must fire before the size check).
+     * Input: new(50000,50000,Rgba16, short buffer) → Output: Err(ByteBudgetExceeded).
+     */
+    #[test]
+    fn new_over_budget_dimensions_rejected() {
+        let result = Raster::new(50_000, 50_000, PixelFormat::Rgba16, vec![0u8; 8]);
+        assert!(
+            matches!(result, Err(RasterError::ByteBudgetExceeded { .. })),
+            "expected ByteBudgetExceeded from new, got {result:?}"
+        );
+    }
+
+    /**
+     * Tests that the budget is configurable: a size that exceeds a caller-set
+     * budget is rejected, while the same size succeeds under a budget that
+     * admits it. Uses `zeroed_with_budget` with a tiny 100-byte budget against
+     * a 10x10 Gray8 (100-byte) raster (admitted at 100, rejected at 99).
+     * Input: zeroed_with_budget(10,10,Gray8, 99|100) → Output: Err | Ok.
+     */
+    #[test]
+    fn zeroed_with_budget_is_configurable() {
+        assert!(matches!(
+            Raster::zeroed_with_budget(10, 10, PixelFormat::Gray8, 99),
+            Err(RasterError::ByteBudgetExceeded { .. })
+        ));
+        assert!(Raster::zeroed_with_budget(10, 10, PixelFormat::Gray8, 100).is_ok());
+    }
 }
 
 #[cfg(test)]
