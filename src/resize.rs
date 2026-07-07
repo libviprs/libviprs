@@ -229,7 +229,39 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
     let src_w = src.width();
     let src_h = src.height();
 
-    let mut dst = vec![0u8; dst_w as usize * dst_h as usize * bpp];
+    // `downscale_to` is downscale-only: reject any target larger than the
+    // source in either axis. This bounds the output buffer to the source's
+    // already-allocated size, so an adversarial `u32` target (e.g. a crafted
+    // PDF page at a large `--dpi` saturating to `u32::MAX`) cannot drive a
+    // multi-gigapixel allocation or overflow the size arithmetic below.
+    if dst_w > src_w || dst_h > src_h {
+        return Err(RasterError::UpscaleNotSupported {
+            src_w,
+            src_h,
+            dst_w,
+            dst_h,
+        });
+    }
+
+    // Fallible allocation: compute the length with checked arithmetic (defence
+    // in depth — the bound above already keeps it within the source size) and
+    // reserve via `try_reserve` so an allocation failure surfaces as a typed
+    // error instead of aborting the process.
+    let len = (dst_w as usize)
+        .checked_mul(dst_h as usize)
+        .and_then(|px| px.checked_mul(bpp))
+        .ok_or(RasterError::SizeOverflow {
+            width: dst_w,
+            height: dst_h,
+            bpp,
+        })?;
+    let mut dst: Vec<u8> = Vec::new();
+    dst.try_reserve(len).map_err(|_| RasterError::AllocationFailed {
+        width: dst_w,
+        height: dst_h,
+        bytes: len,
+    })?;
+    dst.resize(len, 0);
 
     for dy in 0..dst_h {
         for dx in 0..dst_w {
@@ -471,6 +503,35 @@ mod tests {
         let src = solid_raster(4, 4, &[10, 20, 30, 40], PixelFormat::Rgba8);
         let result = downscale_to(&src, u32::MAX, u32::MAX);
         assert!(result.is_err(), "expected Err for saturated target, got Ok");
+        assert!(
+            matches!(result, Err(RasterError::UpscaleNotSupported { .. })),
+            "expected UpscaleNotSupported, got {result:?}"
+        );
+    }
+
+    /**
+     * Tests that downscale_to enforces its downscale-only contract: a target
+     * larger than the source in either axis is rejected with a typed error
+     * rather than allocating an unbounded buffer, while an equal-size target
+     * (a no-op downscale) is still accepted.
+     *
+     * Input: downscale_to(8x8, 9, 8) -> Err(UpscaleNotSupported);
+     *        downscale_to(8x8, 8, 9) -> Err(UpscaleNotSupported);
+     *        downscale_to(8x8, 8, 8) -> Ok.
+     */
+    #[test]
+    fn downscale_to_upscale_rejected() {
+        let src = solid_raster(8, 8, &[42], PixelFormat::Gray8);
+        assert!(matches!(
+            downscale_to(&src, 9, 8),
+            Err(RasterError::UpscaleNotSupported { .. })
+        ));
+        assert!(matches!(
+            downscale_to(&src, 8, 9),
+            Err(RasterError::UpscaleNotSupported { .. })
+        ));
+        // Equal size is a valid (no-op) downscale.
+        assert!(downscale_to(&src, 8, 8).is_ok());
     }
 
     /**
