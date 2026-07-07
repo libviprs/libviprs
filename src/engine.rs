@@ -172,6 +172,12 @@ pub struct EngineConfig {
     /// out of the hash, preserving the geometry-only behaviour for callers
     /// that do not compute a digest.
     pub source_content_hash: Option<String>,
+    /// Optional cooperative-cancellation token. When set, the engine polls it
+    /// at level / tile / strip boundaries (and the retry backoff sleeps in
+    /// short slices so it can be interrupted) and stops with
+    /// [`EngineError::Cancelled`] once the token is cancelled. `None` (the
+    /// default) is a run that cannot be cancelled.
+    pub cancel: Option<crate::cancel::CancelToken>,
 }
 
 impl Default for EngineConfig {
@@ -186,6 +192,7 @@ impl Default for EngineConfig {
             dedupe_strategy: None,
             checkpoint_root: None,
             source_content_hash: None,
+            cancel: None,
         }
     }
 }
@@ -282,6 +289,25 @@ impl EngineConfig {
     pub fn with_source_content_hash(mut self, digest: impl Into<String>) -> Self {
         self.source_content_hash = Some(digest.into());
         self
+    }
+
+    /// Attach a [`CancelToken`](crate::cancel::CancelToken) so the run can be
+    /// cooperatively cancelled. See the [`cancel`](crate::cancel) module for
+    /// the polling contract.
+    pub fn with_cancel(mut self, token: crate::cancel::CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    /// Returns `Err(EngineError::Cancelled)` when a cancel token is attached
+    /// and has been cancelled; otherwise `Ok(())`. Callers poll this at
+    /// cooperative checkpoints in the tiling loops.
+    #[inline]
+    pub(crate) fn check_cancelled(&self) -> Result<(), EngineError> {
+        match &self.cancel {
+            Some(token) if token.is_cancelled() => Err(EngineError::Cancelled),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -457,6 +483,9 @@ fn run_pyramid(
 
     // Process from top level (full res) down to level 0 (1×1)
     for level_idx in (0..plan.levels.len()).rev() {
+        // Cooperative cancellation: stop cleanly at the level boundary before
+        // committing to (potentially expensive) downscale + tile emission.
+        config.check_cancelled()?;
         let level = &plan.levels[level_idx];
         #[cfg(feature = "tracing")]
         let _level_span = tracing::info_span!(
@@ -1204,6 +1233,9 @@ fn extract_and_emit_level(
         let mut skipped = 0u64;
         for row in 0..level_plan.rows {
             for col in 0..level_plan.cols {
+                // Cooperative cancellation: poll before extracting each tile
+                // so a long single-threaded level can be stopped promptly.
+                config.check_cancelled()?;
                 let coord = TileCoord::new(level, col, row);
                 // Honor the resume checkpoint: tiles already present on disk
                 // (per an inbound `.libviprs-job.json`) are not re-emitted.
@@ -1242,6 +1274,11 @@ fn extract_and_emit_level(
                     Err(e) => {
                         ctx.stage_sink
                             .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        // A write that failed because its retry backoff was
+                        // interrupted by a cancellation must surface as
+                        // Cancelled, not be swallowed by RetryThenSkip or
+                        // reported as a plain sink error.
+                        config.check_cancelled()?;
                         match &config.failure_policy {
                             FailurePolicy::RetryThenSkip(_) => {
                                 // Account the skip on the outermost sink so
@@ -1374,6 +1411,12 @@ fn extract_and_emit_parallel(
 
             s.spawn(move || {
                 for coord in chunk {
+                    // Cooperative cancellation: stop feeding tiles into the
+                    // channel as soon as the run is cancelled. The consumer
+                    // observes the cancel independently and returns Cancelled.
+                    if config.check_cancelled().is_err() {
+                        break;
+                    }
                     // Queue-pressure gauge: count active producers. A
                     // producer is "in flight" while it is extracting a
                     // tile and attempting to hand it off. The peak is
@@ -1419,6 +1462,10 @@ fn extract_and_emit_parallel(
         let mut count = 0u64;
         let mut skipped = 0u64;
         for result in rx {
+            // Cooperative cancellation: stop draining the channel and return
+            // Cancelled. Producers observe the same token and wind down; the
+            // scope join then reaps them.
+            config.check_cancelled()?;
             let tile = result?;
             let coord = tile.coord;
             if tile.blank {
@@ -1438,6 +1485,11 @@ fn extract_and_emit_parallel(
                 Err(e) => {
                     ctx.stage_sink
                         .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    // A write that failed because its retry backoff was
+                    // interrupted by a cancellation must surface as Cancelled,
+                    // not be swallowed by RetryThenSkip or reported as a plain
+                    // sink error.
+                    config.check_cancelled()?;
                     match &config.failure_policy {
                         FailurePolicy::RetryThenSkip(_) => {
                             sink.note_sink_skipped();
