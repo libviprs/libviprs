@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -538,6 +539,17 @@ pub struct FsSink {
     /// checkpoint. Capacity is pre-reserved from the plan's total tile
     /// count at construction so per-tile pushes never reallocate.
     completed_tiles: Mutex<Vec<TileCoord>>,
+    /// Absolute paths of tile files written since the last checkpoint flush,
+    /// populated only when resume is enabled. Before a checkpoint is
+    /// certified these are fsynced so the checkpoint never records tiles
+    /// whose bytes are still in the page cache (issue #122). Includes the
+    /// planned tile paths and any `_shared/` files materialised by the
+    /// dedupe path.
+    unsynced_tiles: Mutex<Vec<PathBuf>>,
+    /// Durability backend used to fsync tile data and the checkpoint
+    /// directory. Defaults to real `fsync`; tests inject a recorder to
+    /// assert the durability ordering.
+    durability: Arc<dyn crate::resume::Durability + Send + Sync>,
     /// Set to true the first time we observe `tile.blank == true` or a
     /// blank tile is detected while deduping. Used to infer
     /// `sparse_policy.dedupe`.
@@ -629,9 +641,26 @@ impl FsSink {
             per_level_counts,
             pixel_format: OnceLock::new(),
             completed_tiles: Mutex::new(Vec::with_capacity(completed_cap)),
+            unsynced_tiles: Mutex::new(Vec::new()),
+            durability: Arc::new(crate::resume::RealDurability),
             saw_blank: AtomicBool::new(false),
             engine_config: Mutex::new(None),
         }
+    }
+
+    /// Override the durability backend (test seam).
+    ///
+    /// Production sinks use the default [`RealDurability`](crate::resume::RealDurability)
+    /// installed by [`FsSink::new`]. Tests inject a recorder so the fsync
+    /// ordering — tile data synced before the checkpoint that certifies it —
+    /// can be asserted, since it is invisible in on-disk state.
+    #[cfg(test)]
+    pub(crate) fn with_durability(
+        mut self,
+        durability: Arc<dyn crate::resume::Durability + Send + Sync>,
+    ) -> Self {
+        self.durability = durability;
+        self
     }
 
     /// Attach a [`ManifestBuilder`](crate::manifest::ManifestBuilder) so the
@@ -822,6 +851,7 @@ impl TileSink for FsSink {
             std::fs::write(&abs_path, &bytes)?;
             // Non-dedupe path: the full encoded bytes are what lands on disk.
             self.record_tile_digest(&rel_string, &bytes);
+            self.track_unsynced(&abs_path);
             false
         };
 
@@ -923,6 +953,19 @@ impl FsSink {
     /// with the recorded digest (issue #92).
     ///
     /// A no-op when checksums are disabled or no algorithm has been selected.
+    /// Record a freshly-written absolute path as needing an `fsync` before
+    /// the next checkpoint flush. A no-op when resume is disabled (nothing
+    /// certifies durability, so the cost is not warranted). Issue #122.
+    fn track_unsynced(&self, abs_path: &Path) {
+        if !self.resume_enabled {
+            return;
+        }
+        self.unsynced_tiles
+            .lock()
+            .unwrap()
+            .push(abs_path.to_path_buf());
+    }
+
     fn record_tile_digest(&self, rel: &str, materialized: &[u8]) {
         if self.checksums == crate::checksum::ChecksumMode::None {
             return;
@@ -961,6 +1004,7 @@ impl FsSink {
                 std::fs::write(abs_path, bytes)?;
                 // The full encoded payload lives at the tile path.
                 self.record_tile_digest(rel_string, bytes);
+                self.track_unsynced(abs_path);
 
                 let shared_rel_string = shared_path.to_string_lossy().replace('\\', "/");
                 let shared_abs_path = self.base_dir.join(&shared_path);
@@ -1073,6 +1117,11 @@ impl FsSink {
                 // digest of what is actually on disk so Verify/verify_output
                 // agree (issue #92).
                 self.record_tile_digest(rel_string, &[0u8]);
+                // Both the placeholder at the tile path and the shared file
+                // that actually holds the content must be durable before the
+                // checkpoint certifies this coordinate (issue #122).
+                self.track_unsynced(abs_path);
+                self.track_unsynced(&shared_abs_path);
                 self.manifest_refs
                     .lock()
                     .unwrap()
@@ -1336,6 +1385,7 @@ impl FsSink {
             started_at: timestamp.clone(),
             last_checkpoint_at: timestamp,
         };
+
         JobCheckpoint::save(&self.base_dir, &meta).map_err(SinkError::Io)?;
         Ok(())
     }
@@ -2081,5 +2131,162 @@ mod tests {
             .insert(rel.clone(), "_shared/deadbeef.png".to_string());
         sink.verify_digests_on_disk()
             .expect("manifest-referenced blank may be absent");
+    }
+
+    // -- Durability ordering (issue #122) --
+
+    /// One recorded durability operation, in call order.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DurEvent {
+        File(PathBuf),
+        Dir(PathBuf),
+    }
+
+    /// A [`Durability`](crate::resume::Durability) backend that records the
+    /// order of `fsync` calls (and still performs the real syncs) so tests
+    /// can assert that tile data is made durable before the checkpoint that
+    /// certifies it.
+    struct RecordingDurability {
+        events: Mutex<Vec<DurEvent>>,
+    }
+
+    impl crate::resume::Durability for RecordingDurability {
+        fn sync_file(&self, path: &Path) -> std::io::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(DurEvent::File(path.to_path_buf()));
+            let f = std::fs::File::open(path)?;
+            f.sync_all()
+        }
+
+        fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(DurEvent::Dir(path.to_path_buf()));
+            #[cfg(unix)]
+            {
+                let f = std::fs::File::open(path)?;
+                f.sync_all()
+            }
+            #[cfg(not(unix))]
+            {
+                Ok(())
+            }
+        }
+    }
+
+    /**
+     * Tests the durability ordering fix for issue #122: with resume enabled,
+     * every tile written must be fsynced *before* the checkpoint that
+     * certifies it, and the checkpoint directory must be fsynced *after* the
+     * checkpoint file is renamed into place.
+     *
+     * Works by injecting a recording durability backend, writing a small
+     * pyramid, and calling finish(). The recorded event log must contain one
+     * file-fsync per tile (durability of the certified data) and end with a
+     * directory-fsync of the base dir (durability of the checkpoint's rename),
+     * with every tile-data sync strictly preceding that directory sync.
+     *
+     * Fails on the pre-fix code because no fsync of tile data or the
+     * checkpoint directory occurred at all (the recorder log would be empty).
+     */
+    #[test]
+    #[cfg(not(miri))]
+    fn resume_checkpoint_syncs_tile_data_before_certifying() {
+        let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("out_files");
+
+        let recorder = Arc::new(RecordingDurability {
+            events: Mutex::new(Vec::new()),
+        });
+
+        let sink = FsSink::new(base.clone(), plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_resume(true)
+            .with_durability(recorder.clone());
+
+        // Write every tile in the plan.
+        let mut written = 0usize;
+        for lp in &plan.levels {
+            for col in 0..lp.cols {
+                for row in 0..lp.rows {
+                    let tile = Tile {
+                        coord: TileCoord::new(lp.level, col, row),
+                        raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
+                        blank: false,
+                    };
+                    sink.write_tile(&tile).unwrap();
+                    written += 1;
+                }
+            }
+        }
+        assert!(written > 0, "plan should produce at least one tile");
+
+        sink.finish().unwrap();
+
+        let events = recorder.events.lock().unwrap().clone();
+        assert!(
+            !events.is_empty(),
+            "durability backend must record fsyncs (issue #122 regression)"
+        );
+
+        // Exactly one directory fsync, of the base dir, and it is the last
+        // event: the checkpoint's directory entry is made durable only after
+        // all tile data has been synced.
+        let dir_positions: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| matches!(e, DurEvent::Dir(_)).then_some(i))
+            .collect();
+        assert_eq!(
+            dir_positions.len(),
+            1,
+            "expected exactly one directory fsync, got events: {events:?}"
+        );
+        let dir_idx = dir_positions[0];
+        assert_eq!(
+            events[dir_idx],
+            DurEvent::Dir(base.clone()),
+            "directory fsync must target the checkpoint base dir"
+        );
+        assert_eq!(
+            dir_idx,
+            events.len() - 1,
+            "directory fsync must be the final durability op"
+        );
+
+        // Every tile written must have been fsynced, and all tile-data syncs
+        // must precede the directory sync that certifies the checkpoint.
+        let file_events: Vec<&PathBuf> = events
+            .iter()
+            .filter_map(|e| match e {
+                DurEvent::File(p) => Some(p),
+                DurEvent::Dir(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            file_events.len(),
+            written,
+            "expected one tile-data fsync per written tile"
+        );
+        for lp in &plan.levels {
+            for col in 0..lp.cols {
+                for row in 0..lp.rows {
+                    let rel = plan
+                        .tile_path(TileCoord::new(lp.level, col, row), "raw")
+                        .unwrap();
+                    let abs = base.join(&rel);
+                    assert!(
+                        file_events.iter().any(|p| **p == abs),
+                        "tile {abs:?} was never fsynced before the checkpoint"
+                    );
+                }
+            }
+        }
     }
 }
