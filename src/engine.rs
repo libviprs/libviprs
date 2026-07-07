@@ -916,12 +916,18 @@ pub(crate) fn raster_verify(
                 checksums.get("algo").and_then(|v| v.as_str()),
                 checksums.get("per_tile").and_then(|v| v.as_object()),
             ) {
-                let algo = match algo_str {
-                    "blake3" => Some(crate::manifest::ChecksumAlgo::Blake3),
-                    "sha256" => Some(crate::manifest::ChecksumAlgo::Sha256),
-                    _ => None,
-                };
-                if let Some(algo) = algo {
+                // Route through the single shared parser. An unknown / future
+                // / typo'd algorithm is a hard verification failure here, not
+                // something to silently skip — otherwise a manifest stamped
+                // with a bogus algo would pass with zero digests checked
+                // (issue #95).
+                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str)
+                    .ok_or_else(|| {
+                        EngineError::Sink(SinkError::Other(format!(
+                            "Verify: unknown checksum algorithm {algo_str:?} in manifest"
+                        )))
+                    })?;
+                {
                     // A recorded tile that is gone from disk is a verification
                     // failure, not something to skip — unless it is a
                     // manifest-referenced blank whose content lives in
