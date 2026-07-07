@@ -101,6 +101,25 @@ impl ChecksumAlgo {
         }
     }
 
+    /// Parse the lowercase manifest string form (`"blake3"` / `"sha256"`)
+    /// back into a [`ChecksumAlgo`]. Returns `None` for any unrecognised
+    /// name.
+    ///
+    /// This is the single canonical parser shared by every verify path — the
+    /// post-hoc [`verify_output`](crate::checksum::verify_output), the
+    /// monolithic `raster_verify`, and the streaming
+    /// `verify_from_strip_source`. Routing all three through one function
+    /// guarantees an unknown / future / typo'd algorithm fails verification
+    /// uniformly instead of being silently mapped to "no checksums" in some
+    /// paths and to an error in others.
+    pub fn from_manifest_str(s: &str) -> Option<Self> {
+        match s {
+            "blake3" => Some(Self::Blake3),
+            "sha256" => Some(Self::Sha256),
+            _ => None,
+        }
+    }
+
     /// Hashes `bytes` and returns the lowercase hex digest.
     pub fn hash(&self, bytes: &[u8]) -> String {
         match self {
@@ -730,6 +749,29 @@ mod tests {
         assert_eq!(s, "\"blake3\"");
         let s2 = serde_json::to_string(&ChecksumAlgo::Sha256).unwrap();
         assert_eq!(s2, "\"sha256\"");
+    }
+
+    // Issue #95: the shared manifest-string parser must round-trip both
+    // known algorithms and reject any unknown name, so every verify path can
+    // route through this one definition and fail uniformly on a bogus algo.
+    #[test]
+    fn from_manifest_str_roundtrips_and_rejects_unknown() {
+        assert_eq!(
+            ChecksumAlgo::from_manifest_str("blake3"),
+            Some(ChecksumAlgo::Blake3)
+        );
+        assert_eq!(
+            ChecksumAlgo::from_manifest_str("sha256"),
+            Some(ChecksumAlgo::Sha256)
+        );
+        // Future / typo'd / unsupported names must not parse.
+        assert_eq!(ChecksumAlgo::from_manifest_str("md5"), None);
+        assert_eq!(ChecksumAlgo::from_manifest_str("BLAKE3"), None);
+        assert_eq!(ChecksumAlgo::from_manifest_str(""), None);
+        // Parsing is the exact inverse of `as_str` for every variant.
+        for algo in [ChecksumAlgo::Blake3, ChecksumAlgo::Sha256] {
+            assert_eq!(ChecksumAlgo::from_manifest_str(algo.as_str()), Some(algo));
+        }
     }
 
     #[test]
