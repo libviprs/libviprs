@@ -2341,4 +2341,46 @@ mod tests {
         assert_eq!(result.tiles_produced, plan.total_tile_count());
         assert_eq!(sink.tile_count() as u64, plan.total_tile_count());
     }
+
+    /// Raw-format Verify must recognize the 1-byte `BLANK_TILE_MARKER` that
+    /// `BlankTileStrategy::Placeholder` writes for blank tiles, rather than
+    /// byte-comparing the marker against the regenerated full tile (issue
+    /// #94). A fully-uniform source produces an all-placeholder pyramid, so
+    /// every on-disk tile is a marker.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn raster_verify_accepts_raw_placeholder_markers() {
+        use crate::sink::{FsSink, TileFormat};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (w, h, ts) = (256u32, 256u32, 128u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let data = vec![7u8; w as usize * h as usize * bpp];
+        let src = Raster::new(w, h, PixelFormat::Rgb8, data).unwrap();
+        let plan = PyramidPlanner::new(w, h, ts, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let sink = FsSink::new(&out, plan.clone()).with_format(TileFormat::Raw);
+        // Match the background to the solid fill so every edge-padded tile is
+        // also uniform, producing an all-placeholder pyramid.
+        let mut cfg =
+            EngineConfig::default().with_blank_tile_strategy(BlankTileStrategy::Placeholder);
+        cfg.background_rgb = [7, 7, 7];
+        generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver).unwrap();
+
+        // Setup sanity: the run really did emit 1-byte markers on disk.
+        let first = plan.tile_coords().next().unwrap();
+        let rel = plan.tile_path(first, "raw").unwrap();
+        let on_disk = std::fs::read(out.join(&rel)).unwrap();
+        assert_eq!(
+            on_disk,
+            vec![crate::sink::BLANK_TILE_MARKER],
+            "placeholder run should write a 1-byte marker on disk"
+        );
+
+        raster_verify(&src, &plan, &sink, &cfg, &NoopObserver)
+            .expect("raw placeholder pyramid must verify");
+    }
 }
