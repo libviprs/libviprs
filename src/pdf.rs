@@ -948,6 +948,28 @@ pub(crate) fn pdfium_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Decide the explicit pdfium library path from a raw `PDFIUM_PATH` value.
+///
+/// Pure policy helper so the resolution decision is unit-testable without
+/// touching the process environment or an installed pdfium binary.
+///
+/// - `None` / empty → the caller falls back to the system library search
+///   path. The current working directory is **never** substituted, closing
+///   the CWE-427 library-injection vector where a planted
+///   `./libpdfium.{dylib,so,dll}` in a writable working directory would be
+///   loaded ahead of the trusted system library.
+/// - a directory → the platform library file name is appended by the
+///   caller via `pdfium_platform_library_name_at_path`.
+/// - a file → used verbatim as the library to bind.
+#[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
+fn resolve_pdfium_path(raw: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let raw = raw?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(raw))
+}
+
 /// Open a pdfium instance with the appropriate bindings.
 #[cfg(feature = "pdfium")]
 pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, PdfError> {
@@ -972,10 +994,23 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
     #[cfg(feature = "pdfium-static")]
     let bindings =
         Pdfium::bind_to_statically_linked_library().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+    // Resolve the library explicitly from `PDFIUM_PATH`, then fall back to
+    // the trusted system search path. The current working directory is never
+    // consulted (CWE-427): a directory value has the platform library file
+    // name appended, a file value is bound verbatim, and an unset/empty value
+    // defers entirely to `bind_to_system_library`.
     #[cfg(not(feature = "pdfium-static"))]
-    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+    let bindings = match resolve_pdfium_path(std::env::var_os("PDFIUM_PATH")) {
+        Some(path) => {
+            let library = if path.is_dir() {
+                Pdfium::pdfium_platform_library_name_at_path(&path)
+            } else {
+                path
+            };
+            Pdfium::bind_to_library(library).map_err(|e| PdfError::Pdfium(e.to_string()))?
+        }
+        None => Pdfium::bind_to_system_library().map_err(|e| PdfError::Pdfium(e.to_string()))?,
+    };
     let pdfium = Pdfium::new(bindings);
     let _ = PDFIUM.set(pdfium);
     Ok(PDFIUM.get().expect("PDFIUM was just set"))
