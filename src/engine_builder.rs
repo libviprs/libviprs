@@ -40,6 +40,37 @@ use crate::streaming::{
 };
 use crate::streaming_mapreduce::{MapReduceConfig, generate_pyramid_mapreduce};
 
+/// Checks that a [`PyramidPlan`] is internally well-formed and describes the
+/// source it is about to be run against.
+///
+/// A `PyramidPlan` obtained from [`PyramidPlanner::plan`](crate::PyramidPlanner::plan)
+/// always upholds these invariants, but the plan and the source are supplied
+/// independently to the engine, so a mismatched pair (or a plan that was
+/// mutated after construction) could otherwise reach code that trusts
+/// `plan.image_width/height` and a non-empty `plan.levels`. Enforcing the
+/// invariants here turns what were out-of-bounds slice copies and an
+/// arithmetic underflow into typed, recoverable errors (issue #132).
+fn validate_plan_for_source(
+    plan: &PyramidPlan,
+    source_width: u32,
+    source_height: u32,
+) -> Result<(), EngineError> {
+    if plan.levels.is_empty() {
+        return Err(EngineError::InvalidPlan {
+            reason: "plan has no levels",
+        });
+    }
+    if plan.image_width != source_width || plan.image_height != source_height {
+        return Err(EngineError::PlanSourceMismatch {
+            plan_width: plan.image_width,
+            plan_height: plan.image_height,
+            source_width,
+            source_height,
+        });
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // EngineKind
 // ---------------------------------------------------------------------------
@@ -455,6 +486,19 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         };
 
         let kind = resolve_engine_kind(engine_kind, &source);
+
+        // Validate the plan against the source before any engine driver runs.
+        // Both the monolithic and streaming paths trust `plan.image_width/height`
+        // and `plan.levels` (canvas embedding, tile extraction, `levels.len() - 1`).
+        // A plan built for different dimensions than the supplied source, or a
+        // structurally invalid plan, is rejected here with a typed error rather
+        // than being allowed to reach an out-of-bounds slice copy or an
+        // arithmetic underflow deeper in the pipeline (issue #132).
+        let (source_width, source_height) = match &source {
+            EngineSource::Raster(raster) => (raster.width(), raster.height()),
+            EngineSource::Strip(strip) => (strip.width(), strip.height()),
+        };
+        validate_plan_for_source(&plan, source_width, source_height)?;
 
         // Unified resume path: every engine kind now flows through the
         // same (skip, cp) + ResumeAwareSink pipeline. Verify is a
@@ -1184,6 +1228,54 @@ mod checkpoint_durability_tests {
             ResumePolicy::verify().checkpoint_every(),
             0,
             "Verify must keep the final-flush-only default"
+        );
+    }
+
+    // A plan whose declared image dimensions do not match the source raster
+    // must be rejected with a typed error at the engine entry point, not blow
+    // up inside `embed_in_canvas`'s slice copy. Here a centred Google plan for
+    // a 300x300 image (canvas 512x512, centre offset 106) is paired with a
+    // larger 500x500 source; the embed loop writes source rows past the end of
+    // the canvas buffer and panics on pre-fix code. After the fix the run
+    // returns `EngineError::PlanSourceMismatch` cleanly.
+    #[test]
+    fn run_collect_rejects_plan_source_dimension_mismatch() {
+        let source = Raster::new(500, 500, PixelFormat::Rgb8, vec![10u8; 500 * 500 * 3]).unwrap();
+        let plan = PyramidPlanner::new(300, 300, 256, 0, Layout::Google)
+            .unwrap()
+            .with_centre(true)
+            .plan();
+
+        let result = EngineBuilder::new(&source, plan, MemorySink::new()).run_collect();
+
+        match result {
+            Err(EngineError::PlanSourceMismatch {
+                plan_width,
+                plan_height,
+                source_width,
+                source_height,
+            }) => {
+                assert_eq!((plan_width, plan_height), (300, 300));
+                assert_eq!((source_width, source_height), (500, 500));
+            }
+            other => panic!("expected PlanSourceMismatch, got {other:?}"),
+        }
+    }
+
+    // A hand-mutated plan with an empty level list underflows `levels.len() - 1`
+    // (debug panic / release silent zero-tile "success"). The engine must
+    // reject it with a typed error before it reaches that arithmetic.
+    #[test]
+    fn run_collect_rejects_plan_with_no_levels() {
+        let source = solid_source();
+        let mut plan = solid_plan();
+        plan.levels.clear();
+
+        let result = EngineBuilder::new(&source, plan, MemorySink::new()).run_collect();
+
+        assert!(
+            matches!(result, Err(EngineError::InvalidPlan { .. })),
+            "expected InvalidPlan for an empty-levels plan, got {result:?}"
         );
     }
 }
