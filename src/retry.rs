@@ -281,6 +281,10 @@ pub struct RetryingSink<S: TileSink> {
     skipped_due_to_failure: AtomicU64,
     /// Per-sink monotonic tick used to de-correlate jitter across calls.
     jitter_tick: AtomicU64,
+    /// Optional cooperative-cancellation token. When set, the exponential
+    /// backoff sleeps in short slices and aborts between them, so an in-flight
+    /// retry does not have to run its full schedule before the run can stop.
+    cancel: Option<crate::cancel::CancelToken>,
 }
 
 impl<S: TileSink> RetryingSink<S> {
@@ -292,7 +296,18 @@ impl<S: TileSink> RetryingSink<S> {
             retry_count: AtomicU64::new(0),
             skipped_due_to_failure: AtomicU64::new(0),
             jitter_tick: AtomicU64::new(0),
+            cancel: None,
         }
+    }
+
+    /// Attach a [`CancelToken`](crate::cancel::CancelToken) so an in-flight
+    /// backoff can be interrupted. The engine wires this from
+    /// [`EngineConfig::cancel`](crate::engine::EngineConfig::cancel); a
+    /// cancelled token stops the retry loop, and the engine then reports the
+    /// run as [`EngineError::Cancelled`](crate::engine::EngineError::Cancelled).
+    pub fn with_cancel(mut self, token: Option<crate::cancel::CancelToken>) -> Self {
+        self.cancel = token;
+        self
     }
 
     /// Total number of retry attempts observed by this sink so far.
@@ -325,7 +340,12 @@ impl<S: TileSink> RetryingSink<S> {
     }
 
     /// Sleep for the computed backoff, adding jitter if enabled.
-    fn backoff_sleep(&self, attempt: u32) {
+    ///
+    /// When a [`CancelToken`](crate::cancel::CancelToken) is attached, the
+    /// sleep is broken into short slices and abandoned as soon as the token is
+    /// cancelled. Returns `true` if the full backoff elapsed, `false` if it was
+    /// cut short by cancellation.
+    fn backoff_sleep(&self, attempt: u32) -> bool {
         let base = compute_backoff(&self.policy, attempt);
         let total = if self.policy.jitter {
             let max_jitter_nanos = (base / 2).as_nanos() as u64;
@@ -334,9 +354,27 @@ impl<S: TileSink> RetryingSink<S> {
         } else {
             base
         };
-        if !total.is_zero() {
-            thread::sleep(total);
+        if total.is_zero() {
+            return true;
         }
+        // No cancel token: sleep the whole duration in one go (fast path).
+        let Some(cancel) = &self.cancel else {
+            thread::sleep(total);
+            return true;
+        };
+        // Interruptible sleep: poll the token between short slices so an
+        // in-flight backoff can be aborted well before its full schedule.
+        const SLICE: Duration = Duration::from_millis(25);
+        let mut remaining = total;
+        while !remaining.is_zero() {
+            if cancel.is_cancelled() {
+                return false;
+            }
+            let step = remaining.min(SLICE);
+            thread::sleep(step);
+            remaining -= step;
+        }
+        !cancel.is_cancelled()
     }
 }
 
@@ -352,7 +390,16 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
                 }
                 let mut last_err = first_err;
                 for attempt in 0..self.policy.max_retries {
-                    self.backoff_sleep(attempt);
+                    // If cancellation fires during (or before) the backoff,
+                    // stop retrying and return the last error immediately. The
+                    // engine polls the same token on the write-error path and
+                    // promotes this to EngineError::Cancelled.
+                    if !self.backoff_sleep(attempt) {
+                        return Err(last_err);
+                    }
+                    if self.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        return Err(last_err);
+                    }
                     self.retry_count.fetch_add(1, Ordering::Relaxed);
                     match self.inner.write_tile(tile) {
                         Ok(()) => return Ok(()),

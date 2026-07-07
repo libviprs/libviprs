@@ -63,6 +63,10 @@ pub struct MapReduceConfig {
     pub background_rgb: [u8; 3],
     /// Blank tile handling strategy.
     pub blank_tile_strategy: BlankTileStrategy,
+    /// Optional cooperative-cancellation token. When set, the engine polls it
+    /// before each batch of strips and stops with
+    /// [`EngineError::Cancelled`] once cancelled (#133).
+    pub cancel: Option<crate::cancel::CancelToken>,
 }
 
 impl Default for MapReduceConfig {
@@ -73,6 +77,7 @@ impl Default for MapReduceConfig {
             buffer_size: 64,
             background_rgb: [255, 255, 255],
             blank_tile_strategy: BlankTileStrategy::Emit,
+            cancel: None,
         }
     }
 }
@@ -89,6 +94,7 @@ impl MapReduceConfig {
             dedupe_strategy: None,
             checkpoint_root: None,
             source_content_hash: None,
+            cancel: self.cancel.clone(),
         }
     }
 }
@@ -336,6 +342,9 @@ pub(crate) fn generate_pyramid_mapreduce(
     // ===================================================================
     let mut strip_index_offset: u32 = 0;
     for (batch_idx, batch_specs) in strip_specs.chunks(inflight as usize).enumerate() {
+        // Cooperative cancellation: stop cleanly at the batch boundary before
+        // rendering (and downscaling) another batch of strips.
+        engine_cfg.check_cancelled()?;
         observer.on_event(EngineEvent::BatchStarted {
             batch_index: batch_idx as u32,
             strips_in_batch: batch_specs.len() as u32,

@@ -952,6 +952,9 @@ pub(crate) fn generate_pyramid_streaming(
     let mut strip_index: u32 = 0;
     let mut y: u32 = 0;
     while y < ch {
+        // Cooperative cancellation: stop at the strip boundary before
+        // obtaining (rendering) and downscaling the next strip (#133).
+        config.engine.check_cancelled()?;
         // Clamp the last strip if the canvas height isn't a multiple of
         // strip_height. The shorter strip is handled correctly by all
         // downstream functions.

@@ -45,6 +45,7 @@
 //! **See also:** the [interactive CLI documentation](https://libviprs.org/cli/)
 //! bundles every public knob into runnable examples.
 
+pub mod cancel;
 pub mod checksum;
 pub mod dedupe;
 pub mod engine;
@@ -77,6 +78,7 @@ pub mod verify;
 // Leaf helpers, constants, and free functions stay behind their module path
 // (e.g. `libviprs::resume::SCHEMA_VERSION`) so `use libviprs::*` does not
 // flood callers with implementation detail.
+pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use engine::{

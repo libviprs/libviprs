@@ -177,6 +177,9 @@ pub struct EngineBuilder<'a, S: TileSink> {
     // Resume
     resume: Option<ResumePolicy>,
 
+    // Cooperative cancellation
+    cancel: Option<crate::cancel::CancelToken>,
+
     // StreamingConfig knobs
     memory_budget_bytes: Option<u64>,
     budget_policy: Option<BudgetPolicy>,
@@ -220,6 +223,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             failure_policy: None,
             dedupe: None,
             resume: None,
+            cancel: None,
             memory_budget_bytes: None,
             budget_policy: None,
             extensions: Extensions::new(),
@@ -275,6 +279,9 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         if let Some(ds) = config.dedupe_strategy {
             self.dedupe = Some(ds);
         }
+        if config.cancel.is_some() {
+            self.cancel = config.cancel;
+        }
         // Carry the checkpoint knobs into an EXPLICITLY-chosen ResumePolicy
         // only, so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
         // don't silently lose the cadence / root that used to live on the
@@ -320,6 +327,17 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// and [`--verify`](https://libviprs.org/cli/#flag-verify) flags.
     pub fn with_resume(mut self, policy: ResumePolicy) -> Self {
         self.resume = Some(policy);
+        self
+    }
+
+    /// Attach a [`CancelToken`](crate::cancel::CancelToken) so the run can be
+    /// cooperatively cancelled from another thread. Every engine kind polls
+    /// the token at level / tile / strip boundaries, and the retry backoff
+    /// sleeps in short slices so it can be interrupted; a cancelled run stops
+    /// and returns [`EngineError::Cancelled`]. See the [`cancel`](crate::cancel)
+    /// module for the full polling contract.
+    pub fn with_cancel(mut self, token: crate::cancel::CancelToken) -> Self {
+        self.cancel = Some(token);
         self
     }
 
@@ -433,6 +451,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             failure_policy,
             dedupe,
             resume,
+            cancel,
             memory_budget_bytes,
             budget_policy,
             extensions: _extensions, // libviprs itself reads zero extensions
@@ -448,6 +467,9 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             failure_policy,
             dedupe,
         );
+        // Thread the cooperative-cancellation token onto the config so every
+        // engine driver (and the streaming config that embeds it) polls it.
+        engine_cfg.cancel = cancel.clone();
 
         let observer_ref: &dyn EngineObserver = match &observer {
             Some(arc) => arc.as_ref(),
@@ -475,7 +497,9 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             FailurePolicy::RetryThenFail(p) | FailurePolicy::RetryThenSkip(p)
                 if !sink.applies_retry_policy() =>
             {
-                Some(RetryingSink::new(&sink, p.clone()))
+                // Share the run's cancel token with the retry loop so an
+                // in-flight backoff can be interrupted (#133).
+                Some(RetryingSink::new(&sink, p.clone()).with_cancel(engine_cfg.cancel.clone()))
             }
             _ => None,
         };
@@ -604,6 +628,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         buffer_size,
                         background_rgb,
                         blank_strategy,
+                        cancel.clone(),
                     );
                     generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)
                 }
@@ -614,6 +639,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         buffer_size,
                         background_rgb,
                         blank_strategy,
+                        cancel.clone(),
                     );
                     generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
                 }
@@ -685,6 +711,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     buffer_size,
                     background_rgb,
                     blank_strategy,
+                    cancel.clone(),
                 );
                 generate_pyramid_mapreduce(&source, &plan, engine_sink, &cfg, observer_ref)?
             }
@@ -695,6 +722,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     buffer_size,
                     background_rgb,
                     blank_strategy,
+                    cancel.clone(),
                 );
                 generate_pyramid_mapreduce(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
             }
@@ -762,6 +790,7 @@ fn build_mapreduce_config(
     buffer_size: Option<usize>,
     background_rgb: Option<[u8; 3]>,
     blank_strategy: Option<BlankTileStrategy>,
+    cancel: Option<crate::cancel::CancelToken>,
 ) -> MapReduceConfig {
     let mut cfg = MapReduceConfig::default();
     if let Some(b) = memory_budget_bytes {
@@ -779,6 +808,7 @@ fn build_mapreduce_config(
     if let Some(bts) = blank_strategy {
         cfg.blank_tile_strategy = bts;
     }
+    cfg.cancel = cancel;
     cfg
 }
 
