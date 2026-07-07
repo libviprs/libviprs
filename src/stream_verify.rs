@@ -613,4 +613,50 @@ mod tests {
             other => panic!("expected ChecksumMismatch, got {other:?}"),
         }
     }
+
+    /// Raw-format strip Verify must recognize the 1-byte `BLANK_TILE_MARKER`
+    /// that `BlankTileStrategy::Placeholder` writes, rather than
+    /// byte-comparing it against the regenerated full tile (issue #94). A
+    /// fully-uniform source yields an all-placeholder pyramid.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_raw_placeholder_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (w, h, ts) = (256u32, 256u32, 128u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let src = Raster::new(
+            w,
+            h,
+            PixelFormat::Rgb8,
+            vec![7u8; w as usize * h as usize * bpp],
+        )
+        .unwrap();
+        let plan = PyramidPlanner::new(w, h, ts, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let sink = FsSink::new(&out, plan.clone()).with_format(TileFormat::Raw);
+        // Match the background to the solid fill so every edge-padded tile is
+        // also uniform, producing an all-placeholder pyramid.
+        let mut cfg = EngineConfig::default()
+            .with_blank_tile_strategy(crate::engine::BlankTileStrategy::Placeholder);
+        cfg.background_rgb = [7, 7, 7];
+        crate::engine::generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver)
+            .unwrap();
+
+        // Setup sanity: at least the first tile is a 1-byte marker on disk.
+        let first = plan.tile_coords().next().unwrap();
+        let rel = plan.tile_path(first, "raw").unwrap();
+        let on_disk = std::fs::read(out.join(&rel)).unwrap();
+        assert_eq!(
+            on_disk,
+            vec![crate::sink::BLANK_TILE_MARKER],
+            "placeholder run should write a 1-byte marker on disk"
+        );
+
+        let strip_src = RasterStripSource::new(&src);
+        verify_from_strip_source(&strip_src, &plan, &sink, &cfg, &NoopObserver)
+            .expect("raw placeholder pyramid must verify via strip path");
+    }
 }
