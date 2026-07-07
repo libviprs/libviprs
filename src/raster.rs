@@ -508,6 +508,36 @@ mod tests {
     }
 
     /**
+     * Tests that region() rejects rectangles whose `x + w` or `y + h` would
+     * overflow a u32, instead of panicking (debug) or wrapping to a passing
+     * guard (release). Regression test for the u32-add bounds bypass.
+     * Works by requesting coordinates whose u32 sum wraps below the raster
+     * dimensions on a small raster and asserting RegionOutOfBounds is returned
+     * without panicking.
+     * Input: region(3_000_000_000, 0, 2_000_000_000, 1) on a 10x10 raster →
+     * Err(RegionOutOfBounds). `x + w` = 5e9 wraps to ~705M as u32.
+     */
+    #[test]
+    fn region_rejects_coordinate_overflow() {
+        let r = Raster::zeroed(10, 10, PixelFormat::Rgb8).unwrap();
+        // x + w overflows u32 (3e9 + 2e9 = 5e9 > u32::MAX).
+        assert!(matches!(
+            r.region(3_000_000_000, 0, 2_000_000_000, 1),
+            Err(RasterError::RegionOutOfBounds { .. })
+        ));
+        // y + h overflows u32 the same way.
+        assert!(matches!(
+            r.region(0, 3_000_000_000, 1, 2_000_000_000),
+            Err(RasterError::RegionOutOfBounds { .. })
+        ));
+        // Exact-boundary saturation just past u32::MAX is also rejected.
+        assert!(matches!(
+            r.region(u32::MAX, 0, 1, 1),
+            Err(RasterError::RegionOutOfBounds { .. })
+        ));
+    }
+
+    /**
      * Tests that RegionView pixels correspond to the correct source raster pixels.
      * Works by creating a raster with position-dependent values (x, y, x+y per pixel)
      * and verifying region pixel (0,0) maps to source pixel (4,3).
