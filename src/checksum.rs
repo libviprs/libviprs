@@ -88,6 +88,86 @@ pub fn hash_tile(bytes: &[u8], algo: ChecksumAlgo) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Untrusted-path sanitization + streaming hash
+// ---------------------------------------------------------------------------
+
+/// Join an attacker-controlled *relative* manifest path onto a trusted `root`,
+/// rejecting anything that could escape `root`.
+///
+/// Manifest `per_tile` keys are attacker-controlled: a hostile bundle can list
+/// `/etc/passwd`, a Windows drive prefix, or `../../secret`. `Path::join` with
+/// an absolute or prefixed component silently *replaces* the base, and `..`
+/// walks upward — both give arbitrary-file read (and a hash/existence oracle,
+/// since the digest is echoed back on mismatch).
+///
+/// This returns `Some(root.join(rel))` only when every component of `rel` is a
+/// plain name (or a redundant `.`); it returns `None` for an empty path or any
+/// path containing a root, a prefix (e.g. `C:`), or a `..` component. Because
+/// only `Normal`/`CurDir` components survive, the join can never escape `root`.
+pub(crate) fn safe_manifest_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let rel_path = Path::new(rel);
+    if rel_path.as_os_str().is_empty() {
+        return None;
+    }
+    for comp in rel_path.components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => return None,
+        }
+    }
+    Some(root.join(rel_path))
+}
+
+/// Hash the contents of the file at `path` by streaming it through the hasher
+/// in fixed-size chunks, capping peak memory regardless of file size.
+///
+/// This replaces `std::fs::read` + [`hash_tile`], which buffered the whole file
+/// and was an OOM primitive when pointed at a huge (or infinite, e.g.
+/// `/dev/zero`) file. Returns the same lowercase hex digest as [`hash_tile`]
+/// would for identical bytes.
+pub(crate) fn hash_file(path: &Path, algo: ChecksumAlgo) -> std::io::Result<String> {
+    use std::io::Read;
+
+    // 64 KiB is large enough to amortize syscall/read overhead while keeping
+    // the transient buffer trivially small.
+    let mut buf = [0u8; 64 * 1024];
+    let mut file = std::fs::File::open(path)?;
+
+    match algo {
+        ChecksumAlgo::Blake3 => {
+            let mut hasher = blake3::Hasher::new();
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            Ok(hasher.finalize().to_hex().to_string())
+        }
+        ChecksumAlgo::Sha256 => {
+            let mut hasher = sha2::Sha256::new();
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            let out = hasher.finalize();
+            let mut s = String::with_capacity(out.len() * 2);
+            for b in out.iter() {
+                use std::fmt::Write;
+                let _ = write!(s, "{:02x}", b);
+            }
+            Ok(s)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VerifyReport / VerifyError
 // ---------------------------------------------------------------------------
 
@@ -141,6 +221,13 @@ pub enum VerifyError {
 
     #[error("unknown checksum algorithm in manifest: {0}")]
     UnknownAlgo(String),
+
+    /// A `per_tile` key was an absolute, prefixed, or `..`-containing path that
+    /// would escape the pyramid directory. Rejected before any filesystem
+    /// access so it cannot be used for path traversal or as a hash/existence
+    /// oracle.
+    #[error("manifest tile path escapes pyramid directory: {0}")]
+    UnsafePath(String),
 
     #[error("checksum mismatch")]
     Mismatch,
@@ -237,10 +324,16 @@ pub fn verify_output(dir: &Path) -> Result<VerifyReport, VerifyError> {
         };
 
         let rel_path = PathBuf::from(rel);
-        let abs = dir.join(&rel_path);
+        // Reject traversal / absolute / prefixed paths before touching the
+        // filesystem — a hostile manifest must not be able to read outside the
+        // pyramid directory or probe file existence via the report.
+        let abs = match safe_manifest_join(dir, rel) {
+            Some(p) => p,
+            None => return Err(VerifyError::UnsafePath(rel.clone())),
+        };
 
-        let bytes = match std::fs::read(&abs) {
-            Ok(b) => b,
+        let got = match hash_file(&abs, algo) {
+            Ok(g) => g,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 report.tiles_missing.push(rel_path);
                 continue;
@@ -253,7 +346,6 @@ pub fn verify_output(dir: &Path) -> Result<VerifyReport, VerifyError> {
             }
         };
 
-        let got = hash_tile(&bytes, algo);
         if got.eq_ignore_ascii_case(digest_hex) {
             report.tiles_ok += 1;
         } else {
@@ -312,6 +404,54 @@ mod tests {
     #[test]
     fn checksum_mode_default_is_none() {
         assert_eq!(ChecksumMode::default(), ChecksumMode::None);
+    }
+
+    #[test]
+    fn safe_manifest_join_rejects_escaping_paths() {
+        let root = Path::new("/tmp/pyramid");
+        // Absolute / rooted paths.
+        assert!(safe_manifest_join(root, "/etc/passwd").is_none());
+        // Parent-dir traversal, at any depth.
+        assert!(safe_manifest_join(root, "../secret").is_none());
+        assert!(safe_manifest_join(root, "0/../../secret").is_none());
+        assert!(safe_manifest_join(root, "a/b/../../../x").is_none());
+        // Empty path.
+        assert!(safe_manifest_join(root, "").is_none());
+    }
+
+    #[test]
+    fn safe_manifest_join_accepts_plain_relative_paths() {
+        let root = Path::new("/tmp/pyramid");
+        assert_eq!(
+            safe_manifest_join(root, "0/0_0.raw"),
+            Some(PathBuf::from("/tmp/pyramid/0/0_0.raw"))
+        );
+        // A redundant `.` is harmless and does not escape.
+        assert_eq!(
+            safe_manifest_join(root, "./0/0_0.raw"),
+            Some(PathBuf::from("/tmp/pyramid/./0/0_0.raw"))
+        );
+    }
+
+    #[test]
+    fn hash_file_matches_in_memory_hash_for_both_algos() {
+        let dir = tempfile::tempdir().unwrap();
+        // Larger than the 64 KiB streaming chunk to exercise multiple reads.
+        let bytes = vec![0x5Au8; 200 * 1024 + 3];
+        let p = dir.path().join("tile.raw");
+        std::fs::write(&p, &bytes).unwrap();
+
+        for algo in [ChecksumAlgo::Blake3, ChecksumAlgo::Sha256] {
+            assert_eq!(hash_file(&p, algo).unwrap(), hash_tile(&bytes, algo));
+        }
+    }
+
+    #[test]
+    fn hash_file_reports_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.raw");
+        let err = hash_file(&missing, ChecksumAlgo::Blake3).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
