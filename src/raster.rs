@@ -319,7 +319,14 @@ impl Raster {
     /// Returns [`RasterError::RegionOutOfBounds`] if the rectangle exceeds the
     /// raster dimensions or has a zero width/height.
     pub fn region(&self, x: u32, y: u32, w: u32, h: u32) -> Result<RegionView<'_>, RasterError> {
-        if x + w > self.width || y + h > self.height || w == 0 || h == 0 {
+        // Widen to u64 so `x + w` / `y + h` cannot overflow u32: an unchecked
+        // u32 add panics in debug and wraps in release, which would admit an
+        // out-of-bounds rectangle and defeat the RegionOutOfBounds contract.
+        if x as u64 + w as u64 > self.width as u64
+            || y as u64 + h as u64 > self.height as u64
+            || w == 0
+            || h == 0
+        {
             return Err(RasterError::RegionOutOfBounds {
                 x,
                 y,
@@ -428,8 +435,12 @@ impl<'a> RegionView<'a> {
         }
         let bpp = self.raster.format.bytes_per_pixel();
         let stride = self.raster.stride();
-        let abs_x = self.x + px;
-        let abs_y = self.y + py;
+        // Widen to u64 for defense in depth: for a validly bounded region the
+        // absolute coordinates cannot overflow u32, but computing them in a
+        // wider type keeps the offset math safe even if that invariant is ever
+        // weakened.
+        let abs_x = self.x as u64 + px as u64;
+        let abs_y = self.y as u64 + py as u64;
         let start = abs_y as usize * stride + abs_x as usize * bpp;
         Some(&self.raster.data()[start..start + bpp])
     }
