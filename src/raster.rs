@@ -319,7 +319,14 @@ impl Raster {
     /// Returns [`RasterError::RegionOutOfBounds`] if the rectangle exceeds the
     /// raster dimensions or has a zero width/height.
     pub fn region(&self, x: u32, y: u32, w: u32, h: u32) -> Result<RegionView<'_>, RasterError> {
-        if x + w > self.width || y + h > self.height || w == 0 || h == 0 {
+        // Widen to u64 so `x + w` / `y + h` cannot overflow u32: an unchecked
+        // u32 add panics in debug and wraps in release, which would admit an
+        // out-of-bounds rectangle and defeat the RegionOutOfBounds contract.
+        if x as u64 + w as u64 > self.width as u64
+            || y as u64 + h as u64 > self.height as u64
+            || w == 0
+            || h == 0
+        {
             return Err(RasterError::RegionOutOfBounds {
                 x,
                 y,
@@ -428,8 +435,12 @@ impl<'a> RegionView<'a> {
         }
         let bpp = self.raster.format.bytes_per_pixel();
         let stride = self.raster.stride();
-        let abs_x = self.x + px;
-        let abs_y = self.y + py;
+        // Widen to u64 for defense in depth: for a validly bounded region the
+        // absolute coordinates cannot overflow u32, but computing them in a
+        // wider type keeps the offset math safe even if that invariant is ever
+        // weakened.
+        let abs_x = self.x as u64 + px as u64;
+        let abs_y = self.y as u64 + py as u64;
         let start = abs_y as usize * stride + abs_x as usize * bpp;
         Some(&self.raster.data()[start..start + bpp])
     }
@@ -505,6 +516,36 @@ mod tests {
         assert!(r.region(5, 5, 5, 5).is_ok());
         assert!(r.region(5, 5, 6, 5).is_err()); // x+w > width
         assert!(r.region(0, 0, 0, 5).is_err()); // zero width
+    }
+
+    /**
+     * Tests that region() rejects rectangles whose `x + w` or `y + h` would
+     * overflow a u32, instead of panicking (debug) or wrapping to a passing
+     * guard (release). Regression test for the u32-add bounds bypass.
+     * Works by requesting coordinates whose u32 sum wraps below the raster
+     * dimensions on a small raster and asserting RegionOutOfBounds is returned
+     * without panicking.
+     * Input: region(3_000_000_000, 0, 2_000_000_000, 1) on a 10x10 raster →
+     * Err(RegionOutOfBounds). `x + w` = 5e9 wraps to ~705M as u32.
+     */
+    #[test]
+    fn region_rejects_coordinate_overflow() {
+        let r = Raster::zeroed(10, 10, PixelFormat::Rgb8).unwrap();
+        // x + w overflows u32 (3e9 + 2e9 = 5e9 > u32::MAX).
+        assert!(matches!(
+            r.region(3_000_000_000, 0, 2_000_000_000, 1),
+            Err(RasterError::RegionOutOfBounds { .. })
+        ));
+        // y + h overflows u32 the same way.
+        assert!(matches!(
+            r.region(0, 3_000_000_000, 1, 2_000_000_000),
+            Err(RasterError::RegionOutOfBounds { .. })
+        ));
+        // Exact-boundary saturation just past u32::MAX is also rejected.
+        assert!(matches!(
+            r.region(u32::MAX, 0, 1, 1),
+            Err(RasterError::RegionOutOfBounds { .. })
+        ));
     }
 
     /**
