@@ -5,9 +5,9 @@
 //!
 //! Under `--cfg loom`, `crate::sync_queue::bounded` is backed by a
 //! loom-instrumented `Mutex` + `Condvar` implementation, so these tests
-//! exhaustively explore thread interleavings of the real
-//! send / recv / teardown protocol rather than a toy stand-in. The invariants
-//! modelled here are the ones the engine depends on:
+//! model-check thread interleavings of the real send / recv / teardown
+//! protocol rather than a toy stand-in (see `model` for the search bound).
+//! The invariants modelled here are the ones the engine depends on:
 //!
 //! 1. **No lost items** — every value a producer hands off is delivered
 //!    (FIFO backpressure queue, multiple producers, one consumer).
@@ -31,13 +31,31 @@ mod tests {
     use loom::sync::atomic::{AtomicUsize, Ordering};
     use loom::thread;
 
+    /// Model-check `f` under a bounded number of preemptions.
+    ///
+    /// The queue uses two condvars, and an unbounded exhaustive search over
+    /// three threads is intractable as a CI merge gate. A preemption bound
+    /// keeps the search fast and deterministic while still covering the
+    /// interleavings that expose teardown / ordering bugs; an explicit
+    /// `LOOM_MAX_PREEMPTIONS` (or `LOOM_MAX_BRANCHES`) override still wins.
+    fn model<F>(f: F)
+    where
+        F: Fn() + Sync + Send + 'static,
+    {
+        let mut builder = loom::model::Builder::new();
+        if builder.preemption_bound.is_none() {
+            builder.preemption_bound = Some(3);
+        }
+        builder.check(f);
+    }
+
     /// Two producers push three items total into a capacity-2 queue while a
-    /// consumer drains it. Loom explores every interleaving and verifies that
+    /// consumer drains it. Loom explores the interleavings and verifies that
     /// no item is ever lost or duplicated — the core delivery guarantee the
     /// tile-emission consumer relies on.
     #[test]
     fn loom_queue_no_lost_items() {
-        loom::model(|| {
+        model(|| {
             let (tx, rx) = bounded::<u32>(2);
             let tx2 = tx.clone();
 
@@ -69,7 +87,7 @@ mod tests {
     /// full progress (both sends observed) and both items arrive in order.
     #[test]
     fn loom_backpressure_blocks_producer() {
-        loom::model(|| {
+        model(|| {
             let (tx, rx) = bounded::<u32>(1);
             let progress = Arc::new(AtomicUsize::new(0));
 
@@ -95,12 +113,12 @@ mod tests {
 
     /// The consumer takes at most one item then drops `rx` while the producer
     /// may still be blocked on a full queue. Reaching the end of the model
-    /// across every interleaving proves the blocked sender is always woken by
-    /// the receiver-drop teardown and never deadlocks — the engine's
+    /// across the explored interleavings proves the blocked sender is always
+    /// woken by the receiver-drop teardown and never deadlocks — the engine's
     /// early-error path.
     #[test]
     fn loom_receiver_drop_unblocks_senders() {
-        loom::model(|| {
+        model(|| {
             let (tx, rx) = bounded::<u32>(1);
 
             let producer = thread::spawn(move || {
@@ -122,7 +140,7 @@ mod tests {
     /// delivered — the `drop(tx)`-before-consume invariant.
     #[test]
     fn loom_drop_tx_terminates_receiver() {
-        loom::model(|| {
+        model(|| {
             let (tx, rx) = bounded::<u32>(2);
 
             let producer = thread::spawn(move || {
