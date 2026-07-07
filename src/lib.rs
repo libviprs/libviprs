@@ -64,6 +64,7 @@ pub mod resize;
 pub mod resume;
 pub mod retry;
 pub mod sink;
+pub(crate) mod sync_queue;
 #[cfg(feature = "s3")]
 pub mod sink_object_store;
 #[cfg(feature = "packfile")]
