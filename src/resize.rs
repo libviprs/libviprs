@@ -195,6 +195,17 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
     Raster::new(dst_w, dst_h, fmt, dst)
 }
 
+/// Number of source samples covered by one destination pixel's source region.
+///
+/// This is the divisor used to average a destination pixel, so it must be exact
+/// for every downscale ratio. The half-open span `[sx0, sx1) x [sy0, sy1)` can
+/// be as large as the entire source raster (for a 1x1 destination), and a source
+/// may hold more than `u32::MAX` samples, so the product is computed in `u64`.
+#[inline]
+fn source_region_area(sx0: u32, sx1: u32, sy0: u32, sy1: u32) -> u64 {
+    (sx1 - sx0) as u64 * (sy1 - sy0) as u64
+}
+
 /// Downscale a raster to arbitrary dimensions using simple bilinear-ish area averaging.
 ///
 /// Maps each destination pixel to the corresponding rectangular region in the
@@ -274,7 +285,7 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
             let sy1 = sy1.min(src_h);
 
             let dst_offset = (dy as usize * dst_w as usize + dx as usize) * bpp;
-            let count = (sx1 - sx0) * (sy1 - sy0);
+            let count = source_region_area(sx0, sx1, sy0, sy1);
 
             if count == 0 {
                 continue;
@@ -296,7 +307,7 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
                         }
                     }
                 }
-                let avg = (sum + count as u64 / 2) / count as u64;
+                let avg = (sum + count / 2) / count;
                 if bpc == 1 {
                     dst[dst_offset + c] = avg as u8;
                 } else {
@@ -644,5 +655,27 @@ mod tests {
         assert_eq!(dst.data()[0], 127); // R: (255*255+255*0)/(2*255) = 127
         assert_eq!(dst.data()[1], 127); // G: (255*0+255*255)/(2*255) = 127 (truncated)
         assert_eq!(dst.data()[3], 255); // A: (255+255)/2 = 255
+    }
+
+    /**
+     * Tests that the per-destination-pixel source area is computed in u64 so an
+     * extreme downscale ratio cannot overflow the divisor.
+     * Works by asking for the area of a whole 65536x65536 (~4.3 gigapixel)
+     * source mapped onto a single destination pixel: 65536*65536 == 2^32, which
+     * overflows a u32 product (debug panic / release wrap to 0 → a black or
+     * misdivided output pixel). Computed in u64 it is exact and still usable as
+     * a rounding divisor.
+     * Input: source region [0,65536) x [0,65536) → area 2^32, avg of all-200 == 200.
+     */
+    #[test]
+    fn area_count_widens_past_u32() {
+        let area = source_region_area(0, 65536, 0, 65536);
+        assert_eq!(area, 1u64 << 32, "gigapixel area must not overflow u32");
+
+        // Exercise the same rounding-divide the averaging loop performs, with a
+        // sum that only fits in u64, to confirm the divisor stays exact.
+        let sum: u64 = area * 200; // every source sample == 200
+        let avg = (sum + area / 2) / area;
+        assert_eq!(avg, 200, "u64 divisor must average correctly");
     }
 }
