@@ -872,17 +872,33 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
     Ok(PDFIUM.get().expect("PDFIUM was just set"))
 }
 
-/// Convert a rendered pdfium bitmap into an RGBA [`Raster`].
+/// Convert a rendered pdfium bitmap into an RGBA [`Raster`], defending
+/// against the panic-on-mismatch inside `PdfBitmap::as_image()`.
 ///
 /// `as_image` is the bitmap conversion closure (in production,
-/// `|| bitmap.as_image()`); it is passed as a closure so the panic-prone
-/// step can be isolated. See the fix in [`Self`]'s callers for why.
+/// `|| bitmap.as_image()`). The 0.8.x fork's `as_image()` ends in
+/// `RgbaImage::from_raw(w, h, bytes).map(...).unwrap()`; `from_raw`
+/// returns `None` whenever the width/height pdfium reports disagree with
+/// the returned buffer length, so an adversarial or edge page makes
+/// `as_image()` panic. Called bare inside a MapReduce render worker,
+/// that unwind aborts the rendering thread. Isolating the call in
+/// [`std::panic::catch_unwind`] converts the panic into a typed
+/// [`PdfError::Pdfium`] the caller can propagate.
+///
+/// (Upstream pdfium-render 0.9.1's `Result`-returning `as_image`
+/// supersedes this guard once the pinned fork is bumped.)
 #[cfg(feature = "pdfium")]
 fn bitmap_to_raster<F>(as_image: F) -> Result<Raster, PdfError>
 where
     F: FnOnce() -> image::DynamicImage,
 {
-    let img = as_image();
+    let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(as_image)).map_err(|_| {
+        PdfError::Pdfium(
+            "pdfium reported bitmap dimensions inconsistent with its buffer length \
+             (PdfBitmap::as_image mismatch)"
+                .to_string(),
+        )
+    })?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     let data = rgba.into_raw();
