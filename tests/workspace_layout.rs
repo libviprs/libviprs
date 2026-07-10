@@ -3,9 +3,10 @@
 //! The repo used to have two disjoint cargo roots: the `libviprs` package and
 //! a `fuzz/` crate detached by an empty `[workspace]` table. The detached
 //! crate resolved dependencies on its own, with its own lockfile, and never
-//! saw the root `[patch.crates-io]` that pins `pdfium-render` to the
-//! thread-safety fork. These tests assert the unified layout: one workspace,
-//! one lockfile, and a `[patch]` table that applies to every member.
+//! saw the root pin of `pdfium-render` to the thread-safety fork (then a
+//! `[patch.crates-io]` entry, now a direct git dependency). These tests
+//! assert the unified layout: one workspace, one lockfile, and dependency
+//! pins that apply to every member.
 
 use std::path::Path;
 use std::process::Command;
@@ -63,7 +64,8 @@ fn fuzz_crate_is_a_member_of_the_root_workspace() {
 }
 
 /// Both crates seen from the root manifest: same workspace, so the single
-/// root lockfile and the single `[patch.crates-io]` table govern them all.
+/// root lockfile and the single set of workspace dependency pins govern
+/// them all.
 #[test]
 fn root_workspace_contains_both_crates() {
     let root = repo_root();
@@ -76,9 +78,10 @@ fn root_workspace_contains_both_crates() {
     );
 }
 
-/// The shared `[patch.crates-io]` must still pin `pdfium-render` to the
-/// libviprs fork (per-call thread-safety locking). The workspace lockfile is
-/// the single source of truth for that resolution.
+/// The workspace must still pin `pdfium-render` to the libviprs fork
+/// (per-call thread-safety locking), now as a direct git dependency rather
+/// than a `[patch.crates-io]` entry. The workspace lockfile is the single
+/// source of truth for that resolution.
 #[test]
 fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock"))
