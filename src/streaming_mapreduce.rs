@@ -591,6 +591,8 @@ pub(crate) fn generate_pyramid_mapreduce(
     // ===================================================================
     for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
         if let Some(leftover) = accumulators[level_idx].take() {
+            // The leftover was charged when stored as an unpaired first half.
+            let leftover_bytes = leftover.data().len() as u64;
             let (_, lh) = if plan.layout == Layout::Google {
                 plan.canvas_size_at_level(plan.levels[level_idx].level)
             } else {
@@ -612,6 +614,10 @@ pub(crate) fn generate_pyramid_mapreduce(
 
             if level_idx > 0 {
                 let further_half = resize::downscale_half(&leftover)?;
+                let further_bytes = further_half.data().len() as u64;
+                // Honour `propagate_down`'s caller-charges-the-buffer contract
+                // (issue #109): the callee releases this charge once consumed.
+                tracker.alloc(further_bytes);
                 propagate_down(
                     further_half,
                     level_idx - 1,
@@ -628,6 +634,10 @@ pub(crate) fn generate_pyramid_mapreduce(
                     &mut tiles_skipped,
                 )?;
             }
+
+            // The leftover buffer is dropped here; release its charge.
+            drop(leftover);
+            tracker.dealloc(leftover_bytes);
         }
     }
 

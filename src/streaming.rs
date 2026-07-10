@@ -1081,6 +1081,9 @@ pub(crate) fn generate_pyramid_streaming(
     // levels below, which may themselves be monolithic.
     for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
         if let Some(leftover) = accumulators[level_idx].take() {
+            // The leftover was charged when it was stored as an unpaired first
+            // half; it is still charged now.
+            let leftover_bytes = leftover.data().len() as u64;
             // The leftover covers the bottom slice of this level. Its Y
             // position is the level height minus the strip's own height.
             let (_, lh) = if plan.layout == Layout::Google {
@@ -1105,6 +1108,12 @@ pub(crate) fn generate_pyramid_streaming(
             // Continue the downscale chain into lower levels
             if level_idx > 0 {
                 let further_half = resize::downscale_half(&leftover)?;
+                let further_bytes = further_half.data().len() as u64;
+                // Charge the downscaled half before handing it down (the
+                // caller-charges-the-buffer contract of `propagate_down`).
+                // `leftover` is still live during the downscale, so the peak
+                // captures both.
+                tracker.alloc(further_bytes);
                 propagate_down(
                     further_half,
                     level_idx - 1,
@@ -1121,6 +1130,11 @@ pub(crate) fn generate_pyramid_streaming(
                     &mut tiles_skipped,
                 )?;
             }
+
+            // The leftover buffer is dropped at the end of this block; release
+            // its charge.
+            drop(leftover);
+            tracker.dealloc(leftover_bytes);
         }
     }
 
@@ -1738,24 +1752,53 @@ pub(crate) fn propagate_down(
     tiles_produced: &mut u64,
     tiles_skipped: &mut u64,
 ) -> Result<(), EngineError> {
+    // Memory-accounting contract: the caller has already charged the
+    // `MemoryTracker` for the bytes of `half_strip` (the buffer it hands in).
+    // This function is responsible for releasing that charge once the buffer
+    // is consumed, or for leaving it charged while the buffer lives on in an
+    // accumulator. Every *new* raster buffer it allocates (the concatenated
+    // combined strip and the downscaled half handed to the recursive call) is
+    // charged here so that `peak_memory_bytes` reflects the true simultaneous
+    // working set — including the propagate/concat transients that were
+    // previously invisible (#109).
+    let incoming_bytes = half_strip.data().len() as u64;
+
     if level_idx <= monolithic_threshold {
         // Monolithic path: append rows and stop. The flush phase will
         // assemble the full raster and cascade downscales from there.
+        //
+        // The half's rows move into the persistent monolithic accumulator.
+        // Charge that growth before the copy and release the transient
+        // `half_strip` buffer after it, so the peak captures the brief window
+        // where both the source half and the growing accumulator are live,
+        // and the accumulator's bytes stay charged once the half is dropped.
+        tracker.alloc(incoming_bytes);
         let acc = &mut mono_accumulators[level_idx];
         acc.extend_from_slice(half_strip.data());
+        drop(half_strip);
+        tracker.dealloc(incoming_bytes);
         return Ok(());
     }
 
     // Strip-pairing path: check if we already have a stored first half.
     match accumulators[level_idx].take() {
         None => {
-            // First of pair — store and wait for the partner
+            // First of pair — store and wait for the partner. The buffer
+            // lives on in the accumulator, so its charge is intentionally
+            // left in place; the matching `Some` arm releases it later.
             accumulators[level_idx] = Some(half_strip);
         }
         Some(prev) => {
             // Second of pair — stack top-over-bottom to reconstruct the
-            // full strip height at this level
+            // full strip height at this level. `prev` is still charged from
+            // when it was stored in the `None` arm above.
+            let prev_bytes = prev.data().len() as u64;
             let combined = concat_vertical(&prev, &half_strip)?;
+            let combined_bytes = combined.data().len() as u64;
+            // Charge the combined buffer now: at this instant `prev`, the
+            // incoming half, and `combined` are all live — this is the
+            // concat transient the tracker previously ignored.
+            tracker.alloc(combined_bytes);
             // The combined strip's Y offset is where the first half started
             let combined_y = strip_y_at_level.saturating_sub(prev.height());
 
@@ -1772,9 +1815,23 @@ pub(crate) fn propagate_down(
             *tiles_produced += tp;
             *tiles_skipped += ts_skip;
 
+            // The two source halves are no longer needed once the combined
+            // strip exists; release their charges (the buffers are dropped
+            // here for `prev` and at function exit for `half_strip`).
+            drop(prev);
+            drop(half_strip);
+            tracker.dealloc(prev_bytes);
+            tracker.dealloc(incoming_bytes);
+
             // Continue the downscale chain into the next lower level
             if level_idx > 0 {
                 let further_half = resize::downscale_half(&combined)?;
+                let further_bytes = further_half.data().len() as u64;
+                // Charge the downscaled half before handing it to the
+                // recursive call, honouring the contract that the caller
+                // charges the buffer it passes down. `combined` is still
+                // live during the downscale, so the peak captures both.
+                tracker.alloc(further_bytes);
                 propagate_down(
                     further_half,
                     level_idx - 1,
@@ -1791,6 +1848,9 @@ pub(crate) fn propagate_down(
                     tiles_skipped,
                 )?;
             }
+
+            // The combined transient is done; release it.
+            tracker.dealloc(combined_bytes);
         }
     }
 
@@ -2058,6 +2118,102 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+
+    // -- Issue #109: peak_memory_bytes must include propagate/concat transients --
+
+    /// `propagate_down` reaches its strip-pairing (`Some`) arm when two levels
+    /// above the monolithic threshold are strip-paired. At the instant the two
+    /// half-strips are concatenated, three buffers are simultaneously live —
+    /// the two source halves plus the combined strip — yet before #109 the
+    /// tracker was never touched inside `propagate_down`, so this transient
+    /// (and every deeper propagation buffer) was invisible to
+    /// `peak_memory_bytes`.
+    ///
+    /// This drives `propagate_down` directly with a paired half-strip and
+    /// asserts the reported peak accounts for the concat transient. It fails
+    /// on the unfixed code (the tracker stays at the two caller-charged halves,
+    /// never rising to include the combined buffer) and passes once the
+    /// transient is charged.
+    #[test]
+    fn propagate_down_charges_concat_transient() {
+        let planner = PyramidPlanner::new(2048, 2048, 128, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let format = PixelFormat::Rgb8;
+        let bpp = format.bytes_per_pixel() as u64;
+        let strip_height = 256;
+
+        // With this geometry the two largest levels are strip-paired, so
+        // propagating a half at `top - 1` hits the concat branch.
+        let mono_thresh = find_monolithic_threshold(&plan, format, strip_height);
+        let top = plan.levels.len() - 1;
+        let level_idx = top - 1;
+        assert!(
+            level_idx > mono_thresh,
+            "test geometry must keep level {level_idx} strip-paired (mono_thresh={mono_thresh})"
+        );
+
+        let lw = plan.levels[level_idx].width;
+        let hh = plan.tile_size; // half-strip height: one tile row
+        let half_bytes = lw as u64 * hh as u64 * bpp;
+
+        let mut accumulators: Vec<Option<Raster>> = vec![None; plan.levels.len()];
+        let mut mono_accumulators: Vec<Vec<u8>> = plan.levels.iter().map(|_| Vec::new()).collect();
+        let sink = MemorySink::new();
+        let config = EngineConfig::default();
+        let tracker = MemoryTracker::new();
+        let mut tiles_produced = 0u64;
+        let mut tiles_skipped = 0u64;
+
+        // First half of the pair. Mirror the engine's convention of charging
+        // the buffer before handing it to `propagate_down`.
+        tracker.alloc(half_bytes);
+        propagate_down(
+            solid_raster(lw, hh, 10),
+            level_idx,
+            hh,
+            &mut accumulators,
+            &mut mono_accumulators,
+            mono_thresh,
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &tracker,
+            &mut tiles_produced,
+            &mut tiles_skipped,
+        )
+        .unwrap();
+
+        // Second half — triggers the vertical concat of both halves.
+        tracker.alloc(half_bytes);
+        propagate_down(
+            solid_raster(lw, hh, 20),
+            level_idx,
+            2 * hh,
+            &mut accumulators,
+            &mut mono_accumulators,
+            mono_thresh,
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &tracker,
+            &mut tiles_produced,
+            &mut tiles_skipped,
+        )
+        .unwrap();
+
+        // At the concat instant the two half buffers (half_bytes each) and the
+        // combined buffer (their sum, 2 * half_bytes) are all live.
+        let combined_bytes = 2 * half_bytes;
+        let expected_min = 2 * half_bytes + combined_bytes;
+        assert!(
+            tracker.peak_bytes() >= expected_min,
+            "reported peak {} must include the concat transient (>= {})",
+            tracker.peak_bytes(),
+            expected_min
+        );
     }
 
     #[test]
