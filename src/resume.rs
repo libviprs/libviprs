@@ -302,6 +302,27 @@ pub(super) mod tile_coord_vec_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::fmt;
 
+    /// Upper bound on the number of elements we will speculatively reserve
+    /// from a deserializer's reported `size_hint` before reading any data.
+    ///
+    /// The hint is advisory and, for a self-describing or length-prefixed
+    /// wire format, is attacker-controlled: a corrupt or hostile checkpoint
+    /// could otherwise advertise a gigantic sequence length and trigger a
+    /// multi-gigabyte speculative allocation before a single element is read.
+    /// We cap the reservation so a bogus hint costs at most this many slots;
+    /// the `Vec` still grows normally if the sequence genuinely turns out to
+    /// be longer, so honest large checkpoints remain correct.
+    pub(super) const MAX_SEQ_PREALLOC: usize = 4096;
+
+    /// Bound a deserializer-reported sequence length by [`MAX_SEQ_PREALLOC`].
+    ///
+    /// A missing hint reserves nothing; any reported hint is clamped to the
+    /// cap so the pre-read reservation is fixed regardless of the value the
+    /// format claims.
+    pub(super) fn capped_prealloc(size_hint: Option<usize>) -> usize {
+        size_hint.unwrap_or(0).min(MAX_SEQ_PREALLOC)
+    }
+
     #[derive(Serialize, Deserialize)]
     pub(super) struct CoordShadow {
         pub(super) level: u32,
@@ -354,7 +375,7 @@ pub(super) mod tile_coord_vec_serde {
             where
                 A: SeqAccess<'de>,
             {
-                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                let mut out = Vec::with_capacity(capped_prealloc(seq.size_hint()));
                 while let Some(shadow) = seq.next_element::<CoordShadow>()? {
                     out.push(shadow.into());
                 }
@@ -1412,5 +1433,80 @@ mod tests {
         let empty = CompletedTileSet::default();
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn capped_prealloc_clamps_hostile_hint() {
+        use super::tile_coord_vec_serde::{MAX_SEQ_PREALLOC, capped_prealloc};
+
+        // A missing hint reserves nothing.
+        assert_eq!(capped_prealloc(None), 0);
+        // A modest, honest hint passes through unchanged.
+        assert_eq!(capped_prealloc(Some(10)), 10);
+        assert_eq!(capped_prealloc(Some(MAX_SEQ_PREALLOC)), MAX_SEQ_PREALLOC);
+        // Anything above the cap — including a hostile `usize::MAX` — is bounded.
+        assert_eq!(
+            capped_prealloc(Some(MAX_SEQ_PREALLOC + 1)),
+            MAX_SEQ_PREALLOC
+        );
+        assert_eq!(capped_prealloc(Some(usize::MAX)), MAX_SEQ_PREALLOC);
+    }
+
+    /// A [`SeqAccess`] that advertises a gigantic sequence length but yields no
+    /// elements — the shape a corrupt or hostile length-prefixed checkpoint
+    /// would take. Driving the real coord deserializer with this must not turn
+    /// the reported hint into a speculative allocation.
+    #[test]
+    fn coord_deserializer_ignores_hostile_size_hint() {
+        use super::tile_coord_vec_serde::{MAX_SEQ_PREALLOC, deserialize};
+        use serde::Deserializer;
+        use serde::de::value::Error as DeError;
+        use serde::de::{DeserializeSeed, SeqAccess, Visitor};
+
+        struct HostileSeq;
+        impl<'de> SeqAccess<'de> for HostileSeq {
+            type Error = DeError;
+            fn next_element_seed<T>(&mut self, _seed: T) -> Result<Option<T::Value>, Self::Error>
+            where
+                T: DeserializeSeed<'de>,
+            {
+                Ok(None)
+            }
+            fn size_hint(&self) -> Option<usize> {
+                // Without a cap this would drive `Vec::with_capacity(usize::MAX)`,
+                // which panics on capacity overflow.
+                Some(usize::MAX)
+            }
+        }
+
+        struct HostileDeserializer;
+        impl<'de> Deserializer<'de> for HostileDeserializer {
+            type Error = DeError;
+            fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: Visitor<'de>,
+            {
+                visitor.visit_seq(HostileSeq)
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str
+                string bytes byte_buf option unit unit_struct newtype_struct
+                tuple tuple_struct map struct enum identifier ignored_any
+            }
+            fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: Visitor<'de>,
+            {
+                unreachable!("coord deserializer only requests a sequence")
+            }
+        }
+
+        let coords = deserialize(HostileDeserializer).expect("empty hostile sequence deserializes");
+        assert!(coords.is_empty());
+        assert!(
+            coords.capacity() <= MAX_SEQ_PREALLOC,
+            "reservation ({}) must stay within the cap ({MAX_SEQ_PREALLOC})",
+            coords.capacity(),
+        );
     }
 }
