@@ -740,7 +740,7 @@ fn secs_to_ymd_hms_engine(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 /// callers see the explicit variant (tests in `phase3_checksum.rs` match on
 /// `EngineError::ChecksumMismatch`). All other sink errors pass through as
 /// `EngineError::Sink`.
-fn promote_sink_error(err: SinkError) -> EngineError {
+pub(crate) fn promote_sink_error(err: SinkError) -> EngineError {
     match err {
         SinkError::ChecksumMismatch {
             tile_rel_path,

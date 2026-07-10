@@ -628,6 +628,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         buffer_size,
                         background_rgb,
                         blank_strategy,
+                        &engine_cfg.failure_policy,
                         cancel.clone(),
                     );
                     generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)
@@ -639,6 +640,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         buffer_size,
                         background_rgb,
                         blank_strategy,
+                        &engine_cfg.failure_policy,
                         cancel.clone(),
                     );
                     generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
@@ -711,6 +713,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     buffer_size,
                     background_rgb,
                     blank_strategy,
+                    &engine_cfg.failure_policy,
                     cancel.clone(),
                 );
                 generate_pyramid_mapreduce(&source, &plan, engine_sink, &cfg, observer_ref)?
@@ -722,6 +725,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     buffer_size,
                     background_rgb,
                     blank_strategy,
+                    &engine_cfg.failure_policy,
                     cancel.clone(),
                 );
                 generate_pyramid_mapreduce(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
@@ -784,12 +788,14 @@ fn build_streaming_config(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_mapreduce_config(
     memory_budget_bytes: Option<u64>,
     concurrency: Option<usize>,
     buffer_size: Option<usize>,
     background_rgb: Option<[u8; 3]>,
     blank_strategy: Option<BlankTileStrategy>,
+    failure_policy: &FailurePolicy,
     cancel: Option<crate::cancel::CancelToken>,
 ) -> MapReduceConfig {
     let mut cfg = MapReduceConfig::default();
@@ -808,6 +814,7 @@ fn build_mapreduce_config(
     if let Some(bts) = blank_strategy {
         cfg.blank_tile_strategy = bts;
     }
+    cfg.failure_policy = failure_policy.clone();
     cfg.cancel = cancel;
     cfg
 }
