@@ -987,20 +987,26 @@ fn prepare_resume_state(
                     .map_err(|e| EngineError::ResumeFailed(crate::resume::ResumeError::from(e)))?;
             }
             // When an explicit checkpoint_root sits apart from the sink dir,
-            // it only ever holds our own `.libviprs-job.json`. Remove just
-            // that file so a stale checkpoint can't make this fresh run look
-            // resumable — leaving every other entry in place.
+            // it only ever holds our own checkpoint files. Remove both the
+            // JSON header and the append-only segment log (issue #127) so a
+            // stale checkpoint can't make this fresh run look resumable, and so
+            // the fresh run does not append onto a prior run's coordinate log,
+            // leaving every other entry in place.
             if let Some(root) = &config.checkpoint_root {
                 let same_as_sink = sink.checkpoint_root().is_some_and(|s| s == root.as_path());
                 if !same_as_sink {
-                    let marker = root.join(crate::resume::CHECKPOINT_FILENAME);
-                    match std::fs::remove_file(&marker) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => {
-                            return Err(EngineError::ResumeFailed(
-                                crate::resume::ResumeError::from(e),
-                            ));
+                    for marker in [
+                        crate::resume::JobCheckpoint::checkpoint_path(root),
+                        crate::resume::JobCheckpoint::segments_path(root),
+                    ] {
+                        match std::fs::remove_file(&marker) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                return Err(EngineError::ResumeFailed(
+                                    crate::resume::ResumeError::from(e),
+                                ));
+                            }
                         }
                     }
                 }

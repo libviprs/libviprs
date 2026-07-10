@@ -634,8 +634,29 @@ pub(crate) struct CheckpointState {
     /// The directory where `.libviprs-job.json` lives — typically the sink's
     /// `base_dir`. Every call to [`CheckpointState::flush`] writes there.
     root: std::path::PathBuf,
-    /// Running metadata. Re-serialised on every flush.
+    /// Running metadata. Only its small scalar fields (schema, plan hash,
+    /// completed levels, timestamps, format) plus the fixed `inline` slice of
+    /// coordinates are re-serialised into the header on every flush; the bulk
+    /// of `completed_tiles` is persisted through the append-only segment log.
     meta: std::sync::Mutex<JobMetadata>,
+    /// Half-open range `inline_start..inline_end` inside `meta.completed_tiles`
+    /// identifying the coordinates that live *inline* in the JSON header rather
+    /// than in the segment log. These are the coordinates a resume loaded from
+    /// a header that did not already have them in the segment file (a legacy or
+    /// hand-written checkpoint). The range is fixed for the life of the run, so
+    /// the header stays a bounded size regardless of how many new tiles the run
+    /// completes (issue #127). For a fresh run and for a resume off an
+    /// engine-written segment log, this range is empty and the header carries
+    /// no coordinates at all.
+    inline_start: usize,
+    inline_end: usize,
+    /// Serialises flushes and tracks how many of `meta.completed_tiles` are
+    /// already durable in the segment log. Held across the append + header
+    /// rewrite so two workers cannot interleave partial segment frames. The
+    /// stored value is the exclusive upper index into `completed_tiles`
+    /// covered by the log so far; it starts at `inline_end` (everything known
+    /// at construction is either inline in the header or already in the log).
+    seg_cursor: std::sync::Mutex<usize>,
     /// Monotonically increasing count of tiles marked completed over the whole
     /// run. A flush is triggered whenever this counter lands on a multiple of
     /// `checkpoint_every`; it is never reset. Because [`AtomicU64::fetch_add`]
@@ -656,9 +677,24 @@ impl CheckpointState {
         _plan: &PyramidPlan,
         checkpoint_every: u64,
     ) -> Self {
+        // Coordinates already durable in the segment log occupy the front of
+        // `completed_tiles` (see `JobCheckpoint::load`, which lists segment
+        // coordinates first). Everything after that came from the header inline
+        // and must keep being written inline until it is migrated into the log
+        // by the first flush. Counting physical frames is an O(1) metadata read.
+        let segment_frames = crate::resume::count_segment_frames(
+            &crate::resume::JobCheckpoint::segments_path(&root),
+        )
+        .unwrap_or(0);
+        let total = meta.completed_tiles.len();
+        let inline_start = segment_frames.min(total);
+        let inline_end = total;
         Self {
             root,
             meta: std::sync::Mutex::new(meta),
+            inline_start,
+            inline_end,
+            seg_cursor: std::sync::Mutex::new(inline_end),
             completed_counter: AtomicU64::new(0),
             checkpoint_every,
         }
@@ -734,15 +770,59 @@ impl CheckpointState {
         }
     }
 
-    /// Serialise the current metadata to `<root>/.libviprs-job.json`. Atomic
-    /// via the tmp+rename dance inside [`JobCheckpoint::save`].
+    /// Persist the checkpoint with *bounded* per-flush I/O (issue #127).
+    ///
+    /// Rather than re-serialising the whole `completed_tiles` vector into the
+    /// JSON header on every flush (which made per-flush cost grow with all
+    /// completed tiles, cumulatively O(n²/k)), this appends only the
+    /// coordinates completed since the previous flush to the append-only
+    /// segment log, then rewrites a small header carrying just the scalar
+    /// fields plus the fixed inline coordinate range. The append is a single
+    /// bounded write; the header stays a bounded size.
+    ///
+    /// Ordering: the delta coordinates are appended and fsynced *before* the
+    /// header that summarises them is renamed into place, so a crash between
+    /// the two leaves the segment log holding coordinates the header does not
+    /// yet mention. Those tiles were genuinely written (the coordinate is only
+    /// marked after a successful write), so recovering them as completed is
+    /// safe; a resume simply skips already-done work.
+    ///
+    /// The `seg_cursor` lock serialises concurrent flushes so two workers
+    /// cannot interleave partial segment frames or double-append the same
+    /// delta.
     pub(crate) fn flush(&self) -> Result<(), ResumeError> {
-        let snapshot = {
+        let mut cursor = crate::poison::recover(&self.seg_cursor);
+
+        // Snapshot only the bounded parts we need under the meta lock: the
+        // frozen inline coordinate slice, the newly-completed delta, and the
+        // scalar header fields. The full vector is never cloned.
+        let (header_meta, delta, new_cursor) = {
             let mut meta = crate::poison::recover(&self.meta);
             meta.last_checkpoint_at = now_rfc3339_engine();
-            meta.clone()
+            let len = meta.completed_tiles.len();
+            let inline_end = self.inline_end.min(len);
+            let inline_start = self.inline_start.min(inline_end);
+            let inline = meta.completed_tiles[inline_start..inline_end].to_vec();
+            let delta = meta.completed_tiles[(*cursor).min(len)..len].to_vec();
+            let header_meta = JobMetadata {
+                schema_version: meta.schema_version.clone(),
+                plan_hash: meta.plan_hash.clone(),
+                completed_tiles: inline,
+                levels_completed: meta.levels_completed.clone(),
+                started_at: meta.started_at.clone(),
+                last_checkpoint_at: meta.last_checkpoint_at.clone(),
+                content_format: meta.content_format,
+            };
+            (header_meta, delta, len)
         };
-        JobCheckpoint::save(&self.root, &snapshot).map_err(ResumeError::from)
+
+        // Append the delta first so its bytes are durable before the header
+        // that certifies the completed set is published.
+        crate::resume::append_segments(&self.root, &delta, &crate::resume::RealDurability)
+            .map_err(ResumeError::from)?;
+        JobCheckpoint::save(&self.root, &header_meta).map_err(ResumeError::from)?;
+        *cursor = new_cursor;
+        Ok(())
     }
 }
 
@@ -1829,16 +1909,15 @@ mod tests {
     /// tiles and the per-flush write cost is O(n) — cumulatively O(n^2/k).
     ///
     /// This ratchet asserts the header size stays bounded regardless of how
-    /// many tiles have been recorded. It is `#[ignore]`d because the fix
-    /// requires moving the coordinate log out of the single JSON header
-    /// (append-only segments / per-level bitmaps), which changes the on-disk
-    /// contract currently frozen by the `libviprs-tests` integration suite
-    /// (raw-parses `.libviprs-job.json` for `completed_tiles`, and asserts a
-    /// single checkpoint file). Landing criterion 1 therefore needs a
-    /// coordinated update to that shared suite. Un-ignore to reproduce the
-    /// unbounded-I/O behaviour on the current code.
+    /// many tiles have been recorded. The fix (issue #127) moves the
+    /// coordinate log out of the single JSON header into an append-only
+    /// segment file, so each periodic flush appends only the delta and the
+    /// header stays small. `JobCheckpoint::load` merges the segment log back
+    /// in, so the recorded set is still fully recoverable. The
+    /// `libviprs-tests` integration suite was updated in lockstep to read the
+    /// checkpoint through `JobCheckpoint::load` rather than raw-parsing the
+    /// header.
     #[test]
-    #[ignore = "issue #127 criterion 1: needs segmented checkpoint format + coordinated libviprs-tests update"]
     fn checkpoint_flush_io_is_bounded_per_flush() {
         use crate::resume::{CHECKPOINT_FILENAME, JobCheckpoint, JobMetadata};
 
