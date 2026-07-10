@@ -158,6 +158,21 @@ pub enum EngineEvent {
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 pub trait EngineObserver: Send + Sync {
     fn on_event(&self, event: EngineEvent);
+
+    /// Receive the builder's [`Extensions`](crate::extensions::Extensions) map
+    /// once, before any tile is emitted.
+    ///
+    /// This is the reader end of the extension hatch threaded through
+    /// [`EngineBuilder::with_extension`](crate::EngineBuilder::with_extension):
+    /// third-party context (metrics recorders, tracing spans, custom config
+    /// blobs) inserted on the builder is delivered here so a custom observer
+    /// can clone out the handles it needs for the rest of the run. The default
+    /// implementation ignores the map, so existing observers are unaffected.
+    ///
+    /// The borrow is valid only for the duration of the call; an observer that
+    /// needs a value past this point must clone it out (extension values are
+    /// `Send + Sync`, so `Arc`-shaped handles clone cheaply).
+    fn on_extensions(&self, _extensions: &crate::extensions::Extensions) {}
 }
 
 /// A no-op observer that discards all events.
