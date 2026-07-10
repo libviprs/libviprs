@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -427,26 +426,22 @@ pub(crate) fn generate_pyramid_observed(
     config: &EngineConfig,
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
-    run_pyramid(source, plan, sink, config, observer, None, None)
+    run_pyramid(source, plan, sink, config, observer)
 }
 
-/// Internal driver shared by both `generate_pyramid_observed` and
-/// `generate_pyramid_resumable`.
+/// Internal driver behind [`generate_pyramid_observed`].
 ///
-/// `skip_coords` (optional): tiles that should not be re-emitted because they
-/// were recorded as complete in an incoming checkpoint.
-///
-/// `checkpoint_state` (optional): when supplied, the engine persists the
-/// running `JobMetadata` to `sink.checkpoint_root()/.libviprs-job.json`
-/// every `config.checkpoint_every` tiles (and once at the end).
+/// Resume is handled one layer up, in [`crate::engine_builder`]: the builder
+/// wraps the user sink in a `ResumeAwareSink` that filters already-completed
+/// coordinates and advances the on-disk [`CheckpointState`]. The engine driver
+/// itself is intentionally resume-oblivious — it walks the whole plan and hands
+/// every tile to the (possibly wrapping) sink.
 fn run_pyramid(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
     config: &EngineConfig,
     observer: &dyn EngineObserver,
-    skip_coords: Option<&HashSet<TileCoord>>,
-    checkpoint_state: Option<&CheckpointState>,
 ) -> Result<EngineResult, EngineError> {
     let started = Instant::now();
     #[cfg(feature = "tracing")]
@@ -501,8 +496,6 @@ fn run_pyramid(
         queue_pressure_peak: &queue_pressure_peak,
         stage_encode: &stage_encode,
         stage_sink: &stage_sink,
-        skip_coords,
-        checkpoint_state,
     };
 
     // Process from top level (full res) down to level 0 (1×1)
@@ -553,11 +546,6 @@ fn run_pyramid(
         tiles_produced += level_tiles;
         tiles_skipped += level_skipped;
 
-        // Record level completion into the optional checkpoint.
-        if let Some(cp) = checkpoint_state {
-            cp.mark_level_completed(level.level, level.tile_count());
-        }
-
         observer.on_event(EngineEvent::LevelCompleted {
             level: level.level,
             tiles_produced: level_tiles,
@@ -576,13 +564,6 @@ fn run_pyramid(
         sink_finish_start.elapsed().as_nanos() as u64,
         Ordering::Relaxed,
     );
-
-    // Flush a final checkpoint — ensures the on-disk `.libviprs-job.json`
-    // reflects every tile emitted by the run (not only those that landed on
-    // a `checkpoint_every` boundary).
-    if let Some(cp) = checkpoint_state {
-        cp.flush().map_err(EngineError::from)?;
-    }
 
     observer.on_event(EngineEvent::Finished {
         total_tiles: tiles_produced,
@@ -623,14 +604,6 @@ struct EmitContext<'a> {
     queue_pressure_peak: &'a AtomicU32,
     stage_encode: &'a AtomicU64,
     stage_sink: &'a AtomicU64,
-    /// Tiles that have already been written on a previous run (from a resume
-    /// checkpoint). When `Some`, tiles matching an entry are skipped without
-    /// calling the sink.
-    skip_coords: Option<&'a HashSet<TileCoord>>,
-    /// Running on-disk checkpoint. When present, each successful write is
-    /// appended to it, and when `config.checkpoint_every` is non-zero the
-    /// checkpoint is flushed to disk periodically.
-    checkpoint_state: Option<&'a CheckpointState>,
 }
 
 /// Mutable, shared state for the on-disk resume checkpoint.
@@ -695,9 +668,9 @@ impl CheckpointState {
     }
 
     /// Promote the level to `levels_completed` only when every tile in that
-    /// level is present in `completed_tiles`. Called by `run_pyramid` after
-    /// each level's inner loop returns, with `expected_tiles` set to the
-    /// level's full [`LevelPlan::tile_count`].
+    /// level is present in `completed_tiles`. Called by the builder's resume
+    /// path once the run returns, with `expected_tiles` set to the level's
+    /// full [`LevelPlan::tile_count`].
     ///
     /// A level in which [`FailurePolicy::RetryThenSkip`] dropped one or more
     /// tiles never has all of its coordinates recorded (skipped tiles call
@@ -707,7 +680,7 @@ impl CheckpointState {
     /// `completed_tiles`") would be violated, and a consumer honouring the
     /// documented "skip whole levels" resume optimisation would treat the
     /// failure-skipped tiles as done — permanently unrecoverable (issue #125).
-    fn mark_level_completed(&self, level: u32, expected_tiles: u64) {
+    pub(crate) fn mark_level_completed(&self, level: u32, expected_tiles: u64) {
         let mut meta = self.meta.lock().unwrap();
         let recorded = meta
             .completed_tiles
@@ -1286,13 +1259,6 @@ fn extract_and_emit_level(
                 // so a long single-threaded level can be stopped promptly.
                 config.check_cancelled()?;
                 let coord = TileCoord::new(level, col, row);
-                // Honor the resume checkpoint: tiles already present on disk
-                // (per an inbound `.libviprs-job.json`) are not re-emitted.
-                if let Some(skip) = ctx.skip_coords {
-                    if skip.contains(&coord) {
-                        continue;
-                    }
-                }
                 let encode_start = Instant::now();
                 let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
                 ctx.stage_encode
@@ -1316,9 +1282,6 @@ fn extract_and_emit_level(
                         ctx.stage_sink
                             .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         ctx.bytes_written.fetch_add(tile_bytes, Ordering::Relaxed);
-                        if let Some(cp) = ctx.checkpoint_state {
-                            cp.mark_tile_completed(coord).map_err(EngineError::from)?;
-                        }
                     }
                     Err(e) => {
                         ctx.stage_sink
@@ -1470,15 +1433,12 @@ fn extract_and_emit_parallel(
     // MemoryTracker never charged); borrowing keeps the real peak in line
     // with `peak_memory_bytes`.
 
-    // Collect tile coordinates for this level, honouring the resume
-    // checkpoint: tiles flagged as already complete are elided here so
-    // neither the producer nor consumer do any work for them.
+    // Collect every tile coordinate for this level. Resume filtering happens
+    // in the builder's `ResumeAwareSink`, not here — the engine walks the
+    // whole plan and lets the wrapping sink short-circuit already-completed
+    // writes.
     let coords: Vec<TileCoord> = (0..level_plan.rows)
         .flat_map(|row| (0..level_plan.cols).map(move |col| TileCoord::new(level, col, row)))
-        .filter(|coord| match ctx.skip_coords {
-            Some(skip) => !skip.contains(coord),
-            None => true,
-        })
         .collect();
 
     if coords.is_empty() {
@@ -1570,9 +1530,6 @@ fn extract_and_emit_parallel(
                     ctx.stage_sink
                         .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     ctx.bytes_written.fetch_add(tile_bytes, Ordering::Relaxed);
-                    if let Some(cp) = ctx.checkpoint_state {
-                        cp.mark_tile_completed(coord).map_err(EngineError::from)?;
-                    }
                 }
                 Err(e) => {
                     ctx.stage_sink
