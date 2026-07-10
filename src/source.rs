@@ -1,6 +1,7 @@
+use std::io::Cursor;
 use std::path::Path;
 
-use image::GenericImageView;
+use image::{GenericImageView, ImageReader, Limits};
 use thiserror::Error;
 
 use crate::pixel::PixelFormat;
@@ -25,6 +26,75 @@ pub enum SourceError {
     UnsupportedColorType(image::ColorType),
     #[error("raster construction error: {0}")]
     Raster(#[from] crate::raster::RasterError),
+    #[error(
+        "image dimensions {width}x{height} exceed the configured pixel ceiling ({max_pixels} px)"
+    )]
+    DimensionLimitExceeded {
+        width: u32,
+        height: u32,
+        max_pixels: u64,
+    },
+}
+
+/// Resource limits applied to a single image decode.
+///
+/// These bound the work a decoder may perform before pixel data is
+/// materialised into a [`Raster`], guarding the process against
+/// decompression bombs and pathologically large inputs. The width,
+/// height, and allocation ceilings are pushed down into the underlying
+/// decoder via [`image::Limits`] (so an oversized image is rejected
+/// *before* it is fully allocated), and the combined `width * height`
+/// pixel count is checked explicitly just before raster construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodeLimits {
+    /// Maximum decoded width, in pixels.
+    pub max_width: u32,
+    /// Maximum decoded height, in pixels.
+    pub max_height: u32,
+    /// Maximum total pixel count (`width * height`).
+    pub max_pixels: u64,
+    /// Maximum number of bytes the decoder may allocate at one time.
+    pub max_alloc_bytes: u64,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            // Matches the widest dimension the `image` strict limits can
+            // express and covers every format libviprs targets.
+            max_width: 65_535,
+            max_height: 65_535,
+            // ~1 gigapixel; large enough for legitimate scans, small
+            // enough to reject a decompression bomb before allocation.
+            max_pixels: 1u64 << 30,
+            // Mirrors the `image` crate default allocation budget.
+            max_alloc_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+impl DecodeLimits {
+    /// Translate into the `image` crate's strict/non-strict limit set.
+    fn to_image_limits(self) -> Limits {
+        let mut limits = Limits::no_limits();
+        limits.max_image_width = Some(self.max_width);
+        limits.max_image_height = Some(self.max_height);
+        limits.max_alloc = Some(self.max_alloc_bytes);
+        limits
+    }
+
+    /// Enforce the `width * height` ceiling before a [`Raster`] is built.
+    fn check_pixels(self, width: u32, height: u32) -> Result<(), SourceError> {
+        let pixels = u64::from(width).saturating_mul(u64::from(height));
+        if pixels > self.max_pixels {
+            return Err(SourceError::DimensionLimitExceeded {
+                width,
+                height,
+                max_pixels: self.max_pixels,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Map `image` crate color types to our canonical pixel format.
@@ -60,28 +130,21 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// **See also:** [interactive example](https://libviprs.org/cli/#pyramid) (general
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
-    let img = image::open(path)?;
-    let (width, height) = img.dimensions();
-    let color = img.color();
-    let format = color_type_to_format(color)?;
+    decode_file_with_limits(path, DecodeLimits::default())
+}
 
-    // For La8/La16, we need to convert to Rgba to get the right byte layout
-    let data = match color {
-        image::ColorType::La8 => img.to_rgba8().into_raw(),
-        image::ColorType::La16 => {
-            let rgba16 = img.to_rgba16();
-            let pixels = rgba16.as_raw();
-            // Convert &[u16] → Vec<u8> in native endian
-            let mut bytes = Vec::with_capacity(pixels.len() * 2);
-            for &sample in pixels {
-                bytes.extend_from_slice(&sample.to_ne_bytes());
-            }
-            bytes
-        }
-        _ => img.into_bytes(),
-    };
-
-    Ok(Raster::new(width, height, format, data)?)
+/// Decode an image file into a [`Raster`] under explicit [`DecodeLimits`].
+///
+/// Identical to [`decode_file`] but lets the caller supply the
+/// dimension/allocation budget instead of using [`DecodeLimits::default`].
+/// The limits are configured on the decoder before any pixel data is
+/// allocated, and the `width * height` ceiling is checked before the
+/// [`Raster`] is constructed.
+pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
+    let mut reader = ImageReader::open(path)?;
+    reader.limits(limits.to_image_limits());
+    let img = reader.decode()?;
+    build_raster(img, limits)
 }
 
 /// Decode from an in-memory buffer (format auto-detected).
@@ -101,26 +164,76 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// **See also:** [interactive example](https://libviprs.org/cli/#pyramid) (general
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
-    let img = image::load_from_memory(bytes)?;
+    decode_bytes_with_limits(bytes, DecodeLimits::default())
+}
+
+/// Decode an in-memory buffer into a [`Raster`] under explicit [`DecodeLimits`].
+///
+/// Identical to [`decode_bytes`] but lets the caller supply the
+/// dimension/allocation budget. The limits are configured on the decoder
+/// before any pixel data is allocated, and the `width * height` ceiling
+/// is checked before the [`Raster`] is constructed.
+pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits.to_image_limits());
+    let img = reader.decode()?;
+    build_raster(img, limits)
+}
+
+/// Materialise a decoded [`image::DynamicImage`] into a [`Raster`].
+///
+/// Enforces the pixel ceiling, maps the color type to a canonical
+/// [`PixelFormat`], and packs the sample bytes. For gray+alpha inputs
+/// the luminance is expanded to RGB in a single streaming pass so no
+/// second full-image copy is buffered.
+fn build_raster(img: image::DynamicImage, limits: DecodeLimits) -> Result<Raster, SourceError> {
     let (width, height) = img.dimensions();
+    // Enforce the explicit ceiling before allocating the packed buffer.
+    limits.check_pixels(width, height)?;
     let color = img.color();
     let format = color_type_to_format(color)?;
+    let data = pack_bytes(img, color);
+    Ok(Raster::new(width, height, format, data)?)
+}
 
-    let data = match color {
+/// Pack a decoded image into the canonical native-endian byte layout.
+fn pack_bytes(img: image::DynamicImage, color: image::ColorType) -> Vec<u8> {
+    match color {
+        // 8-bit gray+alpha: a single expanding copy to RGBA8, then a
+        // zero-copy unwrap of the backing buffer.
         image::ColorType::La8 => img.to_rgba8().into_raw(),
+        // 16-bit gray+alpha: stream luminance → RGB directly into the
+        // output byte buffer, borrowing the already-decoded LumaA16
+        // samples so no intermediate RGBA16 image is materialised.
         image::ColorType::La16 => {
-            let rgba16 = img.to_rgba16();
-            let pixels = rgba16.as_raw();
-            let mut bytes = Vec::with_capacity(pixels.len() * 2);
-            for &sample in pixels {
-                bytes.extend_from_slice(&sample.to_ne_bytes());
-            }
-            bytes
+            let la = img
+                .as_luma_alpha16()
+                .expect("color type verified as La16 above");
+            la16_to_rgba16_bytes(la.as_raw())
         }
         _ => img.into_bytes(),
-    };
+    }
+}
 
-    Ok(Raster::new(width, height, format, data)?)
+/// Expand interleaved `[luma, alpha]` u16 samples into RGBA16 bytes.
+///
+/// Writes exactly one output buffer: for each source pixel the single
+/// luminance sample is emitted on all three color channels followed by
+/// the alpha sample, each in native-endian byte order. This avoids the
+/// second whole-image allocation that a `to_rgba16` conversion would
+/// require before the byte re-pack.
+fn la16_to_rgba16_bytes(samples: &[u16]) -> Vec<u8> {
+    // 2 input samples per pixel → 4 output channels × 2 bytes.
+    let mut bytes = Vec::with_capacity(samples.len() * 4);
+    for pair in samples.chunks_exact(2) {
+        let luma = pair[0];
+        let alpha = pair[1];
+        bytes.extend_from_slice(&luma.to_ne_bytes());
+        bytes.extend_from_slice(&luma.to_ne_bytes());
+        bytes.extend_from_slice(&luma.to_ne_bytes());
+        bytes.extend_from_slice(&alpha.to_ne_bytes());
+    }
+    bytes
 }
 
 /// Generate a synthetic test image (RGB8 gradient pattern).
@@ -166,6 +279,30 @@ mod tests {
                 .unwrap();
         }
         buf
+    }
+
+    /// Encode a `w x h` La16 (gray + alpha) PNG in memory, returning the
+    /// encoded bytes alongside the `(luma, alpha)` samples that were
+    /// written so callers can verify the decoded RGBA16 layout.
+    fn create_la16_png(w: u32, h: u32) -> (Vec<u8>, Vec<(u16, u16)>) {
+        use image::{DynamicImage, ImageBuffer, ImageFormat, LumaA};
+
+        let mut buf: ImageBuffer<LumaA<u16>, Vec<u16>> = ImageBuffer::new(w, h);
+        let mut expected = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let luma = ((x.wrapping_mul(4096).wrapping_add(y.wrapping_mul(7))) & 0xFFFF) as u16;
+                let alpha = ((x.wrapping_add(y.wrapping_mul(300))) & 0xFFFF) as u16;
+                buf.put_pixel(x, y, LumaA([luma, alpha]));
+                expected.push((luma, alpha));
+            }
+        }
+        let dyn_img = DynamicImage::ImageLumaA16(buf);
+        let mut out = Vec::new();
+        dyn_img
+            .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .unwrap();
+        (out, expected)
     }
 
     fn create_test_jpeg(w: u32, h: u32) -> Vec<u8> {
@@ -327,5 +464,88 @@ mod tests {
     fn decode_file_not_found() {
         let result = decode_file(Path::new("/nonexistent/image.png"));
         assert!(result.is_err());
+    }
+
+    /**
+     * Reproducer for the missing dimension ceiling: a fully decodable
+     * image must still be rejected when its pixel count exceeds the
+     * configured `max_pixels`. Works by decoding a valid 64x64 PNG under
+     * a `DecodeLimits` whose ceiling (100 px) is far below 64*64=4096 and
+     * asserting a `DimensionLimitExceeded` error is returned before the
+     * raster is built. Before the fix no ceiling existed and this decode
+     * succeeded. Input: 64x64 PNG + max_pixels=100 → Output: Err.
+     */
+    #[test]
+    fn decode_bytes_rejects_over_pixel_ceiling() {
+        let png = create_test_png(64, 64);
+        let limits = DecodeLimits {
+            max_pixels: 100,
+            ..DecodeLimits::default()
+        };
+        let result = decode_bytes_with_limits(&png, limits);
+        match result {
+            Err(SourceError::DimensionLimitExceeded {
+                width,
+                height,
+                max_pixels,
+            }) => {
+                assert_eq!(width, 64);
+                assert_eq!(height, 64);
+                assert_eq!(max_pixels, 100);
+            }
+            other => panic!("expected DimensionLimitExceeded, got {other:?}"),
+        }
+        // The same bytes decode fine under the default (generous) ceiling.
+        assert!(decode_bytes(&png).is_ok());
+    }
+
+    /**
+     * Confirms the explicit width/height limits are pushed down into the
+     * decoder itself (not merely checked after the fact): decoding a
+     * 64-wide PNG under `max_width = 10` must fail with an `image`
+     * limit/decode error. Input: 64x48 PNG + max_width=10 → Output: Err.
+     */
+    #[test]
+    fn decode_bytes_enforces_decoder_width_limit() {
+        let png = create_test_png(64, 48);
+        let limits = DecodeLimits {
+            max_width: 10,
+            ..DecodeLimits::default()
+        };
+        let result = decode_bytes_with_limits(&png, limits);
+        assert!(
+            matches!(result, Err(SourceError::Decode(_))),
+            "expected a decoder limit error, got {result:?}"
+        );
+    }
+
+    /**
+     * Verifies the streaming La16 conversion produces the exact RGBA16
+     * native-endian byte layout: luminance replicated across R, G, B and
+     * the alpha sample last, two bytes each. Works by encoding a known
+     * La16 PNG, decoding it, and comparing every 8-byte pixel against the
+     * expected expansion of the original (luma, alpha) samples.
+     * Input: 5x3 La16 PNG → Output: Raster(5, 3, Rgba16) with each pixel
+     * bytes == [luma, luma, luma, alpha] in native endian.
+     */
+    #[test]
+    fn decode_la16_streams_to_rgba16_layout() {
+        let (png, expected) = create_la16_png(5, 3);
+        let raster = decode_bytes(&png).unwrap();
+        assert_eq!(raster.width(), 5);
+        assert_eq!(raster.height(), 3);
+        assert_eq!(raster.format(), PixelFormat::Rgba16);
+
+        let data = raster.data();
+        assert_eq!(data.len(), expected.len() * 4 * 2);
+        for (i, &(luma, alpha)) in expected.iter().enumerate() {
+            let base = i * 8;
+            let mut want = Vec::with_capacity(8);
+            want.extend_from_slice(&luma.to_ne_bytes());
+            want.extend_from_slice(&luma.to_ne_bytes());
+            want.extend_from_slice(&luma.to_ne_bytes());
+            want.extend_from_slice(&alpha.to_ne_bytes());
+            assert_eq!(&data[base..base + 8], want.as_slice(), "pixel {i} mismatch");
+        }
     }
 }
