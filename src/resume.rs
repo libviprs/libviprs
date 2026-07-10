@@ -6,12 +6,28 @@
 //!
 //! # Checkpoint format
 //!
-//! Each output directory contains a single file, `.libviprs-job.json`, whose
-//! contents deserialise to [`JobMetadata`]. The file is written atomically via
-//! a `.tmp` sibling + rename so that a crash mid-write cannot produce a torn
-//! or partially-updated checkpoint. The sibling name is made unique per
-//! process (pid + counter) so two jobs sharing one output directory cannot
-//! stage into — and torn-rename over — the same temp file (issue #126).
+//! Each output directory contains a small JSON header, `.libviprs-job.json`,
+//! whose contents deserialise to [`JobMetadata`]. The header is written
+//! atomically via a `.tmp` sibling + rename so that a crash mid-write cannot
+//! produce a torn or partially-updated checkpoint. The sibling name is made
+//! unique per process (pid + counter) so two jobs sharing one output directory
+//! cannot stage into, and torn-rename over, the same temp file (issue #126).
+//!
+//! The list of completed tile coordinates does *not* live inline in that
+//! header on the hot path. Re-serialising the whole vector on every periodic
+//! flush made per-flush I/O proportional to all completed tiles, so a
+//! libvips-scale run re-wrote hundreds of gigabytes cumulatively (issue #127).
+//! Instead, [`CheckpointState`](crate::engine) appends only the coordinates
+//! completed *since the last flush* to an append-only side log,
+//! `.libviprs-job.segments`, keeping each periodic flush bounded. The header
+//! carries the small, fixed set of scalar fields (schema, plan hash, completed
+//! levels, timestamps, format) plus any coordinates that were already inline
+//! at resume time (a hand-written or legacy checkpoint). [`JobCheckpoint::load`]
+//! reconstructs the full completed set by merging the header's inline
+//! coordinates with the segment log, so callers see one coherent
+//! [`JobMetadata`] regardless of how the checkpoint was written. A trailing
+//! partially-written segment record (a crash mid-append) is ignored on read;
+//! the coordinates before it are still recovered.
 //!
 //! # Plan hashing
 //!
@@ -72,6 +88,22 @@ pub const SCHEMA_VERSION: &str = "1";
 /// Always lives directly inside the output directory (the tile sink's base
 /// path). Relative path: `<output_dir>/.libviprs-job.json`.
 pub const CHECKPOINT_FILENAME: &str = ".libviprs-job.json";
+
+/// Well-known filename for the append-only completed-coordinate log that sits
+/// alongside [`CHECKPOINT_FILENAME`].
+///
+/// Each record is a fixed 12-byte little-endian frame `(level, col, row)`.
+/// The engine appends only the coordinates completed since the previous flush,
+/// which keeps per-flush I/O bounded instead of proportional to every tile
+/// completed so far (issue #127). [`JobCheckpoint::load`] replays this log and
+/// merges it with the header's inline coordinates. Relative path:
+/// `<output_dir>/.libviprs-job.segments`.
+pub const SEGMENTS_FILENAME: &str = ".libviprs-job.segments";
+
+/// On-disk size, in bytes, of one segment record: three little-endian `u32`
+/// fields `(level, col, row)`. A trailing run of fewer than this many bytes is
+/// a torn final append and is ignored on read.
+pub(crate) const SEGMENT_RECORD_LEN: usize = 12;
 
 /// Well-known filename for the advisory run lock guarding a checkpoint root.
 ///
@@ -469,6 +501,15 @@ impl JobCheckpoint {
         dir.join(CHECKPOINT_FILENAME)
     }
 
+    /// Absolute path of the append-only completed-coordinate segment log for
+    /// the given output directory.
+    ///
+    /// Returns `<dir>/.libviprs-job.segments` without checking whether the
+    /// file actually exists.
+    pub fn segments_path(dir: &Path) -> PathBuf {
+        dir.join(SEGMENTS_FILENAME)
+    }
+
     /// Load and deserialise the checkpoint from `dir`.
     ///
     /// * `Ok(None)` — the checkpoint file does not exist.
@@ -490,7 +531,7 @@ impl JobCheckpoint {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(ResumeError::Io(e)),
         };
-        let meta: JobMetadata = serde_json::from_slice(&bytes)
+        let mut meta: JobMetadata = serde_json::from_slice(&bytes)
             .map_err(|source| ResumeError::Corrupt { path, source })?;
         if meta.schema_version != SCHEMA_VERSION {
             return Err(ResumeError::SchemaMismatch {
@@ -498,6 +539,28 @@ impl JobCheckpoint {
                 found: meta.schema_version,
             });
         }
+
+        // Merge the append-only segment log (issue #127). The completed set is
+        // reconstructed as `segment coordinates ++ header-inline coordinates`,
+        // deduplicated with first-seen order preserved. Segment coordinates
+        // come first so their count lines up with the physical frame count in
+        // the file, which `CheckpointState` uses to decide which coordinates
+        // are already durable versus still inline in the header.
+        let segment_coords = read_segment_log(&Self::segments_path(dir))?;
+        if !segment_coords.is_empty() {
+            let mut seen = std::collections::HashSet::with_capacity(
+                segment_coords.len() + meta.completed_tiles.len(),
+            );
+            let inline = std::mem::take(&mut meta.completed_tiles);
+            let mut merged = Vec::with_capacity(segment_coords.len() + inline.len());
+            for coord in segment_coords.into_iter().chain(inline) {
+                if seen.insert(coord) {
+                    merged.push(coord);
+                }
+            }
+            meta.completed_tiles = merged;
+        }
+
         Ok(Some(meta))
     }
 
@@ -559,6 +622,97 @@ impl JobCheckpoint {
         durability.sync_dir(dir)?;
         Ok(())
     }
+}
+
+/// Encode a single tile coordinate as its fixed 12-byte little-endian segment
+/// frame `(level, col, row)`.
+fn encode_segment_frame(coord: &TileCoord) -> [u8; SEGMENT_RECORD_LEN] {
+    let mut buf = [0u8; SEGMENT_RECORD_LEN];
+    buf[0..4].copy_from_slice(&coord.level.to_le_bytes());
+    buf[4..8].copy_from_slice(&coord.col.to_le_bytes());
+    buf[8..12].copy_from_slice(&coord.row.to_le_bytes());
+    buf
+}
+
+/// Count the number of complete records currently in the segment log without
+/// parsing them. A trailing partial frame (a torn append) is not counted.
+///
+/// Returns `0` when the file does not exist. `CheckpointState` uses this at
+/// construction to learn how many completed coordinates are already durable in
+/// the log versus still carried inline in the header.
+pub(crate) fn count_segment_frames(path: &Path) -> io::Result<usize> {
+    match std::fs::metadata(path) {
+        Ok(md) => Ok((md.len() as usize) / SEGMENT_RECORD_LEN),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// Replay the append-only segment log at `path`, decoding every complete
+/// 12-byte frame into a [`TileCoord`].
+///
+/// A trailing run shorter than one record is a crash mid-append and is
+/// dropped: the coordinates written before it are intact and returned. Missing
+/// file yields an empty vector.
+fn read_segment_log(path: &Path) -> Result<Vec<TileCoord>, ResumeError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ResumeError::Io(e)),
+    };
+    let frames = bytes.len() / SEGMENT_RECORD_LEN;
+    let mut coords = Vec::with_capacity(frames);
+    for chunk in bytes.chunks_exact(SEGMENT_RECORD_LEN) {
+        let level = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let col = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+        let row = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
+        coords.push(TileCoord::new(level, col, row));
+    }
+    Ok(coords)
+}
+
+/// Append completed coordinates to the segment log at `<dir>/.libviprs-job.segments`.
+///
+/// The write is a single `write_all` of the concatenated frames followed by a
+/// data fsync, so the appended coordinates are durable before the caller
+/// rewrites the header that summarises them. When the log did not exist yet
+/// (the first append of a run), the containing directory is fsynced too so the
+/// new file's directory entry survives power loss.
+///
+/// Callers must serialise their appends: the engine drives this from a single
+/// flush critical section so two workers never interleave partial frames.
+pub(crate) fn append_segments(
+    dir: &Path,
+    coords: &[TileCoord],
+    durability: &dyn Durability,
+) -> io::Result<()> {
+    if coords.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    let path = JobCheckpoint::segments_path(dir);
+    let is_new = !path.exists();
+
+    let mut buf = Vec::with_capacity(coords.len() * SEGMENT_RECORD_LEN);
+    for coord in coords {
+        buf.extend_from_slice(&encode_segment_frame(coord));
+    }
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+
+    // A freshly created log needs its directory entry flushed as well;
+    // subsequent appends only grow an already-linked file.
+    if is_new {
+        durability.sync_dir(dir)?;
+    }
+    Ok(())
 }
 
 /// Durability backend used by the checkpoint/sink write paths to issue
@@ -1098,6 +1252,93 @@ mod tests {
     fn checkpoint_path_is_well_known_filename() {
         let p = JobCheckpoint::checkpoint_path(Path::new("/tmp/out"));
         assert_eq!(p, PathBuf::from("/tmp/out/.libviprs-job.json"));
+    }
+
+    /// Issue #127: coordinates written to the append-only segment log are
+    /// merged back into `completed_tiles` by `load`, and combine with any
+    /// inline header coordinates without duplication.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn load_merges_segment_log_with_inline_header() {
+        let dir = tempfile::tempdir().unwrap();
+        // Header carries one inline coordinate (a legacy / hand-written
+        // checkpoint), the segment log carries two more.
+        let mut meta = sample_meta("deadbeef");
+        meta.completed_tiles = vec![TileCoord::new(9, 9, 9)];
+        JobCheckpoint::save(dir.path(), &meta).unwrap();
+        append_segments(
+            dir.path(),
+            &[TileCoord::new(0, 0, 0), TileCoord::new(1, 2, 3)],
+            &RealDurability,
+        )
+        .unwrap();
+
+        let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
+        // Segment coordinates come first, then inline-only coordinates.
+        assert_eq!(
+            loaded.completed_tiles,
+            vec![
+                TileCoord::new(0, 0, 0),
+                TileCoord::new(1, 2, 3),
+                TileCoord::new(9, 9, 9),
+            ]
+        );
+        // Physical frame count matches the coordinates written to the log.
+        assert_eq!(
+            count_segment_frames(&JobCheckpoint::segments_path(dir.path())).unwrap(),
+            2
+        );
+    }
+
+    /// A coordinate present in *both* the header inline set and the segment
+    /// log is reported once (dedup keeps `completed_tiles.len()` honest even
+    /// after a crash re-appended an already-inline coordinate).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn load_dedupes_overlap_between_header_and_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = sample_meta("deadbeef");
+        meta.completed_tiles = vec![TileCoord::new(0, 0, 0)];
+        JobCheckpoint::save(dir.path(), &meta).unwrap();
+        append_segments(dir.path(), &[TileCoord::new(0, 0, 0)], &RealDurability).unwrap();
+
+        let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.completed_tiles, vec![TileCoord::new(0, 0, 0)]);
+    }
+
+    /// A torn trailing segment frame (a crash mid-append) is dropped on read;
+    /// the whole frames before it are still recovered.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn load_ignores_torn_trailing_segment_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = sample_meta("deadbeef");
+        // sample_meta populates two inline coordinates; clear them so this
+        // test isolates the segment log.
+        let mut header = meta;
+        header.completed_tiles.clear();
+        JobCheckpoint::save(dir.path(), &header).unwrap();
+        append_segments(
+            dir.path(),
+            &[TileCoord::new(2, 0, 0), TileCoord::new(2, 1, 0)],
+            &RealDurability,
+        )
+        .unwrap();
+        // Simulate a partial append: 5 stray bytes shorter than one record.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(JobCheckpoint::segments_path(dir.path()))
+                .unwrap();
+            f.write_all(&[1, 2, 3, 4, 5]).unwrap();
+        }
+
+        let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            loaded.completed_tiles,
+            vec![TileCoord::new(2, 0, 0), TileCoord::new(2, 1, 0)]
+        );
     }
 
     #[test]
