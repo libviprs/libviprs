@@ -144,11 +144,31 @@ fn algo_tag(a: ChecksumAlgo) -> AlgoTag {
 /// order regardless of hash-state randomization.
 #[derive(Debug, Default)]
 struct DedupeState {
-    /// `(algo_tag, digest) -> shared_key` for first-write / reference
+    /// `(algo_tag, digest) -> SeenEntry` for first-write / reference
     /// decisions.
-    seen: BTreeMap<(AlgoTag, [u8; 32]), String>,
+    seen: BTreeMap<(AlgoTag, [u8; 32]), SeenEntry>,
     /// `tile_path -> shared_key` for manifest emission.
     refs: BTreeMap<String, String>,
+}
+
+/// Value stored per distinct content hash in [`DedupeState::seen`].
+///
+/// The shared-key stem is a pure function of the content hash, but the
+/// physical file's *extension* is inherited from whichever tile was recorded
+/// first (that tile's bytes are the ones promoted into `_shared/`). A later
+/// same-bytes tile with a different extension must therefore reference the
+/// path that was actually written, not one re-derived from its own extension
+/// (issue #96). We remember that full path here so `Reference` decisions can
+/// return it verbatim.
+#[derive(Debug, Clone)]
+struct SeenEntry {
+    /// Deterministic `blank_<hash>` stem of the shared file.
+    shared_key: String,
+    /// Full relative path of the shared file as first written, e.g.
+    /// `_shared/blank_<hash>.png`. `None` for entries injected via
+    /// [`DedupeIndex::seed_shared_key`], which carry no extension; those fall
+    /// back to the recording tile's extension (best effort, resume mode).
+    shared_path: Option<PathBuf>,
 }
 
 /// In-memory mapping from content-hash to shared-key. One instance per
@@ -243,16 +263,33 @@ impl DedupeIndex {
 
         match state.seen.entry((algo_tag(algo), digest)) {
             std::collections::btree_map::Entry::Vacant(e) => {
-                e.insert(shared_key.clone());
+                e.insert(SeenEntry {
+                    shared_key: shared_key.clone(),
+                    shared_path: Some(shared_path.clone()),
+                });
                 DedupeDecision::WriteNew {
                     shared_key,
                     shared_path,
                 }
             }
-            std::collections::btree_map::Entry::Occupied(_) => DedupeDecision::Reference {
-                shared_key,
-                shared_path,
-            },
+            // A first occurrence already wrote a physical file under
+            // `_shared/`. Return the *stored* shared key and path so the
+            // reference resolves to the file that actually exists, rather
+            // than one re-derived from this tile's (possibly different)
+            // extension (issue #96). Seeded entries carry no stored path;
+            // for those we fall back to this tile's extension.
+            std::collections::btree_map::Entry::Occupied(e) => {
+                let stored = e.get();
+                let shared_key = stored.shared_key.clone();
+                let shared_path = stored
+                    .shared_path
+                    .clone()
+                    .unwrap_or_else(|| Self::shared_path(&shared_key, ext));
+                DedupeDecision::Reference {
+                    shared_key,
+                    shared_path,
+                }
+            }
         }
     }
 
@@ -281,7 +318,15 @@ impl DedupeIndex {
         };
         let algo = self.effective_algo();
         let mut state = self.state.lock().expect("dedupe state mutex poisoned");
-        state.seen.insert((algo_tag(algo), digest), shared_key);
+        state.seen.insert(
+            (algo_tag(algo), digest),
+            SeenEntry {
+                shared_key,
+                // No extension is known when seeding from a hex hash; the
+                // first `record` that hits this entry supplies its own.
+                shared_path: None,
+            },
+        );
     }
 
     /// Compute the on-disk relative path for a shared blob.
@@ -665,6 +710,36 @@ mod tests {
             // Placeholder is exactly one byte.
             let md = std::fs::metadata(&tile).unwrap();
             assert_eq!(md.len(), 1);
+        }
+    }
+
+    #[test]
+    fn cross_extension_reference_points_at_written_shared_file() {
+        // Regression: two same-bytes tiles with *different* extensions must
+        // not collide onto a shared file that was never written. The first
+        // tile (`.png`) is the one whose bytes actually get promoted into
+        // `_shared/`, so a later `.jpg` tile with identical bytes must
+        // reference `_shared/<key>.png` — the file that exists on disk — not
+        // `_shared/<key>.jpg`, which nothing ever created.
+        let idx = DedupeIndex::new(DedupeStrategy::Blanks);
+        let bytes = b"identical tile payload";
+
+        let first = idx.record("0/0_0.png", bytes);
+        let written_shared_path = match first {
+            DedupeDecision::WriteNew { shared_path, .. } => shared_path,
+            _ => panic!("first record must be WriteNew"),
+        };
+
+        let second = idx.record("0/0_1.jpg", bytes);
+        match second {
+            DedupeDecision::Reference { shared_path, .. } => {
+                assert_eq!(
+                    shared_path, written_shared_path,
+                    "reference must point at the actually-written shared file, \
+                     not a path derived from the second tile's extension"
+                );
+            }
+            _ => panic!("second record must be Reference"),
         }
     }
 
