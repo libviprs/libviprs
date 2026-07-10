@@ -676,6 +676,20 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 }
             };
 
+            // Advance `levels_completed` under the live resume path. The
+            // engine driver no longer touches the checkpoint (resume lives
+            // entirely in `ResumeAwareSink`), so level promotion has to happen
+            // here, once every tile the run was going to emit has passed
+            // through the wrapper. `mark_level_completed` is gated on every
+            // tile of the level being present in `completed_tiles`, so a level
+            // left partial by a failed run — or by `RetryThenSkip` dropping a
+            // tile — is withheld rather than falsely recorded (issue #125).
+            if let Some(cp) = cp.as_ref() {
+                for level in &plan.levels {
+                    cp.mark_level_completed(level.level, level.tile_count());
+                }
+            }
+
             // Persist the checkpoint whether the run succeeded or failed.
             // On the error path this is the only chance to make completed
             // tiles durable: an interrupted run (kill -9 / OOM / preemption
@@ -705,6 +719,16 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             let skipped = wrapped.skipped_count();
             if skipped > 0 {
                 result.tiles_produced = result.tiles_produced.saturating_sub(skipped);
+            }
+
+            // The monolithic engine credits `bytes_written` on every `Ok`
+            // returned by the sink, including the wrapper's short-circuited
+            // skips. Subtract the bytes of the skipped tiles so `bytes_written`
+            // counts only tiles this run actually emitted rather than every
+            // tile the engine visited.
+            let skipped_bytes = wrapped.skipped_bytes();
+            if skipped_bytes > 0 {
+                result.bytes_written = result.bytes_written.saturating_sub(skipped_bytes);
             }
             return Ok((result, sink));
         }
@@ -998,6 +1022,12 @@ mod resume {
         /// callers see "tiles actually written this run" rather than
         /// "tiles the engine visited".
         pub(super) skipped: AtomicU64,
+        /// Running sum of the payload bytes of skipped tiles. The monolithic
+        /// engine credits `bytes_written` on every `Ok` from the sink — and a
+        /// short-circuited skip returns `Ok` without writing anything — so the
+        /// engine over-counts by exactly this many bytes. The builder subtracts
+        /// it after the run so `bytes_written` reflects bytes actually emitted.
+        pub(super) skipped_bytes: AtomicU64,
     }
 
     impl<'a, S: TileSink + ?Sized> ResumeAwareSink<'a, S> {
@@ -1011,11 +1041,16 @@ mod resume {
                 skip,
                 cp,
                 skipped: AtomicU64::new(0),
+                skipped_bytes: AtomicU64::new(0),
             }
         }
 
         pub(super) fn skipped_count(&self) -> u64 {
             self.skipped.load(Ordering::Relaxed)
+        }
+
+        pub(super) fn skipped_bytes(&self) -> u64 {
+            self.skipped_bytes.load(Ordering::Relaxed)
         }
     }
 
@@ -1023,6 +1058,8 @@ mod resume {
         fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
             if self.skip.contains(&tile.coord) {
                 self.skipped.fetch_add(1, Ordering::Relaxed);
+                self.skipped_bytes
+                    .fetch_add(tile.raster.data().len() as u64, Ordering::Relaxed);
                 return Ok(());
             }
             self.inner.write_tile(tile)?;
@@ -1785,5 +1822,107 @@ mod auto_budget_routing_tests {
                  engine and surface BudgetExceeded, got {other:?}"
             ),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live-resume bookkeeping (issue #136)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod live_resume_bookkeeping_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::{JobCheckpoint, ResumePolicy};
+    use crate::sink::FsSink;
+
+    fn solid_source() -> Raster {
+        // 8x8 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn solid_plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    /// Resume is driven entirely by the builder's `ResumeAwareSink`, which used
+    /// to skip only the *write* while never touching `levels_completed` and
+    /// while the monolithic engine still credited `bytes_written` for every
+    /// short-circuited skip (it sees the wrapper's `Ok` and cannot tell a real
+    /// write from a skip).
+    ///
+    /// Before the fix (RED):
+    ///   * `levels_completed` stayed empty after a completed run — the live
+    ///     path never advanced it.
+    ///   * a fully-resumed run reported `bytes_written > 0` even though it
+    ///     emitted nothing, because the engine counted the skipped tiles.
+    ///
+    /// After the fix (GREEN): the builder promotes every fully-emitted level
+    /// and subtracts the skipped tiles' bytes, so `levels_completed` is
+    /// complete and a no-op resume reports `bytes_written == 0`.
+    #[test]
+    fn resume_advances_levels_and_excludes_skipped_bytes() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+        let level_count = plan.levels.len();
+
+        // Run 1: full render. Seeds the on-disk checkpoint (completed_tiles
+        // and, after the fix, levels_completed).
+        let sink1 = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let r1 = EngineBuilder::new(&source, plan.clone(), sink1)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(cp.path())
+                    .with_checkpoint_every(1),
+            )
+            .run()
+            .expect("initial render must succeed");
+        assert!(
+            r1.bytes_written > 0,
+            "the first run writes real tiles, so bytes_written must be non-zero"
+        );
+
+        // The live resume path must advance levels_completed for every level
+        // whose tiles were all emitted.
+        let meta = JobCheckpoint::load(cp.path())
+            .expect("checkpoint load must not error")
+            .expect("a resume run must leave a checkpoint on disk");
+        assert_eq!(
+            meta.levels_completed.len(),
+            level_count,
+            "every fully-emitted level must be recorded in levels_completed, \
+             got {:?}",
+            meta.levels_completed
+        );
+
+        // Run 2: resume over the same checkpoint. Every tile is already
+        // recorded, so ResumeAwareSink short-circuits all writes.
+        let sink2 = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let r2 = EngineBuilder::new(&source, plan.clone(), sink2)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(cp.path())
+                    .with_checkpoint_every(1),
+            )
+            .run()
+            .expect("resume run must succeed");
+
+        assert_eq!(
+            r2.tiles_produced, 0,
+            "a fully-resumed run must not report any tiles produced"
+        );
+        assert_eq!(
+            r2.bytes_written, 0,
+            "tiles skipped on resume must not be counted as bytes_written"
+        );
     }
 }
