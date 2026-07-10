@@ -260,8 +260,18 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// Convenience for callers that already have a fully-constructed
     /// [`EngineConfig`] — typically because they're migrating from the
     /// old `generate_pyramid_observed(source, plan, sink, &config, obs)`
-    /// free function. Individual `.with_*` setters called after
-    /// `with_config` take precedence.
+    /// free function.
+    ///
+    /// # Precedence
+    ///
+    /// `with_config` overwrites **every** field it carries *unconditionally*:
+    /// the incoming config wins over any earlier `.with_*` setter, and this
+    /// holds uniformly even for the config's `Option` fields whose "unset"
+    /// (`None`) value clears an earlier setter — e.g. a config with no dedupe
+    /// strategy clears an earlier `.with_dedupe(..)` just as `config.concurrency`
+    /// overwrites an earlier `.with_concurrency(..)`. To keep a value regardless
+    /// of the config, apply its setter *after* `with_config`; setters called
+    /// after `with_config` therefore take precedence.
     ///
     /// Also threads the config's `checkpoint_every` and `checkpoint_root`
     /// into an *existing* [`ResumePolicy`] — but only when one has already
@@ -276,12 +286,15 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         self.background_rgb = Some(config.background_rgb);
         self.blank_strategy = Some(config.blank_tile_strategy);
         self.failure_policy = Some(config.failure_policy);
-        if let Some(ds) = config.dedupe_strategy {
-            self.dedupe = Some(ds);
-        }
-        if config.cancel.is_some() {
-            self.cancel = config.cancel;
-        }
+        // Uniform precedence: every value the config carries overwrites any
+        // earlier setter unconditionally, including when the config field is
+        // its "unset" form. `dedupe_strategy` / `cancel` are `Option`s on the
+        // config, so a `None` there means "no dedupe" / "no cancellation" and
+        // must clear an earlier `.with_dedupe(..)` / `.with_cancel(..)` exactly
+        // as `config.concurrency` overwrites an earlier `.with_concurrency(..)`.
+        // Anything a caller wants to preserve is set *after* `with_config`.
+        self.dedupe = config.dedupe_strategy;
+        self.cancel = config.cancel;
         // Carry the checkpoint knobs into an EXPLICITLY-chosen ResumePolicy
         // only, so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
         // don't silently lose the cadence / root that used to live on the
@@ -1562,5 +1575,84 @@ mod failure_policy_parity_tests {
     #[test]
     fn mapreduce_parallel_honors_retry_then_skip() {
         assert_skip_honored(EngineKind::MapReduce, Some(2));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `with_config` field-precedence uniformity
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod with_config_precedence_tests {
+    use super::*;
+    use crate::dedupe::DedupeStrategy;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+
+    fn source() -> Raster {
+        Raster::new(4, 4, PixelFormat::Rgb8, vec![10u8; 4 * 4 * 3]).unwrap()
+    }
+
+    fn plan() -> PyramidPlan {
+        PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    // `with_config` must apply one precedence rule to every field it carries:
+    // the incoming config overwrites any earlier setter unconditionally. The
+    // scalar fields (e.g. concurrency) already did this; `dedupe` and `cancel`
+    // used to overwrite *only* when the config value was `Some`, so an earlier
+    // `.with_dedupe(..)` / `.with_cancel(..)` survived a config that left them
+    // unset — while an earlier `.with_concurrency(..)` was clobbered by the
+    // config's default. This test pins the uniform rule: a config whose dedupe,
+    // cancel, and concurrency are all their default/unset values clears each of
+    // those earlier setters identically.
+    #[test]
+    fn with_config_overwrites_every_field_uniformly() {
+        let src = source();
+        let cancel = crate::cancel::CancelToken::new();
+
+        // Config in its default shape: concurrency 0, no dedupe, no cancel.
+        let cfg = EngineConfig::default();
+
+        let builder = EngineBuilder::new(&src, plan(), MemorySink::new())
+            .with_concurrency(4)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_cancel(cancel)
+            .with_config(cfg);
+
+        assert_eq!(
+            builder.concurrency,
+            Some(0),
+            "config concurrency must overwrite an earlier .with_concurrency"
+        );
+        assert_eq!(
+            builder.dedupe, None,
+            "a config with no dedupe strategy must clear an earlier .with_dedupe, \
+             matching how concurrency is overwritten"
+        );
+        assert!(
+            builder.cancel.is_none(),
+            "a config with no cancel token must clear an earlier .with_cancel, \
+             matching how concurrency is overwritten"
+        );
+    }
+
+    // The flip side of the uniform rule: setters applied *after* `with_config`
+    // win, for the same fields the config would otherwise clear.
+    #[test]
+    fn setters_after_with_config_take_precedence() {
+        let src = source();
+
+        let builder = EngineBuilder::new(&src, plan(), MemorySink::new())
+            .with_config(EngineConfig::default())
+            .with_concurrency(7)
+            .with_dedupe(DedupeStrategy::Blanks);
+
+        assert_eq!(builder.concurrency, Some(7));
+        assert_eq!(builder.dedupe, Some(DedupeStrategy::Blanks));
     }
 }
