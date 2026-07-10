@@ -270,8 +270,23 @@ impl MemoryTracker {
     }
 
     /// Record a deallocation of `bytes`.
+    ///
+    /// Uses saturating semantics: if `bytes` exceeds the currently tracked
+    /// total, `current` clamps to `0` rather than wrapping around the `u64`
+    /// range. A plain `fetch_sub` would underflow to `~2^64`, and the next
+    /// [`alloc`](Self::alloc)'s `fetch_max` would then ratchet `peak` to that
+    /// garbage value permanently. In-tree call sites balance their
+    /// alloc/dealloc pairs, but the type is `pub` with a `Clone`-able `Arc`
+    /// interior, so a caller can drive `current` negative; saturating keeps the
+    /// counter meaningful in that case.
     pub fn dealloc(&self, bytes: u64) {
-        self.current.fetch_sub(bytes, Ordering::Relaxed);
+        // `fetch_update` retries on contention (CAS loop) so the clamp is
+        // applied atomically with respect to concurrent alloc/dealloc calls.
+        let _ = self
+            .current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(bytes))
+            });
     }
 
     /// Current tracked memory in bytes.
@@ -284,7 +299,16 @@ impl MemoryTracker {
         self.peak.load(Ordering::Relaxed)
     }
 
-    /// Reset the tracker.
+    /// Reset the tracker back to zero.
+    ///
+    /// **Quiescent-only.** The two counters are cleared with independent,
+    /// non-atomic stores, so this must be called only when no other thread is
+    /// concurrently calling [`alloc`](Self::alloc) or [`dealloc`](Self::dealloc)
+    /// on this tracker (or any of its `Clone`d handles). Calling it while
+    /// allocations are in flight can interleave a store between another
+    /// thread's `current` update and its `peak` ratchet, leaving `peak` lower
+    /// than a `current` that outlives the reset. Reset between runs, not
+    /// during one.
     pub fn reset(&self) {
         self.current.store(0, Ordering::Relaxed);
         self.peak.store(0, Ordering::Relaxed);
@@ -505,6 +529,48 @@ mod tests {
         t.reset();
         assert_eq!(t.current_bytes(), 0);
         assert_eq!(t.peak_bytes(), 0);
+    }
+
+    /**
+     * Reproducer for #114: an over-large `dealloc` must not wrap `current`
+     * below zero. With the old `fetch_sub`, `dealloc(bytes)` where
+     * `bytes > current` underflowed to ~2^64, and the next `alloc`'s
+     * `fetch_max` ratcheted `peak` to that garbage value permanently.
+     *
+     * Before the fix `current_bytes()` returned `u64::MAX - 49` after the
+     * unbalanced dealloc and `peak_bytes()` was corrupted by the following
+     * alloc (RED). After switching to a saturating `fetch_update`, `current`
+     * clamps to 0 and `peak` stays meaningful (GREEN).
+     *
+     * Input: alloc(100), dealloc(150), alloc(10) →
+     * Output: current=10, peak stays a small sane value (never ~2^64).
+     */
+    #[test]
+    fn dealloc_saturates_and_does_not_corrupt_peak() {
+        let t = MemoryTracker::new();
+        t.alloc(100);
+        assert_eq!(t.current_bytes(), 100);
+
+        // Deallocate more than is currently tracked: must clamp to 0, not wrap.
+        t.dealloc(150);
+        assert_eq!(
+            t.current_bytes(),
+            0,
+            "dealloc must saturate at zero rather than underflow"
+        );
+
+        // The next alloc must not pick up a wrapped `current` into `peak`.
+        t.alloc(10);
+        assert_eq!(t.current_bytes(), 10);
+        assert_eq!(
+            t.peak_bytes(),
+            100,
+            "peak must remain the true high-water mark, uncorrupted by underflow"
+        );
+        assert!(
+            t.peak_bytes() < u64::MAX / 2,
+            "peak must never be ratcheted to a wrapped garbage value"
+        );
     }
 
     /**
