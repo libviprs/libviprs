@@ -178,9 +178,17 @@ pub fn compute_inflight_strips(
         + channel_bytes;
     let available = memory_budget_bytes.saturating_sub(fixed_cost);
     let k = available / strip_cost;
-    // Clamp before the `u32` cast so a huge budget cannot wrap to a small (or
-    // zero) strip count, which would make the batch loop's `chunks(K)` panic.
-    k.min(u32::MAX as u64).max(1) as u32
+    // The image only spans this many strips (`strip_cost != 0` above implies
+    // `strip_height >= 1`, so the `div_ceil` is safe). There is no reason to
+    // admit more in-flight strips than actually exist, and using it as the
+    // upper clamp bound also keeps the return within `u32` range.
+    let total_strips = (plan.canvas_height.div_ceil(strip_height) as u64).max(1);
+    // Clamp *before* the `u32` cast: `k` is a `u64`, so a huge budget can yield
+    // a value at or above `2^32`. `k as u32` would then truncate — any nonzero
+    // multiple of `2^32` wraps to 0 — and `strip_specs.chunks(0)` panics with
+    // "chunk size must be non-zero". Clamping first guarantees `1..=total_strips`
+    // (issue #106).
+    k.clamp(1, total_strips) as u32
 }
 
 /// Estimate peak memory for the MapReduce streaming engine.
@@ -724,6 +732,42 @@ mod tests {
         let plan = planner.plan();
         let k = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 1);
         assert!(k >= 1);
+    }
+
+    #[test]
+    fn compute_inflight_strips_huge_budget_no_chunks_zero_panic() {
+        // A caller-supplied budget that is a nonzero multiple of 2^32 (or the
+        // saturating maximum) used to make `k` land on a multiple of 2^32 and
+        // truncate to 0 in the `u32` cast, so `strip_specs.chunks(inflight)`
+        // panicked with "chunk size must be non-zero" (issue #106). The count
+        // must instead stay in `1..=total_strips` for *any* budget.
+        let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let strip_height = 512u32;
+        // Exact number of strips the batch loop will chunk over.
+        let total_strips = plan.canvas_height.div_ceil(strip_height);
+
+        for budget in [1u64 << 32, 2u64 << 32, u64::MAX] {
+            let inflight =
+                compute_inflight_strips(&plan, PixelFormat::Rgb8, strip_height, 0, budget);
+            assert!(
+                inflight >= 1,
+                "budget {budget}: inflight must be >= 1 to avoid chunks(0), got {inflight}",
+            );
+            assert!(
+                inflight <= total_strips,
+                "budget {budget}: inflight {inflight} must not exceed total strips {total_strips}",
+            );
+
+            // Prove the returned count is a legal `chunks` argument: the call
+            // below panics if `inflight` ever truncated to 0.
+            let strip_specs: Vec<u32> = (0..total_strips).collect();
+            let batches = strip_specs.chunks(inflight as usize).count();
+            assert!(
+                batches >= 1,
+                "budget {budget}: chunking produced no batches"
+            );
+        }
     }
 
     #[test]
