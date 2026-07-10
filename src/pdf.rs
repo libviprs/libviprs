@@ -1063,14 +1063,24 @@ where
 ///
 /// `stride` is pdfium's tightest 32-bit BGRA row length, `width * 4` bytes;
 /// real pdfium strides are `>=` this, so the check is conservative.
+///
+/// A zero `width` or `height` is also refused: a page whose dimensions round
+/// to 0 px at a low DPI would otherwise reach pdfium and yield a degenerate
+/// bitmap that divides by zero in `as_rgba_bytes` (`bytes.len() / height`).
+/// See #86.
 #[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
 fn pdfium_bitmap_span(width: u32, height: u32) -> Result<usize, PdfError> {
     // Compute in u64 so the multiply itself cannot overflow, then reject any
     // span pdfium's i32 buffer-length arithmetic could not represent. A zero
-    // width yields a zero/negative stride, which is equally unusable.
+    // width yields a zero/negative stride, and a zero height yields a
+    // zero-row bitmap whose stride pdfium reports as the buffer length —
+    // `as_rgba_bytes` then divides `bytes.len() / height` and panics with a
+    // divide-by-zero. Both degenerate dimensions are equally unusable, so
+    // reject a page that rounds to 0 px in either axis before pdfium ever
+    // sees it (#86).
     let stride = u64::from(width) * 4;
     let span = stride * u64::from(height);
-    if width == 0 || span > i32::MAX as u64 {
+    if width == 0 || height == 0 || span > i32::MAX as u64 {
         return Err(PdfError::RenderTooLarge {
             width,
             height,
@@ -1414,6 +1424,44 @@ mod tests {
             pdfium_bitmap_span(0, 21600),
             Err(PdfError::RenderTooLarge { .. })
         ));
+    }
+
+    /*
+     * Regression for #86: a page whose height rounds to 0 px must not reach
+     * pdfium. `as_rgba_bytes` divides `bytes.len() / height`, so a zero-height
+     * bitmap panics with a divide-by-zero. `render_at_size` calls
+     * `pdfium_bitmap_span` first, so guarding a zero height there closes the
+     * panic for both `render_page_pdfium` and `render_page_pdfium_budgeted`.
+     *
+     * Before the fix `pdfium_bitmap_span(100, 0)` returned `Ok(0)` (the guard
+     * only rejected `width == 0`), letting the degenerate render proceed; after
+     * the fix it returns a typed error.
+     */
+    #[test]
+    fn pdfium_bitmap_span_rejects_zero_height() {
+        // The exact scenario from #86: dimensions derived for a page that
+        // rounds to 0 px tall at a low DPI (e.g. a 0.5 pt-tall page at 72 DPI).
+        let (width, height) =
+            render_dims_within_budget(100.0, 0.5, 72, DEFAULT_MAX_RENDER_PIXELS).unwrap();
+        assert_eq!(height, 0, "a 0.5 pt page at 72 DPI must round to 0 px tall");
+        assert!(
+            width > 0,
+            "width stays non-zero, isolating the height==0 case"
+        );
+
+        // Those dimensions must be refused with a typed error rather than
+        // handed to pdfium (which would panic downstream in as_rgba_bytes).
+        assert!(matches!(
+            pdfium_bitmap_span(width, height),
+            Err(PdfError::RenderTooLarge {
+                height: 0,
+                span: 0,
+                ..
+            })
+        ));
+
+        // A non-degenerate height on the same width still succeeds.
+        assert!(pdfium_bitmap_span(width, 1).is_ok());
     }
 
     /**
