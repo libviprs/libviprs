@@ -981,6 +981,47 @@ impl FsSink {
             .push(abs_path.to_path_buf());
     }
 
+    /// Digest algorithm used to name `_shared/blank_<hex>.<ext>` files. Mirrors
+    /// `DedupeIndex::effective_algo`: the blank/none strategies always name
+    /// shared blobs by their Blake3 digest; `All` honours the caller's choice.
+    /// Kept in-sink so a shared blob can be revalidated against the digest
+    /// embedded in its own filename without reaching into the index.
+    fn dedupe_algo(&self) -> crate::manifest::ChecksumAlgo {
+        match self.dedupe_index.as_ref().map(|i| i.strategy()) {
+            Some(crate::dedupe::DedupeStrategy::All { algo }) => algo,
+            _ => crate::manifest::ChecksumAlgo::Blake3,
+        }
+    }
+
+    /// True when the file already at `_shared/blank_<hex>.<ext>` hashes to the
+    /// `<hex>` digest embedded in its own filename. Used before trusting a
+    /// pre-existing shared blob on a resume rerun: a crash mid-write can leave
+    /// a short/empty blob that an existence check alone would happily reuse and
+    /// point every duplicate tile at (issue #97). A missing file, an unreadable
+    /// file, a filename without the `blank_` stem, or a digest mismatch all
+    /// return `false` so the caller re-materialises the blob from known-good
+    /// bytes.
+    fn shared_blob_valid(&self, shared_abs_path: &Path) -> bool {
+        let Some(expected_hex) = shared_abs_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|stem| stem.strip_prefix("blank_"))
+        else {
+            return false;
+        };
+        // A well-formed shared stem is exactly the 64-char hex of a 32-byte
+        // digest; anything else was not produced by this scheme, so don't
+        // pretend to validate it.
+        if expected_hex.len() != 64 {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(shared_abs_path) else {
+            return false;
+        };
+        let got = hex_encode_32(&hash_tile_raw(&bytes, self.dedupe_algo()));
+        got.eq_ignore_ascii_case(expected_hex)
+    }
+
     fn record_tile_digest(&self, rel: &str, materialized: &[u8]) {
         if self.checksums == crate::checksum::ChecksumMode::None {
             return;
@@ -1069,16 +1110,21 @@ impl FsSink {
                     if let Some(parent) = shared_abs_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    // If the shared file is already present (e.g. a
-                    // resume-mode rerun) leave it in place; otherwise
-                    // rename the first tile across. Fall back to writing
-                    // the bytes if rename fails (cross-device, etc.).
-                    if !shared_abs_path.exists() {
+                    // Reuse a pre-existing shared blob ONLY if its on-disk
+                    // content still hashes to the digest in its filename. A
+                    // crash mid-write during a prior run can leave a short or
+                    // empty blob that an existence check alone would trust and
+                    // point every duplicate at (issue #97); such a blob must be
+                    // re-materialised. When there is no usable blob, rename the
+                    // first tile across (atomic on POSIX; also overwrites a
+                    // stale corrupt blob), falling back to an atomic tmp+rename
+                    // write if the rename fails (cross-device, etc.).
+                    if !self.shared_blob_valid(&shared_abs_path) {
                         if std::fs::rename(&p.tile_abs_path, &shared_abs_path).is_err() {
-                            std::fs::write(&shared_abs_path, &p.bytes)?;
+                            atomic_write(&shared_abs_path, &p.bytes)?;
                         }
                     } else if p.tile_abs_path.exists() {
-                        // The shared file already existed; drop the
+                        // A valid shared blob already existed; drop the
                         // duplicate at the first tile path so we can link
                         // it back below.
                         let _ = std::fs::remove_file(&p.tile_abs_path);
@@ -1120,13 +1166,16 @@ impl FsSink {
                     }
                 }
 
-                // The shared file should now exist; if not (resume mode
-                // with a wiped `_shared/`), materialize it from bytes.
-                if !shared_abs_path.exists() {
+                // The shared file should now exist and be valid; if it is
+                // missing (resume mode with a wiped `_shared/`) or present but
+                // corrupt (a crash truncated a prior run's blob), materialize
+                // it from the current tile's bytes via an atomic tmp+rename so
+                // a reader never sees a partial blob (issue #97).
+                if !self.shared_blob_valid(&shared_abs_path) {
                     if let Some(parent) = shared_abs_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    std::fs::write(&shared_abs_path, bytes)?;
+                    atomic_write(&shared_abs_path, bytes)?;
                 }
 
                 // Write a 1-byte placeholder at the current tile path and
@@ -1497,6 +1546,37 @@ fn secs_to_ymd_hms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 /// Hash `bytes` with `algo` and return the raw 32-byte digest. Both
 /// supported algorithms (Blake3, SHA-256) produce exactly 32 bytes, so we
 /// can store them as fixed-size arrays on the hot path instead of paying
+/// Monotonic counter feeding the temp-file suffix in [`atomic_write`], so two
+/// writers in the same process never pick the same `.tmp` name for the same
+/// shared blob.
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write `bytes` to `path` atomically: stage them in a sibling `.tmp` file and
+/// `rename` it into place. On POSIX the rename is atomic, so a concurrent
+/// reader (or a crash) never observes a partially-written `path` — it sees
+/// either the old contents or the complete new contents, never a truncated
+/// blob (issue #97). The temp name is disambiguated by pid + a process-wide
+/// counter so parallel workers staging the same destination don't clobber each
+/// other's temp file. The temp is best-effort cleaned up if the rename fails.
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("blob");
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".{file_name}.tmp.{pid}.{seq}",
+        pid = std::process::id(),
+    ));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// for a `String` allocation per tile.
 fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] {
     use crate::manifest::ChecksumAlgo;
@@ -2118,6 +2198,112 @@ mod tests {
             report.tiles_mismatched.is_empty(),
             "unexpected mismatches: {:?}",
             report.tiles_mismatched
+        );
+    }
+
+    /// Locate the single `_shared/blank_*.<ext>` blob under `base`.
+    #[cfg(not(miri))]
+    fn find_shared_blob(base: &Path) -> PathBuf {
+        let shared_dir = base.join("_shared");
+        let mut found = None;
+        for entry in std::fs::read_dir(&shared_dir)
+            .unwrap_or_else(|e| panic!("no _shared/ dir at {shared_dir:?}: {e}"))
+        {
+            let path = entry.unwrap().path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("blank_"))
+            {
+                assert!(found.is_none(), "expected exactly one shared blob");
+                found = Some(path);
+            }
+        }
+        found.expect("no _shared/blank_* blob was emitted")
+    }
+
+    /**
+     * Regression for issue #97: shared `_shared/blank_<hex>.<ext>` blobs must
+     * be re-validated against the digest embedded in their filename before a
+     * resume rerun trusts them. A crash mid-write can leave a short/empty blob;
+     * the prior code kept it on an existence check alone and pointed every
+     * duplicate tile at the corruption, which — without `ChecksumMode::Verify`
+     * — was served silently.
+     *
+     * This drives one full dedupe run to materialize a correct shared blob,
+     * truncates that blob to empty to simulate a crash-interrupted prior run,
+     * then reruns the identical job over the same base (a resume). After the
+     * rerun the shared blob must again hold the full, correct payload — the new
+     * sink must have detected the digest mismatch and re-materialized it.
+     * Before the fix the empty blob passed the bare `exists()` check and stayed
+     * empty (RED); with the rehash-on-resume guard it is rewritten (GREEN).
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn resume_revalidates_corrupt_shared_blob() {
+        use crate::dedupe::DedupeStrategy;
+
+        let planner = PyramidPlanner::new(16, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert!(top.cols >= 2, "test needs a level with >=2 tiles");
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("output_files");
+
+        let write_two_dupes = |base: &Path| {
+            let sink = FsSink::new(base.to_path_buf(), plan.clone())
+                .with_format(TileFormat::Png)
+                .with_dedupe(DedupeStrategy::Blanks);
+            for col in 0..2 {
+                let rect = plan.tile_rect(TileCoord::new(top.level, col, 0)).unwrap();
+                let tile = Tile {
+                    coord: TileCoord::new(top.level, col, 0),
+                    raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                    blank: false,
+                };
+                sink.write_tile(&tile).unwrap();
+            }
+            sink.finish().unwrap();
+        };
+
+        // Run 1: produce a correct shared blob and remember its good bytes.
+        write_two_dupes(&base);
+        let shared_blob = find_shared_blob(&base);
+        let good_bytes = std::fs::read(&shared_blob).unwrap();
+        assert!(!good_bytes.is_empty(), "run 1 must emit non-empty payload");
+
+        // Simulate the crash aftermath a resume rerun inherits: a truncated
+        // (empty) shared blob left mid-write, while the tile placeholders that
+        // referenced it are regenerated from scratch on the rerun. The tile
+        // files are removed so the rerun's fresh tile write does not
+        // incidentally repair the shared inode through a leftover hardlink —
+        // the corrupt `_shared/` blob is the sole survivor, exactly as after a
+        // crash between the shared-blob write and its fsync.
+        std::fs::write(&shared_blob, b"").unwrap();
+        assert_eq!(std::fs::read(&shared_blob).unwrap().len(), 0);
+        for col in 0..2 {
+            let tile_path = base.join(format!("{}/{col}_0.png", top.level));
+            let _ = std::fs::remove_file(&tile_path);
+        }
+
+        // Run 2 (resume): the rerun must NOT trust the corrupt blob on its
+        // mere existence — it must re-hash it, find the mismatch, and rewrite.
+        write_two_dupes(&base);
+
+        let after = std::fs::read(&shared_blob).unwrap();
+        assert_eq!(
+            after, good_bytes,
+            "resume must re-materialize the corrupt shared blob to its full payload"
+        );
+
+        // And the restored blob must hash to the digest in its own filename.
+        let sink = FsSink::new(base.clone(), plan.clone())
+            .with_format(TileFormat::Png)
+            .with_dedupe(DedupeStrategy::Blanks);
+        assert!(
+            sink.shared_blob_valid(&shared_blob),
+            "restored shared blob must validate against its filename digest"
         );
     }
 
