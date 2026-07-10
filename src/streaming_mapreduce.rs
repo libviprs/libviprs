@@ -27,7 +27,9 @@
 //! - [`generate_pyramid_mapreduce_auto`] — auto-selects monolithic or MapReduce
 //!   based on the budget vs. estimated monolithic peak memory.
 
-use crate::engine::{BlankTileStrategy, EngineConfig, EngineError, EngineResult, is_blank_tile};
+use crate::engine::{
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, is_blank_for_strategy,
+};
 use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
@@ -231,7 +233,13 @@ fn emit_strip_tiles_parallel(
 ) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
     let ts = plan.tile_size;
-    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
+    // Honor the full `BlankTileStrategy` — including
+    // `PlaceholderWithTolerance` — via the same predicate the sequential and
+    // monolithic paths use. An exact-equality test against `Placeholder`
+    // silently dropped the tolerance variant whenever `tile_concurrency > 0`,
+    // flipping blank flags and `tiles_skipped` between concurrency settings and
+    // breaking the byte-identical-output guarantee (issue #107).
+    let blank_strategy = config.blank_tile_strategy;
 
     let first_row = strip_canvas_y / ts;
     let last_row = (strip_canvas_y + strip.height())
@@ -278,7 +286,7 @@ fn emit_strip_tiles_parallel(
                         bg,
                     )
                     .map(|tile_raster| {
-                        let blank = use_placeholders && is_blank_tile(&tile_raster);
+                        let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
                         Tile {
                             coord,
                             raster: tile_raster,
@@ -923,6 +931,91 @@ mod tests {
             "real peak {} exceeded budget {budget}",
             result.peak_memory_bytes,
         );
+    }
+
+    /// A raster that is uniform within a small channel delta but *not* exactly
+    /// uniform: every pixel is the base colour with a per-pixel wobble of at
+    /// most `delta`. `PlaceholderWithTolerance { max_channel_delta >= delta }`
+    /// treats each full tile as blank; exact `Placeholder` does not.
+    fn near_uniform_raster(w: u32, h: u32, base: u8, delta: u8) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                // Deterministic wobble in `0..=delta`, so the tile is blank
+                // within tolerance but every pixel is not identical.
+                let wobble = ((x + y) % (delta as u32 + 1)) as u8;
+                data[off] = base + wobble;
+                data[off + 1] = base + wobble;
+                data[off + 2] = base + wobble;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    #[test]
+    fn placeholder_with_tolerance_identical_across_tile_concurrency() {
+        // Regression for issue #107: the parallel tile-emission path tested
+        // `blank_tile_strategy == Placeholder` with exact equality, so
+        // `PlaceholderWithTolerance` silently degraded to "never blank" the
+        // moment `tile_concurrency > 0` — flipping blank flags and
+        // `tiles_skipped` between concurrency settings and breaking the
+        // byte-identical-output guarantee. The base level is emitted through
+        // that path, so its near-uniform tiles are where the two runs diverge.
+        let src = near_uniform_raster(256, 256, 100, 2);
+        let plan = PyramidPlanner::new(256, 256, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let run = |tile_concurrency: usize| {
+            let sink = MemorySink::new();
+            let config = MapReduceConfig {
+                memory_budget_bytes: 1_000_000,
+                tile_concurrency,
+                blank_tile_strategy: BlankTileStrategy::PlaceholderWithTolerance {
+                    max_channel_delta: 2,
+                },
+                ..MapReduceConfig::default()
+            };
+            let result = generate_pyramid_mapreduce(
+                &RasterStripSource::new(&src),
+                &plan,
+                &sink,
+                &config,
+                &NoopObserver,
+            )
+            .unwrap();
+            let mut tiles = sink.tiles();
+            tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+            (result.tiles_skipped, tiles)
+        };
+
+        let (seq_skipped, seq_tiles) = run(0);
+        let (par_skipped, par_tiles) = run(4);
+
+        // The tolerance must produce *some* blank tiles, otherwise the test
+        // would pass vacuously (exact-equality bug and correct code agree on
+        // "never blank").
+        assert!(
+            seq_skipped > 0,
+            "sequential path must skip near-uniform tiles under the tolerance"
+        );
+        assert_eq!(
+            seq_skipped, par_skipped,
+            "tiles_skipped must be identical at tile_concurrency 0 and >= 2 \
+             (parallel path ignored PlaceholderWithTolerance, issue #107)"
+        );
+
+        assert_eq!(seq_tiles.len(), par_tiles.len());
+        for (s, p) in seq_tiles.iter().zip(par_tiles.iter()) {
+            assert_eq!(s.coord, p.coord);
+            assert_eq!(
+                s.data, p.data,
+                "tile bytes diverged between concurrency settings at {:?}",
+                p.coord
+            );
+        }
     }
 
     #[test]
