@@ -267,11 +267,12 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
             bpp,
         })?;
     let mut dst: Vec<u8> = Vec::new();
-    dst.try_reserve(len).map_err(|_| RasterError::AllocationFailed {
-        width: dst_w,
-        height: dst_h,
-        bytes: len,
-    })?;
+    dst.try_reserve(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width: dst_w,
+            height: dst_h,
+            bytes: len,
+        })?;
     dst.resize(len, 0);
 
     for dy in 0..dst_h {

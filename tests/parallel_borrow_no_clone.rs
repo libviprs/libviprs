@@ -55,9 +55,8 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
             if new_size >= layout.size() {
-                let live =
-                    LIVE.fetch_add(new_size - layout.size(), Ordering::Relaxed) + new_size
-                        - layout.size();
+                let live = LIVE.fetch_add(new_size - layout.size(), Ordering::Relaxed) + new_size
+                    - layout.size();
                 PEAK.fetch_max(live, Ordering::Relaxed);
             } else {
                 LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);

@@ -2136,9 +2136,7 @@ mod tests {
 
         // Delete the recorded tile from disk, then verify again: this must be
         // reported as a failure, not silently skipped.
-        let rel = plan
-            .tile_path(coord, TileFormat::Png.extension())
-            .unwrap();
+        let rel = plan.tile_path(coord, TileFormat::Png.extension()).unwrap();
         let abs = base.join(&rel);
         assert!(abs.exists(), "recorded tile should exist before deletion");
         std::fs::remove_file(&abs).unwrap();

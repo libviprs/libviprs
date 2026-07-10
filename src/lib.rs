@@ -64,7 +64,6 @@ pub mod resize;
 pub mod resume;
 pub mod retry;
 pub mod sink;
-pub(crate) mod sync_queue;
 #[cfg(feature = "s3")]
 pub mod sink_object_store;
 #[cfg(feature = "packfile")]
@@ -73,6 +72,7 @@ pub mod source;
 pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
+pub(crate) mod sync_queue;
 pub mod verify;
 
 // Curated crate-root surface: types and high-level entry points only.

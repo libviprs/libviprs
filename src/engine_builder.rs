@@ -870,9 +870,7 @@ fn prepare_resume_state(
             // that file so a stale checkpoint can't make this fresh run look
             // resumable — leaving every other entry in place.
             if let Some(root) = &config.checkpoint_root {
-                let same_as_sink = sink
-                    .checkpoint_root()
-                    .is_some_and(|s| s == root.as_path());
+                let same_as_sink = sink.checkpoint_root().is_some_and(|s| s == root.as_path());
                 if !same_as_sink {
                     let marker = root.join(crate::resume::CHECKPOINT_FILENAME);
                     match std::fs::remove_file(&marker) {
