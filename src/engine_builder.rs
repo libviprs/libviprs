@@ -52,6 +52,7 @@ use crate::engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, generate_pyramid_observed,
 };
 use crate::extensions::Extensions;
+use crate::mapreduce_hot_cache::generate_pyramid_mapreduce_hot_cache;
 use crate::observe::{EngineObserver, NoopObserver};
 use crate::planner::PyramidPlan;
 use crate::raster::Raster;
@@ -61,7 +62,9 @@ use crate::sink::TileSink;
 use crate::streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, generate_pyramid_streaming,
 };
-use crate::streaming_mapreduce::{MapReduceConfig, generate_pyramid_mapreduce};
+use crate::streaming_mapreduce::{
+    LocalWorkExecutor, MapReduceConfig, WorkExecutor, generate_pyramid_mapreduce,
+};
 
 /// Checks that a [`PyramidPlan`] is internally well-formed and describes the
 /// source it is about to be run against.
@@ -120,6 +123,20 @@ pub enum EngineKind {
     Streaming,
     /// Parallel map-reduce streaming engine. Accepts either source kind.
     MapReduce,
+    /// MapReduce engine with an in-memory hot cache: rendering is identical
+    /// to [`MapReduce`](Self::MapReduce), but every produced tile is retained
+    /// in RAM and the caller's sink receives the whole pyramid as one batched
+    /// flush at the end of the run, in canonical `(level, row, col)` order,
+    /// followed by a single `finish()`.
+    ///
+    /// A local-only memory-vs-throughput tradeoff (issue #67): the memory
+    /// budget still bounds the MAP/REDUCE working set (including the
+    /// pre-flight [`EngineError::BudgetExceeded`] rejection), while the cache
+    /// itself holds the full pyramid's raster bytes until the flush. Because
+    /// of that deliberate residency, [`Auto`](Self::Auto) never selects this
+    /// engine; it is explicit opt-in only. Accepts either source kind.
+    /// Byte-identical output to the streaming and MapReduce engines.
+    MapReduceHotCache,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +205,7 @@ pub struct EngineBuilder<'a, S: TileSink> {
 
     engine_kind: EngineKind,
     observer: Option<Arc<dyn EngineObserver>>,
+    executor: Option<Arc<dyn WorkExecutor>>,
 
     // EngineConfig knobs
     concurrency: Option<usize>,
@@ -216,6 +234,7 @@ impl<'a, S: TileSink> std::fmt::Debug for EngineBuilder<'a, S> {
         f.debug_struct("EngineBuilder")
             .field("source", &self.source)
             .field("engine_kind", &self.engine_kind)
+            .field("has_executor", &self.executor.is_some())
             .field("concurrency", &self.concurrency)
             .field("buffer_size", &self.buffer_size)
             .field("background_rgb", &self.background_rgb)
@@ -239,6 +258,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             sink,
             engine_kind: EngineKind::Auto,
             observer: None,
+            executor: None,
             concurrency: None,
             buffer_size: None,
             background_rgb: None,
@@ -275,6 +295,22 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel).
     pub fn with_engine(mut self, kind: EngineKind) -> Self {
         self.engine_kind = kind;
+        self
+    }
+
+    /// Install a [`WorkExecutor`] at the MapReduce MAP-phase strip-dispatch
+    /// seam (issue #67), substituting for the built-in in-process rendering.
+    ///
+    /// Consulted by [`EngineKind::MapReduce`] and
+    /// [`EngineKind::MapReduceHotCache`] (the engines with a MAP phase);
+    /// the monolithic and sequential streaming engines have no strip-dispatch
+    /// seam and ignore it. Defaults to
+    /// [`LocalWorkExecutor`](crate::streaming_mapreduce::LocalWorkExecutor),
+    /// which preserves the engine's historical behaviour exactly. See
+    /// [`WorkExecutor`] for the dispatch-order and byte-parity contract a
+    /// custom executor must uphold.
+    pub fn with_executor(mut self, executor: Arc<dyn WorkExecutor>) -> Self {
+        self.executor = Some(executor);
         self
     }
 
@@ -494,6 +530,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             sink,
             engine_kind,
             observer,
+            executor,
             concurrency,
             buffer_size,
             background_rgb,
@@ -524,6 +561,14 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         let observer_ref: &dyn EngineObserver = match &observer {
             Some(arc) => arc.as_ref(),
             None => &NoopObserver,
+        };
+
+        // The MAP-phase strip-dispatch seam (issue #67). Absent an installed
+        // executor, the local in-process renderer preserves the engines'
+        // historical behaviour exactly.
+        let executor_ref: &dyn WorkExecutor = match &executor {
+            Some(arc) => arc.as_ref(),
+            None => &LocalWorkExecutor,
         };
 
         // Deliver the extension hatch to its one reader. The map used to be
@@ -625,7 +670,8 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         )?
                     }
                     (EngineKind::Streaming, EngineSource::Raster(raster))
-                    | (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
+                    | (EngineKind::MapReduce, EngineSource::Raster(raster))
+                    | (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
                         let strip = RasterStripSource::new(raster);
                         crate::verify::verify_from_strip_source(
                             &strip,
@@ -636,7 +682,8 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         )?
                     }
                     (EngineKind::Streaming, EngineSource::Strip(strip))
-                    | (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
+                    | (EngineKind::MapReduce, EngineSource::Strip(strip))
+                    | (EngineKind::MapReduceHotCache, EngineSource::Strip(strip)) => {
                         crate::verify::verify_from_strip_source(
                             strip.as_ref(),
                             &plan,
@@ -720,7 +767,14 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         &engine_cfg.failure_policy,
                         cancel.clone(),
                     );
-                    generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)
+                    generate_pyramid_mapreduce(
+                        &strip,
+                        &plan,
+                        &wrapped,
+                        &cfg,
+                        observer_ref,
+                        executor_ref,
+                    )
                 }
                 (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
                     let cfg = build_mapreduce_config(
@@ -732,7 +786,53 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         &engine_cfg.failure_policy,
                         cancel.clone(),
                     );
-                    generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
+                    generate_pyramid_mapreduce(
+                        strip.as_ref(),
+                        &plan,
+                        &wrapped,
+                        &cfg,
+                        observer_ref,
+                        executor_ref,
+                    )
+                }
+                (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
+                    let strip = RasterStripSource::new(raster);
+                    let cfg = build_mapreduce_config(
+                        memory_budget_bytes,
+                        concurrency,
+                        buffer_size,
+                        background_rgb,
+                        blank_strategy,
+                        &engine_cfg.failure_policy,
+                        cancel.clone(),
+                    );
+                    generate_pyramid_mapreduce_hot_cache(
+                        &strip,
+                        &plan,
+                        &wrapped,
+                        &cfg,
+                        observer_ref,
+                        executor_ref,
+                    )
+                }
+                (EngineKind::MapReduceHotCache, EngineSource::Strip(strip)) => {
+                    let cfg = build_mapreduce_config(
+                        memory_budget_bytes,
+                        concurrency,
+                        buffer_size,
+                        background_rgb,
+                        blank_strategy,
+                        &engine_cfg.failure_policy,
+                        cancel.clone(),
+                    );
+                    generate_pyramid_mapreduce_hot_cache(
+                        strip.as_ref(),
+                        &plan,
+                        &wrapped,
+                        &cfg,
+                        observer_ref,
+                        executor_ref,
+                    )
                 }
                 (EngineKind::Monolithic, EngineSource::Strip(_)) => {
                     unreachable!("Monolithic + Strip rejected above")
@@ -829,7 +929,14 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     &engine_cfg.failure_policy,
                     cancel.clone(),
                 );
-                generate_pyramid_mapreduce(&source, &plan, engine_sink, &cfg, observer_ref)?
+                generate_pyramid_mapreduce(
+                    &source,
+                    &plan,
+                    engine_sink,
+                    &cfg,
+                    observer_ref,
+                    executor_ref,
+                )?
             }
             (EngineKind::MapReduce, EngineSource::Strip(source)) => {
                 let cfg = build_mapreduce_config(
@@ -841,7 +948,53 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     &engine_cfg.failure_policy,
                     cancel.clone(),
                 );
-                generate_pyramid_mapreduce(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
+                generate_pyramid_mapreduce(
+                    source.as_ref(),
+                    &plan,
+                    engine_sink,
+                    &cfg,
+                    observer_ref,
+                    executor_ref,
+                )?
+            }
+            (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
+                let source = RasterStripSource::new(raster);
+                let cfg = build_mapreduce_config(
+                    memory_budget_bytes,
+                    concurrency,
+                    buffer_size,
+                    background_rgb,
+                    blank_strategy,
+                    &engine_cfg.failure_policy,
+                    cancel.clone(),
+                );
+                generate_pyramid_mapreduce_hot_cache(
+                    &source,
+                    &plan,
+                    engine_sink,
+                    &cfg,
+                    observer_ref,
+                    executor_ref,
+                )?
+            }
+            (EngineKind::MapReduceHotCache, EngineSource::Strip(source)) => {
+                let cfg = build_mapreduce_config(
+                    memory_budget_bytes,
+                    concurrency,
+                    buffer_size,
+                    background_rgb,
+                    blank_strategy,
+                    &engine_cfg.failure_policy,
+                    cancel.clone(),
+                );
+                generate_pyramid_mapreduce_hot_cache(
+                    source.as_ref(),
+                    &plan,
+                    engine_sink,
+                    &cfg,
+                    observer_ref,
+                    executor_ref,
+                )?
             }
             (EngineKind::Auto, _) => {
                 // `resolve_engine_kind` already flattened Auto to a concrete
@@ -1397,6 +1550,7 @@ mod extension_wiring_tests {
             EngineKind::Monolithic,
             EngineKind::Streaming,
             EngineKind::MapReduce,
+            EngineKind::MapReduceHotCache,
         ] {
             let seen_value = Arc::new(AtomicU64::new(0));
             let fired = Arc::new(AtomicU64::new(0));
