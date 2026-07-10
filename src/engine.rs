@@ -555,7 +555,7 @@ fn run_pyramid(
 
         // Record level completion into the optional checkpoint.
         if let Some(cp) = checkpoint_state {
-            cp.mark_level_completed(level.level);
+            cp.mark_level_completed(level.level, level.tile_count());
         }
 
         observer.on_event(EngineEvent::LevelCompleted {
@@ -694,11 +694,29 @@ impl CheckpointState {
         Ok(())
     }
 
-    /// Promote the level to `levels_completed` if every tile in that level
-    /// has been accounted for. Called by `run_pyramid` after each level's
-    /// inner loop returns.
-    fn mark_level_completed(&self, level: u32) {
+    /// Promote the level to `levels_completed` only when every tile in that
+    /// level is present in `completed_tiles`. Called by `run_pyramid` after
+    /// each level's inner loop returns, with `expected_tiles` set to the
+    /// level's full [`LevelPlan::tile_count`].
+    ///
+    /// A level in which [`FailurePolicy::RetryThenSkip`] dropped one or more
+    /// tiles never has all of its coordinates recorded (skipped tiles call
+    /// `note_sink_skipped` and never reach [`Self::mark_tile_completed`]), so
+    /// such a level must **not** be recorded as completed. Otherwise the
+    /// `levels_completed` invariant ("every tile in the level is present in
+    /// `completed_tiles`") would be violated, and a consumer honouring the
+    /// documented "skip whole levels" resume optimisation would treat the
+    /// failure-skipped tiles as done — permanently unrecoverable (issue #125).
+    fn mark_level_completed(&self, level: u32, expected_tiles: u64) {
         let mut meta = self.meta.lock().unwrap();
+        let recorded = meta
+            .completed_tiles
+            .iter()
+            .filter(|c| c.level == level)
+            .count() as u64;
+        if recorded < expected_tiles {
+            return;
+        }
         if !meta.levels_completed.contains(&level) {
             meta.levels_completed.push(level);
         }
@@ -1860,6 +1878,76 @@ mod tests {
             matches!(via_sink, EngineError::ResumeFailed(_)),
             "checkpoint failure via the sink path must promote to the same \
              EngineError::ResumeFailed variant as the monolithic path, got {via_sink:?}"
+        );
+    }
+
+    /// Issue #125: a level in which `RetryThenSkip` dropped a tile must NOT be
+    /// recorded in `levels_completed`, whose documented invariant is that every
+    /// tile of a completed level is present in `completed_tiles`. A skipped
+    /// tile calls `note_sink_skipped` and never reaches `mark_tile_completed`,
+    /// so the level is genuinely incomplete; recording it would let a consumer
+    /// honouring the "skip whole levels" resume optimisation treat the dropped
+    /// tile as done — permanently unrecoverable.
+    ///
+    /// Before the fix `mark_level_completed` pushed unconditionally, so the
+    /// partial level was recorded (RED). After the fix the push is gated on
+    /// every tile of the level being present in `completed_tiles`, so it is
+    /// withheld until the level truly completes (GREEN).
+    #[test]
+    fn partial_level_is_not_recorded_completed() {
+        use crate::resume::JobMetadata;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        // Pick a level with more than one tile so a single dropped tile leaves
+        // a detectable gap.
+        let level = plan
+            .levels
+            .iter()
+            .find(|l| l.tile_count() >= 2)
+            .expect("plan must contain a multi-tile level");
+        let level_id = level.level;
+        let total = level.tile_count();
+
+        let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
+        // checkpoint_every == 0 keeps this a pure in-memory bookkeeping test
+        // (no intermediate disk flushes).
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 0);
+
+        // Enumerate every tile of the level, then hold one back — emulating a
+        // tile dropped by `FailurePolicy::RetryThenSkip`, which records the
+        // skip on the sink but never calls `mark_tile_completed`.
+        let mut coords = Vec::new();
+        for row in 0..level.rows {
+            for col in 0..level.cols {
+                coords.push(TileCoord::new(level_id, col, row));
+            }
+        }
+        let dropped = coords.pop().unwrap();
+        for c in &coords {
+            cp.mark_tile_completed(*c).unwrap();
+        }
+        assert_eq!(coords.len() as u64, total - 1);
+
+        // A level still missing a tile must not be recorded as completed.
+        cp.mark_level_completed(level_id, total);
+        assert!(
+            !cp.meta.lock().unwrap().levels_completed.contains(&level_id),
+            "level {level_id} was recorded completed while tile {dropped:?} is \
+             still missing from completed_tiles — violates the levels_completed \
+             invariant (issue #125)"
+        );
+
+        // Once the final tile lands, the level genuinely completes and may be
+        // recorded.
+        cp.mark_tile_completed(dropped).unwrap();
+        cp.mark_level_completed(level_id, total);
+        assert!(
+            cp.meta.lock().unwrap().levels_completed.contains(&level_id),
+            "level {level_id} has all {total} tiles recorded but was not marked completed"
         );
     }
 
