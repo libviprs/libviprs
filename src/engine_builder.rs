@@ -21,6 +21,34 @@
 //! [`EngineKind::Monolithic`] refuses to run against a strip source and
 //! surfaces [`EngineError::IncompatibleSource`] instead of silently pulling
 //! the whole source into memory.
+//!
+//! # Per-tile operation: current shape and roadmap
+//!
+//! Every engine kind hardwires exactly one per-level transform today — the
+//! 2×2 box-filter downscale ([`resize::downscale_half`](crate::resize::downscale_half))
+//! followed by tile extraction. That level-walk is duplicated across the
+//! three engine drivers (`engine.rs`, `streaming.rs`,
+//! `streaming_mapreduce.rs`) plus the two read-only verify walks
+//! (`verify.rs`, `stream_verify.rs`). There is intentionally no operation
+//! abstraction yet: pyramid generation is the crate's sole pipeline shape.
+//!
+//! **Roadmap for a second per-tile operation** (rotate, sharpen, colour
+//! transform, …), so the walks change once rather than in lockstep:
+//!
+//! 1. Introduce a `TileOp` trait (`fn apply(&self, level: &Raster) ->
+//!    Result<Raster, RasterError>`) with a `DownscaleHalf` unit implementation
+//!    that wraps today's behaviour, keeping the default pipeline byte-for-byte
+//!    identical.
+//! 2. Thread a `&dyn TileOp` (defaulting to `DownscaleHalf`) into a single
+//!    shared `walk_levels(source, plan, op, emit)` helper, and rewrite each of
+//!    the five call sites to delegate to it — collapsing the duplicated walk
+//!    to one definition parameterised by the operation.
+//! 3. Surface the operation on this builder via a `with_tile_op` setter,
+//!    carried alongside the existing config knobs.
+//!
+//! Steps 1–2 span the engine drivers and the shared verify walks, so they land
+//! as a dedicated cross-module change; this builder is where step 3 (the
+//! caller-facing setter) will attach once the shared walk exists.
 
 use std::sync::Arc;
 
@@ -425,10 +453,14 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
     /// Attach a user-defined extension keyed by its runtime `TypeId`.
     ///
-    /// libviprs itself reads zero extensions today; the hatch exists so
-    /// third-party consumers (metrics exporters, custom audit logs, bespoke
-    /// observer state) can thread context through the pipeline without a
-    /// semver bump.
+    /// The hatch lets third-party consumers (metrics exporters, custom audit
+    /// logs, bespoke observer state) thread context through the pipeline
+    /// without a semver bump. On [`run`](EngineBuilder::run) /
+    /// [`run_collect`](EngineBuilder::run_collect) the full map is delivered to
+    /// the attached observer via
+    /// [`EngineObserver::on_extensions`](crate::observe::EngineObserver::on_extensions)
+    /// once, before any tile is emitted, so a custom observer can read the
+    /// values it needs for the run.
     pub fn with_extension<T: Send + Sync + 'static>(mut self, value: T) -> Self {
         self.extensions.insert(value);
         self
@@ -477,7 +509,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             cancel,
             memory_budget_bytes,
             budget_policy,
-            extensions: _extensions, // libviprs itself reads zero extensions
+            extensions,
         } = self;
 
         // Build the EngineConfig once; the three engines accept slight
@@ -498,6 +530,16 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             Some(arc) => arc.as_ref(),
             None => &NoopObserver,
         };
+
+        // Deliver the extension hatch to its one reader. The map used to be
+        // destructured and discarded, so `with_extension` was decorative:
+        // nothing in the pipeline ever read it. Handing it to the observer
+        // once, before any tile is emitted, is the wiring that makes the hatch
+        // functional — a custom `EngineObserver` clones out the handles it
+        // needs (metrics recorders, tracing spans, custom config) for the rest
+        // of the run (issue #138). `NoopObserver` and observers that don't
+        // override `on_extensions` ignore it at zero cost.
+        observer_ref.on_extensions(&extensions);
 
         // #119: route writes through `RetryingSink` when the configured
         // failure policy carries a `RetryPolicy`. Previously the engine only
@@ -1235,6 +1277,128 @@ mod retry_wiring_tests {
             sink.written() > 0,
             "tiles recovered by retry must land in the sink"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extension-hatch wiring (issue #138)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod extension_wiring_tests {
+    use super::*;
+    use crate::observe::EngineEvent;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A user-supplied context handle stashed on the builder via
+    /// `with_extension` and expected back through the observer.
+    struct Marker(u64);
+
+    /// Observer that records the value of any [`Marker`] extension delivered to
+    /// it, plus whether `on_extensions` fired at all.
+    struct CapturingObserver {
+        seen_value: Arc<AtomicU64>,
+        fired: Arc<AtomicU64>,
+    }
+
+    impl EngineObserver for CapturingObserver {
+        fn on_event(&self, _event: EngineEvent) {}
+
+        fn on_extensions(&self, extensions: &Extensions) {
+            self.fired.fetch_add(1, Ordering::SeqCst);
+            if let Some(marker) = extensions.get::<Marker>() {
+                self.seen_value.store(marker.0, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn small_source() -> Raster {
+        let data = vec![10u8; 4 * 4 * 3];
+        Raster::new(4, 4, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn small_plan() -> PyramidPlan {
+        PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    // The extension hatch must be functional, not decorative: a value inserted
+    // via `with_extension` has to reach the attached observer's
+    // `on_extensions` hook before the run tiles. On the pre-fix code the
+    // builder destructured `extensions: _extensions` and discarded it, so the
+    // observer never saw it and this asserts 0 (RED). After wiring the delivery
+    // the observer reads the marker back (GREEN).
+    #[test]
+    fn builder_delivers_extensions_to_observer() {
+        let seen_value = Arc::new(AtomicU64::new(0));
+        let fired = Arc::new(AtomicU64::new(0));
+        let observer = CapturingObserver {
+            seen_value: seen_value.clone(),
+            fired: fired.clone(),
+        };
+
+        let source = small_source();
+        let plan = small_plan();
+        EngineBuilder::new(&source, plan, MemorySink::new())
+            .with_observer(observer)
+            .with_extension(Marker(42))
+            .run()
+            .expect("run must succeed");
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the observer's on_extensions hook must fire exactly once per run"
+        );
+        assert_eq!(
+            seen_value.load(Ordering::SeqCst),
+            42,
+            "the value inserted via with_extension must be delivered to the observer"
+        );
+    }
+
+    // The hatch is delivered on every routed engine kind, not just the default
+    // monolithic path — a metrics/tracing observer must see its context
+    // regardless of how `Auto` resolves or which kind the caller pins.
+    #[test]
+    fn extensions_delivered_across_engine_kinds() {
+        for kind in [
+            EngineKind::Monolithic,
+            EngineKind::Streaming,
+            EngineKind::MapReduce,
+        ] {
+            let seen_value = Arc::new(AtomicU64::new(0));
+            let fired = Arc::new(AtomicU64::new(0));
+            let observer = CapturingObserver {
+                seen_value: seen_value.clone(),
+                fired: fired.clone(),
+            };
+
+            let source = small_source();
+            let plan = small_plan();
+            EngineBuilder::new(&source, plan, MemorySink::new())
+                .with_engine(kind)
+                .with_observer(observer)
+                .with_extension(Marker(7))
+                .run()
+                .unwrap_or_else(|e| panic!("{kind:?} run must succeed: {e:?}"));
+
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                1,
+                "{kind:?}: on_extensions must fire once"
+            );
+            assert_eq!(
+                seen_value.load(Ordering::SeqCst),
+                7,
+                "{kind:?}: the extension value must reach the observer"
+            );
+        }
     }
 }
 
