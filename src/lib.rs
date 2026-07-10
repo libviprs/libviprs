@@ -18,7 +18,9 @@
 //!    [`MemorySink`] (in-memory).
 //! 4. **Select an engine** with [`EngineKind`]: `Auto` (default; picks based on
 //!    source kind and memory budget), `Monolithic` (in-memory),
-//!    `Streaming` (sequential strip), or `MapReduce` (parallel strip).
+//!    `Streaming` (sequential strip), `MapReduce` (parallel strip), or
+//!    `MapReduceHotCache` (parallel strip, tiles cached in RAM and flushed to
+//!    the sink in one canonical-order batch at the end).
 //! 5. **Observe progress** by passing an [`EngineObserver`] to
 //!    `.with_observer(...)`; lifecycle, level, tile, and batch updates arrive as
 //!    [`EngineEvent`] variants (see the [`observe`] module).
@@ -57,6 +59,7 @@ pub(crate) mod level_walk;
 #[cfg(loom)]
 mod loom_tests;
 pub mod manifest;
+pub(crate) mod mapreduce_hot_cache;
 pub mod observe;
 pub mod pdf;
 pub mod pixel;
@@ -127,4 +130,6 @@ pub use streaming::{
 #[cfg(feature = "pdfium")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
 pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
-pub use streaming_mapreduce::MapReduceConfig;
+pub use streaming_mapreduce::{
+    LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
+};
