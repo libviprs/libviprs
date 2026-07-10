@@ -669,7 +669,7 @@ impl CheckpointState {
     /// checkpoint to disk so a crash can resume from the latest boundary.
     pub(crate) fn mark_tile_completed(&self, coord: TileCoord) -> Result<(), ResumeError> {
         {
-            let mut meta = self.meta.lock().unwrap();
+            let mut meta = crate::poison::recover(&self.meta);
             meta.completed_tiles.push(coord);
         }
         // Flush periodically. `checkpoint_every == 0` disables this path and
@@ -720,7 +720,7 @@ impl CheckpointState {
     /// documented "skip whole levels" resume optimisation would treat the
     /// failure-skipped tiles as done — permanently unrecoverable (issue #125).
     pub(crate) fn mark_level_completed(&self, level: u32, expected_tiles: u64) {
-        let mut meta = self.meta.lock().unwrap();
+        let mut meta = crate::poison::recover(&self.meta);
         let recorded = meta
             .completed_tiles
             .iter()
@@ -738,7 +738,7 @@ impl CheckpointState {
     /// via the tmp+rename dance inside [`JobCheckpoint::save`].
     pub(crate) fn flush(&self) -> Result<(), ResumeError> {
         let snapshot = {
-            let mut meta = self.meta.lock().unwrap();
+            let mut meta = crate::poison::recover(&self.meta);
             meta.last_checkpoint_at = now_rfc3339_engine();
             meta.clone()
         };
@@ -1870,6 +1870,44 @@ mod tests {
         // And the recorded set must still be fully recoverable.
         let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
         assert!(loaded.completed_tiles.len() >= 5_000);
+    }
+
+    /// Reproducer for #117: a poisoned checkpoint-`meta` lock must not cascade
+    /// a second panic into every later `mark_tile_completed` — which, on the
+    /// write path, would also abort the final checkpoint flush. We poison the
+    /// meta mutex under `catch_unwind`, then keep marking tiles. Before the fix
+    /// (`.lock().unwrap()`) the next mark panicked (RED); after it the guard is
+    /// recovered and the pre-poison completions survive (GREEN).
+    #[test]
+    fn poisoned_checkpoint_meta_recovers_without_cascade() {
+        use crate::resume::JobMetadata;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
+        // checkpoint_every = 0 keeps the test off the disk-flush path so it
+        // isolates the in-memory `meta` lock recovery.
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 0);
+
+        cp.mark_tile_completed(TileCoord::new(0, 0, 0)).unwrap();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cp.meta.lock().unwrap();
+            panic!("worker panic while holding the checkpoint meta lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(cp.meta.is_poisoned());
+
+        // The lifecycle bookkeeping must keep working after the poison.
+        cp.mark_tile_completed(TileCoord::new(0, 1, 0)).unwrap();
+        cp.mark_level_completed(0, 1);
+        let recorded = crate::poison::recover(&cp.meta).completed_tiles.len();
+        assert_eq!(
+            recorded, 2,
+            "recovered meta must retain the pre-poison completion and accept new ones"
+        );
     }
 
     /// Issue #140: a checkpoint-write failure must surface as *one* variant

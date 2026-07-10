@@ -228,6 +228,12 @@ impl PackfileSink {
 
     /// Append raw `bytes` to the archive under `archive_path`.
     fn append_bytes(&self, archive_path: &str, bytes: &[u8]) -> Result<(), SinkError> {
+        // Fragile-write-path branch of the crate poison policy (crate::poison):
+        // the archive writer appends sequentially, so a holder that panicked
+        // mid-entry leaves a half-written tar/zip that every later append would
+        // corrupt. We therefore do NOT recover the guard; we surface the poison
+        // as a typed error so the run aborts cleanly instead of building on an
+        // unusable writer.
         let mut guard = self
             .writer
             .lock()
