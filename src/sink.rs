@@ -493,11 +493,15 @@ impl TileFormat {
 ///
 /// # Lock order
 ///
-/// `pixel_format` (OnceLock, no lock) -> `per_level_counts` (atomics, no
-/// lock) -> `tile_digests` -> `manifest_refs` -> `pending_first` ->
-/// `completed_tiles` -> `engine_config` -> dedupe mutexes. **Do not nest**
-/// locks in a different order; the hot write path acquires only the
-/// tile-local mutexes it needs and never reaches back up the chain.
+/// `dedupe_promote` (outermost; guards the whole promote-on-2nd-hit
+/// critical section) -> `pixel_format` (OnceLock, no lock) ->
+/// `per_level_counts` (atomics, no lock) -> `tile_digests` ->
+/// `manifest_refs` -> `pending_first` -> `completed_tiles` ->
+/// `engine_config` -> dedupe mutexes. **Do not nest** locks in a different
+/// order; the hot write path acquires only the tile-local mutexes it needs
+/// and never reaches back up the chain. `dedupe_promote` is only ever taken
+/// as the outermost lock and never while holding an inner mutex, so it
+/// introduces no cycle.
 pub struct FsSink {
     base_dir: PathBuf,
     plan: PyramidPlan,
@@ -509,6 +513,16 @@ pub struct FsSink {
     /// Lazily-initialised dedupe index, present only when `dedupe` is not
     /// [`DedupeStrategy::None`].
     dedupe_index: Option<crate::dedupe::DedupeIndex>,
+    /// Serialises the dedupe "promote on 2nd hit" critical section so the
+    /// index decision, the tile write, the `pending_first` registration and
+    /// the promote/link steps form a single atomic unit. Without it a
+    /// concurrent duplicate that receives `Reference` could run its
+    /// `pending_first.remove` before the first writer's `pending_first.insert`,
+    /// silently skipping promotion and breaking the at-least-one-hardlink
+    /// invariant (issue #111). This is the outermost lock (see the
+    /// type-level `# Lock order`); it is only ever taken at the top of
+    /// [`FsSink::dedupe_write`] and never while holding an inner mutex.
+    dedupe_promote: Mutex<()>,
     resume_enabled: bool,
     /// Running per-tile checksum table, populated only when `checksums` is
     /// non-[`ChecksumMode::None`]. Keyed by the relative tile path inside
@@ -634,6 +648,7 @@ impl FsSink {
             checksum_algo: None,
             dedupe: None,
             dedupe_index: None,
+            dedupe_promote: Mutex::new(()),
             resume_enabled: false,
             tile_digests: Mutex::new(BTreeMap::new()),
             manifest_refs: Mutex::new(HashMap::new()),
@@ -991,6 +1006,17 @@ impl FsSink {
             .dedupe_index
             .as_ref()
             .expect("dedupe_write called without a dedupe index");
+
+        // Hold the promote lock across the entire decision -> write ->
+        // register -> promote sequence. The index decision, the first
+        // writer's `pending_first.insert`, and a duplicate's
+        // `pending_first.remove` would otherwise be three independent
+        // critical sections: a `Reference` racing ahead of the first
+        // writer's insert would find no pending entry, skip promotion, and
+        // leave the first tile as a full private copy — breaking the
+        // at-least-one-hardlink invariant (issue #111). Serialising here
+        // makes the promote-on-2nd-hit sequence atomic.
+        let _promote = self.dedupe_promote.lock().unwrap();
 
         let decision = idx.record(rel_string, bytes);
         match decision {
@@ -2315,6 +2341,117 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /**
+     * Regression for issue #111: the dedupe "promote on 2nd hit" path split
+     * the index decision, the first tile write, and the `pending_first`
+     * registration into separate critical sections. Under concurrent
+     * `write_tile` a duplicate receiving `Reference` could run its
+     * `pending_first.remove` before the first writer's `pending_first.insert`,
+     * silently skipping promotion: the shared file was re-materialised while
+     * the first tile kept a full private copy, so no tile ever became a
+     * hardlink to the shared inode (the shared file ended up with nlink == 1).
+     *
+     * This test races two identical uniform tiles through one dedupe sink
+     * many times. The at-least-one-hardlink invariant requires that once a
+     * `_shared/` file is materialised, at least one tile path is hardlinked
+     * to it (nlink >= 2). Before the fix at least one iteration observed a
+     * shared file with nlink == 1; after serialising the promote critical
+     * section every iteration holds the invariant.
+     */
+    #[cfg(all(not(miri), unix))]
+    #[test]
+    fn dedupe_concurrent_promote_keeps_shared_hardlink() {
+        use crate::dedupe::DedupeStrategy;
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::Barrier;
+
+        // 16x8 @ tile 8 => the full-resolution level is 2 tiles wide.
+        let planner = PyramidPlanner::new(16, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert!(
+            top.cols >= 2,
+            "test needs a level with at least two tiles, got cols={}",
+            top.cols
+        );
+
+        // Many iterations: the racing insert/remove window is small, so a
+        // single pass may miss it. The invariant must hold on every one.
+        for iter in 0..128 {
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().join("output_files");
+            let sink = FsSink::new(base.clone(), plan.clone())
+                .with_format(TileFormat::Png)
+                .with_dedupe(DedupeStrategy::Blanks);
+
+            let make = |col: u32| {
+                let rect = plan.tile_rect(TileCoord::new(top.level, col, 0)).unwrap();
+                Tile {
+                    coord: TileCoord::new(top.level, col, 0),
+                    raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                    blank: false,
+                }
+            };
+            let tile_a = make(0);
+            let tile_b = make(1);
+
+            // Release both writers simultaneously to maximise the odds the
+            // `Reference` writer reaches `pending_first.remove` before the
+            // first writer's `pending_first.insert`.
+            let barrier = Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    barrier.wait();
+                    sink.write_tile(&tile_a).unwrap();
+                });
+                s.spawn(|| {
+                    barrier.wait();
+                    sink.write_tile(&tile_b).unwrap();
+                });
+            });
+
+            // Exactly one shared file must exist and it must carry the
+            // promoted content with at least one hardlink from a tile path.
+            let shared_dir = base.join("_shared");
+            let shared_files: Vec<_> = std::fs::read_dir(&shared_dir)
+                .unwrap_or_else(|e| panic!("iter {iter}: _shared unreadable: {e}"))
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(
+                shared_files.len(),
+                1,
+                "iter {iter}: expected exactly one shared file, got {shared_files:?}"
+            );
+            let shared = &shared_files[0];
+            let shared_meta = std::fs::metadata(shared).unwrap();
+            assert!(
+                shared_meta.nlink() >= 2,
+                "iter {iter}: shared file {shared:?} has nlink={}, so no tile is \
+                 hardlinked to it (promotion was skipped)",
+                shared_meta.nlink()
+            );
+
+            // Corroborate: at least one of the two tile paths resolves to the
+            // shared inode.
+            let shared_ino = shared_meta.ino();
+            let shared_dev = shared_meta.dev();
+            let mut linked = false;
+            for col in 0..2 {
+                let rel = plan
+                    .tile_path(TileCoord::new(top.level, col, 0), "png")
+                    .unwrap();
+                let tile_meta = std::fs::metadata(base.join(&rel)).unwrap();
+                if tile_meta.ino() == shared_ino && tile_meta.dev() == shared_dev {
+                    linked = true;
+                }
+            }
+            assert!(
+                linked,
+                "iter {iter}: neither tile path is hardlinked to the shared inode"
+            );
         }
     }
 }
