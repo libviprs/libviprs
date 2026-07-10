@@ -532,7 +532,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             None => &sink,
         };
 
-        let kind = resolve_engine_kind(engine_kind, &source);
+        let kind = resolve_engine_kind(engine_kind, &source, &plan, memory_budget_bytes);
 
         // Validate the plan against the source before any engine driver runs.
         // Both the monolithic and streaming paths trust `plan.image_width/height`
@@ -842,17 +842,42 @@ fn build_mapreduce_config(
     cfg
 }
 
-/// Flatten [`EngineKind::Auto`] to a concrete variant based on the source.
+/// Flatten [`EngineKind::Auto`] to a concrete variant based on the source and
+/// the caller's memory budget.
 ///
 /// * `Raster` → [`EngineKind::Monolithic`] (fastest when the raster fits in
-///   memory; the free-function `generate_pyramid_auto` would already have
-///   made this choice under its own budget heuristic).
+///   memory), **unless** an explicit memory budget was supplied via
+///   [`EngineBuilder::with_memory_budget`] and the monolithic engine's
+///   estimated peak (`estimate_peak_memory_for_format`: full canvas plus the
+///   first downscaled level) would exceed it. In that case `Auto` selects the
+///   bounded-memory [`EngineKind::Streaming`] engine so a large raster under a
+///   small budget no longer runs the monolithic path at 2-3x source in RAM
+///   and OOMs the container (issue #135).
 /// * `Strip`  → [`EngineKind::Streaming`].
 ///
+/// A `None` budget preserves the historical `Raster → Monolithic` choice: the
+/// monolithic engine stays the default whenever the caller has not asked for a
+/// bounded run.
+///
 /// Non-`Auto` kinds pass through unchanged.
-fn resolve_engine_kind(kind: EngineKind, source: &EngineSource<'_>) -> EngineKind {
+fn resolve_engine_kind(
+    kind: EngineKind,
+    source: &EngineSource<'_>,
+    plan: &PyramidPlan,
+    memory_budget_bytes: Option<u64>,
+) -> EngineKind {
     match (kind, source) {
-        (EngineKind::Auto, EngineSource::Raster(_)) => EngineKind::Monolithic,
+        (EngineKind::Auto, EngineSource::Raster(raster)) => {
+            let fits_budget = match memory_budget_bytes {
+                Some(budget) => plan.estimate_peak_memory_for_format(raster.format()) <= budget,
+                None => true,
+            };
+            if fits_budget {
+                EngineKind::Monolithic
+            } else {
+                EngineKind::Streaming
+            }
+        }
         (EngineKind::Auto, EngineSource::Strip(_)) => EngineKind::Streaming,
         (k, _) => k,
     }
@@ -1654,5 +1679,111 @@ mod with_config_precedence_tests {
 
         assert_eq!(builder.concurrency, Some(7));
         assert_eq!(builder.dedupe, Some(DedupeStrategy::Blanks));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `EngineKind::Auto` budget-aware routing (issue #135)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod auto_budget_routing_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+
+    // A raster big enough that the monolithic peak (canvas + first downscaled
+    // level) is comfortably larger than the tiny budgets used below.
+    fn big_source() -> Raster {
+        let data = vec![9u8; 128 * 128 * 3];
+        Raster::new(128, 128, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn big_plan() -> PyramidPlan {
+        PyramidPlanner::new(128, 128, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    // Core reproducer for #135: with a memory budget too small for the
+    // monolithic peak, `Auto` must flatten to the bounded-memory `Streaming`
+    // engine rather than `Monolithic`. Before the fix `resolve_engine_kind`
+    // returned `Monolithic` unconditionally for any raster source, ignoring
+    // the documented budget — this asserts the corrected routing directly.
+    #[test]
+    fn auto_selects_streaming_when_budget_below_monolithic_peak() {
+        let source = big_source();
+        let plan = big_plan();
+        let engine_source = EngineSource::Raster(&source);
+
+        let peak = plan.estimate_peak_memory_for_format(source.format());
+        assert!(peak > 2, "sanity: monolithic peak must be non-trivial");
+        let tight_budget = peak / 2; // strictly below the monolithic peak
+
+        let kind = resolve_engine_kind(EngineKind::Auto, &engine_source, &plan, Some(tight_budget));
+        assert_eq!(
+            kind,
+            EngineKind::Streaming,
+            "Auto must pick the bounded-memory engine when the budget \
+             ({tight_budget}) cannot fit the monolithic peak ({peak})"
+        );
+    }
+
+    // A budget that comfortably fits the monolithic peak keeps the fast
+    // in-memory path.
+    #[test]
+    fn auto_keeps_monolithic_when_budget_fits() {
+        let source = big_source();
+        let plan = big_plan();
+        let engine_source = EngineSource::Raster(&source);
+
+        let peak = plan.estimate_peak_memory_for_format(source.format());
+        let kind = resolve_engine_kind(EngineKind::Auto, &engine_source, &plan, Some(peak));
+        assert_eq!(
+            kind,
+            EngineKind::Monolithic,
+            "a budget >= the monolithic peak must keep the monolithic engine"
+        );
+    }
+
+    // No explicit budget preserves the historical default: raster sources run
+    // the monolithic engine.
+    #[test]
+    fn auto_defaults_to_monolithic_without_budget() {
+        let source = big_source();
+        let plan = big_plan();
+        let engine_source = EngineSource::Raster(&source);
+
+        let kind = resolve_engine_kind(EngineKind::Auto, &engine_source, &plan, None);
+        assert_eq!(kind, EngineKind::Monolithic);
+    }
+
+    // End-to-end proof that the routing is honoured by `run()`: a budget too
+    // small even for the streaming engine's minimum aligned strip must surface
+    // `BudgetExceeded` under the default `Auto`. Only the streaming engine
+    // consults the budget, so this error can *only* appear if `Auto` routed
+    // away from the monolithic path. Before the fix `Auto` ran the monolithic
+    // engine, which ignored the budget and completed the run (no error) — the
+    // exact OOM-inducing behaviour #135 describes.
+    #[test]
+    fn auto_run_honors_budget_and_routes_to_streaming() {
+        let source = big_source();
+        let plan = big_plan();
+
+        let result = EngineBuilder::new(&source, plan, MemorySink::new())
+            .with_memory_budget(1_000)
+            .run();
+
+        match result {
+            Err(EngineError::BudgetExceeded { budget_bytes, .. }) => {
+                assert_eq!(budget_bytes, 1_000);
+            }
+            other => panic!(
+                "Auto with a tiny budget must route to the bounded streaming \
+                 engine and surface BudgetExceeded, got {other:?}"
+            ),
+        }
     }
 }
