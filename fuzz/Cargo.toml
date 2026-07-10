@@ -8,12 +8,13 @@ authors = ["Roman Goldmann <roman@devshell.org>"]
 [package.metadata]
 cargo-fuzz = true
 
+# Versions are single-sourced in [workspace.dependencies] at the repo root
+# (issue #151). This crate is a workspace member, so it shares the root
+# lockfile and the root [patch.crates-io] table.
 [dependencies]
-libfuzzer-sys = "0.4"
-arbitrary = { version = "1", features = ["derive"] }
-
-[dependencies.libviprs]
-path = ".."
+libfuzzer-sys = { workspace = true }
+arbitrary = { workspace = true }
+libviprs = { workspace = true }
 
 [[bin]]
 name = "fuzz_decode"
@@ -24,5 +25,3 @@ doc = false
 name = "fuzz_pdf_render"
 path = "fuzz_targets/fuzz_pdf_render.rs"
 doc = false
-
-[workspace]

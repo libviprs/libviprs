@@ -1,3 +1,35 @@
+# Root workspace (issue #151). Every crate in this repo is a member, so the
+# repo has one lockfile and one [patch.crates-io] table. The fuzz crate used
+# to be detached by its own empty [workspace] table, which gave it a private
+# lockfile and silently dropped the pdfium-render fork patch.
+[workspace]
+members = ["fuzz"]
+# Stated explicitly for clarity; this is already the edition-2024 default
+# (MSRV-aware resolver v3), so resolution behavior is unchanged.
+resolver = "3"
+
+# Single-sourced version pins shared by every workspace member. Members
+# inherit with `{ workspace = true }` so versions cannot drift per crate.
+[workspace.dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+blake3 = "1.8.4"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+libfuzzer-sys = "0.4"
+libviprs = { path = "." }
+loom = "0.7"
+lopdf = "0.36"
+pdfium-render = { version = "0.8", features = ["sync"] }
+proptest = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11.0"
+tar = "0.4.45"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+zip = "7.2.0"
+
 [package]
 name = "libviprs"
 version = "0.3.1"
@@ -40,23 +72,23 @@ tracing = ["dep:tracing"]
 packfile = ["dep:tar", "dep:zip"]
 
 [dependencies]
-blake3 = "1.8.4"
-flate2 = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
-lopdf = "0.36"
-pdfium-render = { version = "0.8", optional = true, features = ["sync"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-sha2 = "0.11.0"
-tar = { version = "0.4.45", optional = true }
-thiserror = "2"
-tracing = { version = "0.1", optional = true }
-zip = { version = "7.2.0", optional = true }
+blake3 = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }
+lopdf = { workspace = true }
+pdfium-render = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
-loom = "0.7"
-proptest = "1"
-tempfile = "3"
+loom = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
 
 # Use libviprs/pdfium-render with proper per-call thread-safety locking
 # in `ThreadSafePdfiumBindings`. Upstream pdfium-render 0.8.37's
@@ -69,5 +101,8 @@ tempfile = "3"
 #
 # Tracking issue: ajrcarey/pdfium-render upstream PR pending. Once
 # merged + released, this patch can be dropped.
+#
+# Because this table lives at the workspace root, it applies to every
+# workspace member; cargo ignores [patch] tables in member manifests.
 [patch.crates-io]
 pdfium-render = { git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/per-call-thread-safety" }
