@@ -297,6 +297,27 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
     Ok(PdfInfo { page_count, pages })
 }
 
+/// Resolve a 1-based `page` number to its object id in the `lopdf` page map.
+///
+/// `lopdf` keys its page map by `u32`, but callers hand us a `usize` page
+/// number that comes from untrusted input. A truncating `page as u32` cast
+/// wraps any value at or above `2^32` back into the low range — e.g. page
+/// `2^32 + 1` narrows to `1` — so the lookup would silently return a *different*
+/// page's object id instead of erroring. Range-checking the narrow with
+/// `u32::try_from` turns that wrap into a typed [`PdfError::PageOutOfRange`],
+/// and a legitimately-missing key maps to the same error.
+fn page_object_id(
+    pages_map: &std::collections::BTreeMap<u32, lopdf::ObjectId>,
+    page: usize,
+) -> Result<lopdf::ObjectId, PdfError> {
+    let total = pages_map.len();
+    let key = u32::try_from(page).map_err(|_| PdfError::PageOutOfRange { page, total })?;
+    pages_map
+        .get(&key)
+        .copied()
+        .ok_or(PdfError::PageOutOfRange { page, total })
+}
+
 /// Extract the largest embedded raster image from a PDF page.
 ///
 /// This is the fast path for scanned blueprints: the page typically contains
@@ -318,11 +339,7 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
-    let total = pages_map.len();
-
-    let &page_id = pages_map
-        .get(&(page as u32))
-        .ok_or(PdfError::PageOutOfRange { page, total })?;
+    let page_id = page_object_id(&pages_map, page)?;
 
     extract_largest_image(&doc, page_id, page)
 }
@@ -814,10 +831,7 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
 pub fn page_rotate(path: &Path, page: usize) -> Result<PageRotation, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
     let pages_map = doc.get_pages();
-    let total = pages_map.len();
-    let &page_id = pages_map
-        .get(&(page as u32))
-        .ok_or(PdfError::PageOutOfRange { page, total })?;
+    let page_id = page_object_id(&pages_map, page)?;
     PageRotation::try_from_degrees(resolve_rotate(&doc, page_id))
 }
 
@@ -1156,8 +1170,16 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
             total: total as usize,
         });
     }
+    // `page` is already bounded to `1..=total` by the guard above, and
+    // pdfium's page count is a `u16`, so this narrowing cannot wrap — but
+    // range-check it rather than truncate so a future change to the guard
+    // can never silently reintroduce a wrapping `as u16` cast.
+    let index = u16::try_from(page - 1).map_err(|_| PdfError::PageOutOfRange {
+        page,
+        total: total as usize,
+    })?;
     let pdf_page = pages
-        .get(page as u16 - 1)
+        .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
     let (width, height) = render_dims_within_budget(
@@ -1381,8 +1403,16 @@ pub fn render_page_pdfium_budgeted(
             total: total as usize,
         });
     }
+    // `page` is already bounded to `1..=total` by the guard above, and
+    // pdfium's page count is a `u16`, so this narrowing cannot wrap — but
+    // range-check it rather than truncate so a future change to the guard
+    // can never silently reintroduce a wrapping `as u16` cast.
+    let index = u16::try_from(page - 1).map_err(|_| PdfError::PageOutOfRange {
+        page,
+        total: total as usize,
+    })?;
     let pdf_page = pages
-        .get(page as u16 - 1)
+        .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
     let width_pts = pdf_page.width().value as f64;
@@ -1407,6 +1437,51 @@ pub fn render_page_pdfium_budgeted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for #91: `page_object_id` must range-check the `usize -> u32`
+    /// page-number narrowing. A page number at or above `2^32` truncates under
+    /// the old `page as u32` cast — e.g. `2^32 + 1` wraps to `1` — which would
+    /// silently return page 1's object id instead of erroring. The guarded
+    /// `u32::try_from` narrow must surface a typed [`PdfError::PageOutOfRange`].
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn page_object_id_rejects_index_wrapping_u32() {
+        use std::collections::BTreeMap;
+
+        let mut pages_map: BTreeMap<u32, lopdf::ObjectId> = BTreeMap::new();
+        pages_map.insert(1, (1, 0));
+
+        // 2^32 + 1 narrows to 1 under a truncating `as u32` cast, which would
+        // wrongly resolve to page 1's object id (1, 0).
+        let page = (1usize << 32) + 1;
+        assert_eq!(page as u32, 1, "precondition: the cast wraps to page 1");
+
+        let err = page_object_id(&pages_map, page).unwrap_err();
+        assert!(
+            matches!(err, PdfError::PageOutOfRange { page: p, total: 1 } if p == page),
+            "wrapped page index must be rejected, got {err:?}"
+        );
+
+        // Sanity: an in-range page still resolves to its object id.
+        assert_eq!(page_object_id(&pages_map, 1).unwrap(), (1, 0));
+    }
+
+    /// A page number that fits in `u32` but is not present in the map still
+    /// yields [`PdfError::PageOutOfRange`] — the guarded narrow must not change
+    /// the behaviour for an ordinary out-of-range lookup.
+    #[test]
+    fn page_object_id_rejects_missing_in_range_page() {
+        use std::collections::BTreeMap;
+
+        let mut pages_map: BTreeMap<u32, lopdf::ObjectId> = BTreeMap::new();
+        pages_map.insert(1, (1, 0));
+
+        let err = page_object_id(&pages_map, 2).unwrap_err();
+        assert!(
+            matches!(err, PdfError::PageOutOfRange { page: 2, total: 1 }),
+            "an in-range but absent page must be rejected, got {err:?}"
+        );
+    }
 
     /*
      * Regression for #89: the init serialisation guard must recover from
