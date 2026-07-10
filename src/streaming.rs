@@ -36,9 +36,12 @@
 //!
 //! ## Entry points
 //!
-//! - [`generate_pyramid_streaming`] — explicit streaming with a [`StripSource`].
-//! - [`generate_pyramid_auto`] — auto-selects monolithic or streaming based on
-//!   the budget vs. estimated monolithic peak memory.
+//! Streaming is reached through the fluent
+//! [`EngineBuilder`](crate::EngineBuilder). Select it explicitly with
+//! [`EngineKind::Streaming`](crate::EngineKind::Streaming) over a
+//! [`StripSource`], or let [`EngineKind::Auto`](crate::EngineKind::Auto)
+//! choose monolithic vs. streaming based on the budget vs. the estimated
+//! monolithic peak memory.
 
 use crate::engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, promote_sink_error,
@@ -175,8 +178,9 @@ pub trait StripSource: Send + Sync {
 /// Extracts row bands via [`Raster::extract`], which copies the requested
 /// rows into a new buffer without touching the rest of the source.
 ///
-/// This is the default source used by [`generate_pyramid_auto`] when the
-/// monolithic path would exceed the memory budget. The source raster still
+/// This is the default source used by
+/// [`EngineKind::Auto`](crate::EngineKind::Auto) when the monolithic path would
+/// exceed the memory budget. The source raster still
 /// lives in memory, but the pyramid generation pipeline avoids the large
 /// canvas-sized working allocation that the monolithic engine requires.
 pub struct RasterStripSource<'a> {

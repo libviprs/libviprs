@@ -18,8 +18,8 @@ use crate::sink::{SinkError, Tile, TileSink};
 /// Errors that can occur during pyramid generation.
 ///
 /// Wraps lower-level raster and sink errors into a single error type so that
-/// callers of [`generate_pyramid`] and [`generate_pyramid_observed`] can handle
-/// all failure modes uniformly. Also covers engine-specific conditions such as
+/// callers of [`EngineBuilder::run`](crate::EngineBuilder::run) can handle all
+/// failure modes uniformly. Also covers engine-specific conditions such as
 /// cancellation and worker panics.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -49,8 +49,18 @@ pub enum EngineError {
         got: String,
     },
     /// The resumed job checkpoint's plan hash does not match the current plan.
-    #[error("plan hash mismatch (expected {expected}, got {got})")]
-    PlanHashMismatch { expected: String, got: String },
+    ///
+    /// `expected` is the hash the current run computes from its live plan and
+    /// content contract (what a resume-compatible checkpoint must carry);
+    /// `actual` is the hash the on-disk checkpoint actually recorded. The two
+    /// fields follow the same `{expected, actual}` convention as the resume
+    /// layer so the reading is unambiguous: the run expected one hash and found
+    /// a different one on disk (issue #145).
+    #[error(
+        "plan hash mismatch: current plan hashes to {expected}, \
+         but the checkpoint on disk recorded {actual}"
+    )]
+    PlanHashMismatch { expected: String, actual: String },
     /// A resumable job could not be initialised or advanced.
     #[error("resume failed: {0}")]
     ResumeFailed(#[from] ResumeError),
@@ -130,7 +140,7 @@ pub enum BlankTileStrategy {
 
 /// Configuration for the pyramid generation engine.
 ///
-/// Groups every tunable knob that affects how [`generate_pyramid`] runs:
+/// Groups every tunable knob that affects how [`EngineBuilder::run`](crate::EngineBuilder::run) runs:
 /// thread count, channel buffer depth, edge-tile background color, and
 /// blank-tile handling. The [`Default`] implementation provides sensible
 /// values for single-threaded operation.
@@ -281,8 +291,8 @@ impl EngineConfig {
     /// [`FsSink::should_dedupe_tile`](crate::sink::FsSink)); they differ only in
     /// the sink-side shared-key hash algorithm, which does not change the
     /// engine's emit decision. Sinks that were themselves given a
-    /// [`DedupeStrategy`] continue to apply their own per-sink dedupe on top of
-    /// this.
+    /// [`DedupeStrategy`](crate::dedupe::DedupeStrategy) continue to apply their
+    /// own per-sink dedupe on top of this.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
     /// (and the related [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all) flag).
@@ -369,8 +379,8 @@ pub struct StageDurations {
 ///
 /// Captures tile counts, level counts, and peak memory so that callers can
 /// log, display progress, or assert correctness without inspecting the sink
-/// directly. Every field is populated by [`generate_pyramid`] /
-/// [`generate_pyramid_observed`].
+/// directly. Every field is populated by a run through
+/// [`EngineBuilder::run`](crate::EngineBuilder::run).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineResult {
@@ -400,31 +410,16 @@ pub struct EngineResult {
     pub skipped_due_to_failure: u64,
 }
 
-/// Generates a complete tile pyramid from a source raster.
-///
-/// This is the primary entry point for pyramid generation. It processes levels
-/// from full resolution (top) down to 1x1, extracting tiles at each level and
-/// writing them to the provided [`TileSink`]. When
-/// [`EngineConfig::concurrency`] is greater than zero, tiles within each level
-/// are produced in parallel using scoped threads with bounded-channel
-/// backpressure.
-///
-/// For progress reporting, use [`generate_pyramid_observed`] instead.
-///
-/// See the
-/// [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
-/// for filesystem output,
-/// [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
-/// for PDF-sourced pyramids, and the
-/// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
-/// for end-to-end CLI usage.
 /// Generates a tile pyramid with an [`EngineObserver`] for progress events.
 ///
-/// Behaves identically to [`generate_pyramid`] but emits [`EngineEvent`]s
-/// (level started/completed, tile completed, finished) to the supplied
-/// observer. This is the function used by the
+/// Processes levels from full resolution (top) down to 1x1, extracting tiles at
+/// each level and writing them to the provided [`TileSink`], and emits
+/// [`EngineEvent`]s (level started/completed, tile completed, finished) to the
+/// supplied observer. When [`EngineConfig::concurrency`] is greater than zero,
+/// tiles within each level are produced in parallel using scoped threads with
+/// bounded-channel backpressure. This is the function the
 /// [CLI pyramid command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
-/// to drive its progress bar.
+/// drives to power its progress bar.
 ///
 /// See the
 /// [observability tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
@@ -890,6 +885,29 @@ pub(crate) fn promote_sink_error(err: SinkError) -> EngineError {
     }
 }
 
+/// Run a parallel worker's tile-extraction body, converting a panic into
+/// [`EngineError::WorkerPanic`] so a contained worker fault surfaces as a
+/// typed error on the tile channel instead of unwinding out of
+/// [`std::thread::scope`] and re-raising as a raw panic through the engine
+/// entry point.
+///
+/// Before this, the monolithic producer pool and the MapReduce tile-emission
+/// pool spawned their workers without collecting the join handles, so a panic
+/// in one worker (for example a broken tiling invariant) escaped the scope and
+/// propagated as an uncontained panic, poisoning the sink/observer mutexes on
+/// the way out. The MapReduce *map* phase already gets this right by joining
+/// its handles and mapping a panicked join to [`EngineError::WorkerPanic`];
+/// this helper gives the emission pools the same contract so a worker panic on
+/// every parallel path returns the typed error (issue #118).
+pub(crate) fn catch_worker_panic<T>(
+    body: impl FnOnce() -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(_) => Err(EngineError::WorkerPanic),
+    }
+}
+
 /// Best-effort reverse-parse of a tile relative path back into a [`TileCoord`].
 ///
 /// Understands the DeepZoom (`<level>/<col>_<row>.<ext>`) and XYZ /
@@ -920,6 +938,30 @@ fn parse_tile_rel_path(rel: &str) -> Option<TileCoord> {
         }
         _ => None,
     }
+}
+
+/// Resolve the [`TileCoord`] a manifest tile key refers to, so a checksum
+/// mismatch is attributed to the *offending* tile rather than a fabricated
+/// `TileCoord(0, 0, 0)` (or, worse, a coordinate with its col/row transposed).
+///
+/// The authoritative match scans the plan for the coordinate whose
+/// [`PyramidPlan::tile_path`] equals the key under any known extension. This is
+/// exact for every layout, including [`Layout::Google`](crate::planner::Layout),
+/// whose on-disk order is `{level}/{row}/{col}` and would otherwise be
+/// mis-parsed as `{level}/{col}/{row}` by the layout-agnostic
+/// [`parse_tile_rel_path`], swapping the reported col and row. The structural
+/// parse is kept only as a fallback for a foreign key the plan does not
+/// produce; if that also fails we surface `TileCoord(0, 0, 0)` (issue #139).
+fn coord_for_manifest_rel(plan: &PyramidPlan, rel: &str) -> TileCoord {
+    let normalized = rel.replace('\\', "/");
+    for coord in plan.tile_coords() {
+        for ext in ["raw", "png", "jpeg", "jpg"] {
+            if plan.tile_path(coord, ext).is_some_and(|p| p == normalized) {
+                return coord;
+            }
+        }
+    }
+    parse_tile_rel_path(rel).unwrap_or_else(|| TileCoord::new(0, 0, 0))
 }
 
 /// Resolve the on-disk checkpoint root. Prefers the explicit
@@ -996,19 +1038,27 @@ pub fn raster_verify(
     // byte mismatch on the first one, which is strictly less useful than
     // failing fast with the structural error.
     if let Some(meta) = JobCheckpoint::load(root)? {
-        if let Err(got) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
+        if let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
             return Err(EngineError::PlanHashMismatch {
-                expected: meta.plan_hash,
-                got,
+                expected: current,
+                actual: meta.plan_hash,
             });
         }
     }
 
-    // Try every known tile-file extension until we find one that matches.
-    // The sink's active format isn't visible from this layer, so we probe
-    // the common extensions produced by `TileFormat::extension` before
-    // declaring a tile missing.
-    let candidate_exts = ["raw", "png", "jpeg", "jpg"];
+    // Probe only the sink's *active* on-disk format. A previous run in a
+    // different format can leave a stale file at a sibling extension (e.g. a
+    // leftover `.png` when this run writes `.raw`); probing every extension and
+    // accepting the first hit would silently validate that stale file and let a
+    // missing active-format tile pass. A sink that pins a concrete format
+    // reports it through `content_format`; when the format is unknown (a
+    // transparent wrapper returns `None`) we fall back to probing every known
+    // extension as before (issue #139).
+    let candidate_exts: Vec<&'static str> = match sink.content_format() {
+        Some(crate::sink::TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"],
+        Some(fmt) => vec![fmt.extension()],
+        None => vec!["raw", "png", "jpeg", "jpg"],
+    };
 
     for coord in plan.tile_coords() {
         let mut found: Option<std::path::PathBuf> = None;
@@ -1089,8 +1139,7 @@ pub fn raster_verify(
                         };
                         if !got.eq_ignore_ascii_case(expected_s) {
                             return Err(EngineError::ChecksumMismatch {
-                                tile: parse_tile_rel_path(rel)
-                                    .unwrap_or_else(|| TileCoord::new(0, 0, 0)),
+                                tile: coord_for_manifest_rel(plan, rel),
                                 expected: expected_s.to_string(),
                                 got,
                             });
@@ -1613,17 +1662,22 @@ fn extract_and_emit_parallel(
                         break;
                     }
                     let extract_start = Instant::now();
-                    let result = extract_tile(raster, plan, coord, bg)
-                        .map(|tile_raster| {
-                            let blank =
-                                blank_for_output(&tile_raster, blank_strategy, dedupe_strategy);
-                            Tile {
-                                coord,
-                                raster: tile_raster,
-                                blank,
-                            }
-                        })
-                        .map_err(EngineError::from);
+                    // Contain a worker panic (e.g. a broken tiling invariant)
+                    // as a typed `WorkerPanic` on the channel rather than
+                    // letting it unwind out of `thread::scope` (issue #118).
+                    let result = catch_worker_panic(|| {
+                        extract_tile(raster, plan, coord, bg)
+                            .map(|tile_raster| {
+                                let blank =
+                                    blank_for_output(&tile_raster, blank_strategy, dedupe_strategy);
+                                Tile {
+                                    coord,
+                                    raster: tile_raster,
+                                    blank,
+                                }
+                            })
+                            .map_err(EngineError::from)
+                    });
                     stage_extract
                         .fetch_add(extract_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -3312,6 +3366,273 @@ mod tests {
             matches!(err, EngineError::PlanHashMismatch { .. }),
             "expected PlanHashMismatch on tile-format change, got {err:?}"
         );
+    }
+
+    /// `PlanHashMismatch` must name the CURRENT run's hash as `expected` and the
+    /// on-disk checkpoint's recorded hash as `actual`, so the rendered message
+    /// is unambiguous about which side is which. Before issue #145 the fields
+    /// were swapped (and named `{expected, got}`), so "expected X" pointed at the
+    /// checkpoint rather than the plan the caller is running now.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn plan_hash_mismatch_names_current_expected_and_checkpoint_actual() {
+        use crate::resume::{JobCheckpoint, PlanContract, ResumePolicy, compute_plan_hash};
+        use crate::sink::{FsSink, TileFormat};
+        use crate::{EngineBuilder, EngineKind};
+        use tempfile::tempdir;
+
+        let src = gradient_raster(96, 96);
+        let plan = PyramidPlanner::new(96, 96, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("tiles");
+
+        // Run 1: write a Raw pyramid + checkpoint under a white background.
+        let cfg1 = EngineConfig {
+            background_rgb: [255, 255, 255],
+            ..EngineConfig::default()
+        };
+        let sink1 = FsSink::new(root.clone(), plan.clone()).with_format(TileFormat::Raw);
+        EngineBuilder::new(&src, plan.clone(), &sink1)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(cfg1)
+            .with_resume(ResumePolicy::overwrite())
+            .run()
+            .unwrap();
+
+        // The hash the checkpoint recorded on disk.
+        let checkpoint_hash = JobCheckpoint::load(&root)
+            .unwrap()
+            .expect("run 1 must have written a checkpoint")
+            .plan_hash;
+
+        // Run 2: resume the SAME directory with a different background. The
+        // padding colour is part of the hashed content contract, so the resume
+        // gate must reject it.
+        let cfg2 = EngineConfig {
+            background_rgb: [0, 0, 0],
+            ..EngineConfig::default()
+        };
+        let sink2 = FsSink::new(root.clone(), plan.clone()).with_format(TileFormat::Raw);
+        let current_hash = compute_plan_hash(&plan, &PlanContract::from_engine(&cfg2, &sink2));
+
+        let err = EngineBuilder::new(&src, plan.clone(), &sink2)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(cfg2)
+            .with_resume(ResumePolicy::resume())
+            .run()
+            .expect_err("resume with a changed background must be rejected");
+
+        let (expected, actual) = match &err {
+            EngineError::PlanHashMismatch { expected, actual } => {
+                (expected.clone(), actual.clone())
+            }
+            other => panic!("expected PlanHashMismatch, got {other:?}"),
+        };
+        assert_ne!(
+            expected, actual,
+            "a genuine mismatch must carry two different hashes"
+        );
+        assert_eq!(
+            actual, checkpoint_hash,
+            "`actual` must be the hash the on-disk checkpoint recorded"
+        );
+        assert_eq!(
+            expected, current_hash,
+            "`expected` must be the hash the current run computes for its plan"
+        );
+
+        // The rendered message must attribute each hash to the correct side.
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("current plan hashes to {current_hash}")),
+            "message must name the current plan hash as expected: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("checkpoint on disk recorded {checkpoint_hash}")),
+            "message must name the checkpoint hash as actual: {msg}"
+        );
+    }
+
+    /// `catch_worker_panic` must convert a panicking body into the typed
+    /// [`EngineError::WorkerPanic`] and pass `Ok` / `Err` through unchanged, so
+    /// a worker fault surfaces on the tile channel instead of unwinding out of
+    /// `thread::scope` (issue #118).
+    #[test]
+    fn catch_worker_panic_maps_panic_and_passes_through() {
+        // Pass-through: Ok and Err are returned verbatim.
+        let ok: Result<u32, EngineError> = catch_worker_panic(|| Ok(7));
+        assert!(matches!(ok, Ok(7)));
+        let err: Result<u32, EngineError> = catch_worker_panic(|| Err(EngineError::Cancelled));
+        assert!(matches!(err, Err(EngineError::Cancelled)));
+
+        // A panic is contained and mapped to WorkerPanic. Silence the default
+        // hook so the intentional panic does not spam test output.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked: Result<u32, EngineError> =
+            catch_worker_panic(|| panic!("simulated broken tiling invariant"));
+        std::panic::set_hook(prev);
+        assert!(
+            matches!(panicked, Err(EngineError::WorkerPanic)),
+            "a panicking worker body must map to EngineError::WorkerPanic, got {panicked:?}"
+        );
+    }
+
+    /// Reproduces the parallel emission-pool structure: a worker panics inside
+    /// `std::thread::scope` while its peers make progress. The panic must reach
+    /// the consumer as [`EngineError::WorkerPanic`] rather than re-raise out of
+    /// the scope, and a sink guarded by a `Mutex` must stay usable afterwards
+    /// because the fault was contained, not unwound (issue #118).
+    #[test]
+    fn contained_worker_panic_surfaces_as_error_without_poisoning() {
+        use std::sync::Mutex;
+
+        let (tx, rx) = crate::sync_queue::bounded::<Result<u32, EngineError>>(4);
+        let sink: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome: Result<(), EngineError> = std::thread::scope(|s| {
+            for wid in 0..4u32 {
+                let tx = tx.clone();
+                s.spawn(move || {
+                    let r = catch_worker_panic(|| {
+                        if wid == 2 {
+                            panic!("worker {wid} hit a broken invariant");
+                        }
+                        Ok(wid)
+                    });
+                    let _ = tx.send(r);
+                });
+            }
+            drop(tx);
+            for msg in rx {
+                // A contained worker panic arrives here as a plain `Err`.
+                let v = msg?;
+                sink.lock().unwrap().push(v);
+            }
+            Ok(())
+        });
+        std::panic::set_hook(prev);
+
+        assert!(
+            matches!(outcome, Err(EngineError::WorkerPanic)),
+            "a contained worker panic must surface as WorkerPanic, got {outcome:?}"
+        );
+        // The consumer never unwound while holding the lock, so the sink mutex
+        // is not poisoned and remains usable.
+        assert!(
+            sink.lock().is_ok(),
+            "the sink mutex was poisoned by a contained worker fault"
+        );
+    }
+
+    /// Verify must probe only the sink's active on-disk format. A stale sibling
+    /// file of a *different* format left by a previous run must not stand in for
+    /// a missing active-format tile (issue #139).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn verify_uses_active_format_and_rejects_stale_sibling() {
+        use crate::sink::{FsSink, TileFormat};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("tiles");
+        let src = gradient_raster(128, 128);
+        let plan = PyramidPlanner::new(128, 128, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let sink = FsSink::new(&root, plan.clone()).with_format(TileFormat::Raw);
+        let cfg = EngineConfig::default();
+        generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver).unwrap();
+
+        // Baseline: a clean raw pyramid verifies.
+        raster_verify(&src, &plan, &sink, &cfg, &NoopObserver)
+            .expect("a clean raw pyramid must verify");
+
+        // Remove the active-format (.raw) tile and drop a stale .png of a
+        // different format at the same coordinate, as a previous run would.
+        let coord = plan.tile_coords().next().unwrap();
+        let raw_rel = plan.tile_path(coord, "raw").unwrap();
+        let png_rel = plan.tile_path(coord, "png").unwrap();
+        std::fs::remove_file(root.join(&raw_rel)).unwrap();
+        std::fs::write(root.join(&png_rel), b"\x89PNG stale bytes from an old run").unwrap();
+
+        let err = raster_verify(&src, &plan, &sink, &cfg, &NoopObserver).expect_err(
+            "a missing active-format tile must fail Verify even when a stale sibling exists",
+        );
+        assert!(
+            err.to_string().contains("missing tile"),
+            "expected a missing-tile error for the absent .raw tile, got {err:?}"
+        );
+    }
+
+    /// A manifest checksum mismatch must be attributed to the offending tile,
+    /// not a col/row-transposed coordinate. Google layout stores tiles at
+    /// `{level}/{row}/{col}`, which the layout-agnostic path parser transposes;
+    /// the plan-scan attribution keeps the reported coordinate correct (issue
+    /// #139).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn verify_attributes_google_checksum_mismatch_to_correct_tile() {
+        use crate::manifest::ChecksumAlgo;
+        use crate::sink::{FsSink, TileFormat};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("tiles");
+        let src = gradient_raster(300, 300);
+        let plan = PyramidPlanner::new(300, 300, 64, 0, Layout::Google)
+            .unwrap()
+            .plan();
+        let sink = FsSink::new(&root, plan.clone()).with_format(TileFormat::Raw);
+        let cfg = EngineConfig::default();
+        generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver).unwrap();
+
+        // A `col != row` tile exposes the transposition, since its on-disk path
+        // `{level}/{row}/{col}` parses to the swapped coordinate.
+        let target = plan
+            .tile_coords()
+            .find(|c| c.col != c.row)
+            .expect("Google plan must contain a col != row tile");
+        let transposed = TileCoord::new(target.level, target.row, target.col);
+        assert_ne!(target, transposed);
+
+        // Record every tile's pristine digest into a manifest next to the tiles.
+        let mut per_tile = serde_json::Map::new();
+        for coord in plan.tile_coords() {
+            let rel = plan.tile_path(coord, "raw").unwrap();
+            let digest =
+                crate::checksum::hash_file(&root.join(&rel), ChecksumAlgo::Blake3).unwrap();
+            per_tile.insert(rel, serde_json::Value::String(digest));
+        }
+        let manifest = serde_json::json!({
+            "checksums": { "algo": "blake3", "per_tile": serde_json::Value::Object(per_tile) }
+        });
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Corrupt ONLY the target tile so it is the single digest mismatch.
+        let target_abs = root.join(plan.tile_path(target, "raw").unwrap());
+        let mut bytes = std::fs::read(&target_abs).unwrap();
+        bytes[0] ^= 0xFF;
+        std::fs::write(&target_abs, &bytes).unwrap();
+
+        let err = raster_verify(&src, &plan, &sink, &cfg, &NoopObserver)
+            .expect_err("a corrupted tile must fail manifest verification");
+        match err {
+            EngineError::ChecksumMismatch { tile, .. } => {
+                assert_eq!(
+                    tile, target,
+                    "mismatch must be attributed to the corrupted tile, not its transpose"
+                );
+                assert_ne!(tile, transposed);
+            }
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
     }
 
     /**

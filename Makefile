@@ -1,9 +1,15 @@
-.PHONY: ci fmt clippy test miri loom
+.PHONY: ci fmt clippy test miri loom doc
 
 ## Run all CI workflows locally (mirrors .github/workflows/ci.yml)
-ci: fmt clippy test miri loom
+ci: fmt clippy test doc miri loom
 	@echo ""
 	@echo "All CI checks passed."
+
+## Build the docs and fail on any broken intra-doc link (Docs job).
+## Runs with every feature so the gated surface resolves (issue #146).
+doc:
+	@echo "==> cargo doc (deny broken intra-doc links)"
+	RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps --all-features
 
 ## Check formatting (Check & Lint job)
 fmt:

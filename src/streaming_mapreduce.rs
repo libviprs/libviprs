@@ -23,9 +23,12 @@
 //!
 //! ## Entry points
 //!
-//! - [`generate_pyramid_mapreduce`] — explicit MapReduce with a [`StripSource`].
-//! - [`generate_pyramid_mapreduce_auto`] — auto-selects monolithic or MapReduce
-//!   based on the budget vs. estimated monolithic peak memory.
+//! MapReduce is reached through the fluent
+//! [`EngineBuilder`](crate::EngineBuilder). Select it explicitly with
+//! [`EngineKind::MapReduce`](crate::EngineKind::MapReduce) over a
+//! [`StripSource`], or let [`EngineKind::Auto`](crate::EngineKind::Auto)
+//! choose monolithic vs. MapReduce based on the budget vs. the estimated
+//! monolithic peak memory.
 
 use crate::engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, is_blank_for_strategy,
@@ -159,8 +162,8 @@ fn estimate_mono_buffer_cost(plan: &PyramidPlan, format: PixelFormat) -> u64 {
 /// plus the channel could push the peak toward 2× budget.
 ///
 /// Returns at least 1. When even a single strip does not fit, callers rely on
-/// the pre-flight [`EngineError::BudgetExceeded`] check in
-/// [`generate_pyramid_mapreduce`] to reject the budget up front.
+/// the pre-flight [`EngineError::BudgetExceeded`] check in the MapReduce engine
+/// to reject the budget up front.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
 pub fn compute_inflight_strips(
@@ -290,22 +293,27 @@ fn emit_strip_tiles_parallel(
 
             s.spawn(move || {
                 for coord in chunk {
-                    let result = crate::streaming::extract_tile_from_strip(
-                        strip,
-                        plan,
-                        coord,
-                        strip_canvas_y,
-                        bg,
-                    )
-                    .map(|tile_raster| {
-                        let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
-                        Tile {
+                    // Contain a worker panic as a typed `WorkerPanic` on the
+                    // channel rather than letting it unwind out of
+                    // `thread::scope`, matching the map phase (issue #118).
+                    let result = crate::engine::catch_worker_panic(|| {
+                        crate::streaming::extract_tile_from_strip(
+                            strip,
+                            plan,
                             coord,
-                            raster: tile_raster,
-                            blank,
-                        }
-                    })
-                    .map_err(EngineError::from);
+                            strip_canvas_y,
+                            bg,
+                        )
+                        .map(|tile_raster| {
+                            let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
+                            Tile {
+                                coord,
+                                raster: tile_raster,
+                                blank,
+                            }
+                        })
+                        .map_err(EngineError::from)
+                    });
                     if tx.send(result).is_err() {
                         break;
                     }
