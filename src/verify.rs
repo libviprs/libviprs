@@ -14,5 +14,5 @@
 //! Both emit the same `LevelStarted` / `TileCompleted` / `LevelCompleted`
 //! / `Finished` event stream so observers see verify runs as first-class.
 
-pub(crate) use crate::engine::raster_verify;
-pub(crate) use crate::stream_verify::verify_from_strip_source;
+pub use crate::engine::raster_verify;
+pub use crate::stream_verify::verify_from_strip_source;
