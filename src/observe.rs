@@ -65,6 +65,29 @@ pub enum EngineEvent {
     },
     /// A tile was produced and sent to the sink.
     TileCompleted { coord: TileCoord },
+    /// A tile failed terminally and was skipped under
+    /// [`FailurePolicy::RetryThenSkip`](crate::engine::FailurePolicy).
+    ///
+    /// Emitted *instead of* [`TileCompleted`](Self::TileCompleted): a tile
+    /// that failed every retry produced no output, so reporting it as
+    /// completed would corrupt any observer that pairs completions with sink
+    /// writes (progress bars, completion counters, per-tile audit logs). The
+    /// `error` string carries a human-readable description of the terminal
+    /// failure.
+    TileFailed { coord: TileCoord, error: String },
+    /// A tile was skipped on resume because a prior run already produced it.
+    ///
+    /// Emitted for tiles listed in an inbound resume checkpoint. Such tiles
+    /// are never re-extracted or re-written this run, so they must not
+    /// surface as [`TileCompleted`](Self::TileCompleted) — an observer would
+    /// otherwise double-count them across the original and resumed runs.
+    TileSkippedOnResume { coord: TileCoord },
+    /// A tile write failed and a retry is about to be attempted.
+    ///
+    /// `attempt` is 1-based: the first retry after the initial failure is
+    /// `attempt == 1`. Terminal failure (all retries exhausted) surfaces as
+    /// [`TileFailed`](Self::TileFailed), never as `TileCompleted`.
+    RetryAttempted { coord: TileCoord, attempt: u32 },
     /// A level finished processing.
     LevelCompleted { level: u32, tiles_produced: u64 },
 
@@ -93,6 +116,15 @@ pub enum EngineEvent {
         batch_index: u32,
         tiles_produced: u64,
     },
+
+    // -- Durability events --
+    /// A resume checkpoint was flushed to durable storage.
+    ///
+    /// `tiles` is the cumulative number of completed tiles recorded in the
+    /// checkpoint at flush time, giving observers a durable-progress signal
+    /// distinct from the in-memory [`TileCompleted`](Self::TileCompleted)
+    /// stream.
+    CheckpointFlushed { tiles: u64 },
 
     // -- Completion events --
     /// The tiling phase is done.
@@ -146,6 +178,17 @@ impl EngineObserver for NoopObserver {
 /// the full event history available for post-hoc assertions. This is the
 /// primary observer used in integration tests and is also useful for
 /// debugging production pipelines (attach it alongside a logging observer).
+///
+/// # Unbounded by choice
+///
+/// The buffer grows without limit: one [`EngineEvent`] is retained per event,
+/// under a single mutex. This is deliberate — the collector exists to capture
+/// a *complete* history for tests and debugging, where the event count is
+/// small and known. It is **not** suitable for very large runs: a pyramid of
+/// `10^8` tiles emits at least that many events and will exhaust memory.
+/// For production progress reporting, implement [`EngineObserver`] directly
+/// with an aggregating counter (O(1) memory), or drain the collector
+/// periodically. See issue #128 for the rationale.
 ///
 /// # Example usage
 ///
@@ -312,6 +355,76 @@ mod tests {
                 total_tiles: 10,
                 ..
             }
+        ));
+    }
+
+    /**
+     * Reproducer for #128: a terminally-failed tile must have a dedicated
+     * event distinct from `TileCompleted`, and a resume-skipped tile must
+     * have its own event too. Reporting either as `TileCompleted` corrupts
+     * observers that pair completions with sink writes (the exact defect the
+     * issue describes).
+     *
+     * Before the fix the event vocabulary had no failure or resume-skip
+     * variant, so this test failed to compile (RED). After adding the
+     * variants it captures them and asserts each is distinct from a
+     * completion (GREEN).
+     *
+     * Input: TileFailed(2,3,4), TileSkippedOnResume(0,1,1) →
+     * Output: neither event matches TileCompleted; fields round-trip.
+     */
+    #[test]
+    fn failed_and_skipped_tiles_are_not_reported_as_completed() {
+        let obs = CollectingObserver::new();
+        let failed = TileCoord::new(2, 3, 4);
+        let skipped = TileCoord::new(0, 1, 1);
+        obs.on_event(EngineEvent::TileFailed {
+            coord: failed,
+            error: "sink write failed after retries".to_string(),
+        });
+        obs.on_event(EngineEvent::TileSkippedOnResume { coord: skipped });
+
+        let events = obs.events();
+        assert_eq!(events.len(), 2);
+
+        // A failure is never observable as a completion.
+        assert!(!matches!(events[0], EngineEvent::TileCompleted { .. }));
+        match &events[0] {
+            EngineEvent::TileFailed { coord, error } => {
+                assert_eq!(*coord, failed);
+                assert_eq!(error, "sink write failed after retries");
+            }
+            other => panic!("expected TileFailed, got {other:?}"),
+        }
+
+        // A resume-skip is never observable as a completion.
+        assert!(!matches!(events[1], EngineEvent::TileCompleted { .. }));
+        assert!(matches!(
+            events[1],
+            EngineEvent::TileSkippedOnResume { coord } if coord == skipped
+        ));
+    }
+
+    /**
+     * Tests that the retry and checkpoint-flush events carry their
+     * coordinates / counters and are distinct from completion. Guards the
+     * remaining #128 vocabulary additions against accidental removal.
+     * Input: RetryAttempted(coord, attempt=2), CheckpointFlushed(tiles=7).
+     */
+    #[test]
+    fn retry_and_checkpoint_events_round_trip() {
+        let obs = CollectingObserver::new();
+        let coord = TileCoord::new(1, 2, 3);
+        obs.on_event(EngineEvent::RetryAttempted { coord, attempt: 2 });
+        obs.on_event(EngineEvent::CheckpointFlushed { tiles: 7 });
+        let events = obs.events();
+        assert!(matches!(
+            events[0],
+            EngineEvent::RetryAttempted { attempt: 2, .. }
+        ));
+        assert!(matches!(
+            events[1],
+            EngineEvent::CheckpointFlushed { tiles: 7 }
         ));
     }
 
