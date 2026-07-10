@@ -9,7 +9,9 @@
 //! Each output directory contains a single file, `.libviprs-job.json`, whose
 //! contents deserialise to [`JobMetadata`]. The file is written atomically via
 //! a `.tmp` sibling + rename so that a crash mid-write cannot produce a torn
-//! or partially-updated checkpoint.
+//! or partially-updated checkpoint. The sibling name is made unique per
+//! process (pid + counter) so two jobs sharing one output directory cannot
+//! stage into — and torn-rename over — the same temp file (issue #126).
 //!
 //! # Plan hashing
 //!
@@ -44,6 +46,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -498,11 +501,17 @@ impl JobCheckpoint {
         // before the rename publishes it.
         {
             let mut f = std::fs::File::create(&tmp_path)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
+            if let Err(e) = f.write_all(&bytes).and_then(|()| f.sync_all()) {
+                // Don't leave a partially-written unique temp file behind.
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
         }
 
-        std::fs::rename(&tmp_path, &final_path)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
 
         // Fsync the containing directory so the rename itself is durable. A
         // synced checkpoint file whose *directory entry* is still in the page
@@ -553,14 +562,31 @@ impl Durability for RealDurability {
     }
 }
 
-/// Build the temp-file sibling path used by [`JobCheckpoint::save`].
+/// Monotonic counter feeding the temp-file suffix in [`tmp_path_for`], so two
+/// checkpoint writers in the same process never stage into the same `.tmp`
+/// sibling.
+static CHECKPOINT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Build a *unique* temp-file sibling path used by [`JobCheckpoint::save`].
 ///
-/// For `/foo/bar/.libviprs-job.json` this returns
-/// `/foo/bar/.libviprs-job.json.tmp`. Extracted so the naming scheme is kept
-/// in one place and can be adjusted independently of the save logic.
+/// For `/foo/bar/.libviprs-job.json` this returns something like
+/// `/foo/bar/.libviprs-job.json.tmp.<pid>.<counter>`. The suffix is
+/// disambiguated by the process id and a process-wide monotonic counter so
+/// that two jobs sharing one output directory — whether two processes or two
+/// threads within one process — never stage into the same temp file.
+///
+/// A fixed `.tmp` name (the historical scheme) let two concurrent saves
+/// interleave `File::create` / `write_all` on the *same* sibling and then each
+/// `rename` a half-written, torn JSON into place, so the next `--resume`
+/// refused the checkpoint as [`ResumeError::Corrupt`] (issue #126). Because
+/// each writer now owns a distinct temp file, its `rename` publishes a
+/// complete payload atomically and cannot be clobbered mid-write by another
+/// writer's staging.
 fn tmp_path_for(final_path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let seq = CHECKPOINT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut s = final_path.as_os_str().to_owned();
-    s.push(".tmp");
+    s.push(format!(".tmp.{pid}.{seq}"));
     PathBuf::from(s)
 }
 
@@ -999,9 +1025,110 @@ mod tests {
         let plan = sample_plan();
         let meta = sample_meta(&compute_plan_hash(&plan, &sample_contract()));
         JobCheckpoint::save(dir.path(), &meta).unwrap();
-        let tmp = tmp_path_for(&JobCheckpoint::checkpoint_path(dir.path()));
-        assert!(!tmp.exists(), "tmp file should be renamed, not linger");
+        // No staging sibling (`.libviprs-job.json.tmp.*`) may linger after a
+        // successful save — the unique temp file must have been renamed away.
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "tmp files should be renamed, not linger: {leftover:?}"
+        );
         assert!(JobCheckpoint::checkpoint_path(dir.path()).exists());
+    }
+
+    // Issue #126 (acceptance criterion 2): temp files must be unique per
+    // process so two concurrent saves on one output directory never stage into
+    // the same `.tmp` sibling and torn-rename over each other. The historical
+    // fixed name (`.libviprs-job.json.tmp`) made `tmp_path_for` a pure function
+    // of the final path, so successive calls collided; this test fails on that
+    // code and passes once the name is disambiguated by pid + counter.
+    #[test]
+    fn tmp_paths_are_unique_per_call() {
+        let final_path = JobCheckpoint::checkpoint_path(Path::new("/tmp/out"));
+        let a = tmp_path_for(&final_path);
+        let b = tmp_path_for(&final_path);
+        assert_ne!(
+            a, b,
+            "concurrent checkpoint saves must not share a tmp filename"
+        );
+        // Both temps stage next to the real checkpoint and carry the pid so a
+        // second *process* on the same directory also picks a distinct name.
+        let pid = std::process::id().to_string();
+        for tmp in [&a, &b] {
+            let s = tmp.to_string_lossy();
+            assert!(s.contains(".libviprs-job.json.tmp."), "unexpected tmp: {s}");
+            assert!(s.contains(&pid), "tmp name must carry the pid: {s}");
+        }
+    }
+
+    // Issue #126 (acceptance criterion 1): concurrent jobs must not corrupt
+    // each other's checkpoint file. Many threads hammer `save` on one shared
+    // directory while the main thread continuously reloads it. With a fixed
+    // temp name the interleaved `create`/`write_all`/`rename` published torn
+    // JSON that `load` rejected as `Corrupt`; with per-writer unique temps each
+    // rename publishes a complete payload, so a concurrent read always sees a
+    // valid checkpoint.
+    #[test]
+    #[cfg_attr(miri, ignore)] // threads + filesystem access blocked by Miri isolation
+    fn concurrent_saves_never_publish_a_torn_checkpoint() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path: Arc<PathBuf> = Arc::new(dir.path().to_path_buf());
+        let plan = sample_plan();
+        let hash = compute_plan_hash(&plan, &sample_contract());
+
+        // Seed one valid checkpoint so the reader always has something to load.
+        JobCheckpoint::save(&dir_path, &sample_meta(&hash)).unwrap();
+
+        const WRITERS: usize = 8;
+        const SAVES_PER_WRITER: usize = 40;
+
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            let dir_path = Arc::clone(&dir_path);
+            let hash = hash.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..SAVES_PER_WRITER {
+                    let mut meta = sample_meta(&hash);
+                    // Vary the payload length so a torn rename would surface as
+                    // an obviously invalid parse rather than an aligned one.
+                    for r in 0..((w * SAVES_PER_WRITER + i) as u32 % 50) {
+                        meta.completed_tiles.push(TileCoord::new(0, 0, r));
+                    }
+                    JobCheckpoint::save(&dir_path, &meta).unwrap();
+                }
+            }));
+        }
+
+        // While the writers race, keep reloading: a torn checkpoint would
+        // surface as `ResumeError::Corrupt`.
+        for _ in 0..400 {
+            match JobCheckpoint::load(&dir_path) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("checkpoint vanished mid-run"),
+                Err(e) => panic!("concurrent save corrupted the checkpoint: {e:?}"),
+            }
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final state is still a clean, loadable checkpoint with no stray temps.
+        assert!(JobCheckpoint::load(&dir_path).unwrap().is_some());
+        let leftover: Vec<_> = std::fs::read_dir(&*dir_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "stray temp files remain: {leftover:?}");
     }
 
     #[test]
