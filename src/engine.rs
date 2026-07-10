@@ -1746,7 +1746,7 @@ mod tests {
     #[test]
     #[ignore = "issue #127 criterion 1: needs segmented checkpoint format + coordinated libviprs-tests update"]
     fn checkpoint_flush_io_is_bounded_per_flush() {
-        use crate::resume::{JobCheckpoint, JobMetadata, CHECKPOINT_FILENAME};
+        use crate::resume::{CHECKPOINT_FILENAME, JobCheckpoint, JobMetadata};
 
         let dir = tempfile::tempdir().unwrap();
         let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
@@ -1761,7 +1761,8 @@ mod tests {
         let size_after_few = std::fs::metadata(&header).unwrap().len();
 
         for i in 0..5_000u32 {
-            cp.mark_tile_completed(TileCoord::new(0, i % 2, i / 2)).unwrap();
+            cp.mark_tile_completed(TileCoord::new(0, i % 2, i / 2))
+                .unwrap();
         }
         let size_after_many = std::fs::metadata(&header).unwrap().len();
 

@@ -1251,10 +1251,9 @@ mod tests {
         );
 
         // Built directly from an iterator of coords.
-        let from_iter: CompletedTileSet =
-            [TileCoord::new(3, 2, 1), TileCoord::new(3, 2, 1)]
-                .into_iter()
-                .collect();
+        let from_iter: CompletedTileSet = [TileCoord::new(3, 2, 1), TileCoord::new(3, 2, 1)]
+            .into_iter()
+            .collect();
         assert_eq!(from_iter.len(), 1);
         assert!(from_iter.contains(&TileCoord::new(3, 2, 1)));
 
