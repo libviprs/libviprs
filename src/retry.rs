@@ -435,8 +435,16 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
         self.inner.finish()
     }
 
-    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
-        self.inner.record_engine_config(config);
+    /// Expose the wrapped sink so the trait's bookkeeping defaults forward
+    /// through it. `RetryingSink` genuinely owns two counters
+    /// (`sink_retry_count`, `sink_skipped_due_to_failure`) and its own
+    /// retry-loop marker (`applies_retry_policy`), so those stay overridden
+    /// below; every purely-transparent hook (`record_engine_config`,
+    /// `checkpoint_root`, `init_level_count`, `content_format`) is served by
+    /// the default that reads this inner sink, so the wrapper cannot silently
+    /// drop one (issue #137).
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        Some(&self.inner)
     }
 
     fn sink_retry_count(&self) -> u64 {
@@ -457,23 +465,6 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
         // report N (mirrors how `sink_retry_count` sums per-level counters that are
         // each bumped only by their own retry loop).
         self.skipped_due_to_failure.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn checkpoint_root(&self) -> Option<&std::path::Path> {
-        self.inner.checkpoint_root()
-    }
-
-    fn init_level_count(&self, levels: usize) {
-        // Transparent decorator: forward the pre-sizing hint so wrapped sinks
-        // (e.g. `FsSink`) still preallocate their per-level bookkeeping when
-        // the engine drives writes through this retry wrapper.
-        self.inner.init_level_count(levels);
-    }
-
-    fn content_format(&self) -> Option<crate::sink::TileFormat> {
-        // Forward so resume plan-hashing sees the wrapped sink's on-disk
-        // format even when a retry policy is configured.
-        self.inner.content_format()
     }
 
     fn applies_retry_policy(&self) -> bool {
