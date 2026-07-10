@@ -368,22 +368,19 @@ pub(super) mod tile_coord_vec_serde {
 /// Errors that can occur while reading, writing, or validating a checkpoint.
 ///
 /// `Io(io::Error)` wraps filesystem failures from the underlying
-/// [`std::fs`] calls; `PlanHashMismatch` and `SchemaMismatch` surface
-/// semantic incompatibilities that make it unsafe to resume.
+/// [`std::fs`] calls; `SchemaMismatch` surfaces a semantic incompatibility
+/// that makes it unsafe to resume.
+///
+/// A checkpoint whose `plan_hash` disagrees with the current plan is *not*
+/// reported here: that divergence is detected at the resume gate
+/// ([`verify_checkpoint_contract`]) and surfaced to callers as
+/// [`crate::engine::EngineError::PlanHashMismatch`], which carries the
+/// additional format-change context a fixed-field checkpoint error could not.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ResumeError {
-    /// The checkpoint's `plan_hash` disagrees with the current plan's hash.
-    /// Resuming would produce incoherent output, so the engine refuses.
-    #[error("plan hash mismatch: checkpoint records {expected}, current plan hashes to {actual}")]
-    PlanHashMismatch {
-        /// Hash stored in the checkpoint file.
-        expected: String,
-        /// Hash freshly computed from the current plan.
-        actual: String,
-    },
     /// The checkpoint's `schema_version` does not match [`SCHEMA_VERSION`].
     #[error("checkpoint schema mismatch: binary speaks version {expected}, file declares {found}")]
     SchemaMismatch {
@@ -801,8 +798,8 @@ pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> Str
 /// Because the format is folded into [`compute_plan_hash`], recomputing the
 /// expected hash straight from the live sink would flip the format bits and
 /// reject an otherwise valid checkpoint — the resume would fail with
-/// [`ResumeError::PlanHashMismatch`] purely because a wrapper was added or
-/// removed between the writing run and the resuming run.
+/// [`crate::engine::EngineError::PlanHashMismatch`] purely because a wrapper
+/// was added or removed between the writing run and the resuming run.
 ///
 /// To stay robust the geometry + content contract is re-hashed using the
 /// format that was **recorded when the checkpoint was written**
@@ -1222,6 +1219,34 @@ mod tests {
             verify_checkpoint_contract(&meta, &plan, &config, &jpeg).is_err(),
             "changing the tile format must invalidate the checkpoint"
         );
+    }
+
+    #[test]
+    fn plan_hash_divergence_surfaces_as_engine_error_not_a_resume_variant() {
+        // A checkpoint whose recorded `plan_hash` does not match the current
+        // plan is the "real condition" the removed `ResumeError::PlanHashMismatch`
+        // variant was documented to carry. It is NOT reported through
+        // `ResumeError`: the resume gate returns the freshly-computed hash and
+        // the engine layer maps it to `EngineError::PlanHashMismatch`. This
+        // test pins that boundary so nobody re-introduces a redundant
+        // checkpoint-error variant for a condition the engine already owns.
+        let plan = sample_plan();
+        let config = EngineConfig::default();
+        let png = FormatSink(Some(TileFormat::Png));
+
+        // A metadata blob whose plan_hash is garbage relative to the live plan.
+        let meta = sample_meta("0000000000000000000000000000000000000000000000000000000000000000");
+
+        let got = verify_checkpoint_contract(&meta, &plan, &config, &png)
+            .expect_err("a divergent plan_hash must be rejected by the resume gate");
+        // The gate hands back the *actual* hash for the engine to embed in
+        // `EngineError::PlanHashMismatch { expected, got }`.
+        assert_eq!(
+            got,
+            compute_plan_hash(&plan, &PlanContract::from_engine(&config, &png)),
+            "the resume gate must return the freshly computed hash for the engine error",
+        );
+        assert_ne!(got, meta.plan_hash, "the two hashes must actually differ");
     }
 
     #[test]

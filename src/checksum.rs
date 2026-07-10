@@ -223,9 +223,10 @@ pub enum VerifyError {
     /// oracle.
     #[error("manifest tile path escapes pyramid directory: {0}")]
     UnsafePath(String),
-
-    #[error("checksum mismatch")]
-    Mismatch,
+    // NOTE: per-tile checksum mismatches are *not* errors — `verify_output`
+    // records them in [`VerifyReport::tiles_mismatched`] and still returns
+    // `Ok`. `VerifyError` is reserved for structural failures (manifest
+    // missing, unparseable, malformed, or an unsafe tile path).
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +448,52 @@ mod tests {
         let missing = dir.path().join("nope.raw");
         let err = hash_file(&missing, ChecksumAlgo::Blake3).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn verify_output_reports_tile_mismatch_in_report_not_as_error() {
+        // The "real condition" the removed `VerifyError::Mismatch` variant was
+        // meant to represent: a tile whose on-disk bytes do not hash to the
+        // recorded digest. By design that is NOT an error — `verify_output`
+        // returns `Ok` and records the offending tile in
+        // `VerifyReport::tiles_mismatched`. This pins that contract so no one
+        // re-introduces a context-free error variant for a per-tile mismatch.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // A tile whose bytes match its recorded digest, and one whose do not.
+        let ok_bytes = b"good tile bytes";
+        let bad_bytes = b"actual bytes on disk";
+        std::fs::create_dir_all(root.join("0")).unwrap();
+        std::fs::write(root.join("0/0_0.raw"), ok_bytes).unwrap();
+        std::fs::write(root.join("0/1_0.raw"), bad_bytes).unwrap();
+
+        let ok_digest = hash_tile(ok_bytes, ChecksumAlgo::Blake3);
+        // A digest that deliberately disagrees with `bad_bytes`.
+        let wrong_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+        assert_ne!(hash_tile(bad_bytes, ChecksumAlgo::Blake3), wrong_digest);
+
+        let manifest = serde_json::json!({
+            "checksums": {
+                "algo": "blake3",
+                "per_tile": {
+                    "0/0_0.raw": ok_digest,
+                    "0/1_0.raw": wrong_digest,
+                }
+            }
+        });
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let report =
+            verify_output(root).expect("a per-tile mismatch must not be a structural error");
+        assert_eq!(report.tiles_checked, 2);
+        assert_eq!(report.tiles_ok, 1);
+        assert!(report.tiles_missing.is_empty());
+        assert_eq!(report.tiles_mismatched, vec![PathBuf::from("0/1_0.raw")]);
     }
 
     #[test]
