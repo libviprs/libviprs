@@ -110,7 +110,6 @@ fn assert_manifest_error_non_exhaustive(v: &ManifestError) {
 #[allow(dead_code)]
 fn assert_resume_error_non_exhaustive(v: &ResumeError) {
     match v {
-        ResumeError::PlanHashMismatch { .. } => {}
         ResumeError::SchemaMismatch { .. } => {}
         ResumeError::Corrupt { .. } => {}
         ResumeError::Io(..) => {}
@@ -129,7 +128,6 @@ fn assert_verify_error_non_exhaustive(v: &VerifyError) {
         VerifyError::BadField { .. } => {}
         VerifyError::UnknownAlgo(..) => {}
         VerifyError::UnsafePath(..) => {}
-        VerifyError::Mismatch => {}
         _ => {}
     }
 }
