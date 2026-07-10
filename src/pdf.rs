@@ -37,6 +37,10 @@ pub enum PdfError {
     Raster(#[from] crate::raster::RasterError),
     #[error("page {page} out of range (document has {total} pages)")]
     PageOutOfRange { page: usize, total: usize },
+    #[error(
+        "document has {count} pages, exceeding pdfium's {max}-page index limit (u16 PdfPageIndex)"
+    )]
+    PageCountExceedsIndex { count: usize, max: usize },
     #[error("pdfium error: {0}")]
     Pdfium(String),
     #[error(
@@ -316,6 +320,53 @@ fn page_object_id(
         .get(&key)
         .copied()
         .ok_or(PdfError::PageOutOfRange { page, total })
+}
+
+/// The largest page count pdfium can address without wrapping.
+///
+/// pdfium-render models page indices as [`u16`] (`PdfPageIndex`), so its pages
+/// accessor narrows `FPDF_GetPageCount` (a C `int`) to `u16` with a truncating
+/// `as` cast. A document with more than `u16::MAX` pages therefore reports a
+/// *wrapped* count (e.g. `65536` becomes `0`), under-reporting the page count
+/// and making high pages unreachable.
+#[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
+const PDFIUM_MAX_PAGE_COUNT: usize = u16::MAX as usize;
+
+/// Reject a document whose true page count exceeds pdfium's `u16` page-index
+/// width (see [`PDFIUM_MAX_PAGE_COUNT`]).
+///
+/// The `FPDF_GetPageCount` (`c_int`) → `u16` `PdfPageIndex` narrowing happens
+/// inside pdfium-render, before the count reaches this crate, so the wrap is
+/// irreversible by the time its pages accessor hands back a `u16`. This guard
+/// runs on the pdfium render paths against the
+/// document's *true* page count — taken from `lopdf`, the same authoritative
+/// page structure [`page_object_id`] trusts — so a truncated count can never
+/// silently drive a page lookup.
+#[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
+fn check_pdfium_page_count(true_count: usize) -> Result<(), PdfError> {
+    if true_count > PDFIUM_MAX_PAGE_COUNT {
+        return Err(PdfError::PageCountExceedsIndex {
+            count: true_count,
+            max: PDFIUM_MAX_PAGE_COUNT,
+        });
+    }
+    Ok(())
+}
+
+/// Guard the pdfium render paths against a page count that overflows pdfium's
+/// `u16` page index (see [`check_pdfium_page_count`]).
+///
+/// The document's true page count is read from `lopdf`, whose page map is keyed
+/// by `u32` and so counts pages without pdfium's `u16` truncation. A file that
+/// `lopdf` cannot parse is left untouched — pdfium may still be able to render
+/// it — so this only rejects a document `lopdf` can read whose page count
+/// exceeds the index width.
+#[cfg(feature = "pdfium")]
+fn reject_pages_beyond_pdfium_index(path: &Path) -> Result<(), PdfError> {
+    if let Ok(doc) = lopdf::Document::load(path) {
+        check_pdfium_page_count(doc.get_pages().len())?;
+    }
+    Ok(())
 }
 
 /// Extract the largest embedded raster image from a PDF page.
@@ -1156,6 +1207,7 @@ pub(crate) fn render_at_size(
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
+    reject_pages_beyond_pdfium_index(path)?;
     let pdfium = init_pdfium()?;
     let _lock = pdfium_lock();
     let document = pdfium
@@ -1389,6 +1441,7 @@ pub fn render_page_pdfium_budgeted(
     max_dpi: u32,
     max_pixels: u64,
 ) -> Result<BudgetRenderResult, PdfError> {
+    reject_pages_beyond_pdfium_index(path)?;
     let pdfium = init_pdfium()?;
     let _lock = pdfium_lock();
     let document = pdfium
@@ -1481,6 +1534,41 @@ mod tests {
             matches!(err, PdfError::PageOutOfRange { page: 2, total: 1 }),
             "an in-range but absent page must be rejected, got {err:?}"
         );
+    }
+
+    /// Regression for #91 (acceptance criterion #2): pdfium-render narrows
+    /// `FPDF_GetPageCount` (a C `int`) to a `u16` `PdfPageIndex` at its pages
+    /// accessor, so a document with more than `u16::MAX` pages reports a
+    /// *wrapped* count (`65536` becomes `0`). `check_pdfium_page_count` must
+    /// reject a true page count past the index width with a typed
+    /// [`PdfError::PageCountExceedsIndex`] instead of letting a truncated count
+    /// silently drive a page lookup.
+    #[test]
+    fn check_pdfium_page_count_rejects_index_width_overflow() {
+        // One page past the u16 index width wraps to 0 under pdfium-render's
+        // `FPDF_GetPageCount as u16` cast — the exact truncation this guards.
+        let overflowing = PDFIUM_MAX_PAGE_COUNT + 1;
+        assert_eq!(overflowing as u16, 0, "precondition: the cast wraps to 0");
+
+        let err = check_pdfium_page_count(overflowing).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PdfError::PageCountExceedsIndex { count, max }
+                    if count == overflowing && max == PDFIUM_MAX_PAGE_COUNT
+            ),
+            "a page count past the u16 index width must be rejected, got {err:?}"
+        );
+    }
+
+    /// The boundary count (`u16::MAX`) and any smaller count are representable
+    /// by pdfium's page index and must be accepted unchanged — the guard must
+    /// not reject documents pdfium can address.
+    #[test]
+    fn check_pdfium_page_count_accepts_up_to_index_width() {
+        assert!(check_pdfium_page_count(0).is_ok());
+        assert!(check_pdfium_page_count(1).is_ok());
+        assert!(check_pdfium_page_count(PDFIUM_MAX_PAGE_COUNT).is_ok());
     }
 
     /*
