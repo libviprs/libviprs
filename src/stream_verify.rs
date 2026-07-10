@@ -129,7 +129,7 @@ fn strip_layout_error(reason: String) -> EngineError {
 /// plan.levels.len()`, `duration = started.elapsed()`, every other counter
 /// zero. Verify never writes to the sink and never retries, so the
 /// write-side counters have no meaningful value to report.
-pub(crate) fn verify_from_strip_source(
+pub fn verify_from_strip_source(
     source: &dyn StripSource,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
