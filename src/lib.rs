@@ -53,6 +53,7 @@ pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
 pub mod geo;
+pub(crate) mod level_walk;
 #[cfg(loom)]
 mod loom_tests;
 pub mod manifest;
