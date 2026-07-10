@@ -287,8 +287,18 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         // don't silently lose the cadence / root that used to live on the
         // config. If no policy was attached we leave `resume` as `None`
         // rather than conjuring a destructive Overwrite (issue #123).
+        //
+        // A non-zero `config.checkpoint_every` is an *explicit* caller choice
+        // and must win over the policy's implicit default — `ResumePolicy::resume()`
+        // seeds a coarse fallback cadence (`DEFAULT_RESUME_CHECKPOINT_EVERY`), and
+        // gating the override on `policy.checkpoint_every() == 0` used to let that
+        // fallback silently swallow the config value. That dropped the caller's
+        // cadence on the floor, so a crash between the (rare) fallback flushes
+        // left no checkpoint and `--resume` re-rendered everything. Overriding
+        // whenever the config sets a value keeps the documented "config threads
+        // into the policy" contract and bounds resume rework to one interval.
         if let Some(mut policy) = self.resume.take() {
-            if config.checkpoint_every != 0 && policy.checkpoint_every() == 0 {
+            if config.checkpoint_every != 0 {
                 policy = policy.with_checkpoint_every(config.checkpoint_every);
             }
             if policy.checkpoint_root().is_none() {
@@ -1241,6 +1251,116 @@ mod checkpoint_durability_tests {
             meta.completed_tiles.len(),
             2,
             "the checkpoint must record exactly the tiles completed before the failure"
+        );
+    }
+
+    /// A sink that forwards its first `n - 1` writes to an inner [`FsSink`]
+    /// (so they land on disk *and* drive the resume checkpoint) and then
+    /// **panics** on the `n`-th write. A panic — unlike a returned
+    /// `SinkError` — unwinds straight past the builder's error-path
+    /// `cp.flush()`, so the only tiles that survive are the ones a *periodic*
+    /// flush already persisted. That makes the checkpoint cadence the sole
+    /// thing standing between a crash and a full re-render, which is exactly
+    /// the invariant this reproducer guards.
+    struct PanicOnNthSink {
+        inner: crate::sink::FsSink,
+        counter: AtomicU32,
+        panic_at: u32,
+    }
+
+    impl TileSink for PanicOnNthSink {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.panic_at {
+                panic!("PanicOnNthSink: deliberate crash at write #{n}");
+            }
+            self.inner.write_tile(tile)
+        }
+
+        fn finish(&self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+
+        fn checkpoint_root(&self) -> Option<&std::path::Path> {
+            self.inner.checkpoint_root()
+        }
+    }
+
+    // Regression: `EngineConfig::with_checkpoint_every` handed to the builder
+    // via `with_config` must actually take effect on a Resume run.
+    //
+    // `ResumePolicy::resume()` seeds a coarse fallback cadence
+    // (`DEFAULT_RESUME_CHECKPOINT_EVERY`, 1000). `with_config` previously only
+    // adopted the config's cadence when the policy's was still 0, so an
+    // explicit `with_checkpoint_every(5)` on the config was silently discarded
+    // and the engine flushed every 1000 tiles instead. A crash before the
+    // first fallback flush then left *no* checkpoint, forcing `--resume` to
+    // re-render every tile — unbounded rework.
+    //
+    // Here a 64-tile run crashes (panics) at write #30 with the config asking
+    // for a flush every 5 tiles. The periodic flush must have persisted the
+    // completed tiles, and the count must be bounded to within one cadence
+    // interval of the crash point.
+    #[test]
+    fn config_checkpoint_every_bounds_resume_rework() {
+        let dir = tempfile::tempdir().unwrap();
+        // 32x32 @ 4px tiles => top level 8x8 = 64 tiles, plus coarser levels;
+        // comfortably more than the 30-write crash point below.
+        let data = vec![7u8; 32 * 32 * 3];
+        let source = Raster::new(32, 32, PixelFormat::Rgb8, data).unwrap();
+        let plan = PyramidPlanner::new(32, 32, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let total = plan.total_tile_count();
+        assert!(total > 30, "need > 30 tiles to crash mid-run, got {total}");
+
+        let panic_at = 30u32;
+        let cadence = 5u64;
+
+        let sink = PanicOnNthSink {
+            inner: crate::sink::FsSink::new(dir.path().join("pyr"), plan.clone()),
+            counter: AtomicU32::new(0),
+            panic_at,
+        };
+
+        // `with_resume` first, then `with_config` — mirroring the documented
+        // migration shape — so the config's cadence must thread into the policy.
+        let cfg = EngineConfig::default()
+            .with_concurrency(1)
+            .with_checkpoint_every(cadence);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            EngineBuilder::new(&source, plan.clone(), sink)
+                .with_resume(ResumePolicy::resume())
+                .with_config(cfg)
+                .run()
+        }));
+        assert!(outcome.is_err(), "the deliberate panic must abort the run");
+
+        let root = dir.path().join("pyr");
+        let meta = JobCheckpoint::load(&root)
+            .expect("checkpoint load must not error")
+            .expect(
+                "a periodic flush must have left a checkpoint on disk; \
+                 None means the config cadence was dropped and rework is unbounded",
+            );
+
+        let completed = meta.completed_tiles.len() as u64;
+        // The write before the crash that landed on a cadence boundary is the
+        // floor; everything up to the crash point is the ceiling.
+        assert!(
+            completed > 0,
+            "the checkpoint must record the tiles a periodic flush persisted"
+        );
+        assert!(
+            completed >= (panic_at as u64 - 1) - cadence,
+            "expected the checkpoint within one cadence interval of the crash: \
+             completed={completed}, crash_at={panic_at}, cadence={cadence}"
+        );
+        assert!(
+            completed <= panic_at as u64,
+            "the checkpoint cannot record more tiles than were written: \
+             completed={completed}, crash_at={panic_at}"
         );
     }
 
