@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -491,17 +492,32 @@ impl TileFormat {
 /// `Debug` is implemented manually because the internal [`DedupeIndex`] does
 /// not derive `Debug`.
 ///
-/// # Lock order
+/// # Lock discipline
 ///
-/// `dedupe_promote` (outermost; guards the whole promote-on-2nd-hit
-/// critical section) -> `pixel_format` (OnceLock, no lock) ->
-/// `per_level_counts` (atomics, no lock) -> `tile_digests` ->
-/// `manifest_refs` -> `pending_first` -> `completed_tiles` ->
-/// `engine_config` -> dedupe mutexes. **Do not nest** locks in a different
-/// order; the hot write path acquires only the tile-local mutexes it needs
-/// and never reaches back up the chain. `dedupe_promote` is only ever taken
-/// as the outermost lock and never while holding an inner mutex, so it
-/// introduces no cycle.
+/// This type does **not** have a totally-ordered lock hierarchy; it has a
+/// two-level rule that is simpler and stronger:
+///
+/// * `dedupe_promote` is the sole **outer** lock. It guards the whole
+///   promote-on-2nd-hit critical section and is only ever taken at the top of
+///   [`FsSink::dedupe_write`], never while a field mutex is already held.
+/// * Every other mutex — `tile_digests`, `manifest_refs`, `pending_first`,
+///   `completed_tiles`, `unsynced_tiles`, `engine_config` — is a **leaf**
+///   lock. A leaf lock is held only long enough to read, mutate, or snapshot
+///   its map/vec (the read paths clone or `mem::take` and release
+///   immediately), and is **never** held while acquiring any other leaf lock,
+///   `dedupe_promote`, or while calling back into `self`.
+///
+/// The consequence — and the actual invariant to preserve — is that **at most
+/// one leaf lock is ever held on a thread at a time**. The only legal nesting
+/// is `dedupe_promote` wrapping a single leaf lock inside `dedupe_write`;
+/// no leaf-over-leaf nesting exists, so there is no lock cycle and no AB-BA
+/// deadlock is reachable. `pixel_format` (a `OnceLock`) and `per_level_counts`
+/// (atomics) take no mutex and are irrelevant to this rule.
+///
+/// Field mutexes are acquired through [`FsSink::lock_leaf`], which in debug
+/// builds trips a panic the instant a second leaf lock is taken while one is
+/// still held — turning an accidental nesting into an immediate, local
+/// failure instead of a latent deadlock (issue #112).
 pub struct FsSink {
     base_dir: PathBuf,
     plan: PyramidPlan,
@@ -520,8 +536,8 @@ pub struct FsSink {
     /// `pending_first.remove` before the first writer's `pending_first.insert`,
     /// silently skipping promotion and breaking the at-least-one-hardlink
     /// invariant (issue #111). This is the outermost lock (see the
-    /// type-level `# Lock order`); it is only ever taken at the top of
-    /// [`FsSink::dedupe_write`] and never while holding an inner mutex.
+    /// type-level `# Lock discipline`); it is only ever taken at the top of
+    /// [`FsSink::dedupe_write`] and never while holding a leaf mutex.
     dedupe_promote: Mutex<()>,
     resume_enabled: bool,
     /// Running per-tile checksum table, populated only when `checksums` is
@@ -575,6 +591,67 @@ pub struct FsSink {
     engine_config: Mutex<Option<crate::engine::EngineConfig>>,
 }
 
+// Per-thread counter of currently-held `FsSink` leaf locks. Only compiled in
+// debug builds, where it backs the "at most one leaf lock at a time" assertion
+// in `LeafGuard`. `dedupe_promote` is intentionally *not* counted here — it is
+// the permitted outer lock (see `FsSink`'s `# Lock discipline`).
+#[cfg(debug_assertions)]
+thread_local! {
+    static FS_SINK_LEAF_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard returned by [`FsSink::lock_leaf`]. Wraps a [`MutexGuard`] over a
+/// leaf field mutex and, in debug builds, maintains the thread-local
+/// [`FS_SINK_LEAF_DEPTH`] so that acquiring a second leaf lock while one is
+/// still held panics immediately — surfacing an accidental leaf-over-leaf
+/// nesting (the class of mistake the old, fictitious lock-order comment would
+/// have invited) at the exact call site rather than as a latent deadlock.
+struct LeafGuard<'a, T> {
+    inner: MutexGuard<'a, T>,
+}
+
+impl<'a, T> LeafGuard<'a, T> {
+    #[track_caller]
+    fn new(m: &'a Mutex<T>) -> Self {
+        #[cfg(debug_assertions)]
+        FS_SINK_LEAF_DEPTH.with(|d| {
+            assert_eq!(
+                d.get(),
+                0,
+                "FsSink leaf mutex acquired while another leaf lock is held — \
+                 violates the at-most-one-leaf-lock invariant (see the type's \
+                 `# Lock discipline`, issue #112)"
+            );
+            d.set(1);
+        });
+        // Poisoning propagates as before: a panicked writer leaves the sink's
+        // bookkeeping in an unknown state, so surfacing it is correct.
+        LeafGuard {
+            inner: m.lock().unwrap(),
+        }
+    }
+}
+
+impl<T> Drop for LeafGuard<'_, T> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        FS_SINK_LEAF_DEPTH.with(|d| d.set(0));
+    }
+}
+
+impl<T> std::ops::Deref for LeafGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for LeafGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
 /// Internal bookkeeping for the "promote on 2nd hit" dedupe path. When the
 /// first reference for a content hash is seen, we write the bytes at the
 /// tile path and stash the following. If a second reference arrives we
@@ -611,6 +688,18 @@ impl std::fmt::Debug for FsSink {
 }
 
 impl FsSink {
+    /// Acquire one of the field ("leaf") mutexes while upholding the type's
+    /// `# Lock discipline`: leaf locks are never nested. In debug builds the
+    /// returned [`LeafGuard`] panics if a second leaf lock is taken while one
+    /// is still held on this thread, so a stray leaf-over-leaf acquisition
+    /// fails loudly at its call site instead of risking a deadlock (issue
+    /// #112). `dedupe_promote` is the sole permitted outer lock and is
+    /// deliberately acquired directly, not through this helper.
+    #[track_caller]
+    fn lock_leaf<'a, T>(&self, m: &'a Mutex<T>) -> LeafGuard<'a, T> {
+        LeafGuard::new(m)
+    }
+
     /// Creates a new filesystem sink rooted at `base_dir` with the given
     /// pyramid plan. The tile encoding format defaults to
     /// [`TileFormat::Png`]; override it via [`FsSink::with_format`] when
@@ -882,7 +971,7 @@ impl TileSink for FsSink {
         }
 
         if self.resume_enabled {
-            self.completed_tiles.lock().unwrap().push(tile.coord);
+            self.lock_leaf(&self.completed_tiles).push(tile.coord);
         }
 
         Ok(())
@@ -931,7 +1020,7 @@ impl TileSink for FsSink {
             }
             crate::engine::BlankTileStrategy::Emit => {}
         }
-        *self.engine_config.lock().unwrap() = Some(config.clone());
+        *self.lock_leaf(&self.engine_config) = Some(config.clone());
     }
 
     fn checkpoint_root(&self) -> Option<&Path> {
@@ -975,9 +1064,7 @@ impl FsSink {
         if !self.resume_enabled {
             return;
         }
-        self.unsynced_tiles
-            .lock()
-            .unwrap()
+        self.lock_leaf(&self.unsynced_tiles)
             .push(abs_path.to_path_buf());
     }
 
@@ -1028,9 +1115,7 @@ impl FsSink {
         }
         if let Some(algo) = self.checksum_algo {
             let digest = hash_tile_raw(materialized, algo);
-            self.tile_digests
-                .lock()
-                .unwrap()
+            self.lock_leaf(&self.tile_digests)
                 .insert(rel.to_string(), digest);
         }
     }
@@ -1082,7 +1167,7 @@ impl FsSink {
                 // it from the index's refs.
                 idx.forget_reference(rel_string);
 
-                self.pending_first.lock().unwrap().insert(
+                self.lock_leaf(&self.pending_first).insert(
                     shared_key,
                     PendingFirst {
                         tile_abs_path: abs_path.to_path_buf(),
@@ -1105,7 +1190,7 @@ impl FsSink {
                 // to the shared file. The hardlink gives us at least one
                 // tile that resolves to the shared inode (required by
                 // `blanks_dedupe_all_point_to_same_inode`).
-                let pending = self.pending_first.lock().unwrap().remove(&shared_key);
+                let pending = self.lock_leaf(&self.pending_first).remove(&shared_key);
                 if let Some(p) = pending {
                     if let Some(parent) = shared_abs_path.parent() {
                         std::fs::create_dir_all(parent)?;
@@ -1158,9 +1243,7 @@ impl FsSink {
                             // yet report success (issue #93).
                             std::fs::write(&p.tile_abs_path, [0u8])?;
                             self.record_tile_digest(&p.tile_rel_path, &[0u8]);
-                            self.manifest_refs
-                                .lock()
-                                .unwrap()
+                            self.lock_leaf(&self.manifest_refs)
                                 .insert(p.tile_rel_path, shared_rel_string.clone());
                         }
                     }
@@ -1197,9 +1280,7 @@ impl FsSink {
                 // checkpoint certifies this coordinate (issue #122).
                 self.track_unsynced(abs_path);
                 self.track_unsynced(&shared_abs_path);
-                self.manifest_refs
-                    .lock()
-                    .unwrap()
+                self.lock_leaf(&self.manifest_refs)
                     .insert(rel_string.to_string(), shared_rel_string);
             }
         }
@@ -1210,7 +1291,7 @@ impl FsSink {
     /// on-disk bytes against the expected digest. Returns a SinkError on
     /// the first mismatch.
     fn verify_digests_on_disk(&self) -> Result<(), SinkError> {
-        let snapshot = self.tile_digests.lock().unwrap().clone();
+        let snapshot = self.lock_leaf(&self.tile_digests).clone();
         let Some(algo) = self.checksum_algo else {
             return Ok(());
         };
@@ -1225,7 +1306,7 @@ impl FsSink {
                     // #93). The sole exemption is a manifest-referenced blank
                     // whose real content lives in `_shared/`; its 1-byte
                     // sentinel may legitimately be absent.
-                    if self.manifest_refs.lock().unwrap().contains_key(rel) {
+                    if self.lock_leaf(&self.manifest_refs).contains_key(rel) {
                         continue;
                     }
                     return Err(SinkError::MissingTile {
@@ -1258,7 +1339,7 @@ impl FsSink {
         // reflects the run's actual concurrency / background / blank-strategy.
         // If the engine never called the hook (e.g. a custom driver that
         // bypasses `generate_pyramid_observed`) we fall back to defaults.
-        let eng_cfg = self.engine_config.lock().unwrap().clone();
+        let eng_cfg = self.lock_leaf(&self.engine_config).clone();
 
         // -- generation settings -------------------------------------------
         let generation = GenerationSettings {
@@ -1354,7 +1435,7 @@ impl FsSink {
         let emit_checksums =
             self.checksum_algo.is_some() && self.checksums != crate::checksum::ChecksumMode::None;
         let checksums = if emit_checksums {
-            let raw = self.tile_digests.lock().unwrap();
+            let raw = self.lock_leaf(&self.tile_digests);
             let per_tile: BTreeMap<String, String> = raw
                 .iter()
                 .map(|(k, v)| (k.clone(), hex_encode_32(v)))
@@ -1368,9 +1449,7 @@ impl FsSink {
         // sink keeps refs as HashMap for O(1) insert on the hot path; convert
         // to the deterministic BTreeMap shape the manifest requires.
         let blank_references: std::collections::BTreeMap<String, String> = self
-            .manifest_refs
-            .lock()
-            .unwrap()
+            .lock_leaf(&self.manifest_refs)
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -1415,16 +1494,14 @@ impl FsSink {
     fn write_resume_checkpoint(&self) -> Result<(), SinkError> {
         use crate::resume::{JobCheckpoint, JobMetadata, SCHEMA_VERSION, compute_plan_hash};
 
-        let completed = self.completed_tiles.lock().unwrap().clone();
+        let completed = self.lock_leaf(&self.completed_tiles).clone();
         // Derive the content contract from the same engine config the resume
         // gate will see, so a legitimate resume matches while a changed
         // format/background/strategy/source is rejected. Falls back to the
         // default config when no snapshot was recorded (e.g. a sink written
         // without an engine run).
         let eng_cfg = self
-            .engine_config
-            .lock()
-            .unwrap()
+            .lock_leaf(&self.engine_config)
             .clone()
             .unwrap_or_default();
         let contract = crate::resume::PlanContract::from_engine(&eng_cfg, self);
@@ -1468,7 +1545,7 @@ impl FsSink {
         // pointing at tiles whose bytes were still in the page cache, and
         // resume would skip those coordinates forever.
         let to_sync: Vec<PathBuf> = {
-            let mut guard = self.unsynced_tiles.lock().unwrap();
+            let mut guard = self.lock_leaf(&self.unsynced_tiles);
             std::mem::take(&mut *guard)
         };
         let mut seen = std::collections::HashSet::new();
@@ -2639,5 +2716,78 @@ mod tests {
                 "iter {iter}: neither tile path is hardlinked to the shared inode"
             );
         }
+    }
+
+    /**
+     * Enforces the FsSink `# Lock discipline` invariant: at most one leaf
+     * field mutex may be held on a thread at a time. Acquiring a second leaf
+     * lock through `lock_leaf` while the first is still held is exactly the
+     * AB-BA nesting the previously mis-documented "lock order" comment would
+     * have invited (issue #112); the debug guard must turn it into an
+     * immediate panic at the call site.
+     *
+     * RED before the fix: no guard existed, so the nested acquisition returned
+     * a second guard silently and this `should_panic` test failed. GREEN
+     * after: `lock_leaf` trips the depth assertion. Debug-only, since the
+     * tracker is compiled under `debug_assertions`.
+     */
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "at-most-one-leaf-lock invariant")]
+    fn fs_sink_leaf_locks_may_not_nest() {
+        let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
+        // Construction touches no filesystem, so the path is never written.
+        let sink = FsSink::new(std::path::PathBuf::from("unused-no-io"), planner.plan());
+        let _outer = sink.lock_leaf(&sink.tile_digests);
+        // A second leaf lock while `_outer` is still live must panic.
+        let _inner = sink.lock_leaf(&sink.manifest_refs);
+    }
+
+    /**
+     * The production write/finish paths must uphold the at-most-one-leaf-lock
+     * invariant. A full run with dedupe, checksums, and resume all active
+     * exercises every leaf mutex — `tile_digests`, `manifest_refs`,
+     * `pending_first`, `completed_tiles`, `unsynced_tiles`, `engine_config` —
+     * plus the `dedupe_promote` outer lock wrapping leaf acquisitions inside
+     * `dedupe_write`. If any path nested two leaf locks the debug guard would
+     * panic mid-run; a clean finish proves the documented invariant holds in
+     * the real code (issue #112).
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn fs_sink_run_never_nests_leaf_locks() {
+        use crate::checksum::ChecksumMode;
+        use crate::dedupe::DedupeStrategy;
+        use crate::manifest::ChecksumAlgo;
+
+        let planner = PyramidPlanner::new(16, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert!(top.cols >= 2, "test needs a level with >=2 tiles");
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("output_files");
+        let sink = FsSink::new(base, plan.clone())
+            .with_format(TileFormat::Png)
+            .with_checksums(ChecksumMode::Verify, ChecksumAlgo::Blake3)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_resume(true);
+
+        // engine_config leaf; two identical uniform tiles drive the dedupe
+        // promote path (pending_first, manifest_refs, tile_digests); resume
+        // drives completed_tiles and unsynced_tiles; finish() re-reads
+        // tile_digests + manifest_refs + engine_config.
+        sink.record_engine_config(&crate::engine::EngineConfig::default());
+        for col in 0..2 {
+            let rect = plan.tile_rect(TileCoord::new(top.level, col, 0)).unwrap();
+            let tile = Tile {
+                coord: TileCoord::new(top.level, col, 0),
+                raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
+        }
+        sink.finish()
+            .expect("full dedupe+checksum+resume run must finish without nesting leaf locks");
     }
 }
