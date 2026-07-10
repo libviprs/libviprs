@@ -67,6 +67,11 @@ pub struct MapReduceConfig {
     /// before each batch of strips and stops with
     /// [`EngineError::Cancelled`] once cancelled (#133).
     pub cancel: Option<crate::cancel::CancelToken>,
+    /// How terminal write failures are handled. Threaded from the builder so
+    /// the MapReduce engine honors the same `FailurePolicy` as the monolithic
+    /// and streaming engines (issue #134). Under `RetryThenSkip` a tile whose
+    /// retries are exhausted is skipped and accounted, not propagated.
+    pub failure_policy: crate::retry::FailurePolicy,
 }
 
 impl Default for MapReduceConfig {
@@ -78,6 +83,7 @@ impl Default for MapReduceConfig {
             background_rgb: [255, 255, 255],
             blank_tile_strategy: BlankTileStrategy::Emit,
             cancel: None,
+            failure_policy: crate::retry::FailurePolicy::default(),
         }
     }
 }
@@ -89,7 +95,7 @@ impl MapReduceConfig {
             buffer_size: self.buffer_size,
             background_rgb: self.background_rgb,
             blank_tile_strategy: self.blank_tile_strategy,
-            failure_policy: crate::retry::FailurePolicy::default(),
+            failure_policy: self.failure_policy.clone(),
             checkpoint_every: 0,
             dedupe_strategy: None,
             checkpoint_root: None,
@@ -288,7 +294,25 @@ fn emit_strip_tiles_parallel(
             if tile.blank {
                 skipped += 1;
             }
-            sink.write_tile(&tile)?;
+            if let Err(e) = sink.write_tile(&tile) {
+                // Honor the configured FailurePolicy so the MapReduce engine
+                // matches the monolithic and streaming engines (issue #134). A
+                // write whose retry backoff was interrupted by a cancellation
+                // must surface as Cancelled, not be swallowed by RetryThenSkip.
+                if let Some(token) = &config.cancel {
+                    if token.is_cancelled() {
+                        return Err(EngineError::Cancelled);
+                    }
+                }
+                match &config.failure_policy {
+                    crate::retry::FailurePolicy::RetryThenSkip(_) => {
+                        sink.note_sink_skipped();
+                        observer.on_event(EngineEvent::TileCompleted { coord });
+                        continue;
+                    }
+                    _ => return Err(crate::engine::promote_sink_error(e)),
+                }
+            }
             observer.on_event(EngineEvent::TileCompleted { coord });
             count += 1;
         }
@@ -665,7 +689,7 @@ pub(crate) fn generate_pyramid_mapreduce(
         queue_pressure_peak: 0,
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
-        skipped_due_to_failure: 0,
+        skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
     })
 }
 

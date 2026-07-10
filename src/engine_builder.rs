@@ -628,6 +628,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         buffer_size,
                         background_rgb,
                         blank_strategy,
+                        &engine_cfg.failure_policy,
                         cancel.clone(),
                     );
                     generate_pyramid_mapreduce(&strip, &plan, &wrapped, &cfg, observer_ref)
@@ -639,6 +640,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                         buffer_size,
                         background_rgb,
                         blank_strategy,
+                        &engine_cfg.failure_policy,
                         cancel.clone(),
                     );
                     generate_pyramid_mapreduce(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
@@ -711,6 +713,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     buffer_size,
                     background_rgb,
                     blank_strategy,
+                    &engine_cfg.failure_policy,
                     cancel.clone(),
                 );
                 generate_pyramid_mapreduce(&source, &plan, engine_sink, &cfg, observer_ref)?
@@ -722,6 +725,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                     buffer_size,
                     background_rgb,
                     blank_strategy,
+                    &engine_cfg.failure_policy,
                     cancel.clone(),
                 );
                 generate_pyramid_mapreduce(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
@@ -784,12 +788,14 @@ fn build_streaming_config(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_mapreduce_config(
     memory_budget_bytes: Option<u64>,
     concurrency: Option<usize>,
     buffer_size: Option<usize>,
     background_rgb: Option<[u8; 3]>,
     blank_strategy: Option<BlankTileStrategy>,
+    failure_policy: &FailurePolicy,
     cancel: Option<crate::cancel::CancelToken>,
 ) -> MapReduceConfig {
     let mut cfg = MapReduceConfig::default();
@@ -808,6 +814,7 @@ fn build_mapreduce_config(
     if let Some(bts) = blank_strategy {
         cfg.blank_tile_strategy = bts;
     }
+    cfg.failure_policy = failure_policy.clone();
     cfg.cancel = cancel;
     cfg
 }
@@ -1305,5 +1312,135 @@ mod checkpoint_durability_tests {
             matches!(result, Err(EngineError::InvalidPlan { .. })),
             "expected InvalidPlan for an empty-levels plan, got {result:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FailurePolicy parity across engine kinds (issue #134)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod failure_policy_parity_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::{MemorySink, SinkError, Tile};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A sink that forwards its first `ok` `write_tile` calls to an inner
+    /// [`MemorySink`] and then fails every subsequent call with a *permanent*
+    /// error. Models a sink that dies partway through a run; under
+    /// `RetryThenSkip` the doomed tiles must be skipped (not propagated) on
+    /// every engine kind.
+    struct FailAfterSink {
+        inner: MemorySink,
+        ok_left: AtomicU32,
+    }
+
+    impl FailAfterSink {
+        fn new(ok: u32) -> Self {
+            Self {
+                inner: MemorySink::new(),
+                ok_left: AtomicU32::new(ok),
+            }
+        }
+
+        fn written(&self) -> usize {
+            self.inner.tile_count()
+        }
+    }
+
+    impl TileSink for FailAfterSink {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            loop {
+                let cur = self.ok_left.load(Ordering::SeqCst);
+                if cur == 0 {
+                    return Err(SinkError::Other("permanent failure".into()));
+                }
+                if self
+                    .ok_left
+                    .compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return self.inner.write_tile(tile);
+                }
+            }
+        }
+    }
+
+    fn source() -> Raster {
+        // 8x8 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    fn fast_policy(max_retries: u32) -> RetryPolicy {
+        RetryPolicy::new(max_retries, std::time::Duration::from_micros(1))
+            .with_multiplier(1.0)
+            .with_max_backoff(std::time::Duration::from_micros(10))
+            .with_jitter(false)
+    }
+
+    // Under `RetryThenSkip`, a permanently-failing sink must cause the doomed
+    // tiles to be *skipped* — the run completes with a non-zero
+    // `skipped_due_to_failure`, not an error — regardless of which engine kind
+    // executes it. Before the fix, only the monolithic engine honored the
+    // policy; the streaming and MapReduce engines propagated the first
+    // terminal write error (FailFast behaviour), so `run_collect` returned
+    // `Err`. This test drives each concrete kind and asserts uniform skip
+    // semantics.
+    fn assert_skip_honored(kind: EngineKind, concurrency: Option<usize>) {
+        let ok = 2u32;
+        let sink = FailAfterSink::new(ok);
+        let src = source();
+
+        let mut builder = EngineBuilder::new(&src, plan(), sink)
+            .with_engine(kind)
+            .with_failure_policy(FailurePolicy::RetryThenSkip(fast_policy(2)));
+        if let Some(c) = concurrency {
+            builder = builder.with_concurrency(c);
+        }
+
+        let (result, sink) = builder.run_collect().unwrap_or_else(|e| {
+            panic!("{kind:?} must skip doomed tiles under RetryThenSkip, got error: {e:?}")
+        });
+
+        assert!(
+            result.skipped_due_to_failure > 0,
+            "{kind:?}: expected at least one tile skipped due to failure, got {}",
+            result.skipped_due_to_failure
+        );
+        assert_eq!(
+            sink.written() as u32,
+            ok,
+            "{kind:?}: exactly the pre-failure tiles must land in the sink"
+        );
+    }
+
+    #[test]
+    fn monolithic_honors_retry_then_skip() {
+        assert_skip_honored(EngineKind::Monolithic, None);
+    }
+
+    #[test]
+    fn streaming_honors_retry_then_skip() {
+        assert_skip_honored(EngineKind::Streaming, None);
+    }
+
+    #[test]
+    fn mapreduce_sequential_honors_retry_then_skip() {
+        assert_skip_honored(EngineKind::MapReduce, Some(0));
+    }
+
+    #[test]
+    fn mapreduce_parallel_honors_retry_then_skip() {
+        assert_skip_honored(EngineKind::MapReduce, Some(2));
     }
 }

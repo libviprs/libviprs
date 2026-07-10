@@ -40,7 +40,9 @@
 //! - [`generate_pyramid_auto`] — auto-selects monolithic or streaming based on
 //!   the budget vs. estimated monolithic peak memory.
 
-use crate::engine::{BlankTileStrategy, EngineConfig, EngineError, EngineResult};
+use crate::engine::{
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, promote_sink_error,
+};
 use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
@@ -1226,7 +1228,7 @@ pub(crate) fn generate_pyramid_streaming(
         queue_pressure_peak: 0,
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
-        skipped_due_to_failure: 0,
+        skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
     })
 }
 
@@ -1493,11 +1495,26 @@ pub(crate) fn emit_strip_tiles(
             if blank {
                 skipped += 1;
             }
-            sink.write_tile(&Tile {
+            if let Err(e) = sink.write_tile(&Tile {
                 coord,
                 raster: tile_raster,
                 blank,
-            })?;
+            }) {
+                // A write that failed because its retry backoff was interrupted
+                // by a cancellation must surface as Cancelled, not be swallowed
+                // by RetryThenSkip or reported as a plain sink error. Mirror the
+                // monolithic engine so the configured FailurePolicy takes effect
+                // on every engine kind (issue #134).
+                config.check_cancelled()?;
+                match &config.failure_policy {
+                    crate::retry::FailurePolicy::RetryThenSkip(_) => {
+                        sink.note_sink_skipped();
+                        observer.on_event(EngineEvent::TileCompleted { coord });
+                        continue;
+                    }
+                    _ => return Err(promote_sink_error(e)),
+                }
+            }
             observer.on_event(EngineEvent::TileCompleted { coord });
             count += 1;
         }
