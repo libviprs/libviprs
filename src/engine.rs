@@ -265,9 +265,25 @@ impl EngineConfig {
     /// Configure the content-addressed deduplication strategy applied by the
     /// engine before a tile reaches the sink.
     ///
-    /// In the Phase 2b stub this records the strategy on the config but does
-    /// not yet drive engine-level deduplication (sinks that accept a
-    /// [`DedupeStrategy`] continue to apply their own per-sink dedupe).
+    /// A non-[`None`](crate::dedupe::DedupeStrategy::None) strategy drives
+    /// engine-level deduplication of blank tiles: every exactly-uniform tile is
+    /// collapsed into the shared 1-byte placeholder marker instead of a full
+    /// payload, so a run over a sparse image no longer writes one complete file
+    /// per identical blank tile. The collapse is reported through
+    /// [`EngineResult::tiles_skipped`] and, for on-disk sinks, materialised as
+    /// the [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER). It is
+    /// non-lossy: the marker regenerates to the same uniform tile, so
+    /// Verify-mode reconstruction still matches (see
+    /// [`regenerated_tile_matches_marker`]).
+    ///
+    /// Both [`Blanks`](crate::dedupe::DedupeStrategy::Blanks) and
+    /// [`All`](crate::dedupe::DedupeStrategy::All) promote uniform content at
+    /// this layer (mirroring
+    /// [`FsSink::should_dedupe_tile`](crate::sink::FsSink)); they differ only in
+    /// the sink-side shared-key hash algorithm, which does not change the
+    /// engine's emit decision. Sinks that were themselves given a
+    /// [`DedupeStrategy`] continue to apply their own per-sink dedupe on top of
+    /// this.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
     /// (and the related [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all) flag).
@@ -1263,7 +1279,7 @@ fn extract_and_emit_level(
                 let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
                 ctx.stage_encode
                     .fetch_add(encode_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
+                let blank = blank_for_output(&tile_raster, blank_strategy, config.dedupe_strategy);
                 if blank {
                     skipped += 1;
                 }
@@ -1348,6 +1364,42 @@ fn is_blank_for_strategy(raster: &Raster, strategy: BlankTileStrategy) -> bool {
     }
 }
 
+/// Decide whether a produced tile is emitted as a placeholder marker rather
+/// than a full payload, combining the explicit [`BlankTileStrategy`] with the
+/// engine-level [`EngineConfig::dedupe_strategy`].
+///
+/// This is the single point where [`EngineConfig::dedupe_strategy`] takes
+/// effect: a non-[`None`](crate::dedupe::DedupeStrategy::None) strategy
+/// collapses every exactly-uniform tile into the shared
+/// [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER), so identical blank
+/// tiles no longer each occupy a full file. Without this the field was a
+/// silent no-op — accepted through [`EngineConfig::with_dedupe_strategy`] but
+/// never routed into the emit path (issue #130).
+///
+/// Restricting the dedupe collapse to [`is_blank_tile`] (exact uniformity)
+/// keeps the marker regenerable, so Verify-mode reconstruction still matches
+/// (see [`regenerated_tile_matches_marker`]). Both
+/// [`Blanks`](crate::dedupe::DedupeStrategy::Blanks) and
+/// [`All`](crate::dedupe::DedupeStrategy::All) promote uniform content here,
+/// matching [`FsSink::should_dedupe_tile`](crate::sink::FsSink); the algorithm
+/// carried by `All` only influences the sink-side shared-key naming, not the
+/// engine's emit decision.
+fn blank_for_output(
+    raster: &Raster,
+    blank_strategy: BlankTileStrategy,
+    dedupe: Option<crate::dedupe::DedupeStrategy>,
+) -> bool {
+    if is_blank_for_strategy(raster, blank_strategy) {
+        return true;
+    }
+    let dedupe_collapses_blanks = matches!(
+        dedupe,
+        Some(crate::dedupe::DedupeStrategy::Blanks)
+            | Some(crate::dedupe::DedupeStrategy::All { .. })
+    );
+    dedupe_collapses_blanks && is_blank_tile(raster)
+}
+
 /// Extracts tiles for one level in parallel using scoped worker threads.
 ///
 /// Tile coordinates are divided into roughly equal chunks (one per worker).
@@ -1379,6 +1431,10 @@ fn extract_and_emit_parallel(
     }
 
     let blank_strategy = config.blank_tile_strategy;
+    // Engine-level dedupe of blank tiles (issue #130). Captured up front so the
+    // per-worker closures can fold it into their blank decision alongside
+    // `blank_strategy`; `Option<DedupeStrategy>` is `Copy`.
+    let dedupe_strategy = config.dedupe_strategy;
 
     // Bounded channel for backpressure: producers block when buffer is full.
     // Routed through `crate::sync_queue` so the loom suite can model-check the
@@ -1449,7 +1505,8 @@ fn extract_and_emit_parallel(
                     let encode_start = Instant::now();
                     let result = extract_tile(raster, plan, coord, bg)
                         .map(|tile_raster| {
-                            let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
+                            let blank =
+                                blank_for_output(&tile_raster, blank_strategy, dedupe_strategy);
                             Tile {
                                 coord,
                                 raster: tile_raster,
@@ -1823,6 +1880,163 @@ mod tests {
     fn solid_raster(w: u32, h: u32, val: u8) -> Raster {
         let data = vec![val; w as usize * h as usize * 3];
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// Issue #130: `EngineConfig::dedupe_strategy` must not be a silent no-op.
+    ///
+    /// A non-`None` strategy has to route into the engine's emit path and
+    /// collapse uniform (blank) tiles into placeholder markers. Over a solid
+    /// raster every tile is uniform, so with dedupe disabled nothing is
+    /// skipped, and with dedupe enabled every tile is collapsed. Before the fix
+    /// the strategy was accepted but never consulted, so `tiles_skipped` stayed
+    /// `0` for `Blanks`/`All` and these assertions failed (RED); after the fix
+    /// they hold (GREEN). Runs both the single-threaded and parallel emit paths.
+    #[test]
+    fn dedupe_strategy_drives_blank_tile_collapse() {
+        use crate::dedupe::DedupeStrategy;
+
+        let src = solid_raster(512, 512, 255);
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let total = plan.total_tile_count();
+        assert!(total > 1, "need multiple tiles to demonstrate a collapse");
+
+        for concurrency in [0usize, 4] {
+            let run = |dedupe: Option<DedupeStrategy>| {
+                let mut config = EngineConfig::default().with_concurrency(concurrency);
+                if let Some(ds) = dedupe {
+                    config = config.with_dedupe_strategy(ds);
+                }
+                let sink = MemorySink::new();
+                let result =
+                    generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+                // Every tile is still produced — the collapse is non-lossy, it
+                // only changes how a tile is represented, not whether it exists.
+                assert_eq!(result.tiles_produced, total);
+                assert_eq!(sink.tile_count() as u64, total);
+                result.tiles_skipped
+            };
+
+            // Baseline: the knob defaults to a no-op, so no tile is collapsed.
+            let skipped_none = run(None);
+            assert_eq!(
+                skipped_none, 0,
+                "concurrency={concurrency}: without a dedupe strategy no tile should be collapsed"
+            );
+
+            // Each active strategy must change behaviour versus the baseline.
+            let skipped_blanks = run(Some(DedupeStrategy::Blanks));
+            assert_eq!(
+                skipped_blanks, total,
+                "concurrency={concurrency}: DedupeStrategy::Blanks must collapse every uniform tile"
+            );
+            assert_ne!(
+                skipped_blanks, skipped_none,
+                "concurrency={concurrency}: DedupeStrategy::Blanks must differ from no dedupe"
+            );
+
+            let skipped_all = run(Some(DedupeStrategy::All {
+                algo: crate::manifest::ChecksumAlgo::Blake3,
+            }));
+            assert_eq!(
+                skipped_all, total,
+                "concurrency={concurrency}: DedupeStrategy::All must collapse every uniform tile"
+            );
+            assert_ne!(
+                skipped_all, skipped_none,
+                "concurrency={concurrency}: DedupeStrategy::All must differ from no dedupe"
+            );
+        }
+    }
+
+    /// Issue #130: the engine-level collapse must reach the sink as real
+    /// placeholder markers, not just a counter. On disk (raw format) a
+    /// collapsed uniform tile is the single-byte
+    /// [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER); without a dedupe
+    /// strategy the same tile carries its full raw payload.
+    #[test]
+    fn dedupe_strategy_writes_placeholder_markers_on_disk() {
+        use crate::dedupe::DedupeStrategy;
+        use crate::sink::{BLANK_TILE_MARKER, FsSink, TileFormat};
+
+        let src = solid_raster(256, 256, 255);
+        let plan = PyramidPlanner::new(256, 256, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let count_marker_files = |dir: &std::path::Path| -> (usize, usize) {
+            let mut markers = 0usize;
+            let mut full = 0usize;
+            for entry in walkdir(dir) {
+                if entry.extension().and_then(|e| e.to_str()) == Some("raw") {
+                    let len = std::fs::metadata(&entry).unwrap().len();
+                    if len == 1 {
+                        let byte = std::fs::read(&entry).unwrap()[0];
+                        assert_eq!(byte, BLANK_TILE_MARKER, "1-byte tile must be the marker");
+                        markers += 1;
+                    } else {
+                        full += 1;
+                    }
+                }
+            }
+            (markers, full)
+        };
+
+        // Baseline: no dedupe -> every raw tile is a full payload.
+        let base = tempfile::tempdir().unwrap();
+        let sink = FsSink::new(base.path().join("out"), plan.clone()).with_format(TileFormat::Raw);
+        let config = EngineConfig::default();
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        sink.finish().unwrap();
+        let (base_markers, base_full) = count_marker_files(&base.path().join("out"));
+        assert_eq!(
+            base_markers, 0,
+            "no dedupe must not write any 1-byte markers"
+        );
+        assert!(base_full > 0, "expected full raw tiles without dedupe");
+
+        // Dedupe enabled -> every uniform tile is collapsed to a 1-byte marker.
+        let dd = tempfile::tempdir().unwrap();
+        let sink = FsSink::new(dd.path().join("out"), plan.clone()).with_format(TileFormat::Raw);
+        let config = EngineConfig::default().with_dedupe_strategy(DedupeStrategy::Blanks);
+        generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+        sink.finish().unwrap();
+        let (dd_markers, dd_full) = count_marker_files(&dd.path().join("out"));
+        assert!(
+            dd_markers > 0,
+            "dedupe strategy must materialise placeholder markers on disk"
+        );
+        assert_eq!(
+            dd_full, 0,
+            "every uniform tile of a solid raster must collapse to a marker under dedupe"
+        );
+        assert_ne!(
+            dd_markers, base_markers,
+            "dedupe strategy must change on-disk output versus no dedupe"
+        );
+    }
+
+    /// Minimal recursive walk of a directory tree, returning every file path.
+    /// Kept local to the test module so the reproducer does not pull in an
+    /// extra dependency.
+    fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
     }
 
     /**
