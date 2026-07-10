@@ -111,6 +111,97 @@ impl MapReduceConfig {
 }
 
 // ---------------------------------------------------------------------------
+// WorkExecutor seam (issue #67)
+// ---------------------------------------------------------------------------
+
+/// One unit of MAP-phase strip work, as dispatched by the MapReduce engine.
+///
+/// Identifies the horizontal band of the top-level canvas a
+/// [`WorkExecutor`] must render: `canvas_y` is the band's starting row in
+/// canvas coordinates, `height` its row count, and `level` the pyramid level
+/// the band belongs to (always the top level today; carried explicitly so an
+/// out-of-process executor can reconstruct the request without the plan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StripWorkUnit {
+    /// Starting row of the strip, in canvas coordinates.
+    pub canvas_y: u32,
+    /// Number of rows in the strip.
+    pub height: u32,
+    /// Pyramid level the strip is rendered at (the plan's top level).
+    pub level: u32,
+}
+
+/// Borrowed context handed to a [`WorkExecutor`] alongside each
+/// [`StripWorkUnit`].
+///
+/// Everything a local executor needs to render the strip in-process. An
+/// out-of-tree distribution layer is free to ignore these borrows and
+/// reconstruct equivalent state on the far side of its transport.
+#[derive(Clone, Copy)]
+pub struct WorkContext<'a> {
+    /// The strip source the engine was launched with.
+    pub source: &'a dyn StripSource,
+    /// The pyramid plan for this run.
+    pub plan: &'a PyramidPlan,
+    /// The engine configuration derived from the run's [`MapReduceConfig`].
+    pub config: &'a EngineConfig,
+}
+
+impl std::fmt::Debug for WorkContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkContext")
+            .field("plan", &self.plan)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Plug-in seam for MAP-phase strip dispatch (issue #67).
+///
+/// The MapReduce engine routes every strip render through this trait, so an
+/// alternative executor (a process pool, an out-of-tree distributed worker
+/// layer) can substitute for the built-in in-process rendering. Install one
+/// via [`EngineBuilder::with_executor`](crate::EngineBuilder::with_executor);
+/// the default is [`LocalWorkExecutor`], which preserves the engine's
+/// historical behaviour exactly.
+///
+/// # Contract
+///
+/// * **Dispatch order** — the engine dispatches work units in canonical
+///   order: strictly increasing `canvas_y`, gap-free over the canvas. On the
+///   parallel MAP path (a source that opts in via
+///   [`StripSource::permits_concurrent_strips`] plus `tile_concurrency > 0`)
+///   several `execute` calls may be in flight at once, so *completion* order
+///   is unspecified; the engine reassembles results positionally, and the
+///   REDUCE phase always consumes strips in canonical order regardless of the
+///   executor.
+/// * **Output** — the returned [`Raster`] must be the canvas-space strip for
+///   the request: `plan.canvas_width` wide, exactly `spec.height` rows, in
+///   `ctx.source.format()`. Byte-identical output to [`LocalWorkExecutor`] is
+///   required for the engine's byte-identical-pyramid guarantee to hold.
+/// * **Errors** — returning `Err` aborts the run with that error. A panic
+///   inside `execute` on the parallel path surfaces as
+///   [`EngineError::WorkerPanic`]; on the sequential path it unwinds, exactly
+///   as the built-in renderer always has.
+pub trait WorkExecutor: Send + Sync {
+    /// Render one canvas-space strip.
+    fn execute(&self, spec: StripWorkUnit, ctx: WorkContext<'_>) -> Result<Raster, EngineError>;
+}
+
+/// Default [`WorkExecutor`]: renders the strip in-process.
+///
+/// Wraps the engine's built-in canvas-strip renderer, so installing it
+/// explicitly is byte-identical to not installing an executor at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LocalWorkExecutor;
+
+impl WorkExecutor for LocalWorkExecutor {
+    fn execute(&self, spec: StripWorkUnit, ctx: WorkContext<'_>) -> Result<Raster, EngineError> {
+        obtain_canvas_strip(ctx.source, ctx.plan, spec.canvas_y, spec.height, ctx.config)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Memory estimation
 // ---------------------------------------------------------------------------
 
@@ -381,6 +472,7 @@ pub(crate) fn generate_pyramid_mapreduce(
     sink: &dyn TileSink,
     config: &MapReduceConfig,
     observer: &dyn EngineObserver,
+    executor: &dyn WorkExecutor,
 ) -> Result<EngineResult, EngineError> {
     let format = source.format();
     let bpp = format.bytes_per_pixel();
@@ -473,12 +565,23 @@ pub(crate) fn generate_pyramid_mapreduce(
 
         // MAP: render all strips in this batch (parallel when beneficial).
         //
+        // Every strip render goes through the `WorkExecutor` seam (issue #67);
+        // the default `LocalWorkExecutor` reproduces the historical in-process
+        // rendering exactly. Work units are dispatched in canonical order and
+        // results are reassembled positionally, so the REDUCE phase below sees
+        // strips in canonical order regardless of the executor.
+        //
         // Concurrent rendering issues `render_strip` from several threads at
         // once and therefore out of `y` order. That only honours the
         // `StripSource` contract for sources that opt in via
         // `permits_concurrent_strips`; a default (cursor-based) source is
         // promised sequential, strictly-increasing-`y` access, so it must take
         // the sequential branch even when concurrency is enabled (issue #105).
+        let work_context = WorkContext {
+            source,
+            plan,
+            config: &engine_cfg,
+        };
         let rendered_strips = if config.tile_concurrency > 0
             && batch_specs.len() > 1
             && source.permits_concurrent_strips()
@@ -487,9 +590,15 @@ pub(crate) fn generate_pyramid_mapreduce(
             std::thread::scope(|s| -> Result<(), EngineError> {
                 let mut handles = Vec::with_capacity(batch_specs.len());
                 for &(y, sh) in batch_specs {
-                    let engine_cfg = &engine_cfg;
                     handles.push(s.spawn(move || -> Result<Raster, EngineError> {
-                        obtain_canvas_strip(source, plan, y, sh, engine_cfg)
+                        executor.execute(
+                            StripWorkUnit {
+                                canvas_y: y,
+                                height: sh,
+                                level: top_level as u32,
+                            },
+                            work_context,
+                        )
                     }));
                 }
                 for (i, handle) in handles.into_iter().enumerate() {
@@ -502,7 +611,16 @@ pub(crate) fn generate_pyramid_mapreduce(
         } else {
             batch_specs
                 .iter()
-                .map(|&(y, sh)| obtain_canvas_strip(source, plan, y, sh, &engine_cfg))
+                .map(|&(y, sh)| {
+                    executor.execute(
+                        StripWorkUnit {
+                            canvas_y: y,
+                            height: sh,
+                            level: top_level as u32,
+                        },
+                        work_context,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -764,7 +882,15 @@ mod tests {
             ..MapReduceConfig::default()
         };
         let strip_src = RasterStripSource::new(&src);
-        generate_pyramid_mapreduce(&strip_src, &plan, &mr_sink, &config, &NoopObserver).unwrap();
+        generate_pyramid_mapreduce(
+            &strip_src,
+            &plan,
+            &mr_sink,
+            &config,
+            &NoopObserver,
+            &LocalWorkExecutor,
+        )
+        .unwrap();
         let mut mr_tiles = mr_sink.tiles();
         mr_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -798,6 +924,7 @@ mod tests {
             &sink,
             &config,
             &NoopObserver,
+            &LocalWorkExecutor,
         )
         .unwrap_err();
         assert!(
@@ -862,6 +989,7 @@ mod tests {
             &sink,
             &config,
             &NoopObserver,
+            &LocalWorkExecutor,
         )
         .unwrap();
         assert!(
@@ -926,6 +1054,7 @@ mod tests {
                 &sink,
                 &config,
                 &NoopObserver,
+                &LocalWorkExecutor,
             )
             .unwrap();
             let mut tiles = sink.tiles();
@@ -1034,6 +1163,7 @@ mod tests {
                 &sink,
                 &config,
                 &NoopObserver,
+                &LocalWorkExecutor,
             )
             .unwrap();
             // `tiles()` preserves write (arrival) order — capture it before
@@ -1108,6 +1238,7 @@ mod tests {
             &sink,
             &config,
             &NoopObserver,
+            &LocalWorkExecutor,
         )
         .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
@@ -1156,6 +1287,7 @@ mod single_level_tests {
             &sink,
             &config,
             &NoopObserver,
+            &LocalWorkExecutor,
         )
         .expect("single-level plan must run to completion without underflow panic");
         sink
