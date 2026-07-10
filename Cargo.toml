@@ -19,7 +19,34 @@ libfuzzer-sys = "0.4"
 libviprs = { path = "." }
 loom = "0.7"
 lopdf = "0.36"
-pdfium-render = { version = "0.8", features = ["sync"] }
+# Direct git dependency on the libviprs/pdfium-render fork, which adds
+# proper per-call thread-safety locking in `ThreadSafePdfiumBindings`.
+# Upstream pdfium-render 0.8.37's wrapper acquires the pdfium global
+# mutex only once on `FPDF_InitLibrary` and bypasses it for every other
+# method, which segfaults under any concurrent access pattern when a
+# single `Pdfium` instance is shared across threads (the common pattern
+# when callers use a process-wide singleton). The fork rewrites every
+# method to acquire the lock per-call.
+#
+# This used to be a `[patch.crates-io]` entry, but a [patch] table only
+# takes effect from the build root: consumers of libviprs (by git or
+# path) silently resolved the unpatched registry wrapper unless they
+# replicated the patch (issue #149). As a direct dependency the fork is
+# an ordinary edge in the graph, so every git/path consumer inherits it
+# with no [patch] hygiene required.
+#
+# The `version` key is a fallback for `cargo publish`: crates.io strips
+# git sources, so the PUBLISHED libviprs still depends on the registry
+# `pdfium-render ^0.8` and crates.io consumers still link the unpatched
+# wrapper. libviprs's own FPDF calls stay safe there via the internal
+# process-wide lock (`src/pdf.rs::pdfium_lock`), but the wrapper's
+# `Send + Sync` remains unsound for direct use. The remaining paths to
+# fix that are tracked in issue #149: upstream the per-call locking
+# (ajrcarey/pdfium-render#262) or publish the fork under a distinct
+# crate name and depend on it by version.
+pdfium-render = { version = "0.8", features = [
+	"sync",
+], git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/per-call-thread-safety" }
 proptest = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -89,20 +116,3 @@ zip = { workspace = true, optional = true }
 loom = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
-
-# Use libviprs/pdfium-render with proper per-call thread-safety locking
-# in `ThreadSafePdfiumBindings`. Upstream pdfium-render 0.8.37's
-# wrapper acquires the pdfium global mutex only once on
-# `FPDF_InitLibrary` and bypasses it for every other method, which
-# segfaults under any concurrent access pattern when a single
-# `Pdfium` instance is shared across threads (the common pattern when
-# callers use a process-wide singleton). The fork rewrites every
-# method to acquire the lock per-call.
-#
-# Tracking issue: ajrcarey/pdfium-render upstream PR pending. Once
-# merged + released, this patch can be dropped.
-#
-# Because this table lives at the workspace root, it applies to every
-# workspace member; cargo ignores [patch] tables in member manifests.
-[patch.crates-io]
-pdfium-render = { git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/per-call-thread-safety" }
