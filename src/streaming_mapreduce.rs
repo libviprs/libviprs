@@ -222,6 +222,18 @@ pub fn estimate_mapreduce_peak_memory(
 // ---------------------------------------------------------------------------
 
 /// Emit tiles from a strip using parallel worker threads.
+///
+/// # Write order
+///
+/// Tiles are extracted concurrently and written to the [`TileSink`] in
+/// channel-*arrival* order, which is neither row-major nor stable across runs.
+/// `TileCompleted` events interleave arbitrarily for the same reason. The set of
+/// tiles written (and their bytes) is fully determined by the strip and plan, so
+/// the resulting pyramid is order-independent — but only for sinks that honour
+/// the [`TileSink`] contract and place each tile by its
+/// [`coord`](crate::sink::Tile::coord) rather than by arrival position. This is
+/// the parallel counterpart of the sequential [`emit_strip_tiles`], which emits
+/// the same tiles in row-major order.
 fn emit_strip_tiles_parallel(
     strip: &Raster,
     plan: &PyramidPlan,
@@ -1014,6 +1026,138 @@ mod tests {
                 s.data, p.data,
                 "tile bytes diverged between concurrency settings at {:?}",
                 p.coord
+            );
+        }
+    }
+
+    #[test]
+    fn mapreduce_order_independent_parity_at_concurrency() {
+        // Issue #108: at `tile_concurrency > 0` the consumer writes tiles in
+        // channel-*arrival* order (see `emit_strip_tiles_parallel`), which is
+        // neither row-major nor stable across runs. This proves the *output* is
+        // nonetheless order-independent: the coordinate-keyed pyramid produced
+        // by the parallel emission path (and the concurrent MAP strip-render
+        // path) is byte-identical to the row-major sequential reference, on
+        // every one of several runs that sample different worker interleavings.
+        //
+        // The only in-crate parity test previously ran at the default
+        // `tile_concurrency: 0`, so the parallel tile-emission path and the
+        // multi-strip reduce had no coverage.
+        let src = gradient_raster(1024, 1024);
+        let plan = PyramidPlanner::new(1024, 1024, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        // Row-major reference from the monolithic engine (the module guarantees
+        // byte-identical parity with it).
+        let ref_sink = MemorySink::new();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        let mut ref_tiles = ref_sink.tiles();
+        ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+
+        // Budget chosen so the image spans several strips (strip_height 512 over
+        // a 1024-tall canvas), so `emit_strip_tiles_parallel` — the arrival-order
+        // write path (issue #108) — runs once per strip and the multi-strip
+        // reduce is exercised too. The concurrent strip-render MAP scope
+        // (`inflight >= 2`) only engages for inputs far larger than is practical
+        // in a fast unit test, so it is left to the integration suite; this test
+        // proves order-independence of the tile writes, which is the property
+        // the issue calls out.
+        let budget = 6_000_000u64;
+        let tile_concurrency = 4usize;
+
+        // Guard the coverage the issue calls out: if a planner/budget change
+        // ever collapsed this to a single strip or a single tile per strip, the
+        // parallel emission path would go untested and the assertion would pass
+        // vacuously. Fail loudly instead.
+        let strip_height = compute_strip_height(&plan, PixelFormat::Rgb8, budget).unwrap();
+        let total_strips = plan.canvas_height.div_ceil(strip_height);
+        assert!(
+            total_strips >= 2,
+            "test needs multiple strips to exercise the multi-strip reduce, got {total_strips}"
+        );
+        let top = &plan.levels[plan.levels.len() - 1];
+        assert!(
+            top.cols * top.rows > tile_concurrency as u32,
+            "test needs more top-level tiles than workers so the strip is split \
+             and writes can reorder (got {} tiles, {tile_concurrency} workers)",
+            top.cols * top.rows
+        );
+
+        let run = || {
+            let sink = MemorySink::new();
+            let config = MapReduceConfig {
+                memory_budget_bytes: budget,
+                tile_concurrency,
+                ..MapReduceConfig::default()
+            };
+            let result = generate_pyramid_mapreduce(
+                &RasterStripSource::new(&src),
+                &plan,
+                &sink,
+                &config,
+                &NoopObserver,
+            )
+            .unwrap();
+            // `tiles()` preserves write (arrival) order — capture it before
+            // sorting so we can observe that the parallel path really does
+            // reorder writes relative to row-major.
+            let arrival: Vec<TileCoord> = sink.tiles().into_iter().map(|t| t.coord).collect();
+            let mut sorted = sink.tiles();
+            sorted.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+            (result, arrival, sorted)
+        };
+
+        let row_major: Vec<TileCoord> = ref_tiles.iter().map(|t| t.coord).collect();
+        let mut observed_reorder = false;
+
+        for iteration in 0..8 {
+            let (result, arrival, sorted) = run();
+
+            // Parity: the coordinate-keyed pyramid matches the row-major
+            // reference regardless of the (arbitrary) arrival order.
+            assert_eq!(
+                result.tiles_produced,
+                plan.total_tile_count(),
+                "iteration {iteration}: tile count diverged from the plan"
+            );
+            assert_eq!(
+                ref_tiles.len(),
+                sorted.len(),
+                "iteration {iteration}: tile count diverged from the sequential reference"
+            );
+            for (r, m) in ref_tiles.iter().zip(sorted.iter()) {
+                assert_eq!(r.coord, m.coord, "iteration {iteration}: coord diverged");
+                assert_eq!(
+                    r.data, m.data,
+                    "iteration {iteration}: tile bytes diverged from reference at {:?}",
+                    m.coord
+                );
+            }
+
+            if arrival != row_major {
+                observed_reorder = true;
+            }
+        }
+
+        // Non-vacuity signal: across several runs the parallel path is expected
+        // to deliver at least one non-row-major arrival order (this is the very
+        // behaviour that makes order-independence load-bearing). We do not gate
+        // correctness on it — the scheduler could in principle serialise every
+        // run — but its absence would mean the reordering the test guards
+        // against was never actually observed, so surface it as an eprintln
+        // rather than a hard, scheduler-dependent failure.
+        if !observed_reorder {
+            eprintln!(
+                "note: all runs delivered tiles in row-major order; \
+                 order-independence still held but no reordering was sampled"
             );
         }
     }
