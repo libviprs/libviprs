@@ -784,6 +784,49 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Atomically write `bytes` to `path` using the same staged-`.tmp` + `rename`
+/// discipline as the checkpoint writer ([`JobCheckpoint::save_with`]).
+///
+/// The payload is written to a unique sibling temp file, flushed, and then
+/// renamed over `path`. On POSIX the rename is atomic, so a concurrent reader
+/// (or a crash mid-write) never observes a truncated or half-written `path`:
+/// it sees either the previous complete contents or the new complete contents.
+/// This is what keeps the two on-disk manifest copies from diverging when a
+/// run dies partway through emitting them (issue #124).
+///
+/// Because the rename replaces the directory entry rather than truncating the
+/// existing file, it also succeeds when `path` is a read-only regular file, as
+/// long as its parent directory is writable, matching real atomic-replace
+/// semantics rather than the truncate-in-place behaviour of `fs::write`.
+///
+/// Parent directories are created as needed. The unique temp name (pid + a
+/// process-wide counter) means two writers targeting the same destination
+/// never stage into or clobber each other's temp file.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let tmp = tmp_path_for(path);
+    // Scope the handle so it is closed before the rename — some filesystems
+    // refuse to rename over an open handle. Flush the payload to disk before
+    // publishing so the renamed file is not left empty on power loss.
+    if let Err(e) = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Advisory, exclusive run lock held for the lifetime of a resumable job.
 ///
 /// A resumable run takes this lock against `<dir>/.libviprs-job.lock`
