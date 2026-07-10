@@ -209,6 +209,12 @@ impl PyramidPlanner {
         if overlap >= tile_size {
             return Err(PlannerError::OverlapTooLarge { overlap, tile_size });
         }
+        if checked_canvas_bounds(image_width, image_height, tile_size, layout).is_none() {
+            return Err(PlannerError::DimensionOverflow {
+                width: image_width,
+                height: image_height,
+            });
+        }
         Ok(Self {
             image_width,
             image_height,
@@ -760,6 +766,48 @@ fn ceil_div(a: u32, b: u32) -> u32 {
     a.div_ceil(b)
 }
 
+/// Computes the worst-case (fully padded) canvas dimensions that
+/// [`PyramidPlanner::plan`] could materialise, using checked arithmetic
+/// throughout. Returns `None` if any intermediate shift or product would
+/// overflow `u32`.
+///
+/// This mirrors the canvas math in [`PyramidPlanner::plan_google`] (square
+/// `tile_size * 2^(n_levels - 1)` canvas) and the padded top-level tile grid
+/// used by the centring path for `DeepZoom`/`Xyz` layouts (`cols * tile_size`).
+/// [`PyramidPlanner::new`] calls this so that overflowing configurations surface
+/// [`PlannerError::DimensionOverflow`] at construction time instead of panicking
+/// (debug) or wrapping to a garbage canvas (release) deeper in the pipeline.
+///
+/// Callers must ensure `tile_size > 0`; `div_ceil` panics on a zero divisor.
+fn checked_canvas_bounds(
+    image_width: u32,
+    image_height: u32,
+    tile_size: u32,
+    layout: Layout,
+) -> Option<(u32, u32)> {
+    if layout == Layout::Google {
+        let cols_needed = image_width.div_ceil(tile_size);
+        let rows_needed = image_height.div_ceil(tile_size);
+        let max_grid = cols_needed.max(rows_needed);
+        let n_levels = if max_grid <= 1 {
+            1u32
+        } else {
+            (32 - (max_grid - 1).leading_zeros()) + 1
+        };
+        // canvas = tile_size * 2^(n_levels - 1), square.
+        let span = 1u32.checked_shl(n_levels - 1)?;
+        let canvas = tile_size.checked_mul(span)?;
+        Some((canvas, canvas))
+    } else {
+        // DeepZoom / Xyz: padded top-level grid = ceil(dim / tile) * tile.
+        let cols = image_width.div_ceil(tile_size);
+        let rows = image_height.div_ceil(tile_size);
+        let width = cols.checked_mul(tile_size)?;
+        let height = rows.checked_mul(tile_size)?;
+        Some((width, height))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +831,59 @@ mod tests {
     #[test]
     fn zero_tile_size_rejected() {
         assert!(PyramidPlanner::new(100, 100, 0, 0, Layout::DeepZoom).is_err());
+    }
+
+    /**
+     * Tests that dimensions whose Google canvas would overflow u32 are rejected
+     * at construction time rather than panicking (debug) or wrapping to a
+     * garbage canvas (release) inside plan().
+     * Input: u32::MAX x 1, tile_size=256, Google. The canvas math is
+     * 256 * 2^24 == 2^32, which overflows u32.
+     * Output: Err(DimensionOverflow { width: u32::MAX, height: 1 }).
+     */
+    #[test]
+    fn google_canvas_overflow_rejected() {
+        let result = PyramidPlanner::new(u32::MAX, 1, 256, 0, Layout::Google);
+        assert!(
+            matches!(
+                result,
+                Err(PlannerError::DimensionOverflow { width, height })
+                    if width == u32::MAX && height == 1
+            ),
+            "expected DimensionOverflow, got {result:?}",
+        );
+    }
+
+    /**
+     * Tests that dimensions whose padded (centred) tile grid would overflow
+     * u32 are rejected for non-Google layouts too.
+     * Input: u32::MAX x 1, tile_size=256, DeepZoom. The padded grid is
+     * ceil(u32::MAX / 256) * 256 == 2^32, which overflows u32.
+     * Output: Err(DimensionOverflow).
+     */
+    #[test]
+    fn deepzoom_padded_grid_overflow_rejected() {
+        let result = PyramidPlanner::new(u32::MAX, 1, 256, 0, Layout::DeepZoom);
+        assert!(
+            matches!(result, Err(PlannerError::DimensionOverflow { .. })),
+            "expected DimensionOverflow, got {result:?}",
+        );
+    }
+
+    /**
+     * Tests that dimensions near u32::MAX whose canvas still fits in u32 are
+     * accepted and produce a valid, non-zero canvas.
+     * Input: 2^31 x 2^31 tile_size=256 Google → canvas 256 * 2^23 == 2^31,
+     * the largest square that does not overflow.
+     * Output: Ok, with canvas_width == canvas_height == 2^31.
+     */
+    #[test]
+    fn near_max_dimensions_within_bounds_accepted() {
+        let planner = PyramidPlanner::new(1 << 31, 1 << 31, 256, 0, Layout::Google)
+            .expect("near-max dimensions that fit in u32 must be accepted");
+        let plan = planner.plan();
+        assert_eq!(plan.canvas_width, 1 << 31);
+        assert_eq!(plan.canvas_width, plan.canvas_height);
     }
 
     /**
