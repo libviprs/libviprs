@@ -236,6 +236,15 @@ impl ResumePolicy {
 
     /// Override the checkpoint directory. When unset, the engine falls back
     /// to the sink's `checkpoint_root()` (typically the output base dir).
+    ///
+    /// Two supported uses, both kept by design when issue #137 shrank the
+    /// `TileSink` bookkeeping surface:
+    /// * place the checkpoint somewhere other than the output directory;
+    /// * drive resume and Verify through an opaque external sink wrapper
+    ///   that does not forward `checkpoint_root()`. The crate's own
+    ///   wrappers forward it via `TileSink::inner_sink`, but a wrapper in
+    ///   user code may only forward the data path, and this override is
+    ///   the documented escape hatch for exactly that sink.
     pub fn with_checkpoint_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.checkpoint_root = Some(path.into());
         self
