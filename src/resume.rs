@@ -73,6 +73,14 @@ pub const SCHEMA_VERSION: &str = "1";
 /// path). Relative path: `<output_dir>/.libviprs-job.json`.
 pub const CHECKPOINT_FILENAME: &str = ".libviprs-job.json";
 
+/// Well-known filename for the advisory run lock guarding a checkpoint root.
+///
+/// Lives directly inside the checkpoint directory alongside
+/// [`CHECKPOINT_FILENAME`]. Relative path: `<dir>/.libviprs-job.lock`. Held for
+/// the duration of a run via [`RunLock`] so two jobs cannot share one output
+/// directory (issue #126).
+pub const LOCK_FILENAME: &str = ".libviprs-job.lock";
+
 /// Behaviour selector for resumable pyramid generation.
 ///
 /// * [`ResumeMode::Overwrite`] — wipe any pre-existing output and start fresh.
@@ -423,6 +431,20 @@ pub enum ResumeError {
         #[source]
         source: serde_json::Error,
     },
+    /// Another live job already holds the advisory run lock on the checkpoint
+    /// root.
+    ///
+    /// Returned by [`RunLock::acquire`] when a concurrent Resume or Overwrite
+    /// run owns the same output directory. Refusing here — rather than running
+    /// anyway — is what stops two jobs from interleaving checkpoint flushes
+    /// (each overwriting the other's `completed_tiles`, last-writer-wins) or
+    /// letting one job's Overwrite wipe delete another job's in-flight output
+    /// (issue #126).
+    #[error("checkpoint root is locked by another live job: {path}")]
+    Locked {
+        /// Path of the lock file whose exclusive lock is already held.
+        path: PathBuf,
+    },
     /// Underlying filesystem error.
     #[error("checkpoint I/O error: {0}")]
     Io(#[from] io::Error),
@@ -606,6 +628,105 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
     let mut s = final_path.as_os_str().to_owned();
     s.push(format!(".tmp.{pid}.{seq}"));
     PathBuf::from(s)
+}
+
+/// Advisory, exclusive run lock held for the lifetime of a resumable job.
+///
+/// A resumable run takes this lock against `<dir>/.libviprs-job.lock`
+/// ([`LOCK_FILENAME`]) *before* it touches the output directory and holds it
+/// until the guard is dropped at the end of the run. While the lock is held,
+/// any second job that calls [`RunLock::acquire`] on the same directory is
+/// refused with [`ResumeError::Locked`] instead of being allowed to run
+/// concurrently.
+///
+/// This closes the two concurrency hazards from issue #126 that unique temp
+/// filenames alone cannot:
+///
+/// * two live jobs whose periodic checkpoint flushes would otherwise clobber
+///   each other's `completed_tiles` (last-writer-wins, even with per-writer
+///   unique temps), and
+/// * a concurrent Overwrite wipe deleting another live job's in-flight output.
+///
+/// Because both Resume and Overwrite take this lock before doing any work, at
+/// most one of them runs against a given checkpoint root at a time.
+///
+/// The lock is **advisory**: it only excludes other holders that also go
+/// through `RunLock`. It is an OS-level file lock (`flock`-style, via
+/// [`std::fs::File::try_lock`]) tied to the open file handle, so the kernel
+/// releases it automatically if the process dies without dropping the guard —
+/// a crashed job never strands a stale lock that would wedge every later run.
+#[derive(Debug)]
+#[must_use = "the run lock is released as soon as the guard is dropped"]
+pub struct RunLock {
+    // Field order is load-bearing: struct fields drop in declaration order, so
+    // `file` (which owns the OS lock) is still open when `Drop` runs its
+    // explicit `unlock`, and is closed only afterwards.
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl RunLock {
+    /// Path of the advisory lock file for checkpoint root `dir`.
+    ///
+    /// Returns `<dir>/.libviprs-job.lock` without touching the filesystem.
+    pub fn lock_path(dir: &Path) -> PathBuf {
+        dir.join(LOCK_FILENAME)
+    }
+
+    /// Try to take the exclusive run lock on `dir` without blocking.
+    ///
+    /// * `Ok(RunLock)` — the lock is now held; keep the returned guard alive
+    ///   for the whole run and drop it when finished.
+    /// * `Err(ResumeError::Locked)` — another live job already holds the lock;
+    ///   the caller must refuse to proceed rather than clobber that run.
+    /// * `Err(ResumeError::Io)` — the lock file could not be created or locked.
+    ///
+    /// Acquisition is non-blocking on purpose: a resumable job would rather
+    /// fail fast telling the user another run owns the directory than silently
+    /// queue behind it for an unbounded time.
+    ///
+    /// The lock file is opened (creating it if absent) but never truncated, and
+    /// is intentionally left on disk when the guard drops — unlinking it would
+    /// race a concurrent acquirer that has already opened the same path,
+    /// reintroducing the interleaving this lock exists to prevent.
+    pub fn acquire(dir: &Path) -> Result<RunLock, ResumeError> {
+        // Ensure the directory exists so a first-ever run can place its lock
+        // before the sink has materialised any output.
+        std::fs::create_dir_all(dir)?;
+        let path = Self::lock_path(dir);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        // `File::try_lock` is stable since Rust 1.89; the crate's declared MSRV
+        // is older, so silence the incompatible-MSRV lint at this single call
+        // rather than pulling in a third-party file-locking crate for the same
+        // primitive. Promoting the whole crate to 1.89 is left to the maintainer.
+        #[allow(clippy::incompatible_msrv)]
+        let outcome = file.try_lock();
+        match outcome {
+            Ok(()) => Ok(RunLock { file, path }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(ResumeError::Locked { path }),
+            Err(std::fs::TryLockError::Error(e)) => Err(ResumeError::Io(e)),
+        }
+    }
+
+    /// Path of the lock file this guard currently holds.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        // Best-effort explicit release. The kernel also drops the lock when the
+        // handle closes immediately after, so a failure here is not actionable.
+        // `File::unlock` is stable since Rust 1.89 (see `acquire`).
+        #[allow(clippy::incompatible_msrv)]
+        let _ = self.file.unlock();
+    }
 }
 
 /// True if `coord` appears in `meta.completed_tiles`.
@@ -1147,6 +1268,109 @@ mod tests {
             .filter(|name| name.contains(".tmp."))
             .collect();
         assert!(leftover.is_empty(), "stray temp files remain: {leftover:?}");
+    }
+
+    #[test]
+    fn lock_path_is_well_known_filename() {
+        let p = RunLock::lock_path(Path::new("/tmp/out"));
+        assert_eq!(p, PathBuf::from("/tmp/out/.libviprs-job.lock"));
+    }
+
+    // Issue #126 (advisory run-lock remainder): a second job on an output
+    // directory already owned by a live run must be refused, not allowed to run
+    // concurrently and clobber the first job's checkpoint / output. While the
+    // guard is held, `acquire` returns `Locked`; once it drops, the directory
+    // is free again. The pre-fix code has no `RunLock`, so this test cannot even
+    // compile against it (RED); it passes once the lock lands (GREEN).
+    #[test]
+    #[cfg_attr(miri, ignore)] // file locking unsupported under Miri isolation
+    fn run_lock_refuses_a_second_holder() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let held = RunLock::acquire(dir.path()).expect("first acquire succeeds");
+        assert_eq!(held.path(), RunLock::lock_path(dir.path()));
+
+        match RunLock::acquire(dir.path()) {
+            Err(ResumeError::Locked { path }) => {
+                assert_eq!(path, RunLock::lock_path(dir.path()));
+            }
+            other => panic!("a second job must be refused while the lock is held, got {other:?}"),
+        }
+
+        // Releasing the guard frees the directory for the next run.
+        drop(held);
+        let reacquired = RunLock::acquire(dir.path()).expect("acquire after release succeeds");
+        drop(reacquired);
+    }
+
+    // Issue #126 (advisory run-lock remainder): the whole point of the lock is
+    // mutual exclusion of live runs on one checkpoint root. Many threads race to
+    // acquire the same directory's lock; each holder briefly bumps a shared
+    // "currently inside the critical section" counter and asserts it never sees
+    // more than one holder at a time. Without the lock (or if it failed to
+    // exclude) this counter would exceed 1 and the run's flushes/wipe could
+    // clobber each other. Every contender either holds exclusively or is cleanly
+    // refused with `Locked`.
+    #[test]
+    #[cfg_attr(miri, ignore)] // threads + file locking unsupported under Miri isolation
+    fn run_lock_serialises_concurrent_jobs() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path: Arc<PathBuf> = Arc::new(dir.path().to_path_buf());
+        // Number of threads holding the lock simultaneously (must never > 1).
+        let live = Arc::new(AtomicUsize::new(0));
+        // Count of successful exclusive acquisitions across all threads.
+        let acquisitions = Arc::new(AtomicUsize::new(0));
+
+        const THREADS: usize = 8;
+        const ATTEMPTS: usize = 50;
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let dir_path = Arc::clone(&dir_path);
+            let live = Arc::clone(&live);
+            let acquisitions = Arc::clone(&acquisitions);
+            handles.push(thread::spawn(move || {
+                for _ in 0..ATTEMPTS {
+                    match RunLock::acquire(&dir_path) {
+                        Ok(guard) => {
+                            // Inside the critical section: at most one holder.
+                            let inside = live.fetch_add(1, Ordering::SeqCst) + 1;
+                            assert_eq!(
+                                inside, 1,
+                                "the run lock let two jobs into the critical section at once",
+                            );
+                            acquisitions.fetch_add(1, Ordering::SeqCst);
+                            // Hold briefly so contenders genuinely collide.
+                            thread::yield_now();
+                            live.fetch_sub(1, Ordering::SeqCst);
+                            drop(guard);
+                        }
+                        // A contended attempt is cleanly refused — never a torn
+                        // co-tenancy. That is exactly the desired behaviour.
+                        Err(ResumeError::Locked { .. }) => {}
+                        Err(e) => panic!("unexpected lock error: {e:?}"),
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(live.load(Ordering::SeqCst), 0, "a holder leaked the lock");
+        assert!(
+            acquisitions.load(Ordering::SeqCst) >= 1,
+            "at least one thread must have taken the lock",
+        );
+
+        // The directory is free once every guard has dropped.
+        let final_guard = RunLock::acquire(&dir_path).expect("lock is free after all jobs finish");
+        drop(final_guard);
     }
 
     #[test]
