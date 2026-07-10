@@ -349,7 +349,17 @@ pub struct StageDurations {
     pub decode: Duration,
     /// Time spent downscaling between levels.
     pub resize: Duration,
+    /// Time spent extracting tile rasters out of each level (cropping the
+    /// region, padding edge tiles, and deciding blankness) before they are
+    /// handed to the sink.
+    pub extract: Duration,
     /// Time spent encoding tiles (PNG / JPEG / raw).
+    ///
+    /// Encoding happens inside the sink's `write_tile`, so it is currently
+    /// folded into [`StageDurations::sink`] rather than measured separately;
+    /// this field stays zero until the engine gains a dedicated encode stage.
+    /// It is deliberately **not** where tile *extraction* time is booked — that
+    /// lives in [`StageDurations::extract`].
     pub encode: Duration,
     /// Time spent handing tiles to the sink and awaiting `finish()`.
     pub sink: Duration,
@@ -469,7 +479,7 @@ fn run_pyramid(
     let stage_decode_start = Instant::now();
 
     let stage_resize = AtomicU64::new(0); // nanos
-    let stage_encode = AtomicU64::new(0);
+    let stage_extract = AtomicU64::new(0);
     let stage_sink = AtomicU64::new(0);
 
     // For Google layout or centred plans, embed the source image into a
@@ -494,7 +504,7 @@ fn run_pyramid(
     let ctx = EmitContext {
         bytes_written: &bytes_written,
         queue_pressure_peak: &queue_pressure_peak,
-        stage_encode: &stage_encode,
+        stage_extract: &stage_extract,
         stage_sink: &stage_sink,
     };
 
@@ -575,7 +585,10 @@ fn run_pyramid(
         planning: stage_planning,
         decode: decode_elapsed,
         resize: Duration::from_nanos(stage_resize.load(Ordering::Relaxed)),
-        encode: Duration::from_nanos(stage_encode.load(Ordering::Relaxed)),
+        extract: Duration::from_nanos(stage_extract.load(Ordering::Relaxed)),
+        // Encoding is done by the sink's `write_tile`, so its cost is folded
+        // into `sink` rather than measured separately here (issue #115).
+        encode: Duration::ZERO,
         sink: Duration::from_nanos(stage_sink.load(Ordering::Relaxed)),
     };
 
@@ -602,7 +615,10 @@ fn run_pyramid(
 struct EmitContext<'a> {
     bytes_written: &'a AtomicU64,
     queue_pressure_peak: &'a AtomicU32,
-    stage_encode: &'a AtomicU64,
+    /// Accumulated nanoseconds spent extracting tile rasters (see
+    /// [`StageDurations::extract`]). This is **not** encode time — extraction
+    /// crops/pads a region, it does not PNG/JPEG-encode it (issue #115).
+    stage_extract: &'a AtomicU64,
     stage_sink: &'a AtomicU64,
 }
 
@@ -1282,10 +1298,10 @@ fn extract_and_emit_level(
                 // so a long single-threaded level can be stopped promptly.
                 config.check_cancelled()?;
                 let coord = TileCoord::new(level, col, row);
-                let encode_start = Instant::now();
+                let extract_start = Instant::now();
                 let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
-                ctx.stage_encode
-                    .fetch_add(encode_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                ctx.stage_extract
+                    .fetch_add(extract_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let blank = blank_for_output(&tile_raster, blank_strategy, config.dedupe_strategy);
                 if blank {
                     skipped += 1;
@@ -1352,10 +1368,10 @@ fn extract_and_emit_level(
                 count += 1;
             }
         }
-        // Parallel and single-threaded both contribute to queue_pressure.
-        // In single-threaded there is effectively 1 tile in-flight at a
-        // time; record that as the minimum peak so the test's > 0
-        // assertion holds even when concurrency is 0.
+        // There is no producer/consumer channel on the single-threaded path:
+        // a tile is extracted, written, and dropped before the next one is
+        // touched, so at most one tile is ever "held" at a time. Record a peak
+        // occupancy of 1 to reflect that (issue #115).
         let _ = ctx.queue_pressure_peak.fetch_max(1, Ordering::Relaxed);
         Ok((count, skipped))
     } else {
@@ -1451,9 +1467,13 @@ fn extract_and_emit_parallel(
     // Routed through `crate::sync_queue` so the loom suite can model-check the
     // exact send/recv/teardown protocol this path relies on.
     let (tx, rx) = crate::sync_queue::bounded::<Result<Tile, EngineError>>(config.buffer_size);
-    // Queue-pressure gauge — producers bump when they send, consumer drops
-    // when it receives. The peak gives us a coarse upper bound on in-flight
-    // work, matching the `queue_pressure_peak` field on EngineResult.
+    // Queue-occupancy gauge — a producer bumps it right before it hands a tile
+    // to the channel, and the consumer drops it as soon as it receives one, so
+    // the running value tracks the tiles actually sitting in (or in transit
+    // through) the bounded channel and its peak is the true "tiles held in the
+    // queue" reported by `queue_pressure_peak`. Incrementing *before* the send
+    // (rather than counting active producers) makes the peak sensitive to a
+    // backed-up buffer instead of being capped at the worker count (issue #115).
     let in_flight = Arc::new(AtomicU32::new(0));
 
     // Workers run under `std::thread::scope`, so they cannot outlive this
@@ -1479,7 +1499,7 @@ fn extract_and_emit_parallel(
     let concurrency = config.concurrency.min(coords.len());
     let chunk_size = coords.len().div_ceil(concurrency);
 
-    let stage_encode: &AtomicU64 = ctx.stage_encode;
+    let stage_extract: &AtomicU64 = ctx.stage_extract;
     let queue_peak: &AtomicU32 = ctx.queue_pressure_peak;
 
     std::thread::scope(|s| {
@@ -1498,19 +1518,7 @@ fn extract_and_emit_parallel(
                     if config.check_cancelled().is_err() {
                         break;
                     }
-                    // Queue-pressure gauge: count active producers. A
-                    // producer is "in flight" while it is extracting a
-                    // tile and attempting to hand it off. The peak is
-                    // bounded by the worker count (plus up to one on the
-                    // consumer side while it writes to the sink).
-                    //
-                    // Pure gauge — no happens-before needed between the
-                    // counter and any tile payload, so `Relaxed` is safe
-                    // (and avoids a useless full fence in the hot loop).
-                    let cur = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
-                    let _ = queue_peak.fetch_max(cur, Ordering::Relaxed);
-
-                    let encode_start = Instant::now();
+                    let extract_start = Instant::now();
                     let result = extract_tile(raster, plan, coord, bg)
                         .map(|tile_raster| {
                             let blank =
@@ -1522,16 +1530,29 @@ fn extract_and_emit_parallel(
                             }
                         })
                         .map_err(EngineError::from);
-                    stage_encode
-                        .fetch_add(encode_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    stage_extract
+                        .fetch_add(extract_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                    // Queue-occupancy gauge: the tile is about to enter the
+                    // channel. Bump *before* the (possibly blocking) send so a
+                    // producer stalled on a full buffer is still counted, then
+                    // record the peak. The matching decrement happens on the
+                    // consumer once it receives the tile — the send→recv edge
+                    // guarantees the increment happens-before that decrement, so
+                    // the gauge never underflows.
+                    //
+                    // Pure gauge — no happens-before is needed between the
+                    // counter and any tile payload, so `Relaxed` is safe (and
+                    // avoids a useless full fence in the hot loop).
+                    let cur = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = queue_peak.fetch_max(cur, Ordering::Relaxed);
+
                     let send_failed = tx.send(result).is_err();
-                    // Balance the counter as soon as the tile leaves the
-                    // producer — either the consumer has taken ownership
-                    // (and the channel buffers it briefly) or the consumer
-                    // is gone and we're about to exit. `Relaxed` matches
-                    // the corresponding `fetch_add` above.
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
                     if send_failed {
+                        // The tile never reached the consumer, so the consumer
+                        // will never decrement for it — balance the counter here
+                        // before winding down.
+                        in_flight.fetch_sub(1, Ordering::Relaxed);
                         break; // Consumer dropped
                     }
                 }
@@ -1544,6 +1565,10 @@ fn extract_and_emit_parallel(
         let mut count = 0u64;
         let mut skipped = 0u64;
         for result in rx {
+            // A tile just left the channel: drop the queue-occupancy gauge the
+            // producer bumped before sending it (issue #115). Done first so the
+            // running count reflects the drain even if we bail out below.
+            in_flight.fetch_sub(1, Ordering::Relaxed);
             // Cooperative cancellation: stop draining the channel and return
             // Cancelled. Producers observe the same token and wind down; the
             // scope join then reaps them.
@@ -3301,5 +3326,114 @@ mod tests {
             ),
             other => panic!("expected SinkError::Other for unknown algo, got {other:?}"),
         }
+    }
+
+    /// Issue #115: tile *extraction* time must be booked into the `extract`
+    /// stage, not mislabeled as `encode`.
+    ///
+    /// [`StageDurations::encode`] is documented as PNG/JPEG/raw *encoding*,
+    /// which happens inside the sink (and is folded into `sink`). The engine's
+    /// per-tile crop/pad work is extraction, not encoding. Before the fix that
+    /// wall time was accumulated into the `encode` field, so `encode > 0` and
+    /// `extract` did not exist. After the fix extraction lands in `extract`
+    /// while `encode` stays zero. Exercises both the single-threaded (0) and
+    /// parallel (4) emit paths.
+    #[test]
+    fn extraction_time_is_booked_into_extract_not_encode() {
+        let src = gradient_raster(512, 512);
+        let plan = PyramidPlanner::new(512, 512, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        assert!(
+            plan.total_tile_count() > 1,
+            "need several tiles so extraction takes measurable time"
+        );
+
+        for concurrency in [0usize, 4] {
+            let config = EngineConfig::default().with_concurrency(concurrency);
+            let sink = MemorySink::new();
+            let result =
+                generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+            let stages = &result.stage_durations;
+
+            assert!(
+                stages.extract > Duration::ZERO,
+                "concurrency={concurrency}: extraction time must be recorded in the `extract` \
+                 stage, got {:?}",
+                stages.extract
+            );
+            assert_eq!(
+                stages.encode,
+                Duration::ZERO,
+                "concurrency={concurrency}: `encode` is sink-side PNG/JPEG time and must not be \
+                 fed by tile extraction (issue #115); got {:?}",
+                stages.encode
+            );
+        }
+    }
+
+    /// Issue #115: `queue_pressure_peak` must reflect the tiles actually held in
+    /// the producer/consumer channel, not merely the count of active producers.
+    ///
+    /// The old gauge counted producers currently extracting/sending, so its peak
+    /// was capped by the worker count and blind to a backed-up buffer. Here the
+    /// consumer is deliberately slow while a comfortably-sized buffer feeds two
+    /// workers, so the channel fills well past the worker count. Before the fix
+    /// the peak could not exceed `concurrency`; after it, it tracks true channel
+    /// occupancy and climbs into the buffer.
+    #[test]
+    fn queue_pressure_peak_tracks_buffer_occupancy_not_worker_count() {
+        use std::sync::atomic::AtomicU64;
+
+        /// Sink whose every write sleeps briefly so the bounded channel backs
+        /// up behind a slow consumer.
+        struct SlowSink {
+            writes: AtomicU64,
+        }
+        impl TileSink for SlowSink {
+            fn write_tile(&self, _tile: &Tile) -> Result<(), SinkError> {
+                self.writes.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(2));
+                Ok(())
+            }
+        }
+
+        let concurrency = 2usize;
+        let buffer_size = 16usize;
+
+        // A single top level with many small tiles keeps every worker fed while
+        // the slow sink drains one tile at a time, so the buffer saturates.
+        let src = gradient_raster(1024, 32);
+        let plan = PyramidPlanner::new(1024, 32, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let total = plan.total_tile_count();
+        assert!(
+            total > (buffer_size as u64 + concurrency as u64),
+            "need more tiles than the buffer can hold to force it to saturate"
+        );
+
+        let config = EngineConfig::default()
+            .with_concurrency(concurrency)
+            .with_buffer_size(buffer_size);
+        let sink = SlowSink {
+            writes: AtomicU64::new(0),
+        };
+        let result = generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+
+        assert!(
+            result.queue_pressure_peak > concurrency as u32,
+            "queue_pressure_peak must track buffered tiles, not be capped at the worker count \
+             ({concurrency}); got {}",
+            result.queue_pressure_peak
+        );
+        // Sanity: occupancy can never exceed what the channel plus in-flight
+        // senders can hold.
+        assert!(
+            result.queue_pressure_peak <= (buffer_size + concurrency) as u32,
+            "queue_pressure_peak {} exceeds the maximum possible occupancy {}",
+            result.queue_pressure_peak,
+            buffer_size + concurrency
+        );
     }
 }
