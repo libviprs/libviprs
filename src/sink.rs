@@ -429,11 +429,11 @@ impl MemorySink {
     }
 
     pub fn tiles(&self) -> Vec<CollectedTile> {
-        self.tiles.lock().unwrap().clone()
+        crate::poison::recover(&self.tiles).clone()
     }
 
     pub fn tile_count(&self) -> usize {
-        self.tiles.lock().unwrap().len()
+        crate::poison::recover(&self.tiles).len()
     }
 }
 
@@ -445,7 +445,7 @@ impl Default for MemorySink {
 
 impl TileSink for MemorySink {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        self.tiles.lock().unwrap().push(CollectedTile {
+        crate::poison::recover(&self.tiles).push(CollectedTile {
             coord: tile.coord,
             width: tile.raster.width(),
             height: tile.raster.height(),
@@ -696,10 +696,14 @@ impl<'a, T> LeafGuard<'a, T> {
             );
             d.set(1);
         });
-        // Poisoning propagates as before: a panicked writer leaves the sink's
-        // bookkeeping in an unknown state, so surfacing it is correct.
+        // Poison recovery (crate::poison policy): the leaf fields are plain
+        // in-memory collections that stay structurally valid between
+        // operations, so a panicked writer must not cascade its poison into a
+        // second panic on every subsequent tile write. We recover the guard and
+        // continue; any bookkeeping gap left by the panicked holder is caught
+        // downstream by on-disk digest verification, not by tearing down the run.
         LeafGuard {
-            inner: m.lock().unwrap(),
+            inner: crate::poison::recover(m),
         }
     }
 }
@@ -1214,7 +1218,7 @@ impl FsSink {
         // leave the first tile as a full private copy — breaking the
         // at-least-one-hardlink invariant (issue #111). Serialising here
         // makes the promote-on-2nd-hit sequence atomic.
-        let _promote = self.dedupe_promote.lock().unwrap();
+        let _promote = crate::poison::recover(&self.dedupe_promote);
 
         let decision = idx.record(rel_string, bytes);
         match decision {
@@ -1840,6 +1844,62 @@ mod tests {
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
             blank: false,
         }
+    }
+
+    /// Reproducer for #117: a poisoned `MemorySink` buffer must not cascade a
+    /// second panic into every later `write_tile` / `tiles` / `tile_count`.
+    /// Before the fix (`.lock().unwrap()`) the poison re-panicked (RED); after
+    /// it the guard is recovered and the already-collected tiles survive (GREEN).
+    #[test]
+    fn poisoned_memory_sink_recovers_without_cascade() {
+        let sink = MemorySink::new();
+        sink.write_tile(&make_tile(0, 0, 0)).unwrap();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = sink.tiles.lock().unwrap();
+            panic!("worker panic while holding the MemorySink buffer lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(sink.tiles.is_poisoned());
+
+        assert_eq!(sink.tile_count(), 1);
+        assert_eq!(sink.tiles().len(), 1);
+        sink.write_tile(&make_tile(0, 1, 0)).unwrap();
+        assert_eq!(sink.tile_count(), 2);
+    }
+
+    /// Reproducer for #117 on the primary cascade site: the `FsSink` leaf-lock
+    /// chokepoint. One worker panic that poisons a leaf field mutex must not
+    /// turn every subsequent `write_tile` into a second panic (which, on the
+    /// write path, would also drop the final checkpoint). We poison the
+    /// `completed_tiles` leaf, then keep writing tiles. Before the fix
+    /// (`m.lock().unwrap()` in `LeafGuard::new`) the next write panicked (RED);
+    /// after it the guard recovers and the run continues (GREEN).
+    #[test]
+    fn poisoned_fs_sink_leaf_recovers_without_cascade() {
+        let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let dir = tempfile::tempdir().unwrap();
+        // Resume-enabled so `write_tile` records each coord into the
+        // `completed_tiles` leaf through the `lock_leaf` chokepoint.
+        let sink = FsSink::new(dir.path().join("out_files"), plan).with_resume(true);
+
+        sink.write_tile(&make_tile(0, 0, 0)).unwrap();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = sink.completed_tiles.lock().unwrap();
+            panic!("worker panic while holding an FsSink leaf lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(sink.completed_tiles.is_poisoned());
+
+        // The write path must not cascade the poison into a second panic.
+        sink.write_tile(&make_tile(0, 0, 0)).unwrap();
+        let recorded = crate::poison::recover(&sink.completed_tiles).len();
+        assert_eq!(
+            recorded, 2,
+            "recovered leaf must retain the pre-poison bookkeeping and accept new writes"
+        );
     }
 
     // -- Transparent-decorator bookkeeping (issue #137) --

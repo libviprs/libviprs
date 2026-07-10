@@ -282,8 +282,10 @@ impl DedupeIndex {
         }
 
         // Single lock: update `refs` and `seen` atomically so readers never
-        // observe one populated without the other (Mara B5).
-        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        // observe one populated without the other (Mara B5). Poison is
+        // recovered (crate::poison policy): the maps are structurally valid
+        // between operations, so a panicked prior holder must not cascade.
+        let mut state = crate::poison::recover(&self.state);
         state.refs.insert(path.to_string(), shared_key.clone());
 
         match state.seen.entry((algo_tag(algo), digest)) {
@@ -316,7 +318,7 @@ impl DedupeIndex {
     /// a symlink / hardlink and no manifest pointer is required). No-op if
     /// the path was never recorded.
     pub fn forget_reference(&self, path: &str) {
-        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        let mut state = crate::poison::recover(&self.state);
         state.refs.remove(path);
     }
 
@@ -333,21 +335,13 @@ impl DedupeIndex {
     /// Returns a `BTreeMap` so callers that serialize the result get
     /// deterministic key order (dtolnay #5).
     pub fn references(&self) -> BTreeMap<String, String> {
-        self.state
-            .lock()
-            .expect("dedupe state mutex poisoned")
-            .refs
-            .clone()
+        crate::poison::recover(&self.state).refs.clone()
     }
 
     /// Total number of distinct content hashes seen so far. Useful for
     /// diagnostics and tests.
     pub fn distinct_count(&self) -> usize {
-        self.state
-            .lock()
-            .expect("dedupe state mutex poisoned")
-            .seen
-            .len()
+        crate::poison::recover(&self.state).seen.len()
     }
 }
 
@@ -618,6 +612,37 @@ mod tests {
             idx.distinct_count(),
             0,
             "None must not populate the seen index"
+        );
+    }
+
+    /// Reproducer for #117: a poisoned dedupe-state lock must not cascade a
+    /// second panic into every later `record` / `references` / `distinct_count`
+    /// call. We poison the state mutex under `catch_unwind`, then keep using the
+    /// index. Before the fix (`.lock().expect(...)`) each of these re-panicked
+    /// on the poison (RED); after it they recover the guard and preserve the
+    /// already-seen entries (GREEN).
+    #[test]
+    fn poisoned_dedupe_state_recovers_without_cascade() {
+        let idx = DedupeIndex::new(DedupeStrategy::Blanks);
+        let bytes = b"content that gets deduplicated";
+        let d1 = idx.record("0/0_0.png", bytes);
+        assert!(matches!(d1, DedupeDecision::WriteNew { .. }));
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = idx.state.lock().unwrap();
+            panic!("worker panic while holding the dedupe state lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(idx.state.is_poisoned());
+
+        // Recovered reads see the pre-poison entry, and a duplicate still
+        // resolves to a Reference — none of these may panic.
+        assert_eq!(idx.distinct_count(), 1);
+        assert_eq!(idx.references().len(), 1);
+        let d2 = idx.record("0/0_1.png", bytes);
+        assert!(
+            matches!(d2, DedupeDecision::Reference { .. }),
+            "duplicate must still dedupe after poison recovery; got {d2:?}"
         );
     }
 
