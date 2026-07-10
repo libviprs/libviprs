@@ -59,6 +59,7 @@ pub mod observe;
 pub mod pdf;
 pub mod pixel;
 pub mod planner;
+pub(crate) mod poison;
 pub mod raster;
 pub mod resize;
 pub mod resume;
