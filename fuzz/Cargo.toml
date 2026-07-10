@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 # Versions are single-sourced in [workspace.dependencies] at the repo root
 # (issue #151). This crate is a workspace member, so it shares the root
-# lockfile and the root [patch.crates-io] table.
+# lockfile and the root dependency pins (including the pdfium-render fork).
 [dependencies]
 libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true }

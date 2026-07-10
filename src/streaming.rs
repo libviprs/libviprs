@@ -271,8 +271,8 @@ enum PdfiumSourceState {
 /// FPDF synchronisation that protects `FPDF_CloseDocument` against
 /// concurrent renders lives in `pdfium-render`'s
 /// `ThreadSafePdfiumBindings` wrapper (active via the `sync` feature
-/// plus the `[patch.crates-io]` patched fork pinned in
-/// `libviprs/Cargo.toml`).
+/// plus the per-call locking fork declared as a direct git dependency
+/// in `libviprs/Cargo.toml`).
 ///
 /// Lifetime is `'static` because the document borrows from
 /// [`crate::pdf::init_pdfium`]'s `OnceLock`-backed `&'static Pdfium`.
@@ -297,9 +297,10 @@ impl Drop for StreamingState {
         // other FPDF entry point in this crate (see the invariant at
         // `crate::pdf::pdfium_lock`), teardown must acquire the
         // process-wide lock first: with the unpatched `pdfium-render`
-        // (Cargo does not propagate `[patch.crates-io]` downstream), a
-        // close racing a concurrent render inside the non-thread-safe C
-        // library corrupts the heap.
+        // (crates.io builds of libviprs resolve the upstream wrapper,
+        // since cargo strips the git source on publish), a close racing
+        // a concurrent render inside the non-thread-safe C library
+        // corrupts the heap.
         //
         // Checklist: any pdfium-render object whose `Drop` issues FPDF
         // calls must die inside a `pdfium_lock()` scope.

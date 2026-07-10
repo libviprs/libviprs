@@ -3,11 +3,12 @@
 # audit-pdfium-source.sh — release gate for issue #149.
 #
 # The `pdfium-render` thread-safety fork (per-call locking in
-# `ThreadSafePdfiumBindings`) is applied via `[patch.crates-io]` in this
-# crate's `Cargo.toml`. A `[patch]` table only takes effect from the root
-# of the workspace performing the build, so any sibling crate or crates.io
-# consumer that does NOT replicate the patch silently links the unpatched
-# `pdfium-render 0.8.x` wrapper, which segfaults under concurrent access.
+# `ThreadSafePdfiumBindings`) is a direct git dependency of this crate,
+# so git/path consumers of libviprs inherit it. But cargo strips git
+# sources on publish, so crates.io consumers of the PUBLISHED libviprs
+# still resolve the unpatched `pdfium-render 0.8.x` wrapper, which
+# segfaults under concurrent direct access. Sibling repos that depend on
+# `pdfium-render` directly must pin the fork themselves.
 #
 # This script resolves the dependency graph for a given manifest and fails
 # if `pdfium-render` is sourced from the crates.io registry instead of the
@@ -69,6 +70,7 @@ case "$source_field" in
     echo "audit-pdfium-source: FAIL — pdfium-render does NOT resolve from the libviprs fork (issue #149)." >&2
     echo "  resolved source: ${source_field:-<empty/registry>}" >&2
     echo "  expected a git source containing: $EXPECTED_HOST" >&2
-    echo "  add the [patch.crates-io] pdfium-render fork to this manifest's workspace root." >&2
+    echo "  depend on libviprs by git/path (it pins the fork directly), or pin the" >&2
+    echo "  fork yourself: pdfium-render = { git = \"https://github.com/libviprs/pdfium-render.git\", branch = \"libviprs/per-call-thread-safety\" }" >&2
     exit 1 ;;
 esac
