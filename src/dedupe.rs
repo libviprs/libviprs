@@ -9,18 +9,28 @@
 //! # Storage contract
 //!
 //! For each distinct content hash, at most one physical file is written at
-//! `_shared/<shared_key>.<ext>`. Every other tile with the same content is
-//! then referenced from its planned path via one of three strategies,
-//! attempted in order:
+//! `_shared/<shared_key>.<ext>`. [`DedupeIndex::record`] tells the sink
+//! whether it is looking at the *first* occurrence of some content
+//! ([`DedupeDecision::WriteNew`]) or a later duplicate
+//! ([`DedupeDecision::Reference`]); the sink materialises the layout with a
+//! *promote-on-second-hit* scheme (see [`crate::sink::FsSink`]):
 //!
-//! 1. **Symlink** (`try_symlink`) — preferred on unix because it's cheap and
-//!    readers that follow symlinks see the target bytes transparently.
-//! 2. **Hardlink** (`try_hardlink`) — used when the filesystem or platform
-//!    rejects symlinks (e.g. Windows without the Developer Mode privilege).
-//! 3. **Manifest-only** — as a last resort, a 1-byte placeholder is written
-//!    at the tile path and the sink records the relationship in
-//!    `manifest.json`'s `blank_references` map. Readers must consult the
-//!    manifest to resolve the pointer.
+//! 1. The first tile with a given content hash is written in full at its own
+//!    planned path. Nothing is placed under `_shared/` yet — content seen only
+//!    once never bloats `_shared/`.
+//! 2. When a *second* tile with identical bytes arrives, the first tile's file
+//!    is promoted into `_shared/<shared_key>.<ext>` and the first tile path is
+//!    re-pointed at it with a **hardlink** (guaranteeing at least one tile
+//!    resolves to the shared inode).
+//! 3. That second tile — and every later duplicate — is written as a 1-byte
+//!    placeholder at its own path, and the `tile_path -> shared_path`
+//!    relationship is recorded in `manifest.json`'s `blank_references` map.
+//!    Readers consult the manifest to resolve the pointer.
+//!
+//! The standalone [`materialize_reference`] helper (symlink → hardlink →
+//! placeholder fallback, reported via [`LinkResult`]) is provided for
+//! *alternative* sinks that prefer link-based references over the manifest
+//! scheme above; `FsSink` does not use it.
 //!
 //! # Shared-key contract
 //!
@@ -165,10 +175,10 @@ struct SeenEntry {
     /// Deterministic `blank_<hash>` stem of the shared file.
     shared_key: String,
     /// Full relative path of the shared file as first written, e.g.
-    /// `_shared/blank_<hash>.png`. `None` for entries injected via
-    /// [`DedupeIndex::seed_shared_key`], which carry no extension; those fall
-    /// back to the recording tile's extension (best effort, resume mode).
-    shared_path: Option<PathBuf>,
+    /// `_shared/blank_<hash>.png`. Recorded from the first tile that carried
+    /// this content so later duplicates reference the file that actually
+    /// exists on disk.
+    shared_path: PathBuf,
 }
 
 /// In-memory mapping from content-hash to shared-key. One instance per
@@ -265,29 +275,23 @@ impl DedupeIndex {
             std::collections::btree_map::Entry::Vacant(e) => {
                 e.insert(SeenEntry {
                     shared_key: shared_key.clone(),
-                    shared_path: Some(shared_path.clone()),
+                    shared_path: shared_path.clone(),
                 });
                 DedupeDecision::WriteNew {
                     shared_key,
                     shared_path,
                 }
             }
-            // A first occurrence already wrote a physical file under
-            // `_shared/`. Return the *stored* shared key and path so the
-            // reference resolves to the file that actually exists, rather
-            // than one re-derived from this tile's (possibly different)
-            // extension (issue #96). Seeded entries carry no stored path;
-            // for those we fall back to this tile's extension.
+            // A first occurrence already recorded the physical path that its
+            // bytes will occupy under `_shared/`. Return the *stored* shared
+            // key and path so the reference resolves to the file that actually
+            // gets written, rather than one re-derived from this tile's
+            // (possibly different) extension (issue #96).
             std::collections::btree_map::Entry::Occupied(e) => {
                 let stored = e.get();
-                let shared_key = stored.shared_key.clone();
-                let shared_path = stored
-                    .shared_path
-                    .clone()
-                    .unwrap_or_else(|| Self::shared_path(&shared_key, ext));
                 DedupeDecision::Reference {
-                    shared_key,
-                    shared_path,
+                    shared_key: stored.shared_key.clone(),
+                    shared_path: stored.shared_path.clone(),
                 }
             }
         }
@@ -299,34 +303,6 @@ impl DedupeIndex {
     pub fn forget_reference(&self, path: &str) {
         let mut state = self.state.lock().expect("dedupe state mutex poisoned");
         state.refs.remove(path);
-    }
-
-    /// Record an already-known shared key for a given content hash, used by
-    /// resume-mode sinks when walking an existing `_shared/` directory so
-    /// that subsequent `record` calls don't emit `WriteNew` for content
-    /// that's already physically present on disk.
-    ///
-    /// `hash_hex` must be the lowercase hex of the 32-byte digest produced
-    /// by the index's effective algorithm. Invalid or wrong-length hex is
-    /// silently ignored — the index will simply emit `WriteNew` on first
-    /// encounter, which is benign (the sink's rename-into-_shared path
-    /// already tolerates an existing target).
-    pub fn seed_shared_key(&self, hash_hex: String, shared_key: String) {
-        let digest = match decode_hex_32(&hash_hex) {
-            Some(d) => d,
-            None => return,
-        };
-        let algo = self.effective_algo();
-        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
-        state.seen.insert(
-            (algo_tag(algo), digest),
-            SeenEntry {
-                shared_key,
-                // No extension is known when seeding from a hex hash; the
-                // first `record` that hits this entry supplies its own.
-                shared_path: None,
-            },
-        );
     }
 
     /// Compute the on-disk relative path for a shared blob.
@@ -498,45 +474,69 @@ fn pathdiff(to: &Path, from: &Path) -> Option<PathBuf> {
 /// The parent directory of `tile_path` must already exist; the caller is
 /// responsible for `std::fs::create_dir_all`. Any pre-existing file at
 /// `tile_path` is removed first (so this is safe to call in resume mode).
-pub fn materialize_reference(tile_path: &Path, shared_path: &Path) -> LinkResult {
-    // Remove any leftover file at the tile path so link creation doesn't
-    // fail with EEXIST. `remove_file` silently succeeds on not-found via
-    // explicit check to avoid swallowing unrelated errors.
-    if tile_path.exists() || tile_path.is_symlink() {
-        let _ = std::fs::remove_file(tile_path);
+///
+/// Returns the [`LinkResult`] describing which strategy succeeded, or an
+/// [`io::Error`] if *every* strategy — including the placeholder write —
+/// failed. A failure is never reported as success: if the returned value is
+/// `Ok`, a resolvable file exists at `tile_path`.
+pub fn materialize_reference(tile_path: &Path, shared_path: &Path) -> io::Result<LinkResult> {
+    // Absolutize the shared target before linking. A relative `shared_path`
+    // (e.g. `_shared/blank_<hash>.png`) passed verbatim as a symlink target
+    // is resolved relative to `tile_path`'s parent, which points at a file
+    // that does not exist there — a dangling link. Anchoring to an absolute
+    // path makes the reference resolve regardless of where `tile_path` lives.
+    let shared_target = absolutize(shared_path);
+
+    // Remove any leftover file (or dangling symlink) at the tile path so link
+    // creation doesn't fail with EEXIST. Removing unconditionally — and
+    // tolerating only `NotFound` — closes the check-then-remove TOCTOU window
+    // while still surfacing genuine errors (e.g. EACCES on the parent dir).
+    match std::fs::remove_file(tile_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
 
     #[cfg(windows)]
     {
         // Windows: hardlink first (works without admin), then symlink.
-        if try_hardlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Hardlink;
+        if try_hardlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Hardlink);
         }
-        if try_symlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Symlink;
+        if try_symlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Symlink);
         }
     }
 
     #[cfg(not(windows))]
     {
         // Unix (and other unix-like targets): symlink first, then hardlink.
-        if try_symlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Symlink;
+        if try_symlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Symlink);
         }
-        if try_hardlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Hardlink;
+        if try_hardlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Hardlink);
         }
     }
 
-    // Final fallback: placeholder file.
-    match std::fs::write(tile_path, PLACEHOLDER_MARKER) {
-        Ok(()) => LinkResult::ManifestOnly,
-        Err(_) => {
-            // Even the placeholder write failed; there's not much we can do
-            // without bubbling an error. The caller's manifest map still
-            // documents the intended relationship, so readers that consult
-            // it will recover.
-            LinkResult::ManifestOnly
+    // Final fallback: placeholder file. If even this write fails there is no
+    // resolvable file at `tile_path`, so the error must be surfaced rather
+    // than masqueraded as a successful `ManifestOnly`.
+    std::fs::write(tile_path, PLACEHOLDER_MARKER)?;
+    Ok(LinkResult::ManifestOnly)
+}
+
+/// Resolve `p` to an absolute path. Already-absolute paths are returned
+/// unchanged; relative ones are joined onto the current working directory.
+/// Falls back to the input verbatim only if the cwd cannot be read (in which
+/// case the caller is presumed to control cwd).
+fn absolutize(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p.to_path_buf(),
         }
     }
 }
@@ -554,33 +554,6 @@ fn hex_lower(bytes: &[u8]) -> String {
         s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
-}
-
-/// Decode a lowercase or uppercase hex string into a fixed 32-byte digest.
-/// Returns `None` if the input isn't exactly 64 hex characters. Used by
-/// [`DedupeIndex::seed_shared_key`] to convert a caller-supplied hex hash
-/// back into the raw-byte form now stored in `DedupeState::seen`.
-fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, chunk) in bytes.chunks_exact(2).enumerate() {
-        let hi = hex_nibble(chunk[0])?;
-        let lo = hex_nibble(chunk[1])?;
-        out[i] = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(10 + (b - b'a')),
-        b'A'..=b'F' => Some(10 + (b - b'A')),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -692,7 +665,7 @@ mod tests {
         let tile = tmp.path().join("0").join("0_0.png");
         std::fs::create_dir_all(tile.parent().unwrap()).unwrap();
 
-        let result = materialize_reference(&tile, &shared);
+        let result = materialize_reference(&tile, &shared).expect("materialization must succeed");
         // Depending on the host filesystem, any of the three is legal.
         assert!(matches!(
             result,
@@ -744,32 +717,88 @@ mod tests {
     }
 
     #[test]
-    fn seed_shared_key_suppresses_later_write_new() {
-        let idx = DedupeIndex::new(DedupeStrategy::Blanks);
-        let hash = {
-            let h = blake3::hash(b"payload");
-            hex_lower(h.as_bytes())
-        };
-        idx.seed_shared_key(hash.clone(), format!("blank_{hash}"));
-        let decision = idx.record("a.png", b"payload");
-        assert!(matches!(decision, DedupeDecision::Reference { .. }));
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn materialize_reference_with_relative_target_does_not_dangle() {
+        // Regression (issue #98): a *relative* `shared_path` was passed to the
+        // symlink call verbatim. On unix a symlink target is resolved relative
+        // to the link's own directory, so `_shared/blank_x.png` resolved to
+        // `<tile-dir>/_shared/blank_x.png` — a path that does not exist — and
+        // the reference dangled. Absolutizing the target fixes it.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize the root so the cwd reported by `current_dir` (which the
+        // OS may resolve through symlinks, e.g. /var -> /private/var on macOS)
+        // matches the paths we build here; otherwise the relative-symlink math
+        // compares mismatched prefixes.
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let shared_dir = root.join("_shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::write(shared_dir.join("blank_rel.png"), b"SHAREDPAYLOAD").unwrap();
+
+        let tile = root.join("7").join("1_2.png");
+        std::fs::create_dir_all(tile.parent().unwrap()).unwrap();
+
+        // Deliberately relative shared path, mirroring what `record` returns.
+        let relative_shared = Path::new("_shared").join("blank_rel.png");
+
+        // Run with cwd at the temp root so the relative target *could* be
+        // resolved from there but never from the tile's own directory.
+        let cwd_guard = CwdGuard::change_to(&root);
+        let result =
+            materialize_reference(&tile, &relative_shared).expect("materialization must succeed");
+        drop(cwd_guard);
+
+        // Whichever strategy was chosen, the tile must resolve to the shared
+        // bytes — i.e. it must not dangle.
+        assert!(matches!(result, LinkResult::Symlink | LinkResult::Hardlink));
+        let read_back = std::fs::read(&tile).expect("tile reference must resolve, not dangle");
+        assert_eq!(read_back, b"SHAREDPAYLOAD");
     }
 
     #[test]
-    fn decode_hex_32_roundtrip() {
-        let bytes = [
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-            0xee, 0xff, 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x01, 0x02, 0x03, 0x04,
-            0x05, 0x06, 0x07, 0x08,
-        ];
-        let hex = hex_lower(&bytes);
-        let back = decode_hex_32(&hex).expect("valid hex round-trips");
-        assert_eq!(back, bytes);
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn materialize_reference_surfaces_total_failure() {
+        // Regression (issue #98): when symlink, hardlink, and the placeholder
+        // write all fail, the function used to return `Ok(ManifestOnly)` —
+        // reporting success on total failure. A tile path whose parent
+        // directory does not exist makes every strategy fail, so the call must
+        // now surface an error and leave no file behind.
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("_shared").join("blank_x.png");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"payload").unwrap();
+
+        let missing_parent = tmp.path().join("does").join("not").join("exist");
+        let tile = missing_parent.join("tile.png");
+
+        let result = materialize_reference(&tile, &shared);
+        assert!(
+            result.is_err(),
+            "total failure must surface an error, not report success"
+        );
+        assert!(!tile.exists(), "no file should be left at the tile path");
     }
 
-    #[test]
-    fn decode_hex_32_rejects_bad_length() {
-        assert!(decode_hex_32("").is_none());
-        assert!(decode_hex_32("abcd").is_none());
+    /// Scoped `set_current_dir` helper. Serialises via a process-wide mutex so
+    /// concurrent tests don't clobber each other's cwd, and restores the
+    /// previous directory on drop.
+    struct CwdGuard {
+        prev: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CwdGuard {
+        fn change_to(dir: &Path) -> Self {
+            static CWD_LOCK: Mutex<()> = Mutex::new(());
+            let lock = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prev = std::env::current_dir().unwrap();
+            std::env::set_current_dir(dir).unwrap();
+            CwdGuard { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
+        }
     }
 }
