@@ -88,7 +88,45 @@ pub struct GeoTransform {
     pub f: f64,
 }
 
+/// Relative tolerance used for the affine singularity / collinearity tests.
+///
+/// The determinant of a 2x2 linear part (and the twice-signed-area determinant
+/// of a triangle of ground control points) scales with the *square* of the
+/// coefficient / coordinate magnitudes. An absolute threshold therefore
+/// falsely rejects legitimately small-scale transforms and falsely accepts
+/// near-degenerate large-coordinate ones. We instead compare `|det|` against
+/// this factor times the squared matrix / edge norm — a scale-invariant
+/// relative conditioning check. The value sits a few orders of magnitude above
+/// `f64::EPSILON` (~2.2e-16) to absorb accumulated rounding while still
+/// accepting well-conditioned transforms.
+const DET_REL_EPS: f64 = 1e-12;
+
 impl GeoTransform {
+    /// Reciprocal determinant of the 2x2 linear part, or `None` if the
+    /// transform is non-invertible.
+    ///
+    /// Rejects the transform when any linear coefficient is non-finite (so the
+    /// singularity test never operates on `NaN`/`inf`, where comparisons
+    /// silently misbehave and would otherwise yield a garbage inverse), and
+    /// when `|det|` is small *relative to the squared coefficient norm* rather
+    /// than against an absolute epsilon.
+    fn linear_inv_det(&self) -> Option<f64> {
+        if !(self.a.is_finite() && self.b.is_finite() && self.d.is_finite() && self.e.is_finite()) {
+            return None;
+        }
+        let det = self.a * self.e - self.b * self.d;
+        debug_assert!(
+            det.is_finite(),
+            "affine determinant must be finite for finite coefficients"
+        );
+        // Norm-relative singularity test: |det| scales as ||M||^2.
+        let norm_sq = self.a * self.a + self.b * self.b + self.d * self.d + self.e * self.e;
+        if !det.is_finite() || det.abs() <= DET_REL_EPS * norm_sq {
+            return None;
+        }
+        Some(1.0 / det)
+    }
+
     /// Create a transform from the 6 affine coefficients.
     ///
     /// The coefficients `(a, b, c, d, e, f)` correspond to the row-major
@@ -132,8 +170,10 @@ impl GeoTransform {
     ///
     /// Solves the 6 affine parameters exactly from 3 non-collinear GCPs by
     /// inverting the 3x3 system of equations. Returns `None` if the pixel
-    /// positions are collinear (determinant near zero), because the affine
-    /// is under-constrained in that case.
+    /// positions are collinear or coincident — measured *relative* to the
+    /// spacing of the points, so both tightly-clustered and far-from-origin
+    /// point sets are judged correctly — or if any input coordinate is
+    /// non-finite.
     ///
     /// For over-determined systems (more than 3 GCPs), use
     /// `from_gcps_least_squares`.
@@ -148,10 +188,21 @@ impl GeoTransform {
 
         // Solve: [a b c] * [[px0 px1 px2], [py0 py1 py2], [1 1 1]] = [gx0 gx1 gx2]
         // Same for d, e, f with gy values.
-        let det = p0.x * (p1.y - p2.y) - p1.x * (p0.y - p2.y) + p2.x * (p0.y - p1.y);
-
-        if det.abs() < 1e-12 {
-            return None; // Points are collinear
+        //
+        // The system determinant equals the cross product of the triangle's
+        // edge vectors (twice its signed area). Test collinearity relative to
+        // the edge lengths, so tightly-spaced points or clusters far from the
+        // origin are judged by their actual geometry rather than an absolute
+        // epsilon. A non-finite `det` (from non-finite input coordinates) is
+        // also rejected here.
+        let e1x = p1.x - p0.x;
+        let e1y = p1.y - p0.y;
+        let e2x = p2.x - p0.x;
+        let e2y = p2.y - p0.y;
+        let det = e1x * e2y - e1y * e2x;
+        let norm_sq = (e1x * e1x + e1y * e1y).max(e2x * e2x + e2y * e2y);
+        if !det.is_finite() || det.abs() <= DET_REL_EPS * norm_sq {
+            return None; // Points are collinear, coincident, or non-finite
         }
 
         let inv_det = 1.0 / det;
@@ -169,6 +220,17 @@ impl GeoTransform {
         let f = (p0.x * (p1.y * g2.y - p2.y * g1.y) - p1.x * (p0.y * g2.y - p2.y * g0.y)
             + p2.x * (p0.y * g1.y - p1.y * g0.y))
             * inv_det;
+
+        // Reject a solution poisoned by non-finite geo coordinates or overflow.
+        if !(a.is_finite()
+            && b.is_finite()
+            && c.is_finite()
+            && d.is_finite()
+            && e.is_finite()
+            && f.is_finite())
+        {
+            return None;
+        }
 
         Some(Self { a, b, c, d, e, f })
     }
@@ -198,15 +260,18 @@ impl GeoTransform {
     /// position back to raster pixel space. This is useful for hit-testing
     /// (e.g. "which pixel does this lat/lon correspond to?").
     ///
-    /// Returns `None` if the transform is singular (degenerate), meaning
-    /// the 2x2 coefficient matrix has a near-zero determinant and cannot
-    /// be inverted.
+    /// Returns `None` if the transform is singular (degenerate) — its 2x2
+    /// coefficient matrix has a determinant that is near zero *relative to the
+    /// matrix norm*, or a non-finite coefficient — and cannot be inverted.
+    ///
+    /// # Output range
+    ///
+    /// The returned pixel coordinates are **unclamped**: they may be negative
+    /// or exceed the raster's width/height, and are `f64` (sub-pixel). Callers
+    /// must range-check and round them before using the result as an array or
+    /// tile index.
     pub fn geo_to_pixel(&self, geo: GeoCoord) -> Option<PixelCoord> {
-        let det = self.a * self.e - self.b * self.d;
-        if det.abs() < 1e-12 {
-            return None;
-        }
-        let inv_det = 1.0 / det;
+        let inv_det = self.linear_inv_det()?;
         let dx = geo.x - self.c;
         let dy = geo.y - self.f;
         Some(PixelCoord {
@@ -222,19 +287,28 @@ impl GeoTransform {
     /// unlike [`geo_to_pixel`](Self::geo_to_pixel) which returns a single
     /// point; the inverse transform object can be reused for many lookups.
     ///
-    /// Returns `None` if the transform is singular.
+    /// Returns `None` if the transform is singular — near-zero determinant
+    /// *relative to the matrix norm*, or a non-finite coefficient (including a
+    /// non-finite translation `c`/`f` that would poison the inverse offsets).
     pub fn inverse(&self) -> Option<Self> {
-        let det = self.a * self.e - self.b * self.d;
-        if det.abs() < 1e-12 {
-            return None;
-        }
-        let inv_det = 1.0 / det;
+        let inv_det = self.linear_inv_det()?;
         let a_inv = self.e * inv_det;
         let b_inv = -self.b * inv_det;
         let d_inv = -self.d * inv_det;
         let e_inv = self.a * inv_det;
         let c_inv = -(a_inv * self.c + b_inv * self.f);
         let f_inv = -(d_inv * self.c + e_inv * self.f);
+
+        // `linear_inv_det` guards a/b/d/e; c/f (and overflow) are checked here.
+        if !(a_inv.is_finite()
+            && b_inv.is_finite()
+            && c_inv.is_finite()
+            && d_inv.is_finite()
+            && e_inv.is_finite()
+            && f_inv.is_finite())
+        {
+            return None;
+        }
 
         Some(Self {
             a: a_inv,
@@ -578,6 +652,127 @@ mod tests {
         let t = GeoTransform::new(0.0, 0.0, 5.0, 0.0, 1.0, 0.0);
         assert!(t.inverse().is_none());
         assert!(t.geo_to_pixel(GeoCoord::new(5.0, 3.0)).is_none());
+    }
+
+    /**
+     * Regression: a legitimately small-scale transform must be invertible.
+     * Works because the 2x2 determinant of a 1e-7 deg/px transform is ~1e-14,
+     * which an absolute `det.abs() < 1e-12` threshold falsely rejects even
+     * though the transform is perfectly well-conditioned. The norm-relative
+     * test compares |det| against ~1e-12 * norm^2 (~1e-26), so it is accepted
+     * and the pixel<->geo round trip is lossless.
+     */
+    #[test]
+    fn small_scale_transform_is_invertible() {
+        let t = GeoTransform::from_origin_and_scale(GeoCoord::new(-122.0, 37.0), 1e-7, -1e-7);
+
+        // Both inverse paths must succeed on this well-conditioned transform.
+        assert!(t.inverse().is_some());
+
+        let original = PixelCoord::new(4000.0, 2500.0);
+        let geo = t.pixel_to_geo(original);
+        let back = t
+            .geo_to_pixel(geo)
+            .expect("small-scale transform must be invertible");
+        // Absolute tolerance loosened to match the 1e-7 coordinate scale.
+        assert!(
+            (back.x - original.x).abs() < 1e-3,
+            "x: {} vs {}",
+            back.x,
+            original.x
+        );
+        assert!(
+            (back.y - original.y).abs() < 1e-3,
+            "y: {} vs {}",
+            back.y,
+            original.y
+        );
+    }
+
+    /**
+     * Regression: a near-degenerate large-coordinate transform must be rejected.
+     * Works because rows [1e8, 1e8] and [1e8, 1e8+1e-4] are nearly parallel:
+     * the determinant is ~1e4, which an absolute 1e-12 threshold happily
+     * accepts (yielding a garbage, wildly ill-conditioned inverse). Relative
+     * to the matrix norm^2 (~4e16) the threshold is ~4e4, so |det|=1e4 is
+     * correctly judged singular.
+     */
+    #[test]
+    fn near_singular_large_coordinate_rejected() {
+        let t = GeoTransform::new(1e8, 1e8, 0.0, 1e8, 1e8 + 1e-4, 0.0);
+        assert!(
+            t.inverse().is_none(),
+            "near-singular transform must be rejected"
+        );
+        assert!(
+            t.geo_to_pixel(GeoCoord::new(1.0, 2.0)).is_none(),
+            "near-singular transform must be rejected"
+        );
+    }
+
+    /**
+     * Regression: non-finite coefficients must be rejected, not propagated.
+     * Works because a NaN/inf coefficient makes `det` non-finite, and the old
+     * `det.abs() < 1e-12` comparison is false for NaN, so the code fell through
+     * and returned a `Some` full of NaN pixel coordinates a caller could use as
+     * an index. The finiteness guard now returns `None` for every such input.
+     */
+    #[test]
+    fn non_finite_transform_rejected() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let t = GeoTransform::new(bad, 0.0, 0.0, 0.0, 1.0, 0.0);
+            assert!(t.inverse().is_none(), "inverse must reject {bad}");
+            assert!(
+                t.geo_to_pixel(GeoCoord::new(1.0, 1.0)).is_none(),
+                "geo_to_pixel must reject {bad}"
+            );
+            // A non-finite translation must also be rejected by inverse().
+            let t2 = GeoTransform::new(1.0, 0.0, bad, 0.0, 1.0, 0.0);
+            assert!(
+                t2.inverse().is_none(),
+                "inverse must reject non-finite translation {bad}"
+            );
+        }
+    }
+
+    /**
+     * Regression: GCP collinearity is judged relative to point spacing.
+     * Three genuinely collinear points offset far from the origin must still be
+     * rejected (their edge-relative determinant is zero), while a tiny but
+     * non-degenerate triangle (~1e-4 across) must still solve — its raw
+     * determinant is ~1e-8, which the norm-relative test correctly accepts
+     * because it is large relative to the ~1e-8 squared edge norm.
+     */
+    #[test]
+    fn from_gcps_collinear_far_from_origin_rejected() {
+        // Collinear along y = x, offset far from the origin.
+        let base = 1.0e6;
+        let gcps = [
+            (PixelCoord::new(base, base), GeoCoord::new(0.0, 0.0)),
+            (
+                PixelCoord::new(base + 1.0, base + 1.0),
+                GeoCoord::new(1.0, 1.0),
+            ),
+            (
+                PixelCoord::new(base + 2.0, base + 2.0),
+                GeoCoord::new(2.0, 2.0),
+            ),
+        ];
+        assert!(
+            GeoTransform::from_gcps_exact(&gcps).is_none(),
+            "collinear points far from origin must be rejected"
+        );
+
+        // A small but genuinely non-degenerate triangle must still solve.
+        let gcps_ok = [
+            (PixelCoord::new(0.0, 0.0), GeoCoord::new(0.0, 0.0)),
+            (PixelCoord::new(1e-4, 0.0), GeoCoord::new(1e-4, 0.0)),
+            (PixelCoord::new(0.0, 1e-4), GeoCoord::new(0.0, 1e-4)),
+        ];
+        assert!(
+            GeoTransform::from_gcps_exact(&gcps_ok).is_some(),
+            "small non-degenerate triangle must be solvable"
+        );
     }
 
     // -- Image bounds --
