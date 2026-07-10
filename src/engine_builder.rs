@@ -888,16 +888,16 @@ fn prepare_resume_state(
             Ok((std::collections::HashSet::new(), cp))
         }
         ResumeMode::Resume => {
-            let contract = crate::resume::PlanContract::from_engine(config, sink);
-            let expected_hash = crate::resume::compute_plan_hash(plan, &contract);
             let (completed, levels) =
                 if let Some(root) = crate::engine::resolve_checkpoint_root(config, sink) {
                     match crate::resume::JobCheckpoint::load(&root)? {
                         Some(meta) => {
-                            if meta.plan_hash != expected_hash {
+                            if let Err(got) =
+                                crate::resume::verify_checkpoint_contract(&meta, plan, config, sink)
+                            {
                                 return Err(EngineError::PlanHashMismatch {
                                     expected: meta.plan_hash.clone(),
-                                    got: expected_hash,
+                                    got,
                                 });
                             }
                             (meta.completed_tiles, meta.levels_completed)

@@ -444,7 +444,7 @@ impl TileSink for SlowSink {
 /// for how the CLI maps user flags to a `TileFormat`.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TileFormat {
     Png,
     /// JPEG-encoded tiles. The `quality` knob trades off filesize against
@@ -1384,6 +1384,7 @@ impl FsSink {
                 .collect(),
             started_at: timestamp.clone(),
             last_checkpoint_at: timestamp,
+            content_format: contract.format,
         };
 
         // Durability ordering (issue #122): fsync the tile data written since

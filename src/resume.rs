@@ -37,6 +37,7 @@
 //!     levels_completed: Vec::new(),
 //!     started_at: now_rfc3339(),
 //!     last_checkpoint_at: now_rfc3339(),
+//!     content_format: contract.format,
 //! };
 //! JobCheckpoint::save(output_dir, &meta)?;
 //! ```
@@ -256,6 +257,16 @@ pub struct JobMetadata {
     /// RFC 3339 timestamp of the most recent checkpoint write.
     #[serde(default)]
     pub last_checkpoint_at: String,
+    /// Tile encoding the sink committed to when this checkpoint was written,
+    /// mirroring [`PlanContract::format`]. Recorded explicitly (rather than
+    /// only being folded into `plan_hash`) so the resume gate can reproduce
+    /// the write-time hash without depending on the *live* sink to report the
+    /// format — a transparent wrapper (recording / retry / tee) may not
+    /// forward [`crate::sink::TileSink::content_format`]. Defaults to `None`
+    /// for checkpoints written before this field existed and for sinks that
+    /// do not pin a single on-disk format.
+    #[serde(default)]
+    pub content_format: Option<TileFormat>,
 }
 
 impl JobMetadata {
@@ -270,6 +281,7 @@ impl JobMetadata {
             levels_completed: Vec::new(),
             last_checkpoint_at: started_at.clone(),
             started_at,
+            content_format: None,
         }
     }
 }
@@ -566,11 +578,14 @@ pub fn is_tile_completed(meta: &JobMetadata, coord: &TileCoord) -> bool {
 /// change the bytes a resume would produce, and therefore must invalidate a
 /// checkpoint when they change.
 ///
-/// [`compute_plan_hash`] folds these into the plan hash alongside the plan
-/// geometry so that resuming a checkpoint whose format, padding colour,
-/// blank-tile handling, dedupe layout, or source content differs is rejected
+/// [`compute_plan_hash`] folds the padding colour, blank-tile handling,
+/// dedupe layout, and source content into the plan hash alongside the plan
+/// geometry so that resuming a checkpoint whose contract differs is rejected
 /// with [`crate::engine::EngineError::PlanHashMismatch`] instead of silently
-/// mixing two incompatible outputs on disk.
+/// mixing two incompatible outputs on disk. The [`format`](Self::format) is
+/// *not* hashed — it is compared separately by [`verify_checkpoint_contract`]
+/// so a transparent sink wrapper that cannot report the format does not break
+/// a legitimate resume.
 ///
 /// Build one with [`PlanContract::from_engine`] so that the value derived at
 /// checkpoint-write time and the value derived at the resume gate agree for
@@ -578,7 +593,10 @@ pub fn is_tile_completed(meta: &JobMetadata, coord: &TileCoord) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanContract<'a> {
     /// Tile encoding the sink commits to, when it has one. `None` for sinks
-    /// that do not pin a single on-disk format.
+    /// that do not pin a single on-disk format. Recorded in the checkpoint
+    /// (see [`JobMetadata::content_format`]) and compared by
+    /// [`verify_checkpoint_contract`], but deliberately excluded from
+    /// [`compute_plan_hash`].
     pub format: Option<TileFormat>,
     /// Background RGB used to pad edge tiles.
     pub background_rgb: [u8; 3],
@@ -625,16 +643,26 @@ impl<'a> PlanContract<'a> {
 /// enums), in the order declared below. The result is the lowercase hex
 /// Blake3 digest of those bytes.
 ///
-/// Two runs whose geometry is identical but whose format, padding colour,
-/// blank-tile strategy, dedupe layout, or source digest differ produce
-/// different hashes, so the resume gate rejects a changed content contract
-/// rather than resuming into a mixed output.
+/// Two runs whose geometry is identical but whose padding colour, blank-tile
+/// strategy, dedupe layout, or source digest differ produce different hashes,
+/// so the resume gate rejects a changed content contract rather than resuming
+/// into a mixed output.
+///
+/// The tile **format** is deliberately *not* hashed here. The format is a
+/// property of the live sink, and a legitimate resume may wrap that sink in a
+/// transparent decorator (recording / retry / tee) that does not forward
+/// [`crate::sink::TileSink::content_format`]. Baking the format into this
+/// hash would then flip a bit purely because a wrapper was added or removed,
+/// spuriously rejecting a valid checkpoint. A genuine format change is caught
+/// separately by [`verify_checkpoint_contract`], which compares the format
+/// recorded in the checkpoint against the live sink's.
 pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> String {
     // Domain separator — ties this hash to a specific canonicalisation so
     // the same bytes cannot accidentally match some other hash contract.
-    // Bumped to v2 when the content contract was folded in, so v1 (geometry
-    // only) checkpoints no longer match and are treated as a plan mismatch.
-    const DOMAIN: &[u8] = b"libviprs/plan/v2";
+    // Bumped to v3 when the tile format was lifted out of the hash into an
+    // explicit, wildcard-tolerant comparison (see the module docs); v1/v2
+    // checkpoints no longer match and are treated as a plan mismatch.
+    const DOMAIN: &[u8] = b"libviprs/plan/v3";
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN);
@@ -664,10 +692,11 @@ pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> Str
     }
 
     // Content contract. A single tag byte (plus any payload) per field, so
-    // that changing the format, padding colour, blank-tile handling, dedupe
-    // layout, or source content changes the digest.
-    let (fmt_tag, fmt_quality) = format_tag(contract.format);
-    hasher.update(&[fmt_tag, fmt_quality]);
+    // that changing the padding colour, blank-tile handling, dedupe layout,
+    // or source content changes the digest. The tile format is intentionally
+    // excluded — it is compared separately in `verify_checkpoint_contract` so
+    // that a transparent sink wrapper that cannot report the format does not
+    // invalidate an otherwise-matching checkpoint.
     hasher.update(&contract.background_rgb);
     let (blank_tag, blank_delta) = blank_strategy_tag(contract.blank_strategy);
     hasher.update(&[blank_tag, blank_delta]);
@@ -686,18 +715,58 @@ pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> Str
     hasher.finalize().to_hex().to_string()
 }
 
-/// Tag byte (and quality payload) for a [`TileFormat`].
+/// Decide whether a loaded checkpoint is compatible with the current run.
 ///
-/// Kept in one place so that adding a new format forces an explicit decision
-/// about its byte, mirroring [`layout_tag`]. The second byte carries JPEG
-/// quality (0 for formats without a quality knob).
-fn format_tag(format: Option<TileFormat>) -> (u8, u8) {
-    match format {
-        None => (0, 0),
-        Some(TileFormat::Png) => (1, 0),
-        Some(TileFormat::Jpeg { quality }) => (2, quality),
-        Some(TileFormat::Raw) => (3, 0),
+/// Resume must tolerate a caller wrapping their sink in a transparent
+/// decorator (recording, retry, tee, crash-injecting, …). Such wrappers
+/// legitimately forward `write_tile` and `checkpoint_root` but often do not
+/// forward [`crate::sink::TileSink::content_format`], so the format they
+/// report is `None` even though the underlying run pins a concrete encoding.
+/// Because the format is folded into [`compute_plan_hash`], recomputing the
+/// expected hash straight from the live sink would flip the format bits and
+/// reject an otherwise valid checkpoint — the resume would fail with
+/// [`ResumeError::PlanHashMismatch`] purely because a wrapper was added or
+/// removed between the writing run and the resuming run.
+///
+/// To stay robust the geometry + content contract is re-hashed using the
+/// format that was **recorded when the checkpoint was written**
+/// ([`JobMetadata::content_format`]) rather than whatever the live sink can
+/// report now, so a legitimate resume matches regardless of wrapping. A
+/// *genuine* output-format change is still caught: when the recorded format
+/// and the live sink's format are both concrete and disagree, the checkpoint
+/// is rejected so two incompatible encodings are never mixed on disk.
+///
+/// Returns `Ok(())` when the checkpoint is compatible, or `Err(got)` carrying
+/// the freshly computed hash to surface in the resulting mismatch error.
+pub(crate) fn verify_checkpoint_contract(
+    meta: &JobMetadata,
+    plan: &PyramidPlan,
+    config: &EngineConfig,
+    sink: &dyn TileSink,
+) -> Result<(), String> {
+    let live = PlanContract::from_engine(config, sink);
+
+    // Geometry + non-format content contract. Stable regardless of how the
+    // sink is wrapped, because every field here is derived from the plan and
+    // the engine config, not from the live sink.
+    let expected = compute_plan_hash(plan, &live);
+    if meta.plan_hash != expected {
+        return Err(expected);
     }
+
+    // Genuine output-format change: only when both the checkpoint and the
+    // live sink pin a concrete — and different — encoding. Either side being
+    // `None` means "format unknown", which we treat as compatible rather than
+    // rejecting a valid resume behind a transparent wrapper.
+    if let (Some(recorded), Some(current)) = (meta.content_format, live.format) {
+        if recorded != current {
+            return Err(format!(
+                "{expected} (tile format changed from {recorded:?} to {current:?})"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Tag byte (and tolerance payload) for a [`BlankTileStrategy`].
@@ -740,11 +809,45 @@ fn layout_tag(layout: Layout) -> u8 {
 mod tests {
     use super::*;
     use crate::planner::PyramidPlanner;
+    use crate::sink::{SinkError, Tile};
 
     fn sample_plan() -> PyramidPlan {
         PyramidPlanner::new(128, 128, 64, 0, Layout::DeepZoom)
             .unwrap()
             .plan()
+    }
+
+    /// Minimal sink whose only interesting behaviour is the tile format it
+    /// reports (or refuses to report). Lets the resume-gate tests drive
+    /// [`verify_checkpoint_contract`] without a real filesystem sink.
+    struct FormatSink(Option<TileFormat>);
+
+    impl TileSink for FormatSink {
+        fn write_tile(&self, _tile: &Tile) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn finish(&self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn content_format(&self) -> Option<TileFormat> {
+            self.0
+        }
+    }
+
+    /// Build a checkpoint as the engine would for a run driven by `sink`:
+    /// a geometry+contract hash plus the recorded write-time format.
+    fn checkpoint_for(
+        plan: &PyramidPlan,
+        config: &EngineConfig,
+        sink: &dyn TileSink,
+    ) -> JobMetadata {
+        let contract = PlanContract::from_engine(config, sink);
+        let mut meta = JobMetadata::new(
+            compute_plan_hash(plan, &contract),
+            "1970-01-01T00:00:00Z".into(),
+        );
+        meta.content_format = contract.format;
+        meta
     }
 
     /// A baseline content contract for the plan-hash tests. Individual tests
@@ -767,6 +870,7 @@ mod tests {
             levels_completed: vec![0],
             started_at: "1970-01-01T00:00:00Z".into(),
             last_checkpoint_at: "1970-01-01T00:00:00Z".into(),
+            content_format: None,
         }
     }
 
@@ -902,7 +1006,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_hash_changes_with_tile_format() {
+    fn plan_hash_ignores_tile_format() {
+        // The format is compared separately (see the resume-gate tests
+        // below), not folded into the geometry+contract hash, so two contracts
+        // that differ only in format hash identically.
         let plan = sample_plan();
         let png = PlanContract {
             format: Some(TileFormat::Png),
@@ -912,27 +1019,72 @@ mod tests {
             format: Some(TileFormat::Jpeg { quality: 80 }),
             ..sample_contract()
         };
-        assert_ne!(
+        assert_eq!(
             compute_plan_hash(&plan, &png),
             compute_plan_hash(&plan, &jpeg),
+            "tile format must not affect the plan hash"
+        );
+    }
+
+    #[test]
+    fn resume_rejects_a_changed_tile_format() {
+        // A checkpoint written by a PNG sink must not resume against a JPEG
+        // sink — that would mix two encodings in the same output tree.
+        let plan = sample_plan();
+        let config = EngineConfig::default();
+        let png = FormatSink(Some(TileFormat::Png));
+        let meta = checkpoint_for(&plan, &config, &png);
+
+        assert!(
+            verify_checkpoint_contract(&meta, &plan, &config, &png).is_ok(),
+            "same-format resume must be accepted"
+        );
+
+        let jpeg = FormatSink(Some(TileFormat::Jpeg { quality: 80 }));
+        assert!(
+            verify_checkpoint_contract(&meta, &plan, &config, &jpeg).is_err(),
             "changing the tile format must invalidate the checkpoint"
         );
     }
 
     #[test]
-    fn plan_hash_changes_with_jpeg_quality() {
+    fn resume_rejects_a_changed_jpeg_quality() {
         let plan = sample_plan();
-        let q80 = PlanContract {
-            format: Some(TileFormat::Jpeg { quality: 80 }),
-            ..sample_contract()
-        };
-        let q40 = PlanContract {
-            format: Some(TileFormat::Jpeg { quality: 40 }),
-            ..sample_contract()
-        };
-        assert_ne!(
-            compute_plan_hash(&plan, &q80),
-            compute_plan_hash(&plan, &q40)
+        let config = EngineConfig::default();
+        let q80 = FormatSink(Some(TileFormat::Jpeg { quality: 80 }));
+        let meta = checkpoint_for(&plan, &config, &q80);
+
+        let q40 = FormatSink(Some(TileFormat::Jpeg { quality: 40 }));
+        assert!(
+            verify_checkpoint_contract(&meta, &plan, &config, &q40).is_err(),
+            "changing the JPEG quality must invalidate the checkpoint"
+        );
+    }
+
+    #[test]
+    fn resume_tolerates_a_sink_that_does_not_report_its_format() {
+        // Regression: a transparent wrapper sink returns `None` from
+        // `content_format()`. Resume must still accept a checkpoint written by
+        // the concrete underlying sink instead of failing with a spurious
+        // PlanHashMismatch.
+        let plan = sample_plan();
+        let config = EngineConfig::default();
+
+        // Written by a concrete PNG sink, resumed behind a format-blind wrapper.
+        let png = FormatSink(Some(TileFormat::Png));
+        let meta = checkpoint_for(&plan, &config, &png);
+        let wrapper = FormatSink(None);
+        assert!(
+            verify_checkpoint_contract(&meta, &plan, &config, &wrapper).is_ok(),
+            "a wrapper that does not report its format must not break resume"
+        );
+
+        // Symmetric case: written behind a format-blind wrapper, resumed by
+        // the concrete sink.
+        let meta_blind = checkpoint_for(&plan, &config, &wrapper);
+        assert!(
+            verify_checkpoint_contract(&meta_blind, &plan, &config, &png).is_ok(),
+            "a checkpoint written without a format must resume against a concrete sink"
         );
     }
 

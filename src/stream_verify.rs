@@ -113,12 +113,10 @@ pub(crate) fn verify_from_strip_source(
     // plan divergence surface structurally instead of as per-tile byte
     // mismatches.
     if let Some(meta) = crate::resume::JobCheckpoint::load(root)? {
-        let contract = crate::resume::PlanContract::from_engine(config, sink);
-        let expected = crate::resume::compute_plan_hash(plan, &contract);
-        if meta.plan_hash != expected {
+        if let Err(got) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
             return Err(EngineError::PlanHashMismatch {
                 expected: meta.plan_hash,
-                got: expected,
+                got,
             });
         }
     }

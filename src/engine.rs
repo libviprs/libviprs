@@ -831,6 +831,7 @@ pub(crate) fn cp_for_sink(
         levels_completed,
         started_at: now.clone(),
         last_checkpoint_at: now,
+        content_format: contract.format,
     };
     Some(CheckpointState::new(
         root,
@@ -869,12 +870,10 @@ pub(crate) fn raster_verify(
     // byte mismatch on the first one, which is strictly less useful than
     // failing fast with the structural error.
     if let Some(meta) = JobCheckpoint::load(root)? {
-        let contract = crate::resume::PlanContract::from_engine(config, sink);
-        let expected = compute_plan_hash(plan, &contract);
-        if meta.plan_hash != expected {
+        if let Err(got) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
             return Err(EngineError::PlanHashMismatch {
                 expected: meta.plan_hash,
-                got: expected,
+                got,
             });
         }
     }
