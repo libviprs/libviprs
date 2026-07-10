@@ -1,12 +1,10 @@
 //! Unified fluent entry point for pyramid generation.
 //!
-//! [`EngineBuilder`] collapses the five free-function entry points
-//! ([`generate_pyramid`](crate::generate_pyramid),
-//! [`generate_pyramid_observed`](crate::generate_pyramid_observed),
-//! [`generate_pyramid_streaming`](crate::generate_pyramid_streaming),
-//! [`generate_pyramid_mapreduce`](crate::generate_pyramid_mapreduce),
-//! [`generate_pyramid_mapreduce_auto`](crate::generate_pyramid_mapreduce_auto))
-//! behind a single typed builder. Call
+//! [`EngineBuilder`] is the single typed entry point for pyramid generation.
+//! It folds what used to be a family of monolithic, streaming, and MapReduce
+//! free functions behind one fluent builder, so callers pick the engine through
+//! [`with_engine`](EngineBuilder::with_engine) (see [`EngineKind`]) rather than
+//! by choosing a function name. Call
 //! [`EngineBuilder::new(source, plan, sink)`](EngineBuilder::new), chain any
 //! combination of `with_*` setters, then [`EngineBuilder::run`] or
 //! [`EngineBuilder::run_collect`].
@@ -1054,12 +1052,12 @@ fn prepare_resume_state(
                 if let Some(root) = crate::engine::resolve_checkpoint_root(config, sink) {
                     match crate::resume::JobCheckpoint::load(&root)? {
                         Some(meta) => {
-                            if let Err(got) =
+                            if let Err(current) =
                                 crate::resume::verify_checkpoint_contract(&meta, plan, config, sink)
                             {
                                 return Err(EngineError::PlanHashMismatch {
-                                    expected: meta.plan_hash.clone(),
-                                    got,
+                                    expected: current,
+                                    actual: meta.plan_hash.clone(),
                                 });
                             }
                             (meta.completed_tiles, meta.levels_completed)

@@ -1768,8 +1768,10 @@ mod tests {
 
         let got = verify_checkpoint_contract(&meta, &plan, &config, &png)
             .expect_err("a divergent plan_hash must be rejected by the resume gate");
-        // The gate hands back the *actual* hash for the engine to embed in
-        // `EngineError::PlanHashMismatch { expected, got }`.
+        // The gate hands back the freshly computed hash of the current plan,
+        // which the engine embeds as the `expected` field of
+        // `EngineError::PlanHashMismatch { expected, actual }` (the `actual`
+        // field carries the divergent hash recorded in the checkpoint).
         assert_eq!(
             got,
             compute_plan_hash(&plan, &PlanContract::from_engine(&config, &png)),

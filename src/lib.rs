@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! # libviprs — High-performance tile pyramid generation
 //!
 //! libviprs converts large raster images and PDF documents into multi-resolution
@@ -66,8 +67,10 @@ pub mod resume;
 pub mod retry;
 pub mod sink;
 #[cfg(feature = "s3")]
+#[cfg_attr(docsrs, doc(cfg(feature = "s3")))]
 pub mod sink_object_store;
 #[cfg(feature = "packfile")]
+#[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub mod sink_packfile;
 pub mod source;
 pub mod stream_verify;
@@ -94,6 +97,7 @@ pub use manifest::{
 };
 pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
 #[cfg(feature = "pdfium")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
 pub use pdf::{PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
 pub use pixel::PixelFormat;
@@ -109,8 +113,10 @@ pub use sink::{
     BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
 };
 #[cfg(feature = "s3")]
+#[cfg_attr(docsrs, doc(cfg(feature = "s3")))]
 pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
+#[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
 pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
 pub use streaming::{
@@ -118,5 +124,6 @@ pub use streaming::{
     estimate_streaming_memory,
 };
 #[cfg(feature = "pdfium")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
 pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::MapReduceConfig;

@@ -28,10 +28,12 @@ use crate::streaming::{StripSource, obtain_canvas_strip};
 
 /// Candidate tile file extensions probed when looking for a tile on disk.
 ///
-/// The sink's active format is not visible from this layer (the `TileSink`
-/// trait object doesn't expose it), so we probe the extensions produced by
-/// every [`TileFormat`](crate::sink::TileFormat) variant before declaring a
-/// tile missing. This matches the behaviour of `engine::run_verify`.
+/// Fallback probe set used only when the sink does not pin a concrete format
+/// (a transparent wrapper that returns `None` from
+/// [`TileSink::content_format`](crate::sink::TileSink::content_format)). When
+/// the format *is* known, [`active_candidate_exts`] narrows the probe to the
+/// active format so Verify does not validate a stale sibling file (issue #139).
+/// This matches the behaviour of `engine::raster_verify`.
 const CANDIDATE_EXTS: [&str; 4] = ["raw", "png", "jpeg", "jpg"];
 
 /// A [`StripSource`](crate::streaming::StripSource) (or the canvas-embedding
@@ -140,16 +142,19 @@ pub fn verify_from_strip_source(
     let root_buf = resolve_root(config, sink).ok_or(EngineError::VerifyRequiresOnDiskSink)?;
     let root = root_buf.as_path();
     let bg = config.background_rgb;
+    // Probe only the sink's active on-disk format so a stale sibling file from
+    // a previous run in a different format cannot pass Verify (issue #139).
+    let active_exts = active_candidate_exts(sink);
 
     // Fast-fail when the on-disk checkpoint was produced from a different
     // plan. Mirrors the Monolithic raster_verify path so verify errors on
     // plan divergence surface structurally instead of as per-tile byte
     // mismatches.
     if let Some(meta) = crate::resume::JobCheckpoint::load(root)? {
-        if let Err(got) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
+        if let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
             return Err(EngineError::PlanHashMismatch {
-                expected: meta.plan_hash,
-                got,
+                expected: current,
+                actual: meta.plan_hash,
             });
         }
     }
@@ -163,7 +168,7 @@ pub fn verify_from_strip_source(
     // (e.g. pointed at a stale run) before we spend time re-rendering.
     // ------------------------------------------------------------------
     for coord in plan.tile_coords() {
-        if find_tile_on_disk(root, plan, coord).is_none() {
+        if find_tile_on_disk(root, plan, coord, &active_exts).is_none() {
             return Err(EngineError::Sink(SinkError::Other(format!(
                 "Verify: missing tile for coord {coord:?}"
             ))));
@@ -229,8 +234,7 @@ pub fn verify_from_strip_source(
                         };
                         if !got.eq_ignore_ascii_case(expected_s) {
                             return Err(EngineError::ChecksumMismatch {
-                                tile: parse_tile_rel_path(rel)
-                                    .unwrap_or_else(|| TileCoord::new(0, 0, 0)),
+                                tile: coord_for_manifest_rel(plan, rel),
                                 expected: expected_s.to_string(),
                                 got,
                             });
@@ -381,7 +385,7 @@ pub fn verify_from_strip_source(
                     crate::streaming::extract_tile_from_strip(&current, plan, coord, 0, bg)?;
                 let expected_bytes = expected.data();
 
-                let (abs, ext) = match find_tile_on_disk(root, plan, coord) {
+                let (abs, ext) = match find_tile_on_disk(root, plan, coord, &active_exts) {
                     Some(found) => found,
                     None => {
                         return Err(EngineError::Sink(SinkError::Other(format!(
@@ -462,7 +466,23 @@ pub fn verify_from_strip_source(
 // kept file-local so this module can be built without touching the engine.
 // ---------------------------------------------------------------------------
 
-/// Locate a tile on disk by probing the candidate extensions.
+/// The tile-file extensions to probe for the sink's active on-disk format.
+///
+/// A previous run in a different format can leave a stale sibling file (e.g. a
+/// `.png` when this run writes `.raw`); probing every extension and taking the
+/// first hit would validate that stale file and let a missing active-format
+/// tile pass. When the sink pins a concrete format we probe only it; a
+/// transparent wrapper that reports `None` falls back to every known extension
+/// (issue #139).
+fn active_candidate_exts(sink: &dyn TileSink) -> Vec<&'static str> {
+    match sink.content_format() {
+        Some(crate::sink::TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"],
+        Some(fmt) => vec![fmt.extension()],
+        None => CANDIDATE_EXTS.to_vec(),
+    }
+}
+
+/// Locate a tile on disk by probing `exts` in order.
 ///
 /// Returns `Some((absolute_path, extension))` for the first candidate that
 /// exists as a regular file, or `None` if none match.
@@ -470,8 +490,9 @@ fn find_tile_on_disk(
     root: &std::path::Path,
     plan: &PyramidPlan,
     coord: TileCoord,
+    exts: &[&'static str],
 ) -> Option<(PathBuf, &'static str)> {
-    for ext in &CANDIDATE_EXTS {
+    for ext in exts {
         if let Some(rel) = plan.tile_path(coord, ext) {
             let abs = root.join(&rel);
             if abs.is_file() {
@@ -480,6 +501,28 @@ fn find_tile_on_disk(
         }
     }
     None
+}
+
+/// Resolve the [`TileCoord`] a manifest tile key refers to, so a checksum
+/// mismatch is attributed to the offending tile instead of a fabricated
+/// `TileCoord(0, 0, 0)` (or a col/row-transposed coordinate).
+///
+/// The authoritative match scans the plan for the coordinate whose
+/// [`PyramidPlan::tile_path`] equals the key; this is exact for every layout,
+/// including Google (`{level}/{row}/{col}`), which the layout-agnostic
+/// [`parse_tile_rel_path`] would otherwise transpose. The structural parse is
+/// kept only as a fallback for a foreign key the plan does not produce (issue
+/// #139).
+fn coord_for_manifest_rel(plan: &PyramidPlan, rel: &str) -> TileCoord {
+    let normalized = rel.replace('\\', "/");
+    for coord in plan.tile_coords() {
+        for ext in CANDIDATE_EXTS {
+            if plan.tile_path(coord, ext).is_some_and(|p| p == normalized) {
+                return coord;
+            }
+        }
+    }
+    parse_tile_rel_path(rel).unwrap_or_else(|| TileCoord::new(0, 0, 0))
 }
 
 /// Resolve the on-disk checkpoint root, preferring the config override.

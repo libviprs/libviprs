@@ -66,7 +66,7 @@ pub enum EngineEvent {
     /// A tile was produced and sent to the sink.
     TileCompleted { coord: TileCoord },
     /// A tile failed terminally and was skipped under
-    /// [`FailurePolicy::RetryThenSkip`](crate::engine::FailurePolicy).
+    /// [`FailurePolicy::RetryThenSkip`](crate::retry::FailurePolicy::RetryThenSkip).
     ///
     /// Emitted *instead of* [`TileCompleted`](Self::TileCompleted): a tile
     /// that failed every retry produced no output, so reporting it as
