@@ -192,7 +192,7 @@ impl<'a> RasterStripSource<'a> {
 
 impl<'a> StripSource for RasterStripSource<'a> {
     fn render_strip(&self, y_offset: u32, height: u32) -> Result<Raster, EngineError> {
-        let h = height.min(self.raster.height() - y_offset);
+        let h = height.min(self.raster.height().saturating_sub(y_offset));
         self.raster
             .extract(0, y_offset, self.raster.width(), h)
             .map_err(EngineError::from)
@@ -1331,9 +1331,14 @@ pub(crate) fn obtain_canvas_strip(
             Raster::new(cw, height, format, data).map_err(EngineError::from)
         }
     } else {
-        // DeepZoom/Xyz: strip is in image space, width = source width
+        // DeepZoom/Xyz: strip is in image space, width = source width.
+        // Guard the subtraction: a caller-supplied plan taller than the source
+        // (the public builder accepts plan and source independently) would make
+        // `y` exceed `src_h`, underflowing `src_h - y` — a debug panic and a
+        // release wrap-to-huge that only surfaces downstream. Saturating to 0
+        // yields a typed error from `render_strip`, matching the Google branch.
         let src_h = source.height();
-        let avail_h = (src_h - y).min(height);
+        let avail_h = src_h.saturating_sub(y).min(height);
         source.render_strip(y, avail_h)
     }
 }
@@ -2278,6 +2283,60 @@ mod single_level_tests {
         assert!(
             !sink.tiles().is_empty(),
             "single-level plan should still emit its top-level tile(s)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strip-path u32 subtraction underflow guards (issue #110)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod strip_underflow_guard_tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+
+    fn solid(w: u32, h: u32) -> Raster {
+        let data = vec![0u8; w as usize * h as usize * 3];
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    // `RasterStripSource::render_strip` with a `y_offset` past the source height
+    // must not underflow `raster.height() - y_offset`. Before the guard this
+    // panicked in debug and wrapped to a huge value in release; now it saturates
+    // to a zero-height request and surfaces a typed error.
+    #[test]
+    fn raster_strip_source_offset_beyond_height_errors_without_panic() {
+        let src = solid(10, 10);
+        let source = RasterStripSource::new(&src);
+        // y_offset > height: unguarded `10 - 20` underflows.
+        let result = source.render_strip(20, 5);
+        assert!(
+            result.is_err(),
+            "out-of-range y_offset must yield a typed error, not a panic/wrap"
+        );
+    }
+
+    // The DeepZoom/Xyz branch of `obtain_canvas_strip` subtracts `src_h - y`
+    // without a guard. A plan taller than the source drives `y` past `src_h`;
+    // the subtraction must saturate rather than underflow-panic (debug) or
+    // wrap to a huge strip height (release).
+    #[test]
+    fn deepzoom_obtain_canvas_strip_y_beyond_source_errors_without_panic() {
+        let src = solid(8, 8);
+        let source = RasterStripSource::new(&src);
+        let plan = PyramidPlanner::new(8, 8, 8, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = EngineConfig::default();
+        // y past the source height: unguarded `8 - 13` underflows.
+        let result = obtain_canvas_strip(&source, &plan, 13, 4, &config);
+        assert!(
+            result.is_err(),
+            "y beyond source height must yield a typed error, not a panic/wrap"
         );
     }
 }
