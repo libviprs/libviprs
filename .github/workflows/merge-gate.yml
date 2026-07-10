@@ -27,3 +27,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
+
+  pdfium-source:
+    name: pdfium-render source audit (#149)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Fail the release gate if the pdfium-render thread-safety fork is not
+      # resolved from the libviprs git source (i.e. the [patch.crates-io] was
+      # dropped and the unpatched, segfault-prone wrapper would be linked).
+      - run: bash scripts/audit-pdfium-source.sh . -- --features pdfium
