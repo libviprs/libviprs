@@ -22,31 +22,28 @@
 //!
 //! # Per-tile operation: current shape and roadmap
 //!
-//! Every engine kind hardwires exactly one per-level transform today — the
+//! Every engine kind applies exactly one per-level transform today: the
 //! 2×2 box-filter downscale ([`resize::downscale_half`](crate::resize::downscale_half))
-//! followed by tile extraction. That level-walk is duplicated across the
-//! three engine drivers (`engine.rs`, `streaming.rs`,
-//! `streaming_mapreduce.rs`) plus the two read-only verify walks
-//! (`verify.rs`, `stream_verify.rs`). There is intentionally no operation
-//! abstraction yet: pyramid generation is the crate's sole pipeline shape.
+//! followed by tile extraction. The full-level cascade that applies it lives
+//! in one place, the crate-internal `level_walk::walk_levels_down`, whose
+//! `step` closure is the tile-operation parameter (issue #138). The live
+//! monolithic run, both read-only verify walks, and the streaming engines'
+//! monolithic flush (shared by the sequential and MapReduce drivers via
+//! `streaming::flush_monolithic_levels` / `flush_unpaired_accumulators`) all
+//! delegate to it; the per-strip halving inside the streaming strip loops
+//! and `streaming::propagate_down` is a strip transform and intentionally
+//! stays separate.
 //!
-//! **Roadmap for a second per-tile operation** (rotate, sharpen, colour
-//! transform, …), so the walks change once rather than in lockstep:
+//! **Remaining roadmap for a second per-tile operation** (rotate, sharpen,
+//! colour transform, …):
 //!
-//! 1. Introduce a `TileOp` trait (`fn apply(&self, level: &Raster) ->
-//!    Result<Raster, RasterError>`) with a `DownscaleHalf` unit implementation
-//!    that wraps today's behaviour, keeping the default pipeline byte-for-byte
-//!    identical.
-//! 2. Thread a `&dyn TileOp` (defaulting to `DownscaleHalf`) into a single
-//!    shared `walk_levels(source, plan, op, emit)` helper, and rewrite each of
-//!    the five call sites to delegate to it — collapsing the duplicated walk
-//!    to one definition parameterised by the operation.
-//! 3. Surface the operation on this builder via a `with_tile_op` setter,
+//! 1. Name the operation as a `TileOp` trait (`fn apply(&self, level:
+//!    &Raster) -> Result<Raster, RasterError>`) with a `DownscaleHalf` unit
+//!    implementation wrapping today's behaviour, and pass it through the
+//!    existing `step` hook of `walk_levels_down` (plus the strip-transform
+//!    sites, which must apply the same operation for parity).
+//! 2. Surface the operation on this builder via a `with_tile_op` setter,
 //!    carried alongside the existing config knobs.
-//!
-//! Steps 1–2 span the engine drivers and the shared verify walks, so they land
-//! as a dedicated cross-module change; this builder is where step 3 (the
-//! caller-facing setter) will attach once the shared walk exists.
 
 use std::sync::Arc;
 
