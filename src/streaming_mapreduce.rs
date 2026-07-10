@@ -37,13 +37,13 @@ use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::raster::Raster;
-use crate::resize;
 use crate::sink::{Tile, TileSink};
 #[cfg(test)]
 use crate::streaming::RasterStripSource;
 use crate::streaming::{
-    StripSource, compute_strip_height, emit_full_level_tiles, emit_strip_tiles,
-    fill_background_rows, find_monolithic_threshold, obtain_canvas_strip, propagate_down,
+    StripSource, compute_strip_height, downscale_strip_tracked, emit_strip_tiles,
+    find_monolithic_threshold, flush_monolithic_levels, flush_unpaired_accumulators,
+    obtain_canvas_strip, propagate_down,
 };
 
 /// Configuration for the MapReduce streaming engine.
@@ -526,8 +526,6 @@ pub(crate) fn generate_pyramid_mapreduce(
                 total_strips,
             });
 
-            let strip_bytes = strip.data().len() as u64;
-
             // Emit tiles at the top level
             let (tp, ts_skip) = if config.tile_concurrency > 0 {
                 emit_strip_tiles_parallel(
@@ -554,11 +552,9 @@ pub(crate) fn generate_pyramid_mapreduce(
             tiles_skipped += ts_skip;
             batch_tiles += tp;
 
-            // Downscale for reduce propagation
-            let half = resize::downscale_half(&strip)?;
-            tracker.dealloc(strip_bytes);
-            let half_bytes = half.data().len() as u64;
-            tracker.alloc(half_bytes);
+            // Downscale for reduce propagation, transferring the strip's
+            // memory charge to the half-strip.
+            let half = downscale_strip_tracked(&strip, &tracker)?;
 
             // Propagate half-strip into lower levels.
             //
@@ -597,117 +593,33 @@ pub(crate) fn generate_pyramid_mapreduce(
     // ===================================================================
     // Phase 2: Flush unpaired strip accumulators
     // ===================================================================
-    for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
-        if let Some(leftover) = accumulators[level_idx].take() {
-            // The leftover was charged when stored as an unpaired first half.
-            let leftover_bytes = leftover.data().len() as u64;
-            let (_, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(plan.levels[level_idx].level)
-            } else {
-                (plan.levels[level_idx].width, plan.levels[level_idx].height)
-            };
-            let leftover_y = lh.saturating_sub(leftover.height());
-
-            let (tp, ts_skip) = emit_strip_tiles(
-                &leftover,
-                plan,
-                level_idx as u32,
-                leftover_y,
-                sink,
-                &engine_cfg,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            if level_idx > 0 {
-                let further_half = resize::downscale_half(&leftover)?;
-                let further_bytes = further_half.data().len() as u64;
-                // Honour `propagate_down`'s caller-charges-the-buffer contract
-                // (issue #109): the callee releases this charge once consumed.
-                tracker.alloc(further_bytes);
-                propagate_down(
-                    further_half,
-                    level_idx - 1,
-                    leftover_y / 2,
-                    &mut accumulators,
-                    &mut mono_accumulators,
-                    monolithic_threshold,
-                    plan,
-                    sink,
-                    &engine_cfg,
-                    observer,
-                    &tracker,
-                    &mut tiles_produced,
-                    &mut tiles_skipped,
-                )?;
-            }
-
-            // The leftover buffer is dropped here; release its charge.
-            drop(leftover);
-            tracker.dealloc(leftover_bytes);
-        }
-    }
+    flush_unpaired_accumulators(
+        &mut accumulators,
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        sink,
+        &engine_cfg,
+        observer,
+        &tracker,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // ===================================================================
     // Phase 3: Monolithic flush — assemble and emit small levels
     // ===================================================================
-    {
-        let top_mono = monolithic_threshold.min(plan.levels.len() - 1);
-        let mut prev_raster: Option<Raster> = None;
-
-        for level_idx in (0..=top_mono).rev() {
-            let level = &plan.levels[level_idx];
-            let (lw, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(level.level)
-            } else {
-                (level.width, level.height)
-            };
-            if lw == 0 || lh == 0 {
-                continue;
-            }
-
-            let raster = if let Some(prev) = prev_raster.take() {
-                resize::downscale_half(&prev)?
-            } else {
-                let mut acc_data = std::mem::take(&mut mono_accumulators[level_idx]);
-                if acc_data.is_empty() {
-                    continue;
-                }
-                let expected = lw as usize * lh as usize * bpp;
-
-                if acc_data.len() > expected {
-                    acc_data.truncate(expected);
-                }
-                if acc_data.len() < expected {
-                    let filled_rows = acc_data.len() / (lw as usize * bpp);
-                    acc_data.resize(expected, 0);
-                    fill_background_rows(
-                        &mut acc_data,
-                        filled_rows,
-                        lw,
-                        lh,
-                        bpp,
-                        engine_cfg.background_rgb,
-                    );
-                }
-                Raster::new(lw, lh, format, acc_data)?
-            };
-
-            let (tp, ts_skip) = emit_full_level_tiles(
-                &raster,
-                plan,
-                level_idx as u32,
-                sink,
-                &engine_cfg,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            prev_raster = Some(raster);
-        }
-    }
+    flush_monolithic_levels(
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        format,
+        sink,
+        &engine_cfg,
+        observer,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // Emit LevelCompleted for all levels
     for level in &plan.levels {

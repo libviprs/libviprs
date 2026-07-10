@@ -1038,10 +1038,7 @@ pub(crate) fn generate_pyramid_streaming(
         // Step 3: Downscale the strip with the 2×2 box filter, producing
         // a half-strip at the next level. Free the original strip's memory
         // charge before accounting the new one.
-        let half = resize::downscale_half(&strip)?;
-        tracker.dealloc(strip_bytes);
-        let half_bytes = half.data().len() as u64;
-        tracker.alloc(half_bytes);
+        let half = downscale_strip_tracked(&strip, &tracker)?;
 
         // Step 4: Push the half-strip into the recursive propagation tree.
         // It will be paired with another half-strip at the next level, or
@@ -1076,150 +1073,33 @@ pub(crate) fn generate_pyramid_streaming(
     // ===================================================================
     // Phase 2: Flush unpaired strip accumulators
     // ===================================================================
-    //
-    // When the canvas height isn't evenly divisible by the strip height,
-    // the last half-strip at some levels arrives without a partner. These
-    // leftovers sit in `accumulators[level_idx]` and must be emitted and
-    // propagated before the monolithic flush.
-    //
-    // Process from highest to lowest so that propagation feeds data into
-    // levels below, which may themselves be monolithic.
-    for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
-        if let Some(leftover) = accumulators[level_idx].take() {
-            // The leftover was charged when it was stored as an unpaired first
-            // half; it is still charged now.
-            let leftover_bytes = leftover.data().len() as u64;
-            // The leftover covers the bottom slice of this level. Its Y
-            // position is the level height minus the strip's own height.
-            let (_, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(plan.levels[level_idx].level)
-            } else {
-                (plan.levels[level_idx].width, plan.levels[level_idx].height)
-            };
-            let leftover_y = lh.saturating_sub(leftover.height());
-
-            let (tp, ts_skip) = emit_strip_tiles(
-                &leftover,
-                plan,
-                level_idx as u32,
-                leftover_y,
-                sink,
-                &config.engine,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            // Continue the downscale chain into lower levels
-            if level_idx > 0 {
-                let further_half = resize::downscale_half(&leftover)?;
-                let further_bytes = further_half.data().len() as u64;
-                // Charge the downscaled half before handing it down (the
-                // caller-charges-the-buffer contract of `propagate_down`).
-                // `leftover` is still live during the downscale, so the peak
-                // captures both.
-                tracker.alloc(further_bytes);
-                propagate_down(
-                    further_half,
-                    level_idx - 1,
-                    leftover_y / 2,
-                    &mut accumulators,
-                    &mut mono_accumulators,
-                    monolithic_threshold,
-                    plan,
-                    sink,
-                    &config.engine,
-                    observer,
-                    &tracker,
-                    &mut tiles_produced,
-                    &mut tiles_skipped,
-                )?;
-            }
-
-            // The leftover buffer is dropped at the end of this block; release
-            // its charge.
-            drop(leftover);
-            tracker.dealloc(leftover_bytes);
-        }
-    }
+    flush_unpaired_accumulators(
+        &mut accumulators,
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        sink,
+        &config.engine,
+        observer,
+        &tracker,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // ===================================================================
     // Phase 3: Monolithic flush — assemble and emit small levels
     // ===================================================================
-    //
-    // Only the topmost monolithic level has accumulated raw row data via
-    // propagate_down. All levels below it are empty — they are produced
-    // here by downscaling the level above, exactly as the monolithic
-    // engine does. This guarantees pixel-exact parity: each pixel goes
-    // through the same sequence of 2×2 box-filter averages regardless
-    // of whether the pyramid was built monolithically or via streaming.
-    {
-        let top_mono = monolithic_threshold.min(plan.levels.len() - 1);
-        let mut prev_raster: Option<Raster> = None;
-
-        // Walk from the largest monolithic level (top_mono) down to level 0
-        for level_idx in (0..=top_mono).rev() {
-            let level = &plan.levels[level_idx];
-            let (lw, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(level.level)
-            } else {
-                (level.width, level.height)
-            };
-            if lw == 0 || lh == 0 {
-                continue;
-            }
-
-            let raster = if let Some(prev) = prev_raster.take() {
-                // Produce this level by downscaling the level above,
-                // mirroring the monolithic engine's downscale chain
-                resize::downscale_half(&prev)?
-            } else {
-                // Topmost monolithic level — assemble from accumulated rows.
-                let mut acc_data = std::mem::take(&mut mono_accumulators[level_idx]);
-                if acc_data.is_empty() {
-                    continue;
-                }
-                let expected = lw as usize * lh as usize * bpp;
-
-                // The accumulated data may exceed the expected size when
-                // the source has odd dimensions and downscale_half produces
-                // div_ceil rows from each strip fragment. Truncate to the
-                // exact expected byte count.
-                if acc_data.len() > expected {
-                    acc_data.truncate(expected);
-                }
-                // Conversely, if the last strip was shorter than expected,
-                // pad remaining rows with the background colour.
-                if acc_data.len() < expected {
-                    let filled_rows = acc_data.len() / (lw as usize * bpp);
-                    acc_data.resize(expected, 0);
-                    fill_background_rows(
-                        &mut acc_data,
-                        filled_rows,
-                        lw,
-                        lh,
-                        bpp,
-                        config.engine.background_rgb,
-                    );
-                }
-                Raster::new(lw, lh, format, acc_data)?
-            };
-
-            let (tp, ts_skip) = emit_full_level_tiles(
-                &raster,
-                plan,
-                level_idx as u32,
-                sink,
-                &config.engine,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            // Retain this raster so the next iteration can downscale it
-            prev_raster = Some(raster);
-        }
-    }
+    flush_monolithic_levels(
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        format,
+        sink,
+        &config.engine,
+        observer,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // Emit LevelCompleted for all levels
     for level in &plan.levels {
@@ -1291,6 +1171,211 @@ pub(crate) fn find_monolithic_threshold(
     }
     // Every level is larger than a strip — treat level 0 as monolithic anyway
     0
+}
+
+/// Full-level pixel dimensions for `level_idx`: the padded canvas size for
+/// Google layout, the recorded level size otherwise.
+fn level_dims(plan: &PyramidPlan, level_idx: usize) -> (u32, u32) {
+    if plan.layout == Layout::Google {
+        plan.canvas_size_at_level(plan.levels[level_idx].level)
+    } else {
+        (plan.levels[level_idx].width, plan.levels[level_idx].height)
+    }
+}
+
+/// Downscale a strip with the shared tile operation
+/// ([`resize::downscale_half`]) and transfer its memory-tracker charge to
+/// the resulting half-strip.
+///
+/// Shared by the sequential streaming strip loop and the MapReduce reduce
+/// loop; both charge the strip before calling and hand the returned half to
+/// [`propagate_down`] (whose caller-charges-the-buffer contract the `alloc`
+/// here satisfies).
+pub(crate) fn downscale_strip_tracked(
+    strip: &Raster,
+    tracker: &MemoryTracker,
+) -> Result<Raster, RasterError> {
+    let strip_bytes = strip.data().len() as u64;
+    let half = resize::downscale_half(strip)?;
+    tracker.dealloc(strip_bytes);
+    tracker.alloc(half.data().len() as u64);
+    Ok(half)
+}
+
+/// Phase 2 of the streaming engines: flush unpaired strip accumulators.
+///
+/// When the canvas height isn't evenly divisible by the strip height, the
+/// last half-strip at some levels arrives without a partner. These leftovers
+/// sit in `accumulators[level_idx]` and must be emitted and propagated
+/// before the monolithic flush.
+///
+/// Processes from highest to lowest so that propagation feeds data into
+/// levels below, which may themselves be monolithic. Shared verbatim by the
+/// sequential streaming engine and the MapReduce engine (issue #138).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flush_unpaired_accumulators(
+    accumulators: &mut Vec<Option<Raster>>,
+    mono_accumulators: &mut Vec<Vec<u8>>,
+    monolithic_threshold: usize,
+    plan: &PyramidPlan,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    tracker: &MemoryTracker,
+    tiles_produced: &mut u64,
+    tiles_skipped: &mut u64,
+) -> Result<(), EngineError> {
+    for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
+        if let Some(leftover) = accumulators[level_idx].take() {
+            // The leftover was charged when it was stored as an unpaired first
+            // half; it is still charged now.
+            let leftover_bytes = leftover.data().len() as u64;
+            // The leftover covers the bottom slice of this level. Its Y
+            // position is the level height minus the strip's own height.
+            let (_, lh) = level_dims(plan, level_idx);
+            let leftover_y = lh.saturating_sub(leftover.height());
+
+            let (tp, ts_skip) = emit_strip_tiles(
+                &leftover,
+                plan,
+                level_idx as u32,
+                leftover_y,
+                sink,
+                config,
+                observer,
+            )?;
+            *tiles_produced += tp;
+            *tiles_skipped += ts_skip;
+
+            // Continue the downscale chain into lower levels
+            if level_idx > 0 {
+                let further_half = resize::downscale_half(&leftover)?;
+                let further_bytes = further_half.data().len() as u64;
+                // Charge the downscaled half before handing it down (the
+                // caller-charges-the-buffer contract of `propagate_down`,
+                // issue #109). `leftover` is still live during the downscale,
+                // so the peak captures both.
+                tracker.alloc(further_bytes);
+                propagate_down(
+                    further_half,
+                    level_idx - 1,
+                    leftover_y / 2,
+                    accumulators,
+                    mono_accumulators,
+                    monolithic_threshold,
+                    plan,
+                    sink,
+                    config,
+                    observer,
+                    tracker,
+                    tiles_produced,
+                    tiles_skipped,
+                )?;
+            }
+
+            // The leftover buffer is dropped at the end of this block; release
+            // its charge.
+            drop(leftover);
+            tracker.dealloc(leftover_bytes);
+        }
+    }
+    Ok(())
+}
+
+/// Phase 3 of the streaming engines: assemble and emit the monolithic
+/// (small) levels.
+///
+/// Only the topmost monolithic level has accumulated raw row data via
+/// [`propagate_down`]. All levels below it are produced here by downscaling
+/// the level above with the shared level walk
+/// ([`crate::level_walk::walk_levels_down`]), exactly as the monolithic
+/// engine does. This guarantees pixel-exact parity: each pixel goes through
+/// the same sequence of 2×2 box-filter averages regardless of whether the
+/// pyramid was built monolithically or via streaming. Shared verbatim by the
+/// sequential streaming engine and the MapReduce engine (issue #138).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flush_monolithic_levels(
+    mono_accumulators: &mut [Vec<u8>],
+    monolithic_threshold: usize,
+    plan: &PyramidPlan,
+    format: PixelFormat,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    tiles_produced: &mut u64,
+    tiles_skipped: &mut u64,
+) -> Result<(), EngineError> {
+    let bpp = format.bytes_per_pixel();
+    let top_mono = monolithic_threshold.min(plan.levels.len() - 1);
+
+    // Locate the topmost monolithic level with accumulated data and
+    // assemble its full raster. Levels above it (empty accumulator, or the
+    // degenerate zero-dimension case) produce nothing, exactly as before
+    // the extraction: the pre-#138 loop `continue`d past them until the
+    // first level whose accumulator held rows.
+    let mut base: Option<(usize, Raster)> = None;
+    for level_idx in (0..=top_mono).rev() {
+        let (lw, lh) = level_dims(plan, level_idx);
+        if lw == 0 || lh == 0 {
+            continue;
+        }
+        let mut acc_data = std::mem::take(&mut mono_accumulators[level_idx]);
+        if acc_data.is_empty() {
+            continue;
+        }
+        let expected = lw as usize * lh as usize * bpp;
+
+        // The accumulated data may exceed the expected size when the source
+        // has odd dimensions and downscale_half produces div_ceil rows from
+        // each strip fragment. Truncate to the exact expected byte count.
+        if acc_data.len() > expected {
+            acc_data.truncate(expected);
+        }
+        // Conversely, if the last strip was shorter than expected, pad
+        // remaining rows with the background colour.
+        if acc_data.len() < expected {
+            let filled_rows = acc_data.len() / (lw as usize * bpp);
+            acc_data.resize(expected, 0);
+            fill_background_rows(
+                &mut acc_data,
+                filled_rows,
+                lw,
+                lh,
+                bpp,
+                config.background_rgb,
+            );
+        }
+        base = Some((level_idx, Raster::new(lw, lh, format, acc_data)?));
+        break;
+    }
+    let Some((base_idx, base_raster)) = base else {
+        return Ok(());
+    };
+
+    // Walk from the assembled base level down to level 0, producing each
+    // lower level by downscaling the level above (the shared tile op).
+    crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+        base_raster,
+        base_idx + 1,
+        |_| Ok(()),
+        |_, prev| Ok(resize::downscale_half(&prev)?),
+        |level_idx, raster| {
+            // Defensive guard carried over from the pre-#138 loop: a level
+            // with zero pixel dimensions emits nothing. Below a non-empty
+            // base this is unreachable (level sizes halve with div_ceil, so
+            // they never drop below 1×1).
+            let (lw, lh) = level_dims(plan, level_idx);
+            if lw == 0 || lh == 0 {
+                return Ok(());
+            }
+            let (tp, ts_skip) =
+                emit_full_level_tiles(raster, plan, level_idx as u32, sink, config, observer)?;
+            *tiles_produced += tp;
+            *tiles_skipped += ts_skip;
+            Ok(())
+        },
+    )?;
+    Ok(())
 }
 
 /// Obtain a horizontal strip in canvas coordinate space.

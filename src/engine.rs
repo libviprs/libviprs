@@ -463,7 +463,6 @@ fn run_pyramid(
     // trait impl is a no-op, so unaware sinks silently ignore the hint.
     sink.init_level_count(plan.levels.len());
 
-    let top_level = plan.levels.len() - 1;
     let mut tiles_produced: u64 = 0;
     let mut tiles_skipped: u64 = 0;
     let bytes_read = source.data().len() as u64;
@@ -483,7 +482,7 @@ fn run_pyramid(
     // downscaled level-by-level. This ensures boundary pixels are averaged
     // correctly instead of computing per-level offsets that diverge due to
     // integer rounding.
-    let mut current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
+    let current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
         let canvas = embed_in_canvas(source, plan, config.background_rgb)?;
         let canvas_bytes = canvas.data().len() as u64;
         tracker.alloc(canvas_bytes);
@@ -503,59 +502,76 @@ fn run_pyramid(
         stage_sink: &stage_sink,
     };
 
-    // Process from top level (full res) down to level 0 (1×1)
-    for level_idx in (0..plan.levels.len()).rev() {
-        // Cooperative cancellation: stop cleanly at the level boundary before
-        // committing to (potentially expensive) downscale + tile emission.
-        config.check_cancelled()?;
-        let level = &plan.levels[level_idx];
-        #[cfg(feature = "tracing")]
-        let _level_span = tracing::info_span!(
-            target: "libviprs",
-            "level",
-            level_index = level.level
-        )
-        .entered();
+    // Process from top level (full res) down to level 0 (1×1). The walk
+    // skeleton (descending levels, one tile-op step between adjacent levels,
+    // top level never stepped) lives in `level_walk::walk_levels_down`,
+    // shared with the verify walks and the streaming engines' monolithic
+    // flush. This site parameterizes it with the timed, memory-tracked
+    // downscale and live tile emission.
+    let current = crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+        current,
+        plan.levels.len(),
+        // Enter: cooperative cancellation at the level boundary (before
+        // committing to a potentially expensive downscale + tile emission),
+        // then LevelStarted. The tracing span rides in the returned guard so
+        // it covers the step and emit phases exactly as before.
+        |level_idx| {
+            config.check_cancelled()?;
+            let level = &plan.levels[level_idx];
+            #[cfg(feature = "tracing")]
+            let level_span = tracing::info_span!(
+                target: "libviprs",
+                "level",
+                level_index = level.level
+            )
+            .entered();
 
-        observer.on_event(EngineEvent::LevelStarted {
-            level: level.level,
-            width: level.width,
-            height: level.height,
-            tile_count: level.tile_count(),
-        });
-
-        // Downscale if not at the top level.
-        // Uses downscale_half (2x2 box filter) to match libvips's
-        // region-shrink=mean algorithm. Each level is ceil(prev/2).
-        if level_idx < top_level {
-            let old_bytes = current.data().len() as u64;
+            observer.on_event(EngineEvent::LevelStarted {
+                level: level.level,
+                width: level.width,
+                height: level.height,
+                tile_count: level.tile_count(),
+            });
+            #[cfg(feature = "tracing")]
+            return Ok(level_span);
+            #[cfg(not(feature = "tracing"))]
+            Ok(())
+        },
+        // Step: the tile operation. Uses downscale_half (2x2 box filter) to
+        // match libvips's region-shrink=mean algorithm. Each level is
+        // ceil(prev/2).
+        |_, prev| {
+            let old_bytes = prev.data().len() as u64;
             let resize_start = Instant::now();
-            current = resize::downscale_half(&current)?;
+            let next = resize::downscale_half(&prev)?;
             stage_resize.fetch_add(resize_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let new_bytes = current.data().len() as u64;
+            let new_bytes = next.data().len() as u64;
             // Track: freed old level, allocated new
             tracker.dealloc(old_bytes);
             tracker.alloc(new_bytes);
-        }
+            Ok(next)
+        },
+        // Emit: extract and emit tiles for this level.
+        |level_idx, current| {
+            let (level_tiles, level_skipped) = extract_and_emit_level(
+                current,
+                plan,
+                level_idx as u32,
+                sink,
+                config,
+                observer,
+                &ctx,
+            )?;
+            tiles_produced += level_tiles;
+            tiles_skipped += level_skipped;
 
-        // Extract and emit tiles for this level
-        let (level_tiles, level_skipped) = extract_and_emit_level(
-            &current,
-            plan,
-            level_idx as u32,
-            sink,
-            config,
-            observer,
-            &ctx,
-        )?;
-        tiles_produced += level_tiles;
-        tiles_skipped += level_skipped;
-
-        observer.on_event(EngineEvent::LevelCompleted {
-            level: level.level,
-            tiles_produced: level_tiles,
-        });
-    }
+            observer.on_event(EngineEvent::LevelCompleted {
+                level: plan.levels[level_idx].level,
+                tiles_produced: level_tiles,
+            });
+            Ok(())
+        },
+    )?;
 
     // Free last raster from tracking
     tracker.dealloc(current.data().len() as u64);
@@ -1172,96 +1188,105 @@ pub fn raster_verify(
         })
         .unwrap_or_default();
 
-    let mut current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
+    let current = if plan.centre && (plan.centre_offset_x > 0 || plan.centre_offset_y > 0) {
         embed_in_canvas(source, plan, bg)?
     } else {
         source.clone()
     };
-    let top_level = plan.levels.len() - 1;
 
-    for level_idx in (0..plan.levels.len()).rev() {
-        let level = &plan.levels[level_idx];
-        if level_idx < top_level {
-            current = resize::downscale_half(&current)?;
-        }
-        observer.on_event(EngineEvent::LevelStarted {
-            level: level.level,
-            width: level.width,
-            height: level.height,
-            tile_count: level.tile_count(),
-        });
-        for row in 0..level.rows {
-            for col in 0..level.cols {
-                let coord = TileCoord::new(level_idx as u32, col, row);
-                observer.on_event(EngineEvent::TileCompleted { coord });
-                let expected = extract_tile(&current, plan, coord, bg)?;
-                let expected_bytes = expected.data();
+    // The walk skeleton is the shared `level_walk::walk_levels_down`; this
+    // verify site parameterizes it with the plain (untimed, untracked)
+    // downscale and a per-tile byte comparison instead of tile emission.
+    crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+        current,
+        plan.levels.len(),
+        |_| Ok(()),
+        // Step: the same tile op the live run applies, so the regenerated
+        // pyramid is byte-identical to what the engine wrote.
+        |_, prev| Ok(resize::downscale_half(&prev)?),
+        |level_idx, current| {
+            let level = &plan.levels[level_idx];
+            observer.on_event(EngineEvent::LevelStarted {
+                level: level.level,
+                width: level.width,
+                height: level.height,
+                tile_count: level.tile_count(),
+            });
+            for row in 0..level.rows {
+                for col in 0..level.cols {
+                    let coord = TileCoord::new(level_idx as u32, col, row);
+                    observer.on_event(EngineEvent::TileCompleted { coord });
+                    let expected = extract_tile(current, plan, coord, bg)?;
+                    let expected_bytes = expected.data();
 
-                // Find the on-disk file via the candidate extensions.
-                let mut found: Option<(std::path::PathBuf, String)> = None;
-                for ext in &candidate_exts {
-                    if let Some(rel) = plan.tile_path(coord, ext) {
-                        let abs = root.join(&rel);
-                        if abs.is_file() {
-                            found = Some((abs, (*ext).to_string()));
-                            break;
+                    // Find the on-disk file via the candidate extensions.
+                    let mut found: Option<(std::path::PathBuf, String)> = None;
+                    for ext in &candidate_exts {
+                        if let Some(rel) = plan.tile_path(coord, ext) {
+                            let abs = root.join(&rel);
+                            if abs.is_file() {
+                                found = Some((abs, (*ext).to_string()));
+                                break;
+                            }
                         }
                     }
-                }
-                let (abs, ext) = match found {
-                    Some(f) => f,
-                    None => {
-                        return Err(EngineError::Sink(SinkError::Other(format!(
-                            "Verify: missing tile for coord {:?}",
-                            coord
-                        ))));
-                    }
-                };
+                    let (abs, ext) = match found {
+                        Some(f) => f,
+                        None => {
+                            return Err(EngineError::Sink(SinkError::Other(format!(
+                                "Verify: missing tile for coord {:?}",
+                                coord
+                            ))));
+                        }
+                    };
 
-                let on_disk =
-                    std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
+                    let on_disk =
+                        std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
 
-                if ext == "raw" {
-                    if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
-                        // A 1-byte placeholder: either a blank-tile marker
-                        // (`BlankTileStrategy::Placeholder*`) or a dedupe
-                        // reference whose payload lives in `_shared/`. Validate
-                        // the regenerated tile's blankness / manifest reference
-                        // instead of byte-comparing the marker (issue #94).
-                        let is_dedupe_ref = plan
-                            .tile_path(coord, &ext)
-                            .is_some_and(|rel| blank_ref_paths.contains(&rel));
-                        if !is_dedupe_ref && !regenerated_tile_matches_marker(&expected, config) {
+                    if ext == "raw" {
+                        if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
+                            // A 1-byte placeholder: either a blank-tile marker
+                            // (`BlankTileStrategy::Placeholder*`) or a dedupe
+                            // reference whose payload lives in `_shared/`. Validate
+                            // the regenerated tile's blankness / manifest reference
+                            // instead of byte-comparing the marker (issue #94).
+                            let is_dedupe_ref = plan
+                                .tile_path(coord, &ext)
+                                .is_some_and(|rel| blank_ref_paths.contains(&rel));
+                            if !is_dedupe_ref && !regenerated_tile_matches_marker(&expected, config)
+                            {
+                                return Err(EngineError::ChecksumMismatch {
+                                    tile: coord,
+                                    expected: "blank tile (placeholder marker)".to_string(),
+                                    got: "regenerated tile is not blank".to_string(),
+                                });
+                            }
+                        } else if on_disk != expected_bytes {
+                            // Raw tiles are byte-exact: any mismatch (truncation,
+                            // flipped byte, padding drift) is corruption.
                             return Err(EngineError::ChecksumMismatch {
                                 tile: coord,
-                                expected: "blank tile (placeholder marker)".to_string(),
-                                got: "regenerated tile is not blank".to_string(),
+                                expected: format!("{} bytes (raw)", expected_bytes.len()),
+                                got: format!(
+                                    "{} bytes on disk differ from regenerated tile",
+                                    on_disk.len()
+                                ),
                             });
                         }
-                    } else if on_disk != expected_bytes {
-                        // Raw tiles are byte-exact: any mismatch (truncation,
-                        // flipped byte, padding drift) is corruption.
-                        return Err(EngineError::ChecksumMismatch {
-                            tile: coord,
-                            expected: format!("{} bytes (raw)", expected_bytes.len()),
-                            got: format!(
-                                "{} bytes on disk differ from regenerated tile",
-                                on_disk.len()
-                            ),
-                        });
                     }
+                    // Encoded tiles (png/jpeg) are not byte-exact against a fresh
+                    // encode due to encoder-state nondeterminism, so we keep the
+                    // existence check above and defer deep verification to the
+                    // manifest-checksum branch.
                 }
-                // Encoded tiles (png/jpeg) are not byte-exact against a fresh
-                // encode due to encoder-state nondeterminism, so we keep the
-                // existence check above and defer deep verification to the
-                // manifest-checksum branch.
             }
-        }
-        observer.on_event(EngineEvent::LevelCompleted {
-            level: level.level,
-            tiles_produced: level.tile_count(),
-        });
-    }
+            observer.on_event(EngineEvent::LevelCompleted {
+                level: level.level,
+                tiles_produced: level.tile_count(),
+            });
+            Ok(())
+        },
+    )?;
 
     observer.on_event(EngineEvent::Finished {
         total_tiles: plan.total_tile_count(),
