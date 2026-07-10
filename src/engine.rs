@@ -1296,7 +1296,14 @@ fn extract_and_emit_level(
                                 // Account the skip on the outermost sink so
                                 // it surfaces in EngineResult.
                                 sink.note_sink_skipped();
-                                observer.on_event(EngineEvent::TileCompleted { coord });
+                                // A tile that exhausted RetryThenSkip produced
+                                // no output; report it as TileFailed, never as
+                                // TileCompleted, so observers that pair
+                                // completions with sink writes stay consistent.
+                                observer.on_event(EngineEvent::TileFailed {
+                                    coord,
+                                    error: e.to_string(),
+                                });
                                 // Intentionally do NOT increment count here —
                                 // this tile did not produce output. But also
                                 // do not increment a skip counter tied to
@@ -1542,7 +1549,14 @@ fn extract_and_emit_parallel(
                     match &config.failure_policy {
                         FailurePolicy::RetryThenSkip(_) => {
                             sink.note_sink_skipped();
-                            observer.on_event(EngineEvent::TileCompleted { coord });
+                            // A tile that exhausted RetryThenSkip produced no
+                            // output; report it as TileFailed, never as
+                            // TileCompleted, so observers that pair completions
+                            // with sink writes stay consistent.
+                            observer.on_event(EngineEvent::TileFailed {
+                                coord,
+                                error: e.to_string(),
+                            });
                             continue;
                         }
                         _ => return Err(promote_sink_error(e)),
@@ -1991,6 +2005,105 @@ mod tests {
             assert_ne!(
                 skipped_all, skipped_none,
                 "concurrency={concurrency}: DedupeStrategy::All must differ from no dedupe"
+            );
+        }
+    }
+
+    /// Issue #128: a tile that terminally fails under `RetryThenSkip` must be
+    /// reported as [`EngineEvent::TileFailed`], never as
+    /// [`EngineEvent::TileCompleted`]. The failure/skip vocabulary landed in
+    /// #199; this pins the engine emission site — both the single-threaded and
+    /// the parallel consumer path — to actually emit it.
+    ///
+    /// Before the fix the `RetryThenSkip` arm emitted `TileCompleted` for the
+    /// dropped tile, so an observer pairing completions with sink writes
+    /// over-counted and never learned the tile failed (RED). After the fix the
+    /// dropped tile surfaces as `TileFailed { coord, error }` with a non-empty
+    /// error and no `TileCompleted` is emitted for it (GREEN).
+    #[test]
+    fn retry_then_skip_emits_tile_failed_not_completed() {
+        use crate::retry::{FailurePolicy, RetryPolicy};
+
+        // A sink that terminally fails writing exactly one coordinate and
+        // accepts every other tile, so we get a mix of failed and completed
+        // tiles in the same run.
+        struct FailCoordSink {
+            target: TileCoord,
+        }
+        impl TileSink for FailCoordSink {
+            fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+                if tile.coord == self.target {
+                    Err(SinkError::Other(
+                        "simulated terminal write failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let src = gradient_raster(512, 512);
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        // The top level is a 2×2 grid of tiles, so a single failing coord
+        // leaves sibling tiles that must still complete normally.
+        let top = (plan.levels.len() - 1) as u32;
+        let target = TileCoord::new(top, 1, 1);
+
+        // Cover both emission sites: single-threaded (concurrency == 0) and the
+        // parallel consumer loop (concurrency > 0).
+        for concurrency in [0usize, 4] {
+            let config = EngineConfig::default()
+                .with_concurrency(concurrency)
+                // `fail_fast` retry policy: no waiting, straight to the skip arm.
+                .with_failure_policy(FailurePolicy::RetryThenSkip(RetryPolicy::fail_fast()));
+            let sink = FailCoordSink { target };
+            let obs = CollectingObserver::new();
+
+            // The run itself succeeds — RetryThenSkip swallows the drop.
+            generate_pyramid_observed(&src, &plan, &sink, &config, &obs).unwrap();
+            let events = obs.events();
+
+            // The dropped tile must NOT be reported as completed.
+            assert!(
+                !events.iter().any(|e| matches!(
+                    e,
+                    EngineEvent::TileCompleted { coord } if *coord == target
+                )),
+                "concurrency={concurrency}: dropped tile {target:?} was emitted as \
+                 TileCompleted — violates issue #128"
+            );
+
+            // It must surface exactly once as TileFailed, carrying the error.
+            let failed: Vec<String> = events
+                .iter()
+                .filter_map(|e| match e {
+                    EngineEvent::TileFailed { coord, error } if *coord == target => {
+                        Some(error.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                failed.len(),
+                1,
+                "concurrency={concurrency}: expected exactly one TileFailed for {target:?}, \
+                 got {failed:?}"
+            );
+            assert!(
+                !failed[0].is_empty(),
+                "concurrency={concurrency}: TileFailed must carry a non-empty error description"
+            );
+
+            // Sibling tiles on the same level still complete normally.
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    EngineEvent::TileCompleted { coord }
+                        if coord.level == top && *coord != target
+                )),
+                "concurrency={concurrency}: sibling tiles should still emit TileCompleted"
             );
         }
     }
