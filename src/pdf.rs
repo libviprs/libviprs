@@ -49,9 +49,7 @@ pub enum PdfError {
     },
     #[error("unsupported page /Rotate value: {0} (must be a multiple of 90)")]
     UnsupportedRotation(i64),
-    #[error(
-        "render exceeds pixel budget: {pixels} px (width × height) > {budget} px ceiling"
-    )]
+    #[error("render exceeds pixel budget: {pixels} px (width × height) > {budget} px ceiling")]
     RenderBudgetExceeded { pixels: u64, budget: u64 },
     #[error("failed to allocate {bytes} bytes for render buffer")]
     AllocationFailed { bytes: usize },
@@ -677,12 +675,12 @@ fn cmyk_to_rgb_raster(cmyk_data: &[u8], width: u32, height: u32) -> Result<Raste
     // stream can never wrap `pixel_count * 4` (guard) or `pixel_count * 3`
     // (allocation) into a small value.
     let pixel_count = width as usize * height as usize;
-    let cmyk_len = pixel_count
-        .checked_mul(4)
-        .ok_or_else(|| PdfError::UnsupportedFormat(format!("CMYK size {width}x{height} overflows")))?;
-    let rgb_len = pixel_count
-        .checked_mul(3)
-        .ok_or_else(|| PdfError::UnsupportedFormat(format!("RGB size {width}x{height} overflows")))?;
+    let cmyk_len = pixel_count.checked_mul(4).ok_or_else(|| {
+        PdfError::UnsupportedFormat(format!("CMYK size {width}x{height} overflows"))
+    })?;
+    let rgb_len = pixel_count.checked_mul(3).ok_or_else(|| {
+        PdfError::UnsupportedFormat(format!("RGB size {width}x{height} overflows"))
+    })?;
     if cmyk_data.len() < cmyk_len {
         return Err(PdfError::Decode("CMYK data too short".to_string()));
     }
@@ -1491,8 +1489,7 @@ mod tests {
     /// input.
     #[test]
     fn budgeted_render_dpi_normal_page_uses_max_dpi() {
-        let (dpi_used, capped) =
-            budgeted_render_dpi(612.0, 792.0, 300, DEFAULT_MAX_RENDER_PIXELS);
+        let (dpi_used, capped) = budgeted_render_dpi(612.0, 792.0, 300, DEFAULT_MAX_RENDER_PIXELS);
         assert_eq!(dpi_used, 300);
         assert!(!capped, "a page within budget must not be capped");
     }

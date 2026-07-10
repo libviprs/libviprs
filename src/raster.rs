@@ -106,11 +106,12 @@ fn alloc_zeroed_checked(
         });
     }
     let mut data: Vec<u8> = Vec::new();
-    data.try_reserve_exact(size).map_err(|_| RasterError::AllocationFailed {
-        width,
-        height,
-        bytes: size,
-    })?;
+    data.try_reserve_exact(size)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes: size,
+        })?;
     data.resize(size, 0);
     Ok(data)
 }
