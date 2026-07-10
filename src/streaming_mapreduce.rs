@@ -353,8 +353,13 @@ pub(crate) fn generate_pyramid_mapreduce(
     } else {
         0
     };
-    let inflight =
-        compute_inflight_strips(plan, format, strip_height, channel_bytes, config.memory_budget_bytes);
+    let inflight = compute_inflight_strips(
+        plan,
+        format,
+        strip_height,
+        channel_bytes,
+        config.memory_budget_bytes,
+    );
 
     let ch = plan.canvas_height;
     let top_level = plan.levels.len() - 1;
@@ -809,7 +814,10 @@ mod tests {
         let k_no_channel = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, budget);
         let k_big_channel =
             compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 100_000_000, budget);
-        assert!(k_no_channel > 1, "test needs a case where several strips fit");
+        assert!(
+            k_no_channel > 1,
+            "test needs a case where several strips fit"
+        );
         assert!(k_big_channel <= k_no_channel);
         assert!(k_big_channel >= 1);
     }

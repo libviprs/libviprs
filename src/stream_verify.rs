@@ -113,12 +113,10 @@ pub(crate) fn verify_from_strip_source(
     // plan divergence surface structurally instead of as per-tile byte
     // mismatches.
     if let Some(meta) = crate::resume::JobCheckpoint::load(root)? {
-        let contract = crate::resume::PlanContract::from_engine(config, sink);
-        let expected = crate::resume::compute_plan_hash(plan, &contract);
-        if meta.plan_hash != expected {
+        if let Err(got) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
             return Err(EngineError::PlanHashMismatch {
                 expected: meta.plan_hash,
-                got: expected,
+                got,
             });
         }
     }
@@ -156,20 +154,19 @@ pub(crate) fn verify_from_strip_source(
                 // something to silently skip — otherwise a manifest stamped
                 // with a bogus algo would pass with zero digests checked
                 // (issue #95).
-                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str)
-                    .ok_or_else(|| {
+                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(
+                    || {
                         EngineError::Sink(SinkError::Other(format!(
                             "Verify: unknown checksum algorithm {algo_str:?} in manifest"
                         )))
-                    })?;
+                    },
+                )?;
                 {
                     // A recorded tile that is gone from disk is a verification
                     // failure, not something to skip — unless it is a
                     // manifest-referenced blank whose content lives in
                     // `_shared/` (issue #93).
-                    let blank_refs = manifest
-                        .get("blank_references")
-                        .and_then(|v| v.as_object());
+                    let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
                     for (rel, expected) in per_tile {
                         let Some(expected_s) = expected.as_str() else {
                             continue;
@@ -781,8 +778,7 @@ mod tests {
         let mut cfg = EngineConfig::default()
             .with_blank_tile_strategy(crate::engine::BlankTileStrategy::Placeholder);
         cfg.background_rgb = [7, 7, 7];
-        crate::engine::generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver)
-            .unwrap();
+        crate::engine::generate_pyramid_observed(&src, &plan, &sink, &cfg, &NoopObserver).unwrap();
 
         // Setup sanity: at least the first tile is a 1-byte marker on disk.
         let first = plan.tile_coords().next().unwrap();
