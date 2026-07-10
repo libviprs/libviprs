@@ -5,6 +5,23 @@ All notable changes to libviprs are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `WorkExecutor` trait, `StripWorkUnit`, `WorkContext`, and `LocalWorkExecutor`
+  in `streaming_mapreduce` (re-exported at the crate root): a plug-in seam at
+  the MapReduce MAP-phase strip dispatch, so an out-of-tree executor (process
+  pool, distributed worker layer) can substitute for the built-in in-process
+  rendering (issue #67). Installed via `EngineBuilder::with_executor(...)`;
+  the default `LocalWorkExecutor` is byte-identical to the previous engine.
+- `EngineKind::MapReduceHotCache`: a local-only MapReduce variant that holds
+  every produced tile in RAM and drains the caller's sink in one batched pass
+  at the end of the run, in canonical `(level, row, col)` order, followed by
+  a single `finish()` (issue #67). Byte-identical output to the streaming and
+  MapReduce engines; explicit opt-in only, never selected by
+  `EngineKind::Auto`.
+
 ## [0.3.1] — 2026-04-25
 
 Documentation-only patch: the README and crate-root rustdoc shipped on
