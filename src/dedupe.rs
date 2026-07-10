@@ -266,6 +266,21 @@ impl DedupeIndex {
         let shared_key = format!("blank_{hash_hex}");
         let shared_path = Self::shared_path(&shared_key, ext);
 
+        // `DedupeStrategy::None` is a true passthrough: every tile is written
+        // to its own file and no content is ever collapsed. We must therefore
+        // neither consult nor populate `seen`/`refs`, so two calls with
+        // identical bytes can never yield a `Reference` (issue #99). Returning
+        // `WriteNew` for every call tells the caller to write the tile verbatim
+        // at its planned path. `FsSink` guards this externally and never calls
+        // `record` under `None`, but `record` is public API and other consumers
+        // must not be silently deduplicated.
+        if self.strategy == DedupeStrategy::None {
+            return DedupeDecision::WriteNew {
+                shared_key,
+                shared_path,
+            };
+        }
+
         // Single lock: update `refs` and `seen` atomically so readers never
         // observe one populated without the other (Mara B5).
         let mut state = self.state.lock().expect("dedupe state mutex poisoned");
@@ -573,6 +588,37 @@ mod tests {
     fn shared_path_is_under_shared_dir() {
         let p = DedupeIndex::shared_path("blank_deadbeef", "png");
         assert_eq!(p, PathBuf::from("_shared").join("blank_deadbeef.png"));
+    }
+
+    #[test]
+    fn none_strategy_never_deduplicates() {
+        // Regression (issue #99): `DedupeStrategy::None` must be a true
+        // passthrough. Two tiles with byte-identical contents must each be
+        // reported as `WriteNew` — the second must NOT collapse onto the first
+        // as a `Reference` — and no internal dedupe state may be populated.
+        let idx = DedupeIndex::new(DedupeStrategy::None);
+        let bytes = b"identical tile bytes";
+
+        let d1 = idx.record("0/0_0.png", bytes);
+        let d2 = idx.record("0/0_1.png", bytes);
+
+        assert!(
+            matches!(d1, DedupeDecision::WriteNew { .. }),
+            "None must report the first tile as WriteNew; got {d1:?}"
+        );
+        assert!(
+            matches!(d2, DedupeDecision::WriteNew { .. }),
+            "None must never emit a dedupe Reference; got {d2:?}"
+        );
+        assert!(
+            idx.references().is_empty(),
+            "None must not record any manifest references"
+        );
+        assert_eq!(
+            idx.distinct_count(),
+            0,
+            "None must not populate the seen index"
+        );
     }
 
     #[test]
