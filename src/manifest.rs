@@ -545,14 +545,13 @@ impl Manifest {
 
     /// Serialize and write this manifest to `path`, creating parent
     /// directories as needed.
+    ///
+    /// The write is atomic (staged `.tmp` sibling + rename via
+    /// [`crate::resume::atomic_write`]) so a crash mid-write cannot leave a
+    /// torn manifest, and the two on-disk copies cannot diverge (issue #124).
     pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
         let json = self.to_json_string()?;
-        fs::write(path, json)?;
+        crate::resume::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -846,6 +845,51 @@ mod tests {
             BlankTileStrategy::PlaceholderWithTolerance {
                 max_channel_delta: 7,
             }
+        );
+    }
+
+    /// Issue #124: manifest writes must be atomic (staged `.tmp` + rename), not
+    /// a bare `fs::write` that truncates the destination in place.
+    ///
+    /// A rename replaces the directory entry rather than opening and truncating
+    /// the existing file, so it succeeds even when the previous manifest is a
+    /// read-only regular file (as long as the parent directory is writable),
+    /// and a reader never observes a torn write. A bare `fs::write` instead
+    /// fails with `PermissionDenied` trying to truncate the read-only target.
+    ///
+    /// Before the fix `write_to` used `fs::write` and this returned an error
+    /// (RED); after it the atomic rename replaces the file cleanly (GREEN).
+    #[test]
+    #[cfg(unix)]
+    fn write_to_atomically_replaces_a_read_only_manifest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.manifest.json");
+
+        // Pre-existing manifest that a crashed prior run left behind, made
+        // read-only so an in-place truncate would fail.
+        std::fs::write(&path, b"{\"stale\": true}").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let manifest = sample_manifest();
+        manifest
+            .write_to(&path)
+            .expect("atomic write must replace a read-only manifest");
+
+        // The new content fully replaced the old, and no staging temp lingers.
+        let reloaded = ManifestV1::read_from(&path).unwrap();
+        assert_eq!(reloaded, manifest);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging temp file may linger after a successful write: {leftovers:?}"
         );
     }
 }

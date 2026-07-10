@@ -239,6 +239,27 @@ pub trait TileSink: Send + Sync {
         self.inner_sink().and_then(|inner| inner.checkpoint_root())
     }
 
+    /// Engine hook: tell the sink that resume checkpointing is being driven
+    /// externally (by the engine's [`CheckpointState`](crate::engine)) for
+    /// this run, so the sink must NOT also publish its own `.libviprs-job.json`.
+    ///
+    /// The engine builder calls this once, before the run, whenever it stands
+    /// up a `CheckpointState` for an on-disk sink. It makes the engine's
+    /// checkpoint writer the single component that publishes the checkpoint
+    /// file: a resume run would otherwise have both [`FsSink::finish`] and the
+    /// `CheckpointState` write the file in sequence with different views, and a
+    /// crash between the two could discard prior-run completions (issue #124).
+    /// The sink still fsyncs its own tile data at `finish`, preserving the
+    /// tile-data-before-checkpoint durability ordering (issue #122).
+    ///
+    /// The default forwards to [`TileSink::inner_sink`] (a no-op for terminal
+    /// sinks that keep no resume state).
+    fn suppress_own_checkpoint(&self) {
+        if let Some(inner) = self.inner_sink() {
+            inner.suppress_own_checkpoint();
+        }
+    }
+
     /// Engine hook: tell the sink how many pyramid levels will appear in
     /// this run, so sinks that keep per-level counters can pre-size their
     /// backing storage before the tile loop starts. Default is a no-op.
@@ -612,6 +633,12 @@ pub struct FsSink {
     /// [`FsSink::dedupe_write`] and never while holding a leaf mutex.
     dedupe_promote: Mutex<()>,
     resume_enabled: bool,
+    /// Set by [`TileSink::suppress_own_checkpoint`] when the engine's
+    /// [`CheckpointState`](crate::engine) is the checkpoint writer for this
+    /// run. While set, [`FsSink::finish`] still fsyncs freshly-written tile
+    /// data (issue #122) but does NOT publish its own `.libviprs-job.json`, so
+    /// the engine's writer is the single source of the checkpoint (issue #124).
+    checkpoint_suppressed: AtomicBool,
     /// Running per-tile checksum table, populated only when `checksums` is
     /// non-[`ChecksumMode::None`]. Keyed by the relative tile path inside
     /// `base_dir`. Stores the raw 32-byte digest to keep the hot path
@@ -815,6 +842,7 @@ impl FsSink {
             dedupe_index: None,
             dedupe_promote: Mutex::new(()),
             resume_enabled: false,
+            checkpoint_suppressed: AtomicBool::new(false),
             tile_digests: Mutex::new(BTreeMap::new()),
             manifest_refs: Mutex::new(HashMap::new()),
             pending_first: Mutex::new(HashMap::new()),
@@ -1101,6 +1129,10 @@ impl TileSink for FsSink {
 
     fn checkpoint_root(&self) -> Option<&Path> {
         Some(&self.base_dir)
+    }
+
+    fn suppress_own_checkpoint(&self) {
+        self.checkpoint_suppressed.store(true, Ordering::Relaxed);
     }
 
     fn content_format(&self) -> Option<TileFormat> {
@@ -1554,21 +1586,61 @@ impl FsSink {
             let mut sibling_name = stem.to_os_string();
             sibling_name.push(".manifest.json");
             let sibling_path = parent.join(sibling_name);
-            std::fs::write(&sibling_path, &json)?;
+            atomic_write(&sibling_path, &json)?;
         }
 
         let inside_path = self.base_dir.join("manifest.json");
-        if let Some(parent) = inside_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&inside_path, &json)?;
+        atomic_write(&inside_path, &json)?;
 
         Ok(())
     }
 
     /// Persist the completed-tile checkpoint when resume is enabled.
+    ///
+    /// Always fsyncs the tile data written since the last flush (issue #122).
+    /// It then publishes its own `.libviprs-job.json` only when checkpointing
+    /// is NOT being driven by the engine's
+    /// [`CheckpointState`](crate::engine): when the engine builder has called
+    /// [`TileSink::suppress_own_checkpoint`], that writer is the single source
+    /// of the checkpoint file, so the sink skips its own write to avoid two
+    /// writers publishing divergent views (issue #124). The tile-data fsync
+    /// still runs first, so the engine's terminal flush (which happens after
+    /// the sink's `finish`) certifies data that is already durable.
     fn write_resume_checkpoint(&self) -> Result<(), SinkError> {
         use crate::resume::{JobCheckpoint, JobMetadata, SCHEMA_VERSION, compute_plan_hash};
+
+        // Durability ordering (issue #122): fsync the tile data written since
+        // the last flush *before* the checkpoint that certifies it is
+        // published. Otherwise a power loss can leave the synced checkpoint
+        // pointing at tiles whose bytes were still in the page cache, and
+        // resume would skip those coordinates forever. This runs regardless of
+        // which component publishes the checkpoint.
+        let to_sync: Vec<PathBuf> = {
+            let mut guard = self.lock_leaf(&self.unsynced_tiles);
+            std::mem::take(&mut *guard)
+        };
+        let mut seen = std::collections::HashSet::new();
+        for path in &to_sync {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            match self.durability.sync_file(path) {
+                Ok(()) => {}
+                // A path can legitimately be absent by flush time — e.g. a
+                // dedupe first-occurrence file promoted into `_shared/` and
+                // replaced by a hardlink. The surviving link/target is synced
+                // via its own tracked entry, so a missing path here is not a
+                // durability failure.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SinkError::Io(e)),
+            }
+        }
+
+        // The engine's `CheckpointState` is the sole checkpoint writer when it
+        // is driving this run; the sink must not also publish (issue #124).
+        if self.checkpoint_suppressed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
 
         let completed = self.lock_leaf(&self.completed_tiles).clone();
         // Derive the content contract from the same engine config the resume
@@ -1614,32 +1686,6 @@ impl FsSink {
             last_checkpoint_at: timestamp,
             content_format: contract.format,
         };
-
-        // Durability ordering (issue #122): fsync the tile data written since
-        // the last flush *before* the checkpoint that certifies it is
-        // published. Otherwise a power loss can leave the synced checkpoint
-        // pointing at tiles whose bytes were still in the page cache, and
-        // resume would skip those coordinates forever.
-        let to_sync: Vec<PathBuf> = {
-            let mut guard = self.lock_leaf(&self.unsynced_tiles);
-            std::mem::take(&mut *guard)
-        };
-        let mut seen = std::collections::HashSet::new();
-        for path in &to_sync {
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            match self.durability.sync_file(path) {
-                Ok(()) => {}
-                // A path can legitimately be absent by flush time — e.g. a
-                // dedupe first-occurrence file promoted into `_shared/` and
-                // replaced by a hardlink. The surviving link/target is synced
-                // via its own tracked entry, so a missing path here is not a
-                // durability failure.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(SinkError::Io(e)),
-            }
-        }
 
         // `save_with` fsyncs the checkpoint payload and then its directory,
         // so the rename that publishes the checkpoint is itself durable.
@@ -1699,35 +1745,15 @@ fn secs_to_ymd_hms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 /// Hash `bytes` with `algo` and return the raw 32-byte digest. Both
 /// supported algorithms (Blake3, SHA-256) produce exactly 32 bytes, so we
 /// can store them as fixed-size arrays on the hot path instead of paying
-/// Monotonic counter feeding the temp-file suffix in [`atomic_write`], so two
-/// writers in the same process never pick the same `.tmp` name for the same
-/// shared blob.
-static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
-
 /// Write `bytes` to `path` atomically: stage them in a sibling `.tmp` file and
 /// `rename` it into place. On POSIX the rename is atomic, so a concurrent
 /// reader (or a crash) never observes a partially-written `path` — it sees
 /// either the old contents or the complete new contents, never a truncated
-/// blob (issue #97). The temp name is disambiguated by pid + a process-wide
-/// counter so parallel workers staging the same destination don't clobber each
-/// other's temp file. The temp is best-effort cleaned up if the rename fails.
+/// blob (issue #97). Delegates to [`crate::resume::atomic_write`] so shared
+/// blobs, the manifest copies, and the checkpoint all publish through one
+/// staged-`.tmp` + `rename` helper (issue #124).
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("blob");
-    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(
-        ".{file_name}.tmp.{pid}.{seq}",
-        pid = std::process::id(),
-    ));
-    if let Err(e) = std::fs::write(&tmp, bytes) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    crate::resume::atomic_write(path, bytes)
 }
 
 /// for a `String` allocation per tile.

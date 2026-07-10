@@ -1012,6 +1012,12 @@ fn prepare_resume_state(
                 }
             }
             let cp = crate::engine::cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
+            if cp.is_some() {
+                // The engine's CheckpointState is now the checkpoint writer for
+                // this run; tell the sink not to publish its own copy too
+                // (issue #124).
+                sink.suppress_own_checkpoint();
+            }
             Ok((std::collections::HashSet::new(), cp))
         }
         ResumeMode::Resume => {
@@ -1037,6 +1043,12 @@ fn prepare_resume_state(
             let skip: std::collections::HashSet<crate::planner::TileCoord> =
                 completed.iter().copied().collect();
             let cp = crate::engine::cp_for_sink(sink, plan, config, completed, levels);
+            if cp.is_some() {
+                // The engine's CheckpointState is now the checkpoint writer for
+                // this run; tell the sink not to publish its own copy too
+                // (issue #124).
+                sink.suppress_own_checkpoint();
+            }
             Ok((skip, cp))
         }
         ResumeMode::Verify => unreachable!("Verify is rejected above for non-Monolithic engines"),
@@ -1676,6 +1688,95 @@ mod checkpoint_durability_tests {
         assert!(
             matches!(result, Err(EngineError::InvalidPlan { .. })),
             "expected InvalidPlan for an empty-levels plan, got {result:?}"
+        );
+    }
+
+    /// Counts file- and directory-fsyncs so a test can observe whether a sink
+    /// *published* a checkpoint (a directory fsync of its base dir) versus
+    /// merely fsyncing tile data.
+    #[derive(Default)]
+    struct SyncCounter {
+        files: AtomicU32,
+        dirs: AtomicU32,
+    }
+
+    impl crate::resume::Durability for SyncCounter {
+        fn sync_file(&self, _path: &std::path::Path) -> std::io::Result<()> {
+            self.files.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn sync_dir(&self, _path: &std::path::Path) -> std::io::Result<()> {
+            self.dirs.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    /// Issue #124: a resume run must have exactly one component write the
+    /// checkpoint file. The engine's `CheckpointState` is that writer, so when
+    /// an `FsSink` (which has its own resume-checkpoint writer) is driven by
+    /// the builder, the sink must NOT also publish its own `.libviprs-job.json`.
+    ///
+    /// A directory fsync of the sink's base dir is how `FsSink::finish`
+    /// publishes its checkpoint (via `JobCheckpoint::save_with`). We inject a
+    /// counting durability into the sink and assert that, after a builder-driven
+    /// resume run, the sink issued zero directory fsyncs (it published nothing)
+    /// while still fsyncing tile data (issue #122 preserved). The checkpoint
+    /// nonetheless exists and records every tile, proving the engine's writer
+    /// is the single, complete source.
+    ///
+    /// Before the fix the sink also wrote the checkpoint, so its counting
+    /// durability recorded a directory fsync of the base dir (RED). After the
+    /// fix the builder suppresses the sink's writer, so that count is zero
+    /// (GREEN).
+    #[test]
+    fn resume_run_has_single_checkpoint_writer() {
+        use crate::sink::{FsSink, TileFormat};
+        use std::sync::Arc;
+
+        let source = solid_source();
+        let plan = solid_plan();
+        let total_tiles: usize = plan
+            .levels
+            .iter()
+            .map(|lp| (lp.cols as usize) * (lp.rows as usize))
+            .sum();
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("out_files");
+
+        let recorder = Arc::new(SyncCounter::default());
+        let sink = FsSink::new(base.clone(), plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_resume(true)
+            .with_durability(recorder.clone());
+
+        // A very coarse cadence guarantees no periodic flush fires: only the
+        // builder's terminal `CheckpointState::flush` and (pre-fix) the sink's
+        // own `finish` writer could publish, isolating the double-write.
+        EngineBuilder::new(&source, plan.clone(), sink)
+            .with_resume(ResumePolicy::resume().with_checkpoint_every(1_000_000))
+            .run_collect()
+            .expect("resume run must succeed");
+
+        assert_eq!(
+            recorder.dirs.load(Ordering::Relaxed),
+            0,
+            "the sink must not publish its own checkpoint (directory fsync) when \
+             the engine's CheckpointState is the writer (issue #124)"
+        );
+        assert!(
+            recorder.files.load(Ordering::Relaxed) > 0,
+            "the sink must still fsync tile data before the checkpoint (issue #122)"
+        );
+
+        // The engine's writer is the single, complete source of the checkpoint.
+        let meta = JobCheckpoint::load(&base)
+            .expect("checkpoint load must not error")
+            .expect("the engine's CheckpointState must have published a checkpoint");
+        assert_eq!(
+            meta.completed_tiles.len(),
+            total_tiles,
+            "the sole checkpoint must record every completed tile"
         );
     }
 }
