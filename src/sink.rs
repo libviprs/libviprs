@@ -153,52 +153,96 @@ pub trait TileSink: Send + Sync {
     fn finish(&self) -> Result<(), SinkError> {
         Ok(())
     }
+
+    /// Transparent-decorator hook: a sink that merely wraps another sink
+    /// returns `Some(inner)` here.
+    ///
+    /// Every engine-bookkeeping method below (`record_engine_config`,
+    /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
+    /// `checkpoint_root`, `init_level_count`, `content_format`,
+    /// `applies_retry_policy`) has a default that forwards through this hook.
+    /// A wrapper therefore only has to override `inner_sink` — and any state it
+    /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
+    /// of forwarding every bookkeeping method by hand. That removes the
+    /// silent-data-loss trap where a wrapper that forgets to forward one method
+    /// quietly drops a retry count, the manifest config, the checkpoint root,
+    /// or the on-disk format (issue #137).
+    ///
+    /// Terminal sinks return `None` (the default), which collapses every
+    /// bookkeeping default back to its previous no-op / `0` / `None` value, so
+    /// leaf-sink behaviour is unchanged.
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        None
+    }
+
     /// Engine hook: forward a snapshot of the active [`crate::engine::EngineConfig`]
     /// into the sink so it can populate the manifest's generation settings and
-    /// sparse-policy fields. The default implementation is a no-op; only sinks
-    /// that emit manifests (e.g. [`FsSink`]) need to override.
-    fn record_engine_config(&self, _config: &crate::engine::EngineConfig) {}
+    /// sparse-policy fields. The default forwards to [`TileSink::inner_sink`]
+    /// (a no-op for terminal sinks); only sinks that emit manifests (e.g.
+    /// [`FsSink`]) need to override.
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        if let Some(inner) = self.inner_sink() {
+            inner.record_engine_config(config);
+        }
+    }
 
     /// Engine hook: when the sink (or a wrapper around it) keeps an internal
     /// retry counter, expose the running total so the engine can include it
-    /// in [`crate::engine::EngineResult::retry_count`]. Default is `0`.
+    /// in [`crate::engine::EngineResult::retry_count`]. The default forwards to
+    /// [`TileSink::inner_sink`], returning `0` for terminal sinks.
     fn sink_retry_count(&self) -> u64 {
-        0
+        self.inner_sink()
+            .map_or(0, |inner| inner.sink_retry_count())
     }
 
     /// Engine hook: when the sink (or a wrapper around it) keeps an internal
     /// skip counter, expose the running total so the engine can include it in
-    /// [`crate::engine::EngineResult::skipped_due_to_failure`]. Default is `0`.
+    /// [`crate::engine::EngineResult::skipped_due_to_failure`]. The default
+    /// forwards to [`TileSink::inner_sink`], returning `0` for terminal sinks.
     fn sink_skipped_due_to_failure(&self) -> u64 {
-        0
+        self.inner_sink()
+            .map_or(0, |inner| inner.sink_skipped_due_to_failure())
     }
 
     /// Engine hook: bump the skip counter by one, used by the engine when a
-    /// `FailurePolicy::RetryThenSkip` tile is dropped. Default is a no-op.
-    fn note_sink_skipped(&self) {}
+    /// `FailurePolicy::RetryThenSkip` tile is dropped. The default forwards to
+    /// [`TileSink::inner_sink`] (a no-op for terminal sinks).
+    fn note_sink_skipped(&self) {
+        if let Some(inner) = self.inner_sink() {
+            inner.note_sink_skipped();
+        }
+    }
 
     /// Engine hook: the on-disk root where the checkpoint file
-    /// `.libviprs-job.json` should live. Sinks that do not write to the
-    /// filesystem return `None` (the default).
+    /// `.libviprs-job.json` should live. The default forwards to
+    /// [`TileSink::inner_sink`]; sinks that do not write to the filesystem
+    /// return `None`.
     fn checkpoint_root(&self) -> Option<&Path> {
-        None
+        self.inner_sink().and_then(|inner| inner.checkpoint_root())
     }
 
     /// Engine hook: tell the sink how many pyramid levels will appear in
     /// this run, so sinks that keep per-level counters can pre-size their
     /// backing storage before the tile loop starts. Default is a no-op.
     /// [`FsSink`] already sizes its counters from the plan in
-    /// [`FsSink::new`], so calling this is idempotent there.
-    fn init_level_count(&self, _levels: usize) {}
+    /// [`FsSink::new`], so calling this is idempotent there. The default
+    /// forwards to [`TileSink::inner_sink`] (a no-op for terminal sinks).
+    fn init_level_count(&self, levels: usize) {
+        if let Some(inner) = self.inner_sink() {
+            inner.init_level_count(levels);
+        }
+    }
 
     /// Engine hook: the tile encoding the sink writes, when it has one.
     ///
     /// Folded into the resume plan hash so that resuming a checkpoint with a
     /// changed output format is rejected instead of silently mixing formats
     /// on disk (see [`crate::resume::compute_plan_hash`]). Sinks that do not
-    /// commit to a single on-disk format return `None` (the default).
+    /// commit to a single on-disk format return `None`. The default forwards
+    /// to [`TileSink::inner_sink`], so a transparent wrapper exposes the inner
+    /// sink's format without forwarding this method by hand.
     fn content_format(&self) -> Option<TileFormat> {
-        None
+        self.inner_sink().and_then(|inner| inner.content_format())
     }
 
     /// Engine hook: whether this sink (or a wrapper around it) already runs
@@ -210,8 +254,12 @@ pub trait TileSink: Send + Sync {
     /// double-wrapped (which would inflate `retry_count` and double-count
     /// `skipped_due_to_failure`). Default is `false`; `RetryingSink` overrides
     /// to `true`, and transparent decorators forward the inner sink's answer.
+    /// The default forwards to [`TileSink::inner_sink`] (returning `false` for
+    /// terminal sinks), so a plain wrapper around a `RetryingSink` reports
+    /// `true` automatically and is not re-wrapped.
     fn applies_retry_policy(&self) -> bool {
-        false
+        self.inner_sink()
+            .is_some_and(|inner| inner.applies_retry_policy())
     }
 }
 
@@ -236,6 +284,9 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     }
     fn finish(&self) -> Result<(), SinkError> {
         (**self).finish()
+    }
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        (**self).inner_sink()
     }
     fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
         (**self).record_engine_config(config)
@@ -281,6 +332,9 @@ impl<T: TileSink + ?Sized> TileSink for &T {
     }
     fn finish(&self) -> Result<(), SinkError> {
         (*self).finish()
+    }
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        (*self).inner_sink()
     }
     fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
         (*self).record_engine_config(config)
@@ -1768,6 +1822,149 @@ mod tests {
             raster: Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap(),
             blank: false,
         }
+    }
+
+    // -- Transparent-decorator bookkeeping (issue #137) --
+
+    /// A leaf sink that reports a full, distinct value from every engine
+    /// bookkeeping method so a wrapper's forwarding can be observed.
+    struct BookkeepingLeaf {
+        root: PathBuf,
+        skips: std::sync::atomic::AtomicU64,
+        levels_seen: std::sync::atomic::AtomicU64,
+        config_seen: std::sync::atomic::AtomicBool,
+    }
+
+    impl BookkeepingLeaf {
+        fn new(root: PathBuf) -> Self {
+            Self {
+                root,
+                skips: std::sync::atomic::AtomicU64::new(0),
+                levels_seen: std::sync::atomic::AtomicU64::new(0),
+                config_seen: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl TileSink for BookkeepingLeaf {
+        fn write_tile(&self, _tile: &Tile) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn record_engine_config(&self, _config: &crate::engine::EngineConfig) {
+            self.config_seen
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn sink_retry_count(&self) -> u64 {
+            7
+        }
+        fn sink_skipped_due_to_failure(&self) -> u64 {
+            3
+        }
+        fn note_sink_skipped(&self) {
+            self.skips
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn checkpoint_root(&self) -> Option<&Path> {
+            Some(&self.root)
+        }
+        fn init_level_count(&self, levels: usize) {
+            self.levels_seen
+                .store(levels as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn content_format(&self) -> Option<TileFormat> {
+            Some(TileFormat::Jpeg { quality: 80 })
+        }
+        fn applies_retry_policy(&self) -> bool {
+            true
+        }
+    }
+
+    /// A transparent decorator that overrides ONLY `write_tile` and
+    /// `inner_sink` — it deliberately forwards NONE of the eight engine
+    /// bookkeeping methods by hand.
+    struct PassThrough<S: TileSink> {
+        inner: S,
+    }
+
+    impl<S: TileSink> TileSink for PassThrough<S> {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            self.inner.write_tile(tile)
+        }
+        fn inner_sink(&self) -> Option<&dyn TileSink> {
+            Some(&self.inner)
+        }
+    }
+
+    /// A wrapper that only knows how to name its inner sink (`inner_sink`)
+    /// must not silently drop any engine bookkeeping. Before issue #137 a
+    /// wrapper had to forward all eight methods by hand or lose retry counts,
+    /// the manifest config, the checkpoint root, or the on-disk format; now
+    /// the trait defaults forward through `inner_sink`, so overriding that one
+    /// method is enough.
+    #[test]
+    fn decorator_forwards_all_bookkeeping_through_inner_sink() {
+        use std::sync::atomic::Ordering;
+
+        let root = PathBuf::from("/tmp/libviprs-137-checkpoint");
+        let leaf = BookkeepingLeaf::new(root.clone());
+        let wrapper = PassThrough { inner: leaf };
+
+        // Value-returning hooks reflect the inner leaf without any hand-written
+        // forwarding on `PassThrough`.
+        assert_eq!(wrapper.sink_retry_count(), 7, "retry count must forward");
+        assert_eq!(
+            wrapper.sink_skipped_due_to_failure(),
+            3,
+            "skip count must forward"
+        );
+        assert_eq!(
+            wrapper.checkpoint_root(),
+            Some(root.as_path()),
+            "checkpoint root must forward — else resume silently breaks"
+        );
+        assert_eq!(
+            wrapper.content_format(),
+            Some(TileFormat::Jpeg { quality: 80 }),
+            "content format must forward — else resume plan-hash mixes formats"
+        );
+        assert!(
+            wrapper.applies_retry_policy(),
+            "applies_retry_policy must forward — else the builder double-wraps"
+        );
+
+        // Side-effecting hooks reach the inner leaf too.
+        wrapper.record_engine_config(&crate::engine::EngineConfig::default());
+        assert!(
+            wrapper.inner.config_seen.load(Ordering::Relaxed),
+            "record_engine_config must forward — else the manifest loses settings"
+        );
+        wrapper.init_level_count(5);
+        assert_eq!(
+            wrapper.inner.levels_seen.load(Ordering::Relaxed),
+            5,
+            "init_level_count must forward — else per-level counters mis-size"
+        );
+        wrapper.note_sink_skipped();
+        wrapper.note_sink_skipped();
+        assert_eq!(
+            wrapper.inner.skips.load(Ordering::Relaxed),
+            2,
+            "note_sink_skipped must forward — else skip totals under-count"
+        );
+    }
+
+    /// A terminal sink that overrides none of the hooks keeps the historical
+    /// no-op / `0` / `None` defaults: `inner_sink` returns `None`, so the
+    /// forwarding defaults collapse back to their old values.
+    #[test]
+    fn terminal_sink_keeps_noop_bookkeeping_defaults() {
+        let sink = MemorySink::new();
+        assert!(sink.inner_sink().is_none());
+        assert_eq!(sink.sink_retry_count(), 0);
+        assert_eq!(sink.sink_skipped_due_to_failure(), 0);
+        assert!(sink.checkpoint_root().is_none());
+        assert!(sink.content_format().is_none());
+        assert!(!sink.applies_retry_policy());
     }
 
     // -- MemorySink tests --
