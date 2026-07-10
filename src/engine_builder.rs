@@ -1086,10 +1086,9 @@ fn prepare_resume_state(
 
 mod resume {
     use std::collections::HashSet;
-    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use crate::engine::{CheckpointState, EngineConfig};
+    use crate::engine::CheckpointState;
     use crate::planner::TileCoord;
     use crate::sink::{SinkError, Tile, TileSink};
 
@@ -1102,8 +1101,8 @@ mod resume {
     /// engines themselves oblivious to resume semantics — the filtering
     /// happens at the one natural bottleneck (every tile ultimately lands
     /// in `write_tile`).
-    pub(super) struct ResumeAwareSink<'a, S: TileSink + ?Sized> {
-        pub(super) inner: &'a S,
+    pub(super) struct ResumeAwareSink<'a> {
+        pub(super) inner: &'a dyn TileSink,
         pub(super) skip: &'a HashSet<TileCoord>,
         pub(super) cp: Option<&'a CheckpointState>,
         /// Running count of skipped writes, used after `.run()` to adjust
@@ -1119,9 +1118,9 @@ mod resume {
         pub(super) skipped_bytes: AtomicU64,
     }
 
-    impl<'a, S: TileSink + ?Sized> ResumeAwareSink<'a, S> {
+    impl<'a> ResumeAwareSink<'a> {
         pub(super) fn new(
-            inner: &'a S,
+            inner: &'a dyn TileSink,
             skip: &'a HashSet<TileCoord>,
             cp: Option<&'a CheckpointState>,
         ) -> Self {
@@ -1143,7 +1142,7 @@ mod resume {
         }
     }
 
-    impl<'a, S: TileSink + ?Sized> TileSink for ResumeAwareSink<'a, S> {
+    impl<'a> TileSink for ResumeAwareSink<'a> {
         fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
             if self.skip.contains(&tile.coord) {
                 self.skipped.fetch_add(1, Ordering::Relaxed);
@@ -1163,32 +1162,17 @@ mod resume {
             self.inner.finish()
         }
 
-        fn record_engine_config(&self, config: &EngineConfig) {
-            self.inner.record_engine_config(config)
-        }
-
-        fn sink_retry_count(&self) -> u64 {
-            self.inner.sink_retry_count()
-        }
-
-        fn sink_skipped_due_to_failure(&self) -> u64 {
-            self.inner.sink_skipped_due_to_failure()
-        }
-
-        fn note_sink_skipped(&self) {
-            self.inner.note_sink_skipped()
-        }
-
-        fn checkpoint_root(&self) -> Option<&Path> {
-            self.inner.checkpoint_root()
-        }
-
-        fn init_level_count(&self, levels: usize) {
-            self.inner.init_level_count(levels)
-        }
-
-        fn applies_retry_policy(&self) -> bool {
-            self.inner.applies_retry_policy()
+        /// This wrapper owns no engine bookkeeping of its own: every hook
+        /// (`record_engine_config`, `sink_retry_count`,
+        /// `sink_skipped_due_to_failure`, `note_sink_skipped`,
+        /// `checkpoint_root`, `init_level_count`, `content_format`,
+        /// `applies_retry_policy`) must reach the wrapped sink unchanged.
+        /// Exposing the inner sink through this single hook makes the
+        /// trait's defaults forward all of them, so the wrapper can never
+        /// again silently drop one, the way it previously dropped
+        /// `content_format` by simply not listing it (issue #137).
+        fn inner_sink(&self) -> Option<&dyn TileSink> {
+            Some(self.inner)
         }
     }
 
@@ -2331,5 +2315,62 @@ mod run_lock_wiring_tests {
         let reacquired = RunLock::acquire(out.path())
             .expect("the run must release its lock so a later job can acquire it");
         drop(reacquired);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resume-wrapper forwarding tests (issue #137)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resume_wrapper_forwarding_tests {
+    use super::resume::ResumeAwareSink;
+    use crate::planner::{Layout, PyramidPlanner, TileCoord};
+    use crate::sink::{FsSink, TileFormat, TileSink};
+    use std::collections::HashSet;
+
+    // `ResumeAwareSink` is a transparent decorator: it must expose the inner
+    // sink's on-disk format so the resume plan hash never loses the format
+    // when writes are routed through the wrapper. Before #137's remainder the
+    // wrapper hand-forwarded a subset of bookkeeping methods and simply omitted
+    // `content_format`, so this returned `None` even though the inner `FsSink`
+    // commits to JPEG. Overriding `inner_sink()` closes that silent gap for
+    // every bookkeeping hook at once, not just the ones remembered by hand.
+    #[test]
+    fn resume_aware_sink_forwards_content_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let fs = FsSink::new(dir.path().to_path_buf(), plan)
+            .with_format(TileFormat::Jpeg { quality: 80 });
+        let skip: HashSet<TileCoord> = HashSet::new();
+        let wrapped = ResumeAwareSink::new(&fs, &skip, None);
+
+        assert_eq!(
+            wrapped.content_format(),
+            Some(TileFormat::Jpeg { quality: 80 }),
+            "a transparent resume wrapper must expose the inner sink's on-disk format"
+        );
+    }
+
+    // The wrapper must likewise surface the inner sink's checkpoint root and
+    // the inner sink's format through the single `inner_sink()` hook rather
+    // than through a per-method forward that a future edit could drop.
+    #[test]
+    fn resume_aware_sink_forwards_checkpoint_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let fs = FsSink::new(dir.path().to_path_buf(), plan);
+        let skip: HashSet<TileCoord> = HashSet::new();
+        let wrapped = ResumeAwareSink::new(&fs, &skip, None);
+
+        assert_eq!(
+            wrapped.checkpoint_root(),
+            Some(dir.path()),
+            "a transparent resume wrapper must expose the inner sink's checkpoint root"
+        );
     }
 }
