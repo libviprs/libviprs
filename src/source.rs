@@ -141,10 +141,7 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
-    let mut reader = ImageReader::open(path)?;
-    reader.limits(limits.to_image_limits());
-    let img = reader.decode()?;
-    build_raster(img, limits)
+    decode_reader(ImageReader::open(path)?, limits)
 }
 
 /// Decode from an in-memory buffer (format auto-detected).
@@ -174,7 +171,25 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// before any pixel data is allocated, and the `width * height` ceiling
 /// is checked before the [`Raster`] is constructed.
 pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    decode_reader(
+        ImageReader::new(Cursor::new(bytes)).with_guessed_format()?,
+        limits,
+    )
+}
+
+/// Apply the shared decode budget to a configured [`ImageReader`] and
+/// finalize its output into a [`Raster`].
+///
+/// This is the single tail shared by [`decode_file_with_limits`] and
+/// [`decode_bytes_with_limits`]: the only thing that differs between the
+/// file and in-memory entry points is how the reader is constructed. Both
+/// funnel through here so the limit push-down, decode, and
+/// [`build_raster`] finalization (color-type mapping + La repacking) live
+/// in exactly one place and cannot drift out of parity.
+fn decode_reader<R: std::io::BufRead + std::io::Seek>(
+    mut reader: ImageReader<R>,
+    limits: DecodeLimits,
+) -> Result<Raster, SourceError> {
     reader.limits(limits.to_image_limits());
     let img = reader.decode()?;
     build_raster(img, limits)
@@ -579,6 +594,36 @@ mod tests {
             matches!(result, Err(SourceError::Decode(_))),
             "expected a decoder limit error, got {result:?}"
         );
+    }
+
+    /**
+     * Guards the shared finalize path: `decode_file` and `decode_bytes`
+     * must produce byte-identical rasters for the same input, including the
+     * La16 -> RGBA16 promotion. Both entry points funnel through the single
+     * `decode_reader` -> `build_raster` tail (the issue's proposed
+     * `finalize()`), so the color-type mapping and La repacking cannot drift
+     * back into copy-pasted divergence. Were the two paths ever re-forked,
+     * an La16 (a format with non-trivial repacking) input would expose the
+     * mismatch here. Input: 6x4 La16 PNG decoded via both entry points ->
+     * Output: equal dimensions, format, and pixel bytes.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn decode_file_and_bytes_share_finalize_path() {
+        let (png, _expected) = create_la16_png(6, 4);
+
+        let from_bytes = decode_bytes(&png).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parity.png");
+        std::fs::write(&path, &png).unwrap();
+        let from_file = decode_file(&path).unwrap();
+
+        assert_eq!(from_file.width(), from_bytes.width());
+        assert_eq!(from_file.height(), from_bytes.height());
+        assert_eq!(from_file.format(), from_bytes.format());
+        assert_eq!(from_file.format(), PixelFormat::Rgba16);
+        assert_eq!(from_file.data(), from_bytes.data());
     }
 
     /**
