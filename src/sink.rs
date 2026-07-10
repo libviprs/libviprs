@@ -140,6 +140,24 @@ pub struct Tile {
 /// The engine calls `write_tile` from worker threads, so implementations must be
 /// `Send + Sync`.
 ///
+/// # Write-order independence
+///
+/// **The order in which `write_tile` is called is not guaranteed.** Under the
+/// MapReduce engine with `tile_concurrency > 0`, worker threads extract tiles in
+/// parallel and the consumer writes each tile as it arrives on the bounded
+/// channel — i.e. in channel-arrival order, not row-major, and interleaved
+/// arbitrarily across runs. A sink whose *output* depends on call order (byte
+/// layout of a pack/archive that concatenates tiles in arrival sequence, an
+/// append-only log keyed on position, etc.) will therefore produce run-to-run
+/// different results at `tile_concurrency > 0`.
+///
+/// Implementations must treat each `write_tile` as an independent, commutative
+/// placement keyed by [`Tile::coord`]; the produced pyramid must be identical
+/// regardless of the order in which the calls arrive. All in-tree sinks
+/// ([`FsSink`], [`MemorySink`], the object-store and packfile sinks) satisfy
+/// this because they place each tile by its coordinate rather than by arrival
+/// position.
+///
 /// # Examples
 ///
 /// See [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
