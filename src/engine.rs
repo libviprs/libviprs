@@ -1372,7 +1372,7 @@ fn extract_and_emit_level(
 
 /// Return `true` when the current [`BlankTileStrategy`] wants this tile to be
 /// written as a placeholder.
-fn is_blank_for_strategy(raster: &Raster, strategy: BlankTileStrategy) -> bool {
+pub(crate) fn is_blank_for_strategy(raster: &Raster, strategy: BlankTileStrategy) -> bool {
     match strategy {
         BlankTileStrategy::Emit => false,
         BlankTileStrategy::Placeholder => is_blank_tile(raster),
