@@ -12,6 +12,14 @@ keywords = ["image", "pyramid", "tiles", "deepzoom", "pdf"]
 categories = ["multimedia::images", "graphics"]
 readme = "README.md"
 
+# Build docs.rs with every feature enabled and the `docsrs` cfg set, so the
+# hosted documentation renders the feature-gated surface (render_page_pdfium,
+# PdfiumStripSource, ObjectStoreSink, PackfileSink) with feature badges instead
+# of advertising it as broken intra-doc links (issue #146).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 deprecated = "deny"

@@ -582,8 +582,8 @@ impl TileFormat {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 ///
-/// `Debug` is implemented manually because the internal [`DedupeIndex`] does
-/// not derive `Debug`.
+/// `Debug` is implemented manually because the internal
+/// [`DedupeIndex`](crate::dedupe::DedupeIndex) does not derive `Debug`.
 ///
 /// # Lock discipline
 ///
