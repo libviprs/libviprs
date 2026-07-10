@@ -252,14 +252,30 @@ fn la16_to_rgba16_bytes(samples: &[u16]) -> Vec<u8> {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#test-image)
 pub fn generate_test_raster(width: u32, height: u32) -> Result<Raster, SourceError> {
+    // Bound the requested dimensions against the shared decode budget before
+    // allocating anything. Without this an oversized request would attempt an
+    // unbounded `width * height * bpp` allocation (a debug abort / process
+    // OOM) instead of failing cleanly; it also keeps `width + height` and the
+    // per-pixel gradient math below within range. Oversized dimensions now
+    // yield a typed `DimensionLimitExceeded`.
+    let limits = DecodeLimits::default();
+    limits.check_pixels(width, height)?;
+
     let bpp = PixelFormat::Rgb8.bytes_per_pixel();
     let mut data = vec![0u8; width as usize * height as usize * bpp];
+    // Gradient math is widened to `u64`: for accepted dimensions a single
+    // axis can still be as large as `max_pixels`, so `x * 255` (peaking near
+    // 2^30 * 255) overflows a `u32`. The `.max(1)` denominators keep the
+    // 1-pixel-wide/tall degenerate cases division-safe.
+    let w_denom = u64::from(width).max(1);
+    let h_denom = u64::from(height).max(1);
+    let wh_denom = (u64::from(width) + u64::from(height)).max(1);
     for y in 0..height {
         for x in 0..width {
             let offset = (y as usize * width as usize + x as usize) * bpp;
-            data[offset] = (x * 255 / width.max(1)) as u8;
-            data[offset + 1] = (y * 255 / height.max(1)) as u8;
-            data[offset + 2] = ((x + y) * 255 / (width + height).max(1)) as u8;
+            data[offset] = (u64::from(x) * 255 / w_denom) as u8;
+            data[offset + 1] = (u64::from(y) * 255 / h_denom) as u8;
+            data[offset + 2] = ((u64::from(x) + u64::from(y)) * 255 / wh_denom) as u8;
         }
     }
     Ok(Raster::new(width, height, PixelFormat::Rgb8, data)?)
@@ -385,6 +401,52 @@ mod tests {
         assert_eq!(r.height(), 50);
         assert_eq!(r.format(), PixelFormat::Rgb8);
         assert_eq!(r.data().len(), 100 * 50 * 3);
+    }
+
+    /**
+     * Reproducer for the unchecked gradient arithmetic: a single axis large
+     * enough to keep the total pixel count under the ceiling still drives the
+     * old `x * 255` computation past `u32::MAX` (16_777_215 * 255 already
+     * exceeds it). Before widening the math to `u64` this panicked on
+     * overflow in debug builds (and silently wrapped in release); it must now
+     * complete and paint the far-right column at full red intensity.
+     * Input: (20_000_000, 1) → Output: Ok(Raster) with a saturated last pixel.
+     */
+    #[test]
+    fn generate_test_raster_wide_no_overflow() {
+        let width = 20_000_000u32;
+        let r = generate_test_raster(width, 1).unwrap();
+        assert_eq!(r.width(), width);
+        assert_eq!(r.height(), 1);
+        // Red channel of the last pixel: (width-1) * 255 / width ≈ 254.
+        let last = ((width - 1) as usize) * 3;
+        assert_eq!(r.data()[last], 254);
+    }
+
+    /**
+     * Reproducer for the missing allocation cap: dimensions whose pixel count
+     * exceeds the shared decode budget must be rejected with a typed
+     * `DimensionLimitExceeded` before any buffer is allocated. Before the fix
+     * `generate_test_raster` sized its `vec!` straight from the raw
+     * dimensions, so this request attempted a multi-gigabyte allocation (a
+     * process abort) instead of returning an error.
+     * Input: (65_535, 65_535) → Output: Err(DimensionLimitExceeded).
+     */
+    #[test]
+    fn generate_test_raster_rejects_oversized() {
+        let (width, height) = (65_535u32, 65_535u32);
+        match generate_test_raster(width, height) {
+            Err(SourceError::DimensionLimitExceeded {
+                width: w,
+                height: h,
+                max_pixels,
+            }) => {
+                assert_eq!(w, width);
+                assert_eq!(h, height);
+                assert_eq!(max_pixels, DecodeLimits::default().max_pixels);
+            }
+            other => panic!("expected DimensionLimitExceeded, got {other:?}"),
+        }
     }
 
     /**
