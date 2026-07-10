@@ -1278,17 +1278,28 @@ pub(crate) fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
 
     // Ownership guard: only proceed when the directory is empty or carries
     // our marker. A single pass records both facts.
-    let mut is_empty = true;
+    //
+    // The advisory run lock (`.libviprs-job.lock`) is held for the duration of
+    // an Overwrite run (issue #126) and therefore always sits in the directory
+    // when this runs. It is our own bookkeeping, not foreign output, so it does
+    // not count toward "non-empty" here, and it is skipped by the delete loop
+    // below: unlinking a live lock file would let a concurrent acquirer create
+    // and lock a fresh file at the same path, reintroducing the very race the
+    // lock exists to prevent.
+    let mut has_foreign = false;
     let mut owned = false;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        is_empty = false;
+        if entry.file_name() == crate::resume::LOCK_FILENAME {
+            continue;
+        }
+        has_foreign = true;
         if entry.file_name() == crate::resume::CHECKPOINT_FILENAME {
             owned = true;
             break;
         }
     }
-    if !is_empty && !owned {
+    if has_foreign && !owned {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
@@ -1301,6 +1312,9 @@ pub(crate) fn wipe_directory(dir: &std::path::Path) -> std::io::Result<()> {
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        if entry.file_name() == crate::resume::LOCK_FILENAME {
+            continue;
+        }
         let p = entry.path();
         if p.is_dir() {
             let _ = std::fs::remove_dir_all(&p);
