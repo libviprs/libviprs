@@ -980,20 +980,21 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 ///
 /// pdfium itself is not thread-safe at the C library level. The
 /// `pdfium-render` `sync` feature wraps every FPDF call in a global
-/// mutex, but **only** when libviprs's `[patch.crates-io]` directive
-/// is honoured, which requires the consumer crate (libviprs-tests,
-/// libviprs-cli, downstream users) to either share a workspace with
-/// libviprs or replicate the patch directive. Cargo does not
-/// propagate `[patch.crates-io]` from a path-dependency.
+/// mutex, but **only** in the per-call locking fork that libviprs
+/// declares as a direct git dependency. Consumers that build libviprs
+/// from git or a path inherit that edge, but the crates.io-published
+/// libviprs cannot carry a git source (cargo strips it on publish),
+/// so registry consumers link the upstream wrapper whose locking is
+/// broken (issue #149; upstream ajrcarey/pdfium-render#262).
 ///
-/// To keep libviprs correct without depending on consumer-side
-/// patch hygiene, every FPDF entry point in this crate acquires this
-/// process-wide lock first. If the consumer also has the patched
-/// fork active (the recommended setup), the result is double-locking
-/// — a few extra nanoseconds per call, no correctness or deadlock
-/// concern (the locks are independent `Mutex<()>` instances acquired
-/// in a fixed order). If the patch is missing, this lock alone keeps
-/// concurrent renders safe.
+/// To keep libviprs correct without depending on which wrapper the
+/// consumer's build resolved, every FPDF entry point in this crate
+/// acquires this process-wide lock first. If the fork is also active
+/// (the recommended setup), the result is double-locking: a few extra
+/// nanoseconds per call, no correctness or deadlock concern (the
+/// locks are independent `Mutex<()>` instances acquired in a fixed
+/// order). If the fork is missing, this lock alone keeps concurrent
+/// renders safe.
 ///
 /// **Performance note:** With this lock held, multi-threaded
 /// `render_strip` calls serialise. That matches the underlying
@@ -1351,8 +1352,8 @@ pub(crate) fn strip_matrix(
 ///
 /// FPDF calls underneath this function are serialised by
 /// `pdfium-render`'s `ThreadSafePdfiumBindings` (active via the
-/// `sync` feature plus the `[patch.crates-io]` directive in
-/// `libviprs/Cargo.toml`).
+/// `sync` feature plus the direct git dependency on the per-call
+/// locking fork in `libviprs/Cargo.toml`).
 ///
 /// `dpi`, `rotation`, `y_offset`, `strip_height` semantics match the
 /// matrix derivation documented at [`strip_matrix`].
