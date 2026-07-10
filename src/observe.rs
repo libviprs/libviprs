@@ -230,12 +230,12 @@ impl CollectingObserver {
     /// Return a snapshot of all collected events so far, cloned from the
     /// internal mutex-protected buffer.
     pub fn events(&self) -> Vec<EngineEvent> {
-        self.events.lock().unwrap().clone()
+        crate::poison::recover(&self.events).clone()
     }
 
     /// Return the number of events collected so far.
     pub fn event_count(&self) -> usize {
-        self.events.lock().unwrap().len()
+        crate::poison::recover(&self.events).len()
     }
 }
 
@@ -247,7 +247,7 @@ impl Default for CollectingObserver {
 
 impl EngineObserver for CollectingObserver {
     fn on_event(&self, event: EngineEvent) {
-        self.events.lock().unwrap().push(event);
+        crate::poison::recover(&self.events).push(event);
     }
 }
 
@@ -395,6 +395,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /**
+     * Reproducer for #117: one panicking holder must not cascade its poison
+     * into a second panic on every later observer call. We poison the events
+     * mutex by panicking under `catch_unwind` while holding the guard, then
+     * exercise the public read/write surface.
+     *
+     * Before the fix (`.lock().unwrap()`), `event_count`, `events` and
+     * `on_event` all re-`unwrap()` the poisoned lock and panic (RED). After
+     * the fix they recover the guard via `crate::poison::recover` and keep the
+     * already-collected events, so the count grows past the poison (GREEN).
+     */
+    #[test]
+    fn poisoned_events_lock_recovers_without_cascade() {
+        let obs = CollectingObserver::new();
+        obs.on_event(EngineEvent::TileCompleted {
+            coord: TileCoord::new(0, 0, 0),
+        });
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = obs.events.lock().unwrap();
+            panic!("worker panic while holding the events lock");
+        }));
+        assert!(poisoned.is_err(), "the injected panic must unwind");
+        assert!(obs.events.is_poisoned(), "the lock must now be poisoned");
+
+        // None of these may panic under the recovered poison policy.
+        assert_eq!(obs.event_count(), 1);
+        assert_eq!(obs.events().len(), 1);
+        obs.on_event(EngineEvent::Finished {
+            total_tiles: 1,
+            levels: 1,
+        });
+        assert_eq!(obs.event_count(), 2);
     }
 
     /**
