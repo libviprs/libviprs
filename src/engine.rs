@@ -883,7 +883,7 @@ pub(crate) fn cp_for_sink(
 /// events so progress observers see verify runs as first-class.
 ///
 /// Strip-source equivalents live in [`crate::stream_verify`].
-pub(crate) fn raster_verify(
+pub fn raster_verify(
     source: &Raster,
     plan: &PyramidPlan,
     sink: &dyn TileSink,
