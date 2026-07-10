@@ -34,6 +34,19 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo check --all-targets --features pdfium
 
+  docs:
+    name: Docs (deny broken intra-doc links)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # All features so the gated surface resolves instead of reading as broken
+      # links; docs.rs itself builds with `all-features` (issue #146).
+      - run: cargo doc --no-deps --all-features
+
   test:
     name: Test
     runs-on: ubuntu-latest

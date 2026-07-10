@@ -3,7 +3,7 @@
 //! [`EngineObserver`](crate::observe::EngineObserver),
 //! [`StripSource`](crate::streaming::StripSource)).
 //!
-//! The shape mirrors [`http::Extensions`]: a `TypeId`-keyed map of
+//! The shape mirrors `http::Extensions`: a `TypeId`-keyed map of
 //! `Box<dyn Any + Send + Sync>`. One slot per `TypeId`; re-inserting a type
 //! overwrites the previous value. Values must be `Send + Sync + 'static` so
 //! the map itself is trivially `Send + Sync`.

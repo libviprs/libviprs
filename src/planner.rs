@@ -277,14 +277,14 @@ impl PyramidPlanner {
         }
     }
 
-    /// Estimates the peak heap memory (in bytes) that
-    /// [`generate_pyramid_observed`](crate::generate_pyramid_observed) will
-    /// consume for this planner configuration.
+    /// Estimates the peak heap memory (in bytes) that a monolithic pyramid run
+    /// through [`EngineBuilder::run`](crate::EngineBuilder::run) will consume for
+    /// this planner configuration.
     ///
     /// The estimate covers the two largest allocations that coexist at peak:
     ///
     /// 1. **Source raster** — the caller-owned RGBA8 image passed by reference
-    ///    to `generate_pyramid_observed`. Size: `image_width × image_height × 4`.
+    ///    to the engine. Size: `image_width × image_height × 4`.
     ///
     /// 2. **Canvas raster** — when centring is enabled, the engine embeds the
     ///    source into a padded canvas before downscaling. For `Google` layout
@@ -687,7 +687,7 @@ impl PyramidPlan {
     /// `peak = canvas_bytes + canvas_bytes / 4`
     ///
     /// This estimate is conservative — it ignores smaller intermediate buffers
-    /// that are freed quickly. Used by [`generate_pyramid_auto`](crate::streaming::generate_pyramid_auto)
+    /// that are freed quickly. Used by [`EngineKind::Auto`](crate::EngineKind::Auto)
     /// to decide whether the monolithic path fits within the memory budget.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-limit)
