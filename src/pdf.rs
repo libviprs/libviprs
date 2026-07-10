@@ -938,6 +938,22 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 #[cfg(feature = "pdfium")]
 static PDFIUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Lock a `Mutex<()>` used purely for serialisation, recovering from
+/// poison instead of propagating it. If a thread panicked while holding
+/// the lock the mutex is poisoned; every one of these locks guards
+/// nothing but access to the single-threaded pdfium C library, and a
+/// Rust panic on the Rust side cannot corrupt that library's internal
+/// state, so the poison is benign and must not brick later callers.
+/// Both [`pdfium_lock`] and the init serialisation guard in
+/// [`init_pdfium`] go through here so the recovery is uniform.
+#[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
+#[inline]
+fn lock_recovering(mutex: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Acquire [`PDFIUM_LOCK`]. Panics in another thread that previously
 /// held the lock are recovered from rather than propagated; pdfium is
 /// a C library and a Rust panic on the Rust side cannot corrupt its
@@ -945,9 +961,7 @@ static PDFIUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(feature = "pdfium")]
 #[inline]
 pub(crate) fn pdfium_lock() -> std::sync::MutexGuard<'static, ()> {
-    PDFIUM_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock_recovering(&PDFIUM_LOCK)
 }
 
 /// Decide the explicit pdfium library path from a raw `PDFIUM_PATH` value.
@@ -989,7 +1003,13 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
     if let Some(p) = PDFIUM.get() {
         return Ok(p);
     }
-    let _guard = INIT_GUARD.lock().unwrap();
+    // Recover from poison rather than `.unwrap()`: if a prior init attempt
+    // panicked while holding this guard (e.g. inside `bind_to_system_library`
+    // or `Pdfium::new`) the mutex is poisoned, and propagating that would make
+    // every future `init_pdfium` panic here, permanently disabling all PDF
+    // rendering in the process (#89). The guard only serialises init, so the
+    // poison is benign.
+    let _guard = lock_recovering(&INIT_GUARD);
     if let Some(p) = PDFIUM.get() {
         return Ok(p);
     }
@@ -1387,6 +1407,55 @@ pub fn render_page_pdfium_budgeted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /*
+     * Regression for #89: the init serialisation guard must recover from
+     * poison instead of permanently bricking pdfium initialisation.
+     *
+     * `init_pdfium` locks its `INIT_GUARD` through `lock_recovering`. If a
+     * prior init attempt panicked while holding that guard (e.g. inside
+     * `Pdfium::bind_to_system_library` or `Pdfium::new`) the mutex is
+     * poisoned. A plain `.lock().unwrap()` would then propagate the poison to
+     * every subsequent caller, so all future PDF rendering in the process
+     * would die at that unwrap. `lock_recovering` — the single routine both
+     * `init_pdfium` and `pdfium_lock` use — must hand back the guard instead.
+     *
+     * This exercises `lock_recovering` directly (init itself needs a bound
+     * pdfium library, unavailable in a unit test) against a mutex poisoned the
+     * exact way init would poison it: a thread panicking while holding it.
+     * Before the fix the init path called `.unwrap()` and this recovery did
+     * not exist, so the poisoned lock panicked; after the fix it recovers.
+     */
+    #[test]
+    fn init_guard_recovers_from_poison() {
+        use std::sync::{Arc, Mutex};
+
+        let mutex: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+        // Poison it the way a panic during init would: a thread panics while
+        // holding the lock.
+        let poisoner = Arc::clone(&mutex);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.lock().unwrap();
+            panic!("simulated panic during pdfium init");
+        })
+        .join();
+
+        assert!(
+            mutex.is_poisoned(),
+            "precondition: the init guard must be poisoned"
+        );
+
+        // The routine the init path uses must recover rather than propagate
+        // the poison; a `.unwrap()` here would panic and permanently disable
+        // pdfium init.
+        {
+            let _guard = lock_recovering(&mutex);
+        }
+
+        // And it keeps working on the next attempt — init is not bricked.
+        let _guard = lock_recovering(&mutex);
+    }
 
     /**
      * Regression test for #148: pdfium's bitmap buffer length is computed as
