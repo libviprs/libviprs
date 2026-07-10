@@ -179,7 +179,18 @@ pub struct EngineConfig {
     pub dedupe_strategy: Option<crate::dedupe::DedupeStrategy>,
     /// Explicit on-disk root for resume checkpoints and Verify-mode reads.
     /// If None, falls back to `sink.checkpoint_root()`.
-    /// Required when the sink is an opaque user wrapper that does not forward checkpoint_root().
+    ///
+    /// This field is a deliberate public capability, not a leftover
+    /// workaround (issue #137). The `TileSink::inner_sink` decorator hook
+    /// makes every in-tree wrapper forward `checkpoint_root()`
+    /// automatically, but the crate cannot retrofit that hook onto an
+    /// opaque external wrapper owned by user code (a tee, recording, or
+    /// metrics sink that only forwards the data path). Setting this root
+    /// keeps resume and Verify working through such a wrapper without
+    /// patching it, and it also lets any caller place the checkpoint
+    /// outside the sink's output directory. See
+    /// [`EngineConfig::with_checkpoint_root`] and the builder-level
+    /// mirror, [`crate::resume::ResumePolicy::with_checkpoint_root`].
     pub checkpoint_root: Option<PathBuf>,
     /// Optional content digest identifying the source raster this run reads
     /// from. When set, it is folded into the resume plan hash so that
@@ -303,9 +314,15 @@ impl EngineConfig {
 
     /// Configure an explicit on-disk root for resume checkpoints and
     /// Verify-mode reads. When unset, the engine falls back to
-    /// [`TileSink::checkpoint_root`]. Supplying this is the preferred way
-    /// to drive resume/verify against an opaque user-wrapped sink that does
-    /// not forward `checkpoint_root()`.
+    /// [`TileSink::checkpoint_root`].
+    ///
+    /// Supplying this is the supported way to drive resume/verify against
+    /// an opaque user-wrapped sink that does not forward
+    /// `checkpoint_root()`, and it also decouples the checkpoint location
+    /// from the output directory. This opt-in stays by design (issue #137):
+    /// the `TileSink::inner_sink` hook fixed the crate's own wrappers, but
+    /// external wrappers remain out of the crate's reach, so removing this
+    /// root would drop a real capability rather than dead code.
     pub fn with_checkpoint_root(mut self, root: PathBuf) -> Self {
         self.checkpoint_root = Some(root);
         self

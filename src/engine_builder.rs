@@ -2369,3 +2369,166 @@ mod resume_wrapper_forwarding_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Explicit checkpoint-root opt-in (issue #137 decision record)
+// ---------------------------------------------------------------------------
+//
+// Issue #137's remainder asked whether `EngineConfig::checkpoint_root` (and
+// its `ResumePolicy::with_checkpoint_root` mirror) became redundant once the
+// `TileSink::inner_sink` decorator hook (#220/#239) made every in-tree
+// wrapper forward `checkpoint_root()` automatically. The answer, recorded
+// here, is no: the hook only fixes wrappers the crate owns. An external
+// wrapper written by user code can forward nothing but the data path, and
+// the explicit root is the one public knob that keeps resume and Verify
+// working through it. These tests pin the opt-in as an intentional
+// capability; deleting the field or either builder breaks them.
+
+#[cfg(test)]
+mod checkpoint_root_public_optin_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::{JobCheckpoint, ResumePolicy};
+    use crate::sink::{FsSink, SinkError, Tile, TileSink};
+
+    /// Models a third-party wrapper the crate cannot patch: it forwards only
+    /// the data path (`write_tile` / `finish`) and overrides neither
+    /// `inner_sink()` nor any bookkeeping hook, so `checkpoint_root()` and
+    /// `content_format()` fall back to the terminal `None` defaults even
+    /// though real tiles land on disk through the inner [`FsSink`].
+    struct OpaqueThirdPartySink {
+        inner: FsSink,
+    }
+
+    impl TileSink for OpaqueThirdPartySink {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            self.inner.write_tile(tile)
+        }
+        fn finish(&self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+    }
+
+    fn solid_source() -> Raster {
+        // 8x8 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn solid_plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    fn opaque_sink(out: &std::path::Path, plan: &PyramidPlan) -> OpaqueThirdPartySink {
+        OpaqueThirdPartySink {
+            inner: FsSink::new(out.to_path_buf(), plan.clone()),
+        }
+    }
+
+    /// Verify through an opaque wrapper: refused without the opt-in, clean
+    /// with it. The refusal half is the counterfactual that proves the
+    /// trait-level fix (#220/#239) does NOT make the explicit root
+    /// redundant: the wrapper genuinely hides the on-disk root from the
+    /// engine.
+    #[test]
+    fn verify_through_opaque_wrapper_requires_and_honors_explicit_root() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        // Seed real tiles on disk through the opaque wrapper.
+        EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .run()
+            .expect("seeding run must succeed");
+
+        // Without the opt-in the engine cannot locate the tiles.
+        let err = EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .with_resume(ResumePolicy::verify())
+            .run()
+            .expect_err("Verify through an opaque wrapper with no explicit root must fail");
+        assert!(
+            matches!(err, EngineError::VerifyRequiresOnDiskSink),
+            "expected VerifyRequiresOnDiskSink, got {err:?}"
+        );
+
+        // With the public opt-in the same opaque wrapper verifies cleanly.
+        let result = EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .with_resume(ResumePolicy::verify().with_checkpoint_root(out.path()))
+            .run()
+            .expect("Verify with the explicit checkpoint root must succeed");
+        assert_eq!(result.tiles_produced, 0, "Verify is read-only");
+    }
+
+    /// The `EngineConfig::checkpoint_root` field itself (not just the
+    /// `ResumePolicy` mirror) must keep driving the fallback: `with_config`
+    /// threads it into an attached policy that carries no root of its own.
+    /// This is the exact field the issue proposed retiring.
+    #[test]
+    fn engine_config_checkpoint_root_drives_verify_through_opaque_wrapper() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .run()
+            .expect("seeding run must succeed");
+
+        let cfg = EngineConfig::default().with_checkpoint_root(out.path().to_path_buf());
+        let result = EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .with_resume(ResumePolicy::verify())
+            .with_config(cfg)
+            .run()
+            .expect("EngineConfig::checkpoint_root must drive Verify through the opaque wrapper");
+        assert_eq!(result.tiles_produced, 0, "Verify is read-only");
+    }
+
+    /// Resume through an opaque wrapper with an explicit root that sits
+    /// apart from the output directory: the checkpoint must land at the
+    /// explicit root even though the wrapper hides the sink's directory,
+    /// and a second run over the same root must skip every recorded tile.
+    #[test]
+    fn resume_through_opaque_wrapper_uses_explicit_root() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        // Run 1: full resumable render.
+        let r1 = EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(cp.path())
+                    .with_checkpoint_every(1),
+            )
+            .run()
+            .expect("initial resumable render must succeed");
+        assert!(r1.tiles_produced > 0, "the first run renders real tiles");
+
+        let meta = JobCheckpoint::load(cp.path())
+            .expect("checkpoint load must not error")
+            .expect("the explicit root must receive the checkpoint despite the opaque wrapper");
+        assert_eq!(
+            meta.completed_tiles.len() as u64,
+            plan.total_tile_count(),
+            "the checkpoint must record every completed tile"
+        );
+
+        // Run 2: resume over the same explicit root; every tile short-circuits.
+        let r2 = EngineBuilder::new(&source, plan.clone(), opaque_sink(out.path(), &plan))
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(cp.path())
+                    .with_checkpoint_every(1),
+            )
+            .run()
+            .expect("resume run must succeed");
+        assert_eq!(
+            r2.tiles_produced, 0,
+            "a fully-recorded checkpoint must short-circuit every write"
+        );
+    }
+}
