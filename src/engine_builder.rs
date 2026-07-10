@@ -660,6 +660,35 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 return Ok((result, sink));
             }
 
+            // Overwrite / Resume: take the advisory run lock on the checkpoint
+            // root BEFORE any work touches the directory, and hold it for the
+            // whole run. This is the engine-side half of issue #126: unique
+            // temp filenames alone stop torn renames, but two live jobs sharing
+            // one directory can still (a) clobber each other's `completed_tiles`
+            // when their periodic flushes race, and (b) wipe each other's output
+            // if one runs Overwrite. `RunLock::acquire` is non-blocking, so a
+            // second job is refused with `ResumeError::Locked` (surfaced as
+            // `EngineError::ResumeFailed`) rather than allowed to race. The lock
+            // is dropped when `_run_lock` leaves this block, i.e. after the final
+            // checkpoint flush below. The guard sits ahead of `prepare_resume_state`
+            // so the Overwrite wipe in that helper only ever runs while held.
+            //
+            // The directory to guard is the run's on-disk footprint: the sink's
+            // own output directory (where tiles land and where an Overwrite wipe
+            // strikes) when the sink has one, else the explicit checkpoint root.
+            // A purely in-memory sink with no checkpoint root has nothing on disk
+            // to clobber, so it takes no lock.
+            let lock_dir = sink
+                .checkpoint_root()
+                .map(std::path::Path::to_path_buf)
+                .or_else(|| engine_cfg.checkpoint_root.clone());
+            let _run_lock = match &lock_dir {
+                Some(dir) => {
+                    Some(crate::resume::RunLock::acquire(dir).map_err(EngineError::ResumeFailed)?)
+                }
+                None => None,
+            };
+
             // Overwrite / Resume: shared (skip, cp) setup + ResumeAwareSink.
             let (skip, cp) = prepare_resume_state(&sink, &plan, &engine_cfg, policy.mode())?;
             // Route resume writes through the retry wrapper (when configured)
@@ -2195,5 +2224,112 @@ mod live_resume_bookkeeping_tests {
             r2.bytes_written, 0,
             "tiles skipped on resume must not be counted as bytes_written"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run-lock wiring (issue #126)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod run_lock_wiring_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::{ResumeError, ResumePolicy, RunLock};
+    use crate::sink::FsSink;
+
+    fn solid_source() -> Raster {
+        // 8x8 RGB solid so every tile is non-blank and actually written.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn solid_plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    // Core of issue #126: while one job holds the advisory run lock on an
+    // output directory, a second Overwrite job pointed at that same directory
+    // must be refused (`ResumeError::Locked`), not allowed to run and wipe the
+    // first job's live output.
+    //
+    // Before the wiring (RED): `EngineBuilder::run` never touched `RunLock`, so
+    // the second Overwrite ran to completion and its wipe deleted the sentinel
+    // file the "other job" had placed in the directory.
+    //
+    // After the wiring (GREEN): the run acquires the lock ahead of
+    // `prepare_resume_state`, fails fast with `ResumeError::Locked`, and the
+    // sentinel survives because the guarded wipe never executes.
+    #[test]
+    fn overwrite_is_refused_while_the_output_dir_is_locked() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        // Stand in for a live job that already owns the directory.
+        let held = RunLock::acquire(out.path()).expect("first holder acquires the lock");
+
+        // Make the directory "wipe-owned": a `.libviprs-job.json` marker means
+        // the Overwrite wipe would consider the directory its own and proceed
+        // to clear it. Absent the run lock this run would therefore delete the
+        // sentinel below, which is exactly the clobber issue #126 prevents.
+        std::fs::write(out.path().join(crate::resume::CHECKPOINT_FILENAME), b"{}").unwrap();
+
+        // A sentinel representing the live job's in-flight output. A concurrent
+        // Overwrite that runs its wipe would destroy it.
+        let sentinel = out.path().join("live-output.dat");
+        std::fs::write(&sentinel, b"do not clobber").unwrap();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let err = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite())
+            .run()
+            .expect_err("a second job must be refused while the lock is held");
+
+        match err {
+            EngineError::ResumeFailed(ResumeError::Locked { path }) => {
+                assert_eq!(
+                    path,
+                    RunLock::lock_path(out.path()),
+                    "the refusal must name the lock file for this directory"
+                );
+            }
+            other => panic!("expected ResumeFailed(Locked), got {other:?}"),
+        }
+
+        assert!(
+            sentinel.exists(),
+            "the refused Overwrite must not have wiped the live job's output"
+        );
+
+        drop(held);
+    }
+
+    // The guard must be released when the run finishes so the directory is free
+    // for the next run. A successful Overwrite takes and drops the lock; a fresh
+    // `RunLock::acquire` on the same directory afterwards must therefore succeed.
+    #[test]
+    fn run_releases_the_lock_when_it_finishes() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite())
+            .run()
+            .expect("an unlocked directory must run to completion");
+
+        // If the run had leaked its guard, this non-blocking acquire would fail
+        // with `Locked`.
+        let reacquired = RunLock::acquire(out.path())
+            .expect("the run must release its lock so a later job can acquire it");
+        drop(reacquired);
     }
 }
