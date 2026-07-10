@@ -342,7 +342,7 @@ pub fn verify_from_strip_source(
         y += sh;
     }
 
-    let mut current = canvas_raster;
+    let current = canvas_raster;
 
     // Sanity check: the assembled raster must match the top plan level's
     // recorded dimensions, otherwise the downstream downscale chain will
@@ -354,90 +354,98 @@ pub fn verify_from_strip_source(
     // ------------------------------------------------------------------
     // Phase 4: byte-exact verification, level-by-level, top to bottom.
     //
-    // This is a direct transcription of `run_verify`'s second loop. The
-    // downscale cadence, tile ordering, and event emission order are all
-    // preserved; only the top-level source changes (strip-assembled
-    // rather than `embed_in_canvas`-produced).
+    // The walk skeleton is the shared `level_walk::walk_levels_down` (the
+    // same one `raster_verify` and the live engines drive). The downscale
+    // cadence, tile ordering, and event emission order are all preserved;
+    // only the top-level source changes (strip-assembled rather than
+    // `embed_in_canvas`-produced).
     // ------------------------------------------------------------------
-    for level_idx in (0..plan.levels.len()).rev() {
-        let level = &plan.levels[level_idx];
-        if level_idx < top_level_idx {
-            current = resize::downscale_half(&current)?;
-        }
+    crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+        current,
+        plan.levels.len(),
+        |_| Ok(()),
+        // Step: the same tile op the live engines apply.
+        |_, prev| Ok(resize::downscale_half(&prev)?),
+        |level_idx, current| {
+            let level = &plan.levels[level_idx];
 
-        observer.on_event(EngineEvent::LevelStarted {
-            level: level.level,
-            width: level.width,
-            height: level.height,
-            tile_count: level.tile_count(),
-        });
+            observer.on_event(EngineEvent::LevelStarted {
+                level: level.level,
+                width: level.width,
+                height: level.height,
+                tile_count: level.tile_count(),
+            });
 
-        for row in 0..level.rows {
-            for col in 0..level.cols {
-                let coord = TileCoord::new(level_idx as u32, col, row);
-                observer.on_event(EngineEvent::TileCompleted { coord });
+            for row in 0..level.rows {
+                for col in 0..level.cols {
+                    let coord = TileCoord::new(level_idx as u32, col, row);
+                    observer.on_event(EngineEvent::TileCompleted { coord });
 
-                // `extract_tile_from_strip` with `strip_canvas_y = 0`
-                // applied to a full-level raster is byte-equivalent to the
-                // private `engine::extract_tile`: same rect projection,
-                // same edge padding, same Google vs. DeepZoom branching.
-                let expected =
-                    crate::streaming::extract_tile_from_strip(&current, plan, coord, 0, bg)?;
-                let expected_bytes = expected.data();
+                    // `extract_tile_from_strip` with `strip_canvas_y = 0`
+                    // applied to a full-level raster is byte-equivalent to the
+                    // private `engine::extract_tile`: same rect projection,
+                    // same edge padding, same Google vs. DeepZoom branching.
+                    let expected =
+                        crate::streaming::extract_tile_from_strip(current, plan, coord, 0, bg)?;
+                    let expected_bytes = expected.data();
 
-                let (abs, ext) = match find_tile_on_disk(root, plan, coord, &active_exts) {
-                    Some(found) => found,
-                    None => {
-                        return Err(EngineError::Sink(SinkError::Other(format!(
-                            "Verify: missing tile for coord {coord:?}"
-                        ))));
-                    }
-                };
+                    let (abs, ext) = match find_tile_on_disk(root, plan, coord, &active_exts) {
+                        Some(found) => found,
+                        None => {
+                            return Err(EngineError::Sink(SinkError::Other(format!(
+                                "Verify: missing tile for coord {coord:?}"
+                            ))));
+                        }
+                    };
 
-                let on_disk =
-                    std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
+                    let on_disk =
+                        std::fs::read(&abs).map_err(|e| EngineError::Sink(SinkError::Io(e)))?;
 
-                if ext == "raw" {
-                    if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
-                        // A 1-byte placeholder: either a blank-tile marker
-                        // (`BlankTileStrategy::Placeholder*`) or a dedupe
-                        // reference whose payload lives in `_shared/`. Validate
-                        // the regenerated tile's blankness / manifest reference
-                        // instead of byte-comparing the marker (issue #94).
-                        let is_dedupe_ref = plan
-                            .tile_path(coord, ext)
-                            .is_some_and(|rel| blank_ref_paths.contains(&rel));
-                        if !is_dedupe_ref
-                            && !crate::engine::regenerated_tile_matches_marker(&expected, config)
-                        {
+                    if ext == "raw" {
+                        if on_disk.len() == 1 && on_disk[0] == crate::sink::BLANK_TILE_MARKER {
+                            // A 1-byte placeholder: either a blank-tile marker
+                            // (`BlankTileStrategy::Placeholder*`) or a dedupe
+                            // reference whose payload lives in `_shared/`. Validate
+                            // the regenerated tile's blankness / manifest reference
+                            // instead of byte-comparing the marker (issue #94).
+                            let is_dedupe_ref = plan
+                                .tile_path(coord, ext)
+                                .is_some_and(|rel| blank_ref_paths.contains(&rel));
+                            if !is_dedupe_ref
+                                && !crate::engine::regenerated_tile_matches_marker(
+                                    &expected, config,
+                                )
+                            {
+                                return Err(EngineError::ChecksumMismatch {
+                                    tile: coord,
+                                    expected: "blank tile (placeholder marker)".to_string(),
+                                    got: "regenerated tile is not blank".to_string(),
+                                });
+                            }
+                        } else if on_disk != expected_bytes {
                             return Err(EngineError::ChecksumMismatch {
                                 tile: coord,
-                                expected: "blank tile (placeholder marker)".to_string(),
-                                got: "regenerated tile is not blank".to_string(),
+                                expected: format!("{} bytes (raw)", expected_bytes.len()),
+                                got: format!(
+                                    "{} bytes on disk differ from regenerated tile",
+                                    on_disk.len()
+                                ),
                             });
                         }
-                    } else if on_disk != expected_bytes {
-                        return Err(EngineError::ChecksumMismatch {
-                            tile: coord,
-                            expected: format!("{} bytes (raw)", expected_bytes.len()),
-                            got: format!(
-                                "{} bytes on disk differ from regenerated tile",
-                                on_disk.len()
-                            ),
-                        });
                     }
+                    // Encoded formats (png/jpeg) fall through: existence
+                    // check already passed, and fresh re-encoding is not
+                    // byte-stable, so we don't compare pixel data here.
                 }
-                // Encoded formats (png/jpeg) fall through: existence
-                // check already passed, and fresh re-encoding is not
-                // byte-stable, so we don't compare pixel data here.
             }
-        }
 
-        observer.on_event(EngineEvent::LevelCompleted {
-            level: level.level,
-            tiles_produced: level.tile_count(),
-        });
-    }
+            observer.on_event(EngineEvent::LevelCompleted {
+                level: level.level,
+                tiles_produced: level.tile_count(),
+            });
+            Ok(())
+        },
+    )?;
 
     observer.on_event(EngineEvent::Finished {
         total_tiles: plan.total_tile_count(),
