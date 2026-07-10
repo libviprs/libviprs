@@ -620,9 +620,15 @@ pub(crate) struct CheckpointState {
     root: std::path::PathBuf,
     /// Running metadata. Re-serialised on every flush.
     meta: std::sync::Mutex<JobMetadata>,
-    /// Write counter since the last flush. `checkpoint_every == 0` means we
-    /// never perform intermediate flushes (final flush only).
-    pending_since_flush: std::sync::atomic::AtomicU64,
+    /// Monotonically increasing count of tiles marked completed over the whole
+    /// run. A flush is triggered whenever this counter lands on a multiple of
+    /// `checkpoint_every`; it is never reset. Because [`AtomicU64::fetch_add`]
+    /// hands every concurrent caller a *unique* value, exactly one caller
+    /// observes each boundary — so no increment can be clobbered and the "every
+    /// N tiles" cadence is preserved under parallel marking (issue #113).
+    /// `checkpoint_every == 0` means we never perform intermediate flushes
+    /// (final flush only).
+    completed_counter: std::sync::atomic::AtomicU64,
     /// Flush cadence. `0` disables periodic flushing.
     checkpoint_every: u64,
 }
@@ -637,7 +643,7 @@ impl CheckpointState {
         Self {
             root,
             meta: std::sync::Mutex::new(meta),
-            pending_since_flush: AtomicU64::new(0),
+            completed_counter: AtomicU64::new(0),
             checkpoint_every,
         }
     }
@@ -652,19 +658,36 @@ impl CheckpointState {
         }
         // Flush periodically. `checkpoint_every == 0` disables this path and
         // leaves only the final flush (done by `run_pyramid` on success).
-        //
-        // `Relaxed` is sufficient: `flush()` takes the `meta` mutex
-        // internally, which provides the happens-before edge between the
-        // worker that appended the tile and the thread that serialises
-        // the snapshot. The counter itself is a pure cadence gauge.
-        if self.checkpoint_every > 0 {
-            let n = self.pending_since_flush.fetch_add(1, Ordering::Relaxed) + 1;
-            if n >= self.checkpoint_every {
-                self.pending_since_flush.store(0, Ordering::Relaxed);
-                self.flush()?;
-            }
+        if self.cadence_reached() {
+            self.flush()?;
         }
         Ok(())
+    }
+
+    /// Advance the flush-cadence counter for one completed tile and report
+    /// whether this tile lands exactly on a flush boundary.
+    ///
+    /// The counter is monotonic and never reset: a flush is due precisely when
+    /// the post-increment value is a multiple of `checkpoint_every`. Compared
+    /// to the previous check-then-reset scheme (`fetch_add`, compare against
+    /// the threshold, then `store(0)`), this is race-free under concurrent
+    /// marking. [`AtomicU64::fetch_add`] serialises the increment and returns a
+    /// value unique to each caller, so exactly one caller sees each boundary
+    /// (`n % checkpoint_every == 0`). The old reset could clobber an increment
+    /// interleaved between another worker's `fetch_add` and its `store(0)`,
+    /// dropping a tile from the tally and pushing the next checkpoint past the
+    /// intended N-tile boundary (issue #113).
+    ///
+    /// `Relaxed` is sufficient: [`Self::flush`] takes the `meta` mutex
+    /// internally, which provides the happens-before edge between the worker
+    /// that appended the tile and the thread that serialises the snapshot. The
+    /// counter itself is a pure cadence gauge.
+    fn cadence_reached(&self) -> bool {
+        if self.checkpoint_every == 0 {
+            return false;
+        }
+        let n = self.completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        n % self.checkpoint_every == 0
     }
 
     /// Promote the level to `levels_completed` only when every tile in that
@@ -1919,6 +1942,78 @@ mod tests {
         assert!(
             cp.meta.lock().unwrap().levels_completed.contains(&level_id),
             "level {level_id} has all {total} tiles recorded but was not marked completed"
+        );
+    }
+
+    /// Issue #113: the flush cadence must be preserved under concurrent
+    /// marking — no increment may be lost or double-counted, so over a run of
+    /// `T` completed tiles at cadence `N` exactly `floor(T / N)` flush
+    /// boundaries are hit, independent of how the worker threads interleave.
+    ///
+    /// The previous implementation used a non-atomic check-then-reset
+    /// (`fetch_add(1)`, compare `>= N`, then `store(0)`). A third increment
+    /// interleaved between one worker's `fetch_add` and its `store(0)` was
+    /// clobbered by the reset, dropping tiles from the tally (fewer boundaries
+    /// than expected), while two workers straddling the threshold before either
+    /// reset both fired (more boundaries than expected). Either way the count
+    /// diverged from `floor(T / N)` (RED). The monotonic modulo counter hands
+    /// each caller a unique value and never resets, so exactly one caller sees
+    /// each boundary and the count is exact (GREEN).
+    #[test]
+    fn checkpoint_cadence_preserved_under_concurrency() {
+        use crate::resume::JobMetadata;
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicU64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
+
+        const EVERY: u64 = 4;
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 250_000;
+        let total = THREADS * PER_THREAD;
+        let expected = total / EVERY;
+
+        let cp = Arc::new(CheckpointState::new(
+            dir.path().to_path_buf(),
+            meta,
+            &plan,
+            EVERY,
+        ));
+        // Count cadence boundaries directly off the atomic decision so the
+        // stress loop stays in-memory (no per-tile disk flush) and hammers the
+        // exact increment path that raced. All threads start together to
+        // maximise contention on the shared counter.
+        let boundaries = Arc::new(AtomicU64::new(0));
+        let barrier = Arc::new(Barrier::new(THREADS as usize));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cp = Arc::clone(&cp);
+                let boundaries = Arc::clone(&boundaries);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..PER_THREAD {
+                        if cp.cadence_reached() {
+                            boundaries.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let hit = boundaries.load(Ordering::Relaxed);
+        assert_eq!(
+            hit, expected,
+            "flush cadence lost or duplicated under concurrent marking (issue #113): \
+             {total} tiles at every={EVERY} must hit exactly {expected} flush boundaries, got {hit}"
         );
     }
 
