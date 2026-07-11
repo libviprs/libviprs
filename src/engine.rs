@@ -123,6 +123,7 @@ pub enum EngineError {
 /// for integration-level examples. In the CLI, the `--skip-blank` flag selects
 /// [`BlankTileStrategy::Placeholder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum BlankTileStrategy {
     /// Emit blank tiles as full raster data (default). Every tile coordinate
@@ -158,7 +159,13 @@ pub enum BlankTileStrategy {
 ///
 /// **See also:** the [interactive CLI generator](https://libviprs.org/cli/#cli-generator)
 /// composes a runnable program from these same knobs.
+/// With the `serde` feature enabled the config derives `Serialize` /
+/// `Deserialize` so an out-of-process caller can reconstruct it from a JSON
+/// envelope (issue #67). The [`cancel`](Self::cancel) token is a
+/// process-local runtime handle, not wire state, so it is `#[serde(skip)]`:
+/// it serializes as absent and always deserializes to `None`.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct EngineConfig {
     /// Number of worker threads for tile extraction. 0 = single-threaded (current thread).
@@ -205,6 +212,11 @@ pub struct EngineConfig {
     /// short slices so it can be interrupted) and stops with
     /// [`EngineError::Cancelled`] once the token is cancelled. `None` (the
     /// default) is a run that cannot be cancelled.
+    ///
+    /// Skipped by the `serde` derives: a cancellation flag is shared process
+    /// memory (an `Arc<AtomicBool>`), so there is nothing meaningful to put
+    /// on the wire. Deserialized configs always start with `None`.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub cancel: Option<crate::cancel::CancelToken>,
 }
 
