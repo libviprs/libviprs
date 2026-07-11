@@ -60,6 +60,7 @@ pub mod engine_builder;
 pub mod extensions;
 pub mod extract;
 pub mod geo;
+pub mod histogram;
 pub(crate) mod level_walk;
 #[cfg(loom)]
 mod loom_tests;
@@ -106,6 +107,7 @@ pub use engine::{
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
+pub use histogram::HistogramError;
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,
