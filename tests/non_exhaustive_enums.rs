@@ -12,7 +12,7 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    BandError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat, PlannerError,
+    BandError, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat, PlannerError,
     RasterError, ResumeError, SourceError, VerifyError,
 };
 
@@ -56,6 +56,18 @@ fn assert_engine_event_non_exhaustive(v: &EngineEvent) {
         EngineEvent::BatchCompleted { .. } => {}
         EngineEvent::Finished { .. } => {}
         EngineEvent::PipelineComplete => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+// The reachable `_` arm after every known variant is the whole point of the
+// check, so the single-variant match must stay a match.
+#[allow(clippy::single_match)]
+fn assert_draw_error_non_exhaustive(v: &DrawError) {
+    match v {
+        DrawError::SeedOutOfBounds { .. } => {}
         _ => {}
     }
 }
