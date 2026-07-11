@@ -1,4 +1,5 @@
 use crate::conversion::RasterMeta;
+use crate::imageio::MetadataFields;
 use crate::pixel::PixelFormat;
 use thiserror::Error;
 
@@ -160,6 +161,12 @@ pub struct Raster {
     /// starts from [`RasterMeta::default`]; [`Raster::copy`] and
     /// [`Raster::autorot`] are the mutation surface.
     pub(crate) meta: RasterMeta,
+    /// Attached metadata fields (ICC profile, EXIF blob, arbitrary named
+    /// values), managed by the IO operations (see [`crate::imageio`]).
+    /// Every constructor starts empty; [`Raster::set_field`] and the
+    /// decoders are the mutation surface, and the fields travel with
+    /// clones and [`Raster::copy`].
+    pub(crate) fields: MetadataFields,
 }
 
 impl Raster {
@@ -232,6 +239,7 @@ impl Raster {
             format,
             data,
             meta: RasterMeta::default(),
+            fields: MetadataFields::default(),
         })
     }
 
@@ -279,6 +287,7 @@ impl Raster {
             format,
             data,
             meta: RasterMeta::default(),
+            fields: MetadataFields::default(),
         })
     }
 
