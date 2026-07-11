@@ -114,31 +114,50 @@ pub enum BandError {
 
 /// Read the flat `i`-th sample of a buffer with the given bytes-per-channel
 /// (native byte order for 16-bit, matching [`crate::raster_ops`]).
+/// Unsigned depths only: the panic arm keeps the band ops, which predate
+/// the float formats, from misreading float bytes as `u16` pairs.
 #[inline]
 fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
-    if bpc == 1 {
-        data[i] as u32
-    } else {
-        u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32
+    match bpc {
+        1 => data[i] as u32,
+        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        _ => panic!(
+            "the band operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
 /// Write the flat `i`-th sample. `v` must already fit the depth.
+/// Unsigned depths only; see [`read_flat`].
 #[inline]
 fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    if bpc == 1 {
-        data[i] = v as u8;
-    } else {
-        let b = (v as u16).to_ne_bytes();
-        data[2 * i] = b[0];
-        data[2 * i + 1] = b[1];
+    match bpc {
+        1 => data[i] = v as u8,
+        2 => {
+            let b = (v as u16).to_ne_bytes();
+            data[2 * i] = b[0];
+            data[2 * i + 1] = b[1];
+        }
+        _ => panic!(
+            "the band operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
-/// Clamp-and-round an `f64` constant into the sample range of a depth.
+/// Clamp-and-round an `f64` constant into the sample range of an unsigned
+/// depth. Unsigned depths only; see [`read_flat`].
 #[inline]
 fn const_to_sample(c: f64, bpc: usize) -> u32 {
-    let max = if bpc == 1 { 255.0 } else { 65535.0 };
+    let max = match bpc {
+        1 => 255.0,
+        2 => 65535.0,
+        _ => panic!(
+            "the band operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    };
     c.clamp(0.0, max).round() as u32
 }
 
@@ -1210,5 +1229,16 @@ mod tests {
 
         let folded2 = mono.bandfold(Some(2));
         assert_eq!(folded2.width(), mono.width() / 2);
+    }
+
+    /// The band ops reject float rasters loudly instead of misreading
+    /// their bytes as u16 pairs (float band maths lands with a later
+    /// batch; cast to an unsigned format first).
+    #[test]
+    #[should_panic(expected = "do not support float rasters")]
+    fn bands_float_panics() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::zeroed(2, 2, f1).unwrap();
+        let _ = im.bandjoin_const(255.0);
     }
 }

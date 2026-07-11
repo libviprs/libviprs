@@ -64,6 +64,10 @@ pub enum RasterError {
         dst_w: u32,
         dst_h: u32,
     },
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatUnsupported { op: &'static str },
+    #[error("from_f32_samples requires a float pixel format (RgbaF32 / FloatF32), got {format:?}")]
+    NotFloatFormat { format: PixelFormat },
 }
 
 /// Default ceiling, in bytes, on a single raster buffer allocation sized from
@@ -316,6 +320,85 @@ impl Raster {
     /// Allows in-place pixel manipulation without re-allocating.
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
+    }
+
+    /// Create a float raster from per-channel `f32` samples.
+    ///
+    /// `samples` is the flat sample sequence (row-major, channels
+    /// interleaved), so it must hold exactly
+    /// `width * height * format.channels()` values. Each sample is stored
+    /// in native byte order, the same convention [`Raster::f32_samples`]
+    /// and the arithmetic on 16-bit samples use.
+    ///
+    /// ```
+    /// # use libviprs::{PixelFormat, Raster};
+    /// let fmt = PixelFormat::with_channels(1, 4).unwrap(); // FloatF32(1)
+    /// let im = Raster::from_f32_samples(2, 1, fmt, &[0.25, -1.5]).unwrap();
+    /// assert_eq!(im.getpoint(0, 0), vec![0.25]);
+    /// assert_eq!(im.getpoint(1, 0), vec![-1.5]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::NotFloatFormat`] if `format` is not a float
+    /// format, [`RasterError::ZeroDimension`] if width or height is 0,
+    /// [`RasterError::BufferSizeMismatch`] if the sample count is wrong
+    /// (reported in bytes, matching [`Raster::new`]), or the size and
+    /// allocation errors of [`Raster::new`].
+    pub fn from_f32_samples(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        samples: &[f32],
+    ) -> Result<Self, RasterError> {
+        if !format.is_float() {
+            return Err(RasterError::NotFloatFormat { format });
+        }
+        if width == 0 || height == 0 {
+            return Err(RasterError::ZeroDimension { width, height });
+        }
+        let expected = buffer_len(width, height, format.bytes_per_pixel())?;
+        // A slice of f32 occupies exactly 4 bytes per element, so this
+        // multiplication cannot overflow usize.
+        let actual = samples.len() * 4;
+        if actual != expected {
+            return Err(RasterError::BufferSizeMismatch {
+                width,
+                height,
+                format,
+                expected,
+                actual,
+            });
+        }
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve_exact(expected)
+            .map_err(|_| RasterError::AllocationFailed {
+                width,
+                height,
+                bytes: expected,
+            })?;
+        for s in samples {
+            data.extend_from_slice(&s.to_ne_bytes());
+        }
+        Raster::new(width, height, format, data)
+    }
+
+    /// The pixel data as `f32` samples, for float formats.
+    ///
+    /// Returns the flat sample sequence (row-major, channels interleaved)
+    /// decoded from the native-byte-order buffer, or `None` when the
+    /// format does not store float samples. The inverse of
+    /// [`Raster::from_f32_samples`].
+    pub fn f32_samples(&self) -> Option<Vec<f32>> {
+        if !self.format.is_float() {
+            return None;
+        }
+        Some(
+            self.data
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        )
     }
 
     /// Bytes per row (stride). No padding -- rows are tightly packed.
@@ -747,6 +830,93 @@ mod tests {
             Err(RasterError::ByteBudgetExceeded { .. })
         ));
         assert!(Raster::zeroed_with_budget(10, 10, PixelFormat::Gray8, 100).is_ok());
+    }
+
+    /**
+     * Tests float raster construction and access: from_f32_samples stores
+     * native-endian f32s so data length is w*h*channels*4, f32_samples
+     * decodes them back exactly (including negatives and fractions), and
+     * the byte buffer round-trips through Raster::new unchanged.
+     * Input: 2x1 RgbaF32 with 8 samples → f32_samples returns them exactly.
+     */
+    #[test]
+    fn float_raster_construct_and_access() {
+        let samples = [0.0f32, 0.5, -1.25, 255.0, 65536.0, 1e-6, -0.0, 3.5];
+        let im = Raster::from_f32_samples(2, 1, PixelFormat::RgbaF32, &samples).unwrap();
+        assert_eq!(im.width(), 2);
+        assert_eq!(im.height(), 1);
+        assert_eq!(im.format(), PixelFormat::RgbaF32);
+        assert_eq!(im.data().len(), 2 * 16);
+        assert_eq!(im.stride(), 32);
+        assert_eq!(im.f32_samples().unwrap(), samples.to_vec());
+
+        // The raw byte buffer constructs an identical raster through new().
+        let again = Raster::new(2, 1, PixelFormat::RgbaF32, im.data().to_vec()).unwrap();
+        assert_eq!(again.f32_samples().unwrap(), samples.to_vec());
+
+        // A zeroed float raster reads as all-0.0 samples.
+        let z = Raster::zeroed(3, 2, PixelFormat::with_channels(1, 4).unwrap()).unwrap();
+        assert_eq!(z.f32_samples().unwrap(), vec![0.0f32; 6]);
+    }
+
+    /**
+     * Tests from_f32_samples typed errors: a non-float format is rejected
+     * as NotFloatFormat, a wrong sample count as BufferSizeMismatch (in
+     * bytes), and zero dimensions as ZeroDimension.
+     * Input: Rgb8 → NotFloatFormat; 3 samples for 2x1 FloatF32(1) →
+     * BufferSizeMismatch; 0x1 → ZeroDimension.
+     */
+    #[test]
+    fn from_f32_samples_typed_errors() {
+        assert!(matches!(
+            Raster::from_f32_samples(1, 1, PixelFormat::Rgb8, &[0.0, 0.0, 0.0]),
+            Err(RasterError::NotFloatFormat { .. })
+        ));
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        assert!(matches!(
+            Raster::from_f32_samples(2, 1, f1, &[0.0, 0.0, 0.0]),
+            Err(RasterError::BufferSizeMismatch {
+                expected: 8,
+                actual: 12,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Raster::from_f32_samples(0, 1, f1, &[]),
+            Err(RasterError::ZeroDimension { .. })
+        ));
+    }
+
+    /**
+     * Tests that f32_samples is None for every unsigned format, so callers
+     * cannot misread u8/u16 buffers as floats.
+     * Input: Gray8 and Rgba16 rasters → f32_samples() == None.
+     */
+    #[test]
+    fn f32_samples_none_for_unsigned() {
+        let g = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
+        assert!(g.f32_samples().is_none());
+        let r = Raster::zeroed(2, 2, PixelFormat::Rgba16).unwrap();
+        assert!(r.f32_samples().is_none());
+    }
+
+    /**
+     * Tests the buffer-size invariant for the float formats, mirroring the
+     * unsigned buffer_size_invariant proptest at fixed sizes: data length
+     * equals w*h*bytes_per_pixel for RgbaF32 and FloatF32(1/3/7).
+     * Input: 5x4 rasters → data().len() == 20 * bpp.
+     */
+    #[test]
+    fn float_buffer_size_invariant() {
+        for fmt in [
+            PixelFormat::RgbaF32,
+            PixelFormat::with_channels(1, 4).unwrap(),
+            PixelFormat::with_channels(3, 4).unwrap(),
+            PixelFormat::with_channels(7, 4).unwrap(),
+        ] {
+            let r = Raster::zeroed(5, 4, fmt).unwrap();
+            assert_eq!(r.data().len(), 20 * fmt.bytes_per_pixel(), "{fmt:?}");
+        }
     }
 }
 

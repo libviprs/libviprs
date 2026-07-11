@@ -144,32 +144,51 @@ fn expect_hist<T>(op: &str, r: Result<T, HistogramError>) -> T {
 // ---------------------------------------------------------------------------
 
 /// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]).
+/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
+/// keeps the histogram ops, which predate the float formats, from
+/// misreading float bytes as `u16` pairs.
 #[inline]
 fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
     match bpc {
         1 => data[i] as u32,
-        _ => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
+        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
+        _ => panic!(
+            "the histogram operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
 /// Write the flat `i`-th sample, saturating into the depth.
+/// Unsigned depths only; see [`read_flat`].
 #[inline]
 fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
     match bpc {
         1 => data[i] = v.min(255) as u8,
-        _ => {
+        2 => {
             let b = (v.min(65535) as u16).to_ne_bytes();
             data[i * 2] = b[0];
             data[i * 2 + 1] = b[1];
         }
+        _ => panic!(
+            "the histogram operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
-/// Number of histogram bins for a sample depth: 256 or 65536.
+/// Number of histogram bins for an unsigned sample depth: 256 or 65536.
+/// Unsigned depths only; see [`read_flat`].
 #[inline]
 fn bins_for(bpc: usize) -> usize {
-    if bpc == 1 { 256 } else { 65536 }
+    match bpc {
+        1 => 256,
+        2 => 65536,
+        _ => panic!(
+            "the histogram operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
 }
 
 /// The canonical format for a band count and byte depth, or a typed error.
@@ -1956,5 +1975,16 @@ mod tests {
     fn equalisation_lut_is_monotonic() {
         let lut = dark_textured().hist_find().hist_cum().hist_norm();
         assert!(lut.hist_ismonotonic());
+    }
+
+    /// The histogram ops reject float rasters loudly instead of
+    /// misreading their bytes as u16 pairs (histograms are defined over
+    /// the unsigned sample ranges; cast to an unsigned format first).
+    #[test]
+    #[should_panic(expected = "do not support float rasters")]
+    fn histogram_float_panics() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::zeroed(2, 2, f1).unwrap();
+        let _ = im.hist_find();
     }
 }

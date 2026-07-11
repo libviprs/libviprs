@@ -686,25 +686,39 @@ fn ink_pixel(ink: &[u8], bpp: usize) -> Option<Vec<u8>> {
 
 /// Read channel `c` of the pixel at byte offset `off` as its unsigned value
 /// (native-endian for 16-bit channels, like `Raster::getpoint`).
+/// Unsigned depths only: the panic arm keeps the sample-level draw ops,
+/// which predate the float formats, from misreading float bytes as `u16`
+/// pairs. (`put_pixel` and the raw-ink paths copy whole `bpp`-sized pixels
+/// and handle float fine.)
 fn channel_at(data: &[u8], off: usize, c: usize, bpc: usize) -> u32 {
-    if bpc == 1 {
-        data[off + c] as u32
-    } else {
-        let b = off + c * 2;
-        u16::from_ne_bytes([data[b], data[b + 1]]) as u32
+    match bpc {
+        1 => data[off + c] as u32,
+        2 => {
+            let b = off + c * 2;
+            u16::from_ne_bytes([data[b], data[b + 1]]) as u32
+        }
+        _ => panic!(
+            "this draw operation does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
 /// Write channel `c` of the pixel at byte offset `off`, saturating to the
-/// channel's range.
+/// channel's range. Unsigned depths only; see [`channel_at`].
 fn set_channel_at(data: &mut [u8], off: usize, c: usize, bpc: usize, v: u32) {
-    if bpc == 1 {
-        data[off + c] = v.min(255) as u8;
-    } else {
-        let b = off + c * 2;
-        let bytes = (v.min(65535) as u16).to_ne_bytes();
-        data[b] = bytes[0];
-        data[b + 1] = bytes[1];
+    match bpc {
+        1 => data[off + c] = v.min(255) as u8,
+        2 => {
+            let b = off + c * 2;
+            let bytes = (v.min(65535) as u16).to_ne_bytes();
+            data[b] = bytes[0];
+            data[b + 1] = bytes[1];
+        }
+        _ => panic!(
+            "this draw operation does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 

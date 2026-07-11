@@ -130,7 +130,8 @@ fn assert_interpretation_non_exhaustive(v: &Interpretation) {
 }
 
 /// The `cast` call sites from the ported `test_byteswap` and `test_msb`
-/// setups: widening casts keep values, and the format changes.
+/// setups (widening casts keep values, and the format changes) and the
+/// float casts from the ported `test_composite_non_separable` setup.
 #[test]
 fn ported_cast_call_sites() {
     let mono = make_test_mono();
@@ -141,6 +142,18 @@ fn ported_cast_call_sites() {
     let colour = make_test_colour();
     let im16 = colour.add_const(32.0).cast(PixelFormat::Rgb16);
     assert_eq!(im16.format(), PixelFormat::Rgb16);
+
+    // The exact float cast expressions of test_composite_non_separable.
+    let base = colour
+        .add_const(100.0)
+        .bandjoin_const(255.0)
+        .cast(PixelFormat::RgbaF32);
+    assert_eq!(base.format(), PixelFormat::RgbaF32);
+    assert_eq!(base.format().channels(), 4);
+    let overlay = colour.bandjoin_const(128.0).cast(PixelFormat::RgbaF32);
+    assert_eq!(overlay.format(), PixelFormat::RgbaF32);
+    // The alpha band cast to float reads back as the joined constant.
+    assert_eq!(overlay.getpoint(50, 50)[3], 128.0);
 }
 
 /// The ported `test_copy` call sites: the builder chain with `xres` and
@@ -294,9 +307,9 @@ fn ported_arrayjoin_call_sites() {
     assert_eq!(im.height(), mono.height() + colour.height());
 }
 
-/// The ported `test_grey` uchar half (`ported_create.rs`). The float
-/// half (`uchar: false`) needs a float PixelFormat and stays a typed
-/// error until that batch lands.
+/// The ported `test_grey` body (`ported_create.rs`), both halves: the
+/// uchar 0..255 ramp and the float 0.0..1.0 ramp the float PixelFormat
+/// batch enabled.
 #[test]
 fn ported_grey_call_sites() {
     let im = Raster::grey(100, 90, true);
@@ -308,7 +321,15 @@ fn ported_grey_call_sites() {
     let p = im.getpoint(99, 0);
     assert_eq!(p[0], 255.0);
 
-    assert!(Raster::try_grey(100, 90, false).is_err());
+    // The float half, exactly as ported_create.rs::test_grey asserts it.
+    let im = Raster::grey(100, 90, false);
+    assert_eq!(im.width(), 100);
+    assert_eq!(im.height(), 90);
+    assert!(im.format().is_float());
+    let p = im.getpoint(0, 0);
+    assert!((p[0] - 0.0).abs() < 0.001);
+    let p = im.getpoint(99, 0);
+    assert!((p[0] - 1.0).abs() < 0.001);
 }
 
 /// The ported `test_identity` body (`ported_create.rs`).
