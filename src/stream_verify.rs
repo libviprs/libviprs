@@ -379,7 +379,7 @@ pub fn verify_from_strip_source(
             for row in 0..level.rows {
                 for col in 0..level.cols {
                     let coord = TileCoord::new(level_idx as u32, col, row);
-                    observer.on_event(EngineEvent::TileCompleted { coord });
+                    observer.on_event(EngineEvent::tile_completed(coord));
 
                     // `extract_tile_from_strip` with `strip_canvas_y = 0`
                     // applied to a full-level raster is byte-equivalent to the

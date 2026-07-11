@@ -1606,13 +1606,13 @@ pub(crate) fn emit_strip_tiles(
                 match &config.failure_policy {
                     crate::retry::FailurePolicy::RetryThenSkip(_) => {
                         sink.note_sink_skipped();
-                        observer.on_event(EngineEvent::TileCompleted { coord });
+                        observer.on_event(EngineEvent::tile_completed(coord));
                         continue;
                     }
                     _ => return Err(promote_sink_error(e)),
                 }
             }
-            observer.on_event(EngineEvent::TileCompleted { coord });
+            observer.on_event(EngineEvent::tile_completed(coord));
             count += 1;
         }
     }

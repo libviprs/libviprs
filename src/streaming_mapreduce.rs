@@ -447,13 +447,13 @@ fn emit_strip_tiles_parallel(
                 match &config.failure_policy {
                     crate::retry::FailurePolicy::RetryThenSkip(_) => {
                         sink.note_sink_skipped();
-                        observer.on_event(EngineEvent::TileCompleted { coord });
+                        observer.on_event(EngineEvent::tile_completed(coord));
                         continue;
                     }
                     _ => return Err(crate::engine::promote_sink_error(e)),
                 }
             }
-            observer.on_event(EngineEvent::TileCompleted { coord });
+            observer.on_event(EngineEvent::tile_completed(coord));
             count += 1;
         }
         Ok((count, skipped))
