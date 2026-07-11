@@ -1,0 +1,1061 @@
+//! Alpha compositing ported from libvips (`vips_composite2`).
+//!
+//! This module is the seventh batch of the libvips operation surface
+//! required by the ported integration tests (after [`crate::bands`],
+//! [`crate::arithmetic`], [`crate::extract`], [`crate::conversion`],
+//! [`crate::draw`], and [`crate::histogram`]): Porter-Duff compositing and
+//! the PDF blend modes, both the separable set (`multiply`, `screen`, ...)
+//! and the non-separable set (`hue`, `saturation`, `colour`,
+//! `luminosity`). Following the established convention the operation
+//! exists in two forms:
+//!
+//! * a fallible [`Raster::try_composite2`] returning
+//!   `Result<Raster, CompositeError>` with typed errors for mismatched
+//!   geometry and band counts; and
+//! * the panicking conveniences [`Raster::composite`] /
+//!   [`Raster::composite2`] matching the ported-test call surface
+//!   (`base.composite(&overlay, CompositeMode::Over)`) exactly, delegating
+//!   to the `try_` form.
+//!
+//! # Semantics
+//!
+//! `base.composite2(&overlay, mode)` composites `overlay` (the source in
+//! Porter-Duff terms) onto `base` (the backdrop), exactly as
+//! `vips_composite2(base, overlay, mode)`.
+//!
+//! * **Alpha.** An input with 2 or 4 bands treats its last band as alpha;
+//!   1- and 3-band inputs are opaque, matching how libvips detects alpha
+//!   in `composite`. The output always carries alpha: 1 colour band
+//!   composites to a 2-band grey+alpha raster
+//!   ([`PixelFormat::Multi8`]`(2)` / `Multi16(2)`), 3 colour bands to
+//!   RGBA.
+//! * **Bands.** Both inputs must have the same number of colour
+//!   (non-alpha) bands, either 1 or 3. The non-separable modes
+//!   ([`CompositeMode::Hue`], [`CompositeMode::Saturation`],
+//!   [`CompositeMode::Colour`], [`CompositeMode::Luminosity`]) operate on
+//!   RGB triples per the PDF specification and require 3 colour bands.
+//! * **Depth and scale.** The output container is the deeper of the two
+//!   inputs. Samples are normalised by the libvips `max_alpha`
+//!   resolution: 255 unless *both* inputs are 16-bit, then 65535
+//!   (`vips_composite`'s `max_alpha` parameter defaults to 255, with
+//!   65535 the documented choice for ushort pipelines). A mixed-depth
+//!   pair therefore reads its 16-bit side on the 0..255 numeric scale,
+//!   which is exactly the shape the crate's promoted 16-bit
+//!   intermediates carry (`add_const`, `linear`, ... promote 8-bit
+//!   numerically, standing in for libvips float images, whose
+//!   `max_alpha` is also 255). Alphas clamp to `0..1`; colour values
+//!   pass through the Porter-Duff arithmetic unclamped (numeric values
+//!   above the scale survive, as in libvips float) and clamp to `0..1`
+//!   only where the PDF blend functions require it. Results are blended
+//!   premultiplied in `f64`, unpremultiplied, and written back on the
+//!   same numeric scale with round-to-nearest and clamping to the
+//!   container range. Every mode is therefore exact to the output
+//!   quantisation; none of the blend modes is blocked on a float
+//!   `PixelFormat`. (The ported non-separable test additionally *casts
+//!   its inputs* to a float format before compositing; that cast target
+//!   arrives with the float-format batch and is independent of this
+//!   operation.)
+//! * **Metadata.** The result carries the base image's metadata
+//!   (interpretation, resolution, offsets, orientation, and attached
+//!   fields), like libvips which copies the header from the first input.
+//!
+//! # Blend mode table
+//!
+//! | Modes | Family |
+//! |---|---|
+//! | `Clear`, `Source`, `Over`, `In`, `Out`, `Atop`, `Dest`, `DestOver`, `DestIn`, `DestOut`, `DestAtop`, `Xor`, `Add`, `Saturate` | Porter-Duff |
+//! | `Multiply`, `Screen`, `Overlay`, `Darken`, `Lighten`, `ColourDodge`, `ColourBurn`, `HardLight`, `SoftLight`, `Difference`, `Exclusion` | PDF separable |
+//! | `Hue`, `Saturation`, `Colour`, `Luminosity` | PDF non-separable |
+//!
+//! The Porter-Duff and separable set matches libvips `VipsBlendMode`
+//! one-to-one; the four non-separable modes extend it (libvips stops at
+//! `exclusion`) because the ported conversion suite exercises them.
+
+use crate::pixel::PixelFormat;
+use crate::raster::{Raster, RasterError};
+use thiserror::Error;
+
+/// A compositing operator for [`Raster::composite2`]: the Porter-Duff
+/// operators plus the PDF separable and non-separable blend modes
+/// (libvips `VipsBlendMode`, extended with the non-separable four).
+///
+/// In every description below the *source* is the overlay argument and
+/// the *backdrop* is the base image the method is called on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CompositeMode {
+    /// Both source and backdrop are discarded; the result is fully
+    /// transparent black.
+    Clear,
+    /// The source only; the backdrop is discarded.
+    Source,
+    /// The source over the backdrop (the classic alpha blend).
+    Over,
+    /// The part of the source inside the backdrop; backdrop discarded.
+    In,
+    /// The part of the source outside the backdrop; backdrop discarded.
+    Out,
+    /// The source where the backdrop is opaque, backdrop elsewhere.
+    Atop,
+    /// The backdrop only; the source is discarded.
+    Dest,
+    /// The backdrop over the source.
+    DestOver,
+    /// The part of the backdrop inside the source; source discarded.
+    DestIn,
+    /// The part of the backdrop outside the source; source discarded.
+    DestOut,
+    /// The backdrop where the source is opaque, source elsewhere.
+    DestAtop,
+    /// Source and backdrop where they do not overlap.
+    Xor,
+    /// Source plus backdrop, clamped (additive blend).
+    Add,
+    /// Source limited to the transparency left by the backdrop, plus the
+    /// backdrop (Porter-Duff saturate).
+    Saturate,
+    /// PDF multiply: darkens by multiplying backdrop and source.
+    Multiply,
+    /// PDF screen: brightens by inverse-multiplying.
+    Screen,
+    /// PDF overlay: multiply or screen depending on the backdrop.
+    Overlay,
+    /// PDF darken: per-channel minimum.
+    Darken,
+    /// PDF lighten: per-channel maximum.
+    Lighten,
+    /// PDF colour dodge: brightens the backdrop toward the source.
+    ColourDodge,
+    /// PDF colour burn: darkens the backdrop toward the source.
+    ColourBurn,
+    /// PDF hard light: multiply or screen depending on the source.
+    HardLight,
+    /// PDF soft light: a softened hard light.
+    SoftLight,
+    /// PDF difference: absolute per-channel difference.
+    Difference,
+    /// PDF exclusion: a lower-contrast difference.
+    Exclusion,
+    /// PDF hue (non-separable): source hue with backdrop saturation and
+    /// luminosity.
+    Hue,
+    /// PDF saturation (non-separable): source saturation with backdrop
+    /// hue and luminosity.
+    Saturation,
+    /// PDF colour (non-separable): source hue and saturation with
+    /// backdrop luminosity.
+    Colour,
+    /// PDF luminosity (non-separable): source luminosity with backdrop
+    /// hue and saturation.
+    Luminosity,
+}
+
+impl CompositeMode {
+    /// Whether this is one of the four PDF non-separable modes, which
+    /// blend RGB triples rather than independent channels.
+    fn is_non_separable(self) -> bool {
+        matches!(
+            self,
+            Self::Hue | Self::Saturation | Self::Colour | Self::Luminosity
+        )
+    }
+
+    /// Whether this is a PDF blend mode (separable or non-separable)
+    /// rather than a plain Porter-Duff operator.
+    fn is_pdf_blend(self) -> bool {
+        !matches!(
+            self,
+            Self::Clear
+                | Self::Source
+                | Self::Over
+                | Self::In
+                | Self::Out
+                | Self::Atop
+                | Self::Dest
+                | Self::DestOver
+                | Self::DestIn
+                | Self::DestOut
+                | Self::DestAtop
+                | Self::Xor
+                | Self::Add
+                | Self::Saturate
+        )
+    }
+}
+
+/// Errors from [`Raster::try_composite2`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CompositeError {
+    #[error(
+        "composite: images differ in size: base {base_w}x{base_h}, overlay {overlay_w}x{overlay_h}"
+    )]
+    DimensionMismatch {
+        base_w: u32,
+        base_h: u32,
+        overlay_w: u32,
+        overlay_h: u32,
+    },
+    #[error(
+        "composite: images differ in colour band count: base has {base}, overlay has {overlay}"
+    )]
+    BandMismatch { base: usize, overlay: usize },
+    #[error(
+        "composite: {bands} bands unsupported; inputs must have 1 or 3 colour bands (plus optional alpha)"
+    )]
+    TooManyBands { bands: usize },
+    #[error(
+        "composite: non-separable mode {mode:?} needs 3 colour bands (RGB), input has {colour_bands}"
+    )]
+    NonSeparableNeedsRgb {
+        mode: CompositeMode,
+        colour_bands: usize,
+    },
+    #[error("composite: raster error: {0}")]
+    Raster(#[from] RasterError),
+}
+
+/// Unwrap a composite result, panicking with the operation name.
+#[track_caller]
+fn expect_composite(r: Result<Raster, CompositeError>) -> Raster {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("composite: {e}"),
+    }
+}
+
+/// Colour band count and alpha presence for a composite input: bands 2
+/// and 4 carry alpha in the last band, 1 and 3 are opaque.
+fn colour_bands(format: PixelFormat) -> Result<(usize, bool), CompositeError> {
+    match format.channels() {
+        1 => Ok((1, false)),
+        2 => Ok((1, true)),
+        3 => Ok((3, false)),
+        4 => Ok((3, true)),
+        bands => Err(CompositeError::TooManyBands { bands }),
+    }
+}
+
+/// Read the flat `i`-th raw sample (not yet normalised: the caller
+/// divides by the working-depth maximum, so mixed-depth inputs share one
+/// scale, matching a value-preserving `vips_cast`).
+#[inline]
+fn read_raw(data: &[u8], bpc: usize, i: usize) -> f64 {
+    if bpc == 1 {
+        data[i] as f64
+    } else {
+        u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as f64
+    }
+}
+
+/// Write a scale-normalised sample at the given depth: the value is
+/// multiplied back onto its numeric scale, rounded to nearest, and
+/// clamped to the container range.
+#[inline]
+fn write_scaled(data: &mut [u8], bpc: usize, i: usize, v: f64, scale: f64) {
+    if bpc == 1 {
+        data[i] = (v * scale).round().clamp(0.0, 255.0) as u8;
+    } else {
+        let b = ((v * scale).round().clamp(0.0, 65535.0) as u16).to_ne_bytes();
+        data[2 * i] = b[0];
+        data[2 * i + 1] = b[1];
+    }
+}
+
+/// Porter-Duff source/backdrop factors for the given source (`sa`) and
+/// backdrop (`ba`) alphas. Returns `None` for the PDF blend modes, which
+/// use the blend formula instead.
+fn porter_duff_factors(mode: CompositeMode, sa: f64, ba: f64) -> Option<(f64, f64)> {
+    Some(match mode {
+        CompositeMode::Clear => (0.0, 0.0),
+        CompositeMode::Source => (1.0, 0.0),
+        CompositeMode::Over => (1.0, 1.0 - sa),
+        CompositeMode::In => (ba, 0.0),
+        CompositeMode::Out => (1.0 - ba, 0.0),
+        CompositeMode::Atop => (ba, 1.0 - sa),
+        CompositeMode::Dest => (0.0, 1.0),
+        CompositeMode::DestOver => (1.0 - ba, 1.0),
+        CompositeMode::DestIn => (0.0, sa),
+        CompositeMode::DestOut => (0.0, 1.0 - sa),
+        CompositeMode::DestAtop => (1.0 - ba, sa),
+        CompositeMode::Xor => (1.0 - ba, 1.0 - sa),
+        CompositeMode::Add => (1.0, 1.0),
+        CompositeMode::Saturate => {
+            let fa = if sa > 0.0 {
+                (1.0 - ba).min(sa) / sa
+            } else {
+                0.0
+            };
+            (fa, 1.0)
+        }
+        _ => return None,
+    })
+}
+
+/// The PDF separable blend function `B(cb, cs)` on unpremultiplied
+/// channel values in `0..=1`.
+fn separable_blend(mode: CompositeMode, cb: f64, cs: f64) -> f64 {
+    match mode {
+        CompositeMode::Multiply => cb * cs,
+        CompositeMode::Screen => cb + cs - cb * cs,
+        CompositeMode::Overlay => separable_blend(CompositeMode::HardLight, cs, cb),
+        CompositeMode::Darken => cb.min(cs),
+        CompositeMode::Lighten => cb.max(cs),
+        CompositeMode::ColourDodge => {
+            if cb <= 0.0 {
+                0.0
+            } else if cs >= 1.0 {
+                1.0
+            } else {
+                (cb / (1.0 - cs)).min(1.0)
+            }
+        }
+        CompositeMode::ColourBurn => {
+            if cb >= 1.0 {
+                1.0
+            } else if cs <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - cb) / cs).min(1.0)
+            }
+        }
+        CompositeMode::HardLight => {
+            if cs <= 0.5 {
+                2.0 * cs * cb
+            } else {
+                1.0 - 2.0 * (1.0 - cs) * (1.0 - cb)
+            }
+        }
+        CompositeMode::SoftLight => {
+            if cs <= 0.5 {
+                cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+            } else {
+                let d = if cb <= 0.25 {
+                    ((16.0 * cb - 12.0) * cb + 4.0) * cb
+                } else {
+                    cb.sqrt()
+                };
+                cb + (2.0 * cs - 1.0) * (d - cb)
+            }
+        }
+        CompositeMode::Difference => (cb - cs).abs(),
+        CompositeMode::Exclusion => cb + cs - 2.0 * cb * cs,
+        _ => unreachable!("separable_blend called with non-blend mode {mode:?}"),
+    }
+}
+
+/// PDF luminosity of an RGB triple (the Rec. 601-style weights the PDF
+/// specification and libvips' non-separable helpers use).
+fn lum(c: [f64; 3]) -> f64 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// PDF `ClipColor`: pull out-of-range channels back toward the
+/// luminosity so the triple stays within `0..=1`.
+fn clip_colour(mut c: [f64; 3]) -> [f64; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    if n < 0.0 {
+        for v in &mut c {
+            *v = l + (*v - l) * l / (l - n);
+        }
+    }
+    if x > 1.0 {
+        for v in &mut c {
+            *v = l + (*v - l) * (1.0 - l) / (x - l);
+        }
+    }
+    c
+}
+
+/// PDF `SetLum`: shift the triple to the target luminosity, clipping.
+fn set_lum(mut c: [f64; 3], l: f64) -> [f64; 3] {
+    let d = l - lum(c);
+    for v in &mut c {
+        *v += d;
+    }
+    clip_colour(c)
+}
+
+/// PDF `Sat`: saturation (max minus min) of a triple.
+fn sat(c: [f64; 3]) -> f64 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+/// PDF `SetSat`: rescale the triple to the target saturation, keeping
+/// the channel order and zeroing the minimum.
+fn set_sat(c: [f64; 3], s: f64) -> [f64; 3] {
+    // Rank the channel indices: min, mid, max.
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let (imin, imid, imax) = (idx[0], idx[1], idx[2]);
+    let mut out = [0.0; 3];
+    if c[imax] > c[imin] {
+        out[imid] = (c[imid] - c[imin]) * s / (c[imax] - c[imin]);
+        out[imax] = s;
+    }
+    out
+}
+
+/// The PDF non-separable blend function on unpremultiplied RGB triples.
+fn non_separable_blend(mode: CompositeMode, cb: [f64; 3], cs: [f64; 3]) -> [f64; 3] {
+    match mode {
+        CompositeMode::Hue => set_lum(set_sat(cs, sat(cb)), lum(cb)),
+        CompositeMode::Saturation => set_lum(set_sat(cb, sat(cs)), lum(cb)),
+        CompositeMode::Colour => set_lum(cs, lum(cb)),
+        CompositeMode::Luminosity => set_lum(cb, lum(cs)),
+        _ => unreachable!("non_separable_blend called with separable mode {mode:?}"),
+    }
+}
+
+impl Raster {
+    /// Fallible form of [`Raster::composite2`].
+    ///
+    /// # Errors
+    ///
+    /// [`CompositeError::DimensionMismatch`] if the images differ in
+    /// size, [`CompositeError::TooManyBands`] if an input has more than 4
+    /// bands, [`CompositeError::BandMismatch`] if the colour band counts
+    /// differ, [`CompositeError::NonSeparableNeedsRgb`] if a
+    /// non-separable mode is used on non-RGB input, or
+    /// [`CompositeError::Raster`] on allocation failure.
+    pub fn try_composite2(
+        &self,
+        overlay: &Raster,
+        mode: CompositeMode,
+    ) -> Result<Raster, CompositeError> {
+        if self.width() != overlay.width() || self.height() != overlay.height() {
+            return Err(CompositeError::DimensionMismatch {
+                base_w: self.width(),
+                base_h: self.height(),
+                overlay_w: overlay.width(),
+                overlay_h: overlay.height(),
+            });
+        }
+        let (colour, base_alpha) = colour_bands(self.format())?;
+        let (overlay_colour, overlay_alpha) = colour_bands(overlay.format())?;
+        if colour != overlay_colour {
+            return Err(CompositeError::BandMismatch {
+                base: colour,
+                overlay: overlay_colour,
+            });
+        }
+        if mode.is_non_separable() && colour != 3 {
+            return Err(CompositeError::NonSeparableNeedsRgb {
+                mode,
+                colour_bands: colour,
+            });
+        }
+
+        // Output container: the deeper input. Normalisation scale: the
+        // libvips max_alpha resolution (255 by default, 65535 only for a
+        // fully 16-bit pipeline); see the module docs.
+        let base_bpc = self.format().bytes_per_channel();
+        let overlay_bpc = overlay.format().bytes_per_channel();
+        let out_bpc = base_bpc.max(overlay_bpc);
+        let scale = if base_bpc == 2 && overlay_bpc == 2 {
+            65535.0
+        } else {
+            255.0
+        };
+        let inv_max = 1.0 / scale;
+
+        let out_format = PixelFormat::with_channels(colour + 1, out_bpc)
+            .expect("colour+1 is 2 or 4, always representable");
+        let mut out = Raster::zeroed(self.width(), self.height(), out_format)?;
+
+        let base_ch = self.format().channels();
+        let overlay_ch = overlay.format().channels();
+        let out_ch = colour + 1;
+        let bdata = self.data();
+        let sdata = overlay.data();
+        let pixels = self.width() as usize * self.height() as usize;
+        let odata = out.data_mut();
+
+        let pdf_blend = mode.is_pdf_blend();
+        let non_separable = mode.is_non_separable();
+
+        let mut cb = [0.0f64; 3];
+        let mut cs = [0.0f64; 3];
+        for p in 0..pixels {
+            // Unpremultiplied colour values and alphas, 0..1.
+            for k in 0..colour {
+                cb[k] = read_raw(bdata, base_bpc, p * base_ch + k) * inv_max;
+                cs[k] = read_raw(sdata, overlay_bpc, p * overlay_ch + k) * inv_max;
+            }
+            // Alphas are semantically 0..1; clamp in case a genuinely
+            // 16-bit alpha meets the mixed-depth 255 scale.
+            let ba = if base_alpha {
+                (read_raw(bdata, base_bpc, p * base_ch + colour) * inv_max).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let sa = if overlay_alpha {
+                (read_raw(sdata, overlay_bpc, p * overlay_ch + colour) * inv_max).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+
+            let (co, ao) = if pdf_blend {
+                // PDF blend formula: the source colour is mixed with
+                // B(cb, cs) by the backdrop alpha, then composited Over.
+                let ao = sa + ba * (1.0 - sa);
+                let mut co = [0.0f64; 3];
+                // The PDF blend functions B(cb, cs) are defined on 0..1;
+                // clamp their inputs (the linear mixing terms keep the
+                // unclamped values).
+                let c1 = |v: f64| v.clamp(0.0, 1.0);
+                if non_separable {
+                    let b = non_separable_blend(
+                        mode,
+                        [c1(cb[0]), c1(cb[1]), c1(cb[2])],
+                        [c1(cs[0]), c1(cs[1]), c1(cs[2])],
+                    );
+                    for k in 0..colour {
+                        co[k] = sa * (1.0 - ba) * cs[k] + ba * (1.0 - sa) * cb[k] + sa * ba * b[k];
+                    }
+                } else {
+                    for k in 0..colour {
+                        co[k] = sa * (1.0 - ba) * cs[k]
+                            + ba * (1.0 - sa) * cb[k]
+                            + sa * ba * separable_blend(mode, c1(cb[k]), c1(cs[k]));
+                    }
+                }
+                (co, ao)
+            } else {
+                let (fa, fb) =
+                    porter_duff_factors(mode, sa, ba).expect("porter-duff mode verified");
+                let mut co = [0.0f64; 3];
+                for k in 0..colour {
+                    co[k] = fa * sa * cs[k] + fb * ba * cb[k];
+                }
+                // Add can push the alpha past 1; clamp like VIPS_BLEND_ADD.
+                let ao = (fa * sa + fb * ba).min(1.0);
+                (co, ao)
+            };
+
+            // Unpremultiply and write back on the numeric scale.
+            for (k, &c_premul) in co.iter().enumerate().take(colour) {
+                let c = if ao > 0.0 { c_premul / ao } else { 0.0 };
+                write_scaled(odata, out_bpc, p * out_ch + k, c, scale);
+            }
+            write_scaled(odata, out_bpc, p * out_ch + colour, ao, scale);
+        }
+
+        out.meta = self.meta;
+        out.fields = self.fields.clone();
+        Ok(out)
+    }
+
+    /// Composite `overlay` onto `self` with the given blend mode
+    /// (libvips `vips_composite2`); see the [module docs](crate::composite)
+    /// for alpha, band, and depth semantics. Panicking form of
+    /// [`Raster::try_composite2`], matching the ported-test call surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`CompositeError`]; see [`Raster::try_composite2`].
+    #[track_caller]
+    pub fn composite(&self, overlay: &Raster, mode: CompositeMode) -> Raster {
+        expect_composite(self.try_composite2(overlay, mode))
+    }
+
+    /// Alias of [`Raster::composite`], named after the binary libvips
+    /// operation (`vips_composite2`).
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`CompositeError`]; see [`Raster::try_composite2`].
+    #[track_caller]
+    pub fn composite2(&self, overlay: &Raster, mode: CompositeMode) -> Raster {
+        expect_composite(self.try_composite2(overlay, mode))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 2x1 RGB base: left pixel [100, 100, 100], right [200, 50, 0].
+    fn base_rgb() -> Raster {
+        Raster::new(2, 1, PixelFormat::Rgb8, vec![100, 100, 100, 200, 50, 0]).unwrap()
+    }
+
+    /// A 2x1 RGBA overlay: left [255, 0, 0, 128], right [0, 255, 0, 255].
+    fn overlay_rgba() -> Raster {
+        Raster::new(
+            2,
+            1,
+            PixelFormat::Rgba8,
+            vec![255, 0, 0, 128, 0, 255, 0, 255],
+        )
+        .unwrap()
+    }
+
+    /**
+     * Tests the classic Over blend against hand-computed values.
+     * Works by compositing a half-transparent red overlay over an opaque
+     * grey base and checking the blend arithmetic per channel.
+     * Input: base [100,100,100] opaque, overlay [255,0,0] alpha 128.
+     * Output: c = 255*a + 100*(1-a), a = 128/255 -> [177.8, 49.8, 49.8, 255].
+     */
+    #[test]
+    fn over_blends_half_transparent_overlay() {
+        let out = base_rgb().composite(&overlay_rgba(), CompositeMode::Over);
+        assert_eq!(out.format(), PixelFormat::Rgba8);
+        let px = out.getpoint(0, 0);
+        let a = 128.0 / 255.0;
+        let want_r = 255.0 * a + 100.0 * (1.0 - a);
+        let want_gb = 100.0 * (1.0 - a);
+        assert!((px[0] - want_r).abs() <= 1.0, "r: {px:?}");
+        assert!((px[1] - want_gb).abs() <= 1.0, "g: {px:?}");
+        assert!((px[2] - want_gb).abs() <= 1.0, "b: {px:?}");
+        assert_eq!(px[3], 255.0);
+
+        // A fully opaque overlay replaces the base outright.
+        let px = out.getpoint(1, 0);
+        assert_eq!(&px[..3], &[0.0, 255.0, 0.0]);
+    }
+
+    /**
+     * Tests the ported test_composite arithmetic on the libvips fixture
+     * values. In the libvips suite the (0,0) pixel of `colour` is
+     * [2, 3, 4]; base = colour + 100, overlay = colour with alpha 128,
+     * and Over must produce [51.8, 52.8, 53.8, 255] within 1.
+     * Input: base [102,103,104], overlay [2,3,4,128].
+     * Output: getpoint(0,0) ~ [51.8, 52.8, 53.8, 255].
+     */
+    #[test]
+    fn over_matches_ported_expected_values() {
+        let base = Raster::new(1, 1, PixelFormat::Rgb8, vec![102, 103, 104]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgba8, vec![2, 3, 4, 128]).unwrap();
+        let comp = base.composite(&overlay, CompositeMode::Over);
+        let px = comp.getpoint(0, 0);
+        assert!((px[0] - 51.8).abs() < 1.0, "{px:?}");
+        assert!((px[1] - 52.8).abs() < 1.0, "{px:?}");
+        assert!((px[2] - 53.8).abs() < 1.0, "{px:?}");
+        assert!((px[3] - 255.0).abs() < 0.5, "{px:?}");
+    }
+
+    /**
+     * Tests every Porter-Duff operator's alpha result on a transparent/
+     * opaque corner case. Works by compositing a half-transparent source
+     * over a half-transparent backdrop and checking the composite alpha
+     * formula fa*sa + fb*ba for each mode.
+     * Input: sa = ba = 0.5 everywhere.
+     * Output: mode-specific alpha (e.g. Over 0.75, Xor 0.5, Clear 0).
+     */
+    #[test]
+    fn porter_duff_alpha_formulas() {
+        let base = Raster::new(1, 1, PixelFormat::Rgba8, vec![80, 80, 80, 128]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgba8, vec![160, 160, 160, 128]).unwrap();
+        let a = 128.0 / 255.0;
+        let cases: &[(CompositeMode, f64)] = &[
+            (CompositeMode::Clear, 0.0),
+            (CompositeMode::Source, a),
+            (CompositeMode::Over, a + a * (1.0 - a)),
+            (CompositeMode::In, a * a),
+            (CompositeMode::Out, a * (1.0 - a)),
+            (CompositeMode::Atop, a),
+            (CompositeMode::Dest, a),
+            (CompositeMode::DestOver, a + a * (1.0 - a)),
+            (CompositeMode::DestIn, a * a),
+            (CompositeMode::DestOut, a * (1.0 - a)),
+            (CompositeMode::DestAtop, a),
+            (CompositeMode::Xor, 2.0 * a * (1.0 - a)),
+            (CompositeMode::Add, 1.0),
+            (CompositeMode::Saturate, 1.0),
+        ];
+        for &(mode, want) in cases {
+            let out = base.composite(&overlay, mode);
+            let got = out.getpoint(0, 0)[3] / 255.0;
+            assert!((got - want).abs() < 0.01, "{mode:?}: alpha {got} != {want}");
+        }
+    }
+
+    /**
+     * Tests that Dest returns the base pixels and Source the overlay
+     * pixels, both with alpha attached.
+     * Works by compositing opaque RGB inputs and comparing the colour
+     * bands to the untouched inputs.
+     * Input: base [100,100,100]/[200,50,0], overlay [255,0,0,128]/[0,255,0,255].
+     */
+    #[test]
+    fn dest_and_source_pass_through() {
+        let base = base_rgb();
+        let overlay = overlay_rgba();
+
+        let dest = base.composite(&overlay, CompositeMode::Dest);
+        assert_eq!(&dest.getpoint(0, 0)[..3], &[100.0, 100.0, 100.0]);
+        assert_eq!(dest.getpoint(0, 0)[3], 255.0);
+        assert_eq!(&dest.getpoint(1, 0)[..3], &[200.0, 50.0, 0.0]);
+
+        let source = base.composite(&overlay, CompositeMode::Source);
+        // Unpremultiplied source colour is returned with its own alpha.
+        assert_eq!(&source.getpoint(0, 0)[..3], &[255.0, 0.0, 0.0]);
+        assert_eq!(source.getpoint(0, 0)[3], 128.0);
+    }
+
+    /**
+     * Tests the separable PDF blend functions on opaque inputs, where the
+     * result is exactly B(cb, cs) per channel.
+     * Works by compositing opaque single-value images and checking the
+     * blend function output for each separable mode.
+     * Input: cb = 0.4 (102), cs = 0.8 (204), all channels.
+     */
+    #[test]
+    fn separable_blends_on_opaque_inputs() {
+        let base = Raster::new(1, 1, PixelFormat::Rgb8, vec![102, 102, 102]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgb8, vec![204, 204, 204]).unwrap();
+        let cb = 102.0 / 255.0;
+        let cs = 204.0 / 255.0;
+        let cases: &[(CompositeMode, f64)] = &[
+            (CompositeMode::Multiply, cb * cs),
+            (CompositeMode::Screen, cb + cs - cb * cs),
+            (CompositeMode::Darken, cb.min(cs)),
+            (CompositeMode::Lighten, cb.max(cs)),
+            (CompositeMode::Difference, (cb - cs).abs()),
+            (CompositeMode::Exclusion, cb + cs - 2.0 * cb * cs),
+            // cs > 0.5: hard light = 1 - 2(1-cs)(1-cb)
+            (
+                CompositeMode::HardLight,
+                1.0 - 2.0 * (1.0 - cs) * (1.0 - cb),
+            ),
+            // cb < 0.5: overlay = 2*cb*cs
+            (CompositeMode::Overlay, 2.0 * cb * cs),
+            (CompositeMode::ColourDodge, (cb / (1.0 - cs)).min(1.0)),
+            (CompositeMode::ColourBurn, 1.0 - ((1.0 - cb) / cs).min(1.0)),
+        ];
+        for &(mode, want) in cases {
+            let out = base.composite(&overlay, mode);
+            let got = out.getpoint(0, 0)[0] / 255.0;
+            assert!((got - want).abs() < 0.01, "{mode:?}: {got} != {want}");
+            assert_eq!(out.getpoint(0, 0)[3], 255.0, "{mode:?} alpha");
+        }
+    }
+
+    /**
+     * Tests SoftLight's two branches against the PDF spec formula.
+     * Works by blending a dark and a bright source over the same backdrop
+     * and comparing with the piecewise definition (including D(x)).
+     * Input: cb = 0.4; cs = 0.2 (first branch) and cs = 0.9 (second).
+     */
+    #[test]
+    fn soft_light_matches_pdf_spec() {
+        let cb = 102.0 / 255.0;
+        let base = Raster::new(1, 1, PixelFormat::Rgb8, vec![102, 102, 102]).unwrap();
+
+        let cs1 = 51.0 / 255.0;
+        let o1 = Raster::new(1, 1, PixelFormat::Rgb8, vec![51, 51, 51]).unwrap();
+        let want1 = cb - (1.0 - 2.0 * cs1) * cb * (1.0 - cb);
+        let got1 = base.composite(&o1, CompositeMode::SoftLight).getpoint(0, 0)[0] / 255.0;
+        assert!((got1 - want1).abs() < 0.01, "{got1} != {want1}");
+
+        let cs2 = 230.0 / 255.0;
+        let o2 = Raster::new(1, 1, PixelFormat::Rgb8, vec![230, 230, 230]).unwrap();
+        let d = cb.sqrt();
+        let want2 = cb + (2.0 * cs2 - 1.0) * (d - cb);
+        let got2 = base.composite(&o2, CompositeMode::SoftLight).getpoint(0, 0)[0] / 255.0;
+        assert!((got2 - want2).abs() < 0.01, "{got2} != {want2}");
+    }
+
+    /**
+     * Tests the non-separable modes' luminosity/saturation contracts.
+     * Works by blending a saturated red source over a grey backdrop:
+     * Luminosity keeps the backdrop hue (grey stays grey-ish with source
+     * luminosity), Colour keeps backdrop luminosity with source hue.
+     * Input: backdrop grey 0.5, source pure red.
+     */
+    #[test]
+    fn non_separable_contracts() {
+        let base = Raster::new(1, 1, PixelFormat::Rgb8, vec![128, 128, 128]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgb8, vec![255, 0, 0]).unwrap();
+
+        // Luminosity: backdrop colour with source luminosity. A grey
+        // backdrop has zero saturation, so the result is the grey with
+        // Lum = lum(red) = 0.3.
+        let px = base
+            .composite(&overlay, CompositeMode::Luminosity)
+            .getpoint(0, 0);
+        for k in 0..3 {
+            assert!((px[k] / 255.0 - 0.3).abs() < 0.01, "luminosity: {px:?}");
+        }
+
+        // Colour: source hue and saturation at backdrop luminosity. The
+        // result keeps lum = 0.502 and is red-dominant.
+        let px = base
+            .composite(&overlay, CompositeMode::Colour)
+            .getpoint(0, 0);
+        let l = 0.3 * px[0] + 0.59 * px[1] + 0.11 * px[2];
+        assert!(
+            (l / 255.0 - 128.0 / 255.0).abs() < 0.01,
+            "colour lum: {px:?}"
+        );
+        assert!(px[0] > px[1] && px[1] >= px[2], "colour hue: {px:?}");
+
+        // Hue with a zero-saturation (grey) source collapses to the
+        // backdrop luminosity (SetSat(cs, 0) is black, SetLum lifts it).
+        let grey_src = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 10, 10]).unwrap();
+        let px = base.composite(&grey_src, CompositeMode::Hue).getpoint(0, 0);
+        for k in 0..3 {
+            assert!((px[k] - 128.0).abs() <= 1.0, "hue with grey source: {px:?}");
+        }
+
+        // Saturation of a grey source is zero, so the result is grey at
+        // backdrop luminosity.
+        let px = base
+            .composite(&grey_src, CompositeMode::Saturation)
+            .getpoint(0, 0);
+        for k in 0..3 {
+            assert!(
+                (px[k] - 128.0).abs() <= 1.0,
+                "saturation with grey source: {px:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests non-separable output geometry on RGBA inputs: dimensions and
+     * band count carry through, matching the ported
+     * test_composite_non_separable assertions.
+     * Input: 3x2 RGBA base and overlay, all four non-separable modes.
+     * Output: 3x2, 4 channels.
+     */
+    #[test]
+    fn non_separable_geometry() {
+        let base = Raster::zeroed(3, 2, PixelFormat::Rgba8).unwrap();
+        let overlay = Raster::new(
+            3,
+            2,
+            PixelFormat::Rgba8,
+            vec![
+                200, 30, 40, 128, 200, 30, 40, 128, 200, 30, 40, 128, 200, 30, 40, 128, 200, 30,
+                40, 128, 200, 30, 40, 128,
+            ],
+        )
+        .unwrap();
+        for mode in [
+            CompositeMode::Hue,
+            CompositeMode::Saturation,
+            CompositeMode::Colour,
+            CompositeMode::Luminosity,
+        ] {
+            let comp = base.composite(&overlay, mode);
+            assert_eq!(comp.width(), base.width());
+            assert_eq!(comp.height(), base.height());
+            assert_eq!(comp.format().channels(), 4);
+        }
+    }
+
+    /**
+     * Tests grey (1 colour band) compositing: output is 2-band
+     * grey+alpha, and Over blends the single channel.
+     * Input: base Gray8 [100] opaque, overlay Multi8(2) [255, 128].
+     * Output: Multi8(2), value = 255*a + 100*(1-a), alpha 255.
+     */
+    #[test]
+    fn grey_plus_alpha_composites_to_two_bands() {
+        let base = Raster::new(1, 1, PixelFormat::Gray8, vec![100]).unwrap();
+        let overlay = Raster::new(
+            1,
+            1,
+            PixelFormat::with_channels(2, 1).unwrap(),
+            vec![255, 128],
+        )
+        .unwrap();
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.format().channels(), 2);
+        let px = out.getpoint(0, 0);
+        let a = 128.0 / 255.0;
+        let want = 255.0 * a + 100.0 * (1.0 - a);
+        assert!((px[0] - want).abs() <= 1.0, "{px:?}");
+        assert_eq!(px[1], 255.0);
+    }
+
+    /**
+     * Tests mixed-depth inputs blend on the shared 0..255 numeric scale
+     * (the libvips max_alpha default and the crate's promoted-16-bit
+     * idiom): a linear mode mixes the raw numeric values directly, and
+     * the result lands in the deeper container.
+     * Input: Gray16 base 32768 opaque, Multi8(2) overlay [200, 128].
+     * Output: Multi16(2); value = 0.502*200 + 0.498*32768 ~ 16419,
+     * alpha raw 255 (the 0..255 scale in a 16-bit container).
+     */
+    #[test]
+    fn mixed_depth_blends_on_numeric_scale() {
+        let base = Raster::new(1, 1, PixelFormat::Gray16, 32768u16.to_ne_bytes().to_vec()).unwrap();
+        let overlay = Raster::new(
+            1,
+            1,
+            PixelFormat::with_channels(2, 1).unwrap(),
+            vec![200, 128],
+        )
+        .unwrap();
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.format(), PixelFormat::with_channels(2, 2).unwrap());
+        let px = out.getpoint(0, 0);
+        let a = 128.0 / 255.0;
+        let want = a * 200.0 + (1.0 - a) * 32768.0;
+        assert!((px[0] - want).abs() <= 1.0, "{px:?} want {want}");
+        assert_eq!(px[1], 255.0);
+    }
+
+    /**
+     * Tests a fully 16-bit pipeline normalises by 65535 (the documented
+     * libvips max_alpha choice for ushort): a half-opaque 16-bit overlay
+     * mixes the raw 16-bit values directly.
+     * Input: Gray16 base 32768 opaque, Multi16(2) overlay [65535, 32768].
+     * Output: 0.5*65535 + 0.5*32768 ~ 49152, alpha 65535.
+     */
+    #[test]
+    fn full_16bit_uses_16bit_scale() {
+        let base = Raster::new(1, 1, PixelFormat::Gray16, 32768u16.to_ne_bytes().to_vec()).unwrap();
+        let overlay = Raster::new(
+            1,
+            1,
+            PixelFormat::with_channels(2, 2).unwrap(),
+            [65535u16, 32768]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        let out = base.composite(&overlay, CompositeMode::Over);
+        let px = out.getpoint(0, 0);
+        let a = 32768.0 / 65535.0;
+        let want = a * 65535.0 + (1.0 - a) * 32768.0;
+        assert!((px[0] - want).abs() <= 1.0, "{px:?} want {want}");
+        assert_eq!(px[1], 65535.0);
+    }
+
+    /**
+     * Tests Add clamps colour and alpha rather than wrapping.
+     * Input: two opaque near-white images.
+     * Output: exactly white, alpha 255.
+     */
+    #[test]
+    fn add_clamps() {
+        let base = Raster::new(1, 1, PixelFormat::Rgb8, vec![200, 200, 200]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgb8, vec![200, 200, 200]).unwrap();
+        let px = base.composite(&overlay, CompositeMode::Add).getpoint(0, 0);
+        assert_eq!(px, vec![255.0, 255.0, 255.0, 255.0]);
+    }
+
+    /**
+     * Tests Clear produces transparent black regardless of inputs.
+     */
+    #[test]
+    fn clear_is_transparent_black() {
+        let px = base_rgb()
+            .composite(&overlay_rgba(), CompositeMode::Clear)
+            .getpoint(0, 0);
+        assert_eq!(px, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /**
+     * Tests Saturate on an opaque backdrop: no transparency is left, so
+     * the source contributes nothing and the backdrop passes through.
+     */
+    #[test]
+    fn saturate_over_opaque_backdrop_keeps_backdrop() {
+        let px = base_rgb()
+            .composite(&overlay_rgba(), CompositeMode::Saturate)
+            .getpoint(0, 0);
+        assert_eq!(&px[..3], &[100.0, 100.0, 100.0]);
+        assert_eq!(px[3], 255.0);
+    }
+
+    /**
+     * Tests Xor on two half-transparent pixels: each contributes its
+     * colour weighted by the other's transparency.
+     * Input: sa = ba = 0.5, cs = 0.8, cb = 0.2.
+     * Output: c = (0.5*0.5*0.8 + 0.5*0.5*0.2) / 0.5 = 0.5.
+     */
+    #[test]
+    fn xor_blends_disjoint_regions() {
+        let base = Raster::new(1, 1, PixelFormat::Rgba8, vec![51, 51, 51, 128]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgba8, vec![204, 204, 204, 128]).unwrap();
+        let px = base.composite(&overlay, CompositeMode::Xor).getpoint(0, 0);
+        assert!((px[0] / 255.0 - 0.5).abs() < 0.01, "{px:?}");
+        assert!((px[3] / 255.0 - 0.5).abs() < 0.01, "{px:?}");
+    }
+
+    /**
+     * Tests typed errors: size mismatch, band mismatch, non-separable on
+     * grey input, and too many bands.
+     */
+    #[test]
+    fn typed_errors() {
+        let rgb = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
+        let small = Raster::zeroed(1, 2, PixelFormat::Rgb8).unwrap();
+        let grey = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
+        let five = Raster::zeroed(2, 2, PixelFormat::with_channels(5, 1).unwrap()).unwrap();
+
+        assert!(matches!(
+            rgb.try_composite2(&small, CompositeMode::Over),
+            Err(CompositeError::DimensionMismatch { .. })
+        ));
+        assert!(matches!(
+            rgb.try_composite2(&grey, CompositeMode::Over),
+            Err(CompositeError::BandMismatch { .. })
+        ));
+        assert!(matches!(
+            grey.try_composite2(&grey, CompositeMode::Hue),
+            Err(CompositeError::NonSeparableNeedsRgb { .. })
+        ));
+        assert!(matches!(
+            rgb.try_composite2(&five, CompositeMode::Over),
+            Err(CompositeError::TooManyBands { .. })
+        ));
+    }
+
+    /**
+     * Tests that the panicking form reports the typed error message.
+     */
+    #[test]
+    #[should_panic(expected = "composite: composite: images differ in size")]
+    fn composite_panics_on_mismatch() {
+        let rgb = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
+        let small = Raster::zeroed(1, 2, PixelFormat::Rgb8).unwrap();
+        let _ = rgb.composite(&small, CompositeMode::Over);
+    }
+
+    /**
+     * Tests metadata carry-through: the result keeps the base image's
+     * resolution and orientation, like libvips copying the first input's
+     * header.
+     */
+    #[test]
+    fn composite_carries_base_metadata() {
+        let base = base_rgb().copy().xres(7.5).orientation(6).build();
+        let out = base.composite(&overlay_rgba(), CompositeMode::Over);
+        assert_eq!(out.xres(), 7.5);
+        assert_eq!(out.orientation(), 6);
+    }
+
+    /**
+     * Tests composite2 and composite agree (composite2 is the binary
+     * libvips name for the same operation).
+     */
+    #[test]
+    fn composite2_is_composite() {
+        let a = base_rgb().composite(&overlay_rgba(), CompositeMode::Screen);
+        let b = base_rgb().composite2(&overlay_rgba(), CompositeMode::Screen);
+        assert_eq!(a.data(), b.data());
+        assert_eq!(a.format(), b.format());
+    }
+
+    /**
+     * Tests unpremultiply safety: where both inputs are fully
+     * transparent, Over writes transparent black without dividing by the
+     * zero output alpha.
+     */
+    #[test]
+    fn zero_alpha_does_not_divide_by_zero() {
+        let base = Raster::new(1, 1, PixelFormat::Rgba8, vec![50, 60, 70, 0]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Rgba8, vec![80, 90, 100, 0]).unwrap();
+        let px = base.composite(&overlay, CompositeMode::Over).getpoint(0, 0);
+        assert_eq!(px, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+}
