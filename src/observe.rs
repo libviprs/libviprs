@@ -3,6 +3,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::planner::TileCoord;
 
+/// Opaque identity of the executor (or external worker) that produced an
+/// event (issue #67).
+///
+/// The engine treats the string as opaque: it is never parsed, only carried
+/// on [`EngineEvent`] variants so an observer can attribute work back to the
+/// executor that performed it. An out-of-tree distribution layer picks its
+/// own naming scheme (hostnames, pool slots, UUIDs). The built-in
+/// [`LocalWorkExecutor`](crate::LocalWorkExecutor) reports no identity, so
+/// locally-executed work stays unattributed (`None`) exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerId(pub String);
+
+impl WorkerId {
+    /// Create a `WorkerId` from anything string-shaped.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The identity as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WorkerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Events emitted during pyramid generation.
 ///
 /// Each variant represents a distinct lifecycle moment in the tile-pyramid
@@ -115,6 +145,66 @@ pub enum EngineEvent {
     BatchCompleted {
         batch_index: u32,
         tiles_produced: u64,
+    },
+
+    // -- Worker attribution events (issue #67) --
+    /// A MAP-phase strip work unit was handed to the installed
+    /// [`WorkExecutor`](crate::WorkExecutor).
+    ///
+    /// Emitted by the MapReduce engines (including
+    /// [`EngineKind::MapReduceHotCache`](crate::EngineKind::MapReduceHotCache))
+    /// on the coordinating thread, in canonical dispatch order (strictly
+    /// increasing `spec.canvas_y`). `worker_id` is the executor's
+    /// self-reported identity from
+    /// [`WorkExecutor::worker_id`](crate::WorkExecutor::worker_id); the
+    /// built-in [`LocalWorkExecutor`](crate::LocalWorkExecutor) reports
+    /// `None`, preserving the unattributed default.
+    StripDispatched {
+        worker_id: Option<WorkerId>,
+        spec: crate::streaming_mapreduce::StripWorkUnit,
+    },
+
+    /// A MAP-phase strip work unit finished executing.
+    ///
+    /// Emitted by the MapReduce engines on the coordinating thread after the
+    /// batch's results are reassembled, in the same canonical order as
+    /// [`StripDispatched`](Self::StripDispatched), so the event stream stays
+    /// deterministic even when strips render concurrently. `duration` is the
+    /// wall-clock time [`WorkExecutor::execute`](crate::WorkExecutor::execute)
+    /// took for this unit.
+    StripExecutorDone {
+        worker_id: Option<WorkerId>,
+        spec: crate::streaming_mapreduce::StripWorkUnit,
+        duration: std::time::Duration,
+    },
+
+    /// An external worker became available to an out-of-tree executor layer.
+    ///
+    /// The in-tree engines never emit this: it is vocabulary for a
+    /// distribution layer built on the [`WorkExecutor`](crate::WorkExecutor)
+    /// seam, so its observers can share one event stream (and one
+    /// [`EngineObserver`] implementation) with the engine's own events.
+    WorkerJoined { worker_id: WorkerId },
+
+    /// An external worker left an out-of-tree executor layer.
+    ///
+    /// Like [`WorkerJoined`](Self::WorkerJoined), this is emitted only by
+    /// out-of-tree distribution layers, never by the in-tree engines.
+    /// `reason` is a free-form, human-readable explanation (for example
+    /// "drained" or "heartbeat timeout").
+    WorkerLeft { worker_id: WorkerId, reason: String },
+
+    /// A point-in-time memory reading attributed to a worker.
+    ///
+    /// Emitted only by out-of-tree executor layers that want to surface
+    /// per-worker memory pressure through the shared event stream;
+    /// `worker_id` is `None` when the reading describes the process as a
+    /// whole. The in-tree engines report memory through
+    /// [`EngineResult`](crate::EngineResult) instead and never emit this.
+    MemorySnapshot {
+        worker_id: Option<WorkerId>,
+        current_bytes: u64,
+        peak_bytes: u64,
     },
 
     // -- Durability events --
@@ -248,6 +338,73 @@ impl Default for CollectingObserver {
 impl EngineObserver for CollectingObserver {
     fn on_event(&self, event: EngineEvent) {
         crate::poison::recover(&self.events).push(event);
+    }
+}
+
+/// An observer that fans every event out to a list of observers, in order.
+///
+/// This is the multi-observer composition behind
+/// [`EngineBuilder::with_observers`](crate::EngineBuilder::with_observers)
+/// (issue #67): each [`EngineEvent`] is delivered to every registered
+/// observer in registration order, synchronously, on the thread that
+/// produced the event. [`on_extensions`](EngineObserver::on_extensions) is
+/// forwarded the same way, so every registered observer can read the
+/// extension hatch.
+///
+/// The type is public so callers composing observers by hand (outside the
+/// builder) can reuse it instead of writing their own fan-out.
+pub struct FanOutObserver {
+    observers: Vec<Arc<dyn EngineObserver>>,
+}
+
+impl FanOutObserver {
+    /// Create a fan-out over the given observers. Events are delivered in
+    /// the order the observers appear in the vector.
+    pub fn new(observers: Vec<Arc<dyn EngineObserver>>) -> Self {
+        Self { observers }
+    }
+
+    /// Append another observer; it receives events after all previously
+    /// registered ones.
+    pub fn push(&mut self, observer: Arc<dyn EngineObserver>) {
+        self.observers.push(observer);
+    }
+
+    /// Number of registered observers.
+    pub fn len(&self) -> usize {
+        self.observers.len()
+    }
+
+    /// Whether no observers are registered (events are then discarded).
+    pub fn is_empty(&self) -> bool {
+        self.observers.is_empty()
+    }
+}
+
+impl std::fmt::Debug for FanOutObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FanOutObserver")
+            .field("observers", &self.observers.len())
+            .finish()
+    }
+}
+
+impl EngineObserver for FanOutObserver {
+    fn on_event(&self, event: EngineEvent) {
+        // Clone for all but the last delivery; the final observer takes the
+        // original by value.
+        if let Some((last, rest)) = self.observers.split_last() {
+            for obs in rest {
+                obs.on_event(event.clone());
+            }
+            last.on_event(event);
+        }
+    }
+
+    fn on_extensions(&self, extensions: &crate::extensions::Extensions) {
+        for obs in &self.observers {
+            obs.on_extensions(extensions);
+        }
     }
 }
 

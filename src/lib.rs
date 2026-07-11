@@ -99,7 +99,9 @@ pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,
 };
-pub use observe::{CollectingObserver, EngineEvent, EngineObserver, MemoryTracker};
+pub use observe::{
+    CollectingObserver, EngineEvent, EngineObserver, FanOutObserver, MemoryTracker, WorkerId,
+};
 #[cfg(feature = "pdfium")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
