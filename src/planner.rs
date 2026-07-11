@@ -42,6 +42,7 @@ pub enum PlannerError {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-layout)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum Layout {
     /// Deep Zoom Image -- `{level}/{col}_{row}.{ext}`, plus `.dzi` manifest.
@@ -101,7 +102,15 @@ pub struct PyramidPlanner {
 /// fabricate a plan with invariant-violating fields (for example an empty
 /// `levels` list or dimensions that do not describe any real source). Read
 /// access to the fields is unaffected. See issue #132.
+///
+/// With the `serde` feature enabled the plan also derives `Serialize` /
+/// `Deserialize`, so an out-of-process caller can reconstruct the exact plan
+/// from a JSON envelope (issue #67). Deserialization is the one sanctioned
+/// path around the `#[non_exhaustive]` construction fence: it exists
+/// precisely so a wire envelope can carry a plan produced by
+/// [`PyramidPlanner::plan`] on the other side of the boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct PyramidPlan {
     pub image_width: u32,
@@ -134,6 +143,7 @@ pub struct PyramidPlan {
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LevelPlan {
     /// Level index (0 = smallest / most zoomed out).
     pub level: u32,
@@ -158,6 +168,7 @@ pub struct LevelPlan {
 ///
 /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TileCoord {
     pub level: u32,
     pub col: u32,
@@ -176,6 +187,7 @@ pub struct TileCoord {
 ///
 /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TileRect {
     pub x: u32,
     pub y: u32,

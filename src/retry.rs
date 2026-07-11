@@ -109,6 +109,7 @@ fn sample_jitter(max_nanos: u64, jitter_tick: &AtomicU64, sink_nonce: u64) -> u6
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max)
 /// (and [`--retry-backoff`](https://libviprs.org/cli/#flag-retry-backoff) for the backoff arg)
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct RetryPolicy {
     pub max_retries: u32,
@@ -200,6 +201,7 @@ impl RetryPolicy {
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum FailurePolicy {
     /// Propagate the first error; no retries.

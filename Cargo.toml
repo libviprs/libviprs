@@ -102,6 +102,15 @@ pdfium-static = ["pdfium", "pdfium-render/static"]
 s3 = []
 tracing = ["dep:tracing"]
 packfile = ["dep:tar", "dep:zip"]
+# Gates public `Serialize` / `Deserialize` derives on the wire/config types
+# (`PyramidPlan`, `LevelPlan`, `TileCoord`, `TileRect`, `Layout`,
+# `EngineConfig`, `BlankTileStrategy`, `FailurePolicy`, `RetryPolicy`,
+# `DedupeStrategy`, `WorkerId`) so out-of-process callers can reconstruct a
+# job from a JSON envelope (issue #67). The serde crate itself is already a
+# required dependency (resume checkpoints and packfile manifests use it
+# internally), so this feature adds no dependencies; it only widens the
+# public API surface, keeping the default build's API unchanged.
+serde = []
 
 [dependencies]
 blake3 = { workspace = true }
