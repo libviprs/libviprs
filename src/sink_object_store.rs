@@ -200,6 +200,12 @@ fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError
         PixelFormat::Rgba8 => Ok(image::ColorType::Rgba8),
         PixelFormat::Rgb16 => Ok(image::ColorType::Rgb16),
         PixelFormat::Rgba16 => Ok(image::ColorType::Rgba16),
+        // Multiband intermediates (from the band ops in `crate::bands`) have
+        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
+        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Err(SinkError::EncodeMsg(format!(
+            "multiband raster ({} bands) cannot be encoded as an image tile",
+            fmt.channels()
+        ))),
     }
 }
 
