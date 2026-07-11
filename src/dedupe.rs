@@ -57,6 +57,7 @@ use crate::manifest::ChecksumAlgo;
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum DedupeStrategy {
     /// No deduplication — every tile is written to its own file. Default.

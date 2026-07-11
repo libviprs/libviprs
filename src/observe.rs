@@ -13,6 +13,7 @@ use crate::planner::TileCoord;
 /// [`LocalWorkExecutor`](crate::LocalWorkExecutor) reports no identity, so
 /// locally-executed work stays unattributed (`None`) exactly as before.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WorkerId(pub String);
 
 impl WorkerId {
