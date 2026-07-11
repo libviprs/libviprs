@@ -186,6 +186,19 @@ impl std::fmt::Debug for WorkContext<'_> {
 pub trait WorkExecutor: Send + Sync {
     /// Render one canvas-space strip.
     fn execute(&self, spec: StripWorkUnit, ctx: WorkContext<'_>) -> Result<Raster, EngineError>;
+
+    /// Self-reported identity carried on the attribution events the engine
+    /// emits for this executor's work (issue #67).
+    ///
+    /// The engine stamps this value onto [`EngineEvent::StripDispatched`]
+    /// and [`EngineEvent::StripExecutorDone`]
+    /// so an observer can attribute strip work back to the executor that
+    /// performed it. The default is `None` (unattributed), which is what
+    /// [`LocalWorkExecutor`] reports; an out-of-tree distribution layer
+    /// overrides this with its own identity scheme.
+    fn worker_id(&self) -> Option<crate::observe::WorkerId> {
+        None
+    }
 }
 
 /// Default [`WorkExecutor`]: renders the strip in-process.
@@ -582,24 +595,49 @@ pub(crate) fn generate_pyramid_mapreduce(
             plan,
             config: &engine_cfg,
         };
-        let rendered_strips = if config.tile_concurrency > 0
+
+        // Attribution (issue #67): announce every work unit on the
+        // coordinating thread, in canonical dispatch order, before any of the
+        // batch executes. The matching `StripExecutorDone` events are emitted
+        // below, also on the coordinating thread and also in canonical order
+        // (results are reassembled positionally first), so the event stream
+        // is deterministic regardless of executor concurrency; only the
+        // measured `duration` values vary run to run.
+        let exec_worker_id = executor.worker_id();
+        for &(y, sh) in batch_specs {
+            observer.on_event(EngineEvent::StripDispatched {
+                worker_id: exec_worker_id.clone(),
+                spec: StripWorkUnit {
+                    canvas_y: y,
+                    height: sh,
+                    level: top_level as u32,
+                },
+            });
+        }
+
+        let timed_strips: Vec<(Raster, std::time::Duration)> = if config.tile_concurrency > 0
             && batch_specs.len() > 1
             && source.permits_concurrent_strips()
         {
-            let mut strips: Vec<Option<Raster>> = vec![None; batch_specs.len()];
+            let mut strips: Vec<Option<(Raster, std::time::Duration)>> =
+                vec![None; batch_specs.len()];
             std::thread::scope(|s| -> Result<(), EngineError> {
                 let mut handles = Vec::with_capacity(batch_specs.len());
                 for &(y, sh) in batch_specs {
-                    handles.push(s.spawn(move || -> Result<Raster, EngineError> {
-                        executor.execute(
-                            StripWorkUnit {
-                                canvas_y: y,
-                                height: sh,
-                                level: top_level as u32,
-                            },
-                            work_context,
-                        )
-                    }));
+                    handles.push(s.spawn(
+                        move || -> Result<(Raster, std::time::Duration), EngineError> {
+                            let started = std::time::Instant::now();
+                            let strip = executor.execute(
+                                StripWorkUnit {
+                                    canvas_y: y,
+                                    height: sh,
+                                    level: top_level as u32,
+                                },
+                                work_context,
+                            )?;
+                            Ok((strip, started.elapsed()))
+                        },
+                    ));
                 }
                 for (i, handle) in handles.into_iter().enumerate() {
                     let strip = handle.join().map_err(|_| EngineError::WorkerPanic)??;
@@ -612,17 +650,39 @@ pub(crate) fn generate_pyramid_mapreduce(
             batch_specs
                 .iter()
                 .map(|&(y, sh)| {
-                    executor.execute(
+                    let started = std::time::Instant::now();
+                    let strip = executor.execute(
                         StripWorkUnit {
                             canvas_y: y,
                             height: sh,
                             level: top_level as u32,
                         },
                         work_context,
-                    )
+                    )?;
+                    Ok((strip, started.elapsed()))
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, EngineError>>()?
         };
+
+        // Emit completion attribution in canonical order, then strip the
+        // timing wrapper so the REDUCE phase below is unchanged.
+        let rendered_strips: Vec<Raster> = timed_strips
+            .into_iter()
+            .enumerate()
+            .map(|(i, (strip, duration))| {
+                let (y, sh) = batch_specs[i];
+                observer.on_event(EngineEvent::StripExecutorDone {
+                    worker_id: exec_worker_id.clone(),
+                    spec: StripWorkUnit {
+                        canvas_y: y,
+                        height: sh,
+                        level: top_level as u32,
+                    },
+                    duration,
+                });
+                strip
+            })
+            .collect();
 
         // All strips in this batch are now materialised simultaneously (the
         // Map phase renders them concurrently, or sequentially into one Vec).

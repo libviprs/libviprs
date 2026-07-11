@@ -289,6 +289,26 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         self
     }
 
+    /// Attach several observers at once; every [`EngineEvent`](crate::EngineEvent)
+    /// fans out to each of them, in the order they appear in the vector
+    /// (issue #67).
+    ///
+    /// Composes the observers through a [`FanOutObserver`](crate::FanOutObserver),
+    /// so delivery is synchronous, on the thread that produced the event,
+    /// exactly as with a single observer; the extension hatch
+    /// ([`EngineObserver::on_extensions`](crate::EngineObserver::on_extensions))
+    /// is forwarded to each of them too. Like every observer setter, this
+    /// fills the builder's one observer slot: it replaces anything a prior
+    /// [`with_observer`](Self::with_observer) /
+    /// [`with_observer_arc`](Self::with_observer_arc) / `with_observers`
+    /// call attached, and a later call replaces it in turn.
+    /// [`with_observer`](Self::with_observer) remains the single-observer
+    /// shorthand.
+    pub fn with_observers(mut self, observers: Vec<Arc<dyn EngineObserver>>) -> Self {
+        self.observer = Some(Arc::new(crate::observe::FanOutObserver::new(observers)));
+        self
+    }
+
     /// Select which engine implementation [`EngineBuilder::run`] will
     /// dispatch to. Defaults to [`EngineKind::Auto`].
     ///
