@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a single `finish()` (issue #67). Byte-identical output to the streaming and
   MapReduce engines; explicit opt-in only, never selected by
   `EngineKind::Auto`.
+- Worker attribution on `EngineEvent` (issue #67): new `WorkerId` newtype and
+  new event variants `StripDispatched`, `StripExecutorDone` (emitted by the
+  MapReduce engines on the coordinating thread, in canonical dispatch order,
+  stamped with the installed executor's self-reported
+  `WorkExecutor::worker_id`, `None` for `LocalWorkExecutor`), plus
+  `WorkerJoined`, `WorkerLeft`, and `MemorySnapshot` as vocabulary for
+  out-of-tree executor layers (never emitted by the in-tree engines).
+  `WorkExecutor::worker_id` has a `None` default, so existing executor
+  implementations are unaffected.
+- `EngineBuilder::with_observers(Vec<Arc<dyn EngineObserver>>)` and the
+  `FanOutObserver` composition behind it (issue #67): every event (and the
+  `on_extensions` hatch) fans out to each registered observer in order.
+  `with_observer` stays as the single-observer shorthand.
 
 ## [0.3.1] — 2026-04-25
 
