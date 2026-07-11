@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `Resume` refused on a plan-hash mismatch now returns
+  `EngineError::PlanHashMismatch` before anything touches the output
+  directory: the plan-hash gate runs ahead of the advisory run-lock
+  acquisition, so a refused resume no longer materialises
+  `.libviprs-job.lock` (or any other file) as a side effect.
+- `RunLock` removes its `.libviprs-job.lock` file when the guard drops, so a
+  finished run leaves no bookkeeping behind in the output tree and a
+  crash+resume run now produces a pyramid byte-identical to a clean single
+  run. The unlink happens while the exclusive lock is still held, and
+  `RunLock::acquire` revalidates after locking that the path still names the
+  inode it locked (retrying against the fresh file otherwise), which keeps
+  the removal safe against concurrent acquirers.
+
 ## [0.4.0] — 2026-07-11
 
 ### Breaking

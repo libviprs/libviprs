@@ -861,6 +861,13 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// [`std::fs::File::try_lock`]) tied to the open file handle, so the kernel
 /// releases it automatically if the process dies without dropping the guard —
 /// a crashed job never strands a stale lock that would wedge every later run.
+///
+/// Releasing the guard also removes the lock file itself, so a finished (or
+/// refused) run leaves no bookkeeping behind in the output directory: a clean
+/// run and a crash+resume run produce byte-identical trees. The unlink happens
+/// while the exclusive lock is still held, and [`RunLock::acquire`]
+/// revalidates after locking that the path still names the inode it locked,
+/// so the removal cannot let two jobs hold "the" lock at once (see `Drop`).
 #[derive(Debug)]
 #[must_use = "the run lock is released as soon as the guard is dropped"]
 pub struct RunLock {
@@ -891,32 +898,53 @@ impl RunLock {
     /// fail fast telling the user another run owns the directory than silently
     /// queue behind it for an unbounded time.
     ///
-    /// The lock file is opened (creating it if absent) but never truncated, and
-    /// is intentionally left on disk when the guard drops — unlinking it would
-    /// race a concurrent acquirer that has already opened the same path,
-    /// reintroducing the interleaving this lock exists to prevent.
+    /// The lock file is opened (creating it if absent) but never truncated. A
+    /// releasing holder unlinks the file while its lock is still held (see
+    /// `Drop`), so an acquirer may open a doomed inode just before that unlink
+    /// and lock it just after the release. A lock on an orphaned inode
+    /// excludes nobody: after every successful `try_lock` the path is
+    /// therefore revalidated against the locked handle, and on a mismatch the
+    /// stale lock is dropped and the acquisition retried against the fresh
+    /// file.
     pub fn acquire(dir: &Path) -> Result<RunLock, ResumeError> {
         // Ensure the directory exists so a first-ever run can place its lock
         // before the sink has materialised any output.
         std::fs::create_dir_all(dir)?;
         let path = Self::lock_path(dir);
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        // `File::try_lock` is stable since Rust 1.89; the crate's declared MSRV
-        // is older, so silence the incompatible-MSRV lint at this single call
-        // rather than pulling in a third-party file-locking crate for the same
-        // primitive. Promoting the whole crate to 1.89 is left to the maintainer.
-        #[allow(clippy::incompatible_msrv)]
-        let outcome = file.try_lock();
-        match outcome {
-            Ok(()) => Ok(RunLock { file, path }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(ResumeError::Locked { path }),
-            Err(std::fs::TryLockError::Error(e)) => Err(ResumeError::Io(e)),
+        // Every retry requires another job to have completed a full
+        // acquire-release cycle inside the microsecond window between our
+        // `open` and our `try_lock`, so a handful of attempts is ample. The
+        // bound turns pathological churn into a clean refusal, not a livelock.
+        const MAX_ACQUIRE_ATTEMPTS: usize = 16;
+        for _ in 0..MAX_ACQUIRE_ATTEMPTS {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            // `File::try_lock` is stable since Rust 1.89; the crate's declared MSRV
+            // is older, so silence the incompatible-MSRV lint at this single call
+            // rather than pulling in a third-party file-locking crate for the same
+            // primitive. Promoting the whole crate to 1.89 is left to the maintainer.
+            #[allow(clippy::incompatible_msrv)]
+            let outcome = file.try_lock();
+            match outcome {
+                Ok(()) => {
+                    if lock_path_names_handle(&file, &path)? {
+                        return Ok(RunLock { file, path });
+                    }
+                    // The file we locked was unlinked by a releasing holder:
+                    // drop the stale lock (closing `file`) and race for the
+                    // fresh file now at `path`.
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(ResumeError::Locked { path });
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(ResumeError::Io(e)),
+            }
         }
+        Err(ResumeError::Locked { path })
     }
 
     /// Path of the lock file this guard currently holds.
@@ -925,10 +953,49 @@ impl RunLock {
     }
 }
 
+/// True when `path` still names the same file `locked` has open (same device
+/// and inode). [`RunLock::acquire`] calls this after a successful `try_lock`
+/// to detect that a releasing holder unlinked the lock file between the
+/// acquirer's `open` and its lock.
+#[cfg(unix)]
+fn lock_path_names_handle(locked: &std::fs::File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let held = locked.metadata()?;
+    match std::fs::metadata(path) {
+        Ok(on_disk) => Ok(on_disk.dev() == held.dev() && on_disk.ino() == held.ino()),
+        // The path is gone entirely: the locked inode is orphaned.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Non-Unix fallback: report the handle as current. On these platforms the
+/// release path cannot unlink an open, locked file in the first place (the
+/// `remove_file` in [`RunLock`]'s `Drop` fails and the file persists), so the
+/// stale-inode race this check guards against cannot occur.
+#[cfg(not(unix))]
+fn lock_path_names_handle(_locked: &std::fs::File, _path: &Path) -> io::Result<bool> {
+    Ok(true)
+}
+
 impl Drop for RunLock {
     fn drop(&mut self) {
-        // Best-effort explicit release. The kernel also drops the lock when the
-        // handle closes immediately after, so a failure here is not actionable.
+        // Unlink the lock file, then release the lock. The ordering is
+        // load-bearing: because the unlink happens while the exclusive lock is
+        // still held, the path can never name an inode whose lock has already
+        // been released. A concurrent `acquire` that opened this inode before
+        // the unlink obtains its lock only after the `unlock` below, then
+        // notices the path no longer names its inode and retries against the
+        // fresh file (see `RunLock::acquire`). Removing the file is what keeps
+        // a finished run from leaking bookkeeping into the caller's output
+        // directory, and a refused resume from mutating a directory it
+        // promised not to touch.
+        //
+        // Both calls are best-effort. On platforms where unlinking an open
+        // file fails (Windows), the file persists, which simply restores the
+        // historical leave-it-behind behaviour there; the kernel also drops
+        // the lock when the handle closes immediately after this.
+        let _ = std::fs::remove_file(&self.path);
         // `File::unlock` is stable since Rust 1.89 (see `acquire`).
         #[allow(clippy::incompatible_msrv)]
         let _ = self.file.unlock();
@@ -1592,6 +1659,36 @@ mod tests {
 
         // Releasing the guard frees the directory for the next run.
         drop(held);
+        let reacquired = RunLock::acquire(dir.path()).expect("acquire after release succeeds");
+        drop(reacquired);
+    }
+
+    // A finished (or refused) run must leave the checkpoint root exactly as it
+    // found it, so releasing the guard removes the lock file. The unlink runs
+    // while the exclusive lock is still held and `acquire` revalidates the
+    // path after locking, which keeps the removal safe against a concurrent
+    // acquirer; this test pins the on-disk outcome. Unix-only: on platforms
+    // where unlinking an open file fails, the file is deliberately left
+    // behind.
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(miri, ignore)] // file locking unsupported under Miri isolation
+    fn run_lock_release_removes_the_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let held = RunLock::acquire(dir.path()).expect("first acquire succeeds");
+        assert!(
+            RunLock::lock_path(dir.path()).exists(),
+            "the lock file exists while the guard is held"
+        );
+
+        drop(held);
+        assert!(
+            !RunLock::lock_path(dir.path()).exists(),
+            "the lock file must be removed when the guard drops"
+        );
+
+        // The directory is immediately acquirable again after the removal.
         let reacquired = RunLock::acquire(dir.path()).expect("acquire after release succeeds");
         drop(reacquired);
     }
