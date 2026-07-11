@@ -99,7 +99,7 @@ pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use conversion::{Angle, ConversionError, Interpretation, RasterCopyBuilder};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
-pub use draw::{Circle, DrawOp, Rectangle};
+pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
 };
