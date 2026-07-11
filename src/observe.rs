@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use crate::planner::TileCoord;
 
@@ -95,7 +96,21 @@ pub enum EngineEvent {
         tile_count: u64,
     },
     /// A tile was produced and sent to the sink.
-    TileCompleted { coord: TileCoord },
+    ///
+    /// `worker_id` attributes the tile to the [`WorkExecutor`](crate::WorkExecutor)
+    /// that produced it, and `timestamp` records when the coordinating thread
+    /// emitted the event (issue #67). Both are additive and optional: the
+    /// in-tree engines set `worker_id: None` (work is unattributed) and stamp
+    /// `timestamp: Some(_)` at emit time on the coordinating thread. An
+    /// out-of-tree executor layer fills `worker_id` to route the event back to
+    /// the worker that produced it. Construct with
+    /// [`EngineEvent::tile_completed`](Self::tile_completed) to stamp both the
+    /// default way.
+    TileCompleted {
+        coord: TileCoord,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
     /// A tile failed terminally and was skipped under
     /// [`FailurePolicy::RetryThenSkip`](crate::retry::FailurePolicy::RetryThenSkip).
     ///
@@ -104,21 +119,40 @@ pub enum EngineEvent {
     /// completed would corrupt any observer that pairs completions with sink
     /// writes (progress bars, completion counters, per-tile audit logs). The
     /// `error` string carries a human-readable description of the terminal
-    /// failure.
-    TileFailed { coord: TileCoord, error: String },
+    /// failure. `worker_id` / `timestamp` carry the same optional attribution
+    /// as [`TileCompleted`](Self::TileCompleted) (issue #67).
+    TileFailed {
+        coord: TileCoord,
+        error: String,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
     /// A tile was skipped on resume because a prior run already produced it.
     ///
     /// Emitted for tiles listed in an inbound resume checkpoint. Such tiles
     /// are never re-extracted or re-written this run, so they must not
     /// surface as [`TileCompleted`](Self::TileCompleted) — an observer would
     /// otherwise double-count them across the original and resumed runs.
-    TileSkippedOnResume { coord: TileCoord },
+    /// `worker_id` / `timestamp` carry the same optional attribution as
+    /// [`TileCompleted`](Self::TileCompleted) (issue #67).
+    TileSkippedOnResume {
+        coord: TileCoord,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
     /// A tile write failed and a retry is about to be attempted.
     ///
     /// `attempt` is 1-based: the first retry after the initial failure is
     /// `attempt == 1`. Terminal failure (all retries exhausted) surfaces as
     /// [`TileFailed`](Self::TileFailed), never as `TileCompleted`.
-    RetryAttempted { coord: TileCoord, attempt: u32 },
+    /// `worker_id` / `timestamp` carry the same optional attribution as
+    /// [`TileCompleted`](Self::TileCompleted) (issue #67).
+    RetryAttempted {
+        coord: TileCoord,
+        attempt: u32,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
     /// A level finished processing.
     LevelCompleted { level: u32, tiles_produced: u64 },
 
@@ -229,6 +263,55 @@ pub enum EngineEvent {
     /// (manifest writing, cleanup, etc.) is finished. The engine never
     /// emits this — it is purely a caller-side bookend to `SourceLoadStarted`.
     PipelineComplete,
+}
+
+impl EngineEvent {
+    /// Build a [`TileCompleted`](Self::TileCompleted) the in-tree way: no worker
+    /// attribution (`worker_id: None`) and a coordinating-thread timestamp
+    /// (`timestamp: Some(SystemTime::now())`).
+    ///
+    /// This is the constructor the built-in engines call, so every in-tree
+    /// tile-completion event is stamped identically. An out-of-tree executor
+    /// layer that needs `worker_id` builds the variant directly.
+    pub fn tile_completed(coord: TileCoord) -> Self {
+        Self::TileCompleted {
+            coord,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
+
+    /// Build a [`TileFailed`](Self::TileFailed) with no worker attribution and a
+    /// coordinating-thread timestamp. See [`tile_completed`](Self::tile_completed).
+    pub fn tile_failed(coord: TileCoord, error: String) -> Self {
+        Self::TileFailed {
+            coord,
+            error,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
+
+    /// Build a [`TileSkippedOnResume`](Self::TileSkippedOnResume) with no worker
+    /// attribution and a coordinating-thread timestamp.
+    pub fn tile_skipped_on_resume(coord: TileCoord) -> Self {
+        Self::TileSkippedOnResume {
+            coord,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
+
+    /// Build a [`RetryAttempted`](Self::RetryAttempted) with no worker
+    /// attribution and a coordinating-thread timestamp.
+    pub fn retry_attempted(coord: TileCoord, attempt: u32) -> Self {
+        Self::RetryAttempted {
+            coord,
+            attempt,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
 }
 
 /// Trait for receiving engine progress events.
@@ -512,9 +595,7 @@ mod tests {
             height: 1,
             tile_count: 1,
         });
-        obs.on_event(EngineEvent::TileCompleted {
-            coord: TileCoord::new(0, 0, 0),
-        });
+        obs.on_event(EngineEvent::tile_completed(TileCoord::new(0, 0, 0)));
         obs.on_event(EngineEvent::LevelCompleted {
             level: 0,
             tiles_produced: 1,
@@ -569,9 +650,7 @@ mod tests {
     #[test]
     fn poisoned_events_lock_recovers_without_cascade() {
         let obs = CollectingObserver::new();
-        obs.on_event(EngineEvent::TileCompleted {
-            coord: TileCoord::new(0, 0, 0),
-        });
+        obs.on_event(EngineEvent::tile_completed(TileCoord::new(0, 0, 0)));
 
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = obs.events.lock().unwrap();
@@ -610,11 +689,11 @@ mod tests {
         let obs = CollectingObserver::new();
         let failed = TileCoord::new(2, 3, 4);
         let skipped = TileCoord::new(0, 1, 1);
-        obs.on_event(EngineEvent::TileFailed {
-            coord: failed,
-            error: "sink write failed after retries".to_string(),
-        });
-        obs.on_event(EngineEvent::TileSkippedOnResume { coord: skipped });
+        obs.on_event(EngineEvent::tile_failed(
+            failed,
+            "sink write failed after retries".to_string(),
+        ));
+        obs.on_event(EngineEvent::tile_skipped_on_resume(skipped));
 
         let events = obs.events();
         assert_eq!(events.len(), 2);
@@ -622,7 +701,7 @@ mod tests {
         // A failure is never observable as a completion.
         assert!(!matches!(events[0], EngineEvent::TileCompleted { .. }));
         match &events[0] {
-            EngineEvent::TileFailed { coord, error } => {
+            EngineEvent::TileFailed { coord, error, .. } => {
                 assert_eq!(*coord, failed);
                 assert_eq!(error, "sink write failed after retries");
             }
@@ -633,7 +712,7 @@ mod tests {
         assert!(!matches!(events[1], EngineEvent::TileCompleted { .. }));
         assert!(matches!(
             events[1],
-            EngineEvent::TileSkippedOnResume { coord } if coord == skipped
+            EngineEvent::TileSkippedOnResume { coord, .. } if coord == skipped
         ));
     }
 
@@ -647,7 +726,7 @@ mod tests {
     fn retry_and_checkpoint_events_round_trip() {
         let obs = CollectingObserver::new();
         let coord = TileCoord::new(1, 2, 3);
-        obs.on_event(EngineEvent::RetryAttempted { coord, attempt: 2 });
+        obs.on_event(EngineEvent::retry_attempted(coord, 2));
         obs.on_event(EngineEvent::CheckpointFlushed { tiles: 7 });
         let events = obs.events();
         assert!(matches!(
