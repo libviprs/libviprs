@@ -37,10 +37,10 @@
 //! trailer with the orientation tag and the attached metadata fields.
 //! libvips itself stores an XML trailer there; both readers treat an
 //! unparseable trailer as absent, so pixels and header survive either
-//! way. The reader accepts both byte orders (swapping 16-bit samples as
-//! needed), rejects band formats other than uchar/ushort (float `.v`
-//! arrives with the float-format batch), and enforces the
-//! [`get_max_coord`] dimension ceiling on untrusted header geometry.
+//! way. The reader accepts both byte orders (swapping 16-bit and float
+//! samples as needed), rejects band formats other than uchar, ushort,
+//! and float, and enforces the [`get_max_coord`] dimension ceiling on
+//! untrusted header geometry.
 //!
 //! # Metadata fields
 //!
@@ -441,10 +441,10 @@ impl Raster {
             "height" => MetadataValue::Int(i64::from(self.height())),
             "bands" => MetadataValue::Int(self.format().channels() as i64),
             "format" => MetadataValue::Str(
-                if self.format().bytes_per_channel() == 1 {
-                    "uchar"
-                } else {
-                    "ushort"
+                match self.format().bytes_per_channel() {
+                    1 => "uchar",
+                    2 => "ushort",
+                    _ => "float",
                 }
                 .to_string(),
             ),
@@ -721,7 +721,13 @@ impl Raster {
         push_i32(&mut out, self.height() as i32);
         push_i32(&mut out, self.format().channels() as i32);
         push_i32(&mut out, 8 * bpc as i32); // deprecated Bbits
-        push_i32(&mut out, if bpc == 1 { 0 } else { 2 }); // BandFmt: uchar / ushort
+        // BandFmt (VipsBandFormat codes): 0 = uchar, 2 = ushort, 6 = float.
+        let band_fmt = match bpc {
+            1 => 0,
+            2 => 2,
+            _ => 6,
+        };
+        push_i32(&mut out, band_fmt);
         push_i32(&mut out, 0); // Coding: none
         push_i32(&mut out, interpretation_code(self.interpretation()));
         out.extend_from_slice(&(self.xres() as f32).to_ne_bytes());
@@ -821,10 +827,11 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     let bpc = match band_fmt {
         0 => 1, // uchar
         2 => 2, // ushort
+        6 => 4, // float
         other => {
             return Err(SourceError::VipsFormat(format!(
-                "unsupported .v band format {other}; only uchar and ushort are supported \
-                 (float band formats arrive with the float-format batch)"
+                "unsupported .v band format {other}; only uchar, ushort, and float \
+                 are supported"
             )));
         }
     };
@@ -859,6 +866,11 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     if swapped && bpc == 2 {
         for pair in data.chunks_exact_mut(2) {
             pair.swap(0, 1);
+        }
+    }
+    if swapped && bpc == 4 {
+        for quad in data.chunks_exact_mut(4) {
+            quad.reverse();
         }
     }
 
@@ -1448,6 +1460,52 @@ mod tests {
     }
 
     /**
+     * Tests the float .v round-trip: a FloatF32 raster encodes with
+     * Bbits 32 and BandFmt 6 (FLOAT) and decodes back byte-identical,
+     * an RgbaF32 raster canonicalizes back to RgbaF32, and a file in
+     * the foreign byte order has its 4-byte float samples swapped.
+     */
+    #[test]
+    fn vips_float_roundtrip_and_foreign_endian() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(2, 1, f1, &[0.5, -3.25]).unwrap();
+        let bytes = im.encode_vips().unwrap();
+        // Header words: Bbits (offset 16) is 32, BandFmt (offset 20) is 6.
+        assert_eq!(i32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 32);
+        assert_eq!(i32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 6);
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.format(), f1);
+        assert_eq!(back.data(), im.data());
+        assert_eq!(back.f32_samples().unwrap(), vec![0.5, -3.25]);
+        assert_eq!(back.get_field("format").unwrap().as_str(), "float");
+
+        // Four-band float canonicalizes back to the named RgbaF32.
+        let rgba =
+            Raster::from_f32_samples(1, 1, PixelFormat::RgbaF32, &[1.0, 2.0, 3.0, 4.5]).unwrap();
+        let rgba_back = decode_bytes(&rgba.encode_vips().unwrap()).unwrap();
+        assert_eq!(rgba_back.format(), PixelFormat::RgbaF32);
+        assert_eq!(rgba_back.f32_samples().unwrap(), vec![1.0, 2.0, 3.0, 4.5]);
+
+        // Flip the file to the foreign byte order by hand: reverse the
+        // magic, every i32 header word (the two i16 words at 44/46 are
+        // zero, so the 4-byte reverse is exact here), and each 4-byte
+        // float sample. The decoder must swap the samples back.
+        let mut foreign = bytes.clone();
+        foreign[..4].reverse();
+        for off in (4..VIPS_HEADER_LEN).step_by(4) {
+            foreign[off..off + 4].reverse();
+        }
+        for off in (VIPS_HEADER_LEN..VIPS_HEADER_LEN + 8).step_by(4) {
+            foreign[off..off + 4].reverse();
+        }
+        // Drop the trailer; hand-flipping only covers header + pixels.
+        foreign.truncate(VIPS_HEADER_LEN + 8);
+        let swapped = decode_bytes(&foreign).unwrap();
+        assert_eq!(swapped.format(), f1);
+        assert_eq!(swapped.f32_samples().unwrap(), vec![0.5, -3.25]);
+    }
+
+    /**
      * Tests save/save_stripped through the extension dispatcher for .v:
      * save keeps attached fields, save_stripped drops them but keeps
      * pixels and header geometry.
@@ -1594,7 +1652,19 @@ mod tests {
             Err(SourceError::VipsFormat(_))
         ));
 
-        let mut float_fmt = good.clone();
+        let mut double_fmt = good.clone();
+        double_fmt[20..24].copy_from_slice(&8i32.to_ne_bytes()); // DOUBLE
+        assert!(matches!(
+            decode_vips_bytes(&double_fmt, DecodeLimits::default()),
+            Err(SourceError::VipsFormat(_))
+        ));
+
+        // FLOAT (6) is a supported band format now, but retagging the
+        // 8-bit fixture as float quadruples the promised pixel bytes.
+        // Use the trailer-free encoding (the JSON metadata trailer would
+        // otherwise be long enough to be eaten as pixel data): the
+        // shortfall must surface as a truncation error, not a misread.
+        let mut float_fmt = im.encode_vips_impl(false);
         float_fmt[20..24].copy_from_slice(&6i32.to_ne_bytes()); // FLOAT
         assert!(matches!(
             decode_vips_bytes(&float_fmt, DecodeLimits::default()),

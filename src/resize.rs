@@ -15,6 +15,14 @@ use crate::raster::{Raster, RasterError};
 pub fn downscale_half(src: &Raster) -> Result<Raster, RasterError> {
     let fmt = src.format();
 
+    // The integer box-filter kernels assume unsigned 8/16-bit samples;
+    // float pyramid levels are not part of the pipeline yet.
+    if fmt.is_float() {
+        return Err(RasterError::FloatUnsupported {
+            op: "downscale_half",
+        });
+    }
+
     if fmt.has_alpha() {
         downscale_half_alpha(src)
     } else {
@@ -229,6 +237,12 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
             width: dst_w,
             height: dst_h,
         });
+    }
+
+    // The integer area-averaging kernel assumes unsigned 8/16-bit samples;
+    // float pyramid levels are not part of the pipeline yet.
+    if src.format().is_float() {
+        return Err(RasterError::FloatUnsupported { op: "downscale_to" });
     }
 
     let fmt = src.format();
@@ -678,5 +692,40 @@ mod tests {
         let sum: u64 = area * 200; // every source sample == 200
         let avg = (sum + area / 2) / area;
         assert_eq!(avg, 200, "u64 divisor must average correctly");
+    }
+
+    /**
+     * Tests that the downscale entry points reject float rasters with the
+     * typed FloatUnsupported error instead of misreading their bytes with
+     * the integer box-filter kernels. Covers both the named RgbaF32 (which
+     * has alpha and would otherwise take the alpha kernel) and FloatF32.
+     * Input: 4x4 float rasters → Err(FloatUnsupported) from both entries.
+     */
+    #[test]
+    fn downscale_rejects_float_with_typed_error() {
+        use crate::pixel::PixelFormat;
+
+        let rgba = Raster::zeroed(4, 4, PixelFormat::RgbaF32).unwrap();
+        assert!(matches!(
+            downscale_half(&rgba),
+            Err(RasterError::FloatUnsupported {
+                op: "downscale_half"
+            })
+        ));
+        assert!(matches!(
+            downscale_to(&rgba, 2, 2),
+            Err(RasterError::FloatUnsupported { op: "downscale_to" })
+        ));
+
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let gray = Raster::zeroed(4, 4, f1).unwrap();
+        assert!(matches!(
+            downscale_half(&gray),
+            Err(RasterError::FloatUnsupported { .. })
+        ));
+        assert!(matches!(
+            downscale_to(&gray, 2, 2),
+            Err(RasterError::FloatUnsupported { .. })
+        ));
     }
 }

@@ -7,19 +7,24 @@
 //! blocks, so the core [`Raster`] type in [`crate::raster`] is untouched.
 //!
 //! 16-bit samples are read and written in native byte order, matching the
-//! convention the resize and decode paths already use.
+//! convention the resize and decode paths already use; float samples are
+//! likewise native-order `f32`.
 
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 
 /// Read the `n`-th channel sample at byte offset `off` as `f64`, honouring the
-/// format's bit depth (native byte order for 16-bit).
+/// format's sample type (native byte order for 16-bit and float).
 fn sample_f64(data: &[u8], off: usize, channel: usize, fmt: PixelFormat) -> f64 {
     match fmt.bytes_per_channel() {
         1 => data[off + channel] as f64,
-        _ => {
+        2 => {
             let b = off + channel * 2;
             u16::from_ne_bytes([data[b], data[b + 1]]) as f64
+        }
+        _ => {
+            let b = off + channel * 4;
+            f32::from_ne_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]]) as f64
         }
     }
 }
@@ -29,9 +34,10 @@ impl Raster {
     ///
     /// The returned vector has [`PixelFormat::channels`] entries: `[gray]` for
     /// grayscale, `[r, g, b]` for RGB, `[r, g, b, a]` for RGBA. Samples are the
-    /// raw stored values (`0..=255` for 8-bit formats, `0..=65535` for 16-bit),
-    /// not normalised. This mirrors libvips `getpoint`, giving arithmetic and
-    /// LUT code a depth-independent view of a pixel.
+    /// raw stored values (`0..=255` for 8-bit formats, `0..=65535` for 16-bit,
+    /// the stored `f32` value for float formats), not normalised. This mirrors
+    /// libvips `getpoint`, giving arithmetic and LUT code a depth-independent
+    /// view of a pixel.
     ///
     /// # Panics
     ///
@@ -65,7 +71,9 @@ impl Raster {
     ///
     /// # Panics
     ///
-    /// Panics if the two rasters differ in width, height, or channel count. The
+    /// Panics if the two rasters differ in width, height, or channel count,
+    /// or if either input is a float raster (float addition lands with a
+    /// later arithmetic batch; cast to an unsigned format first). The
     /// libvips-derived callers always add conformable images; the panic turns a
     /// caller bug into an immediate, clear failure rather than silent garbage.
     pub fn add(&self, other: &Raster) -> Raster {
@@ -78,6 +86,10 @@ impl Raster {
             self.format().channels(),
             other.format().channels(),
             "add: channel-count mismatch"
+        );
+        assert!(
+            !self.format().is_float() && !other.format().is_float(),
+            "add: float rasters are not supported yet; cast to an unsigned 8/16-bit format first"
         );
 
         let width = self.width();
@@ -108,11 +120,16 @@ impl Raster {
 }
 
 /// Read the `i`-th channel sample of `raster` (flat channel index) as `u32`.
+///
+/// Unsigned samples only: `add` guards float inputs out before calling this,
+/// and the panic arm keeps a future caller from misreading float bytes as
+/// `u16` pairs.
 fn read_sample(raster: &Raster, i: usize) -> u32 {
     let data = raster.data();
     match raster.format().bytes_per_channel() {
         1 => data[i] as u32,
-        _ => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
+        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
+        _ => panic!("read_sample: float rasters have no u32 sample view"),
     }
 }
 
@@ -195,5 +212,30 @@ mod tests {
         let a = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
         let b = Raster::zeroed(3, 2, PixelFormat::Gray8).unwrap();
         let _ = a.add(&b);
+    }
+
+    /// getpoint reads float samples as their exact stored values,
+    /// including negatives and values outside the unsigned ranges.
+    #[test]
+    fn getpoint_reads_float() {
+        let im = Raster::from_f32_samples(
+            2,
+            1,
+            PixelFormat::RgbaF32,
+            &[0.5, -1.25, 300.75, 0.0, 65536.5, 1.0, -0.0, 2.5],
+        )
+        .unwrap();
+        assert_eq!(im.getpoint(0, 0), vec![0.5, -1.25, 300.75, 0.0]);
+        assert_eq!(im.getpoint(1, 0), vec![65536.5, 1.0, 0.0, 2.5]);
+    }
+
+    /// add rejects float rasters loudly instead of misreading their bytes
+    /// (float addition lands with a later arithmetic batch).
+    #[test]
+    #[should_panic(expected = "float rasters are not supported")]
+    fn add_float_panics() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let a = Raster::zeroed(2, 2, f1).unwrap();
+        let _ = a.add(&a);
     }
 }
