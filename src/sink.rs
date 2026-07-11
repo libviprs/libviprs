@@ -1804,6 +1804,12 @@ fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorT
             "multiband raster ({} bands) cannot be encoded as an image tile",
             fmt.channels()
         ))),
+        // Float compute intermediates have no PNG/JPEG representation;
+        // cast to an unsigned 8/16-bit format before encoding tiles.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
+            "float raster ({fmt:?}) cannot be encoded as an image tile; \
+             cast to an unsigned 8/16-bit format first"
+        ))),
     }
 }
 
@@ -2520,6 +2526,34 @@ mod tests {
         let raster = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
         let bytes = encode_jpeg(&raster, 90).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+    }
+
+    /**
+     * Tests that the tile encoders reject float rasters with a typed
+     * error instead of mislabelling their bytes as 8/16-bit samples:
+     * PNG/JPEG have no 32-bit float representation here, so callers must
+     * cast to an unsigned format before encoding.
+     * Input: 4x4 RgbaF32 and FloatF32(1) rasters -> Err(EncodeMsg) from
+     * encode_png and encode_jpeg, message naming the float format.
+     */
+    #[test]
+    fn encode_rejects_float_with_typed_error() {
+        let rgba = Raster::zeroed(4, 4, PixelFormat::RgbaF32).unwrap();
+        let f1 = Raster::zeroed(4, 4, PixelFormat::with_channels(1, 4).unwrap()).unwrap();
+        for raster in [&rgba, &f1] {
+            match encode_png(raster) {
+                Err(SinkError::EncodeMsg(msg)) => {
+                    assert!(msg.contains("float raster"), "unexpected message: {msg}")
+                }
+                other => panic!("expected EncodeMsg for float PNG, got {other:?}"),
+            }
+            match encode_jpeg(raster, 90) {
+                Err(SinkError::EncodeMsg(msg)) => {
+                    assert!(msg.contains("float raster"), "unexpected message: {msg}")
+                }
+                other => panic!("expected EncodeMsg for float JPEG, got {other:?}"),
+            }
+        }
     }
 
     /**

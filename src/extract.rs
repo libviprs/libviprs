@@ -239,25 +239,37 @@ pub enum SmartcropInteresting {
 // ---------------------------------------------------------------------------
 
 /// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]).
+/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
+/// keeps the sample-level extract ops, which predate the float formats,
+/// from misreading float bytes as `u16` pairs. (The pure byte-copy paths
+/// like `extract_area` are depth-agnostic and handle float fine.)
 #[inline]
 fn read_s(data: &[u8], bpc: usize, i: usize) -> u32 {
-    if bpc == 1 {
-        data[i] as u32
-    } else {
-        u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32
+    match bpc {
+        1 => data[i] as u32,
+        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        _ => panic!(
+            "this extract operation does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
 /// Write the flat `i`-th sample. `v` must already fit the depth.
+/// Unsigned depths only; see [`read_s`].
 #[inline]
 fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    if bpc == 1 {
-        data[i] = v as u8;
-    } else {
-        let b = (v as u16).to_ne_bytes();
-        data[2 * i] = b[0];
-        data[2 * i + 1] = b[1];
+    match bpc {
+        1 => data[i] = v as u8,
+        2 => {
+            let b = (v as u16).to_ne_bytes();
+            data[2 * i] = b[0];
+            data[2 * i + 1] = b[1];
+        }
+        _ => panic!(
+            "this extract operation does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 

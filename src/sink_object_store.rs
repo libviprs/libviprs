@@ -206,6 +206,12 @@ fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError
             "multiband raster ({} bands) cannot be encoded as an image tile",
             fmt.channels()
         ))),
+        // Float compute intermediates have no PNG/JPEG representation;
+        // cast to an unsigned 8/16-bit format before encoding tiles.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
+            "float raster ({fmt:?}) cannot be encoded as an image tile; \
+             cast to an unsigned 8/16-bit format first"
+        ))),
     }
 }
 

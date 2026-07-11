@@ -507,6 +507,15 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
                 raster.format().channels()
             )));
         }
+        // Float compute intermediates have no PNG/JPEG representation;
+        // cast to an unsigned 8/16-bit format before encoding tiles.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
+            return Err(SinkError::EncodeMsg(format!(
+                "float raster ({:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first",
+                raster.format()
+            )));
+        }
     };
 
     let mut buf = Vec::new();

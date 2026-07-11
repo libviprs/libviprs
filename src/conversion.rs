@@ -66,11 +66,18 @@
 //!
 //! # Deferred surface
 //!
-//! * **Float and signed sample formats.** [`PixelFormat`] carries unsigned
-//!   8- and 16-bit samples only, so `cast` targets are limited to those
-//!   depths and `grey(w, h, false)` (the float 0.0..1.0 ramp) returns
-//!   [`ConversionError::FloatFormatUnsupported`]. A float `PixelFormat`
-//!   batch is a separate prerequisite.
+//! * **Signed and 64-bit sample formats.** [`PixelFormat`] carries
+//!   unsigned 8/16-bit and 32-bit float samples; the signed
+//!   (`char`/`short`/`int`) and `double`/complex targets of `vips_cast`
+//!   remain unrepresentable. No ported test names them yet.
+//! * **Float inputs to the earlier op batches.** `cast` converts to and
+//!   from the float formats and `grey(w, h, false)` produces the float
+//!   0.0..1.0 ramp, but the arithmetic, histogram, band, extract, draw,
+//!   and compositing operations still assume unsigned samples; they
+//!   reject float rasters loudly (a panic with a clear message from their
+//!   panicking ported-test surface) rather than misreading the bytes.
+//!   Float support for those ops lands with their own batches (trig/log
+//!   maths, float compositing, colour spaces).
 //! * **`composite` / `CompositeMode`.** Only the ported composite tests
 //!   reference `CompositeMode`; no conversion-batch test needs it, so the
 //!   enum ships with the Porter-Duff compositing batch instead.
@@ -80,6 +87,7 @@
 use crate::bands::BandError;
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
+use core::num::NonZeroU16;
 use thiserror::Error;
 
 /// Typed errors for the conversion operations in [`crate::conversion`].
@@ -129,10 +137,12 @@ pub enum ConversionError {
     /// The result dimensions would overflow `u32`.
     #[error("result size {width}x{height} exceeds u32::MAX")]
     SizeOverflow { width: u64, height: u64 },
-    /// The operation needs a float sample format, which [`PixelFormat`]
-    /// does not carry yet (unsigned 8/16-bit only). A float-format batch
-    /// is a separate prerequisite.
-    #[error("{op} requires a float sample format, which PixelFormat does not support yet")]
+    /// The operation needs a float sample capability it does not have
+    /// yet. No conversion operation returns this since the float
+    /// [`PixelFormat`] variants landed; the variant is retained for API
+    /// stability and for later batches that grow float surface
+    /// incrementally.
+    #[error("{op} requires a float sample format it does not support yet")]
     FloatFormatUnsupported { op: &'static str },
     /// A delegated band operation failed.
     #[error(transparent)]
@@ -153,27 +163,53 @@ fn expect_conv<T>(op: &str, r: Result<T, ConversionError>) -> T {
     }
 }
 
-/// Read the flat `i`-th sample of a buffer with the given bytes-per-channel
-/// (native byte order for 16-bit, matching [`crate::raster_ops`]).
+/// Read the flat `i`-th unsigned sample of a buffer with the given
+/// bytes-per-channel (native byte order for 16-bit, matching
+/// [`crate::raster_ops`]). Unsigned depths only: float callers use
+/// [`read_f32_flat`], and the panic arm keeps unsigned-only operations
+/// from misreading float bytes as `u16` pairs.
 #[inline]
 fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
-    if bpc == 1 {
-        data[i] as u32
-    } else {
-        u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32
+    match bpc {
+        1 => data[i] as u32,
+        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        _ => panic!(
+            "this operation does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
-/// Write the flat `i`-th sample. `v` must already fit the depth.
+/// Write the flat `i`-th unsigned sample. `v` must already fit the depth.
+/// Unsigned depths only; see [`read_flat`].
 #[inline]
 fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    if bpc == 1 {
-        data[i] = v as u8;
-    } else {
-        let b = (v as u16).to_ne_bytes();
-        data[2 * i] = b[0];
-        data[2 * i + 1] = b[1];
+    match bpc {
+        1 => data[i] = v as u8,
+        2 => {
+            let b = (v as u16).to_ne_bytes();
+            data[2 * i] = b[0];
+            data[2 * i + 1] = b[1];
+        }
+        _ => panic!(
+            "this operation does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
+}
+
+/// Read the flat `i`-th sample of a float buffer (native byte order).
+#[inline]
+fn read_f32_flat(data: &[u8], i: usize) -> f32 {
+    let b = 4 * i;
+    f32::from_ne_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]])
+}
+
+/// Write the flat `i`-th sample of a float buffer (native byte order).
+#[inline]
+fn write_f32_flat(data: &mut [u8], i: usize, v: f32) {
+    let b = 4 * i;
+    data[b..b + 4].copy_from_slice(&v.to_ne_bytes());
 }
 
 /// The libvips colour interpretation tags (`VipsInterpretation`).
@@ -238,15 +274,19 @@ impl Interpretation {
     /// [`PixelFormat`] absent any explicit tag: 8-bit mono reads as
     /// [`Interpretation::Bw`], 16-bit mono as [`Interpretation::Grey16`],
     /// 8-bit colour as [`Interpretation::Srgb`], 16-bit colour as
-    /// [`Interpretation::Rgb16`], and the multiband intermediates as
+    /// [`Interpretation::Rgb16`], four-band float as
+    /// [`Interpretation::Srgb`] (libvips' guess for non-ushort colour),
+    /// and the multiband and float intermediates as
     /// [`Interpretation::Multiband`].
     pub fn for_format(format: PixelFormat) -> Self {
         match format {
             PixelFormat::Gray8 => Self::Bw,
             PixelFormat::Gray16 => Self::Grey16,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => Self::Srgb,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::RgbaF32 => Self::Srgb,
             PixelFormat::Rgb16 | PixelFormat::Rgba16 => Self::Rgb16,
-            PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Self::Multiband,
+            PixelFormat::Multi8(_) | PixelFormat::Multi16(_) | PixelFormat::FloatF32(_) => {
+                Self::Multiband
+            }
         }
     }
 }
@@ -450,16 +490,19 @@ impl Raster {
 
     /// Fallible form of [`Raster::cast`].
     ///
-    /// Changes the sample bit depth without changing the band count.
+    /// Changes the sample format without changing the band count.
     /// Widening (8 to 16 bit) preserves sample values numerically (a `200`
     /// stays `200`); narrowing (16 to 8 bit) clips values above `255`,
     /// matching the default (non-shifting) behaviour of `vips_cast`.
-    /// Casting to the current depth retags the format and copies the
-    /// pixels. Metadata is carried over.
+    /// Casting to a float format stores the exact sample value as an
+    /// `f32` (a `200` becomes `200.0`, never rescaled); casting a float
+    /// raster to an unsigned format rounds to the nearest integer and
+    /// clips to the target range (`0..=255` or `0..=65535`), with `NaN`
+    /// clipping to `0`. Casting to the current depth retags the format
+    /// and copies the pixels. Metadata is carried over.
     ///
-    /// [`PixelFormat`] carries unsigned 8/16-bit samples only, so the
-    /// signed, float, and complex targets of `vips_cast` are
-    /// unrepresentable here; they arrive with a float-format batch.
+    /// The signed (`char`/`short`/`int`) and `double`/complex targets of
+    /// `vips_cast` remain unrepresentable in [`PixelFormat`].
     ///
     /// # Errors
     ///
@@ -482,10 +525,38 @@ impl Raster {
         let samples = self.width() as usize * self.height() as usize * from.channels();
         let sdata = self.data();
         let odata = out.data_mut();
-        for i in 0..samples {
-            let v = read_flat(sdata, in_bpc, i);
-            let v = if out_bpc == 1 { v.min(255) } else { v };
-            write_flat(odata, out_bpc, i, v);
+        if !from.is_float() && !format.is_float() {
+            // Unsigned to unsigned: the integer path, byte-identical to the
+            // pre-float behaviour.
+            for i in 0..samples {
+                let v = read_flat(sdata, in_bpc, i);
+                let v = if out_bpc == 1 { v.min(255) } else { v };
+                write_flat(odata, out_bpc, i, v);
+            }
+        } else {
+            // A float endpoint: go through f64, which holds every u8/u16
+            // and f32 sample exactly.
+            for i in 0..samples {
+                let v: f64 = if from.is_float() {
+                    read_f32_flat(sdata, i) as f64
+                } else {
+                    read_flat(sdata, in_bpc, i) as f64
+                };
+                if format.is_float() {
+                    write_f32_flat(odata, i, v as f32);
+                } else {
+                    // vips_cast semantics: round to nearest, clip to the
+                    // target range. NaN pins to 0 explicitly (min/max would
+                    // pass it through to the non-NaN bound instead).
+                    let max = if out_bpc == 1 { 255.0 } else { 65535.0 };
+                    let v = if v.is_nan() {
+                        0
+                    } else {
+                        v.round().clamp(0.0, max) as u32
+                    };
+                    write_flat(odata, out_bpc, i, v);
+                }
+            }
         }
         out.meta = self.meta;
         Ok(out)
@@ -915,13 +986,30 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// [`ConversionError::FloatFormatUnsupported`] when `uchar` is false
-    /// (the float ramp needs a float [`PixelFormat`], a separate
-    /// prerequisite), or [`ConversionError::Raster`] for zero dimensions
-    /// or allocation failure.
+    /// [`ConversionError::Raster`] for zero dimensions or allocation
+    /// failure.
     pub fn try_grey(width: u32, height: u32, uchar: bool) -> Result<Raster, ConversionError> {
         if !uchar {
-            return Err(ConversionError::FloatFormatUnsupported { op: "grey" });
+            // libvips' default grey: a single-band float ramp running 0.0
+            // at the left edge to 1.0 at the right edge.
+            let fmt = PixelFormat::FloatF32(NonZeroU16::new(1).expect("1 is non-zero"));
+            let mut out = Raster::zeroed(width, height, fmt)?;
+            let w = width as usize;
+            let row = w * 4;
+            let odata = out.data_mut();
+            // Fill row 0, then replicate it: every row of the ramp is equal.
+            for x in 0..w {
+                let v = if w == 1 {
+                    0.0f32
+                } else {
+                    (x as f64 / (w as f64 - 1.0)) as f32
+                };
+                odata[x * 4..x * 4 + 4].copy_from_slice(&v.to_ne_bytes());
+            }
+            for y in 1..height as usize {
+                odata.copy_within(0..row, y * row);
+            }
+            return Ok(out);
         }
         let mut out = Raster::zeroed(width, height, PixelFormat::Gray8)?;
         let w = width as usize;
@@ -940,14 +1028,14 @@ impl Raster {
         Ok(out)
     }
 
-    /// Create a horizontal grey ramp (libvips `vips_grey`): `Gray8` pixels
-    /// running 0 at the left edge to 255 at the right edge, every row
-    /// identical. A 256-wide ramp has `pixel(x) == x` exactly, the fixture
-    /// shape the ported `switch` and relational tests rely on.
-    ///
-    /// `uchar: false` requests libvips' float 0.0..1.0 ramp, which needs a
-    /// float sample format; see [`Raster::try_grey`]. Panicking form of
-    /// [`Raster::try_grey`], matching the ported-test call surface.
+    /// Create a horizontal grey ramp (libvips `vips_grey`). With
+    /// `uchar: true`, `Gray8` pixels running 0 at the left edge to 255 at
+    /// the right edge, every row identical; a 256-wide ramp has
+    /// `pixel(x) == x` exactly, the fixture shape the ported `switch` and
+    /// relational tests rely on. With `uchar: false`, libvips' default
+    /// single-band float ramp running 0.0 to 1.0 in
+    /// [`PixelFormat::FloatF32`]. Panicking form of [`Raster::try_grey`],
+    /// matching the ported-test call surface.
     ///
     /// # Panics
     ///
@@ -1403,6 +1491,156 @@ mod tests {
         let im = gray8(1, 1, vec![0]).copy().xres(42.0).build();
         let out = im.cast(PixelFormat::Gray16);
         assert_eq!(out.xres(), 42.0);
+    }
+
+    /**
+     * Tests that casting u8 samples to float stores the exact values,
+     * never rescaled: a 200 becomes 200.0, matching the value-preserving
+     * widening the unsigned casts already do.
+     * Input: 4x1 Gray8 [0, 1, 128, 255] -> FloatF32(1) [0.0, 1.0, 128.0, 255.0].
+     */
+    #[test]
+    fn cast_u8_to_float_is_exact() {
+        let im = gray8(4, 1, vec![0, 1, 128, 255]);
+        let out = im.cast(PixelFormat::with_channels(1, 4).unwrap());
+        assert!(out.format().is_float());
+        assert_eq!(out.f32_samples().unwrap(), vec![0.0, 1.0, 128.0, 255.0]);
+        assert_eq!(out.getpoint(2, 0), vec![128.0]);
+    }
+
+    /**
+     * Tests that casting u16 samples to float stores the exact values.
+     * Every u16 is exactly representable in f32 (needs 16 bits of
+     * mantissa; f32 has 24), so no value may change.
+     * Input: 3x1 Gray16 [0, 4096, 65535] -> [0.0, 4096.0, 65535.0].
+     */
+    #[test]
+    fn cast_u16_to_float_is_exact() {
+        let im = gray16(3, 1, &[0, 4096, 65535]);
+        let out = im.cast(PixelFormat::with_channels(1, 4).unwrap());
+        assert_eq!(out.f32_samples().unwrap(), vec![0.0, 4096.0, 65535.0]);
+    }
+
+    /**
+     * Tests float -> u8 casting: round to nearest, clip to 0..=255, and
+     * NaN pins to 0 (not to a clip bound).
+     * Input: [-1.5, 0.4, 0.5, 254.6, 300.0, NaN] -> [0, 0, 1, 255, 255, 0].
+     */
+    #[test]
+    fn cast_float_to_u8_rounds_and_clips() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im =
+            Raster::from_f32_samples(6, 1, f1, &[-1.5, 0.4, 0.5, 254.6, 300.0, f32::NAN]).unwrap();
+        let out = im.cast(PixelFormat::Gray8);
+        assert_eq!(out.format(), PixelFormat::Gray8);
+        assert_eq!(out.data(), &[0, 0, 1, 255, 255, 0]);
+    }
+
+    /**
+     * Tests float -> u16 casting: round to nearest and clip to 0..=65535.
+     * Input: [-3.0, 0.5, 65534.6, 70000.0] -> [0, 1, 65535, 65535].
+     */
+    #[test]
+    fn cast_float_to_u16_rounds_and_clips() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 1, f1, &[-3.0, 0.5, 65534.6, 70000.0]).unwrap();
+        let out = im.cast(PixelFormat::Gray16);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!(
+            out.getpoint(0, 0)
+                .into_iter()
+                .chain(out.getpoint(1, 0))
+                .chain(out.getpoint(2, 0))
+                .chain(out.getpoint(3, 0))
+                .collect::<Vec<_>>(),
+            vec![0.0, 1.0, 65535.0, 65535.0]
+        );
+    }
+
+    /**
+     * Tests the u8 -> f32 -> u8 and u16 -> f32 -> u16 round trips are
+     * identities: every in-range integer survives both directions.
+     * Input: Gray8 ramp [0..=255 sampled] and Gray16 values round-trip.
+     */
+    #[test]
+    fn cast_float_round_trips_unsigned() {
+        let vals8: Vec<u8> = vec![0, 1, 2, 63, 127, 128, 200, 254, 255];
+        let im = gray8(vals8.len() as u32, 1, vals8.clone());
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let back = im.cast(f1).cast(PixelFormat::Gray8);
+        assert_eq!(back.data(), im.data(), "u8 -> f32 -> u8 must be identity");
+
+        let vals16: [u16; 6] = [0, 1, 255, 256, 32768, 65535];
+        let im = gray16(vals16.len() as u32, 1, &vals16);
+        let back = im.cast(f1).cast(PixelFormat::Gray16);
+        assert_eq!(back.data(), im.data(), "u16 -> f32 -> u16 must be identity");
+    }
+
+    /**
+     * Tests the exact ported call shape of test_composite_non_separable:
+     * an Rgb8 image through add_const().bandjoin_const().cast(RgbaF32)
+     * produces a 4-band float raster with the expected sample values.
+     * Input: 1x1 Rgb8 [10, 20, 30] +100, join 255 -> RgbaF32
+     * [110.0, 120.0, 130.0, 255.0].
+     */
+    #[test]
+    fn cast_rgbaf32_ported_call_site() {
+        let colour = rgb8(1, 1, vec![10, 20, 30]);
+        let base = colour
+            .add_const(100.0)
+            .bandjoin_const(255.0)
+            .cast(PixelFormat::RgbaF32);
+        assert_eq!(base.format(), PixelFormat::RgbaF32);
+        assert_eq!(base.format().channels(), 4);
+        assert!(base.format().has_alpha());
+        assert_eq!(
+            base.f32_samples().unwrap(),
+            vec![110.0, 120.0, 130.0, 255.0]
+        );
+        assert_eq!(base.getpoint(0, 0), vec![110.0, 120.0, 130.0, 255.0]);
+    }
+
+    /**
+     * Tests float -> float casting retags and copies: a manually built
+     * FloatF32(4) casts to the canonical RgbaF32 with identical samples.
+     * Input: 1x1 FloatF32(4) [0.5, -2.0, 1e6, 0.0] -> RgbaF32, same values.
+     */
+    #[test]
+    fn cast_float_to_float_retags() {
+        let f4 = PixelFormat::FloatF32(core::num::NonZeroU16::new(4).unwrap());
+        let im = Raster::from_f32_samples(1, 1, f4, &[0.5, -2.0, 1e6, 0.0]).unwrap();
+        let out = im.cast(PixelFormat::RgbaF32);
+        assert_eq!(out.format(), PixelFormat::RgbaF32);
+        assert_eq!(out.f32_samples().unwrap(), vec![0.5, -2.0, 1e6, 0.0]);
+    }
+
+    /**
+     * Tests that cast to a float format still rejects band-count changes
+     * with the same typed error as the unsigned targets.
+     * Input: Gray8 -> RgbaF32 => CastBandCountChange.
+     */
+    #[test]
+    fn try_cast_to_float_rejects_band_count_change() {
+        let im = gray8(1, 1, vec![0]);
+        assert!(matches!(
+            im.try_cast(PixelFormat::RgbaF32),
+            Err(ConversionError::CastBandCountChange { .. })
+        ));
+    }
+
+    /**
+     * Tests that cast to and from float carries the metadata block.
+     * Input: xres 42 survives Gray8 -> FloatF32(1) -> Gray8.
+     */
+    #[test]
+    fn cast_float_preserves_metadata() {
+        let im = gray8(1, 1, vec![7]).copy().xres(42.0).build();
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let out = im.cast(f1);
+        assert_eq!(out.xres(), 42.0);
+        let back = out.cast(PixelFormat::Gray8);
+        assert_eq!(back.xres(), 42.0);
+        assert_eq!(back.data(), &[7]);
     }
 
     // ------------------------------------------------------------------
@@ -2158,24 +2396,46 @@ mod tests {
     }
 
     /**
-     * Tests that the float ramp is a typed error until a float
-     * PixelFormat exists.
+     * Tests the ported test_grey float endpoints: grey(100, 90, false) is
+     * a single-band FloatF32 ramp with pixel(0,0) == 0.0 and
+     * pixel(99,0) == 1.0, every row identical. This is the exact call
+     * shape of ported_create.rs::test_grey's float half.
      */
     #[test]
-    fn try_grey_float_unsupported() {
-        assert!(matches!(
-            Raster::try_grey(100, 90, false),
-            Err(ConversionError::FloatFormatUnsupported { .. })
-        ));
+    fn grey_float_ramp_endpoints() {
+        let im = Raster::grey(100, 90, false);
+        assert_eq!((im.width(), im.height()), (100, 90));
+        assert_eq!(im.format(), PixelFormat::with_channels(1, 4).unwrap());
+        assert!(im.format().is_float());
+        let p = im.getpoint(0, 0);
+        assert!((p[0] - 0.0).abs() < 0.001, "left edge should be 0.0");
+        let p = im.getpoint(99, 0);
+        assert!((p[0] - 1.0).abs() < 0.001, "right edge should be 1.0");
+        // Every row is identical.
+        assert_eq!(im.getpoint(42, 0), im.getpoint(42, 89));
     }
 
     /**
-     * Tests that the panicking form surfaces the typed message.
+     * Tests interior float ramp values: pixel(x) == x / (w - 1) exactly
+     * at f32 precision for a 256-wide ramp.
      */
     #[test]
-    #[should_panic(expected = "float sample format")]
-    fn grey_float_panics_with_typed_message() {
-        let _ = Raster::grey(100, 90, false);
+    fn grey_float_ramp_is_linear() {
+        let im = Raster::grey(256, 1, false);
+        for x in [0u32, 1, 128, 254, 255] {
+            let expected = (x as f64 / 255.0) as f32 as f64;
+            assert_eq!(im.getpoint(x, 0), vec![expected]);
+        }
+    }
+
+    /**
+     * Tests the width-1 degenerate float ramp (no division by zero).
+     */
+    #[test]
+    fn grey_float_width_one_is_zero() {
+        let im = Raster::grey(1, 2, false);
+        assert_eq!(im.getpoint(0, 0), vec![0.0]);
+        assert_eq!(im.getpoint(0, 1), vec![0.0]);
     }
 
     // ------------------------------------------------------------------

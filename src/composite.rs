@@ -241,10 +241,15 @@ fn colour_bands(format: PixelFormat) -> Result<(usize, bool), CompositeError> {
 /// scale, matching a value-preserving `vips_cast`).
 #[inline]
 fn read_raw(data: &[u8], bpc: usize, i: usize) -> f64 {
-    if bpc == 1 {
-        data[i] as f64
-    } else {
-        u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as f64
+    match bpc {
+        1 => data[i] as f64,
+        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as f64,
+        // Float compositing (the non-separable ported tests) lands with a
+        // later batch; panic rather than misread float bytes as u16 pairs.
+        _ => panic!(
+            "composite does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
@@ -253,12 +258,18 @@ fn read_raw(data: &[u8], bpc: usize, i: usize) -> f64 {
 /// clamped to the container range.
 #[inline]
 fn write_scaled(data: &mut [u8], bpc: usize, i: usize, v: f64, scale: f64) {
-    if bpc == 1 {
-        data[i] = (v * scale).round().clamp(0.0, 255.0) as u8;
-    } else {
-        let b = ((v * scale).round().clamp(0.0, 65535.0) as u16).to_ne_bytes();
-        data[2 * i] = b[0];
-        data[2 * i + 1] = b[1];
+    match bpc {
+        1 => data[i] = (v * scale).round().clamp(0.0, 255.0) as u8,
+        2 => {
+            let b = ((v * scale).round().clamp(0.0, 65535.0) as u16).to_ne_bytes();
+            data[2 * i] = b[0];
+            data[2 * i + 1] = b[1];
+        }
+        // See read_raw: float compositing lands with a later batch.
+        _ => panic!(
+            "composite does not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
@@ -1057,5 +1068,16 @@ mod tests {
         let overlay = Raster::new(1, 1, PixelFormat::Rgba8, vec![80, 90, 100, 0]).unwrap();
         let px = base.composite(&overlay, CompositeMode::Over).getpoint(0, 0);
         assert_eq!(px, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// composite rejects float rasters loudly instead of misreading
+    /// their bytes as u16 pairs (float compositing, needed by the
+    /// non-separable ported modes, lands with a later batch).
+    #[test]
+    #[should_panic(expected = "does not support float rasters")]
+    fn composite_float_panics() {
+        let base = Raster::zeroed(2, 2, PixelFormat::RgbaF32).unwrap();
+        let overlay = Raster::zeroed(2, 2, PixelFormat::RgbaF32).unwrap();
+        let _ = base.composite(&overlay, CompositeMode::Over);
     }
 }
