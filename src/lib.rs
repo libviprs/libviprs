@@ -52,6 +52,7 @@ pub mod arithmetic;
 pub mod bands;
 pub mod cancel;
 pub mod checksum;
+pub mod composite;
 pub mod conversion;
 pub mod dedupe;
 pub mod draw;
@@ -61,6 +62,7 @@ pub mod extensions;
 pub mod extract;
 pub mod geo;
 pub mod histogram;
+pub mod imageio;
 pub(crate) mod level_walk;
 #[cfg(loom)]
 mod loom_tests;
@@ -98,6 +100,7 @@ pub use arithmetic::ArithmeticError;
 pub use bands::BandError;
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
+pub use composite::{CompositeError, CompositeMode};
 pub use conversion::{Angle, ConversionError, Interpretation, RasterCopyBuilder};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
@@ -108,6 +111,13 @@ pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSour
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
+// The imageio free functions are re-exported at the root (not just behind
+// the module path) because the ported tests import them from the crate
+// root (`use libviprs::{tokenize, get_max_coord, ...}`).
+pub use imageio::{
+    MetadataError, MetadataValue, SaveError, ThumbnailGeometry, get_max_coord, init_from_env,
+    parse_thumbnail_geometry, set_max_coord, tokenize,
+};
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,

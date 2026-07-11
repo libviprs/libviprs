@@ -1841,7 +1841,9 @@ pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
     Ok(buf)
 }
 
-fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
+// Crate-visible so extension-dispatched save (`crate::imageio`) reuses the
+// sink's JPEG encode path.
+pub(crate) fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
     let mut buf = Vec::new();
     let encoder =
         image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
