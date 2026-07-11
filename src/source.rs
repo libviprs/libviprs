@@ -34,6 +34,11 @@ pub enum SourceError {
         height: u32,
         max_pixels: u64,
     },
+    /// A malformed or unsupported native `.v` file (bad magic, truncated
+    /// header or pixel data, unsupported coding/band format, or header
+    /// geometry past the [`crate::imageio::get_max_coord`] ceiling).
+    #[error("vips .v file error: {0}")]
+    VipsFormat(String),
 }
 
 /// Resource limits applied to a single image decode.
@@ -84,7 +89,9 @@ impl DecodeLimits {
     }
 
     /// Enforce the `width * height` ceiling before a [`Raster`] is built.
-    fn check_pixels(self, width: u32, height: u32) -> Result<(), SourceError> {
+    /// Crate-visible so the `.v` decoder in [`crate::imageio`] applies
+    /// the same budget to its untrusted header geometry.
+    pub(crate) fn check_pixels(self, width: u32, height: u32) -> Result<(), SourceError> {
         let pixels = u64::from(width).saturating_mul(u64::from(height));
         if pixels > self.max_pixels {
             return Err(SourceError::DimensionLimitExceeded {
@@ -141,7 +148,34 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
-    decode_reader(ImageReader::open(path)?, limits)
+    // Sniff the leading magic: native .v files and JPEGs take the
+    // in-memory path (the .v decoder parses the libvips header itself,
+    // and the JPEG path scans APP1/APP2 segments for EXIF/ICC metadata
+    // after pixel decode). Every other format keeps the original
+    // streaming reader so its memory profile is unchanged.
+    let mut head = [0u8; 4];
+    {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut filled = 0;
+        while filled < head.len() {
+            let n = file.read(&mut head[filled..])?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+    }
+    let mut raster = if crate::imageio::is_vips_bytes(&head) || head[..3] == [0xFF, 0xD8, 0xFF] {
+        decode_bytes_with_limits(&std::fs::read(path)?, limits)?
+    } else {
+        decode_reader(ImageReader::open(path)?, limits)?
+    };
+    // Record the source path, like the libvips header's filename slot.
+    raster
+        .fields
+        .set("filename", path.display().to_string().into());
+    Ok(raster)
 }
 
 /// Decode from an in-memory buffer (format auto-detected).
@@ -171,10 +205,18 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// before any pixel data is allocated, and the `width * height` ceiling
 /// is checked before the [`Raster`] is constructed.
 pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    decode_reader(
-        ImageReader::new(Cursor::new(bytes)).with_guessed_format()?,
-        limits,
-    )
+    if crate::imageio::is_vips_bytes(bytes) {
+        return crate::imageio::decode_vips_bytes(bytes, limits);
+    }
+    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
+    let mut raster = decode_reader(reader, limits)?;
+    if is_jpeg {
+        // Attach the EXIF/ICC metadata segments the pixel decoder skips,
+        // as the libvips JPEG loader populates the image header.
+        crate::imageio::attach_jpeg_metadata(&mut raster, bytes);
+    }
+    Ok(raster)
 }
 
 /// Apply the shared decode budget to a configured [`ImageReader`] and

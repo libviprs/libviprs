@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image IO, metadata fields, and library-level free functions ported
+  from libvips (seventh batch of the ported-tests operation surface,
+  libviprs-tests issue #55), in the new `imageio` module:
+  `Raster::save` / `Raster::save_stripped` (extension-dispatched encode
+  to PNG, JPEG, or the native `.v` container, with `save_stripped`
+  writing pixels only), `Raster::encode_vips`, the named metadata field
+  system (`get_field` / `set_field` / `try_set_field` / `get_fields` /
+  `get_typeof` / `set_typeof` over the new `MetadataValue` enum, with
+  the built-in header fields reading through to the raster header),
+  `Raster::set_icc_profile` / `Raster::icc_profile`, and the free
+  functions `tokenize`, `parse_thumbnail_geometry` (returning the new
+  `ThumbnailGeometry`), `get_max_coord` / `set_max_coord`, and
+  `init_from_env` (re-exported at the crate root, where the ported
+  tests import them). JPEG save embeds the `icc-profile-data` and raw
+  `exif-data` blobs as APP2/APP1 segments and the decoder captures them
+  back; `.v` files round-trip the full header (both byte orders) plus
+  every attached field, and reject unsupported band formats (float `.v`
+  arrives with the float-format batch) and header geometry past the
+  `max_coord` ceiling. `decode_file` now also records the source path
+  in the `filename` field. Structured EXIF tag encoding (`exif-ifd*-*`
+  into the JPEG APP1 TIFF directory) and PNG iCCP embedding are
+  deferred to the foreign-format batch.
+- Porter-Duff and PDF blend-mode compositing ported from libvips, in
+  the new `composite` module: `Raster::composite` /
+  `Raster::composite2` with the typed `try_composite2` form
+  (`CompositeError`) and the `CompositeMode` enum covering the full
+  libvips `VipsBlendMode` set (Clear through Exclusion) plus the four
+  PDF non-separable modes (Hue, Saturation, Colour, Luminosity) the
+  ported conversion suite exercises. Inputs blend premultiplied in
+  `f64` on the libvips `max_alpha` scale (255 unless both inputs are
+  16-bit) and write back at the deeper input's depth, so every mode is
+  exact to the output quantisation with no float `PixelFormat`
+  required.
 - Band operations ported from libvips (first batch of the ported-tests
   operation surface, libviprs-tests issue #55), in the new `bands` module:
   `bandjoin`, `bandjoin_const`, `bandjoin_vec`, `bandfold`, `bandunfold`,
