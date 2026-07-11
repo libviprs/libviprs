@@ -52,6 +52,7 @@ pub mod arithmetic;
 pub mod bands;
 pub mod cancel;
 pub mod checksum;
+pub mod conversion;
 pub mod dedupe;
 pub mod draw;
 pub mod engine;
@@ -96,6 +97,7 @@ pub use arithmetic::ArithmeticError;
 pub use bands::BandError;
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
+pub use conversion::{Angle, ConversionError, Interpretation, RasterCopyBuilder};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawOp, Rectangle};
 pub use engine::{
