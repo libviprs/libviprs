@@ -1,3 +1,4 @@
+use crate::conversion::RasterMeta;
 use crate::pixel::PixelFormat;
 use thiserror::Error;
 
@@ -154,6 +155,11 @@ pub struct Raster {
     height: u32,
     format: PixelFormat,
     data: Vec<u8>,
+    /// Interpretation / resolution / orientation metadata, managed by the
+    /// conversion operations (see [`crate::conversion`]). Every constructor
+    /// starts from [`RasterMeta::default`]; [`Raster::copy`] and
+    /// [`Raster::autorot`] are the mutation surface.
+    pub(crate) meta: RasterMeta,
 }
 
 impl Raster {
@@ -225,6 +231,7 @@ impl Raster {
             height,
             format,
             data,
+            meta: RasterMeta::default(),
         })
     }
 
@@ -271,6 +278,7 @@ impl Raster {
             height,
             format,
             data,
+            meta: RasterMeta::default(),
         })
     }
 
