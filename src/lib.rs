@@ -57,6 +57,7 @@ pub mod draw;
 pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
+pub mod extract;
 pub mod geo;
 pub(crate) mod level_walk;
 #[cfg(loom)]
@@ -101,6 +102,7 @@ pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
 };
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
+pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
