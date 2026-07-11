@@ -722,6 +722,35 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 return Ok((result, sink));
             }
 
+            // Refuse a mismatched Resume BEFORE anything touches the output
+            // directory. `prepare_resume_state` re-checks the checkpoint under
+            // the run lock (that check stays authoritative for the race where
+            // another job swaps the checkpoint in between), but by that point
+            // `RunLock::acquire` has already created its lock file inside the
+            // directory. A refused resume must leave the directory exactly as
+            // it found it: no tile output, and no bookkeeping either. This
+            // preflight reads the same atomically-renamed checkpoint file the
+            // locked check reads, so it never sees a torn header.
+            if matches!(policy.mode(), ResumeMode::Resume) {
+                if let Some(root) = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink) {
+                    if let Some(meta) = crate::resume::JobCheckpoint::load(&root)
+                        .map_err(EngineError::ResumeFailed)?
+                    {
+                        if let Err(current) = crate::resume::verify_checkpoint_contract(
+                            &meta,
+                            &plan,
+                            &engine_cfg,
+                            &sink,
+                        ) {
+                            return Err(EngineError::PlanHashMismatch {
+                                expected: current,
+                                actual: meta.plan_hash,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Overwrite / Resume: take the advisory run lock on the checkpoint
             // root BEFORE any work touches the directory, and hold it for the
             // whole run. This is the engine-side half of issue #126: unique
@@ -2484,6 +2513,234 @@ mod run_lock_wiring_tests {
         let reacquired = RunLock::acquire(out.path())
             .expect("the run must release its lock so a later job can acquire it");
         drop(reacquired);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resume on-disk side-effect tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resume_side_effect_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::{JobCheckpoint, JobMetadata, ResumePolicy};
+    use crate::sink::{FsSink, SinkError, Tile, TileFormat, TileSink};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Recursively list every regular file under `root`, relative to `root`,
+    /// sorted. Used to assert a refused run has zero on-disk side effects and
+    /// to byte-compare a resumed pyramid against a clean one.
+    fn list_files(root: &Path) -> Vec<PathBuf> {
+        fn walk(root: &Path, cur: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(cur) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    out.push(p.strip_prefix(root).unwrap().to_path_buf());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// A raster with gradient content so every tile is non-blank and distinct.
+    fn gradient_source(w: u32, h: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let off = (y * w as usize + x) * bpp;
+                data[off] = (x % 251) as u8;
+                data[off + 1] = (y % 241) as u8;
+                data[off + 2] = ((x ^ y) % 239) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    // A Resume refused on a plan-hash mismatch must leave the output
+    // directory EXACTLY as it found it: no tiles, no lock file, no segment
+    // log. The plan-hash gate therefore runs before the run lock (whose
+    // acquisition creates `.libviprs-job.lock`) and before any engine work.
+    #[test]
+    fn refused_plan_hash_mismatch_leaves_the_directory_untouched() {
+        let out = tempfile::tempdir().unwrap();
+        let source = gradient_source(64, 64);
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        // A pre-existing checkpoint whose hash cannot match the current plan.
+        let stale = JobMetadata::new("f".repeat(64), "1970-01-01T00:00:00Z".into());
+        JobCheckpoint::save(out.path(), &stale).unwrap();
+        let before = list_files(out.path());
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone()).with_format(TileFormat::Png);
+        let err = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run()
+            .expect_err("a stale plan hash must refuse to resume");
+        assert!(
+            matches!(err, EngineError::PlanHashMismatch { .. }),
+            "expected PlanHashMismatch, got {err:?}"
+        );
+
+        let after = list_files(out.path());
+        assert_eq!(
+            before, after,
+            "a refused Resume must not write tiles, a lock file, or any other file"
+        );
+    }
+
+    // The plan-hash gate runs BEFORE the run lock is acquired: with a live
+    // holder on the directory AND a stale checkpoint, the mismatch refusal
+    // must win. Pre-fix the lock was taken first, so this returned
+    // ResumeFailed(Locked) and, when the directory was free, materialised
+    // `.libviprs-job.lock` before refusing.
+    #[test]
+    #[cfg_attr(miri, ignore)] // file locking unsupported under Miri isolation
+    fn plan_hash_gate_refuses_before_the_run_lock_is_taken() {
+        let out = tempfile::tempdir().unwrap();
+        let source = gradient_source(64, 64);
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let stale = JobMetadata::new("f".repeat(64), "1970-01-01T00:00:00Z".into());
+        JobCheckpoint::save(out.path(), &stale).unwrap();
+
+        // Another live job owns the directory for the whole attempt.
+        let held = crate::resume::RunLock::acquire(out.path()).expect("test holder acquires");
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone()).with_format(TileFormat::Png);
+        let err = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run()
+            .expect_err("stale plan hash must refuse to resume");
+        assert!(
+            matches!(err, EngineError::PlanHashMismatch { .. }),
+            "the plan-hash gate must fire before lock acquisition, got {err:?}"
+        );
+
+        drop(held);
+    }
+
+    /// Sink wrapper that panics on the Nth `write_tile`, simulating a mid-run
+    /// crash. Bookkeeping (checkpoint root, content format, ...) forwards to
+    /// the wrapped sink through `inner_sink`.
+    struct PanickingSink<S: TileSink> {
+        inner: S,
+        panic_at: usize,
+        writes: AtomicUsize,
+    }
+
+    impl<S: TileSink> TileSink for PanickingSink<S> {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            let n = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.panic_at {
+                panic!("PanickingSink: deliberate crash at write #{n}");
+            }
+            self.inner.write_tile(tile)
+        }
+        fn finish(&self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+        fn inner_sink(&self) -> Option<&dyn TileSink> {
+            Some(&self.inner)
+        }
+    }
+
+    // Resume determinism under concurrency: a run that crashes partway and is
+    // then resumed at tile_concurrency 4 must land a pyramid byte-identical
+    // to a single clean run. Only the checkpoint header and segment log (pure
+    // resume bookkeeping) may differ; everything else, including the absence
+    // of stray lock or temp files, is compared byte for byte.
+    #[test]
+    fn crash_and_resume_at_concurrency_four_matches_a_clean_run_byte_for_byte() {
+        let source = gradient_source(96, 64);
+        let plan = PyramidPlanner::new(96, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = EngineConfig::default().with_concurrency(4);
+
+        // Clean single-run reference.
+        let ref_dir = tempfile::tempdir().unwrap();
+        let ref_base = ref_dir.path().join("pyramid");
+        let ref_sink = FsSink::new(ref_base.clone(), plan.clone()).with_format(TileFormat::Png);
+        EngineBuilder::new(&source, plan.clone(), ref_sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(config.clone())
+            .run()
+            .expect("clean reference run succeeds");
+
+        // Crashing first run: panic partway through, with per-tile checkpoint
+        // flushes so the resume genuinely skips prior work instead of
+        // re-rendering everything.
+        let crash_dir = tempfile::tempdir().unwrap();
+        let crash_base = crash_dir.path().join("pyramid");
+        let panic_at = (plan.total_tile_count() as usize / 3).max(2);
+        let panicking = PanickingSink {
+            inner: FsSink::new(crash_base.clone(), plan.clone()).with_format(TileFormat::Png),
+            panic_at,
+            writes: AtomicUsize::new(0),
+        };
+        let first_run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            EngineBuilder::new(&source, plan.clone(), &panicking)
+                .with_engine(EngineKind::Monolithic)
+                .with_config(config.clone())
+                .with_resume(ResumePolicy::resume().with_checkpoint_every(1))
+                .run()
+        }));
+        assert!(first_run.is_err(), "the first run must crash mid-pyramid");
+
+        // Resume into the same directory.
+        let resume_sink =
+            FsSink::new(crash_base.clone(), plan.clone()).with_format(TileFormat::Png);
+        EngineBuilder::new(&source, plan.clone(), resume_sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(config.clone())
+            .with_resume(ResumePolicy::resume().with_checkpoint_every(1))
+            .run()
+            .expect("the resume run completes the pyramid");
+
+        // Byte-compare the two trees, ignoring only the resume bookkeeping
+        // files. A leftover `.libviprs-job.lock` (or a stray temp file) shows
+        // up as a set mismatch and fails the assertion.
+        let bookkeeping = [
+            std::ffi::OsStr::new(crate::resume::CHECKPOINT_FILENAME),
+            std::ffi::OsStr::new(crate::resume::SEGMENTS_FILENAME),
+        ];
+        let keep =
+            |p: &PathBuf| -> bool { !bookkeeping.contains(&p.file_name().unwrap_or_default()) };
+        let ref_files: Vec<PathBuf> = list_files(&ref_base).into_iter().filter(keep).collect();
+        let crash_files: Vec<PathBuf> = list_files(&crash_base).into_iter().filter(keep).collect();
+        assert_eq!(
+            ref_files, crash_files,
+            "crash+resume must produce exactly the clean run's file set"
+        );
+        for rel in &ref_files {
+            let a = std::fs::read(ref_base.join(rel)).unwrap();
+            let b = std::fs::read(crash_base.join(rel)).unwrap();
+            assert_eq!(
+                a,
+                b,
+                "crash+resume diverges from the clean run at {}",
+                rel.display()
+            );
+        }
     }
 }
 
