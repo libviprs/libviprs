@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Band operations ported from libvips (first batch of the ported-tests
+  operation surface, libviprs-tests issue #55), in the new `bands` module:
+  `bandjoin`, `bandjoin_const`, `bandjoin_vec`, `bandfold`, `bandunfold`,
+  `bandmean`, `bandrank`, `bandand`, `bandor`, `bandeor`, `extract_band`,
+  and `extract_bands` as inherent `Raster` methods. Each op also has a
+  fallible `try_*` form returning the new typed `BandError` (re-exported at
+  the crate root); the plain forms panic on invalid input, matching the
+  ported-test call surface. `extract_band`/`extract_bands` accept negative
+  indices (from the end), mixed-depth joins promote numerically to 16-bit,
+  and constants clamp to the format range with round-to-nearest.
+- `PixelFormat` gains `Multi8(n)` / `Multi16(n)` variants so band
+  operations can represent results with band counts other than 1, 3, or 4
+  (for example 2 bands from `extract_bands`, or width-many bands from
+  `bandfold`), plus the canonicalizing constructor
+  `PixelFormat::with_channels`. The enum was already `#[non_exhaustive]`,
+  so external matches are unaffected; multiband rasters are compute
+  intermediates and the tile-encoding sinks reject them with a typed
+  `SinkError`. Manifest serialization round-trips the new variants as
+  `"multi8:N"` / `"multi16:N"` while the six named formats keep their
+  historical tags.
+
 ### Fixed
 
 - A `Resume` refused on a plan-hash mismatch now returns

@@ -499,6 +499,14 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
         PixelFormat::Rgba8 => image::ColorType::Rgba8,
         PixelFormat::Rgb16 => image::ColorType::Rgb16,
         PixelFormat::Rgba16 => image::ColorType::Rgba16,
+        // Multiband intermediates (from the band ops in `crate::bands`) have
+        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
+        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
+            return Err(SinkError::EncodeMsg(format!(
+                "multiband raster ({} bands) cannot be encoded as an image tile",
+                raster.format().channels()
+            )));
+        }
     };
 
     let mut buf = Vec::new();
