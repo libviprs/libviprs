@@ -26,6 +26,8 @@ fn assert_pixel_format_non_exhaustive(v: &PixelFormat) {
         PixelFormat::Rgba8 => {}
         PixelFormat::Rgb16 => {}
         PixelFormat::Rgba16 => {}
+        PixelFormat::RgbaF32 => {}
+        PixelFormat::FloatF32(_) => {}
         _ => {}
     }
 }

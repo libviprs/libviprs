@@ -145,13 +145,18 @@ pub enum ArithmeticError {
 // ---------------------------------------------------------------------------
 
 /// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]).
+/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
+/// keeps the arithmetic ops, which predate the float formats, from
+/// misreading float bytes as `u16` pairs.
 #[inline]
 fn read_u32(data: &[u8], bpc: usize, i: usize) -> u32 {
-    if bpc == 1 {
-        data[i] as u32
-    } else {
-        u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32
+    match bpc {
+        1 => data[i] as u32,
+        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
@@ -162,14 +167,20 @@ fn read_f64(data: &[u8], bpc: usize, i: usize) -> f64 {
 }
 
 /// Write the flat `i`-th sample. `v` must already fit the depth.
+/// Unsigned depths only; see [`read_u32`].
 #[inline]
 fn write_u32(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    if bpc == 1 {
-        data[i] = v as u8;
-    } else {
-        let b = (v as u16).to_ne_bytes();
-        data[2 * i] = b[0];
-        data[2 * i + 1] = b[1];
+    match bpc {
+        1 => data[i] = v as u8,
+        2 => {
+            let b = (v as u16).to_ne_bytes();
+            data[2 * i] = b[0];
+            data[2 * i + 1] = b[1];
+        }
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
     }
 }
 
@@ -185,16 +196,32 @@ fn write_f64(data: &mut [u8], bpc: usize, i: usize, v: f64, max: f64) {
     write_u32(data, bpc, i, v as u32);
 }
 
-/// Largest sample value representable at a depth, as `f64`.
+/// Largest sample value representable at an unsigned depth, as `f64`.
+/// Unsigned depths only; see [`read_u32`].
 #[inline]
 fn depth_max(bpc: usize) -> f64 {
-    if bpc == 1 { 255.0 } else { 65535.0 }
+    match bpc {
+        1 => 255.0,
+        2 => 65535.0,
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
 }
 
-/// Largest sample value representable at a depth, as `u32`.
+/// Largest sample value representable at an unsigned depth, as `u32`.
+/// Unsigned depths only; see [`read_u32`].
 #[inline]
 fn depth_max_u32(bpc: usize) -> u32 {
-    if bpc == 1 { 0xFF } else { 0xFFFF }
+    match bpc {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
 }
 
 /// The output format for a band count and depth; the band count is bounded
@@ -2531,5 +2558,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(im.unpremultiply().getpoint(0, 0), vec![255.0, 100.0]);
+    }
+
+    /// The arithmetic ops reject float rasters loudly instead of
+    /// misreading their bytes as u16 pairs (float maths lands with a
+    /// later batch; cast to an unsigned format first).
+    #[test]
+    #[should_panic(expected = "do not support float rasters")]
+    fn arithmetic_float_panics() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::zeroed(2, 2, f1).unwrap();
+        let _ = im.avg();
     }
 }

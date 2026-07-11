@@ -16,7 +16,8 @@
 //! - `TileFormat`: `{"kind": "png"}`, `{"kind": "jpeg", "quality": N}`,
 //!   `{"kind": "raw"}`.
 //! - `PixelFormat`: `"gray8"`, `"gray16"`, `"rgb8"`, `"rgba8"`, `"rgb16"`,
-//!   `"rgba16"`.
+//!   `"rgba16"`, `"rgbaf32"`; the multiband and float compute
+//!   intermediates as `"multi8:N"`, `"multi16:N"`, `"floatf32:N"`.
 //! - `BlankTileStrategy`: `{"kind": "emit"}`, `{"kind": "placeholder"}`,
 //!   `{"kind": "placeholder_with_tolerance", "tolerance": N}`.
 //!
@@ -271,8 +272,9 @@ mod pixel_format_serde {
 
     pub fn serialize<S: Serializer>(v: &PixelFormat, s: S) -> Result<S::Ok, S::Error> {
         // The named formats keep their historical manifest tags. Multiband
-        // compute intermediates (never produced by the pyramid pipeline, but
-        // the serializer must be total) round-trip as "multi8:N"/"multi16:N".
+        // and float compute intermediates (never produced by the pyramid
+        // pipeline, but the serializer must be total) round-trip as
+        // "multi8:N"/"multi16:N"/"floatf32:N".
         let name = match v {
             PixelFormat::Gray8 => "gray8".to_string(),
             PixelFormat::Gray16 => "gray16".to_string(),
@@ -280,8 +282,10 @@ mod pixel_format_serde {
             PixelFormat::Rgba8 => "rgba8".to_string(),
             PixelFormat::Rgb16 => "rgb16".to_string(),
             PixelFormat::Rgba16 => "rgba16".to_string(),
+            PixelFormat::RgbaF32 => "rgbaf32".to_string(),
             PixelFormat::Multi8(n) => format!("multi8:{n}"),
             PixelFormat::Multi16(n) => format!("multi16:{n}"),
+            PixelFormat::FloatF32(n) => format!("floatf32:{n}"),
         };
         s.serialize_str(&name)
     }
@@ -296,11 +300,13 @@ mod pixel_format_serde {
             "rgba8" => Ok(PixelFormat::Rgba8),
             "rgb16" => Ok(PixelFormat::Rgb16),
             "rgba16" => Ok(PixelFormat::Rgba16),
+            "rgbaf32" => Ok(PixelFormat::RgbaF32),
             other => {
                 let (depth, bands) = other
                     .strip_prefix("multi8:")
                     .map(|n| (1usize, n))
                     .or_else(|| other.strip_prefix("multi16:").map(|n| (2usize, n)))
+                    .or_else(|| other.strip_prefix("floatf32:").map(|n| (4usize, n)))
                     .ok_or_else(unknown)?;
                 let bands: usize = bands.parse().map_err(|_| unknown())?;
                 PixelFormat::with_channels(bands, depth).ok_or_else(unknown)
@@ -784,6 +790,34 @@ mod tests {
         assert!(s.contains("\"multi16:2\""), "unexpected tag in {s}");
         let parsed: Manifest = serde_json::from_str(&s).unwrap();
         assert_eq!(parsed, m);
+    }
+
+    /// The float formats round-trip through the manifest serde: the named
+    /// RgbaF32 as "rgbaf32" and the FloatF32 intermediates as
+    /// "floatf32:N". A "floatf32:4" tag deserializes to the canonical
+    /// RgbaF32, mirroring how "multi8:3" canonicalizes to Rgb8.
+    #[test]
+    fn pixel_format_serde_round_trips_float() {
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::RgbaF32;
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"rgbaf32\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::with_channels(3, 4).unwrap();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"floatf32:3\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+
+        // "floatf32:4" canonicalizes to the named RgbaF32 on the way in.
+        let s4 = s.replace("\"floatf32:3\"", "\"floatf32:4\"");
+        let parsed: Manifest = serde_json::from_str(&s4).unwrap();
+        assert_eq!(parsed.as_v1().source.pixel_format, PixelFormat::RgbaF32);
     }
 
     // Issue #95: the shared manifest-string parser must round-trip both
