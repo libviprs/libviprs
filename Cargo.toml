@@ -19,14 +19,19 @@ libfuzzer-sys = "0.4"
 libviprs = { path = "." }
 loom = "0.7"
 lopdf = "0.36"
-# Direct git dependency on the libviprs/pdfium-render fork, which adds
-# proper per-call thread-safety locking in `ThreadSafePdfiumBindings`.
-# Upstream pdfium-render 0.8.37's wrapper acquires the pdfium global
-# mutex only once on `FPDF_InitLibrary` and bypasses it for every other
-# method, which segfaults under any concurrent access pattern when a
-# single `Pdfium` instance is shared across threads (the common pattern
-# when callers use a process-wide singleton). The fork rewrites every
-# method to acquire the lock per-call.
+# Direct git dependency on the libviprs/pdfium-render fork, pinned to its
+# `libviprs/integration` branch. That branch is the consolidated fork: it
+# carries every one of our pdfium-render PRs (as though merged), so all
+# fixes are single-sourced from one branch rather than one branch per PR.
+# The headline fix is proper per-call thread-safety locking in
+# `ThreadSafePdfiumBindings`. Upstream pdfium-render's wrapper (0.9.x on
+# crates.io) acquires the pdfium global mutex only once on
+# `FPDF_InitLibrary` and bypasses it for every other method, which
+# segfaults under any concurrent access pattern when a single `Pdfium`
+# instance is shared across threads (the common pattern when callers use a
+# process-wide singleton). The fork rewrites every method to acquire the
+# lock per-call. The consolidated fork tracks the 0.9.x upstream line, so
+# the `version` requirement below is `^0.9`.
 #
 # This used to be a `[patch.crates-io]` entry, but a [patch] table only
 # takes effect from the build root: consumers of libviprs (by git or
@@ -37,16 +42,16 @@ lopdf = "0.36"
 #
 # The `version` key is a fallback for `cargo publish`: crates.io strips
 # git sources, so the PUBLISHED libviprs still depends on the registry
-# `pdfium-render ^0.8` and crates.io consumers still link the unpatched
+# `pdfium-render ^0.9` and crates.io consumers still link the unpatched
 # wrapper. libviprs's own FPDF calls stay safe there via the internal
 # process-wide lock (`src/pdf.rs::pdfium_lock`), but the wrapper's
 # `Send + Sync` remains unsound for direct use. The remaining paths to
 # fix that are tracked in issue #149: upstream the per-call locking
 # (ajrcarey/pdfium-render#262) or publish the fork under a distinct
 # crate name and depend on it by version.
-pdfium-render = { version = "0.8", features = [
+pdfium-render = { version = "0.9", features = [
 	"sync",
-], git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/per-call-thread-safety" }
+], git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/integration" }
 proptest = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
