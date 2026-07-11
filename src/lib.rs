@@ -51,6 +51,7 @@
 pub mod cancel;
 pub mod checksum;
 pub mod dedupe;
+pub mod draw;
 pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
@@ -66,6 +67,7 @@ pub mod pixel;
 pub mod planner;
 pub(crate) mod poison;
 pub mod raster;
+pub(crate) mod raster_ops;
 pub mod resize;
 pub mod resume;
 pub mod retry;
@@ -90,6 +92,7 @@ pub mod verify;
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
+pub use draw::{Circle, DrawOp, Rectangle};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
 };

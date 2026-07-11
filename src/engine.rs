@@ -1244,7 +1244,7 @@ pub fn raster_verify(
             for row in 0..level.rows {
                 for col in 0..level.cols {
                     let coord = TileCoord::new(level_idx as u32, col, row);
-                    observer.on_event(EngineEvent::TileCompleted { coord });
+                    observer.on_event(EngineEvent::tile_completed(coord));
                     let expected = extract_tile(current, plan, coord, bg)?;
                     let expected_bytes = expected.data();
 
@@ -1536,10 +1536,7 @@ fn extract_and_emit_level(
                                 // no output; report it as TileFailed, never as
                                 // TileCompleted, so observers that pair
                                 // completions with sink writes stay consistent.
-                                observer.on_event(EngineEvent::TileFailed {
-                                    coord,
-                                    error: e.to_string(),
-                                });
+                                observer.on_event(EngineEvent::tile_failed(coord, e.to_string()));
                                 // Intentionally do NOT increment count here —
                                 // this tile did not produce output. But also
                                 // do not increment a skip counter tied to
@@ -1551,7 +1548,7 @@ fn extract_and_emit_level(
                         }
                     }
                 }
-                observer.on_event(EngineEvent::TileCompleted { coord });
+                observer.on_event(EngineEvent::tile_completed(coord));
                 #[cfg(feature = "tracing")]
                 if tracing::enabled!(target: "libviprs::tile", tracing::Level::TRACE) {
                     tracing::trace!(
@@ -1803,17 +1800,14 @@ fn extract_and_emit_parallel(
                             // output; report it as TileFailed, never as
                             // TileCompleted, so observers that pair completions
                             // with sink writes stay consistent.
-                            observer.on_event(EngineEvent::TileFailed {
-                                coord,
-                                error: e.to_string(),
-                            });
+                            observer.on_event(EngineEvent::tile_failed(coord, e.to_string()));
                             continue;
                         }
                         _ => return Err(promote_sink_error(e)),
                     }
                 }
             }
-            observer.on_event(EngineEvent::TileCompleted { coord });
+            observer.on_event(EngineEvent::tile_completed(coord));
             #[cfg(feature = "tracing")]
             if tracing::enabled!(target: "libviprs::tile", tracing::Level::TRACE) {
                 tracing::trace!(
@@ -2428,7 +2422,7 @@ mod tests {
             assert!(
                 !events.iter().any(|e| matches!(
                     e,
-                    EngineEvent::TileCompleted { coord } if *coord == target
+                    EngineEvent::TileCompleted { coord, .. } if *coord == target
                 )),
                 "concurrency={concurrency}: dropped tile {target:?} was emitted as \
                  TileCompleted — violates issue #128"
@@ -2438,7 +2432,7 @@ mod tests {
             let failed: Vec<String> = events
                 .iter()
                 .filter_map(|e| match e {
-                    EngineEvent::TileFailed { coord, error } if *coord == target => {
+                    EngineEvent::TileFailed { coord, error, .. } if *coord == target => {
                         Some(error.clone())
                     }
                     _ => None,
@@ -2459,7 +2453,7 @@ mod tests {
             assert!(
                 events.iter().any(|e| matches!(
                     e,
-                    EngineEvent::TileCompleted { coord }
+                    EngineEvent::TileCompleted { coord, .. }
                         if coord.level == top && *coord != target
                 )),
                 "concurrency={concurrency}: sibling tiles should still emit TileCompleted"
