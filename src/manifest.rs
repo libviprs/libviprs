@@ -270,19 +270,25 @@ mod pixel_format_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &PixelFormat, s: S) -> Result<S::Ok, S::Error> {
+        // The named formats keep their historical manifest tags. Multiband
+        // compute intermediates (never produced by the pyramid pipeline, but
+        // the serializer must be total) round-trip as "multi8:N"/"multi16:N".
         let name = match v {
-            PixelFormat::Gray8 => "gray8",
-            PixelFormat::Gray16 => "gray16",
-            PixelFormat::Rgb8 => "rgb8",
-            PixelFormat::Rgba8 => "rgba8",
-            PixelFormat::Rgb16 => "rgb16",
-            PixelFormat::Rgba16 => "rgba16",
+            PixelFormat::Gray8 => "gray8".to_string(),
+            PixelFormat::Gray16 => "gray16".to_string(),
+            PixelFormat::Rgb8 => "rgb8".to_string(),
+            PixelFormat::Rgba8 => "rgba8".to_string(),
+            PixelFormat::Rgb16 => "rgb16".to_string(),
+            PixelFormat::Rgba16 => "rgba16".to_string(),
+            PixelFormat::Multi8(n) => format!("multi8:{n}"),
+            PixelFormat::Multi16(n) => format!("multi16:{n}"),
         };
-        s.serialize_str(name)
+        s.serialize_str(&name)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PixelFormat, D::Error> {
         let s = String::deserialize(d)?;
+        let unknown = || serde::de::Error::custom(format!("unknown pixel_format: {s}"));
         match s.as_str() {
             "gray8" => Ok(PixelFormat::Gray8),
             "gray16" => Ok(PixelFormat::Gray16),
@@ -290,9 +296,15 @@ mod pixel_format_serde {
             "rgba8" => Ok(PixelFormat::Rgba8),
             "rgb16" => Ok(PixelFormat::Rgb16),
             "rgba16" => Ok(PixelFormat::Rgba16),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown pixel_format: {other}"
-            ))),
+            other => {
+                let (depth, bands) = other
+                    .strip_prefix("multi8:")
+                    .map(|n| (1usize, n))
+                    .or_else(|| other.strip_prefix("multi16:").map(|n| (2usize, n)))
+                    .ok_or_else(unknown)?;
+                let bands: usize = bands.parse().map_err(|_| unknown())?;
+                PixelFormat::with_channels(bands, depth).ok_or_else(unknown)
+            }
         }
     }
 }
@@ -748,6 +760,30 @@ mod tests {
         assert_eq!(s, "\"blake3\"");
         let s2 = serde_json::to_string(&ChecksumAlgo::Sha256).unwrap();
         assert_eq!(s2, "\"sha256\"");
+    }
+
+    /// Multiband compute intermediates (PixelFormat::Multi8/Multi16, from
+    /// the band ops) round-trip through the manifest serde as "multi8:N" /
+    /// "multi16:N" tags, while the six named formats keep their historical
+    /// tags. The pyramid pipeline never emits multiband manifests, but the
+    /// serializer must be total over the enum.
+    #[test]
+    fn pixel_format_serde_round_trips_multiband() {
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::with_channels(7, 1).unwrap();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"multi8:7\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::with_channels(2, 2).unwrap();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"multi16:2\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
     }
 
     // Issue #95: the shared manifest-string parser must round-trip both

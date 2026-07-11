@@ -12,8 +12,8 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    EngineEvent, Layout, ManifestError, PdfError, PixelFormat, PlannerError, RasterError,
-    ResumeError, SourceError, VerifyError,
+    BandError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat, PlannerError,
+    RasterError, ResumeError, SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -56,6 +56,27 @@ fn assert_engine_event_non_exhaustive(v: &EngineEvent) {
         EngineEvent::BatchCompleted { .. } => {}
         EngineEvent::Finished { .. } => {}
         EngineEvent::PipelineComplete => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_band_error_non_exhaustive(v: &BandError) {
+    match v {
+        BandError::DimensionMismatch { .. } => {}
+        BandError::BandCountMismatch { .. } => {}
+        BandError::BandOutOfRange { .. } => {}
+        BandError::BandRangeOutOfRange { .. } => {}
+        BandError::EmptyBandRange => {}
+        BandError::EmptyConstants => {}
+        BandError::ZeroFactor => {}
+        BandError::FoldNotDivisible { .. } => {}
+        BandError::UnfoldNotDivisible { .. } => {}
+        BandError::TooManyBands { .. } => {}
+        BandError::WidthOverflow { .. } => {}
+        BandError::RankIndexOutOfRange { .. } => {}
+        BandError::Raster(..) => {}
         _ => {}
     }
 }
