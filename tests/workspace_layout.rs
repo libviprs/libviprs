@@ -80,8 +80,10 @@ fn root_workspace_contains_both_crates() {
 
 /// The workspace must still pin `pdfium-render` to the libviprs fork
 /// (per-call thread-safety locking), now as a direct git dependency rather
-/// than a `[patch.crates-io]` entry. The workspace lockfile is the single
-/// source of truth for that resolution.
+/// than a `[patch.crates-io]` entry, tracking the consolidated
+/// `libviprs/integration` branch (the 0.9.x line carrying all of our fork
+/// PRs). The workspace lockfile is the single source of truth for that
+/// resolution.
 #[test]
 fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock"))
@@ -112,7 +114,7 @@ fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
         "pdfium-render must resolve from the fork, got: {source}"
     );
     assert!(
-        source.contains("per-call-thread-safety"),
-        "pdfium-render must track the per-call-thread-safety branch, got: {source}"
+        source.contains("branch=libviprs%2Fintegration"),
+        "pdfium-render must track the consolidated libviprs/integration branch, got: {source}"
     );
 }

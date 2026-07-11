@@ -38,7 +38,7 @@ pub enum PdfError {
     #[error("page {page} out of range (document has {total} pages)")]
     PageOutOfRange { page: usize, total: usize },
     #[error(
-        "document has {count} pages, exceeding pdfium's {max}-page index limit (u16 PdfPageIndex)"
+        "document has {count} pages, exceeding pdfium's {max}-page index limit (c_int page count)"
     )]
     PageCountExceedsIndex { count: usize, max: usize },
     #[error("pdfium error: {0}")]
@@ -322,26 +322,27 @@ fn page_object_id(
         .ok_or(PdfError::PageOutOfRange { page, total })
 }
 
-/// The largest page count pdfium can address without wrapping.
+/// The largest page count pdfium can represent.
 ///
-/// pdfium-render models page indices as [`u16`] (`PdfPageIndex`), so its pages
-/// accessor narrows `FPDF_GetPageCount` (a C `int`) to `u16` with a truncating
-/// `as` cast. A document with more than `u16::MAX` pages therefore reports a
-/// *wrapped* count (e.g. `65536` becomes `0`), under-reporting the page count
-/// and making high pages unreachable.
+/// pdfium-render 0.9 widened `PdfPageIndex` from `u16` to `c_int` (`i32`),
+/// which is `FPDF_GetPageCount`'s own return width, so the old in-wrapper
+/// `u16` truncation (#91) is gone by construction: any count pdfium can
+/// report is representable as an index. What remains is the width of the C
+/// API itself: `FPDF_GetPageCount` returns a `c_int`, so a document whose
+/// true page count exceeds `i32::MAX` cannot be reported faithfully by
+/// pdfium at all (pdfium-render clamps a negative count to `0`).
 #[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
-const PDFIUM_MAX_PAGE_COUNT: usize = u16::MAX as usize;
+const PDFIUM_MAX_PAGE_COUNT: usize = i32::MAX as usize;
 
-/// Reject a document whose true page count exceeds pdfium's `u16` page-index
+/// Reject a document whose true page count exceeds pdfium's `c_int` page-count
 /// width (see [`PDFIUM_MAX_PAGE_COUNT`]).
 ///
-/// The `FPDF_GetPageCount` (`c_int`) → `u16` `PdfPageIndex` narrowing happens
-/// inside pdfium-render, before the count reaches this crate, so the wrap is
-/// irreversible by the time its pages accessor hands back a `u16`. This guard
-/// runs on the pdfium render paths against the
-/// document's *true* page count — taken from `lopdf`, the same authoritative
-/// page structure [`page_object_id`] trusts — so a truncated count can never
-/// silently drive a page lookup.
+/// A count past `i32::MAX` cannot round-trip through `FPDF_GetPageCount`
+/// (`c_int`), so by the time pdfium-render's pages accessor reports a length,
+/// the true count is unrecoverable. This guard runs on the pdfium render paths
+/// against the document's *true* page count (taken from `lopdf`, the same
+/// authoritative page structure [`page_object_id`] trusts), so a misreported
+/// count can never silently drive a page lookup.
 #[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
 fn check_pdfium_page_count(true_count: usize) -> Result<(), PdfError> {
     if true_count > PDFIUM_MAX_PAGE_COUNT {
@@ -354,19 +355,44 @@ fn check_pdfium_page_count(true_count: usize) -> Result<(), PdfError> {
 }
 
 /// Guard the pdfium render paths against a page count that overflows pdfium's
-/// `u16` page index (see [`check_pdfium_page_count`]).
+/// `c_int` page count (see [`check_pdfium_page_count`]).
 ///
 /// The document's true page count is read from `lopdf`, whose page map is keyed
-/// by `u32` and so counts pages without pdfium's `u16` truncation. A file that
-/// `lopdf` cannot parse is left untouched — pdfium may still be able to render
-/// it — so this only rejects a document `lopdf` can read whose page count
-/// exceeds the index width.
+/// by `u32` and so can count pages past `i32::MAX` without pdfium's `c_int`
+/// ceiling. A file that `lopdf` cannot parse is left untouched (pdfium may
+/// still be able to render it), so this only rejects a document `lopdf` can
+/// read whose page count exceeds the index width.
 #[cfg(feature = "pdfium")]
 fn reject_pages_beyond_pdfium_index(path: &Path) -> Result<(), PdfError> {
     if let Ok(doc) = lopdf::Document::load(path) {
         check_pdfium_page_count(doc.get_pages().len())?;
     }
     Ok(())
+}
+
+/// Resolve a 1-based `page` number to pdfium-render's 0-based
+/// [`PdfPageIndex`](pdfium_render::prelude::PdfPageIndex) (`c_int`),
+/// bounds-checked against the page count the document reports.
+///
+/// `total` comes from `PdfPages::len()`, which pdfium-render 0.9 clamps to
+/// `0..=i32::MAX`, so a `page` that passes the bounds check always fits the
+/// index type. The narrowing is still range-checked rather than cast so a
+/// future change to the bounds check can never silently reintroduce a
+/// wrapping conversion (#91).
+#[cfg(feature = "pdfium")]
+pub(crate) fn pdfium_page_index(
+    page: usize,
+    total: pdfium_render::prelude::PdfPageIndex,
+) -> Result<pdfium_render::prelude::PdfPageIndex, PdfError> {
+    // `PdfPages::len()` cannot return a negative count (pdfium-render clamps
+    // it to 0), but saturate rather than assume: a negative count means no
+    // page is addressable.
+    let total = usize::try_from(total).unwrap_or(0);
+    if page == 0 || page > total {
+        return Err(PdfError::PageOutOfRange { page, total });
+    }
+    pdfium_render::prelude::PdfPageIndex::try_from(page - 1)
+        .map_err(|_| PdfError::PageOutOfRange { page, total })
 }
 
 /// Extract the largest embedded raster image from a PDF page.
@@ -1104,33 +1130,33 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
     Ok(PDFIUM.get().expect("PDFIUM was just set"))
 }
 
-/// Convert a rendered pdfium bitmap into an RGBA [`Raster`], defending
-/// against the panic-on-mismatch inside `PdfBitmap::as_image()`.
+/// Convert a rendered pdfium bitmap into an RGBA [`Raster`].
 ///
 /// `as_image` is the bitmap conversion closure (in production,
-/// `|| bitmap.as_image()`). The 0.8.x fork's `as_image()` ends in
-/// `RgbaImage::from_raw(w, h, bytes).map(...).unwrap()`; `from_raw`
-/// returns `None` whenever the width/height pdfium reports disagree with
-/// the returned buffer length, so an adversarial or edge page makes
-/// `as_image()` panic. Called bare inside a MapReduce render worker,
-/// that unwind aborts the rendering thread. Isolating the call in
-/// [`std::panic::catch_unwind`] converts the panic into a typed
-/// [`PdfError::Pdfium`] the caller can propagate.
+/// `|| bitmap.as_image()`). pdfium-render 0.9's `as_image()` returns
+/// `Result`: a width/height that disagrees with the buffer length (the
+/// case that made the 0.8.x `as_image()` panic through its terminal
+/// `from_raw(..).unwrap()`) now surfaces as
+/// `Err(PdfiumError::ImageError)`, which this maps to a typed
+/// [`PdfError::Pdfium`].
 ///
-/// (Upstream pdfium-render 0.9.1's `Result`-returning `as_image`
-/// supersedes this guard once the pinned fork is bumped.)
+/// The [`std::panic::catch_unwind`] isolation predates that upstream fix
+/// and is kept as a backstop: the closure still crosses FFI-adjacent
+/// wrapper code, and a panic reaching a MapReduce render worker aborts
+/// the rendering thread. Any residual panic is converted into the same
+/// typed [`PdfError::Pdfium`] the caller can propagate.
 #[cfg(feature = "pdfium")]
 fn bitmap_to_raster<F>(as_image: F) -> Result<Raster, PdfError>
 where
-    F: FnOnce() -> image::DynamicImage,
+    F: FnOnce() -> Result<image::DynamicImage, pdfium_render::prelude::PdfiumError>,
 {
-    let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(as_image)).map_err(|_| {
-        PdfError::Pdfium(
-            "pdfium reported bitmap dimensions inconsistent with its buffer length \
-             (PdfBitmap::as_image mismatch)"
-                .to_string(),
-        )
-    })?;
+    let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(as_image))
+        .map_err(|_| {
+            PdfError::Pdfium(
+                "panic during pdfium bitmap conversion (PdfBitmap::as_image)".to_string(),
+            )
+        })?
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     let data = rgba.into_raw();
@@ -1216,21 +1242,7 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
     let pages = document.pages();
-    let total = pages.len();
-    if page == 0 || page > total as usize {
-        return Err(PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
-    // `page` is already bounded to `1..=total` by the guard above, and
-    // pdfium's page count is a `u16`, so this narrowing cannot wrap — but
-    // range-check it rather than truncate so a future change to the guard
-    // can never silently reintroduce a wrapping `as u16` cast.
-    let index = u16::try_from(page - 1).map_err(|_| PdfError::PageOutOfRange {
-        page,
-        total: total as usize,
-    })?;
+    let index = pdfium_page_index(page, pages.len())?;
     let pdf_page = pages
         .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
@@ -1450,21 +1462,7 @@ pub fn render_page_pdfium_budgeted(
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
     let pages = document.pages();
-    let total = pages.len();
-    if page == 0 || page > total as usize {
-        return Err(PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
-    // `page` is already bounded to `1..=total` by the guard above, and
-    // pdfium's page count is a `u16`, so this narrowing cannot wrap — but
-    // range-check it rather than truncate so a future change to the guard
-    // can never silently reintroduce a wrapping `as u16` cast.
-    let index = u16::try_from(page - 1).map_err(|_| PdfError::PageOutOfRange {
-        page,
-        total: total as usize,
-    })?;
+    let index = pdfium_page_index(page, pages.len())?;
     let pdf_page = pages
         .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
@@ -1537,19 +1535,23 @@ mod tests {
         );
     }
 
-    /// Regression for #91 (acceptance criterion #2): pdfium-render narrows
-    /// `FPDF_GetPageCount` (a C `int`) to a `u16` `PdfPageIndex` at its pages
-    /// accessor, so a document with more than `u16::MAX` pages reports a
-    /// *wrapped* count (`65536` becomes `0`). `check_pdfium_page_count` must
-    /// reject a true page count past the index width with a typed
-    /// [`PdfError::PageCountExceedsIndex`] instead of letting a truncated count
-    /// silently drive a page lookup.
+    /// Follow-up to #91: pdfium-render 0.9 widened `PdfPageIndex` from `u16`
+    /// to `c_int` (`i32`), so the in-wrapper `u16` truncation the original
+    /// guard targeted is gone by construction. The residual limit is the C
+    /// API's own width: `FPDF_GetPageCount` returns a `c_int`, so a true page
+    /// count past `i32::MAX` cannot be reported faithfully.
+    /// `check_pdfium_page_count` must reject such a count with a typed
+    /// [`PdfError::PageCountExceedsIndex`] instead of letting a misreported
+    /// count silently drive a page lookup.
     #[test]
     fn check_pdfium_page_count_rejects_index_width_overflow() {
-        // One page past the u16 index width wraps to 0 under pdfium-render's
-        // `FPDF_GetPageCount as u16` cast — the exact truncation this guards.
+        // One page past the c_int width is unrepresentable by
+        // `FPDF_GetPageCount`'s return type: the exact overflow this guards.
         let overflowing = PDFIUM_MAX_PAGE_COUNT + 1;
-        assert_eq!(overflowing as u16, 0, "precondition: the cast wraps to 0");
+        assert!(
+            i32::try_from(overflowing).is_err(),
+            "precondition: the count exceeds what c_int can represent"
+        );
 
         let err = check_pdfium_page_count(overflowing).unwrap_err();
         assert!(
@@ -1558,18 +1560,53 @@ mod tests {
                 PdfError::PageCountExceedsIndex { count, max }
                     if count == overflowing && max == PDFIUM_MAX_PAGE_COUNT
             ),
-            "a page count past the u16 index width must be rejected, got {err:?}"
+            "a page count past the c_int width must be rejected, got {err:?}"
         );
     }
 
-    /// The boundary count (`u16::MAX`) and any smaller count are representable
-    /// by pdfium's page index and must be accepted unchanged — the guard must
+    /// The boundary count (`i32::MAX`) and any smaller count are representable
+    /// by pdfium's page count and must be accepted unchanged: the guard must
     /// not reject documents pdfium can address.
     #[test]
     fn check_pdfium_page_count_accepts_up_to_index_width() {
         assert!(check_pdfium_page_count(0).is_ok());
         assert!(check_pdfium_page_count(1).is_ok());
         assert!(check_pdfium_page_count(PDFIUM_MAX_PAGE_COUNT).is_ok());
+    }
+
+    /// `pdfium_page_index` is the single 1-based-page to 0-based-`c_int`
+    /// conversion every pdfium render path uses (follow-up to #91, migrated
+    /// to pdfium-render 0.9's `i32` `PdfPageIndex`). It must bounds-check
+    /// before narrowing: page 0 and pages past the reported total map to
+    /// [`PdfError::PageOutOfRange`], in-range pages map to `page - 1`, and a
+    /// (theoretically impossible) negative total addresses no page at all.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn pdfium_page_index_bounds_checks_before_narrowing() {
+        // In-range pages convert to their 0-based index.
+        assert_eq!(pdfium_page_index(1, 3).unwrap(), 0);
+        assert_eq!(pdfium_page_index(3, 3).unwrap(), 2);
+        assert_eq!(
+            pdfium_page_index(i32::MAX as usize, i32::MAX).unwrap(),
+            i32::MAX - 1
+        );
+
+        // Page 0 (pages are 1-based) and pages past the total are rejected.
+        assert!(matches!(
+            pdfium_page_index(0, 3).unwrap_err(),
+            PdfError::PageOutOfRange { page: 0, total: 3 }
+        ));
+        assert!(matches!(
+            pdfium_page_index(4, 3).unwrap_err(),
+            PdfError::PageOutOfRange { page: 4, total: 3 }
+        ));
+
+        // A negative reported total (pdfium-render clamps this to 0, but the
+        // helper must not assume) addresses no page.
+        assert!(matches!(
+            pdfium_page_index(1, -1).unwrap_err(),
+            PdfError::PageOutOfRange { page: 1, total: 0 }
+        ));
     }
 
     /*
@@ -1903,22 +1940,23 @@ mod tests {
         }
     }
 
-    /// A dimension/length mismatch from pdfium — the case where
-    /// `PdfBitmap::as_image()`'s terminal `RgbaImage::from_raw(w, h,
-    /// bytes).map(...).unwrap()` finds `bytes.len() != w * h * 4` and
-    /// panics — must surface as a typed [`PdfError::Pdfium`], not unwind
-    /// out of the render worker and abort a MapReduce thread. The closure
-    /// reproduces that exact terminal expression: a 2x2 RGBA image needs
-    /// 16 bytes; it is handed 3, so `from_raw` returns `None` and the
-    /// `.unwrap()` panics.
+    /// A dimension/length mismatch from pdfium (the case where 0.8.x's
+    /// `PdfBitmap::as_image()` panicked through its terminal
+    /// `from_raw(..).unwrap()`) surfaces in pdfium-render 0.9 as
+    /// `Err(PdfiumError::ImageError)`. `bitmap_to_raster` must map that
+    /// to a typed [`PdfError::Pdfium`], the same contract the old panic
+    /// guard provided. The closure reproduces 0.9's exact terminal
+    /// expression: a 2x2 RGBA image needs 16 bytes; it is handed 3, so
+    /// `from_raw` returns `None` and `as_image` reports `ImageError`.
     #[cfg(feature = "pdfium")]
     #[test]
     fn bitmap_to_raster_surfaces_dimension_mismatch_as_error() {
         use image::{DynamicImage, RgbaImage};
+        use pdfium_render::prelude::PdfiumError;
         let result = bitmap_to_raster(|| {
             RgbaImage::from_raw(2, 2, vec![0u8; 3])
                 .map(DynamicImage::ImageRgba8)
-                .unwrap()
+                .ok_or(PdfiumError::ImageError)
         });
         match result {
             Err(PdfError::Pdfium(_)) => {}
@@ -1926,14 +1964,36 @@ mod tests {
         }
     }
 
+    /// A panic escaping the conversion closure (the backstop case: 0.9's
+    /// `as_image` returns `Result`, but the closure still crosses
+    /// FFI-adjacent wrapper code) must be caught and surfaced as a typed
+    /// [`PdfError::Pdfium`], not unwind out of the render worker and
+    /// abort a MapReduce thread.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn bitmap_to_raster_surfaces_panic_as_error() {
+        let result = bitmap_to_raster(|| panic!("simulated panic inside bitmap conversion"));
+        match result {
+            Err(PdfError::Pdfium(msg)) => {
+                assert!(
+                    msg.contains("panic"),
+                    "message should name the panic: {msg}"
+                );
+            }
+            other => panic!("expected Err(PdfError::Pdfium), got {other:?}"),
+        }
+    }
+
     /// A well-formed bitmap must still convert into a `Raster` with the
-    /// declared dimensions — the panic guard must not reject valid input.
+    /// declared dimensions: the error mapping must not reject valid input.
     #[cfg(feature = "pdfium")]
     #[test]
     fn bitmap_to_raster_accepts_valid_image() {
         use image::{DynamicImage, RgbaImage};
         let raster = bitmap_to_raster(|| {
-            DynamicImage::ImageRgba8(RgbaImage::from_raw(2, 2, vec![255u8; 16]).unwrap())
+            Ok(DynamicImage::ImageRgba8(
+                RgbaImage::from_raw(2, 2, vec![255u8; 16]).unwrap(),
+            ))
         })
         .unwrap();
         assert_eq!(raster.width(), 2);

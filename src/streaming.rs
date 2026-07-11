@@ -283,9 +283,9 @@ struct StreamingState {
     /// Always `Some(_)` outside `Drop`. Wrapped in `Option` for
     /// readable drop ordering inside the `Drop` impl.
     document: Option<pdfium_render::prelude::PdfDocument<'static>>,
-    /// 0-based page index for pdfium-render's `PdfPages::get`. Stored
-    /// pre-converted so the hot path doesn't re-validate `page > 0`.
-    page_index: u16,
+    /// 0-based page index (`c_int`) for pdfium-render's `PdfPages::get`.
+    /// Stored pre-converted so the hot path doesn't re-validate `page > 0`.
+    page_index: pdfium_render::prelude::PdfPageIndex,
     /// Page's intrinsic `/Rotate`, normalised at construction.
     rotation: crate::pdf::PageRotation,
 }
@@ -464,9 +464,9 @@ impl PdfiumStripSource {
     /// # Concurrency
     ///
     /// pdfium itself is not thread-safe. The `pdfium-render` `sync`
-    /// feature, plus the `[patch.crates-io]` directive in
-    /// `libviprs/Cargo.toml` that pins the patched fork at
-    /// `libviprs/pdfium-render` branch `libviprs/per-call-thread-safety`,
+    /// feature, plus the direct git dependency in `libviprs/Cargo.toml`
+    /// that pins the patched fork at `libviprs/pdfium-render` branch
+    /// `libviprs/integration` (per-call FFI locking),
     /// serialise every FPDF call through a process-wide mutex. So
     /// concurrent `render_strip` calls from multiple threads (e.g.
     /// under `EngineKind::MapReduce`) are correct but produce no
@@ -587,16 +587,10 @@ fn load_streaming_source(
     let document = pdfium
         .load_pdf_from_file(&path, None)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-    let total = document.pages().len();
-    if page == 0 || page > total as usize {
-        return Err(crate::pdf::PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
+    let page_index = crate::pdf::pdfium_page_index(page, document.pages().len())?;
     let pdf_page = document
         .pages()
-        .get(page as u16 - 1)
+        .get(page_index)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
 
     // Match `render_page_pdfium`'s width/height truncation byte-for-byte
@@ -620,7 +614,7 @@ fn load_streaming_source(
         dpi,
         state: PdfiumSourceState::Streaming(Box::new(StreamingState {
             document: Some(document),
-            page_index: (page as u16).saturating_sub(1),
+            page_index,
             rotation,
         })),
     })
@@ -685,15 +679,9 @@ fn probe_page_dims(
         .load_pdf_from_file(path, None)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
     let pages = document.pages();
-    let total = pages.len();
-    if page == 0 || page > total as usize {
-        return Err(crate::pdf::PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
+    let page_index = crate::pdf::pdfium_page_index(page, pages.len())?;
     let pdf_page = pages
-        .get(page as u16 - 1)
+        .get(page_index)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
     let scale = dpi as f32 / 72.0;
     // Pdfium's FPDF_GetPageWidthF/HeightF return the display dimensions —
