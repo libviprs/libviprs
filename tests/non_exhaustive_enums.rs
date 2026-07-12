@@ -12,9 +12,29 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    BandError, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat, PlannerError,
-    RasterError, ResumeError, SourceError, VerifyError,
+    BandError, Combine, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat,
+    PlannerError, Precision, RasterError, ResumeError, SourceError, VerifyError,
 };
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_precision_non_exhaustive(v: &Precision) {
+    match v {
+        Precision::Integer => {}
+        Precision::Float => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_combine_non_exhaustive(v: &Combine) {
+    match v {
+        Combine::Max => {}
+        Combine::Sum => {}
+        _ => {}
+    }
+}
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
