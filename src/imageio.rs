@@ -189,6 +189,30 @@ impl MetadataValue {
         }
     }
 
+    /// The length of this value in its natural unit.
+    ///
+    /// * [`MetadataValue::Blob`]: the number of bytes (what
+    ///   `image.get("icc-profile-data").len()` reports in the ported foreign
+    ///   cell, for example the 564-byte ICC profile of `sample.jpg` read
+    ///   through magick).
+    /// * [`MetadataValue::Str`]: the number of UTF-8 bytes in the string.
+    /// * [`MetadataValue::Int`] / [`MetadataValue::Double`]: `1`, a scalar
+    ///   is a single-element field.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Blob(b) => b.len(),
+            Self::Str(s) => s.len(),
+            Self::Int(_) | Self::Double(_) => 1,
+        }
+    }
+
+    /// Whether this value has zero length; see [`MetadataValue::len`]. A
+    /// scalar [`MetadataValue::Int`] or [`MetadataValue::Double`] is never
+    /// empty (its length is `1`).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Human-readable kind name for panic messages.
     fn kind(&self) -> &'static str {
         match self {
@@ -587,6 +611,31 @@ impl Raster {
     /// `vips_image_get_typeof`, which returns 0 or a `GType`).
     pub fn get_typeof(&self, name: &str) -> u64 {
         self.get_field(name).map_or(0, |v| v.type_code())
+    }
+
+    /// The EXIF orientation tag (libvips `orientation`, values 1-8),
+    /// defaulting to `1` (upright) when the image carries no orientation.
+    ///
+    /// Reads the `orientation` header field; every raster has one, so this
+    /// is total. The oracle reports `orientation = 1` for the reference
+    /// images that are not pre-rotated.
+    pub fn get_orientation(&self) -> i32 {
+        i32::from(self.orientation())
+    }
+
+    /// The number of pages this raster represents (libvips `n-pages`),
+    /// defaulting to `1` for a single-page image.
+    ///
+    /// Reads the attached `n-pages` field that the multi-page loaders set
+    /// (animated GIF/WebP, multi-page TIFF/PDF). A single-page raster has no
+    /// such field and reports `1`, matching the oracle (`n-pages = 1` for
+    /// `sample.jpg`, `5` / `4` / `3` / `35` for the animated fixtures).
+    pub fn get_n_pages(&self) -> u32 {
+        match self.get_field("n-pages") {
+            Some(MetadataValue::Int(n)) => u32::try_from(n).ok().filter(|&n| n > 0).unwrap_or(1),
+            Some(MetadataValue::Str(s)) => s.parse::<u32>().ok().filter(|&n| n > 0).unwrap_or(1),
+            _ => 1,
+        }
     }
 
     /// Remove an attached field by setting its type to 0, the libvips
@@ -1191,6 +1240,56 @@ fn parse_size(s: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::source::{decode_bytes, decode_file};
+
+    #[test]
+    fn metadata_value_len_reports_blob_and_string_bytes() {
+        // The foreign magickload cell asserts `icc.len() == 564` on the ICC
+        // blob; `len` on a blob is its byte count.
+        assert_eq!(MetadataValue::Blob(vec![0u8; 564]).len(), 564);
+        assert_eq!(MetadataValue::Str("abc".to_string()).len(), 3);
+        // A scalar field is a single element.
+        assert_eq!(MetadataValue::Int(7).len(), 1);
+        assert_eq!(MetadataValue::Double(1.5).len(), 1);
+    }
+
+    #[test]
+    fn metadata_value_is_empty_tracks_len() {
+        assert!(MetadataValue::Blob(Vec::new()).is_empty());
+        assert!(MetadataValue::Str(String::new()).is_empty());
+        assert!(!MetadataValue::Blob(vec![1]).is_empty());
+        assert!(!MetadataValue::Int(0).is_empty());
+    }
+
+    #[test]
+    fn get_orientation_defaults_to_one() {
+        // Matches the oracle: `orientation = 1` for the un-rotated fixtures.
+        assert_eq!(Raster::black(4, 4).get_orientation(), 1);
+    }
+
+    #[test]
+    fn get_orientation_reads_the_exif_field() {
+        let mut im = Raster::black(4, 4);
+        im.set_field("orientation", 6i32.into());
+        assert_eq!(im.get_orientation(), 6);
+    }
+
+    #[test]
+    fn get_n_pages_defaults_to_one() {
+        // Matches the oracle: `n-pages = 1` for single-page images.
+        assert_eq!(Raster::black(4, 4).get_n_pages(), 1);
+    }
+
+    #[test]
+    fn get_n_pages_reads_the_attached_field() {
+        let mut im = Raster::black(4, 4);
+        im.set_field("n-pages", MetadataValue::Int(5));
+        assert_eq!(im.get_n_pages(), 5);
+
+        // A non-positive count falls back to the single-page default.
+        let mut im0 = Raster::black(4, 4);
+        im0.set_field("n-pages", MetadataValue::Int(0));
+        assert_eq!(im0.get_n_pages(), 1);
+    }
 
     fn rgb_2x2() -> Raster {
         Raster::new(
