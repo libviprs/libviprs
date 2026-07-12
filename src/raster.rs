@@ -68,6 +68,10 @@ pub enum RasterError {
     FloatUnsupported { op: &'static str },
     #[error("from_f32_samples requires a float pixel format (RgbaF32 / FloatF32), got {format:?}")]
     NotFloatFormat { format: PixelFormat },
+    #[error("unknown memory format {format:?}; expected \"uchar\", \"ushort\", or \"float\"")]
+    UnknownMemoryFormat { format: String },
+    #[error("invalid band count {bands} for memory format {format:?}")]
+    InvalidMemoryBands { bands: u32, format: String },
 }
 
 /// Default ceiling, in bytes, on a single raster buffer allocation sized from
@@ -473,6 +477,84 @@ impl Raster {
             out.extend_from_slice(row);
         }
         Raster::new(w, h, self.format, out)
+    }
+
+    /// Fallible form of [`Raster::new_from_memory`].
+    ///
+    /// Parses `format` (`"uchar"` / `"ushort"` / `"float"`) into the
+    /// per-channel byte depth (1 / 2 / 4), builds the canonical
+    /// [`PixelFormat`] for `bands` at that depth, and wraps the raw buffer
+    /// with the budget-checked [`Raster::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::UnknownMemoryFormat`] for a format string
+    /// outside the supported set, [`RasterError::InvalidMemoryBands`] when
+    /// no format can carry `bands` at that depth (zero or above
+    /// `u16::MAX`), or any error from [`Raster::new`] (notably
+    /// [`RasterError::BufferSizeMismatch`] when `data.len()` does not equal
+    /// `width * height * bands * bytes_per_channel`).
+    pub fn try_new_from_memory(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bands: u32,
+        format: &str,
+    ) -> Result<Raster, RasterError> {
+        let bytes_per_channel = match format {
+            "uchar" => 1,
+            "ushort" => 2,
+            "float" => 4,
+            other => {
+                return Err(RasterError::UnknownMemoryFormat {
+                    format: other.to_string(),
+                });
+            }
+        };
+        let pixel_format = usize::try_from(bands)
+            .ok()
+            .and_then(|b| PixelFormat::with_channels(b, bytes_per_channel))
+            .ok_or_else(|| RasterError::InvalidMemoryBands {
+                bands,
+                format: format.to_string(),
+            })?;
+        Self::new(width, height, pixel_format, data.to_vec())
+    }
+
+    /// Create a raster from a raw pixel buffer already in memory (libvips
+    /// `vips_image_new_from_memory`).
+    ///
+    /// `format` names the per-channel sample type (`"uchar"`, `"ushort"`,
+    /// or `"float"`) and `bands` the channel count; together with `width`
+    /// and `height` they must describe a buffer exactly `data.len()` bytes
+    /// long. Panicking form of [`Raster::try_new_from_memory`], matching
+    /// the ported-test call surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`RasterError`]; see [`Raster::try_new_from_memory`].
+    #[track_caller]
+    pub fn new_from_memory(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bands: u32,
+        format: &str,
+    ) -> Raster {
+        match Self::try_new_from_memory(data, width, height, bands, format) {
+            Ok(raster) => raster,
+            Err(e) => panic!("new_from_memory: {e}"),
+        }
+    }
+
+    /// Copy the raw pixel bytes into a new owned buffer (libvips
+    /// `vips_image_write_to_memory`).
+    ///
+    /// The bytes are the raster's native-endian, tightly-packed pixel
+    /// data, so `Raster::new_from_memory(&im.write_to_memory(), w, h,
+    /// bands, fmt)` reconstructs an identical image.
+    pub fn write_to_memory(&self) -> Vec<u8> {
+        self.data().to_vec()
     }
 }
 
@@ -917,6 +999,76 @@ mod tests {
             let r = Raster::zeroed(5, 4, fmt).unwrap();
             assert_eq!(r.data().len(), 20 * fmt.bytes_per_pixel(), "{fmt:?}");
         }
+    }
+
+    /**
+     * Tests that `bands()` reports the channel count for a known raster of
+     * each canonical band count (1/3/4), matching `format().channels()`.
+     * Input: Gray8/Rgb8/Rgba8 zeroed rasters -> bands 1/3/4.
+     */
+    #[test]
+    fn bands_reports_channel_count() {
+        assert_eq!(Raster::zeroed(4, 4, PixelFormat::Gray8).unwrap().bands(), 1);
+        assert_eq!(Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap().bands(), 3);
+        assert_eq!(Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap().bands(), 4);
+    }
+
+    /**
+     * Tests the memory round-trip: a 200-byte zero buffer builds a 20x10
+     * 1-band uchar (`Gray8`) raster with the expected geometry and avg 0,
+     * and `write_to_memory` returns byte-identical data.
+     * Input: vec![0u8; 200] -> new_from_memory(20,10,1,"uchar") ->
+     * write_to_memory() == input.
+     */
+    #[test]
+    fn new_from_memory_write_to_memory_round_trips() {
+        let data = vec![0u8; 200];
+        let im = Raster::new_from_memory(&data, 20, 10, 1, "uchar");
+        assert_eq!(im.width(), 20);
+        assert_eq!(im.height(), 10);
+        assert_eq!(im.bands(), 1);
+        assert_eq!(im.format(), PixelFormat::Gray8);
+        assert!((im.avg() - 0.0).abs() < 1e-9);
+        assert_eq!(im.write_to_memory(), data);
+    }
+
+    /**
+     * Tests that the format string selects the sample depth and the band
+     * count selects the canonical variant: `ushort`+3 -> Rgb16,
+     * `float`+4 -> RgbaF32.
+     * Input: 36-byte ushort 3x2x3 -> Rgb16; 16-byte float 1x1x4 -> RgbaF32.
+     */
+    #[test]
+    fn new_from_memory_parses_formats_and_bands() {
+        let im = Raster::new_from_memory(&[0u8; 36], 3, 2, 3, "ushort");
+        assert_eq!(im.format(), PixelFormat::Rgb16);
+        assert_eq!(im.bands(), 3);
+
+        let f = Raster::new_from_memory(&[0u8; 16], 1, 1, 4, "float");
+        assert_eq!(f.format(), PixelFormat::RgbaF32);
+    }
+
+    /**
+     * Tests that an unknown format string, a buffer-length mismatch, and a
+     * zero band count each surface as a typed error from the fallible form
+     * rather than panicking.
+     * Input: "uint32" -> UnknownMemoryFormat; 199 bytes for a 200-byte
+     * image -> BufferSizeMismatch; 0 bands -> InvalidMemoryBands.
+     */
+    #[test]
+    fn new_from_memory_typed_errors() {
+        assert!(matches!(
+            Raster::try_new_from_memory(&[0u8; 4], 2, 2, 1, "uint32"),
+            Err(RasterError::UnknownMemoryFormat { .. })
+        ));
+        assert!(matches!(
+            Raster::try_new_from_memory(&[0u8; 199], 20, 10, 1, "uchar"),
+            Err(RasterError::BufferSizeMismatch { .. })
+        ));
+        assert!(matches!(
+            Raster::try_new_from_memory(&[], 1, 1, 0, "uchar"),
+            Err(RasterError::InvalidMemoryBands { bands: 0, .. })
+        ));
     }
 }
 
