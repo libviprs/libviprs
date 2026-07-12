@@ -2859,7 +2859,7 @@ mod tests {
         let v = float_samples(&q)[0];
         assert!((v - 128.0 / 255.0).abs() < 1e-6, "128/255 ~ 0.502, got {v}");
         let a = float_samples(&q.atanh())[0];
-        let expected = (128.0f64 / 255.0).atanh(); // ~0.55245
+        let expected = (128.0f64 / 255.0).atanh(); // ~0.551924
         assert!(a.is_finite(), "atanh(0.502) is finite, got {a}");
         assert!((a - expected).abs() < 1e-6, "expected {expected}, got {a}");
     }
@@ -3617,7 +3617,7 @@ mod tests {
     /// f32::MAX (~89.4): real libvips `vips_math` on uchar input also
     /// outputs float (f32) and yields inf there, so inf IS the correct
     /// op result for large fixture values (libviprs-tests issue #77:
-    /// sinh(226) ~ 3.7e97 >> f32::MAX ~ 3.4e38). Small probes stay
+    /// sinh(226) ~ 7.07e97 >> f32::MAX ~ 3.4e38). Small probes stay
     /// finite and exact.
     #[test]
     fn sinh_cosh_f32_overflow_matches_libvips() {
