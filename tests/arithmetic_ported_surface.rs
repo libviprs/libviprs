@@ -570,18 +570,19 @@ fn ported_surface_math_trig() {
     assert!((px_r[0] - expected).abs() < 0.01);
 }
 
-/// The ported `test_asin` / `test_acos` / `test_atan` bodies, literal:
-/// the `div_const(255.0)` setup quantizes 128/255 to 1 under the integer
-/// div contract, and the ported assertions stay self-consistent because
-/// the expected value reads the post-division image. (`test_atanh` is the
-/// exception: atanh(1) is infinite, so its literal body cannot pass until
-/// the linear family produces float output; the op itself is pinned below
-/// from an exact float input.)
+/// The ported `test_asin` / `test_acos` / `test_atan` and `test_atanh`
+/// bodies, literal: `div_const` outputs a float raster (the libvips
+/// divide / linear float promotion), so the `div_const(255.0)` setup
+/// keeps 128/255 as ~0.502 and the expected values read the
+/// post-division image. The float contract is what makes the literal
+/// `test_atanh` body pass: atanh(0.502) ~ 0.5525 is finite, where the
+/// old integer round-to-1 contract degenerated it to atanh(1) = inf.
 #[test]
 fn ported_surface_math_inverse_trig() {
     let data = vec![128u8; 100 * 100];
     let im = Raster::new(100, 100, PixelFormat::Gray8, data).unwrap();
     let im = im.div_const(255.0);
+    assert!(im.format().is_float(), "div_const promotes to float");
 
     let result = im.asin();
     let px_i = im.getpoint(50, 50);
@@ -598,6 +599,16 @@ fn ported_surface_math_inverse_trig() {
     let px_r = result.getpoint(50, 50);
     let expected = px_i[0].atan().to_degrees();
     assert!((px_r[0] - expected).abs() < 0.1);
+
+    // The literal test_atanh body (ported_arithmetic.rs::test_atanh).
+    let result = im.atanh();
+    let px_r = result.getpoint(50, 50);
+    let expected = px_i[0].atanh();
+    assert!(
+        expected.is_finite() && px_r[0].is_finite(),
+        "atanh(128/255) is finite under the float div contract"
+    );
+    assert!((px_r[0] - expected).abs() < 0.01);
 }
 
 /// The ported `test_atan2` body (`ported_arithmetic.rs`).
@@ -615,9 +626,10 @@ fn ported_surface_atan2() {
 }
 
 /// The ported `test_sinh` / `test_cosh` / `test_tanh` and
-/// `test_asinh` / `test_acosh` bodies; `test_atanh`'s op pinned from a
-/// float raster holding the 128/255 value its setup intends (see
-/// `ported_surface_math_inverse_trig`).
+/// `test_asinh` / `test_acosh` bodies; the `atanh` op additionally
+/// pinned from a hand-built float raster holding 128/255, which now
+/// matches what `div_const(255.0)` itself produces (see
+/// `ported_surface_math_inverse_trig` for the literal setup).
 ///
 /// The ported sinh / cosh bodies probe (10, 10), where the mono image
 /// holds 226; sinh(226) is about 7.07e97, far beyond `f32::MAX`
