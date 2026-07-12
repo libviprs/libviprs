@@ -160,10 +160,25 @@ fn read_u32(data: &[u8], bpc: usize, i: usize) -> u32 {
     }
 }
 
-/// Read the flat `i`-th sample as `f64`.
+/// Read the flat `i`-th sample as `f64`. Unlike [`read_u32`], this reads
+/// every depth including the `f32` formats (native byte order, matching
+/// [`crate::raster_ops`]), so the read-only reductions (`avg`, `deviate`,
+/// `min`/`max`, `minpos`/`maxpos`) and the relational ops work on the
+/// float rasters the create generators emit. The mutating ops still go
+/// through [`write_u32`] / [`depth_max`] and keep rejecting float
+/// outputs loudly.
 #[inline]
 fn read_f64(data: &[u8], bpc: usize, i: usize) -> f64 {
-    read_u32(data, bpc, i) as f64
+    match bpc {
+        1 => f64::from(data[i]),
+        2 => f64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        _ => f64::from(f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+    }
 }
 
 /// Write the flat `i`-th sample. `v` must already fit the depth.
@@ -259,9 +274,24 @@ fn expect_arith<T>(op: &str, r: Result<T, ArithmeticError>) -> T {
     }
 }
 
+/// Reject float inputs on the mutating (integer-writing) paths with the
+/// long-standing loud message, now that [`read_f64`] itself reads floats
+/// for the reductions. Without this, an op that forces an integer output
+/// depth (`add_const` promotes to 16-bit) would silently round-trip a
+/// float raster through `u16` instead of failing.
+#[track_caller]
+fn reject_float_input(r: &Raster) {
+    assert!(
+        !r.format().is_float(),
+        "the arithmetic operations do not support float rasters yet; \
+         cast to an unsigned 8/16-bit format first"
+    );
+}
+
 /// Apply `f` to every sample, writing a result of the same shape at
 /// `out_bpc` depth (rounded and saturated).
 fn unary_map(r: &Raster, out_bpc: usize, f: impl Fn(f64) -> f64) -> Raster {
+    reject_float_input(r);
     let fmt = r.format();
     let bands = fmt.channels();
     let in_bpc = fmt.bytes_per_channel();
@@ -298,6 +328,7 @@ fn vec_map(
     out_bpc: usize,
     f: impl Fn(f64, f64) -> f64,
 ) -> Result<Raster, ArithmeticError> {
+    reject_float_input(r);
     let fmt = r.format();
     let bands = fmt.channels();
     if v.len() != bands {
@@ -332,6 +363,8 @@ fn binary_map(
     widen: bool,
     f: impl Fn(f64, f64) -> f64,
 ) -> Result<Raster, ArithmeticError> {
+    reject_float_input(a);
+    reject_float_input(b);
     ensure_compatible(a, b)?;
     let (a_bpc, b_bpc) = (
         a.format().bytes_per_channel(),
@@ -2631,14 +2664,36 @@ mod tests {
         assert_eq!(im.unpremultiply().getpoint(0, 0), vec![255.0, 100.0]);
     }
 
-    /// The arithmetic ops reject float rasters loudly instead of
-    /// misreading their bytes as u16 pairs (float maths lands with a
-    /// later batch; cast to an unsigned format first).
+    /// The mutating arithmetic ops still reject float rasters loudly
+    /// instead of writing garbage (float outputs land with a later
+    /// batch; cast to an unsigned format first). The read-only
+    /// reductions accept floats since the create batch.
     #[test]
     #[should_panic(expected = "do not support float rasters")]
-    fn arithmetic_float_panics() {
+    fn arithmetic_float_write_panics() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
-        let _ = im.avg();
+        let _ = im.add_const(1.0);
+    }
+
+    /// The read-only reductions read `f32` samples: the float generators
+    /// from the create batch (`gaussnoise`, the masks) call `avg`,
+    /// `deviate`, `min`/`max`, and the position scans directly.
+    #[test]
+    fn reductions_read_float_rasters() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let mut im = Raster::zeroed(2, 2, f1).unwrap();
+        let samples: [f32; 4] = [0.5, -1.5, 2.0, 1.0];
+        for (i, v) in samples.iter().enumerate() {
+            im.data_mut()[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
+        }
+        assert_eq!(im.avg(), 0.5);
+        assert_eq!(im.min(), -1.5);
+        assert_eq!(im.max(), 2.0);
+        assert_eq!(im.minpos(), (-1.5, 1, 0));
+        assert_eq!(im.maxpos(), (2.0, 0, 1));
+        // sum 2.0, sum of squares 7.5: variance (7.5 - 2^2/4) / 3.
+        let dev = im.deviate();
+        assert!((dev - (6.5f64 / 3.0).sqrt()).abs() < 1e-12);
     }
 }
