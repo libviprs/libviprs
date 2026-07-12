@@ -32,8 +32,9 @@
 //! | [`Raster::project`] | `vips_project` | column and row sums |
 //! | [`Raster::add_const`], [`Raster::sub_const`], ... | `vips_linear1` family | per-sample constant arithmetic |
 //! | [`Raster::add_vec`], [`Raster::sub_vec`], ... | `vips_linear` family | per-band constant arithmetic |
-//! | [`Raster::sub`], [`Raster::mul`], [`Raster::div`] | `vips_subtract` / `multiply` / `divide` | image-image arithmetic |
-//! | [`Raster::linear`] | `vips_linear1` | `a * x + b` |
+//! | [`Raster::sub`], [`Raster::mul`] | `vips_subtract` / `vips_multiply` | image-image arithmetic |
+//! | [`Raster::div`], [`Raster::div_const`], [`Raster::div_vec`] | `vips_divide` | float raster |
+//! | [`Raster::linear`] / [`Raster::linear_uchar`] | `vips_linear1` (default / `uchar` option) | `a * x + b`, float / uchar raster |
 //! | [`Raster::sum`] | `vips_sum` | pixelwise sum of an image list |
 //! | [`Raster::minpair`] / [`Raster::maxpair`] | `vips_minpair` / `vips_maxpair` | pixelwise extremum of two images |
 //! | [`Raster::more_than`] family | `vips_relational` | `0` / `255` uchar mask |
@@ -52,17 +53,19 @@
 //!
 //! * **Value domain.** Samples are unsigned integers, `0..=255` (8-bit) or
 //!   `0..=65535` (16-bit). Arithmetic is computed in `f64` and the result is
-//!   rounded to nearest and saturated into the output depth. libvips
-//!   promotes many of these ops to float output; the integer round-and-
-//!   saturate contract predates the float pixel formats and is kept for the
-//!   `add_const` / `linear` / `div` family. The transcendental family below
-//!   produces float output instead.
+//!   rounded to nearest and saturated into the output depth. This integer
+//!   round-and-saturate contract is kept exactly where libvips keeps
+//!   integer output: `vips_add` / `vips_subtract` / `vips_multiply` map
+//!   integer input to integer output, so `add` / `sub` / `mul` and their
+//!   constant forms stay integer here. The divide family and `linear`
+//!   promote to float output instead (see below), as does the
+//!   transcendental family.
 //! * **Depth promotion.** Operations whose exact result can exceed the
-//!   input depth (`add_const`, `mul`, `pow_const`, `linear`, `sum`, ...)
+//!   input depth (`add_const`, `mul`, `pow_const`, `sum`, ...)
 //!   promote 8-bit input to 16-bit output, matching the promotion
 //!   [`Raster::add`] already performs. 16-bit input has no wider format and
 //!   saturates at `65535`. Operations that cannot exceed the input depth
-//!   (`sub`, `div`, `clamp`, ...) keep it; subtraction saturates at `0`.
+//!   (`sub`, `clamp`, ...) keep it; subtraction saturates at `0`.
 //! * **Comparisons.** The relational family returns an 8-bit image with the
 //!   input's band count holding `255` where the relation holds and `0`
 //!   where it does not, matching libvips.
@@ -71,6 +74,16 @@
 //! * **NaN.** A NaN result (e.g. `0.0.powf(f64::NAN)`) writes `0`.
 //!
 //! # Float-output operations
+//!
+//! The divide family ([`Raster::div`], [`Raster::div_const`],
+//! [`Raster::div_vec`]) and [`Raster::linear`] produce a float raster,
+//! matching the libvips promotion tables: `vips_divide` maps every
+//! integer input format to float, and `vips_linear` computes in float
+//! and only casts down when the caller asks for it (the `uchar` option,
+//! [`Raster::linear_uchar`] here). A quotient such as `128 / 255`
+//! therefore stays `0.502` instead of rounding to `1`, which keeps
+//! `atanh` and the other domain-limited maths finite on scaled input.
+//! Division by zero still produces `0`, matching `vips_divide`.
 //!
 //! The transcendental family (`vips_math`: `sin` through `atanh`, `log`,
 //! `log10`, `exp`, `exp10`; `vips_math2`: `atan2`, `pow`, `wop`; `neg`) and
@@ -192,9 +205,10 @@ fn read_u32(data: &[u8], bpc: usize, i: usize) -> u32 {
 /// every depth including the `f32` formats (native byte order, matching
 /// [`crate::raster_ops`]), so the read-only reductions (`avg`, `deviate`,
 /// `min`/`max`, `minpos`/`maxpos`) and the relational ops work on the
-/// float rasters the create generators emit. The mutating ops still go
-/// through [`write_u32`] / [`depth_max`] and keep rejecting float
-/// outputs loudly.
+/// float rasters the create generators emit. The integer-writing ops
+/// still go through [`write_u32`] / [`depth_max`] and keep rejecting
+/// float input loudly; the float-output linear / divide family reads
+/// every depth.
 #[inline]
 fn read_f64(data: &[u8], bpc: usize, i: usize) -> f64 {
     match bpc {
@@ -338,6 +352,34 @@ fn unary_map_float(r: &Raster, f: impl Fn(f64) -> f64) -> Raster {
         write_f32(&mut out, i, f(read_f64(data, in_bpc, i)));
     }
     Raster::new(r.width(), r.height(), out_fmt, out).expect("arithmetic output is well-formed")
+}
+
+/// Apply per-band `f(sample, band_constant)` to every sample, producing
+/// a float raster. Accepts every input depth including float; see
+/// [`unary_map_float`].
+fn vec_map_float(
+    r: &Raster,
+    v: &[f64],
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    let fmt = r.format();
+    let bands = fmt.channels();
+    if v.len() != bands {
+        return Err(ArithmeticError::ConstCountMismatch {
+            expected: bands,
+            got: v.len(),
+        });
+    }
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let mut out = vec![0u8; n * 4];
+    let data = r.data();
+    for i in 0..n {
+        write_f32(&mut out, i, f(read_f64(data, in_bpc, i), v[i % bands]));
+    }
+    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
 }
 
 /// Apply `f` samplewise across two compatible images, producing a float
@@ -1034,16 +1076,23 @@ impl Raster {
         unary_map(self, 2, |v| v * c)
     }
 
-    /// Divide every sample by a constant; division by zero produces `0`,
-    /// matching libvips.
+    /// Divide every sample by a constant. The output is a float raster,
+    /// matching the libvips float promotion for division (`vips_divide`
+    /// maps every integer format to float, and pyvips lowers `image / c`
+    /// to `vips_linear`, which also floats), so quotients keep their
+    /// fractional part: `128 / 255` stays `~0.502` instead of rounding
+    /// to `1`. Division by zero produces `0`, matching `vips_divide`.
+    /// Accepts every input depth including float.
     pub fn div_const(&self, c: f64) -> Raster {
-        unary_map(self, self.format().bytes_per_channel(), move |v| {
-            if c == 0.0 { 0.0 } else { v / c }
-        })
+        unary_map_float(self, move |v| if c == 0.0 { 0.0 } else { v / c })
     }
 
     /// Floor-divide every sample by a constant (Python `//`); division by
-    /// zero produces `0`.
+    /// zero produces `0`. This op keeps the integer output contract: the
+    /// floored quotient of an unsigned integer sample is exactly
+    /// representable at the input depth, so the sample values match the
+    /// pyvips float result exactly and the integer format serves the
+    /// index-building callers ([`crate::histogram`]).
     pub fn floordiv_const(&self, c: f64) -> Raster {
         unary_map(self, self.format().bytes_per_channel(), move |v| {
             if c == 0.0 { 0.0 } else { (v / c).floor() }
@@ -1064,10 +1113,38 @@ impl Raster {
         })
     }
 
-    /// `a * sample + b` for every sample (libvips `linear`). 8-bit input
-    /// promotes to 16-bit; results saturate at the output depth and at `0`.
+    /// `a * sample + b` for every sample (libvips `linear`). The output
+    /// is a float raster, matching `vips_linear`, which computes in
+    /// float and never rounds into an integer container unless the
+    /// caller asks; [`Raster::linear_uchar`] is the asking form.
+    /// Fractional and negative results survive. Accepts every input
+    /// depth including float.
     pub fn linear(&self, a: f64, b: f64) -> Raster {
-        unary_map(self, 2, move |v| a * v + b)
+        unary_map_float(self, move |v| a * v + b)
+    }
+
+    /// `a * sample + b` clipped into `0..=255` and truncated into an
+    /// 8-bit raster (libvips `linear` with the `uchar` option): the
+    /// caller-requests-integer form of [`Raster::linear`]. The
+    /// truncation is the C float-to-uchar cast `vips_linear1` performs,
+    /// not a rounding, matching the `mask_*` uchar path in
+    /// [`crate::create`]. Accepts every input depth including float, so
+    /// it also casts a floated linear / divide result back to uchar.
+    pub fn linear_uchar(&self, a: f64, b: f64) -> Raster {
+        let fmt = self.format();
+        let (bands, in_bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let out_fmt = PixelFormat::with_channels(bands, 1)
+            .expect("band count unchanged, so the 8-bit output format exists");
+        let n = self.width() as usize * self.height() as usize * bands;
+        let mut out = vec![0u8; n];
+        let data = self.data();
+        for (i, o) in out.iter_mut().enumerate() {
+            // C-style cast: clip, then truncate toward zero (NaN casts
+            // to 0 in Rust, which VIPS_FCLIP's comparisons also yield).
+            *o = (a * read_f64(data, in_bpc, i) + b).clamp(0.0, 255.0) as u8;
+        }
+        Raster::new(self.width(), self.height(), out_fmt, out)
+            .expect("arithmetic output is well-formed")
     }
 
     /// Per-band constant addition (libvips `add` with a vector constant);
@@ -1134,16 +1211,17 @@ impl Raster {
         expect_arith("mul_vec", self.try_mul_vec(v))
     }
 
-    /// Per-band constant division; division by zero produces `0`.
+    /// Per-band constant division. Float output, matching the libvips
+    /// float promotion for division (see [`Raster::div_const`]);
+    /// division by zero produces `0`. Accepts every input depth
+    /// including float.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
     /// one element per band.
     pub fn try_div_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
-        vec_map(self, v, self.format().bytes_per_channel(), |s, c| {
-            if c == 0.0 { 0.0 } else { s / c }
-        })
+        vec_map_float(self, v, |s, c| if c == 0.0 { 0.0 } else { s / c })
     }
 
     /// Panicking form of [`Raster::try_div_vec`], matching the ported-test
@@ -1303,20 +1381,18 @@ impl Raster {
         expect_arith("mul", self.try_mul(other))
     }
 
-    /// Divide `self` by `other` samplewise (libvips `divide`); division by
-    /// zero produces `0`.
+    /// Divide `self` by `other` samplewise (libvips `divide`). Float
+    /// output: the `vips_divide` promotion table maps every integer
+    /// input format to float, so fractional quotients survive. Division
+    /// by zero produces `0`, matching libvips. Accepts every input
+    /// depth including float.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
     /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
     pub fn try_div(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
-        binary_map(
-            self,
-            other,
-            false,
-            |a, b| if b == 0.0 { 0.0 } else { a / b },
-        )
+        binary_map_float(self, other, |a, b| if b == 0.0 { 0.0 } else { a / b })
     }
 
     /// Panicking form of [`Raster::try_div`], matching the ported-test
@@ -2760,24 +2836,46 @@ mod tests {
         assert_eq!(im.mul_const(1.5).getpoint(1, 0), vec![5.0]); // 4.5 -> 5 (round half up)
     }
 
-    /// div_const halves values; a zero divisor produces zero, matching
-    /// libvips.
+    /// div_const halves values into a float raster; a zero divisor
+    /// produces zero, matching libvips.
     #[test]
     fn div_const_and_zero_divisor() {
         let im = gray(1, 1, vec![100]);
-        assert_eq!(im.div_const(2.0).getpoint(0, 0), vec![50.0]);
+        let r = im.div_const(2.0);
+        assert!(r.format().is_float());
+        assert_eq!(r.getpoint(0, 0), vec![50.0]);
         assert_eq!(im.div_const(0.0).getpoint(0, 0), vec![0.0]);
     }
 
-    /// floordiv_const floors the quotient instead of rounding.
+    /// The ported test_atanh scenario (libviprs-tests issue #77):
+    /// div_const(255.0) on a 128 image keeps the float quotient
+    /// (libvips promotes division to float), so atanh of the mid-range
+    /// value is finite and correct instead of atanh(1) = inf.
+    #[test]
+    fn div_const_float_enables_atanh() {
+        let im = gray(1, 1, vec![128]);
+        let q = im.div_const(255.0);
+        assert!(q.format().is_float());
+        let v = float_samples(&q)[0];
+        assert!((v - 128.0 / 255.0).abs() < 1e-6, "128/255 ~ 0.502, got {v}");
+        let a = float_samples(&q.atanh())[0];
+        let expected = (128.0f64 / 255.0).atanh(); // ~0.55245
+        assert!(a.is_finite(), "atanh(0.502) is finite, got {a}");
+        assert!((a - expected).abs() < 1e-6, "expected {expected}, got {a}");
+    }
+
+    /// floordiv_const floors the quotient into the integer container;
+    /// div_const keeps the exact float quotient.
     #[test]
     fn floordiv_const_floors() {
         let im = gray(1, 1, vec![100]);
         assert_eq!(im.floordiv_const(3.0).getpoint(0, 0), vec![33.0]);
-        assert_eq!(im.div_const(3.0).getpoint(0, 0), vec![33.0]); // 33.33 rounds to 33
+        let q = im.div_const(3.0).getpoint(0, 0)[0];
+        assert!((q - 100.0 / 3.0).abs() < 1e-4, "100/3 stays 33.33, got {q}");
         let im9 = gray(1, 1, vec![9]);
         assert_eq!(im9.floordiv_const(5.0).getpoint(0, 0), vec![1.0]); // 1.8 floors to 1
-        assert_eq!(im9.div_const(5.0).getpoint(0, 0), vec![2.0]); // 1.8 rounds to 2
+        let q = im9.div_const(5.0).getpoint(0, 0)[0];
+        assert!((q - 1.8).abs() < 1e-6, "9/5 stays 1.8, got {q}");
     }
 
     /// pow_const promotes so squares survive, and saturates at 65535.
@@ -2801,16 +2899,41 @@ mod tests {
         assert_eq!(im.rem_const(0.0).getpoint(2, 0), vec![0.0]);
     }
 
-    /// linear computes a*x + b with promotion.
+    /// linear computes a*x + b into a float raster; negative and
+    /// fractional results survive instead of saturating or rounding.
     #[test]
     fn linear_values() {
         let im = gray(2, 1, vec![0, 100]);
         let r = im.linear(1.0, 10.0);
-        assert_eq!(r.format(), PixelFormat::Gray16);
+        assert!(r.format().is_float());
         assert_eq!(r.getpoint(0, 0), vec![10.0]);
         assert_eq!(r.getpoint(1, 0), vec![110.0]);
         assert!((r.avg() - 60.0).abs() < 1e-9);
         assert_eq!(im.linear(3.0, 5.0).getpoint(1, 0), vec![305.0]);
+        // The float contract: no zero saturation, no rounding.
+        assert_eq!(float_samples(&im.linear(1.0, -20.0)), vec![-20.0, 80.0]);
+        assert_eq!(float_samples(&im.linear(1.0, 0.5)), vec![0.5, 100.5]);
+    }
+
+    /// linear_uchar is the caller-requests-integer form (the vips_linear
+    /// uchar option): clipped into 0..=255, then truncated by the C
+    /// float-to-uchar cast, accepting float input, so it casts a floated
+    /// raster back to uchar.
+    #[test]
+    fn linear_uchar_truncates_and_saturates() {
+        let im = gray(3, 1, vec![10, 200, 0]);
+        let r = im.linear_uchar(2.0, -20.0);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.data(), &[0, 255, 0]); // 0 exact, 380 clips, -20 clips
+
+        // Truncation, not rounding: 9 * 0.2 = 1.8 casts to 1.
+        assert_eq!(gray(1, 1, vec![9]).linear_uchar(0.2, 0.0).data(), &[1]);
+
+        // Round-trip a floated quotient back to uchar.
+        let back = gray(1, 1, vec![128])
+            .div_const(255.0)
+            .linear_uchar(255.0, 0.0);
+        assert_eq!(back.data(), &[128]);
     }
 
     /// add_vec applies one constant per band; a wrong-length vector is a
@@ -2829,8 +2952,9 @@ mod tests {
         ));
     }
 
-    /// sub_vec, mul_vec, and div_vec apply per-band constants with the
-    /// documented saturation / promotion.
+    /// sub_vec and mul_vec apply per-band constants with the documented
+    /// integer saturation / promotion; div_vec floats per band, with the
+    /// zero-divisor rule.
     #[test]
     fn other_vec_ops() {
         let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
@@ -2841,10 +2965,72 @@ mod tests {
         let r = im.mul_vec(&[1.0, 2.0, 30.0]);
         assert_eq!(r.format(), PixelFormat::Rgb16);
         assert_eq!(r.getpoint(0, 0), vec![10.0, 40.0, 900.0]);
+        let d = im.div_vec(&[2.0, 0.0, 3.0]);
+        assert!(d.format().is_float());
+        let d = d.getpoint(0, 0);
+        assert_eq!(&d[..2], &[5.0, 0.0]);
+        assert!((d[2] - 10.0).abs() < 1e-6);
+        // Wrong-length vectors stay typed errors on the float path.
+        assert!(matches!(
+            im.try_div_vec(&[1.0]),
+            Err(ArithmeticError::ConstCountMismatch {
+                expected: 3,
+                got: 1
+            })
+        ));
+    }
+
+    /// The libvips promotion table for the linear / divide family:
+    /// divide always outputs float (the `vips_divide` table maps every
+    /// integer format to float); linear outputs float (`vips_linear`)
+    /// unless the caller requests uchar; add / subtract / multiply keep
+    /// the integer contract (`vips_add` / `vips_subtract` /
+    /// `vips_multiply` keep integer formats for integer input).
+    #[test]
+    fn linear_divide_promotion_table() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im8 = gray(1, 1, vec![128]);
+        let im16 = gray16(1, 1, &[1000]);
+
+        // Divide family: always float.
+        assert_eq!(im8.div_const(2.0).format(), f1);
+        assert_eq!(im16.div_const(2.0).format(), f1);
+        assert_eq!(im8.div(&im8).format(), f1);
+        assert_eq!(im8.div_vec(&[2.0]).format(), f1);
+        let rgb = Raster::new(1, 1, PixelFormat::Rgb8, vec![1, 2, 3]).unwrap();
         assert_eq!(
-            im.div_vec(&[2.0, 0.0, 3.0]).getpoint(0, 0),
-            vec![5.0, 0.0, 10.0]
+            rgb.div_const(2.0).format(),
+            PixelFormat::with_channels(3, 4).unwrap()
         );
+
+        // linear: float unless uchar is requested.
+        assert_eq!(im8.linear(1.0, 0.0).format(), f1);
+        assert_eq!(im16.linear(1.0, 0.0).format(), f1);
+        assert_eq!(im8.linear_uchar(1.0, 0.0).format(), PixelFormat::Gray8);
+
+        // Integer contract unchanged everywhere libvips keeps integer.
+        assert_eq!(im8.add_const(1.0).format(), PixelFormat::Gray16);
+        assert_eq!(im8.sub_const(1.0).format(), PixelFormat::Gray8);
+        assert_eq!(im8.mul_const(2.0).format(), PixelFormat::Gray16);
+        assert_eq!(im8.add_vec(&[1.0]).format(), PixelFormat::Gray16);
+        assert_eq!(im8.sub_vec(&[1.0]).format(), PixelFormat::Gray8);
+        assert_eq!(im8.mul_vec(&[2.0]).format(), PixelFormat::Gray16);
+        assert_eq!(im8.sub(&im8).format(), PixelFormat::Gray8);
+        assert_eq!(im8.mul(&im8).format(), PixelFormat::Gray16);
+        assert_eq!(im8.floordiv_const(2.0).format(), PixelFormat::Gray8);
+        assert_eq!(im8.rem_const(2.0).format(), PixelFormat::Gray8);
+        assert_eq!(im8.pow_const(2.0).format(), PixelFormat::Gray16);
+    }
+
+    /// The linear / divide family accepts float input now that it writes
+    /// float output, so chains like div_const(...).linear(...) work.
+    #[test]
+    fn linear_divide_accept_float_input() {
+        let im = grayf(1, 1, &[0.5]);
+        assert_eq!(float_samples(&im.div_const(2.0)), vec![0.25]);
+        assert_eq!(float_samples(&im.linear(2.0, 1.0)), vec![2.0]);
+        assert_eq!(float_samples(&im.div(&im)), vec![1.0]);
+        assert_eq!(float_samples(&im.div_vec(&[4.0])), vec![0.125]);
     }
 
     // ---- unary shape ops ----
@@ -3346,10 +3532,10 @@ mod tests {
         assert_eq!(im.unpremultiply().getpoint(0, 0), vec![255.0, 100.0]);
     }
 
-    /// The mutating arithmetic ops still reject float rasters loudly
-    /// instead of writing garbage (float outputs land with a later
-    /// batch; cast to an unsigned format first). The read-only
-    /// reductions accept floats since the create batch.
+    /// The integer-writing arithmetic ops still reject float rasters
+    /// loudly instead of writing garbage (the linear / divide family
+    /// floats; cast to an unsigned format first for the rest). The
+    /// read-only reductions accept floats since the create batch.
     #[test]
     #[should_panic(expected = "do not support float rasters")]
     fn arithmetic_float_write_panics() {
@@ -3425,6 +3611,25 @@ mod tests {
         assert!((a[1] - 135.0).abs() < 1e-4, "quadrant II, got {}", a[1]);
         assert!((a[2] + 135.0).abs() < 1e-4, "quadrant III, got {}", a[2]);
         assert!((a[3] + 45.0).abs() < 1e-4, "quadrant IV, got {}", a[3]);
+    }
+
+    /// sinh / cosh overflow the f32 op output above asinh / acosh of
+    /// f32::MAX (~89.4): real libvips `vips_math` on uchar input also
+    /// outputs float (f32) and yields inf there, so inf IS the correct
+    /// op result for large fixture values (libviprs-tests issue #77:
+    /// sinh(226) ~ 3.7e97 >> f32::MAX ~ 3.4e38). Small probes stay
+    /// finite and exact.
+    #[test]
+    fn sinh_cosh_f32_overflow_matches_libvips() {
+        let big = gray(1, 1, vec![226]);
+        assert_eq!(float_samples(&big.sinh()), vec![f64::INFINITY]);
+        assert_eq!(float_samples(&big.cosh()), vec![f64::INFINITY]);
+
+        let small = gray(2, 1, vec![3, 5]);
+        let s = float_samples(&small.sinh());
+        assert!((s[0] - 3.0f64.sinh()).abs() < 1e-3, "sinh(3), got {}", s[0]);
+        let c = float_samples(&small.cosh());
+        assert!((c[1] - 5.0f64.cosh()).abs() < 1e-2, "cosh(5), got {}", c[1]);
     }
 
     /// The hyperbolic family round-trips through its inverses on float
