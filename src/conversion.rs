@@ -535,6 +535,17 @@ impl Raster {
     // Metadata read surface
     // ------------------------------------------------------------------
 
+    /// Number of colour bands (channels) in this raster (libvips `bands`).
+    ///
+    /// Equal to `self.format().channels()`: `1` for the grayscale formats,
+    /// `3` for RGB, `4` for RGBA, and `n` for the multiband / float
+    /// carriers. Unlike libvips, where the band count is stored
+    /// independently of the sample format, libviprs derives it from the
+    /// [`PixelFormat`], so it always agrees with the buffer geometry.
+    pub fn bands(&self) -> u32 {
+        self.format().channels() as u32
+    }
+
     /// The colour [`Interpretation`] of this raster: the value set by
     /// [`Raster::copy`], or one inferred from the [`PixelFormat`] via
     /// [`Interpretation::for_format`] when none has been set.

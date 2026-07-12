@@ -1,11 +1,42 @@
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use image::{GenericImageView, ImageReader, Limits};
 use thiserror::Error;
 
+use crate::imageio::MetadataValue;
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
+
+/// Process-global, path-keyed cache of decoded rasters, backing the
+/// libvips-style load/revalidate semantics ([`decode_file`],
+/// [`decode_file_with_options`], [`Raster::invalidate`]).
+///
+/// libvips keeps a global operation cache, so repeatedly opening the same
+/// file hands back the already-decoded image instead of re-reading and
+/// re-decoding it. A binding built on that library inherits the behaviour,
+/// including its sharp edge: a plain reload returns the *first* image
+/// decoded for a path even after the file changes on disk. The ported
+/// `test_revalidate` pins exactly this, so libviprs mirrors it with a
+/// single process-wide map from the requested path to the raster produced
+/// for it.
+///
+/// - A plain [`decode_file`] is cache-first: the first decode of a path
+///   populates the entry, and every later plain load returns that raster
+///   (a possibly stale read).
+/// - [`decode_file_with_options`] with `revalidate = true` skips the
+///   lookup, re-reads from disk, and refreshes the entry.
+/// - [`Raster::invalidate`] drops the entry for the image's source path.
+///
+/// The map is intentionally never evicted: entries live for the process
+/// lifetime, matching libvips' own unbounded default and keeping the
+/// binding semantics deterministic. A poisoned lock is recovered in place
+/// (the cached rasters are plain data with no broken invariant), so no
+/// path here can panic on lock poisoning.
+static LOAD_CACHE: LazyLock<Mutex<HashMap<PathBuf, Raster>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Errors that can occur when decoding an image source.
 ///
@@ -136,8 +167,69 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#pyramid) (general
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
+///
+/// The decode is served through a process-global, path-keyed load cache
+/// (see [`LOAD_CACHE`]): the first load of a path is decoded from disk and
+/// cached, and every later call returns that cached raster even if the
+/// file has since changed on disk. Use [`decode_file_with_options`] with
+/// `revalidate = true` to force a re-read, or [`Raster::invalidate`] to
+/// drop a path's cached entry.
 pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
-    decode_file_with_limits(path, DecodeLimits::default())
+    decode_file_with_options(path, false)
+}
+
+/// Decode an image file into a [`Raster`], optionally bypassing the
+/// process-global load cache (libvips' `revalidate` load option).
+///
+/// With `revalidate = false` this is [`decode_file`]: a cache-first load
+/// that returns the raster first decoded for `path`, even if the file has
+/// since changed on disk. With `revalidate = true` the cache lookup is
+/// skipped, the file is re-read and decoded fresh, and the cache entry for
+/// `path` is refreshed so subsequent plain [`decode_file`] calls see the
+/// new image. See [`LOAD_CACHE`] for the caching contract and its
+/// libvips-binding rationale.
+///
+/// # Errors
+///
+/// As [`decode_file`]: I/O, decode, unsupported-format, dimension-limit,
+/// and raster-construction errors are all surfaced as [`SourceError`].
+pub fn decode_file_with_options(path: &Path, revalidate: bool) -> Result<Raster, SourceError> {
+    if !revalidate {
+        // Cache hit: hand back a clone of the already-decoded raster.
+        let cache = LOAD_CACHE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(cached) = cache.get(path) {
+            return Ok(cached.clone());
+        }
+    }
+    // Miss, or a forced revalidate: decode from disk outside the lock so a
+    // slow decode never serialises other paths' loads.
+    let raster = decode_file_with_limits(path, DecodeLimits::default())?;
+    LOAD_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(path.to_path_buf(), raster.clone());
+    Ok(raster)
+}
+
+impl Raster {
+    /// Drop this image's entry from the process-global load cache (libvips
+    /// `vips_image_invalidate`), so the next plain [`decode_file`] of its
+    /// source path re-reads and re-decodes it from disk.
+    ///
+    /// The path is the `filename` recorded by [`decode_file`] when the
+    /// image was loaded. An image with no recorded filename (one built in
+    /// memory) has nothing cached under a path, so this is a no-op for it.
+    /// See [`LOAD_CACHE`] for the caching contract.
+    pub fn invalidate(&mut self) {
+        if let Some(MetadataValue::Str(filename)) = self.fields.get("filename") {
+            LOAD_CACHE
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(Path::new(filename));
+        }
+    }
 }
 
 /// Decode an image file into a [`Raster`] under explicit [`DecodeLimits`].
@@ -696,5 +788,62 @@ mod tests {
             want.extend_from_slice(&alpha.to_ne_bytes());
             assert_eq!(&data[base..base + 8], want.as_slice(), "pixel {i} mismatch");
         }
+    }
+
+    /**
+     * Reproduces the ported `test_revalidate` cache contract. A plain
+     * `decode_file` serves the first raster decoded for a path even after
+     * the file is overwritten on disk; `decode_file_with_options(_, true)`
+     * bypasses the cache, re-reads, and refreshes the entry; and a later
+     * plain reload then observes the refreshed image.
+     * Input: write 10x10 .v -> load 10; overwrite 20x20 -> plain reload
+     * still 10 (stale); revalidate -> 20; plain reload -> 20.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn revalidate_bypasses_and_refreshes_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revalidate.v");
+
+        Raster::black(10, 10).save(&path).unwrap();
+        assert_eq!(decode_file(&path).unwrap().width(), 10);
+
+        // Overwrite with a differently sized image on disk.
+        Raster::black(20, 20).save(&path).unwrap();
+
+        // Plain reload is served from the cache: still the old width.
+        assert_eq!(decode_file(&path).unwrap().width(), 10);
+
+        // Revalidate bypasses the cache and refreshes the entry.
+        assert_eq!(decode_file_with_options(&path, true).unwrap().width(), 20);
+
+        // The refreshed entry is what a plain reload now returns.
+        assert_eq!(decode_file(&path).unwrap().width(), 20);
+    }
+
+    /**
+     * Tests that `Raster::invalidate` drops the cached entry for the
+     * image's source path, so the next plain `decode_file` re-reads the
+     * (changed) file from disk.
+     * Input: load 8x8 .v; overwrite 16x16; plain reload still 8 (cached);
+     * invalidate; plain reload -> 16.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn invalidate_drops_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalidate.v");
+
+        Raster::black(8, 8).save(&path).unwrap();
+        let mut im = decode_file(&path).unwrap();
+        assert_eq!(im.width(), 8);
+
+        Raster::black(16, 16).save(&path).unwrap();
+        // Still served from the cache until invalidated.
+        assert_eq!(decode_file(&path).unwrap().width(), 8);
+
+        im.invalidate();
+        // Entry dropped: the plain reload re-reads the 16-wide file.
+        assert_eq!(decode_file(&path).unwrap().width(), 16);
     }
 }
