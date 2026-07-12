@@ -48,13 +48,20 @@
 //!   above the scale survive, as in libvips float) and clamp to `0..1`
 //!   only where the PDF blend functions require it. Results are blended
 //!   premultiplied in `f64`, unpremultiplied, and written back on the
-//!   same numeric scale with round-to-nearest and clamping to the
-//!   container range. Every mode is therefore exact to the output
-//!   quantisation; none of the blend modes is blocked on a float
-//!   `PixelFormat`. (The ported non-separable test additionally *casts
-//!   its inputs* to a float format before compositing; that cast target
-//!   arrives with the float-format batch and is independent of this
-//!   operation.)
+//!   same numeric scale; integer containers round to nearest and clamp
+//!   to the container range, so every integer mode is exact to the
+//!   output quantisation. Float rasters ([`PixelFormat::RgbaF32`],
+//!   [`PixelFormat::FloatF32`]) composite on the same 0..255 numeric
+//!   scale: libvips derives `max_band` from the compositing-space
+//!   *interpretation* (sRGB unless a 16-bit-tagged input is present),
+//!   never from the storage depth
+//!   (`vips_composite_base_max_band` via
+//!   `vips_interpretation_max_alpha`), so a float image cast from 8-bit
+//!   keeps its 0..255 colour values and its 0..255 alpha. Float
+//!   write-back follows the float instantiation of
+//!   `vips_combine_pixels` (numeric limits 0, 0 meaning "no limit"):
+//!   no rounding and no clamping, so fractional, negative, and
+//!   beyond-scale (HDR) samples round-trip exactly at `f32` precision.
 //! * **Metadata.** The result carries the base image's metadata
 //!   (interpretation, resolution, offsets, orientation, and attached
 //!   fields), like libvips which copies the header from the first input.
@@ -244,18 +251,27 @@ fn read_raw(data: &[u8], bpc: usize, i: usize) -> f64 {
     match bpc {
         1 => data[i] as f64,
         2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as f64,
-        // Float compositing (the non-separable ported tests) lands with a
-        // later batch; panic rather than misread float bytes as u16 pairs.
-        _ => panic!(
-            "composite does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
+        // Float: the raw sample, exact in f64. The caller normalises by
+        // the same interpretation-derived scale as the integer depths
+        // (libvips `max_band` comes from the compositing space, not the
+        // storage depth), so a float raster cast from 8-bit reads its
+        // 0..255 numeric values unchanged.
+        _ => f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]) as f64,
     }
 }
 
 /// Write a scale-normalised sample at the given depth: the value is
-/// multiplied back onto its numeric scale, rounded to nearest, and
-/// clamped to the container range.
+/// multiplied back onto its numeric scale. Integer containers round to
+/// nearest and clamp to the container range; float containers store the
+/// product as-is (no rounding, no clamping), matching the float
+/// instantiation of libvips `vips_combine_pixels`, whose numeric limits
+/// of `0, 0` mean "no limit". Fractional, negative, and beyond-scale
+/// (HDR) float samples therefore survive exactly at `f32` precision.
 #[inline]
 fn write_scaled(data: &mut [u8], bpc: usize, i: usize, v: f64, scale: f64) {
     match bpc {
@@ -265,11 +281,10 @@ fn write_scaled(data: &mut [u8], bpc: usize, i: usize, v: f64, scale: f64) {
             data[2 * i] = b[0];
             data[2 * i + 1] = b[1];
         }
-        // See read_raw: float compositing lands with a later batch.
-        _ => panic!(
-            "composite does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
+        _ => {
+            let b = ((v * scale) as f32).to_ne_bytes();
+            data[4 * i..4 * i + 4].copy_from_slice(&b);
+        }
     }
 }
 
@@ -461,7 +476,10 @@ impl Raster {
 
         // Output container: the deeper input. Normalisation scale: the
         // libvips max_alpha resolution (255 by default, 65535 only for a
-        // fully 16-bit pipeline); see the module docs.
+        // fully 16-bit pipeline); see the module docs. Float inputs
+        // (bpc 4) land on the 255 scale like libvips, where max_band
+        // comes from the compositing-space interpretation (sRGB unless a
+        // 16-bit-tagged input is present), never from the storage depth.
         let base_bpc = self.format().bytes_per_channel();
         let overlay_bpc = overlay.format().bytes_per_channel();
         let out_bpc = base_bpc.max(overlay_bpc);
@@ -1070,14 +1088,203 @@ mod tests {
         assert_eq!(px, vec![0.0, 0.0, 0.0, 0.0]);
     }
 
-    /// composite rejects float rasters loudly instead of misreading
-    /// their bytes as u16 pairs (float compositing, needed by the
-    /// non-separable ported modes, lands with a later batch).
+    /// Build a float raster from f32 samples (native-endian).
+    fn raster_f32(w: u32, h: u32, fmt: PixelFormat, vals: &[f32]) -> Raster {
+        let data = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /**
+     * Tests the exact Porter-Duff Over result on RgbaF32 inputs, with no
+     * integer rounding anywhere. Works by compositing two known float
+     * pixels and asserting the premultiplied-then-unpremultiplied values
+     * exactly (pixel 0, where the arithmetic is exact in binary) and to
+     * float precision (pixel 1, a fractional result an integer path
+     * would round).
+     * Input: pixel 0 dst [50,100,200] da=255, src [100,50,25] sa=127.5;
+     *        pixel 1 dst [50,100,200] da=127.5, src same.
+     * Output: pixel 0 exactly [75, 75, 112.5, 255];
+     *         pixel 1 colour (src*0.5 + dst*0.25)/0.75, alpha 191.25.
+     */
     #[test]
-    #[should_panic(expected = "does not support float rasters")]
-    fn composite_float_panics() {
-        let base = Raster::zeroed(2, 2, PixelFormat::RgbaF32).unwrap();
-        let overlay = Raster::zeroed(2, 2, PixelFormat::RgbaF32).unwrap();
-        let _ = base.composite(&overlay, CompositeMode::Over);
+    fn float_over_is_exact_porter_duff() {
+        let base = raster_f32(
+            2,
+            1,
+            PixelFormat::RgbaF32,
+            &[50.0, 100.0, 200.0, 255.0, 50.0, 100.0, 200.0, 127.5],
+        );
+        let overlay = raster_f32(
+            2,
+            1,
+            PixelFormat::RgbaF32,
+            &[100.0, 50.0, 25.0, 127.5, 100.0, 50.0, 25.0, 127.5],
+        );
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.format(), PixelFormat::RgbaF32);
+
+        // Opaque backdrop: sa = 0.5, da = 1, ao = 1; the stored colour is
+        // src*sa + dst*(1-sa) with the fraction preserved.
+        let px = out.getpoint(0, 0);
+        assert_eq!(px, vec![75.0, 75.0, 112.5, 255.0]);
+
+        // Half-transparent backdrop: sa = da = 0.5, ao = 0.75. The
+        // unpremultiplied colour is fractional (83.33...), which an
+        // integer container could not carry.
+        let px = out.getpoint(1, 0);
+        let (sa, da) = (0.5, 0.5);
+        let ao = sa + da * (1.0 - sa);
+        for (k, &s) in [100.0, 50.0, 25.0].iter().enumerate() {
+            let d = [50.0, 100.0, 200.0][k];
+            let want = (s * sa + d * da * (1.0 - sa)) / ao;
+            assert!((px[k] - want).abs() < 1e-3, "band {k}: {px:?} want {want}");
+        }
+        assert_eq!(px[3], 191.25);
+    }
+
+    /**
+     * Tests float opaque-over-opaque returns the source bit-exactly,
+     * including fractional and beyond-scale (HDR) samples: the float
+     * write path neither rounds nor clamps.
+     * Input: opaque RgbaF32 base, opaque overlay [0.125, 2.5, 400.75].
+     * Output: exactly the overlay colour with alpha 255.
+     */
+    #[test]
+    fn float_opaque_over_opaque_returns_source_exactly() {
+        let base = raster_f32(1, 1, PixelFormat::RgbaF32, &[10.0, 20.0, 30.0, 255.0]);
+        let overlay = raster_f32(1, 1, PixelFormat::RgbaF32, &[0.125, 2.5, 400.75, 255.0]);
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.getpoint(0, 0), vec![0.125, 2.5, 400.75, 255.0]);
+    }
+
+    /**
+     * Tests float samples outside the working range survive the actual
+     * blend arithmetic unclamped: colour above the 255 scale (HDR) and
+     * below zero passes through Porter-Duff and the float write-back.
+     * Input: base [510, -12.5, 2.5] opaque, overlay fully transparent.
+     * Output: Over keeps the backdrop exactly, including 510 and -12.5.
+     */
+    #[test]
+    fn float_hdr_and_negative_survive_unclamped() {
+        let base = raster_f32(1, 1, PixelFormat::RgbaF32, &[510.0, -12.5, 2.5, 255.0]);
+        let overlay = raster_f32(1, 1, PixelFormat::RgbaF32, &[90.0, 90.0, 90.0, 0.0]);
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.getpoint(0, 0), vec![510.0, -12.5, 2.5, 255.0]);
+    }
+
+    /**
+     * Tests the float alpha convention: like libvips, a float raster
+     * keeps the 0..255 numeric alpha of the sRGB compositing space
+     * (max_band comes from the interpretation, not the storage depth),
+     * so casting the ported u8 fixture to float reproduces the u8
+     * result. An 0..1 float-alpha reading would instead clamp alpha 128
+     * to opaque and return the overlay colour outright.
+     * Input: base [102,103,104] and overlay [2,3,4,128], u8 and their
+     * RgbaF32 casts.
+     * Output: float Over ~ [51.8, 52.8, 53.8, 255], within quantisation
+     * of the u8 result.
+     */
+    #[test]
+    fn float_alpha_uses_numeric_scale_like_u8() {
+        let base_u8 = Raster::new(1, 1, PixelFormat::Rgb8, vec![102, 103, 104]).unwrap();
+        let overlay_u8 = Raster::new(1, 1, PixelFormat::Rgba8, vec![2, 3, 4, 128]).unwrap();
+        let base_f = base_u8.cast(PixelFormat::with_channels(3, 4).unwrap());
+        let overlay_f = overlay_u8.cast(PixelFormat::RgbaF32);
+
+        let out_f = base_f.composite(&overlay_f, CompositeMode::Over);
+        assert_eq!(out_f.format(), PixelFormat::RgbaF32);
+        let px = out_f.getpoint(0, 0);
+        let a = 128.0 / 255.0;
+        for (k, &b) in [102.0, 103.0, 104.0].iter().enumerate() {
+            let want = [2.0, 3.0, 4.0][k] * a + b * (1.0 - a);
+            assert!((px[k] - want).abs() < 1e-3, "band {k}: {px:?} want {want}");
+        }
+        assert_eq!(px[3], 255.0);
+
+        // And the u8 path agrees to its own quantisation.
+        let px_u8 = base_u8
+            .composite(&overlay_u8, CompositeMode::Over)
+            .getpoint(0, 0);
+        for k in 0..4 {
+            assert!(
+                (px[k] - px_u8[k]).abs() <= 0.5,
+                "band {k}: {px:?} vs {px_u8:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests mixed float-over-u8 compositing: the output takes the deeper
+     * (float) container and blends on the shared 0..255 numeric scale,
+     * keeping the fractional result.
+     * Input: Rgb8 base [100,100,100], RgbaF32 overlay [255,0,0] sa=127.5.
+     * Output: RgbaF32 exactly [177.5, 50, 50, 255].
+     */
+    #[test]
+    fn float_over_u8_takes_float_container() {
+        let base = Raster::new(1, 1, PixelFormat::Rgb8, vec![100, 100, 100]).unwrap();
+        let overlay = raster_f32(1, 1, PixelFormat::RgbaF32, &[255.0, 0.0, 0.0, 127.5]);
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.format(), PixelFormat::RgbaF32);
+        assert_eq!(out.getpoint(0, 0), vec![177.5, 50.0, 50.0, 255.0]);
+    }
+
+    /**
+     * Tests grey float compositing through FloatF32(1)/FloatF32(2): one
+     * colour band plus alpha lands in a FloatF32(2) container with the
+     * exact fractional blend.
+     * Input: FloatF32(1) base [100], FloatF32(2) overlay [200, 127.5].
+     * Output: FloatF32(2) exactly [150, 255].
+     */
+    #[test]
+    fn float_grey_composites_to_two_float_bands() {
+        let base = raster_f32(1, 1, PixelFormat::with_channels(1, 4).unwrap(), &[100.0]);
+        let overlay = raster_f32(
+            1,
+            1,
+            PixelFormat::with_channels(2, 4).unwrap(),
+            &[200.0, 127.5],
+        );
+        let out = base.composite(&overlay, CompositeMode::Over);
+        assert_eq!(out.format(), PixelFormat::with_channels(2, 4).unwrap());
+        assert_eq!(out.getpoint(0, 0), vec![150.0, 255.0]);
+    }
+
+    /**
+     * Tests the ported test_composite_non_separable shape: RgbaF32
+     * inputs through all four non-separable modes keep the geometry and
+     * match the u8 path within its quantisation (the float working
+     * values sit on the same 0..255 scale, so the PDF 0..1 blend clamp
+     * behaves identically).
+     * Input: Rgba8 base/overlay and their RgbaF32 casts.
+     * Output: same dimensions, 4 float channels, values within 0.5 of u8.
+     */
+    #[test]
+    fn float_non_separable_matches_u8_path() {
+        let base_u8 = Raster::new(1, 1, PixelFormat::Rgba8, vec![128, 128, 128, 255]).unwrap();
+        let overlay_u8 = Raster::new(1, 1, PixelFormat::Rgba8, vec![200, 30, 40, 128]).unwrap();
+        let base_f = base_u8.cast(PixelFormat::RgbaF32);
+        let overlay_f = overlay_u8.cast(PixelFormat::RgbaF32);
+        for mode in [
+            CompositeMode::Hue,
+            CompositeMode::Saturation,
+            CompositeMode::Colour,
+            CompositeMode::Luminosity,
+            CompositeMode::Multiply,
+            CompositeMode::Screen,
+        ] {
+            let out_f = base_f.composite(&overlay_f, mode);
+            assert_eq!(out_f.width(), base_f.width());
+            assert_eq!(out_f.height(), base_f.height());
+            assert_eq!(out_f.format(), PixelFormat::RgbaF32);
+            let px_f = out_f.getpoint(0, 0);
+            let px_u8 = base_u8.composite(&overlay_u8, mode).getpoint(0, 0);
+            for k in 0..4 {
+                assert!(
+                    (px_f[k] - px_u8[k]).abs() <= 0.5,
+                    "{mode:?} band {k}: {px_f:?} vs {px_u8:?}"
+                );
+            }
+        }
     }
 }
