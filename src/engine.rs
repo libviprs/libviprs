@@ -1526,11 +1526,15 @@ fn extract_and_emit_level(
                     raster: tile_raster,
                     blank,
                 };
-                // Per-tile tracing span (issue libviprs-tests#83): exactly one
-                // `libviprs::tile` span per emitted tile, carrying its
+                // Per-tile tracing span (issue libviprs-tests#83): one
+                // `libviprs::tile` span per tile write attempt, carrying its
                 // coordinates, nested under the active `libviprs::level` span.
-                // Entered across the sink write so any future encode/sink_write
-                // child spans nest beneath it, matching the documented tree.
+                // It is entered *before* `sink.write_tile` so the span covers
+                // the write itself: a tile whose write exhausts
+                // `RetryThenSkip` (and then `continue`s below without bumping
+                // the produced count) still emits its span, and any future
+                // encode / sink-write child spans nest beneath it, matching the
+                // documented tree.
                 #[cfg(feature = "tracing")]
                 let _tile_span = tracing::info_span!(
                     target: "libviprs",
@@ -1796,11 +1800,13 @@ fn extract_and_emit_parallel(
                 skipped += 1;
             }
             let tile_bytes = tile.raster.data().len() as u64;
-            // Per-tile tracing span (issue libviprs-tests#83): exactly one
-            // `libviprs::tile` span per emitted tile, carrying its coordinates,
-            // nested under the active `libviprs::level` span. The consumer runs
-            // on the same thread the level span was entered on, so the nesting
-            // holds even though extraction happened on a worker thread.
+            // Per-tile tracing span (issue libviprs-tests#83): one
+            // `libviprs::tile` span per tile write attempt, carrying its
+            // coordinates, nested under the active `libviprs::level` span. It
+            // is entered *before* `sink.write_tile`, so a write that exhausts
+            // `RetryThenSkip` still emits its span. The consumer runs on the
+            // same thread the level span was entered on, so the nesting holds
+            // even though extraction happened on a worker thread.
             #[cfg(feature = "tracing")]
             let _tile_span = tracing::info_span!(
                 target: "libviprs",
