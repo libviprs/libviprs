@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image generators ported from libvips (create batch of the ported-tests
+  operation surface, libviprs-tests issue #55), in the new `create`
+  module, all as associated constructors on `Raster` with `try_*`
+  fallible forms and the new `CreateError`: the basic patterns `black` /
+  `black_bands`, `xyz`, `eye`, `zone`, and `sines`; the seeded noise
+  generators `gaussnoise`, `perlin`, and `worley` (bit-exact
+  reproductions of the libvips FNV pixel-hash RNG, with `*_seeded` forms;
+  the default seed is pinned to 0 so unseeded output is deterministic)
+  and `fractsurf` (noise shaped by a fractal power spectrum through an
+  internal 2D DFT, the `vips_freqmult` pipeline); the LUT and matrix
+  constructors `buildlut`, `tonelut`, and `from_matrix`; the full
+  frequency-mask family `mask_ideal` / `mask_ideal_ring` /
+  `mask_ideal_band`, `mask_gaussian` / `mask_gaussian_ring` /
+  `mask_gaussian_band`, `mask_butterworth` / `mask_butterworth_ring` /
+  `mask_butterworth_band`, and `mask_fractal`, reproducing the
+  `create/mask.c` semantics exactly (FFT layout with an `optical`
+  quadrant swap, the DC component forced to 1.0 unless `nodc`, uchar
+  truncation); signed distance fields `sdf` (circle, box, rounded-box,
+  line) with the new `SdfParams`; and real text rendering `text` on the
+  pure-Rust `ab_glyph` rasteriser with the bundled Bitstream Vera Sans
+  face (`fonts/`), honouring dpi, word/char/word-char/none wrapping, and
+  the width x height auto-fit search. `tests/create_ported_surface.rs`
+  pins the ported call surface from the external-crate position.
+- The arithmetic reductions (`avg`, `deviate`, `min` / `max`,
+  `minpos` / `maxpos`) and relational maps now read `f32` rasters, so
+  they work on the float images the create generators emit; the
+  spellings `Raster::max_value` / `Raster::min_value` the ported suites
+  use are provided as aliases. Mutating arithmetic ops still reject
+  float inputs loudly.
 - Colour-space and ICC operations ported from libvips (next batch of the
   ported-tests operation surface, libviprs-tests issue #55), in the new
   `colour` module: `Raster::colourspace` (with the typed

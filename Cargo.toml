@@ -11,6 +11,11 @@ resolver = "3"
 # Single-sourced version pins shared by every workspace member. Members
 # inherit with `{ workspace = true }` so versions cannot drift per crate.
 [workspace.dependencies]
+# Pure-Rust TrueType glyph outlining and rasterisation (Apache-2.0), used by
+# `Raster::text` with the bundled Bitstream Vera Sans face in `fonts/` (see
+# `fonts/VERA-COPYRIGHT.TXT` for the font licence). Chosen over a Pango/Cairo
+# binding to keep the crate pure Rust and the text output deterministic.
+ab_glyph = "0.2"
 arbitrary = { version = "1", features = ["derive"] }
 blake3 = "1.8.4"
 flate2 = "1"
@@ -119,6 +124,7 @@ packfile = ["dep:tar", "dep:zip"]
 serde = []
 
 [dependencies]
+ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 flate2 = { workspace = true }
 image = { workspace = true }
