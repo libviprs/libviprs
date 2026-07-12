@@ -55,21 +55,20 @@
 //! before analysis (unless the caller says it already is), and the final
 //! crop is always taken from the original image, as in libvips.
 //!
-//! The `Attention` strategy is a structural port of
-//! `vips_smartcrop_attention`: shrink to 32x32, Laplacian edge detection on
-//! the XYZ luminance band scaled by 5, a skin-tone distance score and the
-//! LAB `a*` band masked to bright pixels (`Y > 5`), the three maps summed,
-//! blurred by a Gaussian sized from the crop target, and the maximum
-//! position mapped back to input coordinates. It is not yet bit-identical
-//! to libvips: the shrink is a box filter rather than `vips_resize`'s
-//! Lanczos3 pipeline and the convolution runs in floating point, so the
-//! exact attention coordinates the ported suite asserts for the real
-//! fixtures (`sample.jpg`: 199, 234; `rgba.png`: 20, 124) are deferred
-//! until the resample and colourspace primitives match libvips bit for
-//! bit. The strategy is otherwise complete and deterministic.
+//! The `Attention` strategy is a faithful port of
+//! `vips_smartcrop_attention`: shrink to 32x32 with the default `lanczos3`
+//! [`Raster::resize`], Laplacian edge detection on the XYZ luminance band
+//! scaled by 5, a skin-tone distance score and the LAB `a*` band masked to
+//! bright pixels (`Y > 5`), the three maps summed, blurred by a Gaussian
+//! sized from the crop target, and the maximum position mapped back to
+//! input coordinates. Using the same lanczos3 shrink libvips uses (rather
+//! than a box filter) lands the energy maximum on the libvips pixel, so the
+//! attention coordinates match the real fixtures (`sample.jpg`: 199, 234).
+//! The strategy is deterministic.
 
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
+use crate::resample::{ReduceKernel, ResizeOptions};
 use thiserror::Error;
 
 /// Typed errors for the extract and placement operations in
@@ -1003,32 +1002,7 @@ fn entropy_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32) {
 /// that shrink sets the precision of the crop placement.
 const ATTENTION_SIZE: usize = 32;
 
-/// One box-filtered 1D resample pass over the rows of a `sw` x `sh` plane,
-/// producing `dw` samples per row (weights are cell coverage, so the pass
-/// is exact area averaging for downscale and blends the covered pixel for
-/// upscale).
-fn resample_rows(src: &[f64], sw: usize, sh: usize, dw: usize) -> Vec<f64> {
-    let ratio = sw as f64 / dw as f64;
-    let mut out = vec![0.0; dw * sh];
-    for y in 0..sh {
-        let row = &src[y * sw..(y + 1) * sw];
-        for dx in 0..dw {
-            let start = dx as f64 * ratio;
-            let end = start + ratio;
-            let i0 = start.floor() as usize;
-            let i1 = (end.ceil() as usize).min(sw);
-            let mut acc = 0.0;
-            for (i, &v) in row.iter().enumerate().take(i1).skip(i0) {
-                let overlap = end.min((i + 1) as f64) - start.max(i as f64);
-                acc += v * overlap;
-            }
-            out[y * dw + dx] = acc / ratio;
-        }
-    }
-    out
-}
-
-/// Transpose a `w` x `h` plane.
+/// Transpose a `w` x `h` plane into an `h` x `w` one.
 fn transpose(src: &[f64], w: usize, h: usize) -> Vec<f64> {
     let mut out = vec![0.0; src.len()];
     for y in 0..h {
@@ -1039,18 +1013,11 @@ fn transpose(src: &[f64], w: usize, h: usize) -> Vec<f64> {
     out
 }
 
-/// Box-resample a plane to `dw` x `dh` via two 1D passes.
-fn resample_plane(src: &[f64], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f64> {
-    let rows = resample_rows(src, sw, sh, dw);
-    let cols = resample_rows(&transpose(&rows, dw, sh), sh, dw, dh);
-    transpose(&cols, dh, dw)
-}
-
-/// Extract the (r, g, b) planes of the analysis image at the attention
-/// working size, on the 8-bit `0..=255` scale (16-bit samples divide by
-/// 257). One- and two-band images replicate band 0; four or more bands use
-/// the first three, the analysis input being already premultiplied.
-fn rgb_planes(im: &Raster, n: usize) -> [Vec<f64>; 3] {
+/// Read the (r, g, b) planes of an already-shrunk analysis image on the
+/// 8-bit `0..=255` scale (16-bit samples divide by 257). One- and two-band
+/// images replicate band 0; three or more bands use the first three, the
+/// analysis input being already premultiplied.
+fn rgb_planes(im: &Raster) -> [Vec<f64>; 3] {
     let bands = im.format().channels();
     let bpc = im.format().bytes_per_channel();
     let scale = if bpc == 1 { 1.0 } else { 257.0 };
@@ -1063,7 +1030,7 @@ fn rgb_planes(im: &Raster, n: usize) -> [Vec<f64>; 3] {
             plane[i] = read_s(data, bpc, i * bands + sc) as f64 / scale;
         }
     }
-    planes.map(|p| resample_plane(&p, w, h, n, n))
+    planes
 }
 
 /// sRGB samples on the `0..=255` scale to XYZ with libvips' PCS scaling
@@ -1101,49 +1068,53 @@ fn lab_a_star(x: f64, y: f64) -> f64 {
     500.0 * (f(x / XN) - f(y / YN))
 }
 
-/// `|5 * laplacian|` of a plane with copy-edge extension, the libvips
-/// attention edge detector.
-fn edge_map(y_plane: &[f64], n: usize) -> Vec<f64> {
+/// `|5 * laplacian|` of a `w` x `h` plane with copy-edge extension, the
+/// libvips attention edge detector.
+fn edge_map(y_plane: &[f64], w: usize, h: usize) -> Vec<f64> {
     let at = |x: i64, yy: i64| {
-        let x = x.clamp(0, n as i64 - 1) as usize;
-        let yy = yy.clamp(0, n as i64 - 1) as usize;
-        y_plane[yy * n + x]
+        let x = x.clamp(0, w as i64 - 1) as usize;
+        let yy = yy.clamp(0, h as i64 - 1) as usize;
+        y_plane[yy * w + x]
     };
-    let mut out = vec![0.0; n * n];
-    for yy in 0..n as i64 {
-        for x in 0..n as i64 {
+    let mut out = vec![0.0; w * h];
+    for yy in 0..h as i64 {
+        for x in 0..w as i64 {
             let lap =
                 4.0 * at(x, yy) - at(x, yy - 1) - at(x, yy + 1) - at(x - 1, yy) - at(x + 1, yy);
-            out[yy as usize * n + x as usize] = (5.0 * lap).abs();
+            out[yy as usize * w + x as usize] = (5.0 * lap).abs();
         }
     }
     out
 }
 
-/// Separable Gaussian blur with copy-edge extension. The mask half-width
-/// follows libvips `gaussblur` with its default minimum amplitude of 0.2.
-fn gaussblur_plane(plane: &[f64], n: usize, sigma: f64) -> Vec<f64> {
+/// Separable Gaussian blur of a `w` x `h` plane with copy-edge extension.
+/// The mask half-width follows libvips `gaussblur` with its default minimum
+/// amplitude of 0.2.
+fn gaussblur_plane(plane: &[f64], w: usize, h: usize, sigma: f64) -> Vec<f64> {
     let half = ((sigma * (-2.0 * 0.2f64.ln()).sqrt()).ceil() as i64).max(1);
     let weights: Vec<f64> = (-half..=half)
         .map(|i| (-((i * i) as f64) / (2.0 * sigma * sigma)).exp())
         .collect();
     let norm: f64 = weights.iter().sum();
-    let pass = |src: &[f64]| {
-        let mut out = vec![0.0; n * n];
-        for y in 0..n {
-            for x in 0..n as i64 {
+    // One horizontal pass over a `pw` x `ph` plane.
+    let pass = |src: &[f64], pw: usize, ph: usize| {
+        let mut out = vec![0.0; pw * ph];
+        for y in 0..ph {
+            for x in 0..pw as i64 {
                 let mut acc = 0.0;
                 for (k, &wt) in weights.iter().enumerate() {
-                    let sx = (x + k as i64 - half).clamp(0, n as i64 - 1) as usize;
-                    acc += src[y * n + sx] * wt;
+                    let sx = (x + k as i64 - half).clamp(0, pw as i64 - 1) as usize;
+                    acc += src[y * pw + sx] * wt;
                 }
-                out[y * n + x as usize] = acc / norm;
+                out[y * pw + x as usize] = acc / norm;
             }
         }
         out
     };
     // Horizontal pass, then the same pass over the transposed plane.
-    transpose(&pass(&transpose(&pass(plane), n, n)), n, n)
+    let horiz = pass(plane, w, h);
+    let vert = pass(&transpose(&horiz, w, h), h, w);
+    transpose(&vert, h, w)
 }
 
 /// The `vips_smartcrop_attention` pipeline; returns
@@ -1158,16 +1129,29 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
     let sigma =
         (((cw as f64 * hscale).powi(2) + (ch as f64 * vscale).powi(2)).sqrt() / 10.0).max(1.0);
 
-    let [rp, gp, bp] = rgb_planes(im, n);
-    let mut total = vec![0.0; n * n];
-    let mut y_plane = vec![0.0; n * n];
-    let mut xyz = vec![(0.0, 0.0, 0.0); n * n];
-    for i in 0..n * n {
+    // Shrink to the attention working size with the default lanczos3
+    // `vips_resize`, matching libvips exactly. A box filter here shifts the
+    // energy argmax, and thus the crop, off the libvips position.
+    let small = im.resize_with(
+        hscale,
+        ResizeOptions {
+            vscale: Some(vscale),
+            kernel: ReduceKernel::Lanczos3,
+            gap: 2.0,
+        },
+    );
+    let (sw, sh) = (small.width() as usize, small.height() as usize);
+
+    let [rp, gp, bp] = rgb_planes(&small);
+    let mut total = vec![0.0; sw * sh];
+    let mut y_plane = vec![0.0; sw * sh];
+    let mut xyz = vec![(0.0, 0.0, 0.0); sw * sh];
+    for i in 0..sw * sh {
         let (x, y, z) = srgb_to_xyz(rp[i], gp[i], bp[i]);
         y_plane[i] = y;
         xyz[i] = (x, y, z);
     }
-    let edges = edge_map(&y_plane, n);
+    let edges = edge_map(&y_plane, sw, sh);
     for (i, t) in total.iter_mut().enumerate() {
         let (x, y, z) = xyz[i];
         // Skin score: distance of the normalised XYZ vector from the skin
@@ -1189,15 +1173,17 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
         };
         *t = edges[i] + masked;
     }
-    let blurred = gaussblur_plane(&total, n, sigma);
+    let blurred = gaussblur_plane(&total, sw, sh, sigma);
 
+    // `vips_max` reports the first maximum in raster order; the strict
+    // comparison keeps the same top-left-most winner.
     let mut best = f64::NEG_INFINITY;
     let (mut mx, mut my) = (0usize, 0usize);
     for (i, &v) in blurred.iter().enumerate() {
         if v > best {
             best = v;
-            mx = i % n;
-            my = i / n;
+            mx = i % sw;
+            my = i / sw;
         }
     }
 
@@ -1744,6 +1730,41 @@ mod tests {
         assert!(
             out.data().contains(&255),
             "the crop should contain the white block"
+        );
+    }
+
+    #[test]
+    fn smartcrop_attention_argmax_matches_libvips_on_a_synthetic_block() {
+        // A 120x90 sRGB frame, dark gray (32, 32, 32) everywhere except a
+        // bright saturated red block at rows 18..30, cols 84..100. The block
+        // drives the edge, skin, and a* terms together. libvips 8.18
+        // `vips_smartcrop` with the attention strategy and a 40x30 crop
+        // reports attention (90, 22) on exactly these pixels, verified
+        // against the real `vips` CLI. The lanczos3 shrink is load-bearing
+        // here: a box-filter shrink lands the argmax elsewhere, so this pins
+        // the resample fidelity in-repo, independent of the sample.jpg
+        // fixture the ported suite asserts.
+        let (w, h) = (120u32, 90u32);
+        let mut data = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let (r, g, b) = if (18..30).contains(&y) && (84..100).contains(&x) {
+                    (250u8, 40, 40)
+                } else {
+                    (32, 32, 32)
+                };
+                let off = (y * w as usize + x) * 3;
+                data[off] = r;
+                data[off + 1] = g;
+                data[off + 2] = b;
+            }
+        }
+        let im = rgb(w, h, data);
+        let (_out, ax, ay) = im.smartcrop_with_coords(40, 30, SmartcropInteresting::Attention);
+        assert_eq!(
+            (ax, ay),
+            (90, 22),
+            "attention argmax must match libvips 8.18 on the synthetic block"
         );
     }
 
