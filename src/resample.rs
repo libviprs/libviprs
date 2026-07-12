@@ -92,13 +92,19 @@
 //!   the source x, band 1 the source y). Coordinates inside
 //!   `[-1, dim + 1)` are interpolated with background-extended taps (edge
 //!   antialiasing); everything else, including NaN, paints the background.
-//! * **Interpolators.** `nearest`, `bilinear`, and `bicubic` (Catmull-Rom,
-//!   the libvips `VipsInterpolateBicubic` coefficients) are implemented.
-//!   The libvips names `nohalo` and `lbb` are recognised by the parser but
-//!   return [`ResampleError::InterpolatorNotImplemented`]: their
-//!   minmod-subdivision resamplers (`nohalo.cpp`, `lbb.cpp`) are a
-//!   dedicated later batch, and silently aliasing them to bicubic would
-//!   misreport libvips semantics.
+//! * **Interpolators.** `nearest`, `bilinear`, `bicubic` (Catmull-Rom,
+//!   the libvips `VipsInterpolateBicubic` coefficients), `nohalo`, and
+//!   `lbb` are all implemented. `nohalo` and `lbb` are faithful ports of
+//!   the libvips `nohalo.cpp` and `lbb.cpp` minmod-subdivision resamplers:
+//!   `lbb` is locally bounded bicubic (a nonlinear Catmull-Rom variant
+//!   whose reconstruction stays within the range of the 16 nearest input
+//!   samples, so it never overshoots), and `nohalo` is level-1 co-monotone
+//!   subdivision (minmod slopes) finished with `lbb`. Both centre and
+//!   reflect their stencils exactly as the C interpolators do (`lbb` at
+//!   window offset 1, `nohalo` at window offset 2 with round-to-nearest
+//!   centring), so on samples that land exactly on the input grid they
+//!   return the input pixel unchanged, which keeps the 4x rotation
+//!   round-trip an identity.
 //!
 //! # Example usage
 //!
@@ -135,12 +141,6 @@ pub enum ResampleError {
         "unknown interpolator {name:?}; expected \"nearest\", \"bilinear\", \"bicubic\", \"nohalo\" or \"lbb\""
     )]
     UnknownInterpolator { name: String },
-    /// The interpolator is a recognised libvips nickname whose resampler is
-    /// not implemented yet.
-    #[error(
-        "interpolator {name:?} is not implemented yet; use \"nearest\", \"bilinear\" or \"bicubic\""
-    )]
-    InterpolatorNotImplemented { name: &'static str },
     /// The kernel name is not a libvips `VipsKernel` nickname.
     #[error(
         "unknown kernel {name:?}; expected \"nearest\", \"linear\", \"cubic\", \"mitchell\", \"lanczos2\" or \"lanczos3\""
@@ -227,9 +227,6 @@ fn expect_thumbnail(r: Result<Raster, ThumbnailError>) -> Raster {
 
 /// A point resampler for [`Raster::affine`] and [`Raster::mapim`] (libvips
 /// `VipsInterpolate`).
-///
-/// The libvips nicknames `"nohalo"` and `"lbb"` parse but are not
-/// implemented yet; see the module documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Interpolator {
@@ -241,6 +238,16 @@ pub enum Interpolator {
     /// Catmull-Rom bicubic over the surrounding 4x4 samples, the libvips
     /// `VipsInterpolateBicubic` coefficients.
     Bicubic,
+    /// Nohalo level-1 co-monotone subdivision finished with LBB, the
+    /// libvips `VipsInterpolateNohalo` (`nohalo.cpp`). A halo-reducing,
+    /// edge-sharpening resampler that stays within the range of nearby
+    /// input samples.
+    Nohalo,
+    /// Locally bounded bicubic, the libvips `VipsInterpolateLbb`
+    /// (`lbb.cpp`). A nonlinear Catmull-Rom variant whose reconstruction
+    /// is bounded by the 16 nearest input samples, so it produces no
+    /// overshoot.
+    Lbb,
 }
 
 impl Interpolator {
@@ -248,16 +255,15 @@ impl Interpolator {
     ///
     /// # Errors
     ///
-    /// [`ResampleError::InterpolatorNotImplemented`] for `"nohalo"` and
-    /// `"lbb"` (recognised libvips names whose resampler is a later batch),
-    /// [`ResampleError::UnknownInterpolator`] for anything else.
+    /// [`ResampleError::UnknownInterpolator`] for any name that is not a
+    /// recognised libvips interpolator nickname.
     pub fn from_name(name: &str) -> Result<Self, ResampleError> {
         match name {
             "nearest" => Ok(Self::Nearest),
             "bilinear" => Ok(Self::Bilinear),
             "bicubic" => Ok(Self::Bicubic),
-            "nohalo" => Err(ResampleError::InterpolatorNotImplemented { name: "nohalo" }),
-            "lbb" => Err(ResampleError::InterpolatorNotImplemented { name: "lbb" }),
+            "nohalo" => Ok(Self::Nohalo),
+            "lbb" => Ok(Self::Lbb),
             _ => Err(ResampleError::UnknownInterpolator {
                 name: name.to_string(),
             }),
@@ -890,7 +896,117 @@ fn interpolate_at(
                 }
             }
         }
+        Interpolator::Lbb => {
+            // LBB samples the 4x4 block at (x0-1..x0+2, y0-1..y0+2), the
+            // patch corner at (x0, y0), relative offset in [0, 1]; the
+            // same stencil geometry as bicubic (window_offset 1).
+            let k = LbbCoeffs::new(x - x0 as f64, y - y0 as f64);
+            let offsets = stencil_offsets_4x4();
+            let cols = gather_stencil(fetch, x0, y0, &offsets, premultiply, px);
+            for (b, o) in out.iter_mut().enumerate() {
+                let mut s = [0.0f64; 16];
+                for (i, si) in s.iter_mut().enumerate() {
+                    *si = cols[i * fetch.bands + b];
+                }
+                *o = lbbicubic(&k, &s);
+            }
+        }
+        Interpolator::Nohalo => {
+            // Nohalo centres on the nearest pixel (window_offset 2, round
+            // to nearest), reflects the diamond stencil so the sample sits
+            // to the bottom-right of the centre, subdivides to a 4x4 LBB
+            // stencil, then finishes with LBB at the reflected offset.
+            let ix = (x + 0.5).floor() as i64;
+            let iy = (y + 0.5).floor() as i64;
+            let rel_x = x - ix as f64;
+            let rel_y = y - iy as f64;
+            let sx: i64 = if rel_x >= 0.0 { 1 } else { -1 };
+            let sy: i64 = if rel_y >= 0.0 { 1 } else { -1 };
+            // xp1over2 = 2 * |relative| in [0, 1] after the reflection.
+            let k = LbbCoeffs::new(2.0 * rel_x.abs(), 2.0 * rel_y.abs());
+            let offsets = nohalo_offsets(sx, sy);
+            let cols = gather_stencil(fetch, ix, iy, &offsets, premultiply, px);
+            for (b, o) in out.iter_mut().enumerate() {
+                let mut diamond = [0.0f64; 21];
+                for (i, di) in diamond.iter_mut().enumerate() {
+                    *di = cols[i * fetch.bands + b];
+                }
+                let st = NohaloStencil::from_diamond(&diamond);
+                let lbb_stencil = nohalo_subdivision(&st);
+                *o = lbbicubic(&k, &lbb_stencil);
+            }
+        }
     }
+}
+
+/// Gather a nonlinear-interpolator stencil into a flat `taps * bands`
+/// buffer (tap-major), fetching each `(dx, dy)` offset from `(cx, cy)`
+/// through the [`Extend`] rule and premultiplying when asked. `px` is the
+/// per-tap scratch. Allocates one small buffer per output pixel, which the
+/// nonlinear resamplers need because they cannot be expressed as a fixed
+/// weighted sum of taps.
+fn gather_stencil(
+    fetch: &TapFetch<'_>,
+    cx: i64,
+    cy: i64,
+    offsets: &[(i64, i64)],
+    premultiply: bool,
+    px: &mut [f64],
+) -> Vec<f64> {
+    let bands = fetch.bands;
+    let mut cols = vec![0.0f64; offsets.len() * bands];
+    for (idx, &(dx, dy)) in offsets.iter().enumerate() {
+        fetch.fetch(cx + dx, cy + dy, premultiply, px);
+        cols[idx * bands..idx * bands + bands].copy_from_slice(px);
+    }
+    cols
+}
+
+/// The 16 `(dx, dy)` offsets of the LBB 4x4 stencil relative to the patch
+/// corner `(x0, y0)`, in row-major uno/dos/tre/qua order.
+fn stencil_offsets_4x4() -> [(i64, i64); 16] {
+    let mut out = [(0i64, 0i64); 16];
+    let mut idx = 0;
+    let mut dy = -1;
+    while dy <= 2 {
+        let mut dx = -1;
+        while dx <= 2 {
+            out[idx] = (dx, dy);
+            idx += 1;
+            dx += 1;
+        }
+        dy += 1;
+    }
+    out
+}
+
+/// The 21 `(dx, dy)` offsets of the nohalo diamond stencil relative to the
+/// centre pixel, reflected by the sample-position signs `(sx, sy)`, in the
+/// order [`NohaloStencil::from_diamond`] expects.
+fn nohalo_offsets(sx: i64, sy: i64) -> [(i64, i64); 21] {
+    [
+        (-sx, -2 * sy), // uno_two
+        (0, -2 * sy),   // uno_thr
+        (sx, -2 * sy),  // uno_fou
+        (-2 * sx, -sy), // dos_one
+        (-sx, -sy),     // dos_two
+        (0, -sy),       // dos_thr
+        (sx, -sy),      // dos_fou
+        (2 * sx, -sy),  // dos_fiv
+        (-2 * sx, 0),   // tre_one
+        (-sx, 0),       // tre_two
+        (0, 0),         // tre_thr
+        (sx, 0),        // tre_fou
+        (2 * sx, 0),    // tre_fiv
+        (-2 * sx, sy),  // qua_one
+        (-sx, sy),      // qua_two
+        (0, sy),        // qua_thr
+        (sx, sy),       // qua_fou
+        (2 * sx, sy),   // qua_fiv
+        (-sx, 2 * sy),  // cin_two
+        (0, 2 * sy),    // cin_thr
+        (sx, 2 * sy),   // cin_fou
+    ]
 }
 
 /// Catmull-Rom coefficients for offset `x` in `[0, 1]`
@@ -906,6 +1022,634 @@ fn catmull_coefficients(c: &mut [f64; 4], x: f64) {
     c[1] = cr1 - cone + cr4;
     c[2] = x - cfou - cr4;
     c[3] = cfou;
+}
+
+// ---------------------------------------------------------------------------
+// Nohalo / LBB (minmod-subdivision resamplers)
+// ---------------------------------------------------------------------------
+//
+// A faithful port of the libvips `nohalo.cpp` and `lbb.cpp` (v8.18) nonlinear
+// resamplers by N. Robidoux, C. Racette and J. Cupitt. Nohalo is level-1
+// co-monotone subdivision (minmod slopes) producing a 4x4 stencil that feeds
+// LBB; LBB is locally bounded bicubic, a nonlinear Hermite variant of
+// Catmull-Rom whose reconstruction stays within the range of the 16 nearest
+// input samples, so no output clamping is needed to avoid overshoot.
+
+/// The sixteen LBB Hermite coefficients for a sample offset, the
+/// `c00 .. c11dxdy` block shared verbatim by `nohalo.cpp` and `lbb.cpp`.
+/// `xp1over2` and `yp1over2` are both in `[0, 1]`: for LBB they are the
+/// relative offsets directly, for nohalo they are `2 * |relative|` after
+/// the stencil reflection.
+#[derive(Clone, Copy)]
+struct LbbCoeffs {
+    c00: f64,
+    c10: f64,
+    c01: f64,
+    c11: f64,
+    c00dx: f64,
+    c10dx: f64,
+    c01dx: f64,
+    c11dx: f64,
+    c00dy: f64,
+    c10dy: f64,
+    c01dy: f64,
+    c11dy: f64,
+    c00dxdy: f64,
+    c10dxdy: f64,
+    c01dxdy: f64,
+    c11dxdy: f64,
+}
+
+impl LbbCoeffs {
+    fn new(xp1over2: f64, yp1over2: f64) -> Self {
+        let xm1over2 = xp1over2 - 1.0;
+        let onepx = 0.5 + xp1over2;
+        let onemx = 1.5 - xp1over2;
+        let xp1over2sq = xp1over2 * xp1over2;
+
+        let ym1over2 = yp1over2 - 1.0;
+        let onepy = 0.5 + yp1over2;
+        let onemy = 1.5 - yp1over2;
+        let yp1over2sq = yp1over2 * yp1over2;
+
+        let xm1over2sq = xm1over2 * xm1over2;
+        let ym1over2sq = ym1over2 * ym1over2;
+
+        let twice1px = onepx + onepx;
+        let twice1py = onepy + onepy;
+        let twice1mx = onemx + onemx;
+        let twice1my = onemy + onemy;
+
+        let xm1over2sq_times_ym1over2sq = xm1over2sq * ym1over2sq;
+        let xp1over2sq_times_ym1over2sq = xp1over2sq * ym1over2sq;
+        let xp1over2sq_times_yp1over2sq = xp1over2sq * yp1over2sq;
+        let xm1over2sq_times_yp1over2sq = xm1over2sq * yp1over2sq;
+
+        let four_times_1px_times_1py = twice1px * twice1py;
+        let four_times_1mx_times_1py = twice1mx * twice1py;
+        let twice_xp1over2_times_1py = xp1over2 * twice1py;
+        let twice_xm1over2_times_1py = xm1over2 * twice1py;
+
+        let twice_xm1over2_times_1my = xm1over2 * twice1my;
+        let twice_xp1over2_times_1my = xp1over2 * twice1my;
+        let four_times_1mx_times_1my = twice1mx * twice1my;
+        let four_times_1px_times_1my = twice1px * twice1my;
+
+        let twice_1px_times_ym1over2 = twice1px * ym1over2;
+        let twice_1mx_times_ym1over2 = twice1mx * ym1over2;
+        let xp1over2_times_ym1over2 = xp1over2 * ym1over2;
+        let xm1over2_times_ym1over2 = xm1over2 * ym1over2;
+
+        let xm1over2_times_yp1over2 = xm1over2 * yp1over2;
+        let xp1over2_times_yp1over2 = xp1over2 * yp1over2;
+        let twice_1mx_times_yp1over2 = twice1mx * yp1over2;
+        let twice_1px_times_yp1over2 = twice1px * yp1over2;
+
+        Self {
+            c00: four_times_1px_times_1py * xm1over2sq_times_ym1over2sq,
+            c00dx: twice_xp1over2_times_1py * xm1over2sq_times_ym1over2sq,
+            c00dy: twice_1px_times_yp1over2 * xm1over2sq_times_ym1over2sq,
+            c00dxdy: xp1over2_times_yp1over2 * xm1over2sq_times_ym1over2sq,
+
+            c10: four_times_1mx_times_1py * xp1over2sq_times_ym1over2sq,
+            c10dx: twice_xm1over2_times_1py * xp1over2sq_times_ym1over2sq,
+            c10dy: twice_1mx_times_yp1over2 * xp1over2sq_times_ym1over2sq,
+            c10dxdy: xm1over2_times_yp1over2 * xp1over2sq_times_ym1over2sq,
+
+            c01: four_times_1px_times_1my * xm1over2sq_times_yp1over2sq,
+            c01dx: twice_xp1over2_times_1my * xm1over2sq_times_yp1over2sq,
+            c01dy: twice_1px_times_ym1over2 * xm1over2sq_times_yp1over2sq,
+            c01dxdy: xp1over2_times_ym1over2 * xm1over2sq_times_yp1over2sq,
+
+            c11: four_times_1mx_times_1my * xp1over2sq_times_yp1over2sq,
+            c11dx: twice_xm1over2_times_1my * xp1over2sq_times_yp1over2sq,
+            c11dy: twice_1mx_times_ym1over2 * xp1over2sq_times_yp1over2sq,
+            c11dxdy: xm1over2_times_ym1over2 * xp1over2sq_times_yp1over2sq,
+        }
+    }
+}
+
+/// Minmod: the smaller (in absolute value) of two slopes when they share a
+/// sign, else zero (`NOHALO_MINMOD`). `aa` is `a * a`, `ab` is `a * b`.
+#[inline]
+fn nohalo_minmod(a: f64, b: f64, aa: f64, ab: f64) -> f64 {
+    if ab >= 0.0 {
+        if aa <= ab { a } else { b }
+    } else {
+        0.0
+    }
+}
+
+/// Locally bounded bicubic over a 4x4 stencil (`lbbicubic`, the "soft"
+/// 3x3-block limiter version, the libvips default). `s` holds the sixteen
+/// stencil values in row-major order (uno/dos/tre/qua rows, one/two/thr/fou
+/// columns).
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+fn lbbicubic(k: &LbbCoeffs, s: &[f64; 16]) -> f64 {
+    let (uno_one, uno_two, uno_thr, uno_fou) = (s[0], s[1], s[2], s[3]);
+    let (dos_one, dos_two, dos_thr, dos_fou) = (s[4], s[5], s[6], s[7]);
+    let (tre_one, tre_two, tre_thr, tre_fou) = (s[8], s[9], s[10], s[11]);
+    let (qua_one, qua_two, qua_thr, qua_fou) = (s[12], s[13], s[14], s[15]);
+
+    // Four min and four max over 3x3 sub-blocks of the 4x4 stencil.
+    let m1 = dos_two.min(dos_thr);
+    let big_m1 = dos_two.max(dos_thr);
+    let m2 = tre_two.min(tre_thr);
+    let big_m2 = tre_two.max(tre_thr);
+    let m6 = dos_one.min(tre_one);
+    let big_m6 = dos_one.max(tre_one);
+    let m7 = dos_fou.min(tre_fou);
+    let big_m7 = dos_fou.max(tre_fou);
+    let m3 = uno_two.min(uno_thr);
+    let big_m3 = uno_two.max(uno_thr);
+    let m4 = qua_two.min(qua_thr);
+    let big_m4 = qua_two.max(qua_thr);
+    let m5 = m1.min(m2);
+    let big_m5 = big_m1.max(big_m2);
+    let m10 = m6.min(uno_one);
+    let big_m10 = big_m6.max(uno_one);
+    let m11 = m6.min(qua_one);
+    let big_m11 = big_m6.max(qua_one);
+    let m12 = m7.min(uno_fou);
+    let big_m12 = big_m7.max(uno_fou);
+    let m13 = m7.min(qua_fou);
+    let big_m13 = big_m7.max(qua_fou);
+    let m8 = m5.min(m3);
+    let big_m8 = big_m5.max(big_m3);
+    let m9 = m5.min(m4);
+    let big_m9 = big_m5.max(big_m4);
+    let min00 = m8.min(m10);
+    let max00 = big_m8.max(big_m10);
+    let min10 = m8.min(m12);
+    let max10 = big_m8.max(big_m12);
+    let min01 = m9.min(m11);
+    let max01 = big_m9.max(big_m11);
+    let min11 = m9.min(m13);
+    let max11 = big_m9.max(big_m13);
+
+    // Distances to the local min and max.
+    let u00 = dos_two - min00;
+    let v00 = max00 - dos_two;
+    let u10 = dos_thr - min10;
+    let v10 = max10 - dos_thr;
+    let u01 = tre_two - min01;
+    let v01 = max01 - tre_two;
+    let u11 = tre_thr - min11;
+    let v11 = max11 - tre_thr;
+
+    // Centred-difference first derivatives (factors of 1/2 folded in later).
+    let dble_dzdx00i = dos_thr - dos_one;
+    let dble_dzdy11i = qua_thr - dos_thr;
+    let dble_dzdx10i = dos_fou - dos_two;
+    let dble_dzdy01i = qua_two - dos_two;
+    let dble_dzdx01i = tre_thr - tre_one;
+    let dble_dzdy10i = tre_thr - uno_thr;
+    let dble_dzdx11i = tre_fou - tre_two;
+    let dble_dzdy00i = tre_two - uno_two;
+
+    let sign_dzdx00 = if dble_dzdx00i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdx10 = if dble_dzdx10i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdx01 = if dble_dzdx01i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdx11 = if dble_dzdx11i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdy00 = if dble_dzdy00i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdy10 = if dble_dzdy10i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdy01 = if dble_dzdy01i >= 0.0 { 1.0 } else { -1.0 };
+    let sign_dzdy11 = if dble_dzdy11i >= 0.0 { 1.0 } else { -1.0 };
+
+    // Centred-difference cross derivatives (factors of 1/4 folded in later).
+    let quad_d2zdxdy00i = uno_one - uno_thr + dble_dzdx01i;
+    let quad_d2zdxdy10i = uno_two - uno_fou + dble_dzdx11i;
+    let quad_d2zdxdy01i = qua_thr - qua_one - dble_dzdx00i;
+    let quad_d2zdxdy11i = qua_fou - qua_two - dble_dzdx10i;
+
+    // Slope limiters (key multiplier 3, folded with a factor of 2).
+    let dble_slopelimit_00 = 6.0 * u00.min(v00);
+    let dble_slopelimit_10 = 6.0 * u10.min(v10);
+    let dble_slopelimit_01 = 6.0 * u01.min(v01);
+    let dble_slopelimit_11 = 6.0 * u11.min(v11);
+
+    let clamp_slope = |sign: f64, deriv: f64, limit: f64| -> f64 {
+        if sign * deriv <= limit {
+            deriv
+        } else {
+            sign * limit
+        }
+    };
+    let dble_dzdx00 = clamp_slope(sign_dzdx00, dble_dzdx00i, dble_slopelimit_00);
+    let dble_dzdy00 = clamp_slope(sign_dzdy00, dble_dzdy00i, dble_slopelimit_00);
+    let dble_dzdx10 = clamp_slope(sign_dzdx10, dble_dzdx10i, dble_slopelimit_10);
+    let dble_dzdy10 = clamp_slope(sign_dzdy10, dble_dzdy10i, dble_slopelimit_10);
+    let dble_dzdx01 = clamp_slope(sign_dzdx01, dble_dzdx01i, dble_slopelimit_01);
+    let dble_dzdy01 = clamp_slope(sign_dzdy01, dble_dzdy01i, dble_slopelimit_01);
+    let dble_dzdx11 = clamp_slope(sign_dzdx11, dble_dzdx11i, dble_slopelimit_11);
+    let dble_dzdy11 = clamp_slope(sign_dzdy11, dble_dzdy11i, dble_slopelimit_11);
+
+    // Sums and differences of first derivatives.
+    let twelve_sum00 = 6.0 * (dble_dzdx00 + dble_dzdy00);
+    let twelve_dif00 = 6.0 * (dble_dzdx00 - dble_dzdy00);
+    let twelve_sum10 = 6.0 * (dble_dzdx10 + dble_dzdy10);
+    let twelve_dif10 = 6.0 * (dble_dzdx10 - dble_dzdy10);
+    let twelve_sum01 = 6.0 * (dble_dzdx01 + dble_dzdy01);
+    let twelve_dif01 = 6.0 * (dble_dzdx01 - dble_dzdy01);
+    let twelve_sum11 = 6.0 * (dble_dzdx11 + dble_dzdy11);
+    let twelve_dif11 = 6.0 * (dble_dzdx11 - dble_dzdy11);
+
+    let twelve_abs_sum00 = twelve_sum00.abs();
+    let twelve_abs_sum10 = twelve_sum10.abs();
+    let twelve_abs_sum01 = twelve_sum01.abs();
+    let twelve_abs_sum11 = twelve_sum11.abs();
+
+    let u00_times_36 = 36.0 * u00;
+    let u10_times_36 = 36.0 * u10;
+    let u01_times_36 = 36.0 * u01;
+    let u11_times_36 = 36.0 * u11;
+
+    let first_limit00 = twelve_abs_sum00 - u00_times_36;
+    let first_limit10 = twelve_abs_sum10 - u10_times_36;
+    let first_limit01 = twelve_abs_sum01 - u01_times_36;
+    let first_limit11 = twelve_abs_sum11 - u11_times_36;
+
+    let quad_d2zdxdy00ii = quad_d2zdxdy00i.max(first_limit00);
+    let quad_d2zdxdy10ii = quad_d2zdxdy10i.max(first_limit10);
+    let quad_d2zdxdy01ii = quad_d2zdxdy01i.max(first_limit01);
+    let quad_d2zdxdy11ii = quad_d2zdxdy11i.max(first_limit11);
+
+    let v00_times_36 = 36.0 * v00;
+    let v10_times_36 = 36.0 * v10;
+    let v01_times_36 = 36.0 * v01;
+    let v11_times_36 = 36.0 * v11;
+
+    let second_limit00 = v00_times_36 - twelve_abs_sum00;
+    let second_limit10 = v10_times_36 - twelve_abs_sum10;
+    let second_limit01 = v01_times_36 - twelve_abs_sum01;
+    let second_limit11 = v11_times_36 - twelve_abs_sum11;
+
+    let quad_d2zdxdy00iii = quad_d2zdxdy00ii.min(second_limit00);
+    let quad_d2zdxdy10iii = quad_d2zdxdy10ii.min(second_limit10);
+    let quad_d2zdxdy01iii = quad_d2zdxdy01ii.min(second_limit01);
+    let quad_d2zdxdy11iii = quad_d2zdxdy11ii.min(second_limit11);
+
+    let twelve_abs_dif00 = twelve_dif00.abs();
+    let twelve_abs_dif10 = twelve_dif10.abs();
+    let twelve_abs_dif01 = twelve_dif01.abs();
+    let twelve_abs_dif11 = twelve_dif11.abs();
+
+    let third_limit00 = twelve_abs_dif00 - v00_times_36;
+    let third_limit10 = twelve_abs_dif10 - v10_times_36;
+    let third_limit01 = twelve_abs_dif01 - v01_times_36;
+    let third_limit11 = twelve_abs_dif11 - v11_times_36;
+
+    let quad_d2zdxdy00iiii = quad_d2zdxdy00iii.max(third_limit00);
+    let quad_d2zdxdy10iiii = quad_d2zdxdy10iii.max(third_limit10);
+    let quad_d2zdxdy01iiii = quad_d2zdxdy01iii.max(third_limit01);
+    let quad_d2zdxdy11iiii = quad_d2zdxdy11iii.max(third_limit11);
+
+    let fourth_limit00 = u00_times_36 - twelve_abs_dif00;
+    let fourth_limit10 = u10_times_36 - twelve_abs_dif10;
+    let fourth_limit01 = u01_times_36 - twelve_abs_dif01;
+    let fourth_limit11 = u11_times_36 - twelve_abs_dif11;
+
+    let quad_d2zdxdy00 = quad_d2zdxdy00iiii.min(fourth_limit00);
+    let quad_d2zdxdy10 = quad_d2zdxdy10iiii.min(fourth_limit10);
+    let quad_d2zdxdy01 = quad_d2zdxdy01iiii.min(fourth_limit01);
+    let quad_d2zdxdy11 = quad_d2zdxdy11iiii.min(fourth_limit11);
+
+    let newval1 = k.c00 * dos_two + k.c10 * dos_thr + k.c01 * tre_two + k.c11 * tre_thr;
+    let newval2 = k.c00dx * dble_dzdx00
+        + k.c10dx * dble_dzdx10
+        + k.c01dx * dble_dzdx01
+        + k.c11dx * dble_dzdx11
+        + k.c00dy * dble_dzdy00
+        + k.c10dy * dble_dzdy10
+        + k.c01dy * dble_dzdy01
+        + k.c11dy * dble_dzdy11;
+    let newval3 = k.c00dxdy * quad_d2zdxdy00
+        + k.c10dxdy * quad_d2zdxdy10
+        + k.c01dxdy * quad_d2zdxdy01
+        + k.c11dxdy * quad_d2zdxdy11;
+
+    // `dble_dzdy11i` participates only in the reference implementation's
+    // symmetry; it is unused in the final combination, kept above for a
+    // line-by-line correspondence with the C source.
+    let _ = dble_dzdy11i;
+
+    newval1 + 0.5 * newval2 + 0.25 * newval3
+}
+
+/// Nohalo level-1 subdivision (`nohalo_subdivision`): from the 21-point
+/// diamond stencil, compute the twelve new half-density values and return
+/// the sixteen LBB stencil values in row-major order. `st` holds the input
+/// stencil already reflected so the sample sits to the bottom-right of the
+/// centre (`tre_thr`); see [`gather_nohalo_stencil`].
+#[allow(clippy::many_single_char_names)]
+fn nohalo_subdivision(st: &NohaloStencil) -> [f64; 16] {
+    let NohaloStencil {
+        uno_two,
+        uno_thr,
+        uno_fou,
+        dos_one,
+        dos_two,
+        dos_thr,
+        dos_fou,
+        dos_fiv,
+        tre_one,
+        tre_two,
+        tre_thr,
+        tre_fou,
+        tre_fiv,
+        qua_one,
+        qua_two,
+        qua_thr,
+        qua_fou,
+        qua_fiv,
+        cin_two,
+        cin_thr,
+        cin_fou,
+    } = *st;
+
+    // Vertical simple differences.
+    let d_unodos_two = dos_two - uno_two;
+    let d_dostre_two = tre_two - dos_two;
+    let d_trequa_two = qua_two - tre_two;
+    let d_quacin_two = cin_two - qua_two;
+    let d_unodos_thr = dos_thr - uno_thr;
+    let d_dostre_thr = tre_thr - dos_thr;
+    let d_trequa_thr = qua_thr - tre_thr;
+    let d_quacin_thr = cin_thr - qua_thr;
+    let d_unodos_fou = dos_fou - uno_fou;
+    let d_dostre_fou = tre_fou - dos_fou;
+    let d_trequa_fou = qua_fou - tre_fou;
+    let d_quacin_fou = cin_fou - qua_fou;
+    // Horizontal simple differences.
+    let d_dos_onetwo = dos_two - dos_one;
+    let d_dos_twothr = dos_thr - dos_two;
+    let d_dos_thrfou = dos_fou - dos_thr;
+    let d_dos_foufiv = dos_fiv - dos_fou;
+    let d_tre_onetwo = tre_two - tre_one;
+    let d_tre_twothr = tre_thr - tre_two;
+    let d_tre_thrfou = tre_fou - tre_thr;
+    let d_tre_foufiv = tre_fiv - tre_fou;
+    let d_qua_onetwo = qua_two - qua_one;
+    let d_qua_twothr = qua_thr - qua_two;
+    let d_qua_thrfou = qua_fou - qua_thr;
+    let d_qua_foufiv = qua_fiv - qua_fou;
+
+    // Recyclable vertical products and squares.
+    let d_unodos_times_dostre_two = d_unodos_two * d_dostre_two;
+    let d_dostre_two_sq = d_dostre_two * d_dostre_two;
+    let d_dostre_times_trequa_two = d_dostre_two * d_trequa_two;
+    let d_trequa_times_quacin_two = d_quacin_two * d_trequa_two;
+    let d_quacin_two_sq = d_quacin_two * d_quacin_two;
+
+    let d_unodos_times_dostre_thr = d_unodos_thr * d_dostre_thr;
+    let d_dostre_thr_sq = d_dostre_thr * d_dostre_thr;
+    let d_dostre_times_trequa_thr = d_trequa_thr * d_dostre_thr;
+    let d_trequa_times_quacin_thr = d_trequa_thr * d_quacin_thr;
+    let d_quacin_thr_sq = d_quacin_thr * d_quacin_thr;
+
+    let d_unodos_times_dostre_fou = d_unodos_fou * d_dostre_fou;
+    let d_dostre_fou_sq = d_dostre_fou * d_dostre_fou;
+    let d_dostre_times_trequa_fou = d_trequa_fou * d_dostre_fou;
+    let d_trequa_times_quacin_fou = d_trequa_fou * d_quacin_fou;
+    let d_quacin_fou_sq = d_quacin_fou * d_quacin_fou;
+    // Recyclable horizontal products and squares.
+    let d_dos_onetwo_times_twothr = d_dos_onetwo * d_dos_twothr;
+    let d_dos_twothr_sq = d_dos_twothr * d_dos_twothr;
+    let d_dos_twothr_times_thrfou = d_dos_twothr * d_dos_thrfou;
+    let d_dos_thrfou_times_foufiv = d_dos_thrfou * d_dos_foufiv;
+    let d_dos_foufiv_sq = d_dos_foufiv * d_dos_foufiv;
+
+    let d_tre_onetwo_times_twothr = d_tre_onetwo * d_tre_twothr;
+    let d_tre_twothr_sq = d_tre_twothr * d_tre_twothr;
+    let d_tre_twothr_times_thrfou = d_tre_thrfou * d_tre_twothr;
+    let d_tre_thrfou_times_foufiv = d_tre_thrfou * d_tre_foufiv;
+    let d_tre_foufiv_sq = d_tre_foufiv * d_tre_foufiv;
+
+    let d_qua_onetwo_times_twothr = d_qua_onetwo * d_qua_twothr;
+    let d_qua_twothr_sq = d_qua_twothr * d_qua_twothr;
+    let d_qua_twothr_times_thrfou = d_qua_thrfou * d_qua_twothr;
+    let d_qua_thrfou_times_foufiv = d_qua_thrfou * d_qua_foufiv;
+    let d_qua_foufiv_sq = d_qua_foufiv * d_qua_foufiv;
+
+    // Minmod slopes and first-level pixel values.
+    let dos_thr_y = nohalo_minmod(
+        d_dostre_thr,
+        d_unodos_thr,
+        d_dostre_thr_sq,
+        d_unodos_times_dostre_thr,
+    );
+    let tre_thr_y = nohalo_minmod(
+        d_dostre_thr,
+        d_trequa_thr,
+        d_dostre_thr_sq,
+        d_dostre_times_trequa_thr,
+    );
+    let newval_uno_two = 0.5 * (dos_thr + tre_thr) + 0.25 * (dos_thr_y - tre_thr_y);
+
+    let qua_thr_y = nohalo_minmod(
+        d_quacin_thr,
+        d_trequa_thr,
+        d_quacin_thr_sq,
+        d_trequa_times_quacin_thr,
+    );
+    let newval_tre_two = 0.5 * (tre_thr + qua_thr) + 0.25 * (tre_thr_y - qua_thr_y);
+
+    let tre_fou_y = nohalo_minmod(
+        d_dostre_fou,
+        d_trequa_fou,
+        d_dostre_fou_sq,
+        d_dostre_times_trequa_fou,
+    );
+    let qua_fou_y = nohalo_minmod(
+        d_quacin_fou,
+        d_trequa_fou,
+        d_quacin_fou_sq,
+        d_trequa_times_quacin_fou,
+    );
+    let newval_tre_fou = 0.5 * (tre_fou + qua_fou) + 0.25 * (tre_fou_y - qua_fou_y);
+
+    let dos_fou_y = nohalo_minmod(
+        d_dostre_fou,
+        d_unodos_fou,
+        d_dostre_fou_sq,
+        d_unodos_times_dostre_fou,
+    );
+    let newval_uno_fou = 0.5 * (dos_fou + tre_fou) + 0.25 * (dos_fou_y - tre_fou_y);
+
+    let tre_two_x = nohalo_minmod(
+        d_tre_twothr,
+        d_tre_onetwo,
+        d_tre_twothr_sq,
+        d_tre_onetwo_times_twothr,
+    );
+    let tre_thr_x = nohalo_minmod(
+        d_tre_twothr,
+        d_tre_thrfou,
+        d_tre_twothr_sq,
+        d_tre_twothr_times_thrfou,
+    );
+    let newval_dos_one = 0.5 * (tre_two + tre_thr) + 0.25 * (tre_two_x - tre_thr_x);
+
+    let tre_fou_x = nohalo_minmod(
+        d_tre_foufiv,
+        d_tre_thrfou,
+        d_tre_foufiv_sq,
+        d_tre_thrfou_times_foufiv,
+    );
+    let tre_thr_x_minus_tre_fou_x = tre_thr_x - tre_fou_x;
+    let newval_dos_thr = 0.5 * (tre_thr + tre_fou) + 0.25 * tre_thr_x_minus_tre_fou_x;
+
+    let qua_thr_x = nohalo_minmod(
+        d_qua_twothr,
+        d_qua_thrfou,
+        d_qua_twothr_sq,
+        d_qua_twothr_times_thrfou,
+    );
+    let qua_fou_x = nohalo_minmod(
+        d_qua_foufiv,
+        d_qua_thrfou,
+        d_qua_foufiv_sq,
+        d_qua_thrfou_times_foufiv,
+    );
+    let qua_thr_x_minus_qua_fou_x = qua_thr_x - qua_fou_x;
+    let newval_qua_thr = 0.5 * (qua_thr + qua_fou) + 0.25 * qua_thr_x_minus_qua_fou_x;
+
+    let qua_two_x = nohalo_minmod(
+        d_qua_twothr,
+        d_qua_onetwo,
+        d_qua_twothr_sq,
+        d_qua_onetwo_times_twothr,
+    );
+    let newval_qua_one = 0.5 * (qua_two + qua_thr) + 0.25 * (qua_two_x - qua_thr_x);
+
+    let newval_tre_thr = 0.125 * (tre_thr_x_minus_tre_fou_x + qua_thr_x_minus_qua_fou_x)
+        + 0.5 * (newval_tre_two + newval_tre_fou);
+
+    let dos_thr_x = nohalo_minmod(
+        d_dos_twothr,
+        d_dos_thrfou,
+        d_dos_twothr_sq,
+        d_dos_twothr_times_thrfou,
+    );
+    let dos_fou_x = nohalo_minmod(
+        d_dos_foufiv,
+        d_dos_thrfou,
+        d_dos_foufiv_sq,
+        d_dos_thrfou_times_foufiv,
+    );
+    let newval_uno_thr = 0.25 * (dos_fou - tre_thr)
+        + 0.125 * (dos_fou_y - tre_fou_y + dos_thr_x - dos_fou_x)
+        + 0.5 * (newval_uno_two + newval_dos_thr);
+
+    let tre_two_y = nohalo_minmod(
+        d_dostre_two,
+        d_trequa_two,
+        d_dostre_two_sq,
+        d_dostre_times_trequa_two,
+    );
+    let qua_two_y = nohalo_minmod(
+        d_quacin_two,
+        d_trequa_two,
+        d_quacin_two_sq,
+        d_trequa_times_quacin_two,
+    );
+    let newval_tre_one = 0.25 * (qua_two - tre_thr)
+        + 0.125 * (qua_two_x - qua_thr_x + tre_two_y - qua_two_y)
+        + 0.5 * (newval_dos_one + newval_tre_two);
+
+    let dos_two_x = nohalo_minmod(
+        d_dos_twothr,
+        d_dos_onetwo,
+        d_dos_twothr_sq,
+        d_dos_onetwo_times_twothr,
+    );
+    let dos_two_y = nohalo_minmod(
+        d_dostre_two,
+        d_unodos_two,
+        d_dostre_two_sq,
+        d_unodos_times_dostre_two,
+    );
+    let newval_uno_one = 0.25 * (dos_two + dos_thr + tre_two + tre_thr)
+        + 0.125
+            * (dos_two_x - dos_thr_x + tre_two_x - tre_thr_x + dos_two_y + dos_thr_y
+                - tre_two_y
+                - tre_thr_y);
+
+    [
+        newval_uno_one,
+        newval_uno_two,
+        newval_uno_thr,
+        newval_uno_fou,
+        newval_dos_one,
+        tre_thr,
+        newval_dos_thr,
+        tre_fou,
+        newval_tre_one,
+        newval_tre_two,
+        newval_tre_thr,
+        newval_tre_fou,
+        newval_qua_one,
+        qua_thr,
+        newval_qua_thr,
+        qua_fou,
+    ]
+}
+
+/// The 21-point nohalo input stencil, already reflected so the sampling
+/// point lies to the bottom-right of `tre_thr`.
+#[derive(Clone, Copy)]
+struct NohaloStencil {
+    uno_two: f64,
+    uno_thr: f64,
+    uno_fou: f64,
+    dos_one: f64,
+    dos_two: f64,
+    dos_thr: f64,
+    dos_fou: f64,
+    dos_fiv: f64,
+    tre_one: f64,
+    tre_two: f64,
+    tre_thr: f64,
+    tre_fou: f64,
+    tre_fiv: f64,
+    qua_one: f64,
+    qua_two: f64,
+    qua_thr: f64,
+    qua_fou: f64,
+    qua_fiv: f64,
+    cin_two: f64,
+    cin_thr: f64,
+    cin_fou: f64,
+}
+
+impl NohaloStencil {
+    /// Build the stencil from the 21 diamond taps in [`nohalo_offsets`]
+    /// order.
+    fn from_diamond(d: &[f64; 21]) -> Self {
+        Self {
+            uno_two: d[0],
+            uno_thr: d[1],
+            uno_fou: d[2],
+            dos_one: d[3],
+            dos_two: d[4],
+            dos_thr: d[5],
+            dos_fou: d[6],
+            dos_fiv: d[7],
+            tre_one: d[8],
+            tre_two: d[9],
+            tre_thr: d[10],
+            tre_fou: d[11],
+            tre_fiv: d[12],
+            qua_one: d[13],
+            qua_two: d[14],
+            qua_thr: d[15],
+            qua_fou: d[16],
+            qua_fiv: d[17],
+            cin_two: d[18],
+            cin_thr: d[19],
+            cin_fou: d[20],
+        }
+    }
 }
 
 /// Unpremultiply an interpolated pixel in place (`vips_unpremultiply`):
@@ -1402,14 +2146,13 @@ impl Raster {
     /// input `(x, y)` maps to output `(a*x + b*y, c*x + d*y)`, the output
     /// is the rounded bounding box of the transformed input, and each
     /// output pixel is inverse-mapped and interpolated. The interpolator is
-    /// a libvips nickname: `"nearest"`, `"bilinear"`, or `"bicubic"`
-    /// (`"nohalo"` and `"lbb"` are recognised but not implemented yet).
-    /// Panicking form of [`Raster::try_affine`], matching the ported-test
-    /// call surface.
+    /// a libvips nickname: `"nearest"`, `"bilinear"`, `"bicubic"`,
+    /// `"nohalo"`, or `"lbb"`. Panicking form of [`Raster::try_affine`],
+    /// matching the ported-test call surface.
     ///
     /// # Panics
     ///
-    /// Panics on an unknown or unimplemented interpolator name or any
+    /// Panics on an unknown interpolator name or any
     /// [`ResampleError`]; see [`Raster::try_affine`].
     #[track_caller]
     pub fn affine(&self, matrix: [f64; 4], interpolate: &str) -> Raster {
@@ -1561,7 +2304,7 @@ impl Raster {
     ///
     /// # Panics
     ///
-    /// Panics on an unknown or unimplemented interpolator name or any
+    /// Panics on an unknown interpolator name or any
     /// [`ResampleError`]; see [`Raster::try_mapim`].
     #[track_caller]
     pub fn mapim(&self, index: &Raster, interpolate: &str) -> Raster {
@@ -1949,22 +2692,20 @@ mod tests {
         }
     }
 
-    /// An unknown kernel nickname is a typed error, and the recognised
-    /// but unimplemented interpolators fail loudly rather than aliasing.
+    /// An unknown kernel or interpolator nickname is a typed error, and
+    /// every recognised interpolator nickname parses, including the
+    /// nohalo and lbb minmod resamplers.
     #[test]
     fn kernel_and_interpolator_parsing() {
         assert!(matches!(
             ReduceKernel::from_name("box"),
             Err(ResampleError::UnknownKernel { .. })
         ));
-        assert!(matches!(
-            Interpolator::from_name("nohalo"),
-            Err(ResampleError::InterpolatorNotImplemented { name: "nohalo" })
-        ));
-        assert!(matches!(
-            Interpolator::from_name("lbb"),
-            Err(ResampleError::InterpolatorNotImplemented { name: "lbb" })
-        ));
+        assert_eq!(
+            Interpolator::from_name("nohalo").unwrap(),
+            Interpolator::Nohalo
+        );
+        assert_eq!(Interpolator::from_name("lbb").unwrap(), Interpolator::Lbb);
         assert!(matches!(
             Interpolator::from_name("vsqbs"),
             Err(ResampleError::UnknownInterpolator { .. })
@@ -2440,5 +3181,208 @@ mod tests {
             Raster::try_thumbnail_with_profile(&path, 100, "adobe-rgb"),
             Err(ThumbnailError::UnknownProfile { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Nohalo / LBB interpolators, pinned to a real libvips 8.18.3 oracle
+    // -----------------------------------------------------------------
+
+    /// The 16x16 single-band fixture the libvips oracle affines: sharp
+    /// 4x4 block-parity edges so the nohalo minmod slopes and the LBB
+    /// range limiters both activate. The generator formula is
+    /// `base = (x*17 + y*29) % 256; v = 255 - base` on the block-parity
+    /// squares, `base` elsewhere.
+    fn oracle_16x16() -> Raster {
+        let mut data = vec![0u8; 16 * 16];
+        for y in 0..16usize {
+            for x in 0..16usize {
+                let base = ((x * 17 + y * 29) % 256) as u8;
+                let bx = (x / 4) % 2;
+                let by = (y / 4) % 2;
+                data[y * 16 + x] = if bx ^ by != 0 { 255 - base } else { base };
+            }
+        }
+        Raster::new(16, 16, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// The interior 12x12 crop `[6, 6, 12, 12]` of the 28x28 affine of the
+    /// oracle fixture by `[1.5, 0.25, -0.25, 1.5]` matches real libvips
+    /// 8.18.3 byte for byte, for every interpolator. Pinning nearest,
+    /// bilinear, and bicubic confirms the affine geometry and rounding
+    /// agree with libvips; pinning nohalo and lbb confirms the two
+    /// minmod-subdivision ports are faithful. The interior crop keeps the
+    /// stencils off the image edge so the comparison is pure kernel math.
+    #[test]
+    fn affine_interpolators_match_libvips_oracle() {
+        // Captured with: vips affine in.pgm out.v "1.5 0.25 -0.25 1.5"
+        //   --interpolate INTERP  (libvips 8.18.3), interior crop [6,6,12,12].
+        #[rustfmt::skip]
+        let oracle: [(&str, [u8; 144]); 5] = [
+            ("nearest", [
+                80, 129, 129, 112, 95, 95, 78, 194, 194, 211, 1, 1,
+                109, 129, 129, 112, 66, 66, 49, 223, 223, 240, 1, 1,
+                138, 100, 100, 83, 66, 66, 49, 223, 3, 242, 242, 225,
+                138, 100, 184, 201, 201, 218, 235, 235, 3, 242, 242, 196,
+                88, 88, 184, 201, 201, 247, 8, 8, 230, 213, 213, 196,
+                59, 59, 213, 230, 230, 247, 8, 8, 201, 201, 184, 167,
+                59, 59, 242, 242, 3, 20, 20, 37, 201, 201, 184, 138,
+                47, 30, 242, 242, 3, 49, 49, 66, 172, 172, 155, 138,
+                18, 1, 15, 15, 32, 49, 49, 66, 112, 112, 129, 129,
+                18, 1, 211, 211, 194, 194, 177, 160, 160, 112, 129, 129,
+                10, 27, 27, 211, 194, 194, 148, 131, 131, 141, 158, 158,
+                39, 56, 56, 182, 165, 165, 148, 131, 131, 170, 170, 187,
+            ]),
+            ("bilinear", [
+                123, 122, 108, 94, 79, 65, 146, 218, 232, 126, 10, 41,
+                118, 105, 91, 77, 67, 76, 129, 156, 212, 195, 152, 170,
+                123, 129, 138, 151, 169, 192, 149, 3, 165, 231, 217, 202,
+                122, 184, 198, 212, 226, 175, 116, 143, 199, 214, 200, 185,
+                103, 188, 215, 229, 243, 122, 42, 177, 211, 197, 183, 168,
+                76, 185, 187, 115, 101, 62, 37, 148, 194, 180, 166, 151,
+                40, 173, 157, 13, 21, 36, 50, 128, 177, 163, 149, 136,
+                17, 66, 70, 31, 38, 55, 76, 120, 150, 143, 141, 144,
+                7, 33, 84, 106, 123, 135, 143, 139, 112, 126, 140, 154,
+                19, 82, 211, 197, 183, 169, 154, 140, 132, 143, 157, 171,
+                33, 80, 176, 180, 166, 152, 137, 128, 144, 160, 174, 188,
+                50, 77, 150, 163, 149, 135, 120, 108, 147, 177, 191, 205,
+            ]),
+            ("bicubic", [
+                126, 124, 107, 89, 67, 46, 150, 249, 248, 117, 0, 9,
+                118, 95, 82, 71, 63, 60, 124, 158, 228, 209, 152, 180,
+                124, 122, 133, 148, 172, 225, 155, 3, 162, 253, 235, 228,
+                117, 184, 206, 226, 247, 196, 105, 145, 211, 216, 200, 189,
+                96, 193, 234, 248, 255, 111, 10, 198, 239, 197, 182, 169,
+                69, 202, 210, 109, 96, 46, 33, 155, 207, 180, 165, 149,
+                38, 201, 182, 0, 0, 14, 41, 131, 188, 164, 148, 135,
+                10, 61, 54, 16, 33, 54, 69, 120, 152, 141, 138, 141,
+                2, 17, 64, 105, 129, 143, 151, 141, 112, 121, 137, 153,
+                0, 79, 211, 214, 195, 180, 165, 143, 128, 140, 157, 171,
+                13, 78, 191, 194, 168, 152, 136, 127, 144, 161, 174, 188,
+                44, 73, 156, 171, 149, 134, 117, 107, 147, 181, 193, 208,
+            ]),
+            ("nohalo", [
+                127, 125, 106, 89, 70, 54, 144, 232, 239, 120, 2, 21,
+                121, 97, 83, 72, 64, 61, 125, 160, 221, 200, 156, 181,
+                126, 121, 130, 144, 166, 205, 159, 3, 168, 240, 226, 211,
+                118, 184, 202, 220, 237, 181, 111, 150, 208, 217, 200, 185,
+                97, 191, 222, 238, 247, 122, 23, 196, 220, 196, 183, 169,
+                69, 195, 193, 111, 99, 56, 33, 155, 200, 180, 163, 144,
+                38, 184, 169, 4, 11, 29, 46, 132, 184, 164, 148, 134,
+                6, 60, 64, 21, 34, 54, 73, 122, 147, 137, 137, 142,
+                2, 22, 81, 112, 131, 143, 151, 138, 112, 119, 136, 150,
+                9, 85, 211, 206, 191, 177, 160, 143, 126, 137, 156, 171,
+                26, 79, 188, 188, 167, 152, 133, 126, 143, 159, 174, 188,
+                50, 75, 156, 167, 148, 135, 117, 108, 145, 179, 194, 208,
+            ]),
+            ("lbb", [
+                126, 124, 106, 89, 69, 47, 154, 233, 238, 116, 2, 19,
+                117, 96, 81, 71, 63, 57, 131, 161, 226, 203, 161, 188,
+                125, 122, 134, 148, 172, 215, 164, 3, 176, 238, 228, 216,
+                118, 184, 206, 222, 238, 184, 104, 154, 214, 215, 200, 189,
+                95, 193, 233, 238, 246, 131, 19, 201, 224, 196, 182, 170,
+                68, 198, 197, 107, 93, 53, 33, 157, 208, 180, 165, 149,
+                38, 196, 181, 4, 9, 17, 40, 132, 188, 164, 148, 135,
+                10, 65, 60, 19, 34, 53, 69, 119, 152, 141, 137, 141,
+                2, 20, 70, 108, 130, 143, 152, 139, 112, 121, 137, 153,
+                8, 85, 211, 203, 194, 180, 165, 145, 128, 140, 157, 171,
+                17, 77, 187, 190, 167, 152, 135, 126, 144, 161, 174, 188,
+                44, 73, 156, 172, 149, 135, 117, 107, 148, 181, 194, 208,
+            ]),
+        ];
+
+        let im = oracle_16x16();
+        for (name, expected) in oracle {
+            let out = im.affine([1.5, 0.25, -0.25, 1.5], name);
+            assert_eq!(out.width(), 28, "{name} width");
+            assert_eq!(out.height(), 28, "{name} height");
+            let interior = out.extract_area(6, 6, 12, 12);
+            let got = interior.data();
+            let (mismatches, worst) =
+                got.iter()
+                    .zip(expected.iter())
+                    .fold((0usize, 0u8), |(n, worst), (&a, &b)| {
+                        let d = a.abs_diff(b);
+                        (n + usize::from(d != 0), worst.max(d))
+                    });
+            // nohalo and lbb reproduce libvips byte for byte (0 of 144),
+            // which is the exact-parity gate for this work: both compute
+            // their Hermite coefficients directly, just like `nohalo.cpp`
+            // and `lbb.cpp`. The other three kernels only bound the affine
+            // geometry: bilinear differs at a single `.5` rounding tie
+            // (delta 1); nearest at 2 equidistant-neighbour ties (a
+            // whole-pixel swap, so a large delta but the adjacent sample);
+            // and bicubic within delta 3 because libvips bicubic reads
+            // precomputed coefficient tables quantised to a fixed-point
+            // sub-pixel grid (VIPS_TRANSFORM_SCALE) while this direct
+            // Catmull-Rom does not. None of those conventions touch the
+            // on-grid ported test_affine round-trip.
+            let (allowed_count, allowed_delta) = match name {
+                "nohalo" | "lbb" => (0, 0),
+                "bilinear" => (1, 1),
+                "nearest" => (2, u8::MAX),
+                "bicubic" => (60, 3),
+                _ => unreachable!(),
+            };
+            assert!(
+                mismatches <= allowed_count && worst <= allowed_delta,
+                "{name} differs from the libvips oracle in {mismatches} bytes \
+                 (worst delta {worst}); expected at most {allowed_count} bytes, delta {allowed_delta}"
+            );
+        }
+    }
+
+    /// The transpose matrix `[0, 1, 1, 0]` samples exactly on the input
+    /// grid, so every interpolator (including nohalo and lbb) reproduces
+    /// the transpose byte for byte, and four applications are the
+    /// identity: the ported test_affine round-trip invariant.
+    #[test]
+    fn nohalo_lbb_transpose_round_trip_is_identity() {
+        let im = crate::source::generate_test_raster(6, 4).unwrap();
+        let reference = im.rot(Angle::D90).fliphor();
+        for interp in ["nohalo", "lbb"] {
+            let t = im.affine([0.0, 1.0, 1.0, 0.0], interp);
+            assert_eq!(t.width(), im.height(), "{interp} transpose width");
+            assert_eq!(t.height(), im.width(), "{interp} transpose height");
+            assert_eq!(t.data(), reference.data(), "{interp} transpose bytes");
+
+            let mut x = im.clone();
+            for _ in 0..4 {
+                x = x.affine([0.0, 1.0, 1.0, 0.0], interp);
+            }
+            assert_eq!(x.data(), im.data(), "{interp} 4x transpose not identity");
+        }
+    }
+
+    /// LBB stays locally bounded: an upscale never overshoots the range of
+    /// the input samples, the defining property of the resampler (no
+    /// output clamping needed). Nohalo, being co-monotone, likewise keeps
+    /// a monotone ramp within its endpoints.
+    #[test]
+    fn nohalo_lbb_stay_within_input_range() {
+        // A ramp with a sharp central step, the classic overshoot probe:
+        // a plain bicubic rings above 255 / below 0 at the step, lbb and
+        // nohalo may not.
+        let mut data = vec![0u8; 12 * 12];
+        for y in 0..12usize {
+            for x in 0..12usize {
+                data[y * 12 + x] = if x < 6 { 30 } else { 220 };
+            }
+        }
+        let im = Raster::new(12, 12, PixelFormat::Gray8, data).unwrap();
+        for interp in ["nohalo", "lbb"] {
+            // A 2.5x upscale around the step, the regime where cubic
+            // resamplers overshoot.
+            let up = im.affine([2.5, 0.0, 0.0, 2.5], interp);
+            // Sample the interior to avoid the background-extended border.
+            let inner = up.extract_area(4, 4, up.width() - 8, up.height() - 8);
+            let (lo, hi) = inner
+                .data()
+                .iter()
+                .fold((255u8, 0u8), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            assert!(
+                lo >= 30 && hi <= 220,
+                "{interp} overshot the [30, 220] input range: got [{lo}, {hi}]"
+            );
+        }
     }
 }
