@@ -80,6 +80,7 @@ pub mod planner;
 pub(crate) mod poison;
 pub mod raster;
 pub(crate) mod raster_ops;
+pub mod resample;
 pub mod resize;
 pub mod resume;
 pub mod retry;
@@ -144,6 +145,7 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
+pub use resample::{AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions};
 pub use resume::{
     CompletedTileSet, JobCheckpoint, JobMetadata, ResumeError, ResumeMode, ResumePolicy,
 };
