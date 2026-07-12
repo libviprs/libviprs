@@ -170,7 +170,18 @@ pub enum BlankTileStrategy {
 pub struct EngineConfig {
     /// Number of worker threads for tile extraction. 0 = single-threaded (current thread).
     pub concurrency: usize,
-    /// Maximum tiles buffered between producer and sink. Controls backpressure.
+    /// Extra tiles the producer/sink channel may buffer *beyond* the ones the
+    /// workers are actively handing off. Controls backpressure and bounds the
+    /// number of tiles held in flight.
+    ///
+    /// The default is `0`: a rendezvous channel where a worker blocks until the
+    /// sink consumer takes its tile, so the peak in-flight tile count stays at
+    /// roughly the worker count (`concurrency`, plus the one being handed off).
+    /// This keeps memory bounded by the parallelism the caller asked for rather
+    /// than by an unrelated constant, so a run never admits far more tiles than
+    /// it can consume (libviprs-tests issue #79). Raise it to let producers run
+    /// ahead of a bursty or high-latency sink, at the cost of higher peak
+    /// memory and a higher `queue_pressure_peak`.
     pub buffer_size: usize,
     /// Background color (RGB) used to pad edge tiles to the full tile size.
     /// Defaults to white (255, 255, 255).
@@ -224,7 +235,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             concurrency: 0,
-            buffer_size: 64,
+            buffer_size: 0,
             background_rgb: [255, 255, 255],
             blank_tile_strategy: BlankTileStrategy::Emit,
             failure_policy: FailurePolicy::default(),
@@ -253,7 +264,10 @@ impl EngineConfig {
     ///
     /// A smaller buffer limits memory usage but may cause producers to block
     /// more frequently. A larger buffer smooths out sink latency at the cost
-    /// of higher peak memory.
+    /// of higher peak memory. The default (`0`) is a rendezvous channel that
+    /// holds no extra tiles, so the peak in-flight count tracks the worker
+    /// count; pass a positive `n` to let producers run up to `n` tiles ahead
+    /// of the sink.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-buffer-size).
     pub fn with_buffer_size(mut self, n: usize) -> Self {
@@ -3928,12 +3942,68 @@ mod tests {
             result.queue_pressure_peak
         );
         // Sanity: occupancy can never exceed what the channel plus in-flight
-        // senders can hold.
+        // senders can hold. The gauge is bumped just before each `send`, so at
+        // the peak every one of the `concurrency` producers may have counted a
+        // tile that is not yet resident in the buffer, on top of a full buffer.
+        // The bounded channel also lets one item sit mid-handoff (sent but not
+        // yet received) beyond its declared capacity, so the true ceiling is
+        // `buffer_size + concurrency + 1`; asserting the tighter
+        // `buffer_size + concurrency` made this a ~3%-flaky test (it fired at
+        // `+ 1` under an unlucky producer/consumer interleaving).
         assert!(
-            result.queue_pressure_peak <= (buffer_size + concurrency) as u32,
+            result.queue_pressure_peak <= (buffer_size + concurrency + 1) as u32,
             "queue_pressure_peak {} exceeds the maximum possible occupancy {}",
             result.queue_pressure_peak,
-            buffer_size + concurrency
+            buffer_size + concurrency + 1
         );
+    }
+
+    /// libviprs-tests issue #79 (queue over-admission): with the *default*
+    /// config a parallel run must not let far more tiles than the worker count
+    /// sit in flight. Before the fix the default channel buffered up to 64
+    /// tiles, so a `concurrency(4)` run peaked at 30-56 in flight regardless of
+    /// how few workers the caller asked for. The default is now a rendezvous
+    /// channel, so a worker blocks until the sink takes its tile and the peak
+    /// tracks the worker count (plus the one being handed off).
+    ///
+    /// This is the core reproduction of
+    /// `phase3_tracing::queue_pressure_peak_bounded_by_concurrency`.
+    #[test]
+    fn queue_pressure_peak_bounded_by_concurrency_default_config() {
+        let src = gradient_raster(1024, 1024);
+        let plan = PyramidPlanner::new(1024, 1024, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let concurrency = 4usize;
+        // Default config -> default (rendezvous) buffer. The only knob the
+        // caller sets is the worker count, mirroring the phase3 test.
+        let config = EngineConfig::default().with_concurrency(concurrency);
+
+        // Run repeatedly: the peak is scheduling-sensitive, so a single pass
+        // could pass by luck. Every pass must honour the bound.
+        for pass in 0..16 {
+            let sink = MemorySink::new();
+            let result =
+                generate_pyramid_observed(&src, &plan, &sink, &config, &NoopObserver).unwrap();
+
+            // Matches the phase3 contract: peak <= concurrency + a small fudge
+            // for the tile being handed off to the sink.
+            let fudge = 2u32;
+            assert!(
+                result.queue_pressure_peak <= concurrency as u32 + fudge,
+                "pass {pass}: queue_pressure_peak {} exceeds concurrency {concurrency} + fudge {fudge}",
+                result.queue_pressure_peak,
+            );
+            assert!(
+                result.queue_pressure_peak > 0,
+                "pass {pass}: queue_pressure_peak should be > 0 after a real run",
+            );
+            assert_eq!(
+                result.tiles_produced,
+                plan.total_tile_count(),
+                "pass {pass}: every tile must still be produced under the tighter buffer",
+            );
+        }
     }
 }
