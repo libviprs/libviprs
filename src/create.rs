@@ -326,9 +326,12 @@ impl Raster {
         for chunk in out.data_mut().chunks_exact_mut(pixel.len()) {
             chunk.copy_from_slice(&pixel);
         }
-        // Carry the source geometry/metadata (libvips copies the header),
-        // pinning the resolved interpretation so it survives the band-count
-        // change even when the source left it inferred from the format.
+        // Carry the source geometry/interpretation block only (libvips
+        // copies the header geometry). The attached fields stay empty from
+        // `Raster::zeroed`, so ICC/EXIF/filename are intentionally not
+        // inherited. Pin the resolved interpretation so it survives the
+        // band-count change even when the source left it inferred from the
+        // format.
         out.meta = self.meta;
         out.meta.interpretation = Some(self.interpretation());
         Ok(out)
@@ -337,9 +340,12 @@ impl Raster {
     /// Create a constant image the size of `self`, filled with `value`
     /// (libvips `vips_image_new_from_image`).
     ///
-    /// The result keeps `self`'s width, height, sample depth,
-    /// interpretation, resolution, and offsets; only the band count
-    /// changes, to `value.len()`. Every pixel is set to `value`
+    /// The result carries `self`'s geometry/interpretation block only: width,
+    /// height, sample depth, interpretation, resolution, and offsets; the
+    /// band count changes to `value.len()`. It intentionally does *not*
+    /// inherit `self`'s attached fields (ICC profile, EXIF, filename): the
+    /// constant is a freshly built image, not a re-encoding of the source,
+    /// so it starts with an empty field set. Every pixel is set to `value`
     /// (per channel), so a scalar produces a 1-band image with
     /// `avg() == value[0]`, and an N-element vector produces an N-band
     /// image with `avg()` equal to the mean of `value`. Panicking form of
