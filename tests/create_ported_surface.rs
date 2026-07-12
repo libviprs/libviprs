@@ -9,14 +9,15 @@
 //! `src/create.rs`; this file is the API contract, with each ported test
 //! body reproduced literally.
 //!
-//! Not pinned here, because they belong to later batches, are the
-//! ported cell's `fwfft` (`test_fwfft_small_image`), `invertlut`
-//! (`test_invertlut`), `matrixinvert` (`test_matrixinvert`), and
-//! `Kernel::gaussmat` / `Kernel::logmat` (`test_gaussmat` /
-//! `test_logmat`) call sites. The `from_matrix` setup those tests share
-//! is in this batch and is pinned below. The `test_grey` and
-//! `test_identity` bodies are already pinned in
-//! `tests/conversion_ported_surface.rs`.
+//! Not pinned here, because they live in other batches, are the
+//! ported cell's `fwfft` (`test_fwfft_small_image`, pinned in
+//! `tests/freqfilt_ported_surface.rs`), `invertlut` / `matrixinvert`
+//! (`test_invertlut` / `test_matrixinvert`, pinned in
+//! `tests/matrix_ported_surface.rs`), and `Kernel::gaussmat` /
+//! `Kernel::logmat` (`test_gaussmat` / `test_logmat`, a later batch)
+//! call sites. The `from_matrix` setup those tests share is pinned
+//! below. The `test_grey` and `test_identity` bodies are already
+//! pinned in `tests/conversion_ported_surface.rs`.
 //!
 //! One ported assertion is corrected here (see
 //! `ported_mask_butterworth`): the ported cell passes `nodc: true` in
