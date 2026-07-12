@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use image::{GenericImageView, ImageReader, Limits};
 use thiserror::Error;
@@ -10,33 +10,215 @@ use crate::imageio::MetadataValue;
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 
-/// Process-global, path-keyed cache of decoded rasters, backing the
-/// libvips-style load/revalidate semantics ([`decode_file`],
-/// [`decode_file_with_options`], [`Raster::invalidate`]).
+/// Default entry cap for the process-global load cache: at most this many
+/// distinct decoded rasters are retained before the least-recently-used is
+/// evicted. Mirrors libvips' operation-cache size default
+/// (`vips_cache_set_max`, ~100 live operations).
+const DEFAULT_LOAD_CACHE_MAX_ENTRIES: usize = 100;
+
+/// Default byte ceiling for the process-global load cache: once the total
+/// decoded-pixel bytes held exceed this, least-recently-used entries are
+/// evicted until it fits. Mirrors libvips' bounded max-memory cache ceiling
+/// (`vips_cache_set_max_mem`), here ~100 MB.
+const DEFAULT_LOAD_CACHE_MAX_BYTES: usize = 100 * 1024 * 1024;
+
+/// A single cached decode: the shared raster plus its byte footprint and a
+/// recency stamp used to pick the least-recently-used victim on eviction.
+struct CacheEntry {
+    /// The decoded raster, shared behind an [`Arc`] so a cache hit clones a
+    /// cheap handle under the lock and defers the deep pixel copy until
+    /// after the lock is released.
+    raster: Arc<Raster>,
+    /// The raster's pixel-buffer length, summed into
+    /// [`LoadCache::total_bytes`] for the byte-cap.
+    bytes: usize,
+    /// Monotonic access stamp: the highest value is the most-recently-used
+    /// entry, the lowest is the eviction victim.
+    last_used: u64,
+}
+
+/// A bounded, least-recently-used cache of decoded rasters keyed by
+/// canonical path.
 ///
-/// libvips keeps a global operation cache, so repeatedly opening the same
-/// file hands back the already-decoded image instead of re-reading and
-/// re-decoding it. A binding built on that library inherits the behaviour,
-/// including its sharp edge: a plain reload returns the *first* image
-/// decoded for a path even after the file changes on disk. The ported
-/// `test_revalidate` pins exactly this, so libviprs mirrors it with a
-/// single process-wide map from the requested path to the raster produced
-/// for it.
+/// libvips keeps a *bounded*, LRU-evicted operation cache (governed by
+/// `vips_cache_set_max` and `vips_cache_set_max_mem`): repeatedly opening
+/// the same file hands back the already-decoded image, but the cache never
+/// grows without limit. A binding built on that library inherits both the
+/// caching and its bound. This mirrors that with a process-global map that
+/// evicts the least-recently-used entry whenever an insert pushes it past
+/// either the entry-count cap or the total-bytes cap.
 ///
-/// - A plain [`decode_file`] is cache-first: the first decode of a path
-///   populates the entry, and every later plain load returns that raster
-///   (a possibly stale read).
-/// - [`decode_file_with_options`] with `revalidate = true` skips the
-///   lookup, re-reads from disk, and refreshes the entry.
-/// - [`Raster::invalidate`] drops the entry for the image's source path.
+/// Recency is tracked by a monotonic counter stamped on every insert and
+/// every hit; the victim is the entry with the smallest stamp. The entry
+/// count is small (100 by default), so scanning for the minimum on the rare
+/// eviction is cheaper than maintaining an intrusive ordering.
+struct LoadCache {
+    /// Canonical-path → cached decode.
+    map: HashMap<PathBuf, CacheEntry>,
+    /// Running sum of every entry's `bytes`, checked against `max_bytes`.
+    total_bytes: usize,
+    /// Source of monotonically increasing recency stamps.
+    tick: u64,
+    /// Maximum number of resident entries before LRU eviction.
+    max_entries: usize,
+    /// Maximum total pixel bytes before LRU eviction.
+    max_bytes: usize,
+}
+
+impl LoadCache {
+    /// A cache bounded by `max_entries` resident decodes and `max_bytes` of
+    /// total pixel data.
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            total_bytes: 0,
+            tick: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    /// Look up `key`, bumping its recency on a hit and returning the shared
+    /// raster handle (no pixel copy).
+    fn get(&mut self, key: &Path) -> Option<Arc<Raster>> {
+        self.tick += 1;
+        let stamp = self.tick;
+        let entry = self.map.get_mut(key)?;
+        entry.last_used = stamp;
+        Some(Arc::clone(&entry.raster))
+    }
+
+    /// Insert `raster` under `key`, replacing any existing entry, then evict
+    /// least-recently-used entries until both caps hold. Returns the shared
+    /// handle now resident (the one just inserted).
+    fn insert(&mut self, key: PathBuf, raster: Arc<Raster>) -> Arc<Raster> {
+        let bytes = raster.data().len();
+        self.tick += 1;
+        let stamp = self.tick;
+        let handle = Arc::clone(&raster);
+        if let Some(old) = self.map.insert(
+            key,
+            CacheEntry {
+                raster,
+                bytes,
+                last_used: stamp,
+            },
+        ) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+        }
+        self.total_bytes += bytes;
+        self.evict_to_caps();
+        handle
+    }
+
+    /// Insert `raster` under `key` only if the key is absent, returning the
+    /// resident handle (the existing entry on a race, otherwise the new one).
+    fn get_or_insert(&mut self, key: PathBuf, raster: Arc<Raster>) -> Arc<Raster> {
+        if let Some(existing) = self.get(&key) {
+            return existing;
+        }
+        self.insert(key, raster)
+    }
+
+    /// Drop the entry stored under `key`, if any.
+    fn remove(&mut self, key: &Path) {
+        if let Some(old) = self.map.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+        }
+    }
+
+    /// Drop every entry.
+    fn clear(&mut self) {
+        self.map.clear();
+        self.total_bytes = 0;
+    }
+
+    /// Set the entry cap, evicting immediately if the cache now exceeds it.
+    fn set_max_entries(&mut self, max: usize) {
+        self.max_entries = max;
+        self.evict_to_caps();
+    }
+
+    /// Set the byte cap, evicting immediately if the cache now exceeds it.
+    fn set_max_bytes(&mut self, max: usize) {
+        self.max_bytes = max;
+        self.evict_to_caps();
+    }
+
+    /// Evict the least-recently-used entry repeatedly until both the
+    /// entry-count and total-bytes caps hold (or the cache is empty).
+    fn evict_to_caps(&mut self) {
+        while !self.map.is_empty()
+            && (self.map.len() > self.max_entries || self.total_bytes > self.max_bytes)
+        {
+            let victim = self
+                .map
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            match victim {
+                Some(key) => {
+                    if let Some(old) = self.map.remove(&key) {
+                        self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+/// The process-global load cache backing [`decode_file`],
+/// [`decode_file_with_options`], and [`Raster::invalidate`]. See
+/// [`LoadCache`] for the bounded-LRU contract and its libvips-binding
+/// rationale.
+static LOAD_CACHE: LazyLock<Mutex<LoadCache>> = LazyLock::new(|| {
+    Mutex::new(LoadCache::new(
+        DEFAULT_LOAD_CACHE_MAX_ENTRIES,
+        DEFAULT_LOAD_CACHE_MAX_BYTES,
+    ))
+});
+
+/// Lock the global load cache, recovering in place from a poisoned lock.
 ///
-/// The map is intentionally never evicted: entries live for the process
-/// lifetime, matching libvips' own unbounded default and keeping the
-/// binding semantics deterministic. A poisoned lock is recovered in place
-/// (the cached rasters are plain data with no broken invariant), so no
-/// path here can panic on lock poisoning.
-static LOAD_CACHE: LazyLock<Mutex<HashMap<PathBuf, Raster>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The cached rasters are plain data with no broken invariant a panicking
+/// thread could have left behind, so recovering the guard is always safe
+/// and no path here can panic on lock poisoning.
+fn lock_cache() -> MutexGuard<'static, LoadCache> {
+    LOAD_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// The canonical cache key for `path`: the symlink-resolved absolute path,
+/// falling back to the path as given when it cannot be canonicalized (for
+/// example a not-yet-existing file). Insert, lookup, and invalidate all key
+/// off this single identity so differently-spelled but equal paths (a
+/// trailing `./`, a relative spelling, a symlink) share one entry.
+fn cache_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Set the maximum number of decoded rasters the process-global load cache
+/// retains (libvips `vips_cache_set_max`). Lowering it below the current
+/// occupancy evicts the least-recently-used entries immediately.
+pub fn set_load_cache_max_entries(max: usize) {
+    lock_cache().set_max_entries(max);
+}
+
+/// Set the total decoded-pixel byte ceiling the process-global load cache
+/// holds (libvips `vips_cache_set_max_mem`). Lowering it below the current
+/// footprint evicts the least-recently-used entries immediately.
+pub fn set_load_cache_max_bytes(max: usize) {
+    lock_cache().set_max_bytes(max);
+}
+
+/// Drop every entry from the process-global load cache (libvips
+/// `vips_cache_drop_all`), so the next plain [`decode_file`] of any path
+/// re-reads and re-decodes it from disk.
+pub fn clear_load_cache() {
+    lock_cache().clear();
+}
 
 /// Errors that can occur when decoding an image source.
 ///
@@ -168,12 +350,14 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// **See also:** [interactive example](https://libviprs.org/cli/#pyramid) (general
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 ///
-/// The decode is served through a process-global, path-keyed load cache
-/// (see [`LOAD_CACHE`]): the first load of a path is decoded from disk and
+/// The decode is served through a process-global, bounded-LRU load cache
+/// (see [`LoadCache`]): the first load of a path is decoded from disk and
 /// cached, and every later call returns that cached raster even if the
 /// file has since changed on disk. Use [`decode_file_with_options`] with
 /// `revalidate = true` to force a re-read, or [`Raster::invalidate`] to
-/// drop a path's cached entry.
+/// drop a path's cached entry. The cache is bounded by an entry count and a
+/// byte ceiling ([`set_load_cache_max_entries`] / [`set_load_cache_max_bytes`],
+/// [`clear_load_cache`]), so it cannot grow without limit.
 pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
     decode_file_with_options(path, false)
 }
@@ -186,7 +370,7 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// since changed on disk. With `revalidate = true` the cache lookup is
 /// skipped, the file is re-read and decoded fresh, and the cache entry for
 /// `path` is refreshed so subsequent plain [`decode_file`] calls see the
-/// new image. See [`LOAD_CACHE`] for the caching contract and its
+/// new image. See [`LoadCache`] for the caching contract and its
 /// libvips-binding rationale.
 ///
 /// # Errors
@@ -194,23 +378,31 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// As [`decode_file`]: I/O, decode, unsupported-format, dimension-limit,
 /// and raster-construction errors are all surfaced as [`SourceError`].
 pub fn decode_file_with_options(path: &Path, revalidate: bool) -> Result<Raster, SourceError> {
+    let key = cache_key(path);
     if !revalidate {
-        // Cache hit: hand back a clone of the already-decoded raster.
-        let cache = LOAD_CACHE
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if let Some(cached) = cache.get(path) {
-            return Ok(cached.clone());
+        // Cache-first: on a hit, clone only the cheap Arc handle under the
+        // lock and defer the deep pixel copy until the lock is released.
+        let hit = lock_cache().get(&key);
+        if let Some(raster) = hit {
+            return Ok((*raster).clone());
         }
     }
     // Miss, or a forced revalidate: decode from disk outside the lock so a
     // slow decode never serialises other paths' loads.
-    let raster = decode_file_with_limits(path, DecodeLimits::default())?;
-    LOAD_CACHE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .insert(path.to_path_buf(), raster.clone());
-    Ok(raster)
+    let raster = Arc::new(decode_file_with_limits(path, DecodeLimits::default())?);
+    // Reconcile under one critical section: a forced revalidate always
+    // overwrites the entry, while a plain miss inserts only if the key is
+    // still absent (another thread may have populated it while we decoded).
+    let resident = {
+        let mut cache = lock_cache();
+        if revalidate {
+            cache.insert(key, raster)
+        } else {
+            cache.get_or_insert(key, raster)
+        }
+    };
+    // Deep-clone the resident raster only after the lock is released.
+    Ok((*resident).clone())
 }
 
 impl Raster {
@@ -221,13 +413,14 @@ impl Raster {
     /// The path is the `filename` recorded by [`decode_file`] when the
     /// image was loaded. An image with no recorded filename (one built in
     /// memory) has nothing cached under a path, so this is a no-op for it.
-    /// See [`LOAD_CACHE`] for the caching contract.
+    /// The recorded filename is canonicalized to the same identity the load
+    /// keyed off, so invalidation reliably drops the entry even when this
+    /// raster's filename spells the path differently. See [`LoadCache`] for
+    /// the caching contract.
     pub fn invalidate(&mut self) {
         if let Some(MetadataValue::Str(filename)) = self.fields.get("filename") {
-            LOAD_CACHE
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .remove(Path::new(filename));
+            let key = cache_key(Path::new(filename));
+            lock_cache().remove(&key);
         }
     }
 }
@@ -802,6 +995,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn revalidate_bypasses_and_refreshes_cache() {
+        let _serial = cache_test_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("revalidate.v");
 
@@ -831,6 +1025,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn invalidate_drops_cache_entry() {
+        let _serial = cache_test_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("invalidate.v");
 
@@ -845,5 +1040,226 @@ mod tests {
         im.invalidate();
         // Entry dropped: the plain reload re-reads the 16-wide file.
         assert_eq!(decode_file(&path).unwrap().width(), 16);
+    }
+
+    /// Serializes the tests that assert on the *global* load cache's
+    /// cross-call state, so one test clearing or shrinking the shared cache
+    /// can never race another's stale-hit expectation. Poison is recovered
+    /// in place (the guarded unit is `()`).
+    fn cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+        CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// A shared raster whose pixel buffer is exactly `bytes` long, for
+    /// exercising the byte-cap accounting deterministically. Gray8 is one
+    /// byte per pixel, so a `bytes`x1 raster is exactly `bytes` long.
+    fn cache_raster(bytes: usize) -> Arc<Raster> {
+        Arc::new(Raster::zeroed(bytes as u32, 1, PixelFormat::Gray8).unwrap())
+    }
+
+    fn key(name: &str) -> PathBuf {
+        PathBuf::from(name)
+    }
+
+    /**
+     * Past the entry-count cap, an insert evicts the least-recently-used
+     * entry, not an arbitrary or the newest one. Touching "a" after both
+     * "a" and "b" are resident makes "b" the LRU, so the third insert
+     * evicts "b" and keeps "a" and "c".
+     */
+    #[test]
+    fn lru_evicts_least_recently_used_past_entry_cap() {
+        let mut cache = LoadCache::new(2, usize::MAX);
+        cache.insert(key("a"), cache_raster(1));
+        cache.insert(key("b"), cache_raster(1));
+        // Touch "a": now "b" is the least-recently-used.
+        assert!(cache.get(&key("a")).is_some());
+        // Third insert past the 2-entry cap evicts the LRU ("b").
+        cache.insert(key("c"), cache_raster(1));
+        assert_eq!(cache.map.len(), 2);
+        assert!(cache.get(&key("a")).is_some());
+        assert!(cache.get(&key("c")).is_some());
+        assert!(
+            cache.get(&key("b")).is_none(),
+            "b was least-recently-used and should have been evicted"
+        );
+    }
+
+    /**
+     * Past the total-bytes cap, an insert evicts least-recently-used entries
+     * until the footprint fits. A 150-byte cap holds one 100-byte raster;
+     * inserting a second pushes the total to 200 and evicts the LRU first
+     * entry, leaving the cache at one entry and 100 bytes.
+     */
+    #[test]
+    fn lru_evicts_past_byte_cap() {
+        let mut cache = LoadCache::new(usize::MAX, 150);
+        cache.insert(key("a"), cache_raster(100));
+        assert_eq!(cache.total_bytes, 100);
+        cache.insert(key("b"), cache_raster(100));
+        assert_eq!(cache.map.len(), 1);
+        assert_eq!(cache.total_bytes, 100);
+        assert!(
+            cache.get(&key("a")).is_none(),
+            "a should have been evicted to satisfy the byte cap"
+        );
+        assert!(cache.get(&key("b")).is_some());
+    }
+
+    /**
+     * Lowering the entry cap (the `vips_cache_set_max` knob) evicts the
+     * least-recently-used entries immediately until the new cap holds.
+     */
+    #[test]
+    fn set_max_entries_evicts_on_shrink() {
+        let mut cache = LoadCache::new(4, usize::MAX);
+        cache.insert(key("a"), cache_raster(1));
+        cache.insert(key("b"), cache_raster(1));
+        cache.insert(key("c"), cache_raster(1));
+        cache.set_max_entries(1);
+        assert_eq!(cache.map.len(), 1);
+        assert!(
+            cache.get(&key("c")).is_some(),
+            "the most-recently-used entry survives the shrink"
+        );
+    }
+
+    /**
+     * Lowering the byte cap (the `vips_cache_set_max_mem` knob) evicts the
+     * least-recently-used entries immediately until the footprint fits.
+     */
+    #[test]
+    fn set_max_bytes_evicts_on_shrink() {
+        let mut cache = LoadCache::new(usize::MAX, usize::MAX);
+        cache.insert(key("a"), cache_raster(100));
+        cache.insert(key("b"), cache_raster(100));
+        assert_eq!(cache.total_bytes, 200);
+        cache.set_max_bytes(100);
+        assert_eq!(cache.total_bytes, 100);
+        assert!(cache.get(&key("a")).is_none());
+        assert!(cache.get(&key("b")).is_some());
+    }
+
+    /**
+     * Clearing drops every entry and zeroes the byte accounting.
+     */
+    #[test]
+    fn clear_empties_the_cache() {
+        let mut cache = LoadCache::new(usize::MAX, usize::MAX);
+        cache.insert(key("a"), cache_raster(10));
+        cache.insert(key("b"), cache_raster(20));
+        assert_eq!(cache.total_bytes, 30);
+        cache.clear();
+        assert_eq!(cache.map.len(), 0);
+        assert_eq!(cache.total_bytes, 0);
+        assert!(cache.get(&key("a")).is_none());
+    }
+
+    /**
+     * A plain miss inserts only if absent (`get_or_insert` keeps the resident
+     * entry when a concurrent decode already populated it), while a forced
+     * revalidate (`insert`) overwrites unconditionally. Verified by identity:
+     * `get_or_insert` returns the original Arc, `insert` a fresh one.
+     */
+    #[test]
+    fn get_or_insert_keeps_existing_while_insert_overwrites() {
+        let mut cache = LoadCache::new(usize::MAX, usize::MAX);
+        let first = cache.insert(key("a"), cache_raster(4));
+        let resident = cache.get_or_insert(key("a"), cache_raster(8));
+        assert!(
+            Arc::ptr_eq(&first, &resident),
+            "get_or_insert must keep the already-resident entry"
+        );
+        assert_eq!(cache.map.len(), 1);
+        assert_eq!(cache.total_bytes, 4);
+        let replaced = cache.insert(key("a"), cache_raster(8));
+        assert!(
+            !Arc::ptr_eq(&first, &replaced),
+            "insert must overwrite with the new entry"
+        );
+        assert_eq!(cache.total_bytes, 8);
+    }
+
+    /**
+     * Insert, lookup, and invalidate key off one canonical path identity, so
+     * differently-spelled but equal paths share a single cache entry. Loading
+     * through a `./`-spelled path caches under the canonical key; a later
+     * plain load through the canonical spelling hits that same entry (a naive
+     * raw-path key would miss and re-read the overwritten file); and
+     * invalidating the `./`-spelled raster canonicalizes its recorded
+     * filename to the same key and drops the entry.
+     * Input: cache 8x8 via `dir/./ident.v`; overwrite 16x16; load via
+     * `dir/ident.v` -> still 8 (canonical hit); invalidate -> next load 16.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn path_identity_canonicalizes_lookup_and_invalidate() {
+        let _serial = cache_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("ident.v");
+        // A differently-spelled but equal path (a redundant `.` component).
+        let spelled = dir.path().join(".").join("ident.v");
+
+        Raster::black(8, 8).save(&canonical).unwrap();
+
+        // Populate through the differently-spelled path: the key is
+        // canonicalized, but the raster records the raw `./` spelling.
+        let mut via_spelled = decode_file(&spelled).unwrap();
+        assert_eq!(via_spelled.width(), 8);
+
+        // Overwrite on disk; a plain load through the canonical spelling
+        // still hits the same entry, proving lookup collapses both spellings
+        // to one identity.
+        Raster::black(16, 16).save(&canonical).unwrap();
+        assert_eq!(decode_file(&canonical).unwrap().width(), 8);
+
+        // Invalidating the `./`-spelled raster canonicalizes its filename to
+        // the same key and drops the entry, so the next load re-reads.
+        via_spelled.invalidate();
+        assert_eq!(decode_file(&canonical).unwrap().width(), 16);
+    }
+
+    /**
+     * The public cache-control knobs bound and clear the process-global
+     * cache. Bounding to a single entry evicts the older path on the next
+     * load (so an overwritten, previously-cached path re-reads fresh); the
+     * defaults are restored and the cache cleared so the test leaves no
+     * global residue. Serialized with the other global-cache tests.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn public_cache_controls_bound_and_clear_global_cache() {
+        let _serial = cache_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("ctl_a.v");
+        let b = dir.path().join("ctl_b.v");
+        Raster::black(4, 4).save(&a).unwrap();
+        Raster::black(4, 4).save(&b).unwrap();
+
+        clear_load_cache();
+        set_load_cache_max_bytes(usize::MAX);
+        set_load_cache_max_entries(1);
+
+        // Two distinct loads under a 1-entry cap: "a" (older) is evicted.
+        assert_eq!(decode_file(&a).unwrap().width(), 4);
+        assert_eq!(decode_file(&b).unwrap().width(), 4);
+
+        // Overwrite "a": had its entry survived it would report a stale 4;
+        // instead it was evicted, so a fresh load sees the new 8.
+        Raster::black(8, 8).save(&a).unwrap();
+        assert_eq!(
+            decode_file(&a).unwrap().width(),
+            8,
+            "a should have been evicted by the 1-entry bound"
+        );
+
+        // Restore defaults and clear so no global residue leaks to other
+        // (serialized) global-cache tests.
+        set_load_cache_max_entries(DEFAULT_LOAD_CACHE_MAX_ENTRIES);
+        set_load_cache_max_bytes(DEFAULT_LOAD_CACHE_MAX_BYTES);
+        clear_load_cache();
     }
 }
