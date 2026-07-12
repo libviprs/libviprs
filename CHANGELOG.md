@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Colour-space and ICC operations ported from libvips (next batch of the
+  ported-tests operation surface, libviprs-tests issue #55), in the new
+  `colour` module: `Raster::colourspace` (with the typed
+  `try_colourspace` form and the new `ColourError`) routing through D65
+  XYZ across the libvips route table (Lab, XYZ, LCh, CMC, LabS, scRGB,
+  HSV, sRGB, Yxy, Oklab, OkLCh, mono `b-w`/`grey16`, `rgb16`, and the
+  no-lcms CMYK approximation), accepting either an `Interpretation` or a
+  libvips space nickname (`"srgb"`, `"scrgb"`, ...; `Interpretation` now
+  implements `FromStr`); the colour-difference metrics `Raster::de76`,
+  `Raster::de00` (CIEDE2000), and `Raster::de_cmc` (the published
+  CMC(l:c) 1:1 formula); the `Raster::constant` fixture constructor; and
+  real ICC transforms on the pure-Rust moxcms CMS in `Raster::icc_import`
+  / `icc_import_with` (with the new `Intent` and `Pcs` enums),
+  `Raster::icc_export` / `icc_export_with` (8- or 16-bit device output),
+  and `Raster::icc_transform`. Matrix-shaper RGB and grey-TRC profiles
+  evaluate exactly from the parsed TRC curves and colorant matrix; LUT
+  profiles (CMYK and other table-based classes) run through the moxcms
+  LUT engine. Import keeps the source profile attached so a following
+  export round-trips through it, and export attaches the profile it
+  used, both mirroring libvips.
 - Image IO, metadata fields, and library-level free functions ported
   from libvips (seventh batch of the ported-tests operation surface,
   libviprs-tests issue #55), in the new `imageio` module:
