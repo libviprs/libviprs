@@ -69,6 +69,8 @@ pub(crate) mod level_walk;
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
+pub mod morphology;
+pub mod mosaicing;
 pub mod observe;
 pub mod pdf;
 pub mod pixel;
@@ -124,6 +126,8 @@ pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,
 };
+pub use morphology::{Direction, MorphologyError};
+pub use mosaicing::{MergeDirection, MosaicError};
 pub use observe::{
     CollectingObserver, EngineEvent, EngineObserver, FanOutObserver, MemoryTracker, WorkerId,
 };
