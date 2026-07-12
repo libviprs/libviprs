@@ -149,7 +149,9 @@ pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
 pub use raster::{Raster, RasterError, RegionView};
-pub use resample::{AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions};
+pub use resample::{
+    AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
+};
 pub use resume::{
     CompletedTileSet, JobCheckpoint, JobMetadata, ResumeError, ResumeMode, ResumePolicy,
 };
