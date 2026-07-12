@@ -1009,7 +1009,10 @@ impl Raster {
     /// Blend two images under a boolean/mask condition (libvips
     /// `vips_ifthenelse`, no blend): wherever a `self` sample is non-zero the
     /// `then` pixel is taken, otherwise the `otherwise` pixel. A single-band
-    /// condition selects for every band of the operands.
+    /// condition selects for every band of the operands. Mixed branch depths
+    /// promote to a common format first (libvips `vips__formatalike`): an
+    /// `Rgb8` branch paired with an `Rgb16` branch yields `Rgb16`, and any
+    /// float branch switches both to float.
     ///
     /// # Panics
     ///
@@ -1043,8 +1046,7 @@ impl Raster {
                 });
             }
         }
-        let out_fmt = then.format();
-        let bands = out_fmt.channels();
+        let bands = then.format().channels();
         if otherwise.format().channels() != bands {
             return Err(ConversionError::BandCountMismatch {
                 expected: bands,
@@ -1058,6 +1060,36 @@ impl Raster {
                 got: cond_bands,
             });
         }
+        // vips__formatalike: bring both branches to one numeric format
+        // before the per-pixel select, so a narrower branch is never read
+        // at the wider branch's stride. The common depth is the widest
+        // input depth (any float side switches both to float), the same
+        // promotion the band and arrayjoin paths use. Equal-format inputs
+        // keep their format tag untouched.
+        let out_fmt = if then.format() == otherwise.format() {
+            then.format()
+        } else {
+            let bpc = then
+                .format()
+                .bytes_per_channel()
+                .max(otherwise.format().bytes_per_channel());
+            PixelFormat::with_channels(bands, bpc)
+                .expect("band count comes from a valid input format")
+        };
+        let then_cast;
+        let then = if then.format() == out_fmt {
+            then
+        } else {
+            then_cast = then.try_cast(out_fmt)?;
+            &then_cast
+        };
+        let otherwise_cast;
+        let otherwise = if otherwise.format() == out_fmt {
+            otherwise
+        } else {
+            otherwise_cast = otherwise.try_cast(out_fmt)?;
+            &otherwise_cast
+        };
         let cbpc = self.format().bytes_per_channel();
         let cdata = self.data();
         let cstride = self.stride();
@@ -1841,6 +1873,14 @@ mod tests {
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
     }
 
+    fn rgb16(w: u32, h: u32, vals: &[u16]) -> Raster {
+        let mut data = Vec::with_capacity(vals.len() * 2);
+        for v in vals {
+            data.extend_from_slice(&v.to_ne_bytes());
+        }
+        Raster::new(w, h, PixelFormat::Rgb16, data).unwrap()
+    }
+
     // ------------------------------------------------------------------
     // cast
     // ------------------------------------------------------------------
@@ -2165,6 +2205,66 @@ mod tests {
             .interpretation(Interpretation::Lab)
             .build();
         assert_eq!(im.interpretation(), Interpretation::Lab);
+    }
+
+    // ------------------------------------------------------------------
+    // ifthenelse
+    // ------------------------------------------------------------------
+
+    /**
+     * Tests that mixed branch depths promote to the common format before
+     * the per-pixel select (vips__formatalike), the exact shape the ported
+     * test_ifthenelse hits after add_const promotes Rgb8 to Rgb16. The old
+     * code read the Rgb8 else branch at the Rgb16 stride, so an else pixel
+     * of [2,3,4] came back as [770, 516, 1027] (the little-endian byte
+     * pairs [2,3], [4,2], [3,4] of the repeating 8-bit data).
+     * Input: cond Gray8 [0, 255], then Rgb16 [1000,2000,3000 / 100,200,300],
+     * else Rgb8 [2,3,4 / 9,9,9] -> Rgb16 [2,3,4 / 100,200,300].
+     */
+    #[test]
+    fn ifthenelse_mixed_depth_promotes_else_branch() {
+        let cond = gray8(2, 1, vec![0, 255]);
+        let then = rgb16(2, 1, &[1000, 2000, 3000, 100, 200, 300]);
+        let otherwise = rgb8(2, 1, vec![2, 3, 4, 9, 9, 9]);
+        let out = cond.ifthenelse(&then, &otherwise);
+        assert_eq!(out.format(), PixelFormat::Rgb16);
+        assert_eq!(out.getpoint(0, 0), vec![2.0, 3.0, 4.0]);
+        assert_ne!(out.getpoint(0, 0), vec![770.0, 516.0, 1027.0]);
+        assert_eq!(out.getpoint(1, 0), vec![100.0, 200.0, 300.0]);
+    }
+
+    /**
+     * Tests the symmetric promotion: an Rgb8 then branch against an Rgb16
+     * else branch. The 8-bit then values must survive numerically into the
+     * promoted 16-bit output.
+     * Input: cond Gray8 [255, 0], then Rgb8 [2,3,4 / 9,9,9],
+     * else Rgb16 [1000,2000,3000 / 100,200,300] -> Rgb16 [2,3,4 / 100,200,300].
+     */
+    #[test]
+    fn ifthenelse_mixed_depth_promotes_then_branch() {
+        let cond = gray8(2, 1, vec![255, 0]);
+        let then = rgb8(2, 1, vec![2, 3, 4, 9, 9, 9]);
+        let otherwise = rgb16(2, 1, &[1000, 2000, 3000, 100, 200, 300]);
+        let out = cond.ifthenelse(&then, &otherwise);
+        assert_eq!(out.format(), PixelFormat::Rgb16);
+        assert_eq!(out.getpoint(0, 0), vec![2.0, 3.0, 4.0]);
+        assert_eq!(out.getpoint(1, 0), vec![100.0, 200.0, 300.0]);
+    }
+
+    /**
+     * Tests that equal-format branches keep their format and exact bytes,
+     * the pre-fix behaviour that must not regress.
+     * Input: cond Gray8 [0, 255], then Rgb8 [10,20,30 / 40,50,60],
+     * else Rgb8 [2,3,4 / 9,9,9] -> Rgb8 [2,3,4 / 40,50,60].
+     */
+    #[test]
+    fn ifthenelse_same_format_unchanged() {
+        let cond = gray8(2, 1, vec![0, 255]);
+        let then = rgb8(2, 1, vec![10, 20, 30, 40, 50, 60]);
+        let otherwise = rgb8(2, 1, vec![2, 3, 4, 9, 9, 9]);
+        let out = cond.ifthenelse(&then, &otherwise);
+        assert_eq!(out.format(), PixelFormat::Rgb8);
+        assert_eq!(out.data(), &[2, 3, 4, 40, 50, 60]);
     }
 
     // ------------------------------------------------------------------
