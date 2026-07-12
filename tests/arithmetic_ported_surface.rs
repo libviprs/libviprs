@@ -575,7 +575,7 @@ fn ported_surface_math_trig() {
 /// divide / linear float promotion), so the `div_const(255.0)` setup
 /// keeps 128/255 as ~0.502 and the expected values read the
 /// post-division image. The float contract is what makes the literal
-/// `test_atanh` body pass: atanh(0.502) ~ 0.5525 is finite, where the
+/// `test_atanh` body pass: atanh(0.502) ~ 0.5519 is finite, where the
 /// old integer round-to-1 contract degenerated it to atanh(1) = inf.
 #[test]
 fn ported_surface_math_inverse_trig() {
