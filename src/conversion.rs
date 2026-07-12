@@ -134,6 +134,11 @@ pub enum ConversionError {
     /// A `switch` condition image has more than one band.
     #[error("switch conditions must be single-band images, got {bands} bands")]
     ConditionNotMono { bands: usize },
+    /// `rot45` was given an image that is not an odd-sided square. Like
+    /// libvips, the 45-degree rotation is a ring permutation defined only on
+    /// odd squares.
+    #[error("rot45 requires an odd-sided square image, got {width}x{height}")]
+    NotOddSquare { width: u32, height: u32 },
     /// The result dimensions would overflow `u32`.
     #[error("result size {width}x{height} exceeds u32::MAX")]
     SizeOverflow { width: u64, height: u64 },
@@ -308,6 +313,50 @@ pub enum Angle {
     D270,
 }
 
+/// A multiple-of-45-degree rotation for [`Raster::rot45`] (libvips
+/// `VipsAngle45`).
+///
+/// Like libvips, `rot45` is defined only on odd-sided square images: each
+/// concentric square ring of the image is rotated clockwise by an eighth of
+/// a turn per 45-degree step, so the transform is an exact pixel permutation
+/// and every angle has an exact inverse (`D45`/`D315`, `D90`/`D270`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Angle45 {
+    /// No rotation.
+    D0,
+    /// 45 degrees clockwise.
+    D45,
+    /// 90 degrees clockwise.
+    D90,
+    /// 135 degrees clockwise.
+    D135,
+    /// 180 degrees.
+    D180,
+    /// 225 degrees clockwise.
+    D225,
+    /// 270 degrees clockwise.
+    D270,
+    /// 315 degrees clockwise.
+    D315,
+}
+
+impl Angle45 {
+    /// The number of 45-degree clockwise steps this angle represents, `0..8`.
+    fn steps(self) -> u32 {
+        match self {
+            Self::D0 => 0,
+            Self::D45 => 1,
+            Self::D90 => 2,
+            Self::D135 => 3,
+            Self::D180 => 4,
+            Self::D225 => 5,
+            Self::D270 => 6,
+            Self::D315 => 7,
+        }
+    }
+}
+
 /// The metadata block carried by every [`Raster`]: colour interpretation,
 /// resolution, offset, and the EXIF-style orientation tag.
 ///
@@ -404,6 +453,59 @@ impl RasterCopyBuilder<'_> {
 /// same format. `map` receives output coordinates and returns the source
 /// coordinates whose whole pixel (all bands) is copied. Metadata is
 /// carried over from `src`.
+/// Read a flat `bpc`-byte sample as `u32` (native byte order), for the
+/// 1-, 2-, and 4-byte sample depths.
+fn read_sample_u32(bytes: &[u8], bpc: usize) -> u32 {
+    match bpc {
+        1 => bytes[0] as u32,
+        2 => u16::from_ne_bytes([bytes[0], bytes[1]]) as u32,
+        _ => u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+    }
+}
+
+/// Write `v` as a flat `bpc`-byte sample (native byte order), for the 1- and
+/// 2-byte integer depths; wider depths take the low bytes.
+fn write_sample_u32(bytes: &mut [u8], bpc: usize, v: u32) {
+    match bpc {
+        1 => bytes[0] = v as u8,
+        2 => bytes[..2].copy_from_slice(&(v as u16).to_ne_bytes()),
+        _ => bytes[..4].copy_from_slice(&v.to_ne_bytes()),
+    }
+}
+
+/// Position of the cell `(u, v)` (coordinates relative to the ring centre)
+/// clockwise along its Chebyshev ring of radius `r`, in `0..8r`. The walk
+/// starts at the top-left corner `(-r, -r)` and proceeds right, down, left,
+/// then up. `r` must be positive and `(u, v)` must lie on the ring.
+fn ring_index(u: i64, v: i64, r: i64) -> i64 {
+    if v == -r && u < r {
+        // top edge, moving right (includes the top-left corner)
+        u + r
+    } else if u == r && v < r {
+        // right edge, moving down (includes the top-right corner)
+        2 * r + (v + r)
+    } else if v == r && u > -r {
+        // bottom edge, moving left (includes the bottom-right corner)
+        4 * r + (r - u)
+    } else {
+        // left edge, moving up (includes the bottom-left corner)
+        6 * r + (r - v)
+    }
+}
+
+/// Inverse of [`ring_index`]: the cell `(u, v)` at clockwise position `p` in
+/// `0..8r` along the Chebyshev ring of radius `r`.
+fn ring_cell(p: i64, r: i64) -> (i64, i64) {
+    let seg = p / (2 * r);
+    let off = p % (2 * r);
+    match seg {
+        0 => (-r + off, -r),
+        1 => (r, -r + off),
+        2 => (r - off, r),
+        _ => (-r, r - off),
+    }
+}
+
 fn remap(
     src: &Raster,
     out_w: u32,
@@ -653,6 +755,335 @@ impl Raster {
     #[track_caller]
     pub fn rot(&self, angle: Angle) -> Raster {
         expect_conv("rot", self.try_rot(angle))
+    }
+
+    /// Fallible form of [`Raster::rot45`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError::NotOddSquare`] unless the image is an odd-sided
+    /// square, or [`ConversionError::Raster`] on allocation failure.
+    pub fn try_rot45(&self, angle: Angle45) -> Result<Raster, ConversionError> {
+        let size = self.width();
+        if self.height() != size || size % 2 == 0 {
+            return Err(ConversionError::NotOddSquare {
+                width: self.width(),
+                height: self.height(),
+            });
+        }
+        let k = angle.steps();
+        if k == 0 {
+            return Ok(self.clone());
+        }
+        let centre = (size / 2) as i64;
+        // Each concentric square ring (Chebyshev radius `r`, perimeter `8r`)
+        // rotates clockwise by `k * r` cells, i.e. `k` eighths of a turn.
+        // `remap` reads the source cell for every output cell, so the output
+        // ring position `p` pulls from input position `p - k * r`.
+        remap(self, size, size, |x, y| {
+            let u = x as i64 - centre;
+            let v = y as i64 - centre;
+            let r = u.abs().max(v.abs());
+            if r == 0 {
+                return (x, y);
+            }
+            let perim = 8 * r;
+            let p_out = ring_index(u, v, r);
+            let shift = (k as i64 * r) % perim;
+            let p_src = (p_out - shift).rem_euclid(perim);
+            let (su, sv) = ring_cell(p_src, r);
+            ((su + centre) as u32, (sv + centre) as u32)
+        })
+    }
+
+    /// Rotate an odd-sided square image by a multiple of 45 degrees
+    /// clockwise (libvips `vips_rot45`). Each concentric square ring is
+    /// rotated by an eighth of a turn per step, so the transform is an exact
+    /// pixel permutation with an exact inverse. Panicking form of
+    /// [`Raster::try_rot45`], matching the ported-test call surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConversionError`]; see [`Raster::try_rot45`].
+    #[track_caller]
+    pub fn rot45(&self, angle: Angle45) -> Raster {
+        expect_conv("rot45", self.try_rot45(angle))
+    }
+
+    /// Swap the byte order within every sample (libvips `vips_byteswap`):
+    /// for a 16-bit sample the two bytes are exchanged, for a 32-bit float
+    /// the four bytes are reversed, and for an 8-bit sample it is a no-op.
+    /// Applying it twice is always an identity.
+    pub fn byteswap(&self) -> Raster {
+        let bpc = self.format().bytes_per_channel();
+        let mut out = self.clone();
+        if bpc > 1 {
+            for sample in out.data_mut().chunks_exact_mut(bpc) {
+                sample.reverse();
+            }
+        }
+        out
+    }
+
+    /// Take the most significant byte of every sample (libvips `vips_msb`),
+    /// producing an 8-bit image. With `band = Some(b)` only band `b` is kept,
+    /// giving a single-band result; with `None` every band is converted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `band` is out of range for the image.
+    #[track_caller]
+    pub fn msb(&self, band: Option<u32>) -> Raster {
+        expect_conv("msb", self.try_msb(band))
+    }
+
+    /// Fallible form of [`Raster::msb`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError::Band`] if `band` is out of range, or
+    /// [`ConversionError::Raster`] on allocation failure.
+    pub fn try_msb(&self, band: Option<u32>) -> Result<Raster, ConversionError> {
+        let fmt = self.format();
+        let bpc = fmt.bytes_per_channel();
+        let bands = fmt.channels();
+        let shift = ((bpc - 1) * 8) as u32;
+        let (src_bands, out_bands): (Vec<usize>, usize) = match band {
+            None => ((0..bands).collect(), bands),
+            Some(b) => {
+                let b = b as usize;
+                if b >= bands {
+                    return Err(ConversionError::Band(BandError::BandOutOfRange {
+                        band: b as i64,
+                        bands,
+                    }));
+                }
+                (vec![b], 1)
+            }
+        };
+        let out_fmt = PixelFormat::with_channels(out_bands, 1)
+            .expect("an 8-bit format exists for a band count already carried by this raster");
+        let w = self.width();
+        let h = self.height();
+        let src = self.data();
+        let sstride = self.stride();
+        let mut out = Raster::zeroed(w, h, out_fmt)?;
+        let ostride = out.stride();
+        let odata = out.data_mut();
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                for (oi, &sb) in src_bands.iter().enumerate() {
+                    let so = y * sstride + (x * bands + sb) * bpc;
+                    let sample = read_sample_u32(&src[so..so + bpc], bpc);
+                    let oo = y * ostride + x * out_bands + oi;
+                    odata[oo] = (sample >> shift) as u8;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reshape a tall stack of `across * down` tiles, each `tile_height` high
+    /// and the full image width, into an `across`-by-`down` grid of tiles
+    /// (libvips `vips_grid`). Tile `i` (counted from the top of the input)
+    /// lands at grid column `i % across`, row `i / across`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConversionError`]; see [`Raster::try_grid`].
+    #[track_caller]
+    pub fn grid(&self, tile_height: u32, across: u32, down: u32) -> Raster {
+        expect_conv("grid", self.try_grid(tile_height, across, down))
+    }
+
+    /// Fallible form of [`Raster::grid`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError::DimensionMismatch`] if the input height is not
+    /// `tile_height * across * down`, or [`ConversionError::Raster`] on
+    /// allocation failure.
+    pub fn try_grid(
+        &self,
+        tile_height: u32,
+        across: u32,
+        down: u32,
+    ) -> Result<Raster, ConversionError> {
+        let tile_w = self.width();
+        if tile_height == 0
+            || across == 0
+            || down == 0
+            || self.height() != tile_height * across * down
+        {
+            return Err(ConversionError::DimensionMismatch {
+                expected_w: tile_w,
+                expected_h: tile_height.saturating_mul(across).saturating_mul(down),
+                got_w: tile_w,
+                got_h: self.height(),
+            });
+        }
+        let out_w = tile_w * across;
+        let out_h = tile_height * down;
+        remap(self, out_w, out_h, move |x, y| {
+            let col = x / tile_w;
+            let row = y / tile_height;
+            let tile = row * across + col;
+            let sx = x % tile_w;
+            let sy = tile * tile_height + (y % tile_height);
+            (sx, sy)
+        })
+    }
+
+    /// Flatten an image with an alpha channel against a background (libvips
+    /// `vips_flatten`): the last band is treated as alpha and removed, and
+    /// each remaining band `b` becomes
+    /// `src[b] * alpha/max + background[b] * (max - alpha)/max`, where `max`
+    /// is the sample maximum for the depth. `background` defaults to zero
+    /// (black); a single value is used for every band, otherwise one value
+    /// per output band is expected.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConversionError`]; see [`Raster::try_flatten`].
+    #[track_caller]
+    pub fn flatten(&self, background: Option<&[f64]>) -> Raster {
+        expect_conv("flatten", self.try_flatten(background))
+    }
+
+    /// Fallible form of [`Raster::flatten`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError::BandCountMismatch`] if the image has no alpha band
+    /// to remove (fewer than two bands) or `background` has the wrong length,
+    /// or [`ConversionError::Raster`] on allocation failure.
+    pub fn try_flatten(&self, background: Option<&[f64]>) -> Result<Raster, ConversionError> {
+        let fmt = self.format();
+        let bpc = fmt.bytes_per_channel();
+        let in_bands = fmt.channels();
+        if in_bands < 2 {
+            return Err(ConversionError::BandCountMismatch {
+                expected: 2,
+                got: in_bands,
+            });
+        }
+        let out_bands = in_bands - 1;
+        let bg: Vec<f64> = match background {
+            None => vec![0.0; out_bands],
+            Some(v) if v.len() == 1 => vec![v[0]; out_bands],
+            Some(v) if v.len() == out_bands => v.to_vec(),
+            Some(v) => {
+                return Err(ConversionError::BandCountMismatch {
+                    expected: out_bands,
+                    got: v.len(),
+                });
+            }
+        };
+        let out_fmt = PixelFormat::with_channels(out_bands, bpc)
+            .expect("a format exists for a band count already carried by this raster");
+        let max = ((1u64 << (bpc * 8)) - 1) as f64;
+        let w = self.width();
+        let h = self.height();
+        let src = self.data();
+        let sstride = self.stride();
+        let mut out = Raster::zeroed(w, h, out_fmt)?;
+        let ostride = out.stride();
+        let odata = out.data_mut();
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let apos = y * sstride + (x * in_bands + (in_bands - 1)) * bpc;
+                let alpha = read_sample_u32(&src[apos..apos + bpc], bpc) as f64;
+                for (b, &bgb) in bg.iter().enumerate() {
+                    let so = y * sstride + (x * in_bands + b) * bpc;
+                    let s = read_sample_u32(&src[so..so + bpc], bpc) as f64;
+                    let val = s * alpha / max + bgb * (max - alpha) / max;
+                    let v = val.round().clamp(0.0, max) as u64;
+                    let oo = y * ostride + (x * out_bands + b) * bpc;
+                    write_sample_u32(&mut odata[oo..oo + bpc], bpc, v as u32);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Blend two images under a boolean/mask condition (libvips
+    /// `vips_ifthenelse`, no blend): wherever a `self` sample is non-zero the
+    /// `then` pixel is taken, otherwise the `otherwise` pixel. A single-band
+    /// condition selects for every band of the operands.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConversionError`]; see [`Raster::try_ifthenelse`].
+    #[track_caller]
+    pub fn ifthenelse(&self, then: &Raster, otherwise: &Raster) -> Raster {
+        expect_conv("ifthenelse", self.try_ifthenelse(then, otherwise))
+    }
+
+    /// Fallible form of [`Raster::ifthenelse`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError::DimensionMismatch`] if the three images disagree on
+    /// size, [`ConversionError::BandCountMismatch`] if `then` and `otherwise`
+    /// disagree on band count or the condition is neither single-band nor a
+    /// band match, or [`ConversionError::Raster`] on allocation failure.
+    pub fn try_ifthenelse(
+        &self,
+        then: &Raster,
+        otherwise: &Raster,
+    ) -> Result<Raster, ConversionError> {
+        let (w, h) = (self.width(), self.height());
+        for other in [then, otherwise] {
+            if (other.width(), other.height()) != (w, h) {
+                return Err(ConversionError::DimensionMismatch {
+                    expected_w: w,
+                    expected_h: h,
+                    got_w: other.width(),
+                    got_h: other.height(),
+                });
+            }
+        }
+        let out_fmt = then.format();
+        let bands = out_fmt.channels();
+        if otherwise.format().channels() != bands {
+            return Err(ConversionError::BandCountMismatch {
+                expected: bands,
+                got: otherwise.format().channels(),
+            });
+        }
+        let cond_bands = self.format().channels();
+        if cond_bands != 1 && cond_bands != bands {
+            return Err(ConversionError::BandCountMismatch {
+                expected: bands,
+                got: cond_bands,
+            });
+        }
+        let cbpc = self.format().bytes_per_channel();
+        let cdata = self.data();
+        let cstride = self.stride();
+        let mut out = Raster::zeroed(w, h, out_fmt)?;
+        let bpp = out_fmt.bytes_per_pixel();
+        let bpc = out_fmt.bytes_per_channel();
+        let (tstride, ostride) = (then.stride(), out.stride());
+        let ostride_o = otherwise.stride();
+        let tdata = then.data();
+        let odata_o = otherwise.data();
+        let out_data = out.data_mut();
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                for b in 0..bands {
+                    let cb = if cond_bands == 1 { 0 } else { b };
+                    let co = y * cstride + (x * cond_bands + cb) * cbpc;
+                    let take_then = read_sample_u32(&cdata[co..co + cbpc], cbpc) != 0;
+                    let sample_stride = if take_then { tstride } else { ostride_o };
+                    let sample_data = if take_then { tdata } else { odata_o };
+                    let so = y * sample_stride + (x * bands + b) * bpc;
+                    let oo = y * ostride + x * bpp + b * bpc;
+                    out_data[oo..oo + bpc].copy_from_slice(&sample_data[so..so + bpc]);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Flip along the top-left to bottom-right diagonal (EXIF

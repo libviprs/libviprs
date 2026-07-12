@@ -101,7 +101,7 @@ pub use bands::BandError;
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use composite::{CompositeError, CompositeMode};
-pub use conversion::{Angle, ConversionError, Interpretation, RasterCopyBuilder};
+pub use conversion::{Angle, Angle45, ConversionError, Interpretation, RasterCopyBuilder};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
 pub use engine::{
