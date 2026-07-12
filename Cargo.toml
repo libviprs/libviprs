@@ -64,6 +64,12 @@ pdfium-render = { version = "0.9", features = [
 	"sync",
 ], git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/integration" }
 proptest = "1"
+# Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
+# operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
+# `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
+# mixed-radix planner (with Bluestein fallback) handles every image size, not
+# just powers of two, matching what libvips gets from FFTW.
+rustfft = "6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
@@ -131,6 +137,7 @@ image = { workspace = true }
 lopdf = { workspace = true }
 moxcms = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
+rustfft = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
