@@ -104,10 +104,14 @@
 //!
 //! * [ported_resample tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
 
-use crate::extract::Extend;
+use crate::colour::{ColourError, Intent, Pcs};
+use crate::conversion::Interpretation;
+use crate::extract::{Extend, ExtractError};
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
+use crate::source::SourceError;
 use std::f64::consts::PI;
+use std::path::Path;
 use thiserror::Error;
 
 /// Largest reduce mask supported, the libvips `MAX_POINT` from
@@ -178,6 +182,46 @@ fn expect_resample<T>(op: &str, r: Result<T, ResampleError>) -> T {
     match r {
         Ok(v) => v,
         Err(e) => panic!("{op}: {e}"),
+    }
+}
+
+/// Typed errors for the [`Raster::thumbnail`] family (libvips
+/// `vips_thumbnail`): decode, resample, colour, and crop failures folded
+/// into one surface so the panicking forms report a single cause.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ThumbnailError {
+    /// The target width (or height) is zero; a thumbnail box must be at
+    /// least one pixel on each side.
+    #[error("thumbnail target size must be at least 1 pixel, got {size}")]
+    BadSize { size: u32 },
+    /// The output profile name is not a recognised built-in
+    /// ([`Raster::thumbnail_with_profile`] currently accepts only
+    /// `"srgb"`).
+    #[error("unknown output profile {name:?}; expected \"srgb\"")]
+    UnknownProfile { name: String },
+    /// The built-in sRGB profile could not be encoded.
+    #[error("could not build the built-in sRGB profile: {0}")]
+    Profile(String),
+    /// Decoding the source file or buffer failed.
+    #[error(transparent)]
+    Decode(#[from] SourceError),
+    /// A resampling step (reduce / resize / affine) failed.
+    #[error(transparent)]
+    Resample(#[from] ResampleError),
+    /// A colour step (linear import, ICC import / export) failed.
+    #[error(transparent)]
+    Colour(#[from] ColourError),
+    /// The crop-to-box step failed.
+    #[error(transparent)]
+    Extract(#[from] ExtractError),
+}
+
+#[track_caller]
+fn expect_thumbnail(r: Result<Raster, ThumbnailError>) -> Raster {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("thumbnail: {e}"),
     }
 }
 
@@ -1552,6 +1596,276 @@ impl Raster {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Thumbnail (vips_thumbnail / vips_thumbnail_image)
+// ---------------------------------------------------------------------------
+
+/// The colour space a thumbnail resamples in, mirroring the `vips_thumbnail`
+/// `linear` and `export-profile` options.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThumbSpace {
+    /// Resample directly in the decoded device space (the default).
+    Device,
+    /// Import to linear-light scRGB, resample, re-encode to sRGB
+    /// (`--linear`).
+    Linear,
+    /// Import through the embedded ICC profile, resample in the PCS, then
+    /// export to the built-in sRGB profile (`--export-profile srgb`).
+    IccSrgb,
+}
+
+/// The built-in sRGB ICC profile bytes (moxcms `ColorProfile::new_srgb`),
+/// the target for the [`ThumbSpace::IccSrgb`] export.
+fn builtin_srgb_profile() -> Result<Vec<u8>, ThumbnailError> {
+    moxcms::ColorProfile::new_srgb()
+        .encode()
+        .map_err(|e| ThumbnailError::Profile(format!("{e:?}")))
+}
+
+/// Resize `src` by `scale`, short-circuiting the exact-unit case so a
+/// no-op thumbnail (target == source) keeps the pixels and metadata
+/// untouched rather than round-tripping through the resampler.
+fn resize_if_needed(src: &Raster, scale: f64) -> Result<Raster, ResampleError> {
+    if (scale - 1.0).abs() <= f64::EPSILON {
+        Ok(src.clone())
+    } else {
+        src.try_resize(scale)
+    }
+}
+
+/// Fit an in-memory raster into a `width` x `height` box, the core of the
+/// whole thumbnail family (libvips `vips_thumbnail_image`).
+///
+/// The shrink factor fits the image inside the bounding box preserving
+/// aspect (the larger of the per-axis shrinks) or, when `crop` is set,
+/// fills it (the smaller), exactly as `vips_thumbnail_calculate_shrink`.
+/// The resample runs in the space `space` selects, and a crop centre-crops
+/// the filled image down to the box.
+fn thumbnail_fit(
+    src: &Raster,
+    width: u32,
+    height: Option<u32>,
+    crop: bool,
+    space: ThumbSpace,
+) -> Result<Raster, ThumbnailError> {
+    if width == 0 {
+        return Err(ThumbnailError::BadSize { size: 0 });
+    }
+    let box_w = width;
+    let box_h = match height {
+        Some(0) => return Err(ThumbnailError::BadSize { size: 0 }),
+        Some(h) => h,
+        // The bare-width forms fit a square box, matching the ported
+        // `thumbnail(width)` call surface and the vips CLI where a single
+        // size bounds both axes.
+        None => width,
+    };
+
+    let horizontal = f64::from(src.width()) / f64::from(box_w);
+    let vertical = f64::from(src.height()) / f64::from(box_h);
+    let shrink = if crop {
+        horizontal.min(vertical)
+    } else {
+        horizontal.max(vertical)
+    };
+    let scale = 1.0 / shrink;
+
+    let fitted = match space {
+        ThumbSpace::Device => resize_if_needed(src, scale)?,
+        ThumbSpace::Linear => {
+            let linear = src.try_colourspace(Interpretation::ScRgb)?;
+            let small = resize_if_needed(&linear, scale)?;
+            // The resampler resets the interpretation tag to the format
+            // default, so restore scRGB before re-encoding to sRGB.
+            let small = small.copy().interpretation(Interpretation::ScRgb).build();
+            small.try_colourspace(Interpretation::Srgb)?
+        }
+        ThumbSpace::IccSrgb => {
+            let lab = src.try_icc_import_with(Intent::Perceptual, None, Some(Pcs::Lab))?;
+            let small = resize_if_needed(&lab, scale)?;
+            // Restore the Lab tag (dropped by the resampler) so the export
+            // takes the direct PCS path, and point the export at the
+            // built-in sRGB profile.
+            let mut small = small.copy().interpretation(Interpretation::Lab).build();
+            small.set_icc_profile(&builtin_srgb_profile()?);
+            small.try_icc_export_with(8, Intent::Perceptual, None)?
+        }
+    };
+
+    if crop {
+        let (ow, oh) = (fitted.width(), fitted.height());
+        let cw = box_w.min(ow);
+        let ch = box_h.min(oh);
+        let left = (ow - cw) / 2;
+        let top = (oh - ch) / 2;
+        Ok(fitted.try_extract_area(left, top, cw, ch)?)
+    } else {
+        Ok(fitted)
+    }
+}
+
+impl Raster {
+    /// Fallible form of [`Raster::thumbnail`].
+    ///
+    /// # Errors
+    ///
+    /// [`ThumbnailError::Decode`] when the file cannot be read or decoded,
+    /// [`ThumbnailError::BadSize`] for a zero target, or the resample /
+    /// crop errors from the fit.
+    pub fn try_thumbnail(
+        path: &Path,
+        width: u32,
+        height: Option<u32>,
+        crop: bool,
+    ) -> Result<Raster, ThumbnailError> {
+        let src = crate::source::decode_file(path)?;
+        thumbnail_fit(&src, width, height, crop, ThumbSpace::Device)
+    }
+
+    /// Make a thumbnail from an image file (libvips `vips_thumbnail`).
+    ///
+    /// The image is loaded and shrunk to fit inside the `width` x `height`
+    /// bounding box preserving aspect ratio; a bare width (`height` is
+    /// `None`) fits a square `width` x `width` box, so the bound axis lands
+    /// exactly on `width`. With `crop` the image fills the box and is
+    /// centre-cropped to it. The heavy shrink runs through
+    /// [`Raster::resize`], whose gap-driven box pre-shrink keeps the reduce
+    /// mask bounded even for large downscales, matching the shrink-on-load
+    /// then residual-reduce shape of `vips_thumbnail`. Panicking form of
+    /// [`Raster::try_thumbnail`], matching the ported-test call surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ThumbnailError`]; see [`Raster::try_thumbnail`].
+    #[track_caller]
+    pub fn thumbnail(path: &Path, width: u32, height: Option<u32>, crop: bool) -> Raster {
+        expect_thumbnail(Self::try_thumbnail(path, width, height, crop))
+    }
+
+    /// Fallible form of [`Raster::thumbnail_buffer`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Raster::try_thumbnail`]; decodes from memory instead of a file.
+    pub fn try_thumbnail_buffer(data: &[u8], width: u32) -> Result<Raster, ThumbnailError> {
+        let src = crate::source::decode_bytes(data)?;
+        thumbnail_fit(&src, width, None, false, ThumbSpace::Device)
+    }
+
+    /// Make a thumbnail from an in-memory encoded image buffer (libvips
+    /// `vips_thumbnail_buffer`), fitting a square `width` x `width` box.
+    /// Panicking form of [`Raster::try_thumbnail_buffer`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ThumbnailError`]; see [`Raster::try_thumbnail_buffer`].
+    #[track_caller]
+    pub fn thumbnail_buffer(data: &[u8], width: u32) -> Raster {
+        expect_thumbnail(Self::try_thumbnail_buffer(data, width))
+    }
+
+    /// Fallible form of [`Raster::thumbnail_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Raster::try_thumbnail`], plus [`ThumbnailError::Colour`] from
+    /// the linear-light import / export.
+    pub fn try_thumbnail_with_options(
+        path: &Path,
+        width: u32,
+        linear: bool,
+    ) -> Result<Raster, ThumbnailError> {
+        let src = crate::source::decode_file(path)?;
+        let space = if linear {
+            ThumbSpace::Linear
+        } else {
+            ThumbSpace::Device
+        };
+        thumbnail_fit(&src, width, None, false, space)
+    }
+
+    /// Make a thumbnail with the `vips_thumbnail` `linear` option: when
+    /// `linear` is set the reduce runs in linear-light scRGB and the result
+    /// is re-encoded to sRGB, which avoids the darkening a naive gamma-space
+    /// average produces. Fits a square `width` x `width` box. Panicking form
+    /// of [`Raster::try_thumbnail_with_options`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ThumbnailError`].
+    #[track_caller]
+    pub fn thumbnail_with_options(path: &Path, width: u32, linear: bool) -> Raster {
+        expect_thumbnail(Self::try_thumbnail_with_options(path, width, linear))
+    }
+
+    /// Fallible form of [`Raster::thumbnail_with_profile`].
+    ///
+    /// # Errors
+    ///
+    /// [`ThumbnailError::UnknownProfile`] for an output profile other than
+    /// `"srgb"`, plus the decode / colour / resample errors.
+    pub fn try_thumbnail_with_profile(
+        path: &Path,
+        width: u32,
+        output_profile: &str,
+    ) -> Result<Raster, ThumbnailError> {
+        let space = match output_profile {
+            "srgb" | "sRGB" => ThumbSpace::IccSrgb,
+            other => {
+                return Err(ThumbnailError::UnknownProfile {
+                    name: other.to_string(),
+                });
+            }
+        };
+        let src = crate::source::decode_file(path)?;
+        thumbnail_fit(&src, width, None, false, space)
+    }
+
+    /// Make a thumbnail through the embedded ICC profile (libvips
+    /// `vips_thumbnail` with `export-profile`): the image is imported from
+    /// its embedded profile to the Lab PCS, reduced there, and exported to
+    /// `output_profile` (only the built-in `"srgb"` today). Fits a square
+    /// `width` x `width` box. Panicking form of
+    /// [`Raster::try_thumbnail_with_profile`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ThumbnailError`].
+    #[track_caller]
+    pub fn thumbnail_with_profile(path: &Path, width: u32, output_profile: &str) -> Raster {
+        expect_thumbnail(Self::try_thumbnail_with_profile(
+            path,
+            width,
+            output_profile,
+        ))
+    }
+
+    /// Fallible form of [`Raster::thumbnail_image`].
+    ///
+    /// # Errors
+    ///
+    /// [`ThumbnailError::BadSize`] for a zero target, or the resample
+    /// errors from the fit.
+    pub fn try_thumbnail_image(&self, width: u32) -> Result<Raster, ThumbnailError> {
+        thumbnail_fit(self, width, None, false, ThumbSpace::Device)
+    }
+
+    /// Make a thumbnail from this already-loaded raster (libvips
+    /// `vips_thumbnail_image`), fitting a square `width` x `width` box
+    /// preserving aspect ratio. This is the in-memory counterpart to the
+    /// file-loading [`Raster::thumbnail`]; the sequential-access ported
+    /// cell drives it after a decode. Panicking form of
+    /// [`Raster::try_thumbnail_image`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ThumbnailError`]; see [`Raster::try_thumbnail_image`].
+    #[track_caller]
+    pub fn thumbnail_image(&self, width: u32) -> Raster {
+        expect_thumbnail(self.try_thumbnail_image(width))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1961,5 +2275,170 @@ mod tests {
             fout.data()[3],
         ]);
         assert!((got - 2.5).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------
+    // Thumbnail
+    // -----------------------------------------------------------------
+
+    /// A 290x442 portrait RGB raster, the aspect of the libvips `sample.jpg`
+    /// fixture, so the thumbnail dimension checks reuse the vips oracle.
+    fn portrait_290x442() -> Raster {
+        let (w, h) = (290u32, 442u32);
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.push((x % 256) as u8);
+                data.push((y % 256) as u8);
+                data.push(((x + y) % 256) as u8);
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// A one-pixel black/white checkerboard: every 2x downscale sees equal
+    /// black and white, so linear and gamma-space averages diverge sharply.
+    fn checker(side: u32) -> Raster {
+        let mut data = Vec::with_capacity((side * side * 3) as usize);
+        for y in 0..side {
+            for x in 0..side {
+                let v = if (x + y) % 2 == 0 { 0u8 } else { 255u8 };
+                data.extend_from_slice(&[v, v, v]);
+            }
+        }
+        Raster::new(side, side, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// The fit dimensions match the real `vips thumbnail` / `vipsthumbnail`
+    /// oracle for the 290x442 aspect: a bare width fits a square box (the
+    /// bound axis lands exactly), a width x height box fits inside it, and
+    /// crop fills it.
+    #[test]
+    fn thumbnail_fit_matches_vips_oracle_dims() {
+        let im = portrait_290x442();
+        let dims = |w, h, crop| {
+            let t = thumbnail_fit(&im, w, h, crop, ThumbSpace::Device).unwrap();
+            (t.width(), t.height())
+        };
+        // Square boxes: the bound (larger) axis lands exactly on the size.
+        assert_eq!(dims(100, None, false), (66, 100));
+        assert_eq!(dims(128, None, false), (84, 128));
+        assert_eq!(dims(442, None, false), (290, 442));
+        // Rectangular boxes fit inside, preserving aspect.
+        assert_eq!(dims(100, Some(300), false), (100, 152));
+        assert_eq!(dims(300, Some(100), false), (66, 100));
+        // Crop fills the box exactly.
+        assert_eq!(dims(100, Some(300), true), (100, 300));
+    }
+
+    /// The bare-width thumbnail always lands the target on the bound axis,
+    /// the libvips `for height in range(440, 1, -13)` invariant.
+    #[test]
+    fn thumbnail_height_series_is_exact() {
+        let im = portrait_290x442();
+        let mut h = 440u32;
+        while h >= 2 {
+            let t = thumbnail_fit(&im, h, None, false, ThumbSpace::Device).unwrap();
+            assert_eq!(t.height(), h, "bound axis must land exactly for {h}");
+            h = h.saturating_sub(13);
+        }
+    }
+
+    /// A plain shrink preserves the mean, the `|avg_orig - avg_thumb| < 1`
+    /// invariant of the ported thumbnail cell.
+    #[test]
+    fn thumbnail_preserves_average() {
+        let im = portrait_290x442();
+        let t = thumbnail_fit(&im, 100, None, false, ThumbSpace::Device).unwrap();
+        assert!(
+            (im.avg() - t.avg()).abs() < 1.0,
+            "mean drifted: {}",
+            t.avg()
+        );
+    }
+
+    /// Reducing in linear light lifts the mean of a black/white pattern well
+    /// above the gamma-space average, so the linear path is demonstrably not
+    /// a plain reduce.
+    #[test]
+    fn thumbnail_linear_differs_from_naive() {
+        let im = checker(64);
+        let naive = thumbnail_fit(&im, 8, None, false, ThumbSpace::Device).unwrap();
+        let linear = thumbnail_fit(&im, 8, None, false, ThumbSpace::Linear).unwrap();
+        assert_eq!((linear.width(), linear.height()), (8, 8));
+        assert_eq!(linear.format().channels(), 3);
+        // Gamma-space average of 0 and 255 is ~127; linear-light average of
+        // the same pair re-encodes to ~188.
+        assert!(naive.avg() < 140.0, "naive avg {}", naive.avg());
+        assert!(
+            linear.avg() > naive.avg() + 30.0,
+            "linear {} should exceed naive {} by a wide margin",
+            linear.avg(),
+            naive.avg()
+        );
+    }
+
+    /// The file and buffer entry points decode the same bytes and agree, and
+    /// the associated `thumbnail` resolves to this inherent method.
+    #[test]
+    fn thumbnail_file_and_buffer_agree() {
+        let im = portrait_290x442();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("portrait.png");
+        im.save(&path).unwrap();
+
+        let by_file = Raster::thumbnail(&path, 100, None, false);
+        assert_eq!((by_file.width(), by_file.height()), (66, 100));
+        assert_eq!(by_file.format().channels(), 3);
+
+        let buf = std::fs::read(&path).unwrap();
+        let by_buf = Raster::thumbnail_buffer(&buf, 100);
+        assert_eq!((by_buf.width(), by_buf.height()), (66, 100));
+        assert!((by_file.avg() - by_buf.avg()).abs() < 1.0);
+
+        // The in-memory instance form fits the same square box.
+        let by_image = im.thumbnail_image(100);
+        assert_eq!((by_image.width(), by_image.height()), (66, 100));
+    }
+
+    /// The ICC export path imports through the attached profile and exports
+    /// to the built-in sRGB profile; a source already in sRGB round-trips
+    /// close to identity, exercising the whole import/reduce/export machine.
+    #[test]
+    fn thumbnail_icc_srgb_roundtrips() {
+        let mut im = portrait_290x442();
+        im.set_icc_profile(&builtin_srgb_profile().unwrap());
+        let t = thumbnail_fit(&im, 442, None, false, ThumbSpace::IccSrgb).unwrap();
+        assert_eq!((t.width(), t.height()), (290, 442));
+        assert_eq!(t.format().channels(), 3);
+        // sRGB -> Lab(D50) -> sRGB is near identity at 8-bit.
+        assert!(
+            (im.avg() - t.avg()).abs() < 4.0,
+            "sRGB ICC round-trip drifted: {} vs {}",
+            im.avg(),
+            t.avg()
+        );
+    }
+
+    /// A zero target is a typed error, not a panic in the fit math.
+    #[test]
+    fn thumbnail_zero_size_is_typed_error() {
+        let im = portrait_290x442();
+        assert!(matches!(
+            im.try_thumbnail_image(0),
+            Err(ThumbnailError::BadSize { size: 0 })
+        ));
+    }
+
+    /// An unknown output profile is reported, not silently treated as sRGB.
+    #[test]
+    fn thumbnail_unknown_profile_is_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.png");
+        portrait_290x442().save(&path).unwrap();
+        assert!(matches!(
+            Raster::try_thumbnail_with_profile(&path, 100, "adobe-rgb"),
+            Err(ThumbnailError::UnknownProfile { .. })
+        ));
     }
 }
