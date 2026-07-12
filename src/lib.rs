@@ -63,6 +63,7 @@ pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
 pub mod extract;
+pub mod freqfilt;
 pub mod geo;
 pub mod histogram;
 pub mod imageio;
@@ -71,6 +72,7 @@ pub(crate) mod level_walk;
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
+pub mod matrix;
 pub mod morphology;
 pub mod mosaicing;
 pub mod observe;
@@ -118,6 +120,7 @@ pub use engine::{
 };
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
+pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
 // The imageio free functions are re-exported at the root (not just behind
@@ -131,6 +134,7 @@ pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,
 };
+pub use matrix::MatrixError;
 pub use morphology::{Direction, MorphologyError};
 pub use mosaicing::{MergeDirection, MosaicError};
 pub use observe::{
