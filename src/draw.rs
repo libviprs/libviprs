@@ -727,7 +727,12 @@ fn set_channel_at(data: &mut [u8], off: usize, c: usize, bpc: usize, v: u32) {
 /// and the fill derive their pixels from this single walk, so they agree on
 /// the circle boundary by construction: flood-filling an outlined circle
 /// reproduces the filled disc exactly, as it does in libvips.
-fn for_each_octant_step(radius: i32, mut step: impl FnMut(i32, i32)) {
+///
+/// `pub(crate)` because `hough_circle` in [`crate::arithmetic`] votes along
+/// this same point set: the set is symmetric under negation, so a pixel
+/// lying on a drawn midpoint circle always votes for that circle's exact
+/// centre.
+pub(crate) fn for_each_octant_step(radius: i32, mut step: impl FnMut(i32, i32)) {
     let mut x = radius;
     let mut y = 0;
     // Decision variable for the midpoint algorithm.
