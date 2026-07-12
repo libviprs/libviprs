@@ -165,7 +165,10 @@ pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
-pub use source::{SourceError, decode_bytes, decode_file, generate_test_raster};
+pub use source::{
+    SourceError, clear_load_cache, decode_bytes, decode_file, decode_file_with_options,
+    generate_test_raster, set_load_cache_max_bytes, set_load_cache_max_entries,
+};
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory,

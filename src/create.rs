@@ -173,6 +173,19 @@ fn float1() -> PixelFormat {
     PixelFormat::FloatF32(NonZeroU16::new(1).expect("1 is non-zero"))
 }
 
+/// Append `v` as one native-endian sample of `bpc` bytes: a C-style cast
+/// into the 8- or 16-bit unsigned range, or an `f32` for the 4-byte float
+/// depth. These are exactly the depths [`PixelFormat::with_channels`]
+/// accepts, so `bpc` is always 1, 2, or 4. Rust's saturating float-to-int
+/// cast reproduces libvips' clip-then-truncate `vips_cast` behaviour.
+fn push_constant_sample(out: &mut Vec<u8>, bpc: usize, v: f64) {
+    match bpc {
+        1 => out.push(v as u8),
+        2 => out.extend_from_slice(&(v as u16).to_ne_bytes()),
+        _ => out.extend_from_slice(&(v as f32).to_ne_bytes()),
+    }
+}
+
 /// Build a single-band float raster by evaluating `f` at every pixel.
 fn float1_from_fn(
     width: u32,
@@ -283,6 +296,68 @@ impl Raster {
     #[track_caller]
     pub fn black(width: u32, height: u32) -> Raster {
         Self::black_bands(width, height, 1)
+    }
+
+    /// Fallible form of [`Raster::new_from_image`].
+    ///
+    /// # Errors
+    ///
+    /// [`CreateError::InvalidBandCount`] when `value` is empty or longer
+    /// than `u16::MAX` (no [`PixelFormat`] carries that band count), or
+    /// [`CreateError::Raster`] on allocation failure.
+    pub fn try_new_from_image(&self, value: &[f64]) -> Result<Raster, CreateError> {
+        let bands = value.len();
+        // libvips `vips_image_new_from_image` keeps the source `BandFmt`
+        // (sample depth) and only changes the band count to `value.len()`.
+        let bpc = self.format().bytes_per_channel();
+        let format = PixelFormat::with_channels(bands, bpc).ok_or_else(|| {
+            CreateError::InvalidBandCount {
+                op: "new_from_image",
+                bands: u32::try_from(bands).unwrap_or(u32::MAX),
+            }
+        })?;
+        // One pixel's native-endian sample bytes, then replicated across
+        // every pixel so `avg()` equals the mean of `value`.
+        let mut pixel = Vec::with_capacity(bands * bpc);
+        for &v in value {
+            push_constant_sample(&mut pixel, bpc, v);
+        }
+        let mut out = Raster::zeroed(self.width(), self.height(), format)?;
+        for chunk in out.data_mut().chunks_exact_mut(pixel.len()) {
+            chunk.copy_from_slice(&pixel);
+        }
+        // Carry the source geometry/interpretation block only (libvips
+        // copies the header geometry). The attached fields stay empty from
+        // `Raster::zeroed`, so ICC/EXIF/filename are intentionally not
+        // inherited. Pin the resolved interpretation so it survives the
+        // band-count change even when the source left it inferred from the
+        // format.
+        out.meta = self.meta;
+        out.meta.interpretation = Some(self.interpretation());
+        Ok(out)
+    }
+
+    /// Create a constant image the size of `self`, filled with `value`
+    /// (libvips `vips_image_new_from_image`).
+    ///
+    /// The result carries `self`'s geometry/interpretation block only: width,
+    /// height, sample depth, interpretation, resolution, and offsets; the
+    /// band count changes to `value.len()`. It intentionally does *not*
+    /// inherit `self`'s attached fields (ICC profile, EXIF, filename): the
+    /// constant is a freshly built image, not a re-encoding of the source,
+    /// so it starts with an empty field set. Every pixel is set to `value`
+    /// (per channel), so a scalar produces a 1-band image with
+    /// `avg() == value[0]`, and an N-element vector produces an N-band
+    /// image with `avg()` equal to the mean of `value`. Panicking form of
+    /// [`Raster::try_new_from_image`], matching the ported-test call
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`CreateError`]; see [`Raster::try_new_from_image`].
+    #[track_caller]
+    pub fn new_from_image(&self, value: &[f64]) -> Raster {
+        expect_create("new_from_image", self.try_new_from_image(value))
     }
 
     /// Fallible form of [`Raster::xyz`].
@@ -2696,5 +2771,60 @@ mod tests {
         let im = Raster::gaussnoise(16, 16, 5.0, 2.0);
         assert_eq!(im.max_value(), im.max());
         assert_eq!(im.min_value(), im.min());
+    }
+
+    // ---- new_from_image ----
+
+    /// `new_from_image` copies the source geometry and metadata, gives the
+    /// result `value.len()` bands, and fills every pixel with `value` so
+    /// `avg()` equals the mean of `value`.
+    #[test]
+    fn new_from_image_bands_avg_and_metadata() {
+        // A source carrying distinctive, non-default metadata to copy.
+        let src = Raster::zeroed(7, 5, PixelFormat::Rgb8)
+            .unwrap()
+            .copy()
+            .interpretation(Interpretation::Srgb)
+            .xres(3.5)
+            .yres(4.25)
+            .xoffset(11)
+            .yoffset(-9)
+            .build();
+
+        // Scalar -> 1 band, constant 12; metadata carried over.
+        let one = src.new_from_image(&[12.0]);
+        assert_eq!(one.width(), src.width());
+        assert_eq!(one.height(), src.height());
+        assert_eq!(one.bands(), 1);
+        assert!((one.avg() - 12.0).abs() < 1e-9);
+        assert_eq!(one.interpretation(), src.interpretation());
+        assert!((one.xres() - src.xres()).abs() < 1e-9);
+        assert!((one.yres() - src.yres()).abs() < 1e-9);
+        assert_eq!(one.xoffset(), src.xoffset());
+        assert_eq!(one.yoffset(), src.yoffset());
+
+        // 3-element vector -> 3 bands, avg = (1+2+3)/3 = 2.
+        let three = src.new_from_image(&[1.0, 2.0, 3.0]);
+        assert_eq!(three.bands(), 3);
+        assert!((three.avg() - 2.0).abs() < 1e-9);
+
+        // 4-element vector -> 4 bands.
+        let four = src.new_from_image(&[0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(four.bands(), 4);
+        assert!((four.avg() - 0.0).abs() < 1e-9);
+    }
+
+    /// An empty value vector has no band count any format can carry, so
+    /// the fallible form reports `InvalidBandCount` instead of panicking.
+    #[test]
+    fn new_from_image_rejects_empty_value() {
+        let src = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
+        assert!(matches!(
+            src.try_new_from_image(&[]),
+            Err(CreateError::InvalidBandCount {
+                op: "new_from_image",
+                bands: 0
+            })
+        ));
     }
 }
