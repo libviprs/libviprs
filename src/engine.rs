@@ -1526,6 +1526,24 @@ fn extract_and_emit_level(
                     raster: tile_raster,
                     blank,
                 };
+                // Per-tile tracing span (issue libviprs-tests#83): one
+                // `libviprs::tile` span per tile write attempt, carrying its
+                // coordinates, nested under the active `libviprs::level` span.
+                // It is entered *before* `sink.write_tile` so the span covers
+                // the write itself: a tile whose write exhausts
+                // `RetryThenSkip` (and then `continue`s below without bumping
+                // the produced count) still emits its span, and any future
+                // encode / sink-write child spans nest beneath it, matching the
+                // documented tree.
+                #[cfg(feature = "tracing")]
+                let _tile_span = tracing::info_span!(
+                    target: "libviprs",
+                    "tile",
+                    x = coord.col,
+                    y = coord.row,
+                    level = coord.level,
+                )
+                .entered();
                 let sink_start = Instant::now();
                 match sink.write_tile(&tile) {
                     Ok(()) => {
@@ -1563,16 +1581,6 @@ fn extract_and_emit_level(
                     }
                 }
                 observer.on_event(EngineEvent::tile_completed(coord));
-                #[cfg(feature = "tracing")]
-                if tracing::enabled!(target: "libviprs::tile", tracing::Level::TRACE) {
-                    tracing::trace!(
-                        target: "libviprs::tile",
-                        x = coord.col,
-                        y = coord.row,
-                        level = coord.level,
-                        "tile done"
-                    );
-                }
                 count += 1;
             }
         }
@@ -1792,6 +1800,22 @@ fn extract_and_emit_parallel(
                 skipped += 1;
             }
             let tile_bytes = tile.raster.data().len() as u64;
+            // Per-tile tracing span (issue libviprs-tests#83): one
+            // `libviprs::tile` span per tile write attempt, carrying its
+            // coordinates, nested under the active `libviprs::level` span. It
+            // is entered *before* `sink.write_tile`, so a write that exhausts
+            // `RetryThenSkip` still emits its span. The consumer runs on the
+            // same thread the level span was entered on, so the nesting holds
+            // even though extraction happened on a worker thread.
+            #[cfg(feature = "tracing")]
+            let _tile_span = tracing::info_span!(
+                target: "libviprs",
+                "tile",
+                x = coord.col,
+                y = coord.row,
+                level = coord.level,
+            )
+            .entered();
             let sink_start = Instant::now();
             match sink.write_tile(&tile) {
                 Ok(()) => {
@@ -1822,16 +1846,6 @@ fn extract_and_emit_parallel(
                 }
             }
             observer.on_event(EngineEvent::tile_completed(coord));
-            #[cfg(feature = "tracing")]
-            if tracing::enabled!(target: "libviprs::tile", tracing::Level::TRACE) {
-                tracing::trace!(
-                    target: "libviprs::tile",
-                    x = coord.col,
-                    y = coord.row,
-                    level = coord.level,
-                    "tile done"
-                );
-            }
             count += 1;
         }
         Ok((count, skipped))
