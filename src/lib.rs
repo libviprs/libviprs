@@ -96,7 +96,7 @@ pub mod verify;
 // Leaf helpers, constants, and free functions stay behind their module path
 // (e.g. `libviprs::resume::SCHEMA_VERSION`) so `use libviprs::*` does not
 // flood callers with implementation detail.
-pub use arithmetic::ArithmeticError;
+pub use arithmetic::{ArithmeticError, Comparand};
 pub use bands::BandError;
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};

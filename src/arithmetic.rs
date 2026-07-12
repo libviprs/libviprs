@@ -422,6 +422,56 @@ fn compare_const_map(r: &Raster, c: f64, f: impl Fn(f64, f64) -> bool) -> Raster
     Raster::new(r.width(), r.height(), out_fmt, out).expect("arithmetic output is well-formed")
 }
 
+mod comparand_sealed {
+    pub trait Sealed {}
+    impl Sealed for &super::Raster {}
+    impl Sealed for f64 {}
+}
+
+/// Right-hand operand for the samplewise comparison methods
+/// ([`Raster::more_than`], [`Raster::less_than`], and the rest of the
+/// family). It is implemented for `&Raster` (compare against another image,
+/// samplewise) and for `f64` (compare every sample against a constant), so a
+/// single call surface serves both `x.less_than(&other)` and
+/// `x.less_than(128.0)`. The dedicated `*_const` methods remain for callers
+/// that want an unambiguous constant form.
+///
+/// The trait is sealed: only this crate implements it.
+pub trait Comparand: comparand_sealed::Sealed {
+    #[doc(hidden)]
+    #[track_caller]
+    fn compare_against(
+        self,
+        lhs: &Raster,
+        label: &'static str,
+        pred: fn(f64, f64) -> bool,
+    ) -> Raster;
+}
+
+impl Comparand for &Raster {
+    #[track_caller]
+    fn compare_against(
+        self,
+        lhs: &Raster,
+        label: &'static str,
+        pred: fn(f64, f64) -> bool,
+    ) -> Raster {
+        expect_arith(label, compare_map(lhs, self, pred))
+    }
+}
+
+impl Comparand for f64 {
+    #[track_caller]
+    fn compare_against(
+        self,
+        lhs: &Raster,
+        _label: &'static str,
+        pred: fn(f64, f64) -> bool,
+    ) -> Raster {
+        compare_const_map(lhs, self, pred)
+    }
+}
+
 /// Statistical-differencing constants, the libvips `vips_stdif` defaults:
 /// blend factor `a`, target mean `m0`, deviation blend `b`, target
 /// deviation `s0`.
@@ -1167,15 +1217,17 @@ impl Raster {
         compare_map(self, other, |a, b| a > b)
     }
 
-    /// Panicking form of [`Raster::try_more_than`], matching the
-    /// ported-test surface.
+    /// Samplewise `self > other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` (compared samplewise) or an `f64` constant
+    /// (compared against every sample); see [`Comparand`].
     ///
     /// # Panics
     ///
-    /// Panics on any [`ArithmeticError`]; see [`Raster::try_more_than`].
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_more_than`]. A constant operand never fails.
     #[track_caller]
-    pub fn more_than(&self, other: &Raster) -> Raster {
-        expect_arith("more_than", self.try_more_than(other))
+    pub fn more_than(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "more_than", |a, b| a > b)
     }
 
     /// Samplewise `self > c` as a `0` / `255` 8-bit mask.
@@ -1193,15 +1245,16 @@ impl Raster {
         compare_map(self, other, |a, b| a >= b)
     }
 
-    /// Panicking form of [`Raster::try_more_eq`], matching the ported-test
-    /// surface.
+    /// Samplewise `self >= other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
     ///
     /// # Panics
     ///
-    /// Panics on any [`ArithmeticError`]; see [`Raster::try_more_eq`].
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_more_eq`]. A constant operand never fails.
     #[track_caller]
-    pub fn more_eq(&self, other: &Raster) -> Raster {
-        expect_arith("more_eq", self.try_more_eq(other))
+    pub fn more_eq(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "more_eq", |a, b| a >= b)
     }
 
     /// Samplewise `self >= c` as a `0` / `255` 8-bit mask.
@@ -1219,15 +1272,16 @@ impl Raster {
         compare_map(self, other, |a, b| a < b)
     }
 
-    /// Panicking form of [`Raster::try_less_than`], matching the
-    /// ported-test surface.
+    /// Samplewise `self < other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
     ///
     /// # Panics
     ///
-    /// Panics on any [`ArithmeticError`]; see [`Raster::try_less_than`].
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_less_than`]. A constant operand never fails.
     #[track_caller]
-    pub fn less_than(&self, other: &Raster) -> Raster {
-        expect_arith("less_than", self.try_less_than(other))
+    pub fn less_than(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "less_than", |a, b| a < b)
     }
 
     /// Samplewise `self < c` as a `0` / `255` 8-bit mask.
@@ -1245,15 +1299,16 @@ impl Raster {
         compare_map(self, other, |a, b| a <= b)
     }
 
-    /// Panicking form of [`Raster::try_less_eq`], matching the ported-test
-    /// surface.
+    /// Samplewise `self <= other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
     ///
     /// # Panics
     ///
-    /// Panics on any [`ArithmeticError`]; see [`Raster::try_less_eq`].
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_less_eq`]. A constant operand never fails.
     #[track_caller]
-    pub fn less_eq(&self, other: &Raster) -> Raster {
-        expect_arith("less_eq", self.try_less_eq(other))
+    pub fn less_eq(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "less_eq", |a, b| a <= b)
     }
 
     /// Samplewise `self <= c` as a `0` / `255` 8-bit mask.
@@ -1271,15 +1326,17 @@ impl Raster {
         compare_map(self, other, |a, b| a == b)
     }
 
-    /// Panicking form of [`Raster::try_equal`], matching the ported-test
-    /// surface.
+    /// Samplewise `self == other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`]. The
+    /// comparison is exact, so a fractional constant matches no integer sample.
     ///
     /// # Panics
     ///
-    /// Panics on any [`ArithmeticError`]; see [`Raster::try_equal`].
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_equal`]. A constant operand never fails.
     #[track_caller]
-    pub fn equal(&self, other: &Raster) -> Raster {
-        expect_arith("equal", self.try_equal(other))
+    pub fn equal(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "equal", |a, b| a == b)
     }
 
     /// Samplewise `self == c` as a `0` / `255` 8-bit mask. The comparison
@@ -1298,15 +1355,16 @@ impl Raster {
         compare_map(self, other, |a, b| a != b)
     }
 
-    /// Panicking form of [`Raster::try_noteq`], matching the ported-test
-    /// surface.
+    /// Samplewise `self != other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
     ///
     /// # Panics
     ///
-    /// Panics on any [`ArithmeticError`]; see [`Raster::try_noteq`].
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_noteq`]. A constant operand never fails.
     #[track_caller]
-    pub fn noteq(&self, other: &Raster) -> Raster {
-        expect_arith("noteq", self.try_noteq(other))
+    pub fn noteq(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "noteq", |a, b| a != b)
     }
 
     /// Samplewise `self != c` as a `0` / `255` 8-bit mask.
@@ -1338,6 +1396,19 @@ impl Raster {
     #[track_caller]
     pub fn bitand(&self, other: &Raster) -> Raster {
         expect_arith("bitand", self.try_bitand(other))
+    }
+
+    /// Samplewise boolean AND of two images, an alias for [`Raster::bitand`]
+    /// under the libvips `image & image` spelling. On `0` / `255` masks it
+    /// composes the relational ops into a range test, e.g.
+    /// `x.more_eq(64.0).band_and(&x.less_than(128.0))`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_bitand`].
+    #[track_caller]
+    pub fn band_and(&self, other: &Raster) -> Raster {
+        expect_arith("band_and", self.try_bitand(other))
     }
 
     /// Bitwise AND of every sample with a constant. The constant is masked
