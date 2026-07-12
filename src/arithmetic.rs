@@ -42,14 +42,21 @@
 //! | [`Raster::stdif`] | `vips_stdif` | statistical differencing |
 //! | [`Raster::recomb`] | `vips_recomb` | band recombination matrix multiply |
 //! | [`Raster::premultiply`] / [`Raster::unpremultiply`] | `vips_premultiply` / `vips_unpremultiply` | alpha (un)premultiplication |
+//! | [`Raster::sin`] .. [`Raster::atanh`], [`Raster::log`], [`Raster::log10`], [`Raster::exp`], [`Raster::exp10`] | `vips_math` | float raster |
+//! | [`Raster::atan2`], [`Raster::pow`], [`Raster::wop`] | `vips_math2` | float raster |
+//! | [`Raster::neg`] | pyvips `-image` | float raster |
+//! | [`Raster::complexform`], [`Raster::polar`], [`Raster::rect`], [`Raster::conj`], [`Raster::real`], [`Raster::imag`] | `vips_complexform` / `vips_complex` / `vips_complexget` | complex (re/im pair) float raster |
+//! | [`Raster::hough_line`] / [`Raster::hough_circle`] | `vips_hough_line` / `vips_hough_circle` | vote accumulator |
 //!
-//! # Semantics shared by every operation
+//! # Semantics shared by the integer operations
 //!
 //! * **Value domain.** Samples are unsigned integers, `0..=255` (8-bit) or
 //!   `0..=65535` (16-bit). Arithmetic is computed in `f64` and the result is
 //!   rounded to nearest and saturated into the output depth. libvips
-//!   promotes many of these ops to float output; this crate has no float
-//!   pixel format, so round-and-saturate is the documented contract.
+//!   promotes many of these ops to float output; the integer round-and-
+//!   saturate contract predates the float pixel formats and is kept for the
+//!   `add_const` / `linear` / `div` family. The transcendental family below
+//!   produces float output instead.
 //! * **Depth promotion.** Operations whose exact result can exceed the
 //!   input depth (`add_const`, `mul`, `pow_const`, `linear`, `sum`, ...)
 //!   promote 8-bit input to 16-bit output, matching the promotion
@@ -63,20 +70,33 @@
 //!   libvips `vips_divide`.
 //! * **NaN.** A NaN result (e.g. `0.0.powf(f64::NAN)`) writes `0`.
 //!
-//! # Deferred operations
+//! # Float-output operations
 //!
-//! The ported arithmetic suite also calls operations that cannot be
-//! represented with the unsigned integer formats in [`PixelFormat`] and are
-//! deferred until a float sample depth exists: `neg` (negative samples),
-//! the trigonometric / logarithmic / exponential family (`sin`, `cos`,
-//! `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `asinh`,
-//! `acosh`, `atanh`, `log`, `log10`, `exp`, `exp10`, fractional results),
-//! and the complex-number family (`complexform`, `polar`, `rect`, `conj`,
-//! `real`, `imag`). The histogram family (`hist_find*`, `hough_*`) and the
-//! creation / conversion helpers the ported statistics tests use for setup
-//! (`grey`, `insert`) belong to later batches. `floor`, `ceil`, and `rint`
-//! are implemented here: on integer formats they are exact identities,
-//! which is also what libvips produces for integer input.
+//! The transcendental family (`vips_math`: `sin` through `atanh`, `log`,
+//! `log10`, `exp`, `exp10`; `vips_math2`: `atan2`, `pow`, `wop`; `neg`) and
+//! the complex family accept every sample depth, including float input,
+//! and produce a float raster ([`PixelFormat::RgbaF32`] or
+//! [`PixelFormat::FloatF32`]) so fractional and negative results survive,
+//! matching the libvips float promotion. Following libvips `vips_math`,
+//! `sin` / `cos` / `tan` take their input in degrees and `asin` / `acos` /
+//! `atan` / `atan2` produce degrees. Out-of-domain inputs keep IEEE
+//! semantics (`log(0)` is `-inf`, `acosh(0.5)` is NaN) rather than
+//! saturating.
+//!
+//! A complex image is a float raster with an even band count holding
+//! `(re, im)` pairs: [`Raster::complexform`] interleaves two real images,
+//! [`Raster::real`] / [`Raster::imag`] extract the halves, and
+//! [`Raster::polar`] / [`Raster::rect`] / [`Raster::conj`] map pairs
+//! (angles in degrees, matching `vips_complex`).
+//!
+//! `floor`, `ceil`, and `rint` round float rasters samplewise and are exact
+//! identities on the integer formats, which is also what libvips produces
+//! for integer input. `abs` and `sign` likewise gained float branches when
+//! `neg` made negative samples possible.
+//!
+//! The `hist_find*` family lives in [`crate::histogram`]; the creation /
+//! conversion helpers the ported statistics tests use for setup (`grey`,
+//! `insert`) live in their own batches.
 
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
@@ -134,6 +154,14 @@ pub enum ArithmeticError {
     /// The result would have more bands than [`PixelFormat`] can carry.
     #[error("result band count {bands} exceeds the supported maximum of 65535")]
     TooManyBands { bands: usize },
+    /// A complex operation (`polar`, `rect`, `conj`, `real`, `imag`) was
+    /// given an image whose band count is odd, so it cannot hold
+    /// `(re, im)` pairs.
+    #[error("complex operation requires an even band count of (re, im) pairs, image has {bands}")]
+    NotComplex { bands: usize },
+    /// `hough_circle` was given an empty radius range.
+    #[error("hough_circle radius range is empty: min {min} exceeds max {max}")]
+    EmptyRadiusRange { min: u32, max: u32 },
     /// Constructing the result raster failed (allocation budget, size
     /// overflow).
     #[error(transparent)]
@@ -286,6 +314,109 @@ fn reject_float_input(r: &Raster) {
         "the arithmetic operations do not support float rasters yet; \
          cast to an unsigned 8/16-bit format first"
     );
+}
+
+/// Write `v` as the flat `i`-th native-endian `f32` sample.
+#[inline]
+fn write_f32(data: &mut [u8], i: usize, v: f64) {
+    data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+}
+
+/// Apply `f` to every sample, producing a float raster of the same shape.
+/// Accepts every input depth including float; results keep IEEE semantics
+/// (no rounding, clamping, or NaN rewriting).
+fn unary_map_float(r: &Raster, f: impl Fn(f64) -> f64) -> Raster {
+    let fmt = r.format();
+    let bands = fmt.channels();
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let mut out = vec![0u8; n * 4];
+    let data = r.data();
+    for i in 0..n {
+        write_f32(&mut out, i, f(read_f64(data, in_bpc, i)));
+    }
+    Raster::new(r.width(), r.height(), out_fmt, out).expect("arithmetic output is well-formed")
+}
+
+/// Apply `f` samplewise across two compatible images, producing a float
+/// raster. Accepts every input depth including float; see
+/// [`unary_map_float`].
+fn binary_map_float(
+    a: &Raster,
+    b: &Raster,
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    ensure_compatible(a, b)?;
+    let (a_bpc, b_bpc) = (
+        a.format().bytes_per_channel(),
+        b.format().bytes_per_channel(),
+    );
+    let bands = a.format().channels();
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = a.width() as usize * a.height() as usize * bands;
+    let mut out = vec![0u8; n * 4];
+    let (a_data, b_data) = (a.data(), b.data());
+    for i in 0..n {
+        write_f32(
+            &mut out,
+            i,
+            f(read_f64(a_data, a_bpc, i), read_f64(b_data, b_bpc, i)),
+        );
+    }
+    Ok(Raster::new(a.width(), a.height(), out_fmt, out)?)
+}
+
+/// The pair count of a complex image, or `NotComplex` for an odd band
+/// count. A complex image is a raster with an even band count holding
+/// `(re, im)` pairs; see the module docs.
+fn ensure_complex(r: &Raster) -> Result<usize, ArithmeticError> {
+    let bands = r.format().channels();
+    if bands % 2 != 0 {
+        return Err(ArithmeticError::NotComplex { bands });
+    }
+    Ok(bands / 2)
+}
+
+/// Apply `f(re, im) -> (re', im')` to every complex pair, producing a float
+/// raster with the input band count.
+fn complex_map(r: &Raster, f: impl Fn(f64, f64) -> (f64, f64)) -> Result<Raster, ArithmeticError> {
+    ensure_complex(r)?;
+    let fmt = r.format();
+    let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let mut out = vec![0u8; n * 4];
+    let data = r.data();
+    for i in (0..n).step_by(2) {
+        let (re, im) = f(read_f64(data, bpc, i), read_f64(data, bpc, i + 1));
+        write_f32(&mut out, i, re);
+        write_f32(&mut out, i + 1, im);
+    }
+    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
+}
+
+/// Extract one half of every complex pair (`part` is 0 for real, 1 for
+/// imaginary), producing a float raster with half the band count.
+fn complex_get(r: &Raster, part: usize) -> Result<Raster, ArithmeticError> {
+    let pairs = ensure_complex(r)?;
+    let fmt = r.format();
+    let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+    let out_fmt = PixelFormat::with_channels(pairs, 4)
+        .expect("pair count is at least 1 and at most half the input band count");
+    let pixels = r.width() as usize * r.height() as usize;
+    let mut out = vec![0u8; pixels * pairs * 4];
+    let data = r.data();
+    for p in 0..pixels {
+        for pair in 0..pairs {
+            let v = read_f64(data, bpc, p * bands + 2 * pair + part);
+            write_f32(&mut out, p * pairs + pair, v);
+        }
+    }
+    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
 }
 
 /// Apply `f` to every sample, writing a result of the same shape at
@@ -518,6 +649,11 @@ const FIND_TRIM_THRESHOLD: f64 = 10.0;
 
 /// The `scaleimage` log-mode exponent, the libvips `vips_scale` default.
 const SCALE_LOG_EXP: f64 = 0.25;
+
+/// Hough-line accumulator dimensions, the libvips `hough_line` defaults:
+/// angle bins across the width, distance bins down the height.
+const HOUGH_LINE_WIDTH: u32 = 256;
+const HOUGH_LINE_HEIGHT: u32 = 256;
 
 impl Raster {
     // -----------------------------------------------------------------
@@ -1030,17 +1166,43 @@ impl Raster {
         self.clone()
     }
 
-    /// Absolute value of every sample (libvips `abs`). Samples are
-    /// unsigned, so this is an identity copy; it exists so the ported
-    /// call surface composes.
+    /// Unary negation of every sample (libvips and pyvips `-image`). The
+    /// output is a float raster so negative results survive; `abs`
+    /// round-trips it back.
+    pub fn neg(&self) -> Raster {
+        unary_map_float(self, |v| -v)
+    }
+
+    /// Absolute value of every sample (libvips `abs`). Unsigned integer
+    /// samples cannot be negative, so those formats are an identity copy;
+    /// float rasters (for example a [`Raster::neg`] result) map `|v|`
+    /// samplewise and stay float.
     pub fn abs(&self) -> Raster {
-        self.clone()
+        if self.format().is_float() {
+            unary_map_float(self, f64::abs)
+        } else {
+            self.clone()
+        }
     }
 
     /// Sign of every sample (libvips `sign`): `1` for positive samples,
-    /// `0` for zero. Samples are unsigned, so `-1` cannot occur.
+    /// `0` for zero, `-1` for negative samples. Unsigned integer input
+    /// keeps its depth and cannot produce `-1`; float input produces a
+    /// float raster (NaN maps to `0`).
     pub fn sign(&self) -> Raster {
-        unary_map_u32(self, |v| u32::from(v > 0))
+        if self.format().is_float() {
+            unary_map_float(self, |v| {
+                if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+        } else {
+            unary_map_u32(self, |v| u32::from(v > 0))
+        }
     }
 
     /// Clamp every sample into `[min, max]`; the bounds default to the
@@ -1059,22 +1221,38 @@ impl Raster {
         })
     }
 
-    /// Round every sample down (libvips `floor`): an exact identity on the
-    /// integer formats this crate stores.
+    /// Round every sample down (libvips `floor`): float rasters map
+    /// `v.floor()` samplewise and stay float; the integer formats are an
+    /// exact identity, matching libvips for integer input.
     pub fn floor(&self) -> Raster {
-        self.clone()
+        if self.format().is_float() {
+            unary_map_float(self, f64::floor)
+        } else {
+            self.clone()
+        }
     }
 
-    /// Round every sample up (libvips `ceil`): an exact identity on the
-    /// integer formats this crate stores.
+    /// Round every sample up (libvips `ceil`): float rasters map
+    /// `v.ceil()` samplewise and stay float; the integer formats are an
+    /// exact identity.
     pub fn ceil(&self) -> Raster {
-        self.clone()
+        if self.format().is_float() {
+            unary_map_float(self, f64::ceil)
+        } else {
+            self.clone()
+        }
     }
 
-    /// Round every sample to the nearest integer (libvips `rint`): an
-    /// exact identity on the integer formats this crate stores.
+    /// Round every sample to the nearest integer (libvips `rint`, which
+    /// rounds halves away from zero): float rasters map `v.round()`
+    /// samplewise and stay float; the integer formats are an exact
+    /// identity.
     pub fn rint(&self) -> Raster {
-        self.clone()
+        if self.format().is_float() {
+            unary_map_float(self, f64::round)
+        } else {
+            self.clone()
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1763,6 +1941,496 @@ impl Raster {
         }
         Ok(Raster::new(self.width(), self.height(), fmt, out)?)
     }
+
+    // -----------------------------------------------------------------
+    // Transcendental maths (libvips math / math2): float output
+    // -----------------------------------------------------------------
+
+    /// Sine of every sample, input in degrees (libvips `math` SIN). Float
+    /// output; accepts every input depth including float.
+    pub fn sin(&self) -> Raster {
+        unary_map_float(self, |v| v.to_radians().sin())
+    }
+
+    /// Cosine of every sample, input in degrees (libvips `math` COS).
+    /// Float output.
+    pub fn cos(&self) -> Raster {
+        unary_map_float(self, |v| v.to_radians().cos())
+    }
+
+    /// Tangent of every sample, input in degrees (libvips `math` TAN).
+    /// Float output.
+    pub fn tan(&self) -> Raster {
+        unary_map_float(self, |v| v.to_radians().tan())
+    }
+
+    /// Arc sine of every sample, output in degrees (libvips `math` ASIN).
+    /// Float output; inputs outside `[-1, 1]` produce NaN.
+    pub fn asin(&self) -> Raster {
+        unary_map_float(self, |v| v.asin().to_degrees())
+    }
+
+    /// Arc cosine of every sample, output in degrees (libvips `math`
+    /// ACOS). Float output; inputs outside `[-1, 1]` produce NaN.
+    pub fn acos(&self) -> Raster {
+        unary_map_float(self, |v| v.acos().to_degrees())
+    }
+
+    /// Arc tangent of every sample, output in degrees (libvips `math`
+    /// ATAN). Float output.
+    pub fn atan(&self) -> Raster {
+        unary_map_float(self, |v| v.atan().to_degrees())
+    }
+
+    /// Hyperbolic sine of every sample (libvips `math` SINH). Float
+    /// output.
+    pub fn sinh(&self) -> Raster {
+        unary_map_float(self, f64::sinh)
+    }
+
+    /// Hyperbolic cosine of every sample (libvips `math` COSH). Float
+    /// output.
+    pub fn cosh(&self) -> Raster {
+        unary_map_float(self, f64::cosh)
+    }
+
+    /// Hyperbolic tangent of every sample (libvips `math` TANH). Float
+    /// output.
+    pub fn tanh(&self) -> Raster {
+        unary_map_float(self, f64::tanh)
+    }
+
+    /// Inverse hyperbolic sine of every sample (libvips `math` ASINH).
+    /// Float output.
+    pub fn asinh(&self) -> Raster {
+        unary_map_float(self, f64::asinh)
+    }
+
+    /// Inverse hyperbolic cosine of every sample (libvips `math` ACOSH).
+    /// Float output; inputs below `1` produce NaN.
+    pub fn acosh(&self) -> Raster {
+        unary_map_float(self, f64::acosh)
+    }
+
+    /// Inverse hyperbolic tangent of every sample (libvips `math` ATANH).
+    /// Float output; `atanh(1)` is `+inf` and inputs outside `[-1, 1]`
+    /// produce NaN.
+    pub fn atanh(&self) -> Raster {
+        unary_map_float(self, f64::atanh)
+    }
+
+    /// Natural logarithm of every sample (libvips `math` LOG). Float
+    /// output; `log(0)` is `-inf` and negative inputs produce NaN.
+    pub fn log(&self) -> Raster {
+        unary_map_float(self, f64::ln)
+    }
+
+    /// Base-10 logarithm of every sample (libvips `math` LOG10). Float
+    /// output; see [`Raster::log`] for the domain edges.
+    pub fn log10(&self) -> Raster {
+        unary_map_float(self, f64::log10)
+    }
+
+    /// `e` raised to every sample (libvips `math` EXP). Float output;
+    /// large inputs overflow to `+inf` in `f32`.
+    pub fn exp(&self) -> Raster {
+        unary_map_float(self, f64::exp)
+    }
+
+    /// `10` raised to every sample (libvips `math` EXP10). Float output;
+    /// see [`Raster::exp`].
+    pub fn exp10(&self) -> Raster {
+        unary_map_float(self, |v| 10.0f64.powf(v))
+    }
+
+    /// Samplewise `atan2(self, other)` in degrees (libvips `math2` ATAN2:
+    /// `self` is the ordinate, `other` the abscissa). Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_atan2(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, |a, b| a.atan2(b).to_degrees())
+    }
+
+    /// Panicking form of [`Raster::try_atan2`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_atan2`].
+    #[track_caller]
+    pub fn atan2(&self, other: &Raster) -> Raster {
+        expect_arith("atan2", self.try_atan2(other))
+    }
+
+    /// Samplewise `self ** other` (libvips `math2` POW). Float output, so
+    /// fractional exponents and large results survive; contrast
+    /// [`Raster::pow_const`], which keeps the older integer contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_pow(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, f64::powf)
+    }
+
+    /// Panicking form of [`Raster::try_pow`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_pow`].
+    #[track_caller]
+    pub fn pow(&self, other: &Raster) -> Raster {
+        expect_arith("pow", self.try_pow(other))
+    }
+
+    /// Samplewise `other ** self`, power with the operands reversed
+    /// (libvips `math2` WOP). Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_wop(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, |a, b| b.powf(a))
+    }
+
+    /// Panicking form of [`Raster::try_wop`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_wop`].
+    #[track_caller]
+    pub fn wop(&self, other: &Raster) -> Raster {
+        expect_arith("wop", self.try_wop(other))
+    }
+
+    // -----------------------------------------------------------------
+    // Complex operations
+    // -----------------------------------------------------------------
+
+    /// Build a complex image from a real and an imaginary image (libvips
+    /// `complexform`).
+    ///
+    /// The output is a float raster with twice the input band count,
+    /// holding `(re, im)` pairs: band `2b` is band `b` of `real`, band
+    /// `2b + 1` is band `b` of `imag`. Both inputs may be any depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::TooManyBands`] if the doubled band count
+    /// exceeds `u16::MAX`.
+    pub fn try_complexform(real: &Raster, imag: &Raster) -> Result<Raster, ArithmeticError> {
+        ensure_compatible(real, imag)?;
+        let bands = real.format().channels();
+        let out_fmt = format_for(bands * 2, 4)?;
+        let (re_bpc, im_bpc) = (
+            real.format().bytes_per_channel(),
+            imag.format().bytes_per_channel(),
+        );
+        let pixels = real.width() as usize * real.height() as usize;
+        let mut out = vec![0u8; pixels * bands * 2 * 4];
+        let (re_data, im_data) = (real.data(), imag.data());
+        for p in 0..pixels {
+            for b in 0..bands {
+                let i = p * bands + b;
+                write_f32(&mut out, 2 * i, read_f64(re_data, re_bpc, i));
+                write_f32(&mut out, 2 * i + 1, read_f64(im_data, im_bpc, i));
+            }
+        }
+        Ok(Raster::new(real.width(), real.height(), out_fmt, out)?)
+    }
+
+    /// Panicking form of [`Raster::try_complexform`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_complexform`].
+    #[track_caller]
+    pub fn complexform(real: &Raster, imag: &Raster) -> Raster {
+        expect_arith("complexform", Self::try_complexform(real, imag))
+    }
+
+    /// Convert every complex pair from rectangular to polar form (libvips
+    /// `complex` POLAR): `(re, im)` becomes `(magnitude, angle)` with the
+    /// angle in degrees. Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_polar(&self) -> Result<Raster, ArithmeticError> {
+        complex_map(self, |re, im| (re.hypot(im), im.atan2(re).to_degrees()))
+    }
+
+    /// Panicking form of [`Raster::try_polar`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_polar`].
+    #[track_caller]
+    pub fn polar(&self) -> Raster {
+        expect_arith("polar", self.try_polar())
+    }
+
+    /// Convert every complex pair from polar to rectangular form (libvips
+    /// `complex` RECT): `(magnitude, angle_degrees)` becomes `(re, im)`.
+    /// Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_rect(&self) -> Result<Raster, ArithmeticError> {
+        complex_map(self, |mag, angle| {
+            let (s, c) = angle.to_radians().sin_cos();
+            (mag * c, mag * s)
+        })
+    }
+
+    /// Panicking form of [`Raster::try_rect`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_rect`].
+    #[track_caller]
+    pub fn rect(&self) -> Raster {
+        expect_arith("rect", self.try_rect())
+    }
+
+    /// Complex conjugate of every pair (libvips `complex` CONJ):
+    /// `(re, im)` becomes `(re, -im)`. Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_conj(&self) -> Result<Raster, ArithmeticError> {
+        complex_map(self, |re, im| (re, -im))
+    }
+
+    /// Panicking form of [`Raster::try_conj`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_conj`].
+    #[track_caller]
+    pub fn conj(&self) -> Raster {
+        expect_arith("conj", self.try_conj())
+    }
+
+    /// Real part of every complex pair (libvips `complexget` REAL): a
+    /// float raster with half the band count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_real(&self) -> Result<Raster, ArithmeticError> {
+        complex_get(self, 0)
+    }
+
+    /// Panicking form of [`Raster::try_real`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_real`].
+    #[track_caller]
+    pub fn real(&self) -> Raster {
+        expect_arith("real", self.try_real())
+    }
+
+    /// Imaginary part of every complex pair (libvips `complexget` IMAG):
+    /// a float raster with half the band count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_imag(&self) -> Result<Raster, ArithmeticError> {
+        complex_get(self, 1)
+    }
+
+    /// Panicking form of [`Raster::try_imag`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_imag`].
+    #[track_caller]
+    pub fn imag(&self) -> Raster {
+        expect_arith("imag", self.try_imag())
+    }
+
+    // -----------------------------------------------------------------
+    // Hough transforms
+    // -----------------------------------------------------------------
+
+    /// Hough line transform (libvips `hough_line` with its default
+    /// 256 x 256 accumulator).
+    ///
+    /// Every non-zero sample votes for the lines through its pixel. The
+    /// output is a single-band 16-bit accumulator: column `i` is the angle
+    /// bin `theta = 180deg * i / 256`, row `r` is the normalized distance
+    /// bin, so a peak at `(i, r)` decodes as angle `180 * i / width` and
+    /// distance `input_height * r / height` (the normalization libvips
+    /// uses: pixel coordinates are divided by the image dimensions before
+    /// voting, so distances scale by the input height for square inputs).
+    /// Votes whose distance falls outside `[0, 1)` in normalized form are
+    /// discarded; counts saturate at `65535`.
+    pub fn hough_line(&self) -> Raster {
+        let (aw, ah) = (HOUGH_LINE_WIDTH as usize, HOUGH_LINE_HEIGHT as usize);
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let data = self.data();
+
+        // Angle tables: theta spans [0, 180) degrees across the width.
+        let (mut cos_t, mut sin_t) = (vec![0.0f64; aw], vec![0.0f64; aw]);
+        for i in 0..aw {
+            let theta = std::f64::consts::PI * i as f64 / aw as f64;
+            let (s, c) = theta.sin_cos();
+            cos_t[i] = c;
+            sin_t[i] = s;
+        }
+
+        let mut acc = vec![0u32; aw * ah];
+        for y in 0..h {
+            let yd = y as f64 / h as f64;
+            for x in 0..w {
+                let voters = (0..bands)
+                    .filter(|&c| read_f64(data, bpc, (y * w + x) * bands + c) != 0.0)
+                    .count() as u32;
+                if voters == 0 {
+                    continue;
+                }
+                let xd = x as f64 / w as f64;
+                for i in 0..aw {
+                    let r = xd * cos_t[i] + yd * sin_t[i];
+                    let ri = (ah as f64 * r).floor();
+                    if ri >= 0.0 && ri < ah as f64 {
+                        acc[ri as usize * aw + i] += voters;
+                    }
+                }
+            }
+        }
+
+        let out_fmt = PixelFormat::with_channels(1, 2).expect("Gray16 exists");
+        let mut out = vec![0u8; aw * ah * 2];
+        for (i, &v) in acc.iter().enumerate() {
+            write_u32(&mut out, 2, i, v.min(0xFFFF));
+        }
+        Raster::new(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt, out)
+            .expect("hough accumulator is well-formed")
+    }
+
+    /// Hough circle transform (libvips `hough_circle` at scale 1).
+    ///
+    /// Every non-zero sample votes, for each candidate radius, along the
+    /// midpoint circle of that radius centred on its pixel: exactly the
+    /// point set [`Raster::draw_circle`] plots, so a drawn circle's pixels
+    /// all vote for the drawn centre at the drawn radius. The output has
+    /// the input dimensions and one 16-bit band per candidate radius
+    /// (`min_radius..=max_radius`); the peak's pixel is the detected
+    /// centre and its strongest band index plus `min_radius` is the
+    /// detected radius. Counts saturate at `65535`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::EmptyRadiusRange`] if
+    /// `min_radius > max_radius`, or [`ArithmeticError::TooManyBands`] if
+    /// the radius count exceeds `u16::MAX`.
+    pub fn try_hough_circle(
+        &self,
+        min_radius: u32,
+        max_radius: u32,
+    ) -> Result<Raster, ArithmeticError> {
+        if min_radius > max_radius {
+            return Err(ArithmeticError::EmptyRadiusRange {
+                min: min_radius,
+                max: max_radius,
+            });
+        }
+        let radii = (max_radius - min_radius + 1) as usize;
+        let out_fmt = format_for(radii, 2)?;
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let data = self.data();
+
+        let mut acc = vec![0u32; w * h * radii];
+        {
+            let mut vote = |cx: i32, cy: i32, band: usize, votes: u32| {
+                if cx >= 0 && cy >= 0 && (cx as usize) < w && (cy as usize) < h {
+                    acc[(cy as usize * w + cx as usize) * radii + band] += votes;
+                }
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let voters = (0..bands)
+                        .filter(|&c| read_f64(data, bpc, (y * w + x) * bands + c) != 0.0)
+                        .count() as u32;
+                    if voters == 0 {
+                        continue;
+                    }
+                    let (px, py) = (x as i32, y as i32);
+                    for r in min_radius..=max_radius {
+                        let band = (r - min_radius) as usize;
+                        if r == 0 {
+                            vote(px, py, band, voters);
+                            continue;
+                        }
+                        crate::draw::for_each_octant_step(r as i32, |ox, oy| {
+                            // The eight octant reflections, deduplicated at
+                            // oy == 0 and ox == oy so votes are one per
+                            // distinct circle point.
+                            vote(px + ox, py + oy, band, voters);
+                            vote(px - ox, py + oy, band, voters);
+                            if oy != 0 {
+                                vote(px + ox, py - oy, band, voters);
+                                vote(px - ox, py - oy, band, voters);
+                            }
+                            if ox != oy {
+                                vote(px + oy, py + ox, band, voters);
+                                vote(px + oy, py - ox, band, voters);
+                                if oy != 0 {
+                                    vote(px - oy, py + ox, band, voters);
+                                    vote(px - oy, py - ox, band, voters);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut out = vec![0u8; w * h * radii * 2];
+        for (i, &v) in acc.iter().enumerate() {
+            write_u32(&mut out, 2, i, v.min(0xFFFF));
+        }
+        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+    }
+
+    /// Panicking form of [`Raster::try_hough_circle`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_hough_circle`].
+    #[track_caller]
+    pub fn hough_circle(&self, min_radius: u32, max_radius: u32) -> Raster {
+        expect_arith(
+            "hough_circle",
+            self.try_hough_circle(min_radius, max_radius),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1778,6 +2446,20 @@ mod tests {
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
         let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
         Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// A 1-band float raster from `f32` sample values.
+    fn grayf(w: u32, h: u32, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::with_channels(1, 4).unwrap();
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// The flat samples of a float raster as `f64`, for assertions.
+    fn float_samples(r: &Raster) -> Vec<f64> {
+        assert!(r.format().is_float(), "expected a float raster");
+        let n = r.width() as usize * r.height() as usize * r.format().channels();
+        (0..n).map(|i| read_f64(r.data(), 4, i)).collect()
     }
 
     /// A 100x100 Gray8 image whose left half is 0 and right half is `v`.
@@ -2695,5 +3377,308 @@ mod tests {
         // sum 2.0, sum of squares 7.5: variance (7.5 - 2^2/4) / 3.
         let dev = im.deviate();
         assert!((dev - (6.5f64 / 3.0).sqrt()).abs() < 1e-12);
+    }
+
+    // ---- transcendental maths (float output) ----
+
+    /// The trig ops take degrees and produce a float raster:
+    /// sin(90) = 1, cos(0) = 1, tan(45) = 1.
+    #[test]
+    fn trig_degrees_float_output() {
+        let im = gray(3, 1, vec![90, 0, 45]);
+        let s = im.sin();
+        assert_eq!(s.format(), PixelFormat::with_channels(1, 4).unwrap());
+        let sv = float_samples(&s);
+        assert!((sv[0] - 1.0).abs() < 1e-6, "sin(90deg) = 1, got {}", sv[0]);
+        assert!(sv[1].abs() < 1e-6, "sin(0deg) = 0");
+
+        let cv = float_samples(&im.cos());
+        assert!((cv[1] - 1.0).abs() < 1e-6, "cos(0deg) = 1, got {}", cv[1]);
+
+        let tv = float_samples(&im.tan());
+        assert!((tv[2] - 1.0).abs() < 1e-6, "tan(45deg) = 1, got {}", tv[2]);
+    }
+
+    /// The inverse trig ops accept float input and produce degrees:
+    /// asin(1) = 90, asin(0.5) = 30, acos(1) = 0, atan(1) = 45.
+    #[test]
+    fn inverse_trig_degrees_from_float_input() {
+        let im = grayf(2, 1, &[1.0, 0.5]);
+        let a = float_samples(&im.asin());
+        assert!((a[0] - 90.0).abs() < 1e-4);
+        assert!((a[1] - 30.0).abs() < 1e-4);
+        let a = float_samples(&im.acos());
+        assert!(a[0].abs() < 1e-4);
+        assert!((a[1] - 60.0).abs() < 1e-4);
+        let a = float_samples(&im.atan());
+        assert!((a[0] - 45.0).abs() < 1e-4);
+    }
+
+    /// atan2 covers all four quadrants in degrees, atan2(y, x) with self
+    /// as the ordinate.
+    #[test]
+    fn atan2_quadrants() {
+        let y = grayf(4, 1, &[1.0, 1.0, -1.0, -1.0]);
+        let x = grayf(4, 1, &[1.0, -1.0, -1.0, 1.0]);
+        let a = float_samples(&y.atan2(&x));
+        assert!((a[0] - 45.0).abs() < 1e-4, "quadrant I, got {}", a[0]);
+        assert!((a[1] - 135.0).abs() < 1e-4, "quadrant II, got {}", a[1]);
+        assert!((a[2] + 135.0).abs() < 1e-4, "quadrant III, got {}", a[2]);
+        assert!((a[3] + 45.0).abs() < 1e-4, "quadrant IV, got {}", a[3]);
+    }
+
+    /// The hyperbolic family round-trips through its inverses on float
+    /// rasters.
+    #[test]
+    fn hyperbolic_round_trips() {
+        let im = grayf(1, 1, &[0.5]);
+        let v = float_samples(&im.sinh().asinh())[0];
+        assert!((v - 0.5).abs() < 1e-6, "asinh(sinh(0.5)), got {v}");
+        let v = float_samples(&im.tanh().atanh())[0];
+        assert!((v - 0.5).abs() < 1e-6, "atanh(tanh(0.5)), got {v}");
+        let two = grayf(1, 1, &[2.0]);
+        let v = float_samples(&two.cosh().acosh())[0];
+        assert!((v - 2.0).abs() < 1e-6, "acosh(cosh(2)), got {v}");
+        let v = float_samples(&im.tanh())[0];
+        assert!((v - 0.5f64.tanh()).abs() < 1e-7);
+    }
+
+    /// log is the natural log, log10 base 10; exp and exp10 invert them:
+    /// log(e) = 1, log10(100) = 2, exp(0) = 1, exp10(2) = 100.
+    #[test]
+    fn log_exp_families() {
+        let im = grayf(2, 1, &[std::f64::consts::E as f32, 100.0]);
+        let l = float_samples(&im.log());
+        assert!((l[0] - 1.0).abs() < 1e-6, "log(e) = 1, got {}", l[0]);
+        let l = float_samples(&im.log10());
+        assert!((l[1] - 2.0).abs() < 1e-6, "log10(100) = 2, got {}", l[1]);
+
+        let im = gray(2, 1, vec![0, 2]);
+        let e = float_samples(&im.exp());
+        assert!((e[0] - 1.0).abs() < 1e-6, "exp(0) = 1, got {}", e[0]);
+        assert!((e[1] - 2.0f64.exp()).abs() < 1e-4);
+        let e = float_samples(&im.exp10());
+        assert!((e[0] - 1.0).abs() < 1e-6, "exp10(0) = 1");
+        assert!((e[1] - 100.0).abs() < 1e-3, "exp10(2) = 100, got {}", e[1]);
+    }
+
+    /// pow is self ** other and wop is other ** self, both float:
+    /// pow(2, 10) = 1024, wop(2, 10) = 100.
+    #[test]
+    fn pow_and_wop() {
+        let base = gray(1, 1, vec![2]);
+        let exp = gray(1, 1, vec![10]);
+        let v = float_samples(&base.pow(&exp))[0];
+        assert!((v - 1024.0).abs() < 1e-3, "2^10 = 1024, got {v}");
+        let v = float_samples(&base.wop(&exp))[0];
+        assert!((v - 100.0).abs() < 1e-3, "10^2 = 100, got {v}");
+    }
+
+    /// The math2 ops validate image compatibility like the other binary
+    /// ops.
+    #[test]
+    fn math2_rejects_mismatch() {
+        let a = gray(2, 1, vec![1, 2]);
+        let b = gray(1, 1, vec![3]);
+        assert!(matches!(
+            a.try_atan2(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+        assert!(matches!(
+            a.try_pow(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+    }
+
+    /// neg produces a float raster with negated samples; abs and sign have
+    /// float branches, so abs(neg(x)) round-trips and sign sees negatives.
+    #[test]
+    fn neg_abs_sign_float() {
+        let im = gray(2, 1, vec![5, 0]);
+        let n = im.neg();
+        assert!(n.format().is_float());
+        assert_eq!(float_samples(&n), vec![-5.0, 0.0]);
+        assert_eq!(float_samples(&n.abs()), vec![5.0, 0.0]);
+
+        let s = float_samples(&grayf(3, 1, &[-3.5, 0.0, 2.0]).sign());
+        assert_eq!(s, vec![-1.0, 0.0, 1.0]);
+    }
+
+    /// floor, ceil, and rint round float rasters samplewise (rint rounds
+    /// halves away from zero, the libvips VIPS_RINT behavior) and stay
+    /// identities on integer input.
+    #[test]
+    fn rounding_on_float_rasters() {
+        let im = grayf(2, 1, &[1.5, -1.5]);
+        assert_eq!(float_samples(&im.floor()), vec![1.0, -2.0]);
+        assert_eq!(float_samples(&im.ceil()), vec![2.0, -1.0]);
+        assert_eq!(float_samples(&im.rint()), vec![2.0, -2.0]);
+
+        let ints = gray(2, 1, vec![3, 200]);
+        assert_eq!(ints.floor().data(), ints.data());
+        assert_eq!(ints.ceil().format(), PixelFormat::Gray8);
+    }
+
+    /// The unary maths accept float input (a chained result) without
+    /// panicking, unlike the integer-writing ops.
+    #[test]
+    fn math_accepts_float_input() {
+        let im = gray(1, 1, vec![90]);
+        let chained = im.sin().asin();
+        assert!((float_samples(&chained)[0] - 90.0).abs() < 1e-4);
+    }
+
+    // ---- complex operations ----
+
+    /// complexform interleaves (re, im) pairs; real / imag extract them
+    /// and conj negates the imaginary half.
+    #[test]
+    fn complexform_real_imag_conj() {
+        let re = gray(1, 1, vec![3]);
+        let im = gray(1, 1, vec![4]);
+        let z = Raster::complexform(&re, &im);
+        assert_eq!(z.format(), PixelFormat::with_channels(2, 4).unwrap());
+        assert_eq!(float_samples(&z), vec![3.0, 4.0]);
+        assert_eq!(float_samples(&z.real()), vec![3.0]);
+        assert_eq!(float_samples(&z.imag()), vec![4.0]);
+        assert_eq!(float_samples(&z.conj()), vec![3.0, -4.0]);
+    }
+
+    /// Multi-band complexform interleaves per band: bands [1, 2] and
+    /// [3, 4] become [1, 3, 2, 4], and real / imag recover the halves.
+    #[test]
+    fn complexform_multiband_interleaving() {
+        let two = PixelFormat::with_channels(2, 1).unwrap();
+        let re = Raster::new(1, 1, two, vec![1, 2]).unwrap();
+        let im = Raster::new(1, 1, two, vec![3, 4]).unwrap();
+        let z = Raster::complexform(&re, &im);
+        assert_eq!(float_samples(&z), vec![1.0, 3.0, 2.0, 4.0]);
+        assert_eq!(float_samples(&z.real()), vec![1.0, 2.0]);
+        assert_eq!(float_samples(&z.imag()), vec![3.0, 4.0]);
+    }
+
+    /// polar converts (3, 4) to magnitude 5 and angle atan2(4, 3) in
+    /// degrees; rect converts back.
+    #[test]
+    fn polar_rect_round_trip() {
+        let z = Raster::complexform(&gray(1, 1, vec![3]), &gray(1, 1, vec![4]));
+        let p = float_samples(&z.polar());
+        assert!((p[0] - 5.0).abs() < 1e-5, "|3+4i| = 5, got {}", p[0]);
+        let want = 4.0f64.atan2(3.0).to_degrees();
+        assert!((p[1] - want).abs() < 1e-4, "arg(3+4i), got {}", p[1]);
+
+        let back = float_samples(&z.polar().rect());
+        assert!((back[0] - 3.0).abs() < 1e-4);
+        assert!((back[1] - 4.0).abs() < 1e-4);
+    }
+
+    /// The ported polar expectation: (100 + 100i) has magnitude
+    /// 100 * sqrt(2) and angle 45 degrees.
+    #[test]
+    fn polar_ported_values() {
+        let re = gray(1, 1, vec![100]);
+        let z = Raster::complexform(&re, &re);
+        let p = float_samples(&z.polar());
+        assert!((p[0] - 100.0 * 2.0f64.sqrt()).abs() < 1e-3);
+        assert!((p[1] - 45.0).abs() < 1e-4);
+    }
+
+    /// The complex ops reject odd band counts with a typed error.
+    #[test]
+    fn complex_rejects_odd_bands() {
+        let odd = gray(1, 1, vec![7]);
+        assert!(matches!(
+            odd.try_polar(),
+            Err(ArithmeticError::NotComplex { bands: 1 })
+        ));
+        assert!(matches!(
+            odd.try_real(),
+            Err(ArithmeticError::NotComplex { bands: 1 })
+        ));
+    }
+
+    // ---- hough transforms ----
+
+    /// A horizontal line at y = 30 peaks at the 90-degree angle bin and
+    /// the distance bin decoding to 30.
+    #[test]
+    fn hough_line_horizontal_peak() {
+        let mut data = vec![0u8; 100 * 100];
+        for x in 0..100 {
+            data[30 * 100 + x] = 255;
+        }
+        let im = gray(100, 100, data);
+        let acc = im.hough_line();
+        assert_eq!((acc.width(), acc.height()), (256, 256));
+        let (votes, x, y) = acc.maxpos();
+        assert_eq!(votes, 100.0, "all 100 line pixels vote in one bin");
+        let angle = 180.0 * x as f64 / acc.width() as f64;
+        let distance = 100.0 * y as f64 / acc.height() as f64;
+        assert!(
+            (angle - 90.0).abs() < 2.0,
+            "angle should be ~90, got {angle}"
+        );
+        assert!(
+            (distance - 30.0).abs() < 2.0,
+            "distance should be ~30, got {distance}"
+        );
+    }
+
+    /// The ported diagonal: a line along x + y = 100 peaks at 45 degrees
+    /// and normalized distance 100 / sqrt(2).
+    #[test]
+    fn hough_line_diagonal_peak() {
+        let mut data = vec![0u8; 100 * 100];
+        for x in 10..=90 {
+            data[(100 - x) * 100 + x] = 255;
+        }
+        let im = gray(100, 100, data);
+        let acc = im.hough_line();
+        let (_votes, x, y) = acc.maxpos();
+        let angle = 180.0 * x as f64 / acc.width() as f64;
+        let distance = 100.0 * y as f64 / acc.height() as f64;
+        assert!(
+            (angle - 45.0).abs() < 5.0,
+            "angle should be ~45, got {angle}"
+        );
+        assert!(
+            (distance - 100.0 / 2.0f64.sqrt()).abs() < 5.0,
+            "distance should be ~70.7, got {distance}"
+        );
+    }
+
+    /// A drawn circle of radius 40 at (50, 50) peaks at its centre with
+    /// the strongest band at radius 40: every circle pixel votes for the
+    /// exact centre because voting reuses the drawing octant walk.
+    #[test]
+    fn hough_circle_centre_and_radius() {
+        let mut im = Raster::zeroed(100, 100, PixelFormat::Gray8).unwrap();
+        im.draw_circle(&[100], 50, 50, 40);
+
+        let acc = im.hough_circle(35, 45);
+        assert_eq!((acc.width(), acc.height()), (100, 100));
+        assert_eq!(acc.format().channels(), 11);
+
+        let (_votes, x, y) = acc.maxpos();
+        assert!((x as f64 - 50.0).abs() < 2.0, "centre x ~50, got {x}");
+        assert!((y as f64 - 50.0).abs() < 2.0, "centre y ~50, got {y}");
+        let bands = acc.getpoint(x, y);
+        let r = bands
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i as u32 + 35)
+            .unwrap();
+        assert!((r as f64 - 40.0).abs() < 2.0, "radius ~40, got {r}");
+    }
+
+    /// hough_circle validates the radius range.
+    #[test]
+    fn hough_circle_rejects_empty_range() {
+        let im = gray(4, 4, vec![0; 16]);
+        assert!(matches!(
+            im.try_hough_circle(45, 35),
+            Err(ArithmeticError::EmptyRadiusRange { min: 45, max: 35 })
+        ));
     }
 }

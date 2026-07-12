@@ -538,3 +538,302 @@ fn ported_surface_stdif() {
         "stdif should shift mean closer to 128: orig_dist={orig_dist}, new_dist={new_dist}"
     );
 }
+
+/// The ported `test_sin` / `test_cos` / `test_tan` bodies
+/// (`ported_arithmetic.rs` math_functions): degree input, float output,
+/// expected values computed from the same `getpoint` reads the ported
+/// cell uses.
+#[test]
+fn ported_surface_math_trig() {
+    let mono = make_test_mono();
+
+    let result = mono.sin();
+    let px_m = mono.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    let expected = (px_m[0].to_radians()).sin();
+    assert!(
+        (px_r[0] - expected).abs() < 0.001,
+        "sin({}) should be {expected}, got {}",
+        px_m[0],
+        px_r[0]
+    );
+
+    let result = mono.cos();
+    let px_r = result.getpoint(50, 50);
+    let expected = (px_m[0].to_radians()).cos();
+    assert!((px_r[0] - expected).abs() < 0.001);
+
+    let result = mono.tan();
+    let px_m = mono.getpoint(10, 10);
+    let px_r = result.getpoint(10, 10);
+    let expected = (px_m[0].to_radians()).tan();
+    assert!((px_r[0] - expected).abs() < 0.01);
+}
+
+/// The ported `test_asin` / `test_acos` / `test_atan` bodies, literal:
+/// the `div_const(255.0)` setup quantizes 128/255 to 1 under the integer
+/// div contract, and the ported assertions stay self-consistent because
+/// the expected value reads the post-division image. (`test_atanh` is the
+/// exception: atanh(1) is infinite, so its literal body cannot pass until
+/// the linear family produces float output; the op itself is pinned below
+/// from an exact float input.)
+#[test]
+fn ported_surface_math_inverse_trig() {
+    let data = vec![128u8; 100 * 100];
+    let im = Raster::new(100, 100, PixelFormat::Gray8, data).unwrap();
+    let im = im.div_const(255.0);
+
+    let result = im.asin();
+    let px_i = im.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    let expected = px_i[0].asin().to_degrees();
+    assert!((px_r[0] - expected).abs() < 0.1);
+
+    let result = im.acos();
+    let px_r = result.getpoint(50, 50);
+    let expected = px_i[0].acos().to_degrees();
+    assert!((px_r[0] - expected).abs() < 0.1);
+
+    let result = im.atan();
+    let px_r = result.getpoint(50, 50);
+    let expected = px_i[0].atan().to_degrees();
+    assert!((px_r[0] - expected).abs() < 0.1);
+}
+
+/// The ported `test_atan2` body (`ported_arithmetic.rs`).
+#[test]
+fn ported_surface_atan2() {
+    let data_a = vec![128u8; 100 * 100];
+    let data_b = vec![64u8; 100 * 100];
+    let a = Raster::new(100, 100, PixelFormat::Gray8, data_a).unwrap();
+    let b = Raster::new(100, 100, PixelFormat::Gray8, data_b).unwrap();
+
+    let result = a.atan2(&b);
+    let px_r = result.getpoint(50, 50);
+    let expected = (128.0_f64).atan2(64.0).to_degrees();
+    assert!((px_r[0] - expected).abs() < 0.1);
+}
+
+/// The ported `test_sinh` / `test_cosh` / `test_tanh` and
+/// `test_asinh` / `test_acosh` bodies; `test_atanh`'s op pinned from a
+/// float raster holding the 128/255 value its setup intends (see
+/// `ported_surface_math_inverse_trig`).
+///
+/// The ported sinh / cosh bodies probe (10, 10), where the mono image
+/// holds 226; sinh(226) is about 7.07e97, far beyond `f32::MAX`
+/// (3.4e38), so an `f32` sample can only hold `inf` there. That is
+/// libvips behavior too: `vips_math` on uchar input produces a `float`
+/// (f32) image, so the same probe overflows upstream. The pin therefore
+/// probes sinh / cosh on values whose results are f32-representable
+/// (0 at (50, 50), and a small constant image) and keeps tanh at
+/// (10, 10), where tanh(226) = 1 is exact.
+#[test]
+fn ported_surface_math_hyperbolic() {
+    let mono = make_test_mono();
+
+    let result = mono.sinh();
+    let px_m = mono.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    let expected = px_m[0].sinh();
+    assert!((px_r[0] - expected).abs() / expected.abs().max(1.0) < 0.01);
+
+    let result = mono.cosh();
+    let px_r = result.getpoint(50, 50);
+    let expected = px_m[0].cosh();
+    assert!((px_r[0] - expected).abs() / expected.abs().max(1.0) < 0.01);
+
+    let small = Raster::new(100, 100, PixelFormat::Gray8, vec![3u8; 100 * 100]).unwrap();
+    let px_r = small.sinh().getpoint(10, 10);
+    assert!((px_r[0] - 3.0_f64.sinh()).abs() / 3.0_f64.sinh() < 0.01);
+    let px_r = small.cosh().getpoint(10, 10);
+    assert!((px_r[0] - 3.0_f64.cosh()).abs() / 3.0_f64.cosh() < 0.01);
+
+    let result = mono.tanh();
+    let px_m = mono.getpoint(10, 10);
+    let px_r = result.getpoint(10, 10);
+    let expected = px_m[0].tanh();
+    assert!((px_r[0] - expected).abs() < 0.001);
+
+    let data = vec![150u8; 100 * 100];
+    let im = Raster::new(100, 100, PixelFormat::Gray8, data).unwrap();
+    let px_r = im.asinh().getpoint(50, 50);
+    assert!((px_r[0] - 150.0_f64.asinh()).abs() < 0.01);
+    let px_r = im.acosh().getpoint(50, 50);
+    assert!((px_r[0] - 150.0_f64.acosh()).abs() < 0.01);
+
+    let v = (128.0f32) / 255.0;
+    let fmt = PixelFormat::with_channels(1, 4).unwrap();
+    let data: Vec<u8> = std::iter::repeat_n(v, 100 * 100)
+        .flat_map(|s| s.to_ne_bytes())
+        .collect();
+    let im = Raster::new(100, 100, fmt, data).unwrap();
+    let px_i = im.getpoint(50, 50);
+    let px_r = im.atanh().getpoint(50, 50);
+    let expected = px_i[0].atanh();
+    assert!((px_r[0] - expected).abs() < 0.01);
+}
+
+/// The ported `test_log` / `test_log10` / `test_exp` / `test_exp10`
+/// bodies.
+#[test]
+fn ported_surface_log_exp() {
+    let mono = make_test_mono();
+
+    let result = mono.log();
+    let px_m = mono.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    if px_m[0] > 0.0 {
+        assert!((px_r[0] - px_m[0].ln()).abs() < 0.01);
+    }
+    let px_m = mono.getpoint(10, 10);
+    let px_r = result.getpoint(10, 10);
+    assert!(px_m[0] > 0.0, "the ring pixel is non-zero");
+    assert!((px_r[0] - px_m[0].ln()).abs() < 0.01);
+
+    let result = mono.log10();
+    let px_r = result.getpoint(10, 10);
+    assert!((px_r[0] - px_m[0].log10()).abs() < 0.01);
+
+    let data = vec![2u8; 100 * 100];
+    let im = Raster::new(100, 100, PixelFormat::Gray8, data).unwrap();
+    let px_r = im.exp().getpoint(50, 50);
+    assert!((px_r[0] - 2.0_f64.exp()).abs() < 0.01);
+    let px_r = im.exp10().getpoint(50, 50);
+    assert!((px_r[0] - 10.0_f64.powf(2.0)).abs() < 0.01);
+}
+
+/// The ported `test_neg` and `test_abs` bodies: neg produces a float
+/// raster, and abs recovers the original values.
+#[test]
+fn ported_surface_neg_abs() {
+    let mono = make_test_mono();
+    let result = mono.neg();
+    let px_m = mono.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    assert!((px_r[0] - (-px_m[0])).abs() < 1.0);
+
+    let colour = make_test_colour();
+    let negated = colour.neg();
+    let result = negated.abs();
+    let px_c = colour.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    for (c, r) in px_c.iter().zip(px_r.iter()) {
+        assert!((r - c).abs() < 1.0);
+    }
+}
+
+/// The ported `test_pow` Required-API image form, `pow(&self, other)`,
+/// plus the `wop` reversed spelling libvips pairs with it.
+#[test]
+fn ported_surface_pow_image() {
+    let mono = make_test_mono();
+    let exp = Raster::new(100, 100, PixelFormat::Gray8, vec![2u8; 100 * 100]).unwrap();
+    let result = mono.pow(&exp);
+    let px_m = mono.getpoint(10, 10);
+    let px_r = result.getpoint(10, 10);
+    assert!((px_r[0] - px_m[0].powf(2.0)).abs() < 1.0);
+
+    let result = exp.wop(&mono);
+    let px_r = result.getpoint(10, 10);
+    assert!((px_r[0] - px_m[0].powf(2.0)).abs() < 1.0);
+}
+
+/// The ported `test_polar` / `test_rect` / `test_conjugate` bodies
+/// (`ported_arithmetic.rs` complex_histogram), literal.
+#[test]
+fn ported_surface_complex() {
+    let data = vec![100u8; 100 * 100];
+    let re = Raster::new(100, 100, PixelFormat::Gray8, data.clone()).unwrap();
+    let im_part = Raster::new(100, 100, PixelFormat::Gray8, data.clone()).unwrap();
+
+    let complex = Raster::complexform(&re, &im_part);
+    let polar = complex.polar();
+    let magnitude_avg = polar.real().avg();
+    assert!(
+        (magnitude_avg - 100.0 * 2.0_f64.sqrt()).abs() < 1.0,
+        "Magnitude avg should be ~141.42, got {magnitude_avg}"
+    );
+    let angle_avg = polar.imag().avg();
+    assert!(
+        (angle_avg - 45.0).abs() < 1.0,
+        "Angle avg should be ~45 degrees, got {angle_avg}"
+    );
+
+    let mag = 100.0 * 2.0_f64.sqrt();
+    let mag_data = vec![mag as u8; 100 * 100];
+    let angle_data = vec![45u8; 100 * 100];
+    let re = Raster::new(100, 100, PixelFormat::Gray8, mag_data).unwrap();
+    let im_part = Raster::new(100, 100, PixelFormat::Gray8, angle_data).unwrap();
+    let complex = Raster::complexform(&re, &im_part);
+    let rect = complex.rect();
+    assert!((rect.real().avg() - 100.0).abs() < 2.0, "Real part ~100");
+    assert!(
+        (rect.imag().avg() - 100.0).abs() < 2.0,
+        "Imaginary part ~100"
+    );
+
+    let data = vec![100u8; 100 * 100];
+    let re = Raster::new(100, 100, PixelFormat::Gray8, data.clone()).unwrap();
+    let im_part = Raster::new(100, 100, PixelFormat::Gray8, data).unwrap();
+    let complex = Raster::complexform(&re, &im_part);
+    let conj = complex.conj();
+    assert!((conj.real().avg() - 100.0).abs() < 1.0);
+    assert!((conj.imag().avg() - (-100.0)).abs() < 1.0);
+}
+
+/// The ported `test_hough_line` body with the draw call in the pinned
+/// `&[ink]` form (the ported cell passes integer scalar ink, a mis-port
+/// against the surface `ported_draw.rs` pins).
+#[test]
+fn ported_surface_hough_line() {
+    let mut im = Raster::zeroed(100, 100, PixelFormat::Gray8).unwrap();
+    im.draw_line(&[100], 10, 90, 90, 10);
+
+    let hough = im.hough_line();
+    let (_v, x, y) = hough.maxpos();
+
+    let angle = 180.0 * x as f64 / hough.width() as f64;
+    let distance = 100.0 * y as f64 / hough.height() as f64;
+
+    assert!(
+        (angle - 45.0).abs() < 5.0,
+        "Angle should be ~45 degrees, got {angle}"
+    );
+    assert!(
+        (distance - 75.0).abs() < 10.0,
+        "Distance should be ~75, got {distance}"
+    );
+}
+
+/// The ported `test_hough_circle` body with the draw call in the pinned
+/// `&[ink]` outline form (the ported cell passes scalar ink plus a
+/// `false` fill flag; the surface `ported_draw.rs` pins spells the
+/// outline as plain `draw_circle` and the fill as `draw_circle_filled`).
+#[test]
+fn ported_surface_hough_circle() {
+    let mut im = Raster::zeroed(100, 100, PixelFormat::Gray8).unwrap();
+    im.draw_circle(&[100], 50, 50, 40);
+
+    let hough = im.hough_circle(35, 45);
+    let (_v, x, y) = hough.maxpos();
+    let vec = hough.getpoint(x, y);
+    let r = vec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(i, _)| i as u32 + 35)
+        .unwrap();
+
+    assert!(
+        (x as f64 - 50.0).abs() < 2.0,
+        "Centre x should be ~50, got {x}"
+    );
+    assert!(
+        (y as f64 - 50.0).abs() < 2.0,
+        "Centre y should be ~50, got {y}"
+    );
+    assert!(
+        (r as f64 - 40.0).abs() < 2.0,
+        "Radius should be ~40, got {r}"
+    );
+}
