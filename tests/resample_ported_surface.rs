@@ -15,26 +15,22 @@
 //! same rounding the ported cell pins. The stand-in is a smooth gradient,
 //! which the average-preservation thresholds (`< 1`, `< 2`) require.
 //!
-//! Two documented adaptations, neither an assertion change:
+//! One documented adaptation, not an assertion change: the ported
+//! `test_thumbnail`, `test_thumbnail_uhdr_linear`, and `test_thumbnail_icc`
+//! bodies decode `sample.jpg`, `ultra-hdr.jpg`, and `sample-xyb.jpg` from
+//! the fetched reference suite, which this file (running without the
+//! fixtures) cannot open. The thumbnail family itself is implemented (see
+//! `Raster::thumbnail` and friends); this file exercises the in-memory
+//! `Raster::thumbnail_image` counterpart on the synthetic stand-in, and the
+//! path-loading and colour-managed variants are covered by the unit tests
+//! in `src/resample.rs`.
 //!
-//! * The ported `test_affine` iterates the interpolators
-//!   `["nearest", "bicubic", "bilinear", "nohalo", "lbb"]`. The `nohalo`
-//!   and `lbb` resamplers (libvips `nohalo.cpp` / `lbb.cpp`, roughly 2400
-//!   lines of minmod subdivision arithmetic) are a dedicated later batch;
-//!   `Interpolator::from_name` recognises the names and fails loudly with
-//!   `ResampleError::InterpolatorNotImplemented` instead of silently
-//!   aliasing them. The loop here runs the three implemented
-//!   interpolators with the asserted round-trip identity untouched, and a
-//!   companion test pins the loud typed failure for the deferred two.
-//! * The ported `test_thumbnail`, `test_thumbnail_uhdr_linear`, and
-//!   `test_thumbnail_icc` bodies are not reproduced: the thumbnail family
-//!   is not part of this batch. `ported_foreign.rs` declares a
-//!   conflicting `thumbnail` signature (`fn thumbnail(path, width) ->
-//!   Result<Raster, DecodeError>` versus this cell's four-argument
-//!   `Raster::thumbnail`), `ported_infrastructure.rs` a third
-//!   (`im.thumbnail(200)`), and the ICC body needs `Raster::max_value`,
-//!   which belongs to the colour / create batches; reconciling the three
-//!   call surfaces needs its own coordinated batch.
+//! `test_affine` iterates the full ported interpolator list
+//! `["nearest", "bicubic", "bilinear", "nohalo", "lbb"]`. `nohalo` and
+//! `lbb` are faithful ports of libvips `nohalo.cpp` / `lbb.cpp`; the
+//! src-level unit tests pin them to a real libvips 8.18.3 oracle byte for
+//! byte, and here their 4x rotation round-trip is the identity like the
+//! other three.
 
 use libviprs::{PixelFormat, Raster};
 
@@ -124,16 +120,15 @@ mod resize {
 mod affine {
     use super::*;
 
-    /// The ported test_affine body over the implemented interpolators:
-    /// four 90-degree rotations with the [0, 1, 1, 0] matrix are the
-    /// identity, byte for byte. The `nohalo` / `lbb` entries of the
-    /// ported list are deferred (see the file header); their loud typed
-    /// failure is pinned below.
+    /// The ported test_affine body over the full interpolator list: four
+    /// 90-degree rotations with the [0, 1, 1, 0] matrix are the identity,
+    /// byte for byte, for every interpolator including nohalo and lbb (both
+    /// return the exact input sample on the on-grid transpose).
     #[test]
     fn test_affine() {
         let im = sample();
 
-        for interp in &["nearest", "bicubic", "bilinear"] {
+        for interp in &["nearest", "bicubic", "bilinear", "nohalo", "lbb"] {
             let mut x = im.clone();
             for _ in 0..4 {
                 x = x.affine([0.0, 1.0, 1.0, 0.0], interp);
@@ -153,20 +148,16 @@ mod affine {
         }
     }
 
-    /// The deferred interpolators fail loudly with a typed error instead
-    /// of silently aliasing to bicubic.
+    /// Every ported interpolator nickname resolves to a typed
+    /// [`libviprs::Interpolator`]; nohalo and lbb are now implemented, not
+    /// deferred, and an unknown name is still a typed error.
     #[test]
-    fn test_affine_deferred_interpolators_fail_loudly() {
-        for name in ["nohalo", "lbb"] {
-            let err = libviprs::Interpolator::from_name(name).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    libviprs::ResampleError::InterpolatorNotImplemented { .. }
-                ),
-                "{name} should be recognised but unimplemented, got {err}"
-            );
+    fn test_affine_interpolator_nicknames() {
+        for name in ["nearest", "bilinear", "bicubic", "nohalo", "lbb"] {
+            libviprs::Interpolator::from_name(name)
+                .unwrap_or_else(|e| panic!("{name} should parse, got {e}"));
         }
+        assert!(libviprs::Interpolator::from_name("vsqbs").is_err());
     }
 
     /// The ported test_similarity body: similarity(90) approximately
@@ -296,10 +287,28 @@ mod advanced_resampling {
     #[test]
     fn test_root_reexports() {
         let _: libviprs::Interpolator = libviprs::Interpolator::Bilinear;
+        let _: libviprs::Interpolator = libviprs::Interpolator::Nohalo;
+        let _: libviprs::Interpolator = libviprs::Interpolator::Lbb;
         let _: libviprs::ReduceKernel = libviprs::ReduceKernel::Lanczos3;
         let _ = libviprs::AffineOptions::default();
         let _ = libviprs::ResizeOptions::default();
         let im = Raster::constant_u8(4, 4, 9);
         assert_eq!(im.format(), PixelFormat::Gray8);
+    }
+
+    /// The in-memory thumbnail counterpart (`Raster::thumbnail_image`, the
+    /// libvips `vips_thumbnail_image`) fits the synthetic 290x442 portrait
+    /// into a width-100 box preserving aspect ratio, the shape the
+    /// ported_infrastructure sequential path drives.
+    #[test]
+    fn test_thumbnail_image() {
+        let im = sample();
+        let thumb = im.thumbnail_image(100);
+        assert!(thumb.width() <= 100);
+        assert!(thumb.height() > 0);
+        // Portrait input: the height bounds the fit, the width shrinks with
+        // the aspect ratio, so neither axis exceeds the box.
+        assert!(thumb.height() <= 100 || thumb.width() <= 100);
+        assert_eq!(thumb.format().channels(), im.format().channels());
     }
 }
