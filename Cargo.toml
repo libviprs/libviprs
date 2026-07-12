@@ -19,6 +19,12 @@ libfuzzer-sys = "0.4"
 libviprs = { path = "." }
 loom = "0.7"
 lopdf = "0.36"
+# Pure-Rust ICC engine (BSD-3-Clause OR Apache-2.0) used by the colour
+# operations for real ICC profile transforms (parse, matrix-shaper TRC +
+# colorant evaluation, LUT pipelines). `any_to_any` enables the katana
+# LUT engine so LUT-based (non-matrix-shaper) device profiles transform
+# too, keeping icc_import honest for arbitrary profiles.
+moxcms = { version = "0.8.1", features = ["any_to_any"] }
 # Direct git dependency on the libviprs/pdfium-render fork, pinned to its
 # `libviprs/integration` branch. That branch is the consolidated fork: it
 # carries every one of our pdfium-render PRs (as though merged), so all
@@ -117,6 +123,7 @@ blake3 = { workspace = true }
 flate2 = { workspace = true }
 image = { workspace = true }
 lopdf = { workspace = true }
+moxcms = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
