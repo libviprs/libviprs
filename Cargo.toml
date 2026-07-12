@@ -77,6 +77,11 @@ tar = "0.4.45"
 tempfile = "3"
 thiserror = "2"
 tracing = "0.1"
+# Test-only subscriber used by `tests/tracing_tile_spans.rs` to capture the
+# per-tile span tree the `tracing` feature emits (issue #83). It is a
+# dev-dependency only, so it never links into the library or its consumers;
+# the default build stays byte-identical.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 zip = "7.2.0"
 
 [package]
@@ -150,3 +155,4 @@ zip = { workspace = true, optional = true }
 loom = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
