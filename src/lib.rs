@@ -62,6 +62,7 @@ pub mod create;
 pub mod dedupe;
 pub mod draw;
 pub mod encode;
+pub mod encode_tiff;
 pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
@@ -120,6 +121,12 @@ pub use convolution::{Combine, ConvolutionError, Kernel, Precision};
 pub use create::{CreateError, SdfParams};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
+// The TIFF free functions are re-exported at the root (not just behind the
+// module path) because the ported foreign cells call them unqualified
+// (`tiff_page_count(...)`, `decode_tiff_page(...)`). The `save_tiff` family
+// and the `tiff_save` / `tiff_load` round-trip are inherent methods on
+// `Raster` and travel with the already-exported `Raster` type.
+pub use encode_tiff::{decode_tiff_page, tiff_page_count};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
 };

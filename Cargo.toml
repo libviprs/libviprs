@@ -76,6 +76,19 @@ sha2 = "0.11.0"
 tar = "0.4.45"
 tempfile = "3"
 thiserror = "2"
+# Pure-Rust TIFF codec (MIT). It is already in the dependency graph
+# transitively through the `image` crate's `tiff` feature; the TIFF lane
+# promotes it to a direct dependency because the `image` facade does not
+# expose two things the lane needs: per-image compression selection
+# (Uncompressed / LZW / Deflate) on the encode side, and multi-page IFD
+# navigation (page count, decode-nth-page) on the decode side. Only the
+# `lzw` and `deflate` features are declared, the exact codecs the encoder
+# drives; feature unification with `image` (which pulls the crate's full
+# default set) keeps the decoder able to read fax/jpeg pages at runtime.
+tiff = { version = "0.10.3", default-features = false, features = [
+	"lzw",
+	"deflate",
+] }
 tracing = "0.1"
 # Test-only subscriber used by `tests/tracing_tile_spans.rs` to capture the
 # per-tile span tree the `tracing` feature emits (issue #83). It is a
@@ -148,6 +161,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true, optional = true }
 thiserror = { workspace = true }
+tiff = { workspace = true }
 tracing = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 
