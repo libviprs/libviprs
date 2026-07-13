@@ -63,6 +63,11 @@ pub enum Layout {
     /// IIIF Image API v2: `{region}/{size},/0/default.{ext}`, where `region`
     /// is expressed in full-resolution image coordinates, plus an `info.json`
     /// sidecar. Compatible with OpenSeadragon and other IIIF viewers.
+    ///
+    /// The `info.json` `@id` is written as a placeholder base URL. IIIF ties
+    /// `@id` to the serving location, which the planner cannot know, so a
+    /// caller is expected to rewrite it to the real image endpoint when it
+    /// publishes the tiles. See [`properties_sidecar`](PyramidPlan::properties_sidecar).
     Iiif,
 }
 
@@ -273,7 +278,16 @@ impl PyramidPlanner {
             return self.plan_google();
         }
 
-        let levels = self.compute_levels();
+        // Zoomify and IIIF stop the pyramid at a single-tile overview, exactly
+        // as libvips `dzsave` does for these layouts (depth `onetile`). Their
+        // tier index and cumulative tile numbering are derived by a viewer from
+        // WIDTH/HEIGHT/TILESIZE, so the level set has to agree: level 0 is the
+        // single-tile overview and full resolution is the highest tier. The
+        // `onepixel` layouts (DeepZoom, Xyz) keep halving down to 1x1.
+        let levels = match self.layout {
+            Layout::Zoomify | Layout::Iiif => self.compute_levels_single_tile(),
+            _ => self.compute_levels(),
+        };
 
         let (canvas_width, canvas_height, offset_x, offset_y) = if self.centre {
             let top = levels.last().unwrap();
@@ -501,6 +515,43 @@ impl PyramidPlanner {
         levels
     }
 
+    /// Build the level set for layouts that stop at a single-tile overview
+    /// (Zoomify, IIIF), mirroring [`plan_google`](Self::plan_google) and
+    /// libvips `dzsave` with depth `onetile`.
+    ///
+    /// Halving proceeds from full resolution down and stops once the level
+    /// fits inside a single tile (`max(width, height) <= tile_size`), so after
+    /// reversing, level 0 is the single-tile overview and the highest-indexed
+    /// level is full resolution. Unlike Google this keeps the true (rectangular)
+    /// image dimensions and computes each level's grid from them rather than
+    /// forcing a square power-of-two canvas, so `cols`/`rows` at every tier
+    /// match a Zoomify/IIIF viewer's derivation from WIDTH/HEIGHT/TILESIZE.
+    fn compute_levels_single_tile(&self) -> Vec<LevelPlan> {
+        let mut dims = vec![(self.image_width, self.image_height)];
+        let (mut w, mut h) = (self.image_width, self.image_height);
+        while w > self.tile_size || h > self.tile_size {
+            w = ceil_div(w, 2);
+            h = ceil_div(h, 2);
+            dims.push((w, h));
+        }
+        // Reverse so level 0 = smallest (single-tile overview).
+        dims.reverse();
+
+        dims.iter()
+            .enumerate()
+            .map(|(level, &(w, h))| {
+                let (cols, rows) = self.tile_grid(w, h);
+                LevelPlan {
+                    level: level as u32,
+                    width: w,
+                    height: h,
+                    cols,
+                    rows,
+                }
+            })
+            .collect()
+    }
+
     /// Compute the number of tile columns and rows for an image of the given dimensions.
     fn tile_grid(&self, width: u32, height: u32) -> (u32, u32) {
         if width == 0 || height == 0 {
@@ -669,20 +720,25 @@ impl PyramidPlan {
                 // IIIF Image API v2 path: `{region}/{size},/{rotation}/default`.
                 // The region is expressed in full-resolution image coordinates,
                 // so a level's tile index scales up by `sub = 2^(top - level)`.
-                let top_level = self.levels.len() as u32 - 1;
-                let sub = 1u32 << (top_level - coord.level);
-                let ts = self.tile_size;
-                let left = coord.col * ts * sub;
-                let top = coord.row * ts * sub;
-                let region_w = (ts * sub).min(self.image_width - left);
-                let region_h = (ts * sub).min(self.image_height - top);
-                // Output size is the tile's pixel width at this level.
-                let size = ts.min(level.width - coord.col * ts);
-                let region = if left == 0
-                    && top == 0
-                    && region_w == self.image_width
-                    && region_h == self.image_height
-                {
+                // The unclamped region extent `tile_size * sub` can exceed u32
+                // for large images (a low tier over a tall canvas), so the
+                // region maths runs in u64 and clamps to the image bound before
+                // it ever narrows. `left`/`top` are real pixel coordinates of an
+                // in-bounds tile, hence provably `< image_width`/`image_height`.
+                let top_level = self.levels.len() as u64 - 1;
+                let sub = 1u64 << (top_level - coord.level as u64);
+                let ts = self.tile_size as u64;
+                let img_w = self.image_width as u64;
+                let img_h = self.image_height as u64;
+                let left = coord.col as u64 * ts * sub;
+                let top = coord.row as u64 * ts * sub;
+                let tw = ts * sub;
+                let region_w = tw.min(img_w - left);
+                let region_h = tw.min(img_h - top);
+                // Output size is the tile's pixel width at this level; it never
+                // exceeds tile_size, so it stays in u32.
+                let size = self.tile_size.min(level.width - coord.col * self.tile_size);
+                let region = if left == 0 && top == 0 && region_w == img_w && region_h == img_h {
                     "full".to_string()
                 } else {
                     format!("{left},{top},{region_w},{region_h}")
@@ -729,7 +785,9 @@ impl PyramidPlan {
     ///   and `TILESIZE`).
     /// * [`Layout::Iiif`]: `info.json` (the IIIF Image API v2 image
     ///   information document with `@context`, `width`, `height`, and the
-    ///   `tiles` descriptor).
+    ///   `tiles` descriptor). Its `@id` is a placeholder base URL: IIIF binds
+    ///   `@id` to the serving location, which is unknown at planning time, so
+    ///   the caller must rewrite it to the real image endpoint when serving.
     ///
     /// Returns `None` for layouts whose sidecar lives outside the tile
     /// directory or that have none. [`Layout::DeepZoom`] is one such case: its
@@ -1591,32 +1649,52 @@ mod tests {
 
     // -- DeepZoom layout variants: Zoomify + IIIF (libviprs-tests#87) --
 
-    /// Zoomify buckets tiles 256 to a `TileGroup{N}` directory, numbering them
-    /// cumulatively from the most zoomed-out level. These are concrete,
-    /// hand-computed group numbers for an 8192x8192 @ 128 pyramid (14 levels):
-    /// tiles preceding level 11 = 8+4+16+64 = 92, and preceding level 13 =
-    /// 92+256+1024 = 1372, so their groups are 347/256 = 1 and 1372/256 = 5.
+    /// Golden test against real libvips output. Captured with libvips 8.18.3:
+    ///
+    /// ```text
+    /// vips black big.v 8192 8192
+    /// vips dzsave big.v big_zoom --layout zoomify --tile-size 128 --overlap 0 --suffix .jpg
+    /// ```
+    ///
+    /// libvips stops the Zoomify pyramid at a single-tile overview, so the
+    /// 8192x8192 @ 128 pyramid has 7 tiers (0 = overview, 6 = full resolution),
+    /// not the 14 levels a halve-to-1x1 pyramid would emit, and it reports
+    /// `NUMTILES="5461" TILESIZE="128"`. Every `(tier, col, row) -> TileGroup`
+    /// entry below was read straight out of the produced directory tree; the
+    /// planner's `tile_path` must reproduce each byte for byte.
     #[test]
     fn zoomify_tile_path_matches_libvips_grouping() {
         let plan = PyramidPlanner::new(8192, 8192, 128, 0, Layout::Zoomify)
             .unwrap()
             .plan();
-        assert_eq!(plan.level_count(), 14);
-        // The overview tile is number 0, hence TileGroup0.
-        assert_eq!(
-            plan.tile_path(TileCoord::new(0, 0, 0), "jpg").unwrap(),
-            "TileGroup0/0-0-0.jpg"
-        );
-        // Level 11, tile (15,15): n = 92 + 15*16 + 15 = 347 -> group 1.
-        assert_eq!(
-            plan.tile_path(TileCoord::new(11, 15, 15), "jpg").unwrap(),
-            "TileGroup1/11-15-15.jpg"
-        );
-        // Full-res level 13, tile (0,0): 1372 tiles precede it -> group 5.
-        assert_eq!(
-            plan.tile_path(TileCoord::new(13, 0, 0), "jpg").unwrap(),
-            "TileGroup5/13-0-0.jpg"
-        );
+        // libvips: 7 tiers, full resolution is the highest tier.
+        assert_eq!(plan.level_count(), 7);
+        assert_eq!(plan.levels.last().unwrap().level, 6);
+        // libvips ImageProperties.xml: NUMTILES="5461" TILESIZE="128".
+        assert_eq!(plan.total_tile_count(), 5461);
+        let (_, xml) = plan.properties_sidecar("jpg").unwrap();
+        assert!(xml.contains("NUMTILES=\"5461\""), "got: {xml}");
+        assert!(xml.contains("TILESIZE=\"128\""), "got: {xml}");
+
+        // Each entry is a real path libvips wrote, including both sides of the
+        // TileGroup0->1 boundary (tier 4 -> tier 5) and the TileGroup5->...->21
+        // spread across the two largest tiers.
+        let golden = [
+            (0u32, 0u32, 0u32, "TileGroup0/0-0-0.jpg"),
+            (4, 15, 15, "TileGroup1/4-15-15.jpg"),
+            (5, 0, 0, "TileGroup1/5-0-0.jpg"),
+            (5, 31, 31, "TileGroup5/5-31-31.jpg"),
+            (6, 0, 0, "TileGroup5/6-0-0.jpg"),
+            (6, 63, 63, "TileGroup21/6-63-63.jpg"),
+        ];
+        for (level, col, row, expected) in golden {
+            assert_eq!(
+                plan.tile_path(TileCoord::new(level, col, row), "jpg")
+                    .unwrap(),
+                expected,
+                "Zoomify path mismatch for tier {level} ({col},{row})"
+            );
+        }
     }
 
     /// Every Zoomify tile path must agree with an independent recomputation of
@@ -1658,14 +1736,24 @@ mod tests {
         );
     }
 
-    /// IIIF v2 paths are `{region}/{size},/0/default.ext` with the region in
-    /// full-resolution coordinates. A single overview tile uses the `full`
-    /// region shorthand.
+    /// Golden test against real libvips output. Captured with libvips 8.18.3:
+    ///
+    /// ```text
+    /// vips black t512.v 512 512
+    /// vips dzsave t512.v t512_iiif --layout iiif --tile-size 256 --overlap 0 --suffix .jpg
+    /// ```
+    ///
+    /// libvips wrote exactly these five files (as `{region}/{size},/0/default.jpg`
+    /// directories): the four full-resolution tiles plus a single `full/256,`
+    /// overview. The overview level image is 256x256, so its output size is 256,
+    /// not 1 (a halve-to-1x1 pyramid would wrongly emit `full/1,`).
     #[test]
     fn iiif_tile_path_region_and_size() {
         let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
             .unwrap()
             .plan();
+        // libvips: 2 levels (overview + full res), scaleFactors [1, 2].
+        assert_eq!(plan.level_count(), 2);
         let top = plan.levels.last().unwrap().level;
         // Full-res top-left tile: 256x256 region at origin, output size 256.
         assert_eq!(
@@ -1677,10 +1765,47 @@ mod tests {
             plan.tile_path(TileCoord::new(top, 1, 1), "jpg").unwrap(),
             "256,256,256,256/256,/0/default.jpg"
         );
-        // Overview single tile covers the whole image -> "full".
+        // Overview single tile covers the whole image -> "full", size 256.
         assert_eq!(
             plan.tile_path(TileCoord::new(0, 0, 0), "jpg").unwrap(),
-            "full/1,/0/default.jpg"
+            "full/256,/0/default.jpg"
+        );
+    }
+
+    /// Golden test against real libvips output for a non-square image with
+    /// clipped edge tiles. Captured with libvips 8.18.3:
+    ///
+    /// ```text
+    /// vips black wide.v 5000 1200
+    /// vips dzsave wide.v wide_iiif --layout iiif --tile-size 256 --overlap 0 --suffix .jpg
+    /// ```
+    ///
+    /// libvips produced 146 tiles across 6 tiers (scaleFactors [1,2,4,8,16,32]).
+    /// The pinned entries below cover a right-edge tile, the bottom-right corner
+    /// (both region extents clipped), and the `full` overview whose output size
+    /// is the overview level's true width (157), all read straight from disk.
+    #[test]
+    fn iiif_tile_path_matches_libvips_edge_regions() {
+        let plan = PyramidPlanner::new(5000, 1200, 256, 0, Layout::Iiif)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.level_count(), 6);
+        assert_eq!(plan.total_tile_count(), 146);
+        let top = plan.levels.last().unwrap().level;
+        // Full-res rightmost column (col 19): region width clips to 5000-4864=136.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(top, 19, 0), "jpg").unwrap(),
+            "4864,0,136,256/136,/0/default.jpg"
+        );
+        // Full-res bottom-right corner: width 136, height 1200-1024=176.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(top, 19, 4), "jpg").unwrap(),
+            "4864,1024,136,176/136,/0/default.jpg"
+        );
+        // Overview (tier 0) level image is 157x38 -> "full", size 157.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(0, 0, 0), "jpg").unwrap(),
+            "full/157,/0/default.jpg"
         );
     }
 
