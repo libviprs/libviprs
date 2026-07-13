@@ -425,13 +425,6 @@ impl Raster {
     }
 }
 
-/// Decode an image file into a [`Raster`] under explicit [`DecodeLimits`].
-///
-/// Identical to [`decode_file`] but lets the caller supply the
-/// dimension/allocation budget instead of using [`DecodeLimits::default`].
-/// The limits are configured on the decoder before any pixel data is
-/// allocated, and the `width * height` ceiling is checked before the
-/// [`Raster`] is constructed.
 /// Decode an image file in sequential-access mode (libvips
 /// `access = sequential`).
 ///
@@ -473,6 +466,18 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
         .map_err(|e| SourceError::Io(std::io::Error::other(e.to_string())))
 }
 
+/// Decode an image file into a [`Raster`] under explicit [`DecodeLimits`].
+///
+/// Identical to [`decode_file`] but lets the caller supply the
+/// dimension/allocation budget instead of using [`DecodeLimits::default`].
+/// The limits are configured on the decoder before any pixel data is
+/// allocated, and the `width * height` ceiling is checked before the
+/// [`Raster`] is constructed.
+///
+/// # Errors
+///
+/// As [`decode_file`], plus [`SourceError::DimensionLimitExceeded`] when
+/// the decoded `width * height` exceeds the supplied budget.
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
     // Sniff the leading magic: native .v files and JPEGs take the
     // in-memory path (the .v decoder parses the libvips header itself,
