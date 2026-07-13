@@ -1083,10 +1083,18 @@ impl TileSink for FsSink {
 
     fn finish(&self) -> Result<(), SinkError> {
         // DZI sidecar for DeepZoom layouts is still emitted exactly as
-        // before.
+        // before: a sibling of the output directory named `{base}.dzi`.
         if let Some(manifest) = self.plan.dzi_manifest(self.format.extension()) {
             let dzi_path = self.base_dir.with_extension("dzi");
             std::fs::write(&dzi_path, manifest)?;
+        }
+
+        // Layout sidecars that live inside the tile directory (Zoomify's
+        // `ImageProperties.xml`, IIIF's `info.json`). The planner owns the
+        // format and the relative name; the sink only resolves the location.
+        if let Some((rel_path, content)) = self.plan.properties_sidecar(self.format.extension()) {
+            std::fs::create_dir_all(&self.base_dir)?;
+            std::fs::write(self.base_dir.join(rel_path), content)?;
         }
 
         // If ChecksumMode::Verify is active, re-hash every tile on disk and
@@ -1940,6 +1948,87 @@ mod tests {
             recorded, 2,
             "recovered leaf must retain the pre-poison bookkeeping and accept new writes"
         );
+    }
+
+    // -- DeepZoom layout variants: Zoomify + IIIF sidecars (libviprs-tests#87) --
+
+    /// Drive an entire plan through `FsSink` (write every tile, then finish)
+    /// and return the base output directory for structural assertions.
+    fn run_plan_through_fs_sink(plan: PyramidPlan, base: PathBuf) {
+        let sink = FsSink::new(base, plan.clone());
+        for coord in plan.tile_coords() {
+            sink.write_tile(&make_tile(coord.level, coord.col, coord.row))
+                .unwrap();
+        }
+        sink.finish().unwrap();
+    }
+
+    /// A Zoomify pyramid produces a `TileGroup0/` directory and an
+    /// `ImageProperties.xml` sidecar carrying the source dimensions.
+    #[test]
+    fn zoomify_run_writes_tilegroup_and_image_properties() {
+        let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::Zoomify)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("zoomify_out");
+        run_plan_through_fs_sink(plan, base.clone());
+
+        assert!(
+            base.join("TileGroup0").is_dir(),
+            "Zoomify must produce a TileGroup0 directory"
+        );
+        let props = base.join("ImageProperties.xml");
+        assert!(props.exists(), "ImageProperties.xml sidecar must exist");
+        let xml = std::fs::read_to_string(&props).unwrap();
+        assert!(xml.contains("WIDTH=\"300\""), "got: {xml}");
+        assert!(xml.contains("HEIGHT=\"200\""), "got: {xml}");
+        // No .dzi sibling for Zoomify.
+        assert!(!dir.path().join("zoomify_out.dzi").exists());
+    }
+
+    /// An IIIF pyramid produces an `info.json` sidecar carrying the source
+    /// dimensions.
+    #[test]
+    fn iiif_run_writes_info_json() {
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("iiif_out");
+        run_plan_through_fs_sink(plan, base.clone());
+
+        let info = base.join("info.json");
+        assert!(info.exists(), "info.json sidecar must exist");
+        let json = std::fs::read_to_string(&info).unwrap();
+        assert!(json.contains("\"width\": 512"), "got: {json}");
+        assert!(json.contains("\"height\": 512"), "got: {json}");
+        // The full-res tile lands under its region directory.
+        assert!(
+            base.join("0,0,256,256").is_dir(),
+            "IIIF region directory must exist"
+        );
+        assert!(!dir.path().join("iiif_out.dzi").exists());
+    }
+
+    /// DeepZoom behaviour is unchanged: a sibling `.dzi` manifest is emitted
+    /// and no in-directory properties sidecar appears.
+    #[test]
+    fn deepzoom_run_still_writes_sibling_dzi_only() {
+        let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("deepzoom_out");
+        run_plan_through_fs_sink(plan, base.clone());
+
+        let dzi = dir.path().join("deepzoom_out.dzi");
+        assert!(dzi.exists(), "DeepZoom must keep its sibling .dzi manifest");
+        let manifest = std::fs::read_to_string(&dzi).unwrap();
+        assert!(manifest.contains("Width=\"300\""), "got: {manifest}");
+        assert!(manifest.contains("Height=\"200\""), "got: {manifest}");
+        assert!(!base.join("ImageProperties.xml").exists());
+        assert!(!base.join("info.json").exists());
     }
 
     // -- Transparent-decorator bookkeeping (issue #137) --

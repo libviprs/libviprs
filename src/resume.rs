@@ -1290,6 +1290,8 @@ fn layout_tag(layout: Layout) -> u8 {
         Layout::DeepZoom => 1,
         Layout::Xyz => 2,
         Layout::Google => 3,
+        Layout::Zoomify => 4,
+        Layout::Iiif => 5,
     }
 }
 
