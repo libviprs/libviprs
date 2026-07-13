@@ -471,21 +471,43 @@ impl ZipSink {
     /// and `format` for the per-tile encoding. The container format is always
     /// [`PackfileFormat::Zip`].
     ///
-    /// This mirrors the sibling filesystem sinks with an infallible `-> Self`
-    /// signature. Under the hood it delegates to
-    /// [`PackfileSink::new`]`(path, PackfileFormat::Zip, plan, format)`.
+    /// This is the fallible constructor and the recommended entry point when a
+    /// caller wants to handle archive-creation failure explicitly. It delegates
+    /// to [`PackfileSink::new`]`(path, PackfileFormat::Zip, plan, format)`,
+    /// which opens `path` for writing up front.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SinkError::Io`] if the output file at `path` cannot be created
+    /// (for example a parent directory that cannot be created, or a permissions
+    /// error).
+    pub fn try_new(
+        path: impl Into<PathBuf>,
+        plan: PyramidPlan,
+        format: TileFormat,
+    ) -> Result<Self, SinkError> {
+        let inner = PackfileSink::new(path, PackfileFormat::Zip, plan, format)?;
+        Ok(Self { inner })
+    }
+
+    /// Create a ZIP tile sink writing to `path`, using `plan` for tile paths
+    /// and `format` for the per-tile encoding. The container format is always
+    /// [`PackfileFormat::Zip`]. This is a convenience wrapper over
+    /// [`ZipSink::try_new`] for call sites that treat archive creation as
+    /// infallible.
     ///
     /// # Panics
     ///
-    /// Panics if the output file at `path` cannot be created (for example a
-    /// parent directory that cannot be created, or a permissions error).
-    /// Callers who need to handle that I/O failure explicitly can build a
-    /// [`PackfileSink`] with [`PackfileFormat::Zip`] directly, which returns a
-    /// `Result`.
-    pub fn new(path: PathBuf, plan: PyramidPlan, format: TileFormat) -> Self {
-        let inner = PackfileSink::new(path, PackfileFormat::Zip, plan, format)
-            .expect("ZipSink::new: failed to create the ZIP archive output file");
-        Self { inner }
+    /// Unlike the filesystem sinks (whose `new` constructors do no eager I/O
+    /// and defer every write to their `finish` path), `ZipSink::new` performs
+    /// eager I/O: it creates the archive file at `path` when the sink is
+    /// constructed. It therefore panics if that file cannot be created (for
+    /// example a parent directory that cannot be created, or a permissions
+    /// error). Callers who need to handle that failure should use
+    /// [`ZipSink::try_new`], which returns a [`Result`] instead.
+    pub fn new(path: impl Into<PathBuf>, plan: PyramidPlan, format: TileFormat) -> Self {
+        Self::try_new(path, plan, format)
+            .expect("ZipSink::new: failed to create the ZIP archive output file")
     }
 
     /// Returns the archive's output path.
@@ -737,7 +759,9 @@ mod tests {
 
         let sink = ZipSink::new(out.clone(), plan.clone(), TileFormat::Png);
 
-        // Drive every tile of the small pyramid through the sink.
+        // Drive every tile of the small pyramid through the sink, counting the
+        // total we feed in so we can pin the stored `_files/` entry count.
+        let mut driven_tiles = 0usize;
         for level in &plan.levels {
             for y in 0..level.rows {
                 for x in 0..level.cols {
@@ -747,9 +771,11 @@ mod tests {
                         blank: false,
                     };
                     sink.write_tile(&tile).unwrap();
+                    driven_tiles += 1;
                 }
             }
         }
+        assert!(driven_tiles > 0, "test must drive at least one tile");
         sink.finish().unwrap();
 
         // 1. The archive file exists and is non-empty.
@@ -776,6 +802,26 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "manifest.json"),
             "zip must contain the root manifest.json, got: {names:?}"
+        );
+
+        // 4. Exactly one DeepZoom `_files/<level>/<x>_<y>.png` entry per driven
+        //    tile: no tile is dropped and none is duplicated on that path. (The
+        //    mirror `<stem>/…` entries live outside `_files/` and are excluded.)
+        let deep_zoom_tiles = names
+            .iter()
+            .filter(|n| n.contains("_files/") && n.ends_with(".png"))
+            .count();
+        assert_eq!(
+            deep_zoom_tiles, driven_tiles,
+            "DeepZoom `_files/*.png` entry count must equal the driven tile total, got: {names:?}"
+        );
+
+        // 5. `finish()` writes the DeepZoom `<stem>.dzi` manifest at the root.
+        //    The archive stem for `pyramid.zip` is `pyramid`, so pin the
+        //    contract by requiring the `pyramid.dzi` entry.
+        assert!(
+            names.iter().any(|n| n == "pyramid.dzi"),
+            "zip must contain the DeepZoom manifest `pyramid.dzi`, got: {names:?}"
         );
     }
 }
