@@ -169,6 +169,8 @@ mod layout_serde {
             Layout::DeepZoom => "deep_zoom",
             Layout::Xyz => "xyz",
             Layout::Google => "google",
+            Layout::Zoomify => "zoomify",
+            Layout::Iiif => "iiif",
         };
         s.serialize_str(name)
     }
@@ -179,6 +181,8 @@ mod layout_serde {
             "deep_zoom" => Ok(Layout::DeepZoom),
             "xyz" => Ok(Layout::Xyz),
             "google" => Ok(Layout::Google),
+            "zoomify" => Ok(Layout::Zoomify),
+            "iiif" => Ok(Layout::Iiif),
             other => Err(serde::de::Error::custom(format!("unknown layout: {other}"))),
         }
     }
