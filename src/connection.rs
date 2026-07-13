@@ -107,6 +107,11 @@ pub struct Target<W: Write> {
 impl<W: Write> Target<W> {
     /// Wrap an arbitrary writer. Encoded bytes stream to the writer and are
     /// not retained in memory, so [`Target::get_blob`] returns an empty slice.
+    ///
+    /// [`Target::get_blob`] is meaningful only for [`Target::new_to_memory`]
+    /// targets. A writer-backed target keeps no copy of what it encodes, so a
+    /// caller here should read the encoded bytes back from the writer they own,
+    /// not from `get_blob` (which stays empty).
     pub fn new(writer: W) -> Self {
         Self {
             writer,
@@ -123,21 +128,29 @@ impl<W: Write> Target<W> {
 
     /// The bytes captured by an in-memory target.
     ///
-    /// For a [`Target::new_to_memory`] target this is every byte encoded into
-    /// the target so far. For a writer-backed target ([`Target::new`] /
-    /// [`Target::new_to_file`]) nothing is retained and this is empty.
+    /// This is meaningful only for a [`Target::new_to_memory`] target, where it
+    /// returns every byte encoded into the target so far. For a writer-backed
+    /// target ([`Target::new`] / [`Target::new_to_file`]) nothing is retained,
+    /// so this stays empty and the caller should read the encoded bytes back
+    /// from the writer they own instead.
     pub fn get_blob(&self) -> &[u8] {
         &self.blob
     }
 
     /// Route encoded bytes to their destination: the in-memory capture for a
     /// memory target, otherwise the wrapped writer.
+    ///
+    /// The writer-backed branch flushes after writing so a buffered writer
+    /// surfaces any deferred error here, at the encode call, rather than
+    /// swallowing it on drop. `emit` runs once per encode, so the flush cost is
+    /// negligible.
     fn emit(&mut self, bytes: &[u8]) -> io::Result<()> {
         if self.capture {
             self.blob.extend_from_slice(bytes);
             Ok(())
         } else {
-            self.writer.write_all(bytes)
+            self.writer.write_all(bytes)?;
+            self.writer.flush()
         }
     }
 }
@@ -427,6 +440,62 @@ mod tests {
         assert!(raster.encode_to_buffer("PNG").is_ok());
         assert!(raster.encode_to_buffer(".jpg").is_ok());
         assert!(raster.encode_to_buffer("Vips").is_ok());
+    }
+
+    /// A writer-backed [`Target::new`] streams through the `emit` else-branch
+    /// and the writer receives exactly the bytes [`Raster::encode_to_buffer`]
+    /// produces (byte-identity). `get_blob` stays empty for this target.
+    #[test]
+    fn writer_target_emits_bytes_identical_to_buffer() {
+        let raster = sample_raster();
+        let expected = raster.encode_to_buffer("png").unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut target = Target::new(&mut buf);
+            encode_to_target(&raster, &mut target, "png").unwrap();
+            assert!(
+                target.get_blob().is_empty(),
+                "a writer-backed target retains nothing in get_blob"
+            );
+        }
+
+        assert_eq!(
+            buf, expected,
+            "writer-backed emit must deliver the same bytes as encode_to_buffer"
+        );
+    }
+
+    /// A [`Target::new_to_file`] target writes the encoded bytes to disk; reading
+    /// the file back yields exactly [`Raster::encode_to_buffer`]'s bytes and
+    /// decodes to the original raster.
+    #[test]
+    fn file_target_writes_and_reads_back_identical_bytes() {
+        let raster = sample_raster();
+        let expected = raster.encode_to_buffer("png").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connection-file-target.png");
+
+        let mut target = Target::new_to_file(&path).unwrap();
+        encode_to_target(&raster, &mut target, "png").unwrap();
+        assert!(
+            target.get_blob().is_empty(),
+            "a file target retains nothing in get_blob"
+        );
+        drop(target);
+
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(
+            written, expected,
+            "bytes on disk must match encode_to_buffer"
+        );
+
+        let mut source = Source::from_file(&path).unwrap();
+        let decoded = decode_source(&mut source).unwrap();
+        assert_eq!(decoded.width(), raster.width());
+        assert_eq!(decoded.height(), raster.height());
+        assert_eq!(decoded.data(), raster.data());
     }
 
     /// `from_file` records the path; `new` leaves the filename unset.
