@@ -448,6 +448,67 @@ impl TileSink for PackfileSink {
 }
 
 // ---------------------------------------------------------------------------
+// ZipSink
+// ---------------------------------------------------------------------------
+
+/// Tile sink that packs an entire pyramid into a single ZIP archive.
+///
+/// `ZipSink` is a thin newtype over [`PackfileSink`] with the container
+/// format fixed to [`PackfileFormat::Zip`]. It gives callers who only ever
+/// want ZIP output a dedicated type to name, instead of threading a
+/// [`PackfileFormat`] argument through their code. Every [`TileSink`] method
+/// delegates straight to the inner [`PackfileSink`] (through the
+/// [`TileSink::inner_sink`] decorator hook for the engine-bookkeeping
+/// methods, and directly for [`TileSink::write_tile`] /
+/// [`TileSink::finish`]); ZipSink adds no archive-writing logic of its own.
+#[derive(Debug)]
+pub struct ZipSink {
+    inner: PackfileSink,
+}
+
+impl ZipSink {
+    /// Create a ZIP tile sink writing to `path`, using `plan` for tile paths
+    /// and `format` for the per-tile encoding. The container format is always
+    /// [`PackfileFormat::Zip`].
+    ///
+    /// This mirrors the sibling filesystem sinks with an infallible `-> Self`
+    /// signature. Under the hood it delegates to
+    /// [`PackfileSink::new`]`(path, PackfileFormat::Zip, plan, format)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the output file at `path` cannot be created (for example a
+    /// parent directory that cannot be created, or a permissions error).
+    /// Callers who need to handle that I/O failure explicitly can build a
+    /// [`PackfileSink`] with [`PackfileFormat::Zip`] directly, which returns a
+    /// `Result`.
+    pub fn new(path: PathBuf, plan: PyramidPlan, format: TileFormat) -> Self {
+        let inner = PackfileSink::new(path, PackfileFormat::Zip, plan, format)
+            .expect("ZipSink::new: failed to create the ZIP archive output file");
+        Self { inner }
+    }
+
+    /// Returns the archive's output path.
+    pub fn out_path(&self) -> &Path {
+        self.inner.out_path()
+    }
+}
+
+impl TileSink for ZipSink {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        self.inner.write_tile(tile)
+    }
+
+    fn finish(&self) -> Result<(), SinkError> {
+        self.inner.finish()
+    }
+
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        Some(&self.inner)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Archive append helpers
 // ---------------------------------------------------------------------------
 
@@ -660,5 +721,61 @@ mod tests {
 
         let meta = std::fs::metadata(&out).unwrap();
         assert!(meta.len() > 0, "tar archive must be non-empty");
+    }
+
+    /// TDD for the ZipSink lane (libviprs-tests#87): driving a `ZipSink`
+    /// across a small pyramid produces a `.zip` that exists, is non-empty,
+    /// and, when reopened with the `zip` crate, contains the expected tile
+    /// entries plus the root manifest.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn zip_sink_writes_pyramid_archive() {
+        let plan = make_plan(64, 64, 32);
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("pyramid.zip");
+
+        let sink = ZipSink::new(out.clone(), plan.clone(), TileFormat::Png);
+
+        // Drive every tile of the small pyramid through the sink.
+        for level in &plan.levels {
+            for y in 0..level.rows {
+                for x in 0..level.cols {
+                    let tile = Tile {
+                        coord: TileCoord::new(level.level, x, y),
+                        raster: Raster::zeroed(32, 32, PixelFormat::Rgb8).unwrap(),
+                        blank: false,
+                    };
+                    sink.write_tile(&tile).unwrap();
+                }
+            }
+        }
+        sink.finish().unwrap();
+
+        // 1. The archive file exists and is non-empty.
+        let meta = std::fs::metadata(&out).unwrap();
+        assert!(meta.len() > 0, "zip archive must be non-empty");
+
+        // 2. Reopen with the zip crate and enumerate entry names.
+        let file = File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert!(!archive.is_empty(), "zip archive must contain entries");
+
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+
+        // 3. It carries DeepZoom tile entries under `<stem>_files/…` and the
+        //    root manifest.
+        assert!(
+            names
+                .iter()
+                .any(|n| n.contains("_files/") && n.ends_with(".png")),
+            "zip must contain DeepZoom tile entries, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "manifest.json"),
+            "zip must contain the root manifest.json, got: {names:?}"
+        );
     }
 }
