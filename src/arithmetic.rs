@@ -1359,6 +1359,106 @@ impl Raster {
         expect_arith("sub", self.try_sub(other))
     }
 
+    // -----------------------------------------------------------------
+    // Difference reductions
+    // -----------------------------------------------------------------
+
+    /// The maximum absolute per-sample difference between `self` and `other`
+    /// (libvips `max(abs(a - b))`), as `f64`.
+    ///
+    /// Reads every sample of both rasters at full `f64` precision (all
+    /// depths, including float), so a lossless round-trip reports exactly
+    /// `0.0`. The ported foreign cells assert on this directly, for example
+    /// `im.max_diff(&expected) == 0.0`. Both rasters must share pixel
+    /// dimensions and band count.
+    ///
+    /// NaN caveat: NaN samples are unsupported. A NaN difference propagates,
+    /// so any NaN-containing input yields a NaN result, matching
+    /// [`Raster::try_avg_diff`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the rasters disagree.
+    pub fn try_max_diff(&self, other: &Raster) -> Result<f64, ArithmeticError> {
+        ensure_compatible(self, other)?;
+        // Propagate NaN instead of dropping it: `f64::max` would silently
+        // return the finite operand, disagreeing with the NaN-propagating
+        // sum in `try_avg_diff` and letting a `max_diff == 0.0` assertion
+        // pass over unsupported NaN input. Fold to NaN once either side is
+        // NaN so the whole reduction surfaces it.
+        Ok(self.diff_fold(other, 0.0, |acc, d| {
+            if acc.is_nan() || d.is_nan() {
+                f64::NAN
+            } else {
+                acc.max(d)
+            }
+        }))
+    }
+
+    /// Panicking form of [`Raster::try_max_diff`], matching the ported-test
+    /// surface (`im.max_diff(&other)`).
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_max_diff`].
+    #[track_caller]
+    pub fn max_diff(&self, other: &Raster) -> f64 {
+        expect_arith("max_diff", self.try_max_diff(other))
+    }
+
+    /// The mean absolute per-sample difference between `self` and `other`
+    /// (libvips `avg(abs(a - b))`), as `f64`.
+    ///
+    /// Reads every sample of both rasters at full `f64` precision, then
+    /// divides the summed absolute differences by the sample count. The
+    /// ported foreign cells assert on this for lossy round-trips, for
+    /// example `im.colourspace("scrgb").avg_diff(...) < 0.02`. Both rasters
+    /// must share pixel dimensions and band count.
+    ///
+    /// NaN caveat: NaN samples are unsupported. A NaN difference propagates
+    /// through the sum, so any NaN-containing input yields a NaN result,
+    /// matching [`Raster::try_max_diff`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the rasters disagree.
+    pub fn try_avg_diff(&self, other: &Raster) -> Result<f64, ArithmeticError> {
+        ensure_compatible(self, other)?;
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        Ok(self.diff_fold(other, 0.0, |acc, d| acc + d) / n as f64)
+    }
+
+    /// Panicking form of [`Raster::try_avg_diff`], matching the ported-test
+    /// surface (`im.avg_diff(&other)`).
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_avg_diff`].
+    #[track_caller]
+    pub fn avg_diff(&self, other: &Raster) -> f64 {
+        expect_arith("avg_diff", self.try_avg_diff(other))
+    }
+
+    /// Fold `f` over the absolute per-sample differences of two
+    /// dimension-compatible rasters, starting from `init`. Each raster is
+    /// read at its own depth via [`read_f64`], so a mixed-depth pair
+    /// compares numerically. The caller is responsible for having checked
+    /// compatibility (`ensure_compatible`) first.
+    fn diff_fold(&self, other: &Raster, init: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
+        let a_bpc = self.format().bytes_per_channel();
+        let b_bpc = other.format().bytes_per_channel();
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        let (a_data, b_data) = (self.data(), other.data());
+        (0..n)
+            .map(|i| (read_f64(a_data, a_bpc, i) - read_f64(b_data, b_bpc, i)).abs())
+            .fold(init, f)
+    }
+
     /// Multiply two images samplewise (libvips `multiply`); 8-bit inputs
     /// promote to 16-bit and results saturate at the output depth.
     ///
@@ -2529,6 +2629,67 @@ mod tests {
         let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let fmt = PixelFormat::with_channels(1, 4).unwrap();
         Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_on_known_uchar_samples() {
+        // |10-12| = 2, |20-25| = 5  ->  max 5, mean (2+5)/2 = 3.5.
+        let a = gray(2, 1, vec![10, 20]);
+        let b = gray(2, 1, vec![12, 25]);
+        assert_eq!(a.max_diff(&b), 5.0);
+        assert!((a.avg_diff(&b) - 3.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_of_identical_rasters_are_zero() {
+        // Pins the lossless-roundtrip assertion the foreign cells make.
+        let a = gray(2, 2, vec![1, 2, 3, 4]);
+        assert_eq!(a.max_diff(&a.clone()), 0.0);
+        assert_eq!(a.avg_diff(&a.clone()), 0.0);
+    }
+
+    #[test]
+    fn avg_diff_reads_float_rasters() {
+        // |0.5-0.25| = 0.25, |1.0-1.5| = 0.5  ->  mean 0.375.
+        let a = grayf(2, 1, &[0.5, 1.0]);
+        let b = grayf(2, 1, &[0.25, 1.5]);
+        assert!((a.avg_diff(&b) - 0.375).abs() < 1e-6);
+        assert!((a.max_diff(&b) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_propagate_a_nan_sample() {
+        // NaN samples are unsupported input; both reductions agree by
+        // propagating NaN, so neither silently reports a finite difference
+        // (in particular max_diff must not drop the NaN and pass `== 0.0`).
+        let a = grayf(2, 1, &[f32::NAN, 1.0]);
+        let b = grayf(2, 1, &[0.0, 1.0]);
+        assert!(a.max_diff(&b).is_nan());
+        assert!(a.avg_diff(&b).is_nan());
+    }
+
+    #[test]
+    fn diff_mismatched_dimensions_is_a_typed_error() {
+        let a = gray(2, 1, vec![0, 0]);
+        let b = gray(3, 1, vec![0, 0, 0]);
+        assert!(matches!(
+            a.try_max_diff(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+        assert!(matches!(
+            a.try_avg_diff(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn diff_mismatched_bands_is_a_typed_error() {
+        let a = gray(2, 1, vec![0, 0]);
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert!(matches!(
+            a.try_max_diff(&rgb),
+            Err(ArithmeticError::BandCountMismatch { .. })
+        ));
     }
 
     /// The flat samples of a float raster as `f64`, for assertions.
