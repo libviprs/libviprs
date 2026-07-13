@@ -189,6 +189,28 @@ pub struct EngineConfig {
     /// How to handle tiles where every pixel is the same color.
     /// Defaults to `Emit` (write full tile data).
     pub blank_tile_strategy: BlankTileStrategy,
+    /// When `true`, blank (uniform-color) tiles are dropped from the run
+    /// entirely: a blank tile is never handed to the sink, so the output
+    /// carries strictly fewer files. Defaults to `false`.
+    ///
+    /// This is deliberately stronger than
+    /// [`BlankTileStrategy::Placeholder`], which still writes a 1-byte marker
+    /// for every blank tile and so leaves the file count unchanged. Skipping
+    /// removes the tile altogether, mirroring libvips `dzsave`'s
+    /// `skip_blanks`. Blankness uses the same exact-uniformity test as
+    /// [`is_blank_tile`], and the skip decision takes precedence over the
+    /// active [`BlankTileStrategy`].
+    ///
+    /// Honoured by the monolithic engine only. The streaming and map-reduce
+    /// engines currently ignore this flag and emit every tile; parity across
+    /// those engines is deferred.
+    ///
+    /// A level that contains any skipped blank is not eligible for the
+    /// whole-level resume skip optimisation: its blank coordinates are never
+    /// recorded as completed, so the level is never promoted to
+    /// `levels_completed`. On resume such a level is re-walked and its blanks
+    /// re-skipped deterministically, which is safe and idempotent.
+    pub skip_blanks: bool,
     /// How to react when a sink write fails after retries.
     pub failure_policy: FailurePolicy,
     /// Persist the resume checkpoint every N tiles (0 = never).
@@ -238,6 +260,7 @@ impl Default for EngineConfig {
             buffer_size: 0,
             background_rgb: [255, 255, 255],
             blank_tile_strategy: BlankTileStrategy::Emit,
+            skip_blanks: false,
             failure_policy: FailurePolicy::default(),
             checkpoint_every: 0,
             dedupe_strategy: None,
@@ -283,6 +306,25 @@ impl EngineConfig {
     /// (and the related [`--blank-tolerance`](https://libviprs.org/cli/#flag-blank-tolerance) flag).
     pub fn with_blank_tile_strategy(mut self, strategy: BlankTileStrategy) -> Self {
         self.blank_tile_strategy = strategy;
+        self
+    }
+
+    /// When `skip` is `true`, blank (uniform-color) tiles are dropped from the
+    /// run entirely rather than written to the sink, so the output has strictly
+    /// fewer files.
+    ///
+    /// This differs from
+    /// [`with_blank_tile_strategy`](Self::with_blank_tile_strategy) with
+    /// [`BlankTileStrategy::Placeholder`], which still emits a 1-byte marker per
+    /// blank tile (leaving the file count unchanged): skipping produces no file
+    /// at all for a blank tile. Blankness is the same exact-uniformity test as
+    /// [`is_blank_tile`], and skipping wins over the active
+    /// [`BlankTileStrategy`]. See [`EngineConfig::skip_blanks`] for the field.
+    ///
+    /// Honoured by the monolithic engine only (the streaming and map-reduce
+    /// engines currently ignore it; parity is deferred).
+    pub fn skip_blanks(mut self, skip: bool) -> Self {
+        self.skip_blanks = skip;
         self
     }
 
@@ -427,10 +469,16 @@ pub struct StageDurations {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineResult {
-    /// Total number of tiles written to the sink (including placeholders).
+    /// Total number of tiles written to the sink (including placeholder
+    /// markers). This always equals the number of files the run handed to the
+    /// sink.
     pub tiles_produced: u64,
-    /// Number of tiles that were blank and replaced with placeholders
-    /// (only non-zero when `BlankTileStrategy::Placeholder` is used).
+    /// Number of blank (uniform-colour) tiles the engine treated specially.
+    /// A blank tile is counted here under either
+    /// [`BlankTileStrategy::Placeholder`] (the tile is still written, as a
+    /// 1-byte marker, so it is ALSO in `tiles_produced`) or
+    /// [`EngineConfig::skip_blanks`] (the tile is dropped and so is EXCLUDED
+    /// from `tiles_produced`).
     pub tiles_skipped: u64,
     /// Number of pyramid levels that were processed (always equals the plan's level count).
     pub levels_processed: u32,
@@ -475,6 +523,67 @@ pub(crate) fn generate_pyramid_observed(
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     run_pyramid(source, plan, sink, config, observer)
+}
+
+/// Generates a tile pyramid for a rectangular sub-region of `src`.
+///
+/// Region generation is exactly crop-then-pyramid: the `[left, top, width,
+/// height]` rectangle is cropped out of `src` into an owned raster (via
+/// [`Raster::extract`]), and that crop is run through the normal pyramid
+/// pipeline. As a result the top-level tile covers only the requested region,
+/// and every emitted tile is byte-identical to the tile a full run over the
+/// same crop would produce.
+///
+/// The supplied `plan` must describe the **region** dimensions (`width ×
+/// height`), not the whole source: it is applied to the crop as-is. Build it
+/// with `PyramidPlanner::new(width, height, ..)`. Sizing the plan for anything
+/// other than the crop is a caller error: an oversized plan (level-0 larger
+/// than the crop) drives the tiling past the crop bounds, while an undersized
+/// plan would silently cover only part of the region. To fail fast rather than
+/// mis-tile, this function checks the plan's level-0 dimensions against
+/// `(width, height)` up front and returns [`EngineError::PlanSourceMismatch`]
+/// before cropping when they differ.
+///
+/// This mirrors libvips `dzsave`'s region rendering. It is observer-free (it
+/// drives a [`NoopObserver`](crate::observe::NoopObserver) internally); use
+/// [`generate_pyramid_observed`] on a pre-cropped raster if progress events are
+/// needed.
+///
+/// # Errors
+///
+/// Returns [`EngineError::PlanSourceMismatch`] if `plan`'s level-0 dimensions
+/// do not equal `(width, height)`, [`EngineError::Raster`] if the region
+/// rectangle falls outside `src`, and any error the underlying pyramid run
+/// produces.
+// The eight parameters are the region contract: the four pyramid inputs plus
+// the `left/top/width/height` crop rectangle. Bundling the rectangle into a
+// struct would obscure the call site and diverge from the documented API shape,
+// so the argument count is intentional here.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_pyramid_region(
+    src: &Raster,
+    plan: &PyramidPlan,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+) -> Result<EngineResult, EngineError> {
+    // Fail fast before cropping: the plan must be sized for the crop, not the
+    // whole source. An oversized plan would tile past the crop bounds and an
+    // undersized one would silently cover only part of the region, so a
+    // dimension mismatch is a typed error here rather than a mis-tiled run.
+    if plan.image_width != width || plan.image_height != height {
+        return Err(EngineError::PlanSourceMismatch {
+            plan_width: plan.image_width,
+            plan_height: plan.image_height,
+            source_width: width,
+            source_height: height,
+        });
+    }
+    let cropped = src.extract(left, top, width, height)?;
+    generate_pyramid_observed(&cropped, plan, sink, config, &crate::observe::NoopObserver)
 }
 
 /// Internal driver behind [`generate_pyramid_observed`].
@@ -1513,6 +1622,15 @@ fn extract_and_emit_level(
                 let tile_raster = extract_tile(raster, plan, coord, config.background_rgb)?;
                 ctx.stage_extract
                     .fetch_add(extract_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                // skip_blanks (issue libviprs-tests#87): a uniform tile is
+                // dropped before it ever reaches the sink, so the output holds
+                // strictly fewer files. This is engine-side on purpose (it must
+                // not live in the sink), and it takes precedence over the
+                // BlankTileStrategy marker path below.
+                if config.skip_blanks && is_blank_tile(&tile_raster) {
+                    skipped += 1;
+                    continue;
+                }
                 let blank = blank_for_output(&tile_raster, blank_strategy, config.dedupe_strategy);
                 if blank {
                     skipped += 1;
@@ -1796,6 +1914,18 @@ fn extract_and_emit_parallel(
             config.check_cancelled()?;
             let tile = result?;
             let coord = tile.coord;
+            // skip_blanks (issue libviprs-tests#87): mirror the single-threaded
+            // path — a uniform tile is dropped here, before the sink write, so
+            // the output holds strictly fewer files. The in_flight gauge was
+            // already decremented above, so the queue accounting stays balanced.
+            // The worker still extracted and enqueued this tile; only the sink
+            // write is elided (the test drives the monolithic single-threaded
+            // path, and keeping the skip at the write decision point matches it
+            // exactly and keeps `tiles_skipped` consistent across both paths).
+            if config.skip_blanks && is_blank_tile(&tile.raster) {
+                skipped += 1;
+                continue;
+            }
             if tile.blank {
                 skipped += 1;
             }
@@ -2320,6 +2450,126 @@ mod tests {
     fn solid_raster(w: u32, h: u32, val: u8) -> Raster {
         let data = vec![val; w as usize * h as usize * 3];
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// A mostly-white raster whose top-left `patch × patch` quadrant carries a
+    /// gradient, so full-resolution tiles split into uniform (blank) tiles over
+    /// the white margin and non-uniform tiles over the patch.
+    fn mostly_blank_raster(w: u32, h: u32, patch: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![255u8; w as usize * h as usize * bpp];
+        for y in 0..patch.min(h) {
+            for x in 0..patch.min(w) {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                data[off] = (x % 256) as u8;
+                data[off + 1] = (y % 256) as u8;
+                data[off + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// `EngineConfig::skip_blanks(true)` must drop uniform tiles from the run
+    /// entirely, so a mostly-blank source yields strictly fewer emitted tiles /
+    /// sink files than the same run with skipping off. This is distinct from
+    /// `BlankTileStrategy::Placeholder`, which still writes one marker file per
+    /// blank tile (file count unchanged).
+    #[test]
+    fn skip_blanks_emits_strictly_fewer_tiles() {
+        let src = mostly_blank_raster(512, 512, 256);
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        // Full run: every tile coordinate is written.
+        let full_sink = MemorySink::new();
+        let full = generate_pyramid_observed(
+            &src,
+            &plan,
+            &full_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+
+        // skip_blanks run: uniform tiles are never handed to the sink.
+        let skip_sink = MemorySink::new();
+        let skipped = generate_pyramid_observed(
+            &src,
+            &plan,
+            &skip_sink,
+            &EngineConfig::default().skip_blanks(true),
+            &NoopObserver,
+        )
+        .unwrap();
+
+        assert!(
+            skipped.tiles_produced < full.tiles_produced,
+            "skip_blanks(true) must emit fewer tiles: got {} vs full {}",
+            skipped.tiles_produced,
+            full.tiles_produced,
+        );
+        assert!(
+            skipped.tiles_skipped > 0,
+            "at least one blank tile must be reported as skipped"
+        );
+        assert_eq!(
+            skip_sink.tile_count() as u64,
+            skipped.tiles_produced,
+            "every produced tile must correspond to exactly one sink file under skip_blanks"
+        );
+        assert!(
+            (skip_sink.tile_count() as u64) < full_sink.tile_count() as u64,
+            "the sink must hold strictly fewer files with skip_blanks on"
+        );
+    }
+
+    /// `generate_pyramid_region` must be exactly crop-then-pyramid: the tiles it
+    /// produces for a sub-region are byte-identical to a pyramid built from the
+    /// same region cropped out of the source directly, so the top-level tile
+    /// covers only the requested region.
+    #[test]
+    fn generate_pyramid_region_matches_direct_crop() {
+        let src = gradient_raster(256, 256);
+        let (left, top, width, height) = (0u32, 0u32, 100u32, 100u32);
+        // The plan describes the REGION dimensions: the function crops the
+        // source to the region and runs this plan against the crop.
+        let plan = PyramidPlanner::new(width, height, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = EngineConfig::default();
+
+        let region_sink = MemorySink::new();
+        let region =
+            generate_pyramid_region(&src, &plan, &region_sink, &config, left, top, width, height)
+                .unwrap();
+
+        // Reference: build the same pyramid from an explicitly-cropped raster.
+        let cropped = src.extract(left, top, width, height).unwrap();
+        let direct_sink = MemorySink::new();
+        let direct =
+            generate_pyramid_observed(&cropped, &plan, &direct_sink, &config, &NoopObserver)
+                .unwrap();
+
+        assert_eq!(
+            region.tiles_produced, direct.tiles_produced,
+            "region generation must produce the same tile budget as the crop"
+        );
+        assert_eq!(region.tiles_produced, plan.total_tile_count());
+
+        let region_tiles = region_sink.tiles();
+        let direct_tiles = direct_sink.tiles();
+        assert_eq!(region_tiles.len(), direct_tiles.len());
+        for (r, d) in region_tiles.iter().zip(direct_tiles.iter()) {
+            assert_eq!(r.coord, d.coord, "tile coordinates must line up");
+            assert_eq!(r.width, d.width, "tile width must match the crop");
+            assert_eq!(r.height, d.height, "tile height must match the crop");
+            assert_eq!(r.data, d.data, "tile pixels must be identical to the crop");
+        }
+
+        // The top-level tile must be no larger than the requested region.
+        let top_plan = plan.levels.last().unwrap();
+        assert!(top_plan.width <= width && top_plan.height <= height);
     }
 
     /// Issue #130: `EngineConfig::dedupe_strategy` must not be a silent no-op.

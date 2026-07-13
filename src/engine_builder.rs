@@ -212,6 +212,7 @@ pub struct EngineBuilder<'a, S: TileSink> {
     buffer_size: Option<usize>,
     background_rgb: Option<[u8; 3]>,
     blank_strategy: Option<BlankTileStrategy>,
+    skip_blanks: Option<bool>,
     failure_policy: Option<FailurePolicy>,
     dedupe: Option<DedupeStrategy>,
 
@@ -239,6 +240,7 @@ impl<'a, S: TileSink> std::fmt::Debug for EngineBuilder<'a, S> {
             .field("buffer_size", &self.buffer_size)
             .field("background_rgb", &self.background_rgb)
             .field("blank_strategy", &self.blank_strategy)
+            .field("skip_blanks", &self.skip_blanks)
             .field("failure_policy", &self.failure_policy)
             .field("dedupe", &self.dedupe)
             .field("resume", &self.resume)
@@ -263,6 +265,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             buffer_size: None,
             background_rgb: None,
             blank_strategy: None,
+            skip_blanks: None,
             failure_policy: None,
             dedupe: None,
             resume: None,
@@ -364,6 +367,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         self.buffer_size = Some(config.buffer_size);
         self.background_rgb = Some(config.background_rgb);
         self.blank_strategy = Some(config.blank_tile_strategy);
+        self.skip_blanks = Some(config.skip_blanks);
         self.failure_policy = Some(config.failure_policy);
         // Uniform precedence: every value the config carries overwrites any
         // earlier setter unconditionally, including when the config field is
@@ -457,6 +461,18 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-skip-blank).
     pub fn with_blank_strategy(mut self, strategy: BlankTileStrategy) -> Self {
         self.blank_strategy = Some(strategy);
+        self
+    }
+
+    /// Drop blank (uniform-colour) tiles from the run entirely rather than
+    /// writing them, so the output carries strictly fewer files. This is the
+    /// builder mirror of [`EngineConfig::skip_blanks`]; skipping takes
+    /// precedence over the active [`BlankTileStrategy`].
+    ///
+    /// Honoured by the monolithic engine only (the streaming and map-reduce
+    /// engines currently ignore it; parity is deferred).
+    pub fn with_skip_blanks(mut self, skip: bool) -> Self {
+        self.skip_blanks = Some(skip);
         self
     }
 
@@ -555,6 +571,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             buffer_size,
             background_rgb,
             blank_strategy,
+            skip_blanks,
             failure_policy,
             dedupe,
             resume,
@@ -571,6 +588,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             buffer_size,
             background_rgb,
             blank_strategy,
+            skip_blanks,
             failure_policy,
             dedupe,
         );
@@ -1060,11 +1078,13 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_engine_config(
     concurrency: Option<usize>,
     buffer_size: Option<usize>,
     background_rgb: Option<[u8; 3]>,
     blank_strategy: Option<BlankTileStrategy>,
+    skip_blanks: Option<bool>,
     failure_policy: Option<FailurePolicy>,
     dedupe: Option<DedupeStrategy>,
 ) -> EngineConfig {
@@ -1080,6 +1100,9 @@ fn build_engine_config(
     }
     if let Some(bts) = blank_strategy {
         cfg = cfg.with_blank_tile_strategy(bts);
+    }
+    if let Some(skip) = skip_blanks {
+        cfg = cfg.skip_blanks(skip);
     }
     if let Some(fp) = failure_policy {
         cfg = cfg.with_failure_policy(fp);
@@ -2165,6 +2188,7 @@ mod with_config_precedence_tests {
         let builder = EngineBuilder::new(&src, plan(), MemorySink::new())
             .with_concurrency(4)
             .with_dedupe(DedupeStrategy::Blanks)
+            .with_skip_blanks(true)
             .with_cancel(cancel)
             .with_config(cfg);
 
@@ -2177,6 +2201,12 @@ mod with_config_precedence_tests {
             builder.dedupe, None,
             "a config with no dedupe strategy must clear an earlier .with_dedupe, \
              matching how concurrency is overwritten"
+        );
+        assert_eq!(
+            builder.skip_blanks,
+            Some(false),
+            "a config with skip_blanks=false must overwrite an earlier \
+             .with_skip_blanks(true), matching how concurrency is overwritten"
         );
         assert!(
             builder.cancel.is_none(),
@@ -2198,6 +2228,128 @@ mod with_config_precedence_tests {
 
         assert_eq!(builder.concurrency, Some(7));
         assert_eq!(builder.dedupe, Some(DedupeStrategy::Blanks));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `skip_blanks` through the real EngineBuilder + FsSink acceptance path
+// (libviprs-tests issue #87)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod skip_blanks_builder_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::{FsSink, TileFormat};
+    use std::path::Path;
+
+    /// A mostly-white raster whose top-left `patch × patch` quadrant carries a
+    /// gradient, so full-resolution tiles split into uniform (blank) tiles over
+    /// the white margin and non-uniform tiles over the patch.
+    fn mostly_blank_raster(w: u32, h: u32, patch: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![255u8; w as usize * h as usize * bpp];
+        for y in 0..patch.min(h) {
+            for x in 0..patch.min(w) {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                data[off] = (x % 256) as u8;
+                data[off + 1] = (y % 256) as u8;
+                data[off + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// Recursively count regular files with the `.raw` tile extension under
+    /// `root`. FsSink writes one such file per emitted tile, so this is the
+    /// on-disk tile-file count the acceptance path actually produces.
+    fn count_raw_tile_files(root: &Path) -> usize {
+        fn walk(cur: &Path, count: &mut usize) {
+            let Ok(entries) = std::fs::read_dir(cur) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(&p, count);
+                } else if p.extension().and_then(|e| e.to_str()) == Some("raw") {
+                    *count += 1;
+                }
+            }
+        }
+        let mut count = 0;
+        walk(root, &mut count);
+        count
+    }
+
+    /// The real acceptance path: build a pyramid through
+    /// [`EngineBuilder`] + [`FsSink`] over a mostly-blank source, once with
+    /// `with_skip_blanks(true)` and once with it off. Skipping must hand
+    /// strictly FEWER tiles to the sink, leaving strictly fewer `.raw` files on
+    /// disk, and must report `tiles_skipped > 0`. This exercises the builder's
+    /// `with_skip_blanks` setter end to end (the field must survive the builder
+    /// into the monolithic engine, which was the regression), and it is
+    /// parameterised over concurrency so the parallel consumer's skip branch is
+    /// locked in alongside the single-threaded one.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn with_skip_blanks_writes_strictly_fewer_files_through_the_builder() {
+        for concurrency in [0usize, 2] {
+            let src = mostly_blank_raster(512, 512, 256);
+            let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom)
+                .unwrap()
+                .plan();
+
+            let run = |skip: bool, dir: &Path| -> EngineResult {
+                let sink =
+                    FsSink::new(dir.to_path_buf(), plan.clone()).with_format(TileFormat::Raw);
+                EngineBuilder::new(&src, plan.clone(), sink)
+                    .with_engine(EngineKind::Monolithic)
+                    .with_concurrency(concurrency)
+                    .with_skip_blanks(skip)
+                    .run()
+                    .expect("builder run must succeed")
+            };
+
+            let full_dir = tempfile::tempdir().unwrap();
+            let skip_dir = tempfile::tempdir().unwrap();
+
+            let full = run(false, full_dir.path());
+            let skipped = run(true, skip_dir.path());
+
+            let full_files = count_raw_tile_files(full_dir.path());
+            let skip_files = count_raw_tile_files(skip_dir.path());
+
+            // Setup sanity: the full run wrote one file per produced tile.
+            assert_eq!(
+                full_files as u64, full.tiles_produced,
+                "concurrency={concurrency}: full run must write one file per produced tile"
+            );
+            assert_eq!(
+                skip_files as u64, skipped.tiles_produced,
+                "concurrency={concurrency}: skip run must write one file per produced tile"
+            );
+
+            assert!(
+                skipped.tiles_skipped > 0,
+                "concurrency={concurrency}: at least one blank tile must be skipped, got {}",
+                skipped.tiles_skipped
+            );
+            assert!(
+                skip_files < full_files,
+                "concurrency={concurrency}: skip_blanks must leave strictly fewer .raw files on \
+                 disk: {skip_files} vs full {full_files}"
+            );
+            assert!(
+                skipped.tiles_produced < full.tiles_produced,
+                "concurrency={concurrency}: skip_blanks must hand strictly fewer tiles to the sink: \
+                 {} vs full {}",
+                skipped.tiles_produced,
+                full.tiles_produced
+            );
+        }
     }
 }
 
