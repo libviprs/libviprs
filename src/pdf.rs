@@ -413,16 +413,18 @@ const DEFAULT_BACKGROUND_RENDER_DPI: u32 = 72;
 /// any region the page leaves transparent shows `background` instead of the
 /// default white. `background` is read as `[r, g, b]` or `[r, g, b, a]` with
 /// each channel a `0..=255` intensity; a missing alpha defaults to fully
-/// opaque, and out-of-range or non-finite values are clamped into `0..=255`.
-/// The page renders at [`DEFAULT_BACKGROUND_RENDER_DPI`]; callers that need a
-/// specific resolution use [`extract_page_image_dpi`], which this mirrors.
+/// opaque. Out-of-range values are clamped into `0..=255` and a non-finite
+/// channel falls back to its default, so a NaN alpha stays opaque and the u8
+/// narrowing never wraps. The page renders at libvips `pdfload`'s 72-DPI
+/// baseline; callers that need a specific resolution use
+/// [`extract_page_image_dpi`], which this mirrors.
 ///
 /// # Errors
 ///
 /// A [`crate::codec::DecodeError`]: an unsupported-capability error without
-/// `pdfium`, an invalid-input error for a zero page or a `background` with
-/// fewer than three channels, otherwise the rasteriser's error folded into the
-/// decode error.
+/// `pdfium`, an invalid-input error for a zero page or a `background` that is
+/// not 3 (`r, g, b`) or 4 (`r, g, b, a`) channels, otherwise the rasteriser's
+/// error folded into the decode error.
 pub fn extract_page_image_with_background(
     path: &Path,
     page: u32,
@@ -436,11 +438,11 @@ pub fn extract_page_image_with_background(
                 "page index must be >= 1",
             )));
         }
-        if background.len() < 3 {
+        if !(3..=4).contains(&background.len()) {
             return Err(crate::source::SourceError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "background must supply at least 3 channels (r, g, b), got {}",
+                    "background must supply 3 (r, g, b) or 4 (r, g, b, a) channels, got {}",
                     background.len()
                 ),
             )));
@@ -1429,20 +1431,19 @@ pub(crate) fn render_at_size(
 /// Build pdfium's clear colour from a `background` colour slice.
 ///
 /// The slice is read as `[r, g, b]` or `[r, g, b, a]` with each channel a
-/// `0..=255` intensity; a missing alpha defaults to fully opaque. Any missing
-/// leading channel defaults to `0` and non-finite or out-of-range values are
-/// clamped into `0..=255`, so narrowing to pdfium's `u8` channels can never
-/// wrap. This stays total (the public entry point validates the channel count
-/// up front), so a short slice can never panic here.
+/// `0..=255` intensity; a missing alpha defaults to fully opaque. A missing or
+/// non-finite channel (NaN or infinity) falls back to its default before
+/// clamping, so a NaN alpha reads as opaque (its default) rather than
+/// saturating to a transparent `0`, and out-of-range values clamp into
+/// `0..=255`. Narrowing to pdfium's `u8` channels can therefore never wrap.
+/// This stays total (the public entry point validates the channel count up
+/// front), so a short slice can never panic here.
 #[cfg(feature = "pdfium")]
 fn background_to_pdf_color(background: &[f64]) -> pdfium_render::prelude::PdfColor {
     let channel = |index: usize, default: f64| -> u8 {
-        background
-            .get(index)
-            .copied()
-            .unwrap_or(default)
-            .clamp(0.0, 255.0)
-            .round() as u8
+        let raw = background.get(index).copied().unwrap_or(default);
+        let value = if raw.is_finite() { raw } else { default };
+        value.clamp(0.0, 255.0).round() as u8
     };
     pdfium_render::prelude::PdfColor::new(
         channel(0, 0.0),
@@ -1945,6 +1946,74 @@ mod tests {
         assert_ne!(
             white_corner, red_corner,
             "different backgrounds must produce different transparent-region pixels"
+        );
+    }
+
+    /// A non-finite channel falls back to its default rather than saturating
+    /// through the `u8` cast: a NaN alpha reads as opaque (its `255` default),
+    /// non-finite colour channels read as their `0` default, and finite
+    /// out-of-range values still clamp into `0..=255`. Guards the non-finite
+    /// contract of [`background_to_pdf_color`] (see #87).
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn background_to_pdf_color_maps_non_finite_channels_to_defaults() {
+        // A NaN alpha must land on the opaque default, not a transparent 0.
+        let nan_alpha = background_to_pdf_color(&[10.0, 20.0, 30.0, f64::NAN]);
+        assert_eq!(
+            (
+                nan_alpha.red(),
+                nan_alpha.green(),
+                nan_alpha.blue(),
+                nan_alpha.alpha()
+            ),
+            (10, 20, 30, 255),
+            "a NaN alpha must fall back to the opaque default"
+        );
+
+        // Every non-finite variant (NaN, +inf, -inf) resolves to its channel
+        // default rather than wrapping the cast.
+        let non_finite =
+            background_to_pdf_color(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN]);
+        assert_eq!(
+            (
+                non_finite.red(),
+                non_finite.green(),
+                non_finite.blue(),
+                non_finite.alpha()
+            ),
+            (0, 0, 0, 255),
+            "non-finite channels fall back to their defaults"
+        );
+
+        // Finite out-of-range values still clamp into 0..=255.
+        let clamped = background_to_pdf_color(&[-5.0, 300.0, 128.0]);
+        assert_eq!(
+            (
+                clamped.red(),
+                clamped.green(),
+                clamped.blue(),
+                clamped.alpha()
+            ),
+            (0, 255, 128, 255),
+            "finite out-of-range values clamp into 0..=255"
+        );
+    }
+
+    /// The entry point rejects a background slice with more than four channels
+    /// instead of silently ignoring the trailing data: a 5-channel slice fails
+    /// loudly with a typed invalid-input decode error (see #87).
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn extract_page_image_with_background_rejects_over_length_slice() {
+        let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
+        let (_dir, path) = save_doc(doc);
+
+        let err = extract_page_image_with_background(&path, 1, &[0.0, 0.0, 0.0, 255.0, 0.0])
+            .expect_err("a 5-channel background must be rejected");
+        assert!(
+            err.to_string()
+                .contains("3 (r, g, b) or 4 (r, g, b, a) channels"),
+            "over-length background must report the channel-count error, got: {err}"
         );
     }
 
