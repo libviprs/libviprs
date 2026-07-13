@@ -100,6 +100,11 @@ impl MapReduceConfig {
             buffer_size: self.buffer_size,
             background_rgb: self.background_rgb,
             blank_tile_strategy: self.blank_tile_strategy,
+            // Build-only: the MapReduce engine does not (yet) honour
+            // skip_blanks; keeping it off preserves current behaviour.
+            // Engine-side skip_blanks parity for streaming/mapreduce is
+            // deferred (libviprs-tests#87 lane 2 covers the monolithic engine).
+            skip_blanks: false,
             failure_policy: self.failure_policy.clone(),
             checkpoint_every: 0,
             dedupe_strategy: None,
