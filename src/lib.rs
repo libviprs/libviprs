@@ -130,7 +130,8 @@ pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, S
 // `Raster` and travel with the already-exported `Raster` type.
 pub use encode_tiff::{decode_tiff_page, tiff_page_count};
 pub use engine::{
-    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations, is_blank_tile,
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations,
+    generate_pyramid_region, is_blank_tile,
 };
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
