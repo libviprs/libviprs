@@ -432,6 +432,47 @@ impl Raster {
 /// The limits are configured on the decoder before any pixel data is
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
+/// Decode an image file in sequential-access mode (libvips
+/// `access = sequential`).
+///
+/// Sequential access is a memory/IO hint: it lets a loader stream the image
+/// top to bottom instead of keeping it randomly addressable. libviprs
+/// decodes each supported format fully into a [`Raster`] regardless, so the
+/// hint does not change the result: this returns exactly what [`decode_file`]
+/// returns for the same file. The distinct entry point pins the ported
+/// `access = sequential` call surface and reserves the seam for a future
+/// streaming loader.
+///
+/// # Errors
+///
+/// As [`decode_file`].
+pub fn decode_file_sequential(path: &Path) -> Result<Raster, SourceError> {
+    decode_file(path)
+}
+
+/// Decode an image file with shrink-on-load by an integer factor (libvips
+/// JPEG `shrink` load option, typically 1, 2, 4, or 8).
+///
+/// The image is decoded and then reduced by `shrink` on each axis with the
+/// box shrink, giving output dimensions `round(dim / shrink)`. A `shrink` of
+/// 0 or 1 returns the image at full size. A dedicated shrink-on-load decode
+/// path (decoding directly at reduced resolution) can replace the body later
+/// without changing this signature.
+///
+/// # Errors
+///
+/// As [`decode_file`], plus a shrink/resample failure surfaced as
+/// [`SourceError::Io`].
+pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, SourceError> {
+    let base = decode_file(path)?;
+    if shrink <= 1 {
+        return Ok(base);
+    }
+    let factor = f64::from(shrink);
+    base.try_shrink(factor, factor)
+        .map_err(|e| SourceError::Io(std::io::Error::other(e.to_string())))
+}
+
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
     // Sniff the leading magic: native .v files and JPEGs take the
     // in-memory path (the .v decoder parses the libvips header itself,
@@ -1261,5 +1302,44 @@ mod tests {
         set_load_cache_max_entries(DEFAULT_LOAD_CACHE_MAX_ENTRIES);
         set_load_cache_max_bytes(DEFAULT_LOAD_CACHE_MAX_BYTES);
         clear_load_cache();
+    }
+
+    #[test]
+    fn decode_file_sequential_matches_decode_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seq.v");
+        generate_test_raster(48, 32).unwrap().save(&path).unwrap();
+
+        let normal = decode_file(&path).unwrap();
+        let sequential = decode_file_sequential(&path).unwrap();
+        assert_eq!(normal.width(), sequential.width());
+        assert_eq!(normal.height(), sequential.height());
+        assert_eq!(normal.format(), sequential.format());
+        assert_eq!(normal.data(), sequential.data());
+    }
+
+    #[test]
+    fn decode_file_with_shrink_reduces_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shrink.v");
+        generate_test_raster(100, 100).unwrap().save(&path).unwrap();
+
+        // shrink <= 1 is a no-op returning the full-size image.
+        assert_eq!(decode_file_with_shrink(&path, 1).unwrap().width(), 100);
+
+        for factor in [2u32, 4] {
+            let shrunk = decode_file_with_shrink(&path, factor).unwrap();
+            let expected = (100.0_f64 / f64::from(factor)).round() as i64;
+            assert!(
+                (i64::from(shrunk.width()) - expected).abs() <= 1,
+                "shrink={factor}: width {} not near {expected}",
+                shrunk.width()
+            );
+            assert!(
+                (i64::from(shrunk.height()) - expected).abs() <= 1,
+                "shrink={factor}: height {} not near {expected}",
+                shrunk.height()
+            );
+        }
     }
 }

@@ -301,6 +301,117 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
     Ok(PdfInfo { page_count, pages })
 }
 
+/// Build a shared decode error naming a PDF capability that is not available
+/// in this build.
+fn decode_unavailable(what: impl std::fmt::Display) -> crate::codec::DecodeError {
+    crate::source::SourceError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{what} is not available in this build"),
+    ))
+}
+
+/// Fold a [`PdfError`] into the shared decode error, so the DPI/password
+/// extract helpers can report through the `DecodeError` their contracts name.
+fn pdf_to_decode(err: PdfError) -> crate::codec::DecodeError {
+    crate::source::SourceError::Io(std::io::Error::other(err.to_string()))
+}
+
+/// Read [`PdfInfo`] from a password-protected PDF (libvips `pdfload` with
+/// `password`).
+///
+/// Unencrypted documents open regardless of `password`, so this returns the
+/// same result as [`pdf_info`] for them. Encrypted documents need a
+/// decryption path this pure-Rust build does not provide: when the plain read
+/// fails and a non-empty `password` was supplied, this reports a typed
+/// [`PdfError::UnsupportedFormat`] naming the password-protected case rather
+/// than a decrypted document.
+///
+/// # Errors
+///
+/// [`PdfError::UnsupportedFormat`] for an encrypted document, otherwise the
+/// same errors as [`pdf_info`].
+pub fn pdf_info_with_password(path: &Path, password: &str) -> Result<PdfInfo, PdfError> {
+    match pdf_info(path) {
+        Ok(info) => Ok(info),
+        Err(_) if !password.is_empty() => Err(PdfError::UnsupportedFormat(
+            "password-protected PDF decryption is not available in this build".to_string(),
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+/// Extract a page's embedded image at a target render DPI (libvips `pdfload`
+/// with `dpi`), page numbers 1-based.
+///
+/// With the `pdfium` feature the page is rendered at `dpi` through pdfium, so
+/// the output dimensions scale with the DPI. Without `pdfium` there is no
+/// DPI-controlled rasteriser, so this reports a typed decode error: embedded
+/// extraction ([`extract_page_image`]) returns images at their stored size
+/// and cannot honour a DPI.
+///
+/// # Errors
+///
+/// A [`crate::codec::DecodeError`]: an unsupported-capability error without
+/// `pdfium`, an invalid-input error for a non-positive DPI or a zero page,
+/// otherwise the rasteriser's error folded into the decode error.
+pub fn extract_page_image_dpi(
+    path: &Path,
+    page: u32,
+    dpi: f64,
+) -> Result<Raster, crate::codec::DecodeError> {
+    #[cfg(feature = "pdfium")]
+    {
+        if page == 0 {
+            return Err(crate::source::SourceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "page index must be >= 1",
+            )));
+        }
+        if !(dpi.is_finite() && dpi >= 1.0) {
+            return Err(crate::source::SourceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("dpi must be finite and >= 1, got {dpi}"),
+            )));
+        }
+        let dpi_u32 = dpi.round() as u32;
+        render_page_pdfium(path, page as usize, dpi_u32).map_err(pdf_to_decode)
+    }
+    #[cfg(not(feature = "pdfium"))]
+    {
+        let _ = (path, page, dpi);
+        Err(decode_unavailable(
+            "PDF rendering at a specified DPI (requires the `pdfium` feature)",
+        ))
+    }
+}
+
+/// Extract a page image from a password-protected PDF (libvips `pdfload` with
+/// `password`), page numbers 1-based.
+///
+/// Unencrypted documents extract regardless of `password`. Encrypted
+/// documents need a decryption path this build does not provide: when the
+/// plain extraction fails and a non-empty `password` was supplied, this
+/// reports a typed decode error naming the password-protected case.
+///
+/// # Errors
+///
+/// A [`crate::codec::DecodeError`]: an unsupported-capability error for an
+/// encrypted document, otherwise the extraction error folded into the decode
+/// error.
+pub fn extract_page_image_with_password(
+    path: &Path,
+    page: u32,
+    password: &str,
+) -> Result<Raster, crate::codec::DecodeError> {
+    match extract_page_image(path, page as usize) {
+        Ok(raster) => Ok(raster),
+        Err(_) if !password.is_empty() => {
+            Err(decode_unavailable("password-protected PDF decryption"))
+        }
+        Err(err) => Err(pdf_to_decode(err)),
+    }
+}
+
 /// Resolve a 1-based `page` number to its object id in the `lopdf` page map.
 ///
 /// `lopdf` keys its page map by `u32`, but callers hand us a `usize` page
@@ -1489,6 +1600,29 @@ pub fn render_page_pdfium_budgeted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_info_with_password_reports_encrypted_as_unsupported() {
+        let bogus = Path::new("/nonexistent/secret.pdf");
+        // A non-empty password on an unreadable/encrypted document reports the
+        // typed unsupported-capability error.
+        match pdf_info_with_password(bogus, "secret") {
+            Err(PdfError::UnsupportedFormat(msg)) => {
+                assert!(msg.contains("password"), "message was {msg:?}");
+            }
+            other => panic!("expected UnsupportedFormat, got {other:?}"),
+        }
+        // An empty password surfaces the underlying open error unchanged.
+        assert!(pdf_info_with_password(bogus, "").is_err());
+    }
+
+    #[test]
+    fn password_and_dpi_extract_return_a_clean_typed_error() {
+        let bogus = Path::new("/nonexistent/secret.pdf");
+        // Both return the shared DecodeError without panicking.
+        assert!(extract_page_image_with_password(bogus, 1, "secret").is_err());
+        assert!(extract_page_image_dpi(bogus, 1, 72.0).is_err());
+    }
 
     /// Regression for #91: `page_object_id` must range-check the `usize -> u32`
     /// page-number narrowing. A page number at or above `2^32` truncates under

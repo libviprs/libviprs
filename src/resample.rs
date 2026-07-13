@@ -2609,6 +2609,51 @@ impl Raster {
     }
 }
 
+/// Map a [`ThumbnailError`] onto the shared decode error, preserving the
+/// decode cause and folding the resample/colour/crop steps into an I/O error.
+fn thumbnail_to_decode(err: ThumbnailError) -> crate::codec::DecodeError {
+    match err {
+        ThumbnailError::Decode(source) => source,
+        other => crate::source::SourceError::Io(std::io::Error::other(other.to_string())),
+    }
+}
+
+/// Make a thumbnail from an image file, bounded by `width` (libvips
+/// `vips_thumbnail` bare-width form).
+///
+/// A convenience free function over [`Raster::try_thumbnail`] returning the
+/// shared [`crate::codec::DecodeError`], matching the ported foreign cell's
+/// `thumbnail(path, width)` surface. The image is loaded and shrunk to fit
+/// inside a `width` x `width` box, preserving aspect ratio.
+///
+/// # Errors
+///
+/// A [`crate::codec::DecodeError`] when the file cannot be read or decoded,
+/// or when the resample step fails.
+pub fn thumbnail(path: &Path, width: u32) -> Result<Raster, crate::codec::DecodeError> {
+    Raster::try_thumbnail(path, width, None, false).map_err(thumbnail_to_decode)
+}
+
+/// Make a thumbnail from an image file into a `width` x `height` box with a
+/// crop mode (libvips `vips_thumbnail` with `crop`).
+///
+/// `crop` selects the fit: `"none"` (or an empty string) fits inside the box
+/// preserving aspect ratio, and any other value (for example `"centre"`)
+/// fills the box and centre-crops to it.
+///
+/// # Errors
+///
+/// As [`thumbnail`], plus the crop step.
+pub fn thumbnail_crop(
+    path: &Path,
+    width: u32,
+    height: u32,
+    crop: &str,
+) -> Result<Raster, crate::codec::DecodeError> {
+    let do_crop = !matches!(crop, "" | "none");
+    Raster::try_thumbnail(path, width, Some(height), do_crop).map_err(thumbnail_to_decode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3384,5 +3429,44 @@ mod tests {
                 "{interp} overshot the [30, 220] input range: got [{lo}, {hi}]"
             );
         }
+    }
+
+    #[test]
+    fn thumbnail_free_fn_fits_the_width_box() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("thumb_in.png");
+        Raster::new(100, 60, PixelFormat::Rgb8, vec![120u8; 100 * 60 * 3])
+            .unwrap()
+            .save(&path)
+            .unwrap();
+
+        // Bare-width fit into a 50x50 box: shrink = max(100/50, 60/50) = 2.
+        let thumb = super::thumbnail(&path, 50).unwrap();
+        assert_eq!(thumb.width(), 50);
+        assert!(
+            (i64::from(thumb.height()) - 30).abs() <= 1,
+            "height {} not near 30",
+            thumb.height()
+        );
+    }
+
+    #[test]
+    fn thumbnail_crop_free_fn_fills_and_crops_the_box() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("thumb_crop_in.png");
+        Raster::new(100, 60, PixelFormat::Rgb8, vec![90u8; 100 * 60 * 3])
+            .unwrap()
+            .save(&path)
+            .unwrap();
+
+        // crop="centre" fills a 40x40 box and centre-crops to it.
+        let thumb = super::thumbnail_crop(&path, 40, 40, "centre").unwrap();
+        assert_eq!(thumb.width(), 40);
+        assert_eq!(thumb.height(), 40);
+
+        // crop="none" fits inside the box, preserving aspect ratio.
+        let fit = super::thumbnail_crop(&path, 40, 40, "none").unwrap();
+        assert!(fit.width() <= 40 && fit.height() <= 40);
+        assert!(fit.width() == 40 || fit.height() == 40);
     }
 }
