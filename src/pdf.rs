@@ -397,6 +397,73 @@ pub fn extract_page_image_dpi(
     }
 }
 
+/// DPI at which [`extract_page_image_with_background`] rasterises a page.
+///
+/// The background helper takes no DPI parameter, so it renders at libvips
+/// `pdfload`'s 72-DPI baseline (the resolution at which one PDF point maps to
+/// one device pixel). Callers that need a specific resolution reach for
+/// [`extract_page_image_dpi`], which this helper otherwise mirrors.
+#[cfg(feature = "pdfium")]
+const DEFAULT_BACKGROUND_RENDER_DPI: u32 = 72;
+
+/// Extract a page image over a solid background fill (libvips `pdfload` with a
+/// `background`), page numbers 1-based.
+///
+/// pdfium clears the output bitmap to `background` before drawing the page, so
+/// any region the page leaves transparent shows `background` instead of the
+/// default white. `background` is read as `[r, g, b]` or `[r, g, b, a]` with
+/// each channel a `0..=255` intensity; a missing alpha defaults to fully
+/// opaque. Out-of-range values are clamped into `0..=255` and a non-finite
+/// channel falls back to its default, so a NaN alpha stays opaque and the u8
+/// narrowing never wraps. The page renders at libvips `pdfload`'s 72-DPI
+/// baseline; callers that need a specific resolution use
+/// [`extract_page_image_dpi`], which this mirrors.
+///
+/// # Errors
+///
+/// A [`crate::codec::DecodeError`]: an unsupported-capability error without
+/// `pdfium`, an invalid-input error for a zero page or a `background` that is
+/// not 3 (`r, g, b`) or 4 (`r, g, b, a`) channels, otherwise the rasteriser's
+/// error folded into the decode error.
+pub fn extract_page_image_with_background(
+    path: &Path,
+    page: u32,
+    background: &[f64],
+) -> Result<Raster, crate::codec::DecodeError> {
+    #[cfg(feature = "pdfium")]
+    {
+        if page == 0 {
+            return Err(crate::source::SourceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "page index must be >= 1",
+            )));
+        }
+        if !(3..=4).contains(&background.len()) {
+            return Err(crate::source::SourceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "background must supply 3 (r, g, b) or 4 (r, g, b, a) channels, got {}",
+                    background.len()
+                ),
+            )));
+        }
+        render_page_pdfium_with_background(
+            path,
+            page as usize,
+            DEFAULT_BACKGROUND_RENDER_DPI,
+            background,
+        )
+        .map_err(pdf_to_decode)
+    }
+    #[cfg(not(feature = "pdfium"))]
+    {
+        let _ = (path, page, background);
+        Err(decode_unavailable(
+            "PDF rendering with a background fill (requires the `pdfium` feature)",
+        ))
+    }
+}
+
 /// Extract a page image from a password-protected PDF (libvips `pdfload` with
 /// `password`), page numbers 1-based.
 ///
@@ -1361,6 +1428,68 @@ pub(crate) fn render_at_size(
     bitmap_to_raster(|| bitmap.as_image())
 }
 
+/// Build pdfium's clear colour from a `background` colour slice.
+///
+/// The slice is read as `[r, g, b]` or `[r, g, b, a]` with each channel a
+/// `0..=255` intensity; a missing alpha defaults to fully opaque. A missing or
+/// non-finite channel (NaN or infinity) falls back to its default before
+/// clamping, so a NaN alpha reads as opaque (its default) rather than
+/// saturating to a transparent `0`, and out-of-range values clamp into
+/// `0..=255`. Narrowing to pdfium's `u8` channels can therefore never wrap.
+/// This stays total (the public entry point validates the channel count up
+/// front), so a short slice can never panic here.
+#[cfg(feature = "pdfium")]
+fn background_to_pdf_color(background: &[f64]) -> pdfium_render::prelude::PdfColor {
+    let channel = |index: usize, default: f64| -> u8 {
+        let raw = background.get(index).copied().unwrap_or(default);
+        let value = if raw.is_finite() { raw } else { default };
+        value.clamp(0.0, 255.0).round() as u8
+    };
+    pdfium_render::prelude::PdfColor::new(
+        channel(0, 0.0),
+        channel(1, 0.0),
+        channel(2, 0.0),
+        channel(3, 255.0),
+    )
+}
+
+/// Render a page at the given pixel dimensions over a solid `background` fill
+/// and return a Raster.
+///
+/// Identical to [`render_at_size`] except the render config clears the output
+/// bitmap to `background` before drawing the page (pdfium's
+/// [`clear_before_rendering`](pdfium_render::prelude::PdfRenderConfig::clear_before_rendering)
+/// over [`set_clear_color`](pdfium_render::prelude::PdfRenderConfig::set_clear_color),
+/// whose default is
+/// [`PdfColor::WHITE`](pdfium_render::prelude::PdfColor::WHITE)). Any region
+/// the page leaves transparent then shows `background` instead of the default
+/// white. `background` is read as `[r, g, b]` or `[r, g, b, a]`; see
+/// [`background_to_pdf_color`] for the per-channel handling.
+#[cfg(feature = "pdfium")]
+pub(crate) fn render_at_size_with_background(
+    pdf_page: &pdfium_render::prelude::PdfPage<'_>,
+    width: u32,
+    height: u32,
+    background: &[f64],
+) -> Result<Raster, PdfError> {
+    use pdfium_render::prelude::*;
+
+    // Refuse renders whose bitmap buffer would overflow pdfium's i32 span (#148).
+    pdfium_bitmap_span(width, height)?;
+
+    let config = PdfRenderConfig::new()
+        .set_target_width(width as i32)
+        .set_maximum_height(height as i32)
+        .set_clear_color(background_to_pdf_color(background))
+        .clear_before_rendering(true);
+
+    let bitmap = pdf_page
+        .render_with_config(&config)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    bitmap_to_raster(|| bitmap.as_image())
+}
+
 /// Render a PDF page to a raster using PDFium.
 ///
 /// This handles vector content (AutoCAD exports, text, paths) that cannot be
@@ -1391,6 +1520,43 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
     )?;
 
     render_at_size(&pdf_page, width, height)
+}
+
+/// Render a PDF page to a raster over a solid `background` fill using pdfium.
+///
+/// Mirrors [`render_page_pdfium`] but clears the output bitmap to `background`
+/// before drawing, so any region the page leaves transparent shows the
+/// requested colour instead of the default white. See
+/// [`render_at_size_with_background`] for the clear-colour handling. This backs
+/// [`extract_page_image_with_background`].
+#[cfg(feature = "pdfium")]
+fn render_page_pdfium_with_background(
+    path: &Path,
+    page: usize,
+    dpi: u32,
+    background: &[f64],
+) -> Result<Raster, PdfError> {
+    reject_pages_beyond_pdfium_index(path)?;
+    let pdfium = init_pdfium()?;
+    let _lock = pdfium_lock();
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let pages = document.pages();
+    let index = pdfium_page_index(page, pages.len())?;
+    let pdf_page = pages
+        .get(index)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    let (width, height) = render_dims_within_budget(
+        pdf_page.width().value,
+        pdf_page.height().value,
+        dpi,
+        DEFAULT_MAX_RENDER_PIXELS,
+    )?;
+
+    render_at_size_with_background(&pdf_page, width, height, background)
 }
 
 /// Compose the device matrix that maps pre-rotation page coordinates
@@ -1718,6 +1884,136 @@ mod tests {
         assert!(
             err.to_string().contains("password-protected"),
             "encrypted doc should report password-protected, got: {err}"
+        );
+    }
+
+    /// Read one RGBA pixel out of a `PixelFormat::Rgba8` raster's row-major
+    /// byte buffer. Test-only, so an out-of-range coordinate panics.
+    #[cfg(feature = "pdfium")]
+    fn rgba_pixel_at(raster: &Raster, x: u32, y: u32) -> [u8; 4] {
+        assert_eq!(raster.format(), PixelFormat::Rgba8);
+        let idx = ((y * raster.width() + x) * 4) as usize;
+        let px = &raster.data()[idx..idx + 4];
+        [px[0], px[1], px[2], px[3]]
+    }
+
+    /// The background render honours its clear colour: a page whose only
+    /// painted content is a small square in one corner renders the rest of the
+    /// bitmap in the requested colour. Rendering with a white background and
+    /// with a red background both succeed, yield equal dimensions, and differ
+    /// pixel-for-pixel in the transparent region (see #87). Gated on `pdfium`
+    /// because the assertion performs a real page render; without the feature
+    /// the function reports an unsupported-capability decode error instead.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn extract_page_image_with_background_applies_clear_colour() {
+        // A 100x100pt page whose sole content is a 10x10pt black square in the
+        // bottom-left corner. Every other region is unpainted, so pdfium's
+        // clear colour shows through it. That makes it a genuinely transparent
+        // fixture, the precondition a background pixel-difference assertion needs.
+        let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
+        let (_dir, path) = save_doc(doc);
+
+        let white = extract_page_image_with_background(&path, 1, &[255.0, 255.0, 255.0])
+            .expect("white-background render succeeds");
+        let red = extract_page_image_with_background(&path, 1, &[255.0, 0.0, 0.0])
+            .expect("red-background render succeeds");
+
+        // Same page at the same default DPI: identical dimensions.
+        assert!(white.width() > 0 && white.height() > 0);
+        assert_eq!(
+            (white.width(), white.height()),
+            (red.width(), red.height()),
+            "both backgrounds must render the page at the same size"
+        );
+
+        // Sample the top-right corner (far from the bottom-left square, so it
+        // sits in the transparent region). The clear colour reaches it: white
+        // for the white background, red for the red background.
+        let (cx, cy) = (white.width() - 1, 0);
+        let white_corner = rgba_pixel_at(&white, cx, cy);
+        let red_corner = rgba_pixel_at(&red, cx, cy);
+        assert_eq!(
+            white_corner,
+            [255, 255, 255, 255],
+            "white background must fill the transparent region with white"
+        );
+        assert_eq!(
+            red_corner,
+            [255, 0, 0, 255],
+            "red background must fill the transparent region with red"
+        );
+        assert_ne!(
+            white_corner, red_corner,
+            "different backgrounds must produce different transparent-region pixels"
+        );
+    }
+
+    /// A non-finite channel falls back to its default rather than saturating
+    /// through the `u8` cast: a NaN alpha reads as opaque (its `255` default),
+    /// non-finite colour channels read as their `0` default, and finite
+    /// out-of-range values still clamp into `0..=255`. Guards the non-finite
+    /// contract of [`background_to_pdf_color`] (see #87).
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn background_to_pdf_color_maps_non_finite_channels_to_defaults() {
+        // A NaN alpha must land on the opaque default, not a transparent 0.
+        let nan_alpha = background_to_pdf_color(&[10.0, 20.0, 30.0, f64::NAN]);
+        assert_eq!(
+            (
+                nan_alpha.red(),
+                nan_alpha.green(),
+                nan_alpha.blue(),
+                nan_alpha.alpha()
+            ),
+            (10, 20, 30, 255),
+            "a NaN alpha must fall back to the opaque default"
+        );
+
+        // Every non-finite variant (NaN, +inf, -inf) resolves to its channel
+        // default rather than wrapping the cast.
+        let non_finite =
+            background_to_pdf_color(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN]);
+        assert_eq!(
+            (
+                non_finite.red(),
+                non_finite.green(),
+                non_finite.blue(),
+                non_finite.alpha()
+            ),
+            (0, 0, 0, 255),
+            "non-finite channels fall back to their defaults"
+        );
+
+        // Finite out-of-range values still clamp into 0..=255.
+        let clamped = background_to_pdf_color(&[-5.0, 300.0, 128.0]);
+        assert_eq!(
+            (
+                clamped.red(),
+                clamped.green(),
+                clamped.blue(),
+                clamped.alpha()
+            ),
+            (0, 255, 128, 255),
+            "finite out-of-range values clamp into 0..=255"
+        );
+    }
+
+    /// The entry point rejects a background slice with more than four channels
+    /// instead of silently ignoring the trailing data: a 5-channel slice fails
+    /// loudly with a typed invalid-input decode error (see #87).
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn extract_page_image_with_background_rejects_over_length_slice() {
+        let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
+        let (_dir, path) = save_doc(doc);
+
+        let err = extract_page_image_with_background(&path, 1, &[0.0, 0.0, 0.0, 255.0, 0.0])
+            .expect_err("a 5-channel background must be rejected");
+        assert!(
+            err.to_string()
+                .contains("3 (r, g, b) or 4 (r, g, b, a) channels"),
+            "over-length background must report the channel-count error, got: {err}"
         );
     }
 
