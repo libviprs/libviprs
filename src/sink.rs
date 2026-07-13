@@ -24,7 +24,7 @@ pub use crate::retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use crate::sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 
 #[cfg(feature = "packfile")]
-pub use crate::sink_packfile::{PackfileFormat, PackfileSink};
+pub use crate::sink_packfile::{PackfileFormat, PackfileSink, ZipSink};
 
 /// Errors that can occur when writing tiles to a sink.
 ///
