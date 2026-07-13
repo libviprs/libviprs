@@ -1372,13 +1372,28 @@ impl Raster {
     /// `im.max_diff(&expected) == 0.0`. Both rasters must share pixel
     /// dimensions and band count.
     ///
+    /// NaN caveat: NaN samples are unsupported. A NaN difference propagates,
+    /// so any NaN-containing input yields a NaN result, matching
+    /// [`Raster::try_avg_diff`].
+    ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
     /// [`ArithmeticError::BandCountMismatch`] if the rasters disagree.
     pub fn try_max_diff(&self, other: &Raster) -> Result<f64, ArithmeticError> {
         ensure_compatible(self, other)?;
-        Ok(self.diff_fold(other, 0.0, f64::max))
+        // Propagate NaN instead of dropping it: `f64::max` would silently
+        // return the finite operand, disagreeing with the NaN-propagating
+        // sum in `try_avg_diff` and letting a `max_diff == 0.0` assertion
+        // pass over unsupported NaN input. Fold to NaN once either side is
+        // NaN so the whole reduction surfaces it.
+        Ok(self.diff_fold(other, 0.0, |acc, d| {
+            if acc.is_nan() || d.is_nan() {
+                f64::NAN
+            } else {
+                acc.max(d)
+            }
+        }))
     }
 
     /// Panicking form of [`Raster::try_max_diff`], matching the ported-test
@@ -1400,6 +1415,10 @@ impl Raster {
     /// ported foreign cells assert on this for lossy round-trips, for
     /// example `im.colourspace("scrgb").avg_diff(...) < 0.02`. Both rasters
     /// must share pixel dimensions and band count.
+    ///
+    /// NaN caveat: NaN samples are unsupported. A NaN difference propagates
+    /// through the sum, so any NaN-containing input yields a NaN result,
+    /// matching [`Raster::try_max_diff`].
     ///
     /// # Errors
     ///
@@ -2636,6 +2655,17 @@ mod tests {
         let b = grayf(2, 1, &[0.25, 1.5]);
         assert!((a.avg_diff(&b) - 0.375).abs() < 1e-6);
         assert!((a.max_diff(&b) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_propagate_a_nan_sample() {
+        // NaN samples are unsupported input; both reductions agree by
+        // propagating NaN, so neither silently reports a finite difference
+        // (in particular max_diff must not drop the NaN and pass `== 0.0`).
+        let a = grayf(2, 1, &[f32::NAN, 1.0]);
+        let b = grayf(2, 1, &[0.0, 1.0]);
+        assert!(a.max_diff(&b).is_nan());
+        assert!(a.avg_diff(&b).is_nan());
     }
 
     #[test]
