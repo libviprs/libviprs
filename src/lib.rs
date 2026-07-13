@@ -184,8 +184,9 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
-// The text/tabular decoders are re-exported at the crate root (not just behind
-// the module path) so the ported connection and foreign cells can import them
-// as `use libviprs::{matrix_load, csv_load, ppm_load}`, matching the way the
-// `imageio` and `source` decode helpers are surfaced.
-pub use textio::{csv_load, matrix_load, ppm_load};
+// The text/tabular decoders are inherent associated functions on `Raster`
+// (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
+// ported connection and foreign cells reach them through the crate-root
+// `Raster` re-export above. Associated functions need no free-function
+// re-export, so the crate root exposes only their encoder counterparts on
+// `Raster` and the `textio` module path itself.
