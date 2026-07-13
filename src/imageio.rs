@@ -490,6 +490,21 @@ impl Raster {
         })
     }
 
+    /// Read a metadata field as an `i32` (libvips `vips_image_get_int`).
+    ///
+    /// Resolves `name` through [`Raster::get_field`] and returns the value
+    /// when it is an integer that fits in an `i32` (for example the built-in
+    /// `width`/`height`/`bands` header fields, or an attached field such as
+    /// `bits-per-sample`, `tile-width`, or `page-height` set by a loader).
+    /// Returns `None` for an absent field, a non-integer value, or an integer
+    /// outside the `i32` range.
+    pub fn get_int(&self, name: &str) -> Option<i32> {
+        match self.get_field(name)? {
+            MetadataValue::Int(value) => i32::try_from(value).ok(),
+            _ => None,
+        }
+    }
+
     /// Fallible form of [`Raster::set_field`].
     ///
     /// # Errors
@@ -1472,6 +1487,29 @@ mod tests {
         assert!(r.is_err());
         let r = std::panic::catch_unwind(|| MetadataValue::Int(-1).as_u32());
         assert!(r.is_err());
+    }
+
+    /**
+     * Tests `get_int` coerces integer fields (built-in `bands` and an
+     * attached loader field) to `i32`, and returns `None` for an absent
+     * field, a non-integer value, and an out-of-`i32`-range integer.
+     */
+    #[test]
+    fn get_int_reads_integer_fields() {
+        let mut im = rgb_2x2();
+        // Built-in header field resolves through get_field as an Int.
+        assert_eq!(im.get_int("bands"), Some(3));
+
+        // An attached loader-style field round-trips through get_int.
+        im.set_field("bits-per-sample", MetadataValue::Int(8));
+        assert_eq!(im.get_int("bits-per-sample"), Some(8));
+
+        // Absent, non-integer, and out-of-range cases all yield None.
+        assert_eq!(im.get_int("no-such-field"), None);
+        im.set_field("note", "hello".into());
+        assert_eq!(im.get_int("note"), None);
+        im.set_field("huge", MetadataValue::Int(i64::from(i32::MAX) + 1));
+        assert_eq!(im.get_int("huge"), None);
     }
 
     // -- save / .v ----------------------------------------------------------

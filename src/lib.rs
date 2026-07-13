@@ -67,6 +67,7 @@ pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
 pub mod extract;
+pub mod foreign_stubs;
 pub mod freqfilt;
 pub mod geo;
 pub mod histogram;
@@ -133,6 +134,15 @@ pub use engine::{
 };
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
+// The deferred foreign-format free functions and options are re-exported at
+// the root because the ported foreign cell reaches them there
+// (`use libviprs::{magickload, decode_svg, ...}`), matching the imageio
+// convention above. The deferred encoders and `dzsave_buffer` are inherent
+// methods on `Raster`, so they need no re-export.
+pub use foreign_stubs::{
+    MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, decode_svg,
+    magickload, magickload_with,
+};
 pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
@@ -156,7 +166,10 @@ pub use observe::{
 #[cfg(feature = "pdfium")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
-pub use pdf::{PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, pdf_info};
+pub use pdf::{
+    PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, extract_page_image_dpi,
+    extract_page_image_with_password, pdf_info, pdf_info_with_password,
+};
 pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
@@ -164,6 +177,7 @@ pub use planner::{
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
+    thumbnail, thumbnail_crop,
 };
 pub use resume::{
     CompletedTileSet, JobCheckpoint, JobMetadata, ResumeError, ResumeMode, ResumePolicy,
@@ -179,8 +193,9 @@ pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder};
 pub use source::{
-    SourceError, clear_load_cache, decode_bytes, decode_file, decode_file_with_options,
-    generate_test_raster, set_load_cache_max_bytes, set_load_cache_max_entries,
+    SourceError, clear_load_cache, decode_bytes, decode_file, decode_file_sequential,
+    decode_file_with_options, decode_file_with_shrink, generate_test_raster,
+    set_load_cache_max_bytes, set_load_cache_max_entries,
 };
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
