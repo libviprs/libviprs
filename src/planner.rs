@@ -35,6 +35,10 @@ pub enum PlannerError {
 ///   manifest. Compatible with OpenSeadragon, Leaflet, and similar viewers.
 /// * `Xyz` -- `{z}/{x}/{y}.{ext}`, the standard slippy-map / tile-server
 ///   convention used by web mapping libraries.
+/// * `Zoomify`: `TileGroup{N}/{level}-{col}-{row}.{ext}` with a companion
+///   `ImageProperties.xml` descriptor. Tiles are bucketed 256 per group.
+/// * `Iiif`: IIIF Image API v2 region paths with a companion `info.json`
+///   image information document.
 ///
 /// # Example usage
 ///
@@ -52,6 +56,14 @@ pub enum Layout {
     /// Google Maps -- power-of-2 tile grids, `{z}/{x}/{y}.{ext}`.
     /// z=0 is the most zoomed-out level (single tile). No manifest.
     Google,
+    /// Zoomify: `TileGroup{N}/{level}-{col}-{row}.{ext}`, 256 tiles per
+    /// group numbered cumulatively from the most zoomed-out level, plus an
+    /// `ImageProperties.xml` sidecar. `level` 0 is the smallest (overview).
+    Zoomify,
+    /// IIIF Image API v2: `{region}/{size},/0/default.{ext}`, where `region`
+    /// is expressed in full-resolution image coordinates, plus an `info.json`
+    /// sidecar. Compatible with OpenSeadragon and other IIIF viewers.
+    Iiif,
 }
 
 /// Configuration builder for pyramid tile generation.
@@ -634,6 +646,49 @@ impl PyramidPlan {
                 "{}/{}/{}.{}",
                 coord.level, coord.row, coord.col, extension
             )),
+            Layout::Zoomify => {
+                // Zoomify buckets tiles into `TileGroup{N}` directories of 256
+                // tiles each. Tiles are numbered sequentially starting from the
+                // most zoomed-out level (level 0): first every tile in the lower
+                // (smaller) levels, then row-major within this level. The group
+                // index is that running number divided by 256.
+                let mut n: u64 = 0;
+                for lp in &self.levels {
+                    if lp.level < coord.level {
+                        n += lp.cols as u64 * lp.rows as u64;
+                    }
+                }
+                n += coord.row as u64 * level.cols as u64 + coord.col as u64;
+                let group = n / 256;
+                Some(format!(
+                    "TileGroup{}/{}-{}-{}.{}",
+                    group, coord.level, coord.col, coord.row, extension
+                ))
+            }
+            Layout::Iiif => {
+                // IIIF Image API v2 path: `{region}/{size},/{rotation}/default`.
+                // The region is expressed in full-resolution image coordinates,
+                // so a level's tile index scales up by `sub = 2^(top - level)`.
+                let top_level = self.levels.len() as u32 - 1;
+                let sub = 1u32 << (top_level - coord.level);
+                let ts = self.tile_size;
+                let left = coord.col * ts * sub;
+                let top = coord.row * ts * sub;
+                let region_w = (ts * sub).min(self.image_width - left);
+                let region_h = (ts * sub).min(self.image_height - top);
+                // Output size is the tile's pixel width at this level.
+                let size = ts.min(level.width - coord.col * ts);
+                let region = if left == 0
+                    && top == 0
+                    && region_w == self.image_width
+                    && region_h == self.image_height
+                {
+                    "full".to_string()
+                } else {
+                    format!("{left},{top},{region_w},{region_h}")
+                };
+                Some(format!("{region}/{size},/0/default.{extension}"))
+            }
         }
     }
 
@@ -663,6 +718,72 @@ impl PyramidPlan {
             width = self.image_width,
             height = self.image_height,
         ))
+    }
+
+    /// Layout-specific properties/info sidecar that a viewer needs alongside
+    /// the tiles, returned as `(relative_path, content)` where `relative_path`
+    /// is relative to the tile output directory.
+    ///
+    /// * [`Layout::Zoomify`]: `ImageProperties.xml` (the Zoomify
+    ///   `IMAGE_PROPERTIES` descriptor carrying `WIDTH`, `HEIGHT`, `NUMTILES`,
+    ///   and `TILESIZE`).
+    /// * [`Layout::Iiif`]: `info.json` (the IIIF Image API v2 image
+    ///   information document with `@context`, `width`, `height`, and the
+    ///   `tiles` descriptor).
+    ///
+    /// Returns `None` for layouts whose sidecar lives outside the tile
+    /// directory or that have none. [`Layout::DeepZoom`] is one such case: its
+    /// `.dzi` manifest is a sibling of the output directory (its name derives
+    /// from the directory name, which only the sink knows), so it is emitted
+    /// from [`dzi_manifest`](Self::dzi_manifest) instead.
+    ///
+    /// Keeping every layout's sidecar format in one place means the sink only
+    /// has to plumb bytes to a path, never reason about a layout.
+    pub fn properties_sidecar(&self, ext: &str) -> Option<(String, String)> {
+        match self.layout {
+            Layout::Zoomify => {
+                let xml = format!(
+                    "<IMAGE_PROPERTIES WIDTH=\"{width}\" HEIGHT=\"{height}\" \
+                     NUMTILES=\"{numtiles}\" NUMIMAGES=\"1\" VERSION=\"1.8\" \
+                     TILESIZE=\"{tile_size}\" />\n",
+                    width = self.image_width,
+                    height = self.image_height,
+                    numtiles = self.total_tile_count(),
+                    tile_size = self.tile_size,
+                );
+                Some(("ImageProperties.xml".to_string(), xml))
+            }
+            Layout::Iiif => {
+                // scaleFactors are the available downsampling ratios: one power
+                // of two per pyramid level, `1` (full resolution) up to
+                // `2^(levels-1)` (the smallest overview).
+                let scale_factors = (0..self.levels.len())
+                    .map(|i| (1u64 << i).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let json = format!(
+                    "{{\n\
+                     \x20 \"@context\": \"http://iiif.io/api/image/2/context.json\",\n\
+                     \x20 \"@id\": \"https://example.com/iiif\",\n\
+                     \x20 \"protocol\": \"http://iiif.io/api/image\",\n\
+                     \x20 \"width\": {width},\n\
+                     \x20 \"height\": {height},\n\
+                     \x20 \"tiles\": [\n\
+                     \x20   {{ \"width\": {tile_size}, \"scaleFactors\": [{scale_factors}] }}\n\
+                     \x20 ],\n\
+                     \x20 \"profile\": [\n\
+                     \x20   \"http://iiif.io/api/image/2/level0.json\",\n\
+                     \x20   {{ \"formats\": [\"{ext}\"], \"qualities\": [\"default\"] }}\n\
+                     \x20 ]\n\
+                     }}\n",
+                    width = self.image_width,
+                    height = self.image_height,
+                    tile_size = self.tile_size,
+                );
+                Some(("info.json".to_string(), json))
+            }
+            Layout::DeepZoom | Layout::Xyz | Layout::Google => None,
+        }
     }
 
     /// Canvas dimensions at the given level for Google layout.
@@ -1466,6 +1587,155 @@ mod tests {
         let (ox0, oy0) = plan.centre_offset_at_level(0);
         assert_eq!(ox0, 1);
         assert_eq!(oy0, 26);
+    }
+
+    // -- DeepZoom layout variants: Zoomify + IIIF (libviprs-tests#87) --
+
+    /// Zoomify buckets tiles 256 to a `TileGroup{N}` directory, numbering them
+    /// cumulatively from the most zoomed-out level. These are concrete,
+    /// hand-computed group numbers for an 8192x8192 @ 128 pyramid (14 levels):
+    /// tiles preceding level 11 = 8+4+16+64 = 92, and preceding level 13 =
+    /// 92+256+1024 = 1372, so their groups are 347/256 = 1 and 1372/256 = 5.
+    #[test]
+    fn zoomify_tile_path_matches_libvips_grouping() {
+        let plan = PyramidPlanner::new(8192, 8192, 128, 0, Layout::Zoomify)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.level_count(), 14);
+        // The overview tile is number 0, hence TileGroup0.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(0, 0, 0), "jpg").unwrap(),
+            "TileGroup0/0-0-0.jpg"
+        );
+        // Level 11, tile (15,15): n = 92 + 15*16 + 15 = 347 -> group 1.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(11, 15, 15), "jpg").unwrap(),
+            "TileGroup1/11-15-15.jpg"
+        );
+        // Full-res level 13, tile (0,0): 1372 tiles precede it -> group 5.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(13, 0, 0), "jpg").unwrap(),
+            "TileGroup5/13-0-0.jpg"
+        );
+    }
+
+    /// Every Zoomify tile path must agree with an independent recomputation of
+    /// the cumulative numbering, and the chosen pyramid must actually span more
+    /// than one 256-tile group.
+    #[test]
+    fn zoomify_grouping_is_internally_consistent() {
+        let plan = PyramidPlanner::new(4096, 4096, 128, 0, Layout::Zoomify)
+            .unwrap()
+            .plan();
+        let expected_group = |target: TileCoord| -> u64 {
+            let mut n = 0u64;
+            for lp in &plan.levels {
+                if lp.level < target.level {
+                    n += lp.cols as u64 * lp.rows as u64;
+                }
+            }
+            let cols = plan.levels[target.level as usize].cols as u64;
+            n += target.row as u64 * cols + target.col as u64;
+            n / 256
+        };
+        let mut max_group = 0;
+        for coord in plan.tile_coords() {
+            let path = plan.tile_path(coord, "jpg").unwrap();
+            let g = expected_group(coord);
+            max_group = max_group.max(g);
+            assert_eq!(
+                path,
+                format!(
+                    "TileGroup{g}/{}-{}-{}.jpg",
+                    coord.level, coord.col, coord.row
+                ),
+                "unexpected Zoomify path for {coord:?}"
+            );
+        }
+        assert!(
+            max_group >= 1,
+            "test pyramid must cross a 256-tile group boundary"
+        );
+    }
+
+    /// IIIF v2 paths are `{region}/{size},/0/default.ext` with the region in
+    /// full-resolution coordinates. A single overview tile uses the `full`
+    /// region shorthand.
+    #[test]
+    fn iiif_tile_path_region_and_size() {
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
+            .unwrap()
+            .plan();
+        let top = plan.levels.last().unwrap().level;
+        // Full-res top-left tile: 256x256 region at origin, output size 256.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(top, 0, 0), "jpg").unwrap(),
+            "0,0,256,256/256,/0/default.jpg"
+        );
+        // Full-res bottom-right tile: region offset by one tile.
+        assert_eq!(
+            plan.tile_path(TileCoord::new(top, 1, 1), "jpg").unwrap(),
+            "256,256,256,256/256,/0/default.jpg"
+        );
+        // Overview single tile covers the whole image -> "full".
+        assert_eq!(
+            plan.tile_path(TileCoord::new(0, 0, 0), "jpg").unwrap(),
+            "full/1,/0/default.jpg"
+        );
+    }
+
+    /// Zoomify emits an `ImageProperties.xml` sidecar carrying the full-image
+    /// dimensions, the total tile count, and the tile size.
+    #[test]
+    fn zoomify_properties_sidecar_dimensions() {
+        let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::Zoomify)
+            .unwrap()
+            .plan();
+        let (rel, xml) = plan.properties_sidecar("jpg").unwrap();
+        assert_eq!(rel, "ImageProperties.xml");
+        assert!(xml.contains("WIDTH=\"300\""), "got: {xml}");
+        assert!(xml.contains("HEIGHT=\"200\""), "got: {xml}");
+        assert!(xml.contains("TILESIZE=\"128\""), "got: {xml}");
+        assert!(
+            xml.contains(&format!("NUMTILES=\"{}\"", plan.total_tile_count())),
+            "got: {xml}"
+        );
+    }
+
+    /// IIIF emits an `info.json` sidecar carrying the image dimensions, the
+    /// tile width, and the IIIF v2 context.
+    #[test]
+    fn iiif_info_json_sidecar_dimensions() {
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
+            .unwrap()
+            .plan();
+        let (rel, json) = plan.properties_sidecar("png").unwrap();
+        assert_eq!(rel, "info.json");
+        assert!(json.contains("\"width\": 512"), "got: {json}");
+        assert!(json.contains("\"height\": 512"), "got: {json}");
+        assert!(
+            json.contains("\"width\": 256"),
+            "tile width missing: {json}"
+        );
+        assert!(
+            json.contains("http://iiif.io/api/image/2/context.json"),
+            "got: {json}"
+        );
+    }
+
+    /// Layouts whose sidecar is not written inside the tile directory return
+    /// `None` from `properties_sidecar` (DeepZoom keeps its sibling `.dzi`).
+    #[test]
+    fn non_indir_layouts_have_no_properties_sidecar() {
+        for layout in [Layout::DeepZoom, Layout::Xyz, Layout::Google] {
+            let plan = PyramidPlanner::new(300, 200, 128, 0, layout)
+                .unwrap()
+                .plan();
+            assert!(
+                plan.properties_sidecar("png").is_none(),
+                "{layout:?} should have no in-directory properties sidecar"
+            );
+        }
     }
 }
 

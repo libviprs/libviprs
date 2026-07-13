@@ -353,6 +353,19 @@ impl ObjectStoreSink {
                 coord.row,
                 ext,
             ),
+            // Zoomify / IIIF tile paths are plan-dependent (cumulative tile
+            // numbering, region maths), so the planner is the single source of
+            // truth. Prefix its canonical relative tile path with the key
+            // prefix and image name, matching the XYZ / Google key shape.
+            crate::planner::Layout::Zoomify | crate::planner::Layout::Iiif => {
+                let rel = self.plan.tile_path(coord, ext)?;
+                let trimmed = self.cfg.key_prefix.trim_matches('/');
+                if trimmed.is_empty() {
+                    format!("{}/{rel}", self.cfg.image_name)
+                } else {
+                    format!("{trimmed}/{}/{rel}", self.cfg.image_name)
+                }
+            }
         };
         Some(key)
     }
