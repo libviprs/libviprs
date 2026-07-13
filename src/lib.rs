@@ -102,6 +102,7 @@ pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
 pub(crate) mod sync_queue;
+pub mod textio;
 pub mod verify;
 
 // Curated crate-root surface: types and high-level entry points only.
@@ -191,3 +192,9 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
+// The text/tabular decoders are inherent associated functions on `Raster`
+// (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
+// ported connection and foreign cells reach them through the crate-root
+// `Raster` re-export above. Associated functions need no free-function
+// re-export, so the crate root exposes only their encoder counterparts on
+// `Raster` and the `textio` module path itself.
