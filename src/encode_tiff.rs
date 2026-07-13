@@ -325,7 +325,18 @@ impl Raster {
     /// or multiband raster (a compute intermediate with no TIFF form) yields
     /// an empty buffer rather than a spurious error.
     pub fn tiff_save(&self) -> Vec<u8> {
-        encode_to_vec(self, TiffCompression::Deflate).unwrap_or_default()
+        match encode_to_vec(self, TiffCompression::Deflate) {
+            Ok(bytes) => bytes,
+            Err(_err) => {
+                // An empty save is otherwise silent and undiagnosable, so I
+                // surface the reason in debug builds. The contract stays
+                // infallible: float and multiband rasters have no TIFF form
+                // and legitimately yield an empty buffer here.
+                #[cfg(debug_assertions)]
+                eprintln!("tiff_save: encoding produced no bytes ({_err})");
+                Vec::new()
+            }
+        }
     }
 
     /// Decode a raster from in-memory TIFF bytes (the inverse of
@@ -358,6 +369,34 @@ mod tests {
             .collect();
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
         Raster::new(w, h, PixelFormat::Gray16, bytes).unwrap()
+    }
+
+    fn ramp_rgb8(w: u32, h: u32) -> Raster {
+        let data: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let x = (i % w) as u8;
+                let y = (i / w) as u8;
+                [x, y, x.wrapping_add(y)]
+            })
+            .collect();
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn ramp_rgba16(w: u32, h: u32) -> Raster {
+        let samples: Vec<u16> = (0..w * h)
+            .flat_map(|i| {
+                let x = (i % w) as u16;
+                let y = (i / w) as u16;
+                [
+                    x.saturating_mul(200),
+                    y.saturating_mul(200),
+                    x.saturating_add(y).saturating_mul(100),
+                    u16::MAX,
+                ]
+            })
+            .collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
+        Raster::new(w, h, PixelFormat::Rgba16, bytes).unwrap()
     }
 
     fn multipage_gray8_fixture(pages: u8) -> Vec<u8> {
@@ -439,6 +478,60 @@ mod tests {
     }
 
     #[test]
+    fn save_tiff_rgb8_deflate_round_trips_via_decode_tiff_page() {
+        let im = ramp_rgb8(48, 32);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("rgb8.tif");
+        im.save_tiff(&out, TiffCompression::Deflate).unwrap();
+
+        let back = decode_tiff_page(&out, 1).unwrap();
+        assert_eq!(back.width(), im.width());
+        assert_eq!(back.height(), im.height());
+        assert_eq!(back.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            back.data(),
+            im.data(),
+            "multi-channel 8-bit Deflate TIFF must be lossless"
+        );
+    }
+
+    #[test]
+    fn save_tiff_rgba16_deflate_round_trips_via_decode_tiff_page() {
+        let im = ramp_rgba16(48, 32);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("rgba16_deflate.tif");
+        im.save_tiff(&out, TiffCompression::Deflate).unwrap();
+
+        let back = decode_tiff_page(&out, 1).unwrap();
+        assert_eq!(back.width(), im.width());
+        assert_eq!(back.height(), im.height());
+        assert_eq!(back.format(), PixelFormat::Rgba16);
+        assert_eq!(
+            back.data(),
+            im.data(),
+            "16-bit RGBA Deflate TIFF (predictor on) must be lossless"
+        );
+    }
+
+    #[test]
+    fn save_tiff_rgba16_lzw_round_trips_via_decode_tiff_page() {
+        let im = ramp_rgba16(48, 32);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("rgba16_lzw.tif");
+        im.save_tiff(&out, TiffCompression::Lzw).unwrap();
+
+        let back = decode_tiff_page(&out, 1).unwrap();
+        assert_eq!(back.width(), im.width());
+        assert_eq!(back.height(), im.height());
+        assert_eq!(back.format(), PixelFormat::Rgba16);
+        assert_eq!(
+            back.data(),
+            im.data(),
+            "16-bit RGBA LZW TIFF (predictor on) must be lossless"
+        );
+    }
+
+    #[test]
     fn tiff_save_tiff_load_round_trips_bit_exact() {
         let im = ramp_gray8(40, 40);
         let bytes = im.tiff_save();
@@ -447,6 +540,22 @@ mod tests {
         assert_eq!(back.width(), im.width());
         assert_eq!(back.height(), im.height());
         assert_eq!(back.data(), im.data());
+    }
+
+    #[test]
+    fn tiff_save_of_float_raster_yields_empty_and_tiff_load_errs() {
+        // A float raster is a compute intermediate with no TIFF form, so the
+        // infallible `tiff_save` yields an empty buffer (never a panic).
+        let im = Raster::new(2, 2, PixelFormat::RgbaF32, vec![0u8; 2 * 2 * 16]).unwrap();
+        let bytes = im.tiff_save();
+        assert!(
+            bytes.is_empty(),
+            "float raster has no TIFF form and must yield an empty save"
+        );
+        // Loading the resulting empty buffer must surface a typed error, not
+        // panic, so a silently-empty save is diagnosable downstream.
+        assert!(Raster::tiff_load(&bytes).is_err());
+        assert!(Raster::tiff_load(&[]).is_err());
     }
 
     #[test]
