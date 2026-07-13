@@ -281,14 +281,20 @@ pub struct PdfPageInfo {
 /// **See also:** [interactive example](https://libviprs.org/cli/#info)
 pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    Ok(pdf_info_from_doc(&doc))
+}
+
+/// Build a [`PdfInfo`] from an already-loaded document. Shared by [`pdf_info`]
+/// and [`pdf_info_with_password`] so the loaded document is walked once.
+fn pdf_info_from_doc(doc: &lopdf::Document) -> PdfInfo {
     let pages_map = doc.get_pages();
     let page_count = pages_map.len();
     let mut pages = Vec::with_capacity(page_count);
 
     // Pages are returned as BTreeMap<u32, ObjectId>, sorted by page number
     for (&page_num, &page_id) in &pages_map {
-        let (width_pts, height_pts) = get_page_dimensions(&doc, page_id);
-        let has_images = page_has_images(&doc, page_id);
+        let (width_pts, height_pts) = get_page_dimensions(doc, page_id);
+        let has_images = page_has_images(doc, page_id);
 
         pages.push(PdfPageInfo {
             page_number: page_num as usize,
@@ -298,7 +304,7 @@ pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
         });
     }
 
-    Ok(PdfInfo { page_count, pages })
+    PdfInfo { page_count, pages }
 }
 
 /// Build a shared decode error naming a PDF capability that is not available
@@ -320,24 +326,30 @@ fn pdf_to_decode(err: PdfError) -> crate::codec::DecodeError {
 /// `password`).
 ///
 /// Unencrypted documents open regardless of `password`, so this returns the
-/// same result as [`pdf_info`] for them. Encrypted documents need a
-/// decryption path this pure-Rust build does not provide: when the plain read
-/// fails and a non-empty `password` was supplied, this reports a typed
-/// [`PdfError::UnsupportedFormat`] naming the password-protected case rather
-/// than a decrypted document.
+/// same result as [`pdf_info`] for them. Encrypted documents need a decryption
+/// path this pure-Rust build does not provide: only when the opened document
+/// actually carries an encryption dictionary (`lopdf`'s
+/// [`is_encrypted`](lopdf::Document::is_encrypted)) and a non-empty `password`
+/// was supplied does this report a typed [`PdfError::UnsupportedFormat`] naming
+/// the password-protected case. A missing, unreadable, or malformed file
+/// surfaces its real IO/parse error unchanged rather than being mislabelled as
+/// password-protected.
 ///
 /// # Errors
 ///
-/// [`PdfError::UnsupportedFormat`] for an encrypted document, otherwise the
-/// same errors as [`pdf_info`].
+/// [`PdfError::UnsupportedFormat`] for an encrypted document opened with a
+/// non-empty password, otherwise the same errors as [`pdf_info`].
 pub fn pdf_info_with_password(path: &Path, password: &str) -> Result<PdfInfo, PdfError> {
-    match pdf_info(path) {
-        Ok(info) => Ok(info),
-        Err(_) if !password.is_empty() => Err(PdfError::UnsupportedFormat(
+    // Open first so a missing/unreadable/malformed file surfaces its real
+    // IO/parse error. `lopdf` loads an encrypted document's structure without
+    // decrypting its streams, so the encryption dictionary is observable here.
+    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    if !password.is_empty() && doc.is_encrypted() {
+        return Err(PdfError::UnsupportedFormat(
             "password-protected PDF decryption is not available in this build".to_string(),
-        )),
-        Err(err) => Err(err),
+        ));
     }
+    Ok(pdf_info_from_doc(&doc))
 }
 
 /// Extract a page's embedded image at a target render DPI (libvips `pdfload`
@@ -388,28 +400,34 @@ pub fn extract_page_image_dpi(
 /// Extract a page image from a password-protected PDF (libvips `pdfload` with
 /// `password`), page numbers 1-based.
 ///
-/// Unencrypted documents extract regardless of `password`. Encrypted
-/// documents need a decryption path this build does not provide: when the
-/// plain extraction fails and a non-empty `password` was supplied, this
-/// reports a typed decode error naming the password-protected case.
+/// Unencrypted documents extract regardless of `password`. Encrypted documents
+/// need a decryption path this build does not provide: only when the opened
+/// document actually carries an encryption dictionary (`lopdf`'s
+/// [`is_encrypted`](lopdf::Document::is_encrypted)) and a non-empty `password`
+/// was supplied does this report a typed unsupported-capability decode error
+/// naming the password-protected case. A missing, unreadable, or malformed file
+/// surfaces its real IO/parse error folded into the decode error rather than
+/// being mislabelled as password-protected.
 ///
 /// # Errors
 ///
 /// A [`crate::codec::DecodeError`]: an unsupported-capability error for an
-/// encrypted document, otherwise the extraction error folded into the decode
-/// error.
+/// encrypted document opened with a non-empty password, otherwise the
+/// extraction error folded into the decode error.
 pub fn extract_page_image_with_password(
     path: &Path,
     page: u32,
     password: &str,
 ) -> Result<Raster, crate::codec::DecodeError> {
-    match extract_page_image(path, page as usize) {
-        Ok(raster) => Ok(raster),
-        Err(_) if !password.is_empty() => {
-            Err(decode_unavailable("password-protected PDF decryption"))
-        }
-        Err(err) => Err(pdf_to_decode(err)),
+    // Open first so a missing/unreadable/malformed file surfaces its real
+    // error. Only a genuinely encrypted document folds to the
+    // password-protected capability error.
+    let doc =
+        lopdf::Document::load(path).map_err(|e| pdf_to_decode(PdfError::Parse(e.to_string())))?;
+    if !password.is_empty() && doc.is_encrypted() {
+        return Err(decode_unavailable("password-protected PDF decryption"));
     }
+    extract_page_image_from_doc(&doc, page as usize).map_err(pdf_to_decode)
 }
 
 /// Resolve a 1-based `page` number to its object id in the `lopdf` page map.
@@ -526,10 +544,17 @@ pub(crate) fn pdfium_page_index(
 /// uses this when the page has embedded images).
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    extract_page_image_from_doc(&doc, page)
+}
+
+/// Extract the largest embedded image from a page of an already-loaded
+/// document. Shared by [`extract_page_image`] and
+/// [`extract_page_image_with_password`] so the document is loaded once.
+fn extract_page_image_from_doc(doc: &lopdf::Document, page: usize) -> Result<Raster, PdfError> {
     let pages_map = doc.get_pages();
     let page_id = page_object_id(&pages_map, page)?;
 
-    extract_largest_image(&doc, page_id, page)
+    extract_largest_image(doc, page_id, page)
 }
 
 /// Maximum permitted PDF image dimension, in pixels per axis.
@@ -1601,27 +1626,99 @@ pub fn render_page_pdfium_budgeted(
 mod tests {
     use super::*;
 
+    /// Save a `lopdf` document to a fresh temp file and return the directory
+    /// (kept alive for the file's lifetime) alongside the path.
+    fn save_doc(mut doc: lopdf::Document) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.pdf");
+        doc.save(&path).unwrap();
+        (dir, path)
+    }
+
+    /// A minimal, readable, unencrypted 1-page PDF on disk.
+    fn save_plain_pdf() -> (tempfile::TempDir, std::path::PathBuf) {
+        let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
+        save_doc(doc)
+    }
+
+    /// A 1-page PDF carrying a standard-security `/Encrypt` dictionary, so the
+    /// reloaded document reports `is_encrypted()`. Per the PDF spec the
+    /// encryption dictionary itself is not encrypted, so no crypto is needed to
+    /// make the file parse and read back as encrypted.
+    fn save_encrypted_pdf() -> (tempfile::TempDir, std::path::PathBuf) {
+        use lopdf::{Object, dictionary};
+        let (mut doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
+        let encrypt_id = doc.add_object(dictionary! {
+            "Filter" => "Standard",
+            "V" => 1i64,
+            "R" => 2i64,
+            "P" => -1i64,
+        });
+        doc.trailer.set("Encrypt", Object::Reference(encrypt_id));
+        save_doc(doc)
+    }
+
     #[test]
     fn pdf_info_with_password_reports_encrypted_as_unsupported() {
-        let bogus = Path::new("/nonexistent/secret.pdf");
-        // A non-empty password on an unreadable/encrypted document reports the
-        // typed unsupported-capability error.
-        match pdf_info_with_password(bogus, "secret") {
+        // A genuinely encrypted document (one carrying an /Encrypt dictionary)
+        // opened with a non-empty password reports the typed
+        // unsupported-capability error, since this build cannot decrypt it.
+        let (_dir, path) = save_encrypted_pdf();
+        match pdf_info_with_password(&path, "secret") {
             Err(PdfError::UnsupportedFormat(msg)) => {
                 assert!(msg.contains("password"), "message was {msg:?}");
             }
             other => panic!("expected UnsupportedFormat, got {other:?}"),
         }
-        // An empty password surfaces the underlying open error unchanged.
+    }
+
+    #[test]
+    fn pdf_info_with_password_passes_through_open_error() {
+        // A missing/unreadable file must surface its real open error, not the
+        // password-protected message, even when a password is supplied.
+        let bogus = Path::new("/nonexistent/secret.pdf");
+        match pdf_info_with_password(bogus, "secret") {
+            Err(PdfError::Parse(msg)) => {
+                assert!(!msg.contains("password"), "message was {msg:?}");
+            }
+            other => panic!("expected the underlying open error, got {other:?}"),
+        }
+        // An empty password behaves identically.
         assert!(pdf_info_with_password(bogus, "").is_err());
+    }
+
+    #[test]
+    fn pdf_info_with_password_ignores_password_on_unencrypted_doc() {
+        // A normal, readable document is not mislabelled as password-protected
+        // just because a password was supplied.
+        let (_dir, path) = save_plain_pdf();
+        let info = pdf_info_with_password(&path, "secret").expect("plain doc reads back");
+        assert_eq!(info.page_count, 1);
     }
 
     #[test]
     fn password_and_dpi_extract_return_a_clean_typed_error() {
         let bogus = Path::new("/nonexistent/secret.pdf");
-        // Both return the shared DecodeError without panicking.
-        assert!(extract_page_image_with_password(bogus, 1, "secret").is_err());
+        // A missing file surfaces its real error folded into the decode error,
+        // not the password-protected capability message.
+        let err = extract_page_image_with_password(bogus, 1, "secret").unwrap_err();
+        assert!(
+            !err.to_string().contains("password-protected"),
+            "missing file was mislabelled: {err}"
+        );
         assert!(extract_page_image_dpi(bogus, 1, 72.0).is_err());
+    }
+
+    #[test]
+    fn extract_page_image_with_password_reports_encrypted_as_unsupported() {
+        // An encrypted document opened with a password folds to the typed
+        // password-protected capability error.
+        let (_dir, path) = save_encrypted_pdf();
+        let err = extract_page_image_with_password(&path, 1, "secret").unwrap_err();
+        assert!(
+            err.to_string().contains("password-protected"),
+            "encrypted doc should report password-protected, got: {err}"
+        );
     }
 
     /// Regression for #91: `page_object_id` must range-check the `usize -> u32`
