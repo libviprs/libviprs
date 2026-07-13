@@ -200,6 +200,16 @@ pub struct EngineConfig {
     /// `skip_blanks`. Blankness uses the same exact-uniformity test as
     /// [`is_blank_tile`], and the skip decision takes precedence over the
     /// active [`BlankTileStrategy`].
+    ///
+    /// Honoured by the monolithic engine only. The streaming and map-reduce
+    /// engines currently ignore this flag and emit every tile; parity across
+    /// those engines is deferred.
+    ///
+    /// A level that contains any skipped blank is not eligible for the
+    /// whole-level resume skip optimisation: its blank coordinates are never
+    /// recorded as completed, so the level is never promoted to
+    /// `levels_completed`. On resume such a level is re-walked and its blanks
+    /// re-skipped deterministically, which is safe and idempotent.
     pub skip_blanks: bool,
     /// How to react when a sink write fails after retries.
     pub failure_policy: FailurePolicy,
@@ -310,6 +320,9 @@ impl EngineConfig {
     /// at all for a blank tile. Blankness is the same exact-uniformity test as
     /// [`is_blank_tile`], and skipping wins over the active
     /// [`BlankTileStrategy`]. See [`EngineConfig::skip_blanks`] for the field.
+    ///
+    /// Honoured by the monolithic engine only (the streaming and map-reduce
+    /// engines currently ignore it; parity is deferred).
     pub fn skip_blanks(mut self, skip: bool) -> Self {
         self.skip_blanks = skip;
         self
@@ -456,10 +469,16 @@ pub struct StageDurations {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineResult {
-    /// Total number of tiles written to the sink (including placeholders).
+    /// Total number of tiles written to the sink (including placeholder
+    /// markers). This always equals the number of files the run handed to the
+    /// sink.
     pub tiles_produced: u64,
-    /// Number of tiles that were blank and replaced with placeholders
-    /// (only non-zero when `BlankTileStrategy::Placeholder` is used).
+    /// Number of blank (uniform-colour) tiles the engine treated specially.
+    /// A blank tile is counted here under either
+    /// [`BlankTileStrategy::Placeholder`] (the tile is still written, as a
+    /// 1-byte marker, so it is ALSO in `tiles_produced`) or
+    /// [`EngineConfig::skip_blanks`] (the tile is dropped and so is EXCLUDED
+    /// from `tiles_produced`).
     pub tiles_skipped: u64,
     /// Number of pyramid levels that were processed (always equals the plan's level count).
     pub levels_processed: u32,
@@ -517,9 +536,13 @@ pub(crate) fn generate_pyramid_observed(
 ///
 /// The supplied `plan` must describe the **region** dimensions (`width ×
 /// height`), not the whole source: it is applied to the crop as-is. Build it
-/// with `PyramidPlanner::new(width, height, ..)`. A plan whose dimensions do
-/// not match the crop surfaces as an [`EngineError::Raster`] from the tiling
-/// step rather than silently mis-tiling.
+/// with `PyramidPlanner::new(width, height, ..)`. Sizing the plan for anything
+/// other than the crop is a caller error: an oversized plan (level-0 larger
+/// than the crop) drives the tiling past the crop bounds, while an undersized
+/// plan would silently cover only part of the region. To fail fast rather than
+/// mis-tile, this function checks the plan's level-0 dimensions against
+/// `(width, height)` up front and returns [`EngineError::PlanSourceMismatch`]
+/// before cropping when they differ.
 ///
 /// This mirrors libvips `dzsave`'s region rendering. It is observer-free (it
 /// drives a [`NoopObserver`](crate::observe::NoopObserver) internally); use
@@ -528,8 +551,10 @@ pub(crate) fn generate_pyramid_observed(
 ///
 /// # Errors
 ///
-/// Returns [`EngineError::Raster`] if the region rectangle falls outside `src`,
-/// and any error the underlying pyramid run produces.
+/// Returns [`EngineError::PlanSourceMismatch`] if `plan`'s level-0 dimensions
+/// do not equal `(width, height)`, [`EngineError::Raster`] if the region
+/// rectangle falls outside `src`, and any error the underlying pyramid run
+/// produces.
 // The eight parameters are the region contract: the four pyramid inputs plus
 // the `left/top/width/height` crop rectangle. Bundling the rectangle into a
 // struct would obscure the call site and diverge from the documented API shape,
@@ -545,6 +570,18 @@ pub fn generate_pyramid_region(
     width: u32,
     height: u32,
 ) -> Result<EngineResult, EngineError> {
+    // Fail fast before cropping: the plan must be sized for the crop, not the
+    // whole source. An oversized plan would tile past the crop bounds and an
+    // undersized one would silently cover only part of the region, so a
+    // dimension mismatch is a typed error here rather than a mis-tiled run.
+    if plan.image_width != width || plan.image_height != height {
+        return Err(EngineError::PlanSourceMismatch {
+            plan_width: plan.image_width,
+            plan_height: plan.image_height,
+            source_width: width,
+            source_height: height,
+        });
+    }
     let cropped = src.extract(left, top, width, height)?;
     generate_pyramid_observed(&cropped, plan, sink, config, &crate::observe::NoopObserver)
 }
