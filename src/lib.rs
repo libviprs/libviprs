@@ -61,6 +61,7 @@ pub mod convolution;
 pub mod create;
 pub mod dedupe;
 pub mod draw;
+pub mod encode;
 pub mod engine;
 pub mod engine_builder;
 pub mod extensions;
