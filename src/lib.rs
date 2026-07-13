@@ -169,7 +169,8 @@ pub use observe::{
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
 pub use pdf::{
     PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, extract_page_image_dpi,
-    extract_page_image_with_password, pdf_info, pdf_info_with_password,
+    extract_page_image_with_background, extract_page_image_with_password, pdf_info,
+    pdf_info_with_password,
 };
 pub use pixel::PixelFormat;
 pub use planner::{
