@@ -27,11 +27,13 @@
 //! ## Subsampling caveat
 //!
 //! `image` 0.25's JPEG encoder fixes its chroma sampling factors and offers no
-//! public subsample control, so [`Raster::encode_jpeg_options`] honours the
-//! [`JpegSubsample`] argument on a best-effort basis: the quality is applied
-//! for real, and the mode is retained so the call site and the libvips
-//! `subsample_mode` mapping resolve. When a subsample-capable encoder lands the
-//! mode will drive the sampling factors without a signature change.
+//! public subsample control, so [`Raster::encode_jpeg_options`] accepts the
+//! [`JpegSubsample`] argument for signature and contract compatibility but
+//! currently ignores it: the quality is applied for real, while every subsample
+//! mode selects the same encoder configuration. The argument keeps the call
+//! site and the libvips `subsample_mode` mapping resolving today; when a
+//! subsample-capable encoder lands the mode will drive the sampling factors
+//! without a signature change.
 
 use crate::codec::{EncodeError, JpegSubsample};
 use crate::imageio::SaveError;
@@ -61,8 +63,8 @@ impl Raster {
     /// Encode the raster as JPEG bytes at the given quality, with a requested
     /// chroma [`JpegSubsample`] mode.
     ///
-    /// The quality is applied for real; the subsample mode is best-effort (see
-    /// the [module docs](crate::encode)).
+    /// The quality is applied for real; the subsample mode is accepted but
+    /// currently ignored (see the [module docs](crate::encode)).
     ///
     /// # Errors
     ///
@@ -72,9 +74,9 @@ impl Raster {
         quality: u8,
         subsample: JpegSubsample,
     ) -> Result<Vec<u8>, EncodeError> {
-        // Retained for the libvips `subsample_mode` contract; `image` 0.25 has
-        // no public knob to vary the sampling factors, so every mode selects
-        // the same encoder configuration.
+        // Accepted for the libvips `subsample_mode` contract; `image` 0.25 has
+        // no public knob to vary the sampling factors, so the mode is ignored
+        // and every mode selects the same encoder configuration.
         let _ = subsample;
         let mut buf = Vec::new();
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
@@ -128,7 +130,7 @@ impl Raster {
     /// [`SaveError::Encode`] if the encoder rejects the raster, or
     /// [`SaveError::Io`] if the file write fails.
     pub fn save_jpeg(&self, path: &Path, quality: u8) -> Result<(), SaveError> {
-        let bytes = crate::sink::encode_jpeg(self, quality)?;
+        let bytes = self.encode_jpeg(quality).map_err(save_error_from_encode)?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
@@ -622,6 +624,48 @@ mod tests {
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
     }
 
+    fn rgba8(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Raster {
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.extend_from_slice(&f(x, y));
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgba8, data).unwrap()
+    }
+
+    /// Build an `Rgb16` raster whose samples are laid out native-endian, the
+    /// same byte order [`decode_bytes`] produces, so an exact round-trip must
+    /// reproduce the source buffer verbatim.
+    fn rgb16(w: u32, h: u32, f: impl Fn(u32, u32) -> [u16; 3]) -> Raster {
+        let mut data = Vec::with_capacity((w * h * 6) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                for sample in f(x, y) {
+                    data.extend_from_slice(&sample.to_ne_bytes());
+                }
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb16, data).unwrap()
+    }
+
+    /// Walk the length-prefixed PNG chunk stream and report whether a chunk of
+    /// `kind` is present. Robust against a coincidental byte match inside an
+    /// IDAT payload, unlike a raw byte scan.
+    fn png_has_chunk(buf: &[u8], kind: &[u8; 4]) -> bool {
+        let mut pos = PNG_SIGNATURE.len();
+        while pos + 8 <= buf.len() {
+            let len =
+                u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+            if &buf[pos + 4..pos + 8] == kind {
+                return true;
+            }
+            // length(4) + type(4) + data(len) + crc(4)
+            pos += 12 + len;
+        }
+        false
+    }
+
     fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
         assert_eq!(a.len(), b.len());
         let sum: u64 = a
@@ -658,6 +702,32 @@ mod tests {
     }
 
     #[test]
+    fn png_interlaced_16bit_roundtrip_is_lossless() {
+        // Native-endian u16 samples whose high and low bytes differ on every
+        // channel, so any slip in the Adam7 emit closure's native-to-big-endian
+        // conversion would corrupt the round-trip. Odd 9x7 dimensions force
+        // several Adam7 passes to fire.
+        let im = rgb16(9, 7, |x, y| {
+            [
+                x as u16 * 4096 + 1,
+                y as u16 * 8192 + 2,
+                (x + y) as u16 * 2048 + 3,
+            ]
+        });
+        let buf = im.encode_png_interlaced().unwrap();
+        assert_eq!(&buf[..4], &[0x89, b'P', b'N', b'G']);
+        // IHDR bit-depth byte (16): sig(8) + len(4) + "IHDR"(4) + data[8].
+        assert_eq!(buf[8 + 4 + 4 + 8], 16);
+        // IHDR interlace byte (Adam7 == 1): data[12].
+        assert_eq!(buf[8 + 4 + 4 + 12], 1);
+        let im2 = decode_bytes(&buf).unwrap();
+        assert_eq!(im2.width(), im.width());
+        assert_eq!(im2.height(), im.height());
+        assert_eq!(im2.format(), PixelFormat::Rgb16);
+        assert_eq!(im2.data(), im.data());
+    }
+
+    #[test]
     fn png_palette_exact_is_lossless_and_indexed() {
         let palette = [[10u8, 20, 30], [200, 10, 10], [10, 200, 10], [10, 10, 200]];
         let im = rgb8(16, 16, |x, y| palette[((x / 8) + 2 * (y / 8)) as usize]);
@@ -689,6 +759,53 @@ mod tests {
             "quantized palette had {} colours",
             colours.len()
         );
+    }
+
+    #[test]
+    fn png_palette_rgba8_preserves_alpha_and_writes_trns() {
+        // Four exact colours, two of them non-opaque, so the palette is lossless
+        // and a tRNS chunk must be emitted to carry the per-entry alpha through
+        // the round-trip. Exercises the 4-channel palette input arm.
+        let colours = [
+            [10u8, 20, 30, 255],
+            [200, 10, 10, 128],
+            [10, 200, 10, 255],
+            [10, 10, 200, 0],
+        ];
+        let im = rgba8(16, 16, |x, y| colours[((x / 8) + 2 * (y / 8)) as usize]);
+        let buf = im.encode_png_palette(256).unwrap();
+        // IHDR colour-type byte (indexed == 3): sig(8) + len(4) + "IHDR"(4) + data[9].
+        assert_eq!(buf[8 + 4 + 4 + 9], 3);
+        assert!(
+            png_has_chunk(&buf, b"tRNS"),
+            "an indexed PNG with non-opaque pixels must carry a tRNS chunk"
+        );
+        let im2 = decode_bytes(&buf).unwrap();
+        assert_eq!(im2.width(), im.width());
+        assert_eq!(im2.height(), im.height());
+        assert_eq!(im2.format(), PixelFormat::Rgba8);
+        assert_eq!(im2.data(), im.data());
+    }
+
+    #[test]
+    fn png_palette_gray8_covers_single_channel_input() {
+        // Sixteen distinct gray levels stay well within the palette budget, so
+        // the encode is lossless. This exercises the 1-channel palette input
+        // arm, which expands each gray sample to an opaque RGB triple; with no
+        // non-opaque pixel the indexed PNG carries no tRNS and decodes to Rgb8.
+        let im = Raster::new(4, 4, PixelFormat::Gray8, (0..16u8).collect()).unwrap();
+        let buf = im.encode_png_palette(256).unwrap();
+        assert_eq!(buf[8 + 4 + 4 + 9], 3); // indexed colour type
+        assert!(
+            !png_has_chunk(&buf, b"tRNS"),
+            "a fully opaque palette must not emit a tRNS chunk"
+        );
+        let im2 = decode_bytes(&buf).unwrap();
+        assert_eq!(im2.width(), im.width());
+        assert_eq!(im2.height(), im.height());
+        assert_eq!(im2.format(), PixelFormat::Rgb8);
+        let expected: Vec<u8> = (0..16u8).flat_map(|g| [g, g, g]).collect();
+        assert_eq!(im2.data(), expected.as_slice());
     }
 
     #[test]
