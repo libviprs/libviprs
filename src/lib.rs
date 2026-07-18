@@ -164,14 +164,15 @@ pub use mosaicing::{MergeDirection, MosaicError};
 pub use observe::{
     CollectingObserver, EngineEvent, EngineObserver, FanOutObserver, MemoryTracker, WorkerId,
 };
+pub use pdf::{
+    BackgroundColor, PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image,
+    extract_page_image_dpi, extract_page_image_with_background,
+    extract_page_image_with_background_typed, extract_page_image_with_password, pdf_info,
+    pdf_info_with_password,
+};
 #[cfg(feature = "pdfium")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
 pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
-pub use pdf::{
-    PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image, extract_page_image_dpi,
-    extract_page_image_with_background, extract_page_image_with_password, pdf_info,
-    pdf_info_with_password,
-};
 pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
