@@ -848,15 +848,17 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // checkpoint flush below. The guard sits ahead of `prepare_resume_state`
             // so the Overwrite wipe in that helper only ever runs while held.
             //
-            // The directory to guard is the run's on-disk footprint: the sink's
-            // own output directory (where tiles land and where an Overwrite wipe
-            // strikes) when the sink has one, else the explicit checkpoint root.
-            // A purely in-memory sink with no checkpoint root has nothing on disk
-            // to clobber, so it takes no lock.
-            let lock_dir = sink
-                .checkpoint_root()
-                .map(std::path::Path::to_path_buf)
-                .or_else(|| engine_cfg.checkpoint_root.clone());
+            // The directory to guard MUST be the one the checkpoint I/O actually
+            // uses, so the lock guards the file it protects. That is exactly
+            // `resolve_checkpoint_root` — the same resolver used to read, write,
+            // and preflight-verify the checkpoint: the explicit `checkpoint_root`
+            // config wins, falling back to the sink's own output directory.
+            // Resolving the lock dir any other way (e.g. sink-first) can guard
+            // `out/` while the checkpoint lives in `cp/`, leaving the concurrent
+            // segment appends and header renames in `cp/` unguarded (issue #276).
+            // A purely in-memory sink with no checkpoint root resolves to `None`
+            // and takes no lock — nothing on disk to clobber.
+            let lock_dir = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink);
             let _run_lock = match &lock_dir {
                 Some(dir) => {
                     Some(crate::resume::RunLock::acquire(dir).map_err(EngineError::ResumeFailed)?)
@@ -2731,6 +2733,74 @@ mod run_lock_wiring_tests {
         let reacquired = RunLock::acquire(out.path())
             .expect("the run must release its lock so a later job can acquire it");
         drop(reacquired);
+    }
+
+    // Issue #276: when the sink directory and the explicit checkpoint root
+    // differ, the run must lock the CHECKPOINT directory (where the segment
+    // appends and header renames actually land), not the sink output dir. The
+    // lock dir must resolve with the SAME precedence as `resolve_checkpoint_root`
+    // (explicit `checkpoint_root` wins over the sink's own dir); before the fix
+    // the lock dir resolved sink-first, so a run with `checkpoint_root = cp/`
+    // and a sink at `out/` locked `out/` and left `cp/` unguarded.
+    //
+    // Proof: a stand-in job holds the lock on the checkpoint dir `cp/`. A
+    // builder run whose sink is at `out/` but whose checkpoint root is `cp/`
+    // must be refused with `Locked` naming `cp/`'s lock file. Pre-fix the run
+    // would have locked the free `out/` dir and proceeded (RED); post-fix it
+    // collides on `cp/` and fails fast (GREEN).
+    #[test]
+    fn run_locks_the_checkpoint_dir_not_the_sink_dir_when_they_differ() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        // Cross-check the intended precedence directly against the resolver the
+        // checkpoint I/O uses: with `checkpoint_root = cp/` and a sink at `out/`,
+        // `resolve_checkpoint_root` yields `cp/`. The lock must guard exactly this
+        // directory.
+        let resolve_sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let cfg = EngineConfig::default().with_checkpoint_root(cp.path().to_path_buf());
+        let resolved = crate::engine::resolve_checkpoint_root(&cfg, &resolve_sink)
+            .expect("explicit checkpoint root resolves to Some");
+        assert_eq!(
+            resolved,
+            cp.path(),
+            "sanity: resolve_checkpoint_root prefers the explicit checkpoint root"
+        );
+        assert_ne!(
+            RunLock::lock_path(cp.path()),
+            RunLock::lock_path(out.path()),
+            "sink and checkpoint dirs must be distinct for this test to be meaningful"
+        );
+
+        // Stand in for a live job already holding the lock on the CHECKPOINT dir.
+        let held = RunLock::acquire(cp.path()).expect("first holder locks the checkpoint dir");
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let err = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite().with_checkpoint_root(cp.path().to_path_buf()))
+            .run()
+            .expect_err("the run must be refused: the checkpoint dir it locks is held");
+
+        match err {
+            EngineError::ResumeFailed(ResumeError::Locked { path }) => {
+                assert_eq!(
+                    path,
+                    RunLock::lock_path(&resolved),
+                    "the lock must guard the checkpoint dir (resolve_checkpoint_root), i.e. cp/"
+                );
+                assert_ne!(
+                    path,
+                    RunLock::lock_path(out.path()),
+                    "the lock must NOT guard the sink dir out/ (the pre-fix, wrong-dir behavior)"
+                );
+            }
+            other => panic!("expected ResumeFailed(Locked) on the checkpoint dir, got {other:?}"),
+        }
+
+        drop(held);
     }
 }
 
