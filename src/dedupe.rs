@@ -263,7 +263,7 @@ impl DedupeIndex {
             .unwrap_or("bin");
 
         let (algo, digest) = self.hash_content_raw(bytes);
-        let hash_hex = hex_lower(&digest);
+        let hash_hex = crate::hex::hex_lower(&digest);
         let shared_key = format!("blank_{hash_hex}");
         let shared_path = Self::shared_path(&shared_key, ext);
 
@@ -549,21 +549,6 @@ fn absolutize(p: &Path) -> PathBuf {
             Err(_) => p.to_path_buf(),
         }
     }
-}
-
-/// Lowercase-hex encode a byte slice. Duplicated (as of this writing) in
-/// `manifest.rs` and `checksum.rs`; dtolnay flagged the three copies as a
-/// consolidation opportunity. Deferred to a follow-up because promoting the
-/// helper to `pub(crate)` requires touching a file outside this branch's
-/// scope.
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
 }
 
 // ---------------------------------------------------------------------------
