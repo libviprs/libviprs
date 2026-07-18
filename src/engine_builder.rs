@@ -557,6 +557,72 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         Ok(result)
     }
 
+    /// Generate a pyramid for a rectangular sub-region `(left, top, width,
+    /// height)` of the source — the builder-ergonomic equivalent of
+    /// [`generate_pyramid_region`](crate::generate_pyramid_region).
+    ///
+    /// This is crop-then-pyramid: the source is cropped to the region and the
+    /// plan is run against the crop, so the [`PyramidPlan`] must be sized to the
+    /// region, not the whole source (a dimension mismatch is
+    /// [`EngineError::PlanSourceMismatch`]). The builder's config knobs
+    /// (concurrency, blank strategy, skip-blanks, background, dedupe, failure
+    /// policy, cancellation) are threaded through; resume, streaming, and
+    /// observers are not part of the region path, mirroring the free function.
+    ///
+    /// # Errors
+    ///
+    /// Requires an in-memory raster source; a strip source yields
+    /// [`EngineError::IncompatibleSource`] (a strip cannot be cropped after the
+    /// fact).
+    pub fn run_region(
+        self,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<EngineResult, EngineError> {
+        let EngineBuilder {
+            source,
+            plan,
+            sink,
+            engine_kind,
+            concurrency,
+            buffer_size,
+            background_rgb,
+            blank_strategy,
+            skip_blanks,
+            failure_policy,
+            dedupe,
+            cancel,
+            ..
+        } = self;
+
+        let raster = match source {
+            EngineSource::Raster(r) => r,
+            EngineSource::Strip(_) => {
+                return Err(EngineError::IncompatibleSource {
+                    kind: engine_kind,
+                    reason: "region generation requires an in-memory raster source, not a strip",
+                });
+            }
+        };
+
+        let mut config = build_engine_config(
+            concurrency,
+            buffer_size,
+            background_rgb,
+            blank_strategy,
+            skip_blanks,
+            failure_policy,
+            dedupe,
+        );
+        config.cancel = cancel;
+
+        crate::engine::generate_pyramid_region(
+            raster, &plan, &sink, &config, left, top, width, height,
+        )
+    }
+
     /// Dispatch to the underlying engine and return both the result and the
     /// owned sink.
     pub fn run_collect(self) -> Result<(EngineResult, S), EngineError> {
@@ -2719,6 +2785,40 @@ mod resume_side_effect_tests {
             }
         }
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    /// `EngineBuilder::run_region` is the builder-ergonomic equivalent of the
+    /// free `generate_pyramid_region`: byte-identical tiles for the same crop.
+    #[test]
+    fn builder_run_region_matches_generate_pyramid_region() {
+        use crate::engine::{EngineConfig, generate_pyramid_region};
+        use crate::sink::MemorySink;
+
+        let src = gradient_source(256, 256);
+        let (left, top, w, h) = (0u32, 0u32, 100u32, 100u32);
+        let plan = PyramidPlanner::new(w, h, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let cfg = EngineConfig::default();
+
+        let free_sink = MemorySink::new();
+        let free = generate_pyramid_region(&src, &plan, &free_sink, &cfg, left, top, w, h).unwrap();
+
+        let built_sink = MemorySink::new();
+        let built = EngineBuilder::new(&src, plan.clone(), &built_sink)
+            .run_region(left, top, w, h)
+            .unwrap();
+
+        assert_eq!(free.tiles_produced, built.tiles_produced);
+        let mut a = free_sink.tiles();
+        let mut b = built_sink.tiles();
+        a.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+        b.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.coord, y.coord);
+            assert_eq!(x.data, y.data);
+        }
     }
 
     // A Resume refused on a plan-hash mismatch must leave the output
