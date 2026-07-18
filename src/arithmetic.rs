@@ -315,11 +315,19 @@ fn ensure_compatible(a: &Raster, b: &Raster) -> Result<(), ArithmeticError> {
 }
 
 /// Unwrap an arithmetic result for the panicking ported-test surface.
+///
+/// Most [`ArithmeticError`] variants do not name the failing op, so the panic
+/// prefixes `"<op>: "` for context. [`ArithmeticError::FloatUnsupported`] is
+/// the exception: it embeds the op in its own `Display` (mirroring
+/// [`RasterError::FloatUnsupported`]), so prefixing it here as well would
+/// double the name ("sub: sub does not support float rasters yet ...", #339).
+/// That one variant is emitted verbatim; every other variant keeps the prefix.
 #[inline]
 #[track_caller]
 fn expect_arith<T>(op: &str, r: Result<T, ArithmeticError>) -> T {
     match r {
         Ok(v) => v,
+        Err(e @ ArithmeticError::FloatUnsupported { .. }) => panic!("{e}"),
         Err(e) => panic!("{op}: {e}"),
     }
 }
@@ -2740,6 +2748,46 @@ mod tests {
         ));
     }
 
+    /// Follow-up to #339 (tracked by #350): `FloatUnsupported` embeds the op
+    /// name in its `Display`, so the panicking op forms must not re-prefix it
+    /// via `expect_arith` — otherwise the diagnostic reads "sub: sub does not
+    /// support float rasters yet ...". Both the fallible `try_*` error Display
+    /// and the panicking form's panic message must name the op exactly once.
+    #[test]
+    fn float_unsupported_names_op_exactly_once() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let a = Raster::zeroed(2, 2, f1).unwrap();
+        let b = Raster::zeroed(2, 2, f1).unwrap();
+
+        // Fallible form: the typed error's Display already names "sub" once.
+        let display = a.try_sub(&b).unwrap_err().to_string();
+        assert_eq!(
+            display.matches("sub").count(),
+            1,
+            "try_sub error Display must name the op once, got: {display:?}"
+        );
+        assert!(display.starts_with("sub does not support float rasters yet"));
+
+        // Panicking form: the caught panic payload must name "sub" once too
+        // (was doubled as "sub: sub does not support float rasters yet ...").
+        // Silence the default hook so the intentional panic stays off stderr.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.sub(&b)))
+            .expect_err("sub() on a float raster must panic");
+        std::panic::set_hook(prev);
+        let panic_msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload is a string");
+        assert_eq!(
+            panic_msg.matches("sub").count(),
+            1,
+            "sub() panic message must name the op once, got: {panic_msg:?}"
+        );
+    }
+
     /// Issues #279 / #280: an arithmetic op's output is built through the
     /// fallible, budget-free op-output path ([`alloc_op_output`] +
     /// [`Raster::from_op_output`]) that every op now funnels its result
@@ -2762,12 +2810,18 @@ mod tests {
             "expected SizeOverflow, got {built:?}"
         );
 
-        // 1 byte-per-pixel fits usize but exceeds the Vec capacity ceiling,
-        // so the fallible allocation returns AllocationFailed (never SIGABRT).
+        // 1 byte-per-pixel fits usize on a 64-bit target but exceeds the Vec
+        // capacity ceiling, so the fallible allocation returns AllocationFailed
+        // (never SIGABRT). On a 32-bit-usize target the same u32::MAX x u32::MAX
+        // product overflows usize, so `buffer_len` narrows it to SizeOverflow
+        // first; either typed error proves the abort-safety contract holds.
         let alloc = alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Gray8);
         assert!(
-            matches!(alloc, Err(RasterError::AllocationFailed { .. })),
-            "expected AllocationFailed, got {alloc:?}"
+            matches!(
+                alloc,
+                Err(RasterError::AllocationFailed { .. } | RasterError::SizeOverflow { .. })
+            ),
+            "expected AllocationFailed or SizeOverflow, got {alloc:?}"
         );
     }
 
