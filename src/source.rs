@@ -247,9 +247,25 @@ pub enum SourceError {
         height: u32,
         max_pixels: u64,
     },
+    /// Untrusted header geometry whose single-axis width or height exceeds
+    /// the per-decode [`DecodeLimits::max_coord`] ceiling (the libvips
+    /// `VIPS_MAX_COORD` limit). Distinct from
+    /// [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded),
+    /// which bounds the *total* `width * height` pixel count. Raised by the
+    /// native `.v` reader before any allocation so callers can match the
+    /// over-ceiling case as a typed variant instead of substring-matching
+    /// [`VipsFormat`](SourceError::VipsFormat).
+    #[error(
+        "image dimensions {width}x{height} exceed the single-axis coordinate \
+         ceiling ({max_coord} px per axis); raise DecodeLimits::max_coord"
+    )]
+    CoordLimitExceeded {
+        width: u32,
+        height: u32,
+        max_coord: u32,
+    },
     /// A malformed or unsupported native `.v` file (bad magic, truncated
-    /// header or pixel data, unsupported coding/band format, or header
-    /// geometry past the [`DecodeLimits::max_coord`] ceiling).
+    /// header or pixel data, unsupported coding/band format).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
 }
@@ -263,7 +279,19 @@ pub enum SourceError {
 /// decoder via [`image::Limits`] (so an oversized image is rejected
 /// *before* it is fully allocated), and the combined `width * height`
 /// pixel count is checked explicitly just before raster construction.
+///
+/// The struct is `#[non_exhaustive]`: new limit fields can be added in a
+/// future minor release without it being a breaking change, so external
+/// callers cannot construct it with a struct literal (including functional
+/// update syntax). Start from [`DecodeLimits::default`] and adjust
+/// individual ceilings with the `with_*` builder setters, e.g.
+///
+/// ```
+/// use libviprs::source::DecodeLimits;
+/// let limits = DecodeLimits::default().with_max_coord(20_000);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct DecodeLimits {
     /// Maximum decoded width, in pixels.
     pub max_width: u32,
@@ -304,6 +332,47 @@ impl Default for DecodeLimits {
 }
 
 impl DecodeLimits {
+    /// Set the maximum decoded width, in pixels, returning the updated
+    /// limits. Builder setter for [`#[non_exhaustive]`](DecodeLimits)
+    /// customisation from [`DecodeLimits::default`].
+    #[must_use]
+    pub fn with_max_width(mut self, max_width: u32) -> Self {
+        self.max_width = max_width;
+        self
+    }
+
+    /// Set the maximum decoded height, in pixels, returning the updated
+    /// limits.
+    #[must_use]
+    pub fn with_max_height(mut self, max_height: u32) -> Self {
+        self.max_height = max_height;
+        self
+    }
+
+    /// Set the single-axis [`max_coord`](DecodeLimits::max_coord) ceiling,
+    /// in pixels per axis, returning the updated limits.
+    #[must_use]
+    pub fn with_max_coord(mut self, max_coord: u32) -> Self {
+        self.max_coord = max_coord;
+        self
+    }
+
+    /// Set the maximum total pixel count (`width * height`), returning the
+    /// updated limits.
+    #[must_use]
+    pub fn with_max_pixels(mut self, max_pixels: u64) -> Self {
+        self.max_pixels = max_pixels;
+        self
+    }
+
+    /// Set the maximum number of bytes the decoder may allocate at one
+    /// time, returning the updated limits.
+    #[must_use]
+    pub fn with_max_alloc_bytes(mut self, max_alloc_bytes: u64) -> Self {
+        self.max_alloc_bytes = max_alloc_bytes;
+        self
+    }
+
     /// Translate into the `image` crate's strict/non-strict limit set.
     fn to_image_limits(self) -> Limits {
         let mut limits = Limits::no_limits();
@@ -317,16 +386,16 @@ impl DecodeLimits {
     /// ceiling on untrusted header geometry before a [`Raster`] is built.
     /// Crate-visible so the `.v` decoder in [`crate::imageio`] applies the
     /// same per-decode budget it once read from a mutable process-global.
-    /// Returns the typed [`SourceError::VipsFormat`] on an over-ceiling
-    /// dimension rather than allowing a later wrapping cast or oversized
-    /// allocation.
+    /// Returns the typed [`SourceError::CoordLimitExceeded`] on an
+    /// over-ceiling dimension rather than allowing a later wrapping cast or
+    /// oversized allocation.
     pub(crate) fn check_coord(self, width: u32, height: u32) -> Result<(), SourceError> {
         if width > self.max_coord || height > self.max_coord {
-            return Err(SourceError::VipsFormat(format!(
-                "dimensions {width}x{height} exceed the max_coord ceiling ({}); \
-                 raise DecodeLimits::max_coord",
-                self.max_coord
-            )));
+            return Err(SourceError::CoordLimitExceeded {
+                width,
+                height,
+                max_coord: self.max_coord,
+            });
         }
         Ok(())
     }
@@ -713,6 +782,62 @@ mod tests {
                 .unwrap();
         }
         buf
+    }
+
+    /// `DecodeLimits` is `#[non_exhaustive]`, so external callers customise
+    /// it through the `with_*` builder setters rather than a struct literal.
+    /// Each setter overrides exactly its own field and leaves the rest at
+    /// their [`Default`] values, and `check_coord` reports an over-ceiling
+    /// dimension through the dedicated typed [`SourceError::CoordLimitExceeded`]
+    /// variant (issue #349 / #338 follow-up) instead of an opaque
+    /// [`SourceError::VipsFormat`] string.
+    #[test]
+    fn decode_limits_builder_and_typed_coord_error() {
+        let d = DecodeLimits::default();
+
+        // (a) Builder setters override only their own field.
+        let tuned = DecodeLimits::default()
+            .with_max_width(11)
+            .with_max_height(22)
+            .with_max_coord(33)
+            .with_max_pixels(44)
+            .with_max_alloc_bytes(55);
+        assert_eq!(tuned.max_width, 11);
+        assert_eq!(tuned.max_height, 22);
+        assert_eq!(tuned.max_coord, 33);
+        assert_eq!(tuned.max_pixels, 44);
+        assert_eq!(tuned.max_alloc_bytes, 55);
+
+        // A single setter leaves every other ceiling at the default.
+        let only_coord = DecodeLimits::default().with_max_coord(1000);
+        assert_eq!(only_coord.max_coord, 1000);
+        assert_eq!(only_coord.max_width, d.max_width);
+        assert_eq!(only_coord.max_height, d.max_height);
+        assert_eq!(only_coord.max_pixels, d.max_pixels);
+        assert_eq!(only_coord.max_alloc_bytes, d.max_alloc_bytes);
+
+        // (b) check_coord returns the typed variant carrying the offending
+        // dimensions and the ceiling; the over-axis may be width or height.
+        assert!(matches!(
+            only_coord.check_coord(1001, 10),
+            Err(SourceError::CoordLimitExceeded {
+                width: 1001,
+                height: 10,
+                max_coord: 1000,
+            })
+        ));
+        assert!(matches!(
+            only_coord.check_coord(10, 5000),
+            Err(SourceError::CoordLimitExceeded {
+                width: 10,
+                height: 5000,
+                max_coord: 1000,
+            })
+        ));
+
+        // (c) At or below the ceiling is accepted.
+        assert!(only_coord.check_coord(1000, 1000).is_ok());
+        assert!(only_coord.check_coord(0, 0).is_ok());
     }
 
     /// Encode a `w x h` La16 (gray + alpha) PNG in memory, returning the
