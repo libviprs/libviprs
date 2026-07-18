@@ -39,8 +39,8 @@
 //! unparseable trailer as absent, so pixels and header survive either
 //! way. The reader accepts both byte orders (swapping 16-bit and float
 //! samples as needed), rejects band formats other than uchar, ushort,
-//! and float, and enforces the [`get_max_coord`] dimension ceiling on
-//! untrusted header geometry.
+//! and float, and enforces the [`DecodeLimits::max_coord`] dimension
+//! ceiling on untrusted header geometry.
 //!
 //! # Metadata fields
 //!
@@ -62,14 +62,22 @@
 //! * [`parse_thumbnail_geometry`] — the vipsthumbnail size parser
 //!   (`W`, `WxH`, `Wx`, `xH`, with trailing `<` / `>` / `!` modifiers
 //!   tolerated).
-//! * [`get_max_coord`] / [`set_max_coord`] — the process-wide
-//!   `VIPS_MAX_COORD` dimension ceiling (default 10,000,000). It guards
-//!   untrusted dimensions flowing out of file headers (the `.v` reader
-//!   enforces it); wiring it into the in-memory [`Raster`] constructors
-//!   is deferred so their existing typed-error contracts stay stable.
-//! * [`init_from_env`] — library re-init from the environment: reads
-//!   `VIPS_MAX_COORD` (plain integer, or with a binary `k` / `m` / `g`
-//!   suffix, as libvips parses sizes).
+//! * [`get_max_coord`] / [`set_max_coord`] / [`init_from_env`] —
+//!   **deprecated.** A mutable process-global that raced between
+//!   concurrent jobs and was consulted by only the `.v` reader. The
+//!   `VIPS_MAX_COORD` ceiling now lives on the per-decode
+//!   [`DecodeLimits::max_coord`] field (same 10,000,000 default), so no
+//!   decoder reads these globals any more; they remain for one release so
+//!   old callers keep compiling.
+//!
+//! # Decode limits
+//!
+//! Two levels govern how much work an untrusted input may provoke, and no
+//! more: a per-decode [`DecodeLimits`] (single-axis `max_coord`, total
+//! `max_pixels`, and decoder `max_alloc_bytes`, all applied before the
+//! pixels are materialised) and a per-constructor allocation budget
+//! enforced by the [`Raster`] constructors. The former process-global
+//! `MAX_COORD` third regime has been folded into `DecodeLimits`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -848,9 +856,10 @@ pub(crate) fn is_vips_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && (bytes[..4] == VIPS_MAGIC_LE || bytes[..4] == VIPS_MAGIC_BE)
 }
 
-/// Decode a native `.v` file (both byte orders). Enforces the
-/// [`get_max_coord`] ceiling and the caller's [`DecodeLimits`] on the
-/// untrusted header geometry before allocating.
+/// Decode a native `.v` file (both byte orders). Enforces the caller's
+/// [`DecodeLimits`] — the [`max_coord`](DecodeLimits::max_coord)
+/// single-axis ceiling and the pixel budget — on the untrusted header
+/// geometry before allocating.
 pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     if bytes.len() < VIPS_HEADER_LEN {
         return Err(SourceError::VipsFormat(format!(
@@ -905,13 +914,7 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
         )));
     }
     let (width, height) = (width as u32, height as u32);
-    let max_coord = get_max_coord();
-    if width > max_coord || height > max_coord {
-        return Err(SourceError::VipsFormat(format!(
-            "dimensions {width}x{height} exceed the max_coord ceiling ({max_coord}); \
-             raise it with set_max_coord or VIPS_MAX_COORD"
-        )));
-    }
+    limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
     let format = PixelFormat::with_channels(bands as usize, bpc)
         .ok_or_else(|| SourceError::VipsFormat(format!("unrepresentable .v band count {bands}")))?;
@@ -1212,28 +1215,67 @@ pub const DEFAULT_MAX_COORD: u32 = 10_000_000;
 /// `VIPS_MAX_COORD`.
 static MAX_COORD: AtomicU32 = AtomicU32::new(DEFAULT_MAX_COORD);
 
-/// The current process-wide maximum image dimension applied to untrusted
-/// header geometry (the `.v` reader enforces it; see the
-/// [module docs](crate::imageio)).
+/// The current value of the (deprecated) process-wide dimension global.
+///
+/// # Deprecated
+///
+/// Superseded by the per-decode [`DecodeLimits::max_coord`] field. The
+/// `.v` reader no longer consults this global, so its value no longer
+/// affects any decode; it is retained only so callers pinned to the old
+/// API keep compiling for one release.
+#[deprecated(
+    since = "0.4.0",
+    note = "the process-global coordinate ceiling raced between concurrent jobs and \
+            is superseded by the per-decode DecodeLimits::max_coord field; no decoder \
+            consults this global any more"
+)]
 pub fn get_max_coord() -> u32 {
     MAX_COORD.load(Ordering::Relaxed)
 }
 
-/// Set the process-wide maximum image dimension; see [`get_max_coord`].
+/// Set the (deprecated) process-wide dimension global.
+///
+/// # Deprecated
+///
+/// Superseded by the per-decode [`DecodeLimits::max_coord`] field. Setting
+/// this global no longer influences any decode; construct a
+/// [`DecodeLimits`] with the desired `max_coord` and pass it to the decode
+/// call instead.
+#[deprecated(
+    since = "0.4.0",
+    note = "the process-global coordinate ceiling raced between concurrent jobs and \
+            is superseded by the per-decode DecodeLimits::max_coord field; setting it \
+            no longer affects any decode"
+)]
 pub fn set_max_coord(max: u32) {
     MAX_COORD.store(max, Ordering::Relaxed);
 }
 
-/// Re-initialise library settings from the environment, as the libvips
-/// startup does: reads `VIPS_MAX_COORD` (a plain integer, optionally
-/// with a binary `k` / `m` / `g` suffix) into [`set_max_coord`]. Unset
-/// or unparseable variables leave the current settings untouched.
+/// Re-initialise the (deprecated) process-wide dimension global from
+/// `VIPS_MAX_COORD` in the environment (a plain integer, optionally with a
+/// binary `k` / `m` / `g` suffix). Unset or unparseable variables leave
+/// the current value untouched.
+///
+/// # Deprecated
+///
+/// Superseded by the per-decode [`DecodeLimits::max_coord`] field. This
+/// re-init no longer influences any decode; read the environment in the
+/// caller and populate a [`DecodeLimits`] instead.
+#[deprecated(
+    since = "0.4.0",
+    note = "the process-global coordinate ceiling raced between concurrent jobs and \
+            is superseded by the per-decode DecodeLimits::max_coord field; env re-init \
+            no longer affects any decode"
+)]
 pub fn init_from_env() {
     if let Some(n) = std::env::var("VIPS_MAX_COORD")
         .ok()
         .and_then(|v| parse_size(&v))
     {
-        set_max_coord(n);
+        // Inlined store (rather than calling the deprecated `set_max_coord`)
+        // so this deprecated shim does not itself trip the `deprecated` deny
+        // lint on internal use.
+        MAX_COORD.store(n, Ordering::Relaxed);
     }
 }
 
@@ -1904,32 +1946,68 @@ mod tests {
         );
     }
 
-    /**
-     * Tests the max_coord global: default, set/get round-trip, env
-     * re-init (with suffix parsing), and enforcement in the .v reader.
-     * Runs as one test so the process-global state is exercised
-     * sequentially and restored.
-     */
+    /// The `.v` reader enforces the single-axis ceiling from the per-decode
+    /// [`DecodeLimits::max_coord`] field: an over-ceiling dimension returns
+    /// the typed [`SourceError::VipsFormat`] (never a panic or a wrapping
+    /// cast/overflow), while an in-bounds decode is unaffected. This
+    /// replaces the former process-global enforcement (#293).
     #[test]
-    fn max_coord_accessors_env_and_enforcement() {
+    fn max_coord_enforced_per_decode() {
+        let im = Raster::zeroed(2000, 1, PixelFormat::Gray8).unwrap();
+        let bytes = im.encode_vips().unwrap();
+
+        // (a) Over the per-decode ceiling → typed error, not a panic.
+        let tight = DecodeLimits {
+            max_coord: 1000,
+            ..DecodeLimits::default()
+        };
+        let err = decode_vips_bytes(&bytes, tight).unwrap_err();
+        assert!(
+            matches!(err, SourceError::VipsFormat(ref m) if m.contains("max_coord")),
+            "expected a typed VipsFormat max_coord error, got {err}"
+        );
+
+        // Boundary: exactly at the ceiling is accepted; one below rejects.
+        let at = DecodeLimits {
+            max_coord: 2000,
+            ..DecodeLimits::default()
+        };
+        assert!(decode_vips_bytes(&bytes, at).is_ok());
+        let below = DecodeLimits {
+            max_coord: 1999,
+            ..DecodeLimits::default()
+        };
+        assert!(matches!(
+            decode_vips_bytes(&bytes, below),
+            Err(SourceError::VipsFormat(_))
+        ));
+
+        // (b) The default in-bounds decode is unaffected and round-trips.
+        let decoded = decode_vips_bytes(&bytes, DecodeLimits::default()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2000, 1));
+    }
+
+    /// The deprecated process-global accessors still round-trip and
+    /// [`init_from_env`] still parses `VIPS_MAX_COORD` (kept for one
+    /// release), but the global is now inert for decoding: the ceiling
+    /// lives on [`DecodeLimits::max_coord`], so a header past the global no
+    /// longer affects a default decode. Runs as one serialised test so the
+    /// process-global and env state are exercised in order and restored.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_max_coord_globals_still_round_trip() {
         assert_eq!(get_max_coord(), DEFAULT_MAX_COORD);
 
         set_max_coord(1000);
         assert_eq!(get_max_coord(), 1000);
 
-        // Enforcement: a .v header claiming 2000 px is rejected while the
-        // ceiling is 1000, and accepted once the ceiling is raised.
+        // The global no longer governs decoding: a 2000 px header decodes
+        // fine under the default DecodeLimits even with the global at 1000.
         let im = Raster::zeroed(2000, 1, PixelFormat::Gray8).unwrap();
         let bytes = im.encode_vips().unwrap();
-        let err = decode_vips_bytes(&bytes, DecodeLimits::default()).unwrap_err();
-        assert!(
-            matches!(err, SourceError::VipsFormat(ref m) if m.contains("max_coord")),
-            "{err}"
-        );
-        set_max_coord(DEFAULT_MAX_COORD);
         assert!(decode_vips_bytes(&bytes, DecodeLimits::default()).is_ok());
 
-        // Env re-init, including the binary suffix form.
+        // Env re-init still parses, including the binary suffix form.
         // SAFETY: test-local mutation of this process's environment; the
         // variable is removed again before the test ends.
         unsafe { std::env::set_var("VIPS_MAX_COORD", "500") };

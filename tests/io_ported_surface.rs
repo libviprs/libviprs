@@ -229,6 +229,7 @@ fn ported_thumbnail_geometry_call_site() {
 /// process-wide setting (and restored afterwards so parallel tests are
 /// unaffected: the values used stay far above any fixture size).
 #[test]
+#[allow(deprecated)]
 fn ported_max_coord_call_sites() {
     use libviprs::{get_max_coord, init_from_env, set_max_coord};
 
