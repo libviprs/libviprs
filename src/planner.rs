@@ -71,6 +71,15 @@ pub enum Layout {
     Iiif,
 }
 
+/// Placeholder `@id` base URL written into an IIIF `info.json` when the caller
+/// has not supplied a serving location via [`PyramidPlanner::with_iiif_id`].
+///
+/// IIIF binds `@id` to the location that serves the image, which the planner
+/// cannot know, so this stands in until a caller rewrites it (or configures a
+/// real base URL up-front). Kept as a single constant so the default appears in
+/// exactly one place.
+const DEFAULT_IIIF_ID: &str = "https://example.com/iiif";
+
 /// Configuration builder for pyramid tile generation.
 ///
 /// Holds the source image dimensions, tile size, overlap, and target layout.
@@ -94,6 +103,9 @@ pub struct PyramidPlanner {
     overlap: u32,
     layout: Layout,
     centre: bool,
+    /// Optional IIIF `info.json` `@id` base URL. `None` selects the default
+    /// placeholder ([`DEFAULT_IIIF_ID`]). Only consulted for [`Layout::Iiif`].
+    iiif_id: Option<String>,
 }
 
 /// A complete, immutable pyramid plan ready for execution.
@@ -146,6 +158,16 @@ pub struct PyramidPlan {
     pub centre_offset_x: u32,
     /// Vertical centre offset at full resolution (pixels).
     pub centre_offset_y: u32,
+    /// IIIF `info.json` `@id` base URL, as configured via
+    /// [`PyramidPlanner::with_iiif_id`]. `None` means the default placeholder
+    /// ([`DEFAULT_IIIF_ID`]) is emitted. Only used for [`Layout::Iiif`]; see
+    /// [`properties_sidecar`](Self::properties_sidecar).
+    ///
+    /// `#[serde(default)]` keeps deserialization of a plan envelope produced
+    /// before this field existed backward-compatible (issue #67): a missing
+    /// `iiif_id` deserializes to `None` and reproduces the prior placeholder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub iiif_id: Option<String>,
 }
 
 /// Plan for a single pyramid level.
@@ -251,6 +273,7 @@ impl PyramidPlanner {
             overlap,
             layout,
             centre: false,
+            iiif_id: None,
         })
     }
 
@@ -259,6 +282,22 @@ impl PyramidPlanner {
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-centre)
     pub fn with_centre(mut self, centre: bool) -> Self {
         self.centre = centre;
+        self
+    }
+
+    /// Set the base URL written as the `@id` of the IIIF `info.json` sidecar.
+    ///
+    /// Only affects [`Layout::Iiif`]. IIIF binds `@id` to the location that
+    /// serves the image, which the planner cannot infer, so by default the
+    /// sidecar carries a placeholder (`https://example.com/iiif`) that a caller
+    /// rewrites after publishing. Supplying the real serving base here lets the
+    /// planner emit a ready-to-serve `info.json`, avoiding the string rewrite.
+    ///
+    /// Leaving this unset preserves the previous behaviour exactly (the
+    /// placeholder is emitted). See
+    /// [`properties_sidecar`](PyramidPlan::properties_sidecar).
+    pub fn with_iiif_id(mut self, base: impl Into<String>) -> Self {
+        self.iiif_id = Some(base.into());
         self
     }
 
@@ -312,6 +351,7 @@ impl PyramidPlanner {
             centre: self.centre,
             centre_offset_x: offset_x,
             centre_offset_y: offset_y,
+            iiif_id: self.iiif_id.clone(),
         }
     }
 
@@ -482,6 +522,7 @@ impl PyramidPlanner {
             centre: self.centre,
             centre_offset_x: offset_x,
             centre_offset_y: offset_y,
+            iiif_id: self.iiif_id.clone(),
         }
     }
 
@@ -819,10 +860,13 @@ impl PyramidPlan {
                     .map(|i| (1u64 << i).to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
+                // Caller-configured serving base, or the placeholder when unset
+                // (preserving the prior hardcoded default byte-for-byte).
+                let id = self.iiif_id.as_deref().unwrap_or(DEFAULT_IIIF_ID);
                 let json = format!(
                     "{{\n\
                      \x20 \"@context\": \"http://iiif.io/api/image/2/context.json\",\n\
-                     \x20 \"@id\": \"https://example.com/iiif\",\n\
+                     \x20 \"@id\": \"{id}\",\n\
                      \x20 \"protocol\": \"http://iiif.io/api/image\",\n\
                      \x20 \"width\": {width},\n\
                      \x20 \"height\": {height},\n\
@@ -1845,6 +1889,41 @@ mod tests {
         assert!(
             json.contains("http://iiif.io/api/image/2/context.json"),
             "got: {json}"
+        );
+    }
+
+    /// The IIIF `info.json` `@id` base URL is configurable (issue #322).
+    ///
+    /// Unset, the sidecar must still carry the historical placeholder so
+    /// existing callers see no change; a base supplied via
+    /// [`PyramidPlanner::with_iiif_id`] must appear verbatim in `@id`.
+    #[test]
+    fn iiif_info_json_id_is_configurable() {
+        // (a) Default: the placeholder is preserved byte-for-byte.
+        let default_plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
+            .unwrap()
+            .plan();
+        let (_, default_json) = default_plan.properties_sidecar("png").unwrap();
+        assert!(
+            default_json.contains("\"@id\": \"https://example.com/iiif\""),
+            "default @id placeholder missing: {default_json}"
+        );
+
+        // (b) A caller-supplied base URL flows through to the emitted @id.
+        let base = "https://images.example.org/iiif/book1-page42";
+        let configured_plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
+            .unwrap()
+            .with_iiif_id(base)
+            .plan();
+        let (_, configured_json) = configured_plan.properties_sidecar("png").unwrap();
+        assert!(
+            configured_json.contains(&format!("\"@id\": \"{base}\"")),
+            "configured @id missing: {configured_json}"
+        );
+        // The placeholder must not linger once a base is configured.
+        assert!(
+            !configured_json.contains("https://example.com/iiif"),
+            "placeholder should be replaced, not appended: {configured_json}"
         );
     }
 
