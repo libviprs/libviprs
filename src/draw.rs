@@ -29,7 +29,7 @@
 //! Op coordinates are `i32` so shapes may be positioned partly off-canvas.
 //! Every op clips to the raster bounds: pixels outside `0..width` / `0..height`
 //! are silently skipped, matching the clip-don't-panic convention of classic
-//! raster libraries. Drawing is therefore always infallible.
+//! raster libraries. Coordinate handling is therefore always infallible.
 //!
 //! The flood seed is the one place the ported libvips surface wants an error
 //! instead: as a [`DrawOp`], a [`Flood`] whose seed lies off-canvas is a
@@ -39,10 +39,20 @@
 //!
 //! # Ink
 //!
-//! `ink` is the raw pixel value to paint, as bytes. It is written verbatim to
-//! each affected pixel, cycling if it is shorter than the pixel's byte width
-//! (so `&[100]` fills a `Gray8` pixel, and `&[r, g, b]` fills an `Rgb8` one).
-//! Ink longer than one pixel is truncated to the pixel width.
+//! `ink` is the raw pixel value to paint, as bytes: one whole pixel wide, so
+//! `&[100]` paints a `Gray8` pixel and `&[r, g, b]` an `Rgb8` one. The
+//! `Raster::draw_*` convenience methods validate the ink against the target
+//! raster's pixel width
+//! ([`PixelFormat::bytes_per_pixel`](crate::pixel::PixelFormat::bytes_per_pixel))
+//! before painting: a mismatch is a caller bug (for example a 3-byte RGB ink
+//! on an `Rgba8` raster would paint the alpha band from the red byte), so the
+//! panicking `draw_*` forms panic and the fallible `try_draw_*` forms return
+//! [`DrawError::InkLengthMismatch`] instead of silently corrupting channels.
+//!
+//! The low-level [`Raster::put_pixel`] writer is the raw escape hatch: it
+//! copies ink verbatim, cycling if it is shorter than the pixel's byte width
+//! and truncating if longer, so custom [`DrawOp`]s that paint through it opt
+//! out of the length check.
 //!
 //! # Example: a custom op
 //!
@@ -68,6 +78,7 @@
 
 use thiserror::Error;
 
+use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 
 /// An in-place raster drawing operation.
@@ -83,9 +94,9 @@ pub trait DrawOp {
 
 /// Typed errors for the fallible drawing wrappers in [`crate::draw`].
 ///
-/// Ops themselves are infallible (they clip); this error only surfaces from
-/// the `Raster` convenience methods that the ported libvips tests require to
-/// validate their inputs, currently the flood-fill seed.
+/// Ops themselves clip out-of-range coordinates rather than erroring; these
+/// errors surface from the `Raster` convenience methods that validate their
+/// inputs up front — the flood-fill seed and the ink channel width.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DrawError {
@@ -96,6 +107,26 @@ pub enum DrawError {
         y: i32,
         image_w: u32,
         image_h: u32,
+    },
+    /// The ink byte length does not match the target raster's pixel width.
+    ///
+    /// Ink is painted verbatim as one whole pixel, so it must be exactly
+    /// [`PixelFormat::bytes_per_pixel`](crate::pixel::PixelFormat::bytes_per_pixel)
+    /// bytes (`channels * bytes_per_channel`) for the target raster. A shorter
+    /// ink would silently cycle and a longer one truncate, corrupting channels
+    /// — for example a 3-byte RGB ink on an `Rgba8` raster paints the alpha
+    /// band from the red byte — so a mismatch is rejected instead of drawing
+    /// garbage. Paint through [`Raster::put_pixel`] to opt out of the check.
+    #[error(
+        "ink of {ink_len} bytes does not match the {pixel_bytes}-byte pixel width of {format:?}"
+    )]
+    InkLengthMismatch {
+        /// Length of the supplied ink slice, in bytes.
+        ink_len: usize,
+        /// Bytes required for one whole pixel of the target format.
+        pixel_bytes: usize,
+        /// The target raster's pixel format.
+        format: PixelFormat,
     },
 }
 
@@ -794,6 +825,17 @@ fn fill_circle(raster: &mut Raster, ink: &[u8], cx: i32, cy: i32, radius: i32) {
     });
 }
 
+/// Unwrap a [`DrawError`] into a panic tagged with the operation name, the way
+/// the panicking `draw_*` wrappers turn an ink-width bug into an immediate,
+/// clear failure. Mirrors `expect_resample` in [`crate::resample`].
+#[track_caller]
+fn expect_draw<T>(op: &str, r: Result<T, DrawError>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("{op}: {e}"),
+    }
+}
+
 impl Raster {
     /// Apply any [`DrawOp`] to this raster in place.
     ///
@@ -825,29 +867,161 @@ impl Raster {
     }
 
     /// Draw a circle outline (see [`Circle::outline`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
+    /// see [`Raster::try_draw_circle`] for the fallible form.
+    #[track_caller]
     pub fn draw_circle(&mut self, ink: &[u8], cx: i32, cy: i32, radius: i32) {
+        expect_draw("draw_circle", self.try_draw_circle(ink, cx, cy, radius));
+    }
+
+    /// Fallible form of [`Raster::draw_circle`].
+    ///
+    /// # Errors
+    ///
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format.
+    pub fn try_draw_circle(
+        &mut self,
+        ink: &[u8],
+        cx: i32,
+        cy: i32,
+        radius: i32,
+    ) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.draw(&Circle::outline(ink, cx, cy, radius));
+        Ok(())
     }
 
     /// Draw a filled disc (see [`Circle::filled`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
+    /// see [`Raster::try_draw_circle_filled`] for the fallible form.
+    #[track_caller]
     pub fn draw_circle_filled(&mut self, ink: &[u8], cx: i32, cy: i32, radius: i32) {
+        expect_draw(
+            "draw_circle_filled",
+            self.try_draw_circle_filled(ink, cx, cy, radius),
+        );
+    }
+
+    /// Fallible form of [`Raster::draw_circle_filled`].
+    ///
+    /// # Errors
+    ///
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format.
+    pub fn try_draw_circle_filled(
+        &mut self,
+        ink: &[u8],
+        cx: i32,
+        cy: i32,
+        radius: i32,
+    ) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.draw(&Circle::filled(ink, cx, cy, radius));
+        Ok(())
     }
 
     /// Draw a rectangle outline (see [`Rectangle::outline`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
+    /// see [`Raster::try_draw_rect`] for the fallible form.
+    #[track_caller]
     pub fn draw_rect(&mut self, ink: &[u8], left: i32, top: i32, width: i32, height: i32) {
+        expect_draw(
+            "draw_rect",
+            self.try_draw_rect(ink, left, top, width, height),
+        );
+    }
+
+    /// Fallible form of [`Raster::draw_rect`].
+    ///
+    /// # Errors
+    ///
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format.
+    pub fn try_draw_rect(
+        &mut self,
+        ink: &[u8],
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.draw(&Rectangle::outline(ink, left, top, width, height));
+        Ok(())
     }
 
     /// Draw a filled rectangle (see [`Rectangle::filled`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
+    /// see [`Raster::try_draw_rect_filled`] for the fallible form.
+    #[track_caller]
     pub fn draw_rect_filled(&mut self, ink: &[u8], left: i32, top: i32, width: i32, height: i32) {
+        expect_draw(
+            "draw_rect_filled",
+            self.try_draw_rect_filled(ink, left, top, width, height),
+        );
+    }
+
+    /// Fallible form of [`Raster::draw_rect_filled`].
+    ///
+    /// # Errors
+    ///
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format.
+    pub fn try_draw_rect_filled(
+        &mut self,
+        ink: &[u8],
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.draw(&Rectangle::filled(ink, left, top, width, height));
+        Ok(())
     }
 
     /// Draw a 1px line from `(x1, y1)` to `(x2, y2)`, both endpoints
     /// inclusive (see [`Line`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
+    /// see [`Raster::try_draw_line`] for the fallible form.
+    #[track_caller]
     pub fn draw_line(&mut self, ink: &[u8], x1: i32, y1: i32, x2: i32, y2: i32) {
+        expect_draw("draw_line", self.try_draw_line(ink, x1, y1, x2, y2));
+    }
+
+    /// Fallible form of [`Raster::draw_line`].
+    ///
+    /// # Errors
+    ///
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format.
+    pub fn try_draw_line(
+        &mut self,
+        ink: &[u8],
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+    ) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.draw(&Line::new(ink, x1, y1, x2, y2));
+        Ok(())
     }
 
     /// Flood-fill with `ink` from `(x, y)`, bounded by pixels already equal
@@ -855,9 +1029,11 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// Returns [`DrawError::SeedOutOfBounds`] when the seed lies outside the
-    /// image, matching the ported libvips surface.
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format, or [`DrawError::SeedOutOfBounds`] when the
+    /// seed lies outside the image, matching the ported libvips surface.
     pub fn draw_flood(&mut self, ink: &[u8], x: i32, y: i32) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.flood_seed_in_bounds(x, y)?;
         self.draw(&Flood::bounded(ink, x, y));
         Ok(())
@@ -868,9 +1044,11 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// Returns [`DrawError::SeedOutOfBounds`] when the seed lies outside the
-    /// image.
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format, or [`DrawError::SeedOutOfBounds`] when the
+    /// seed lies outside the image.
     pub fn draw_flood_blob(&mut self, ink: &[u8], x: i32, y: i32) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.flood_seed_in_bounds(x, y)?;
         self.draw(&Flood::blob(ink, x, y));
         Ok(())
@@ -878,8 +1056,32 @@ impl Raster {
 
     /// Paint `ink` through the single-band 8-bit stencil `mask` with the
     /// mask's top-left corner at `(x, y)` (see [`Mask`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
+    /// see [`Raster::try_draw_mask`] for the fallible form.
+    #[track_caller]
     pub fn draw_mask(&mut self, ink: &[u8], mask: &Raster, x: i32, y: i32) {
+        expect_draw("draw_mask", self.try_draw_mask(ink, mask, x, y));
+    }
+
+    /// Fallible form of [`Raster::draw_mask`].
+    ///
+    /// # Errors
+    ///
+    /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
+    /// for this raster's format.
+    pub fn try_draw_mask(
+        &mut self,
+        ink: &[u8],
+        mask: &Raster,
+        x: i32,
+        y: i32,
+    ) -> Result<(), DrawError> {
+        self.check_ink(ink)?;
         self.draw(&Mask::new(ink, mask, x, y));
+        Ok(())
     }
 
     /// Box-blur the rect at `(left, top)` sized `width` x `height` in place
@@ -892,6 +1094,23 @@ impl Raster {
     /// replacing pixels (see [`Paste`]).
     pub fn draw_image(&mut self, sub: &Raster, x: i32, y: i32) {
         self.draw(&Paste::new(sub, x, y));
+    }
+
+    /// Validate that `ink` is exactly one pixel wide for this raster's format,
+    /// the precondition the `draw_*` / `try_draw_*` entry points enforce before
+    /// painting. Correct-length ink is required so the verbatim copy in
+    /// [`Raster::put_pixel`] fills each channel from its own byte instead of
+    /// silently cycling (ink too short) or truncating (ink too long).
+    fn check_ink(&self, ink: &[u8]) -> Result<(), DrawError> {
+        let pixel_bytes = self.format().bytes_per_pixel();
+        if ink.len() != pixel_bytes {
+            return Err(DrawError::InkLengthMismatch {
+                ink_len: ink.len(),
+                pixel_bytes,
+                format: self.format(),
+            });
+        }
+        Ok(())
     }
 
     /// Bounds check shared by the flood wrappers.
@@ -1617,5 +1836,116 @@ mod tests {
         via_methods.draw_smudge(10, 10, 3, 3);
 
         assert_eq!(via_seam.data(), via_methods.data());
+    }
+
+    // ---- ink channel validation (#294) ----
+
+    /// A channel-count / depth mismatch is a typed error, not silent
+    /// corruption: the `try_draw_*` forms reject ink that is not exactly one
+    /// pixel wide and leave the raster untouched (no cycling, no truncation,
+    /// no panic).
+    #[test]
+    fn try_draw_rejects_mismatched_ink_length() {
+        // RGB ink (3 bytes) on an Rgba8 raster (4 bytes/pixel): previously
+        // this painted alpha from the red byte.
+        let mut rgba = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        let err = rgba
+            .try_draw_rect_filled(&[10, 20, 30], 1, 1, 4, 4)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DrawError::InkLengthMismatch {
+                    ink_len: 3,
+                    pixel_bytes: 4,
+                    format: PixelFormat::Rgba8,
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("does not match"), "{err}");
+        assert!(
+            rgba.data().iter().all(|&b| b == 0),
+            "rejected draw must not touch the raster"
+        );
+
+        // One-byte ink on Gray16 (2 bytes/pixel): previously wrote a repeated
+        // low byte.
+        let mut g16 = Raster::zeroed(4, 4, PixelFormat::Gray16).unwrap();
+        let err = g16.try_draw_circle(&[200], 2, 2, 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DrawError::InkLengthMismatch {
+                    ink_len: 1,
+                    pixel_bytes: 2,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(g16.data().iter().all(|&b| b == 0));
+
+        // Too-long ink truncates under the old contract; now it errors too.
+        let mut gray = black(4, 4);
+        assert!(matches!(
+            gray.try_draw_line(&[100, 200], 0, 0, 3, 3).unwrap_err(),
+            DrawError::InkLengthMismatch {
+                ink_len: 2,
+                pixel_bytes: 1,
+                ..
+            }
+        ));
+        // Flood wrappers validate ink up front as well.
+        assert!(matches!(
+            gray.draw_flood(&[1, 2], 0, 0).unwrap_err(),
+            DrawError::InkLengthMismatch { .. }
+        ));
+        assert!(gray.data().iter().all(|&b| b == 0), "nothing painted");
+    }
+
+    /// The panicking `draw_*` forms turn the same mismatch into an immediate
+    /// panic tagged with the op name, mirroring the crate's `expect_*` pattern.
+    #[test]
+    #[should_panic(expected = "draw_rect: ink of 3 bytes does not match")]
+    fn draw_rect_panics_on_mismatched_ink() {
+        let mut rgba = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        rgba.draw_rect(&[10, 20, 30], 0, 0, 2, 2);
+    }
+
+    /// Correct-length ink still draws correctly across depths, and the fill is
+    /// byte-identical to the raw op path (no behaviour change for valid ink).
+    #[test]
+    fn correct_length_ink_draws_and_matches_raw_path() {
+        // Gray8 pixel round-trip through the fallible entry point.
+        let mut gray = black(8, 8);
+        gray.try_draw_rect_filled(&[123], 2, 2, 1, 1).unwrap();
+        assert_eq!(gray.getpoint(2, 2), vec![123.0]);
+        assert_eq!(gray.getpoint(0, 0), vec![0.0], "outside the paint");
+
+        // Rgba8: all four channels come from their own byte; alpha is not
+        // stolen from red, and it round-trips exactly.
+        let mut rgba = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        rgba.try_draw_rect_filled(&[10, 20, 30, 40], 1, 1, 3, 3)
+            .unwrap();
+        assert_eq!(rgba.getpoint(2, 2), vec![10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(rgba.getpoint(0, 0), vec![0.0, 0.0, 0.0, 0.0]);
+
+        // Gray16: a 2-byte native-endian ink round-trips to the 16-bit value.
+        let ink16 = 4_000u16.to_ne_bytes();
+        let mut g16 = Raster::zeroed(6, 6, PixelFormat::Gray16).unwrap();
+        g16.try_draw_circle_filled(&ink16, 3, 3, 2).unwrap();
+        assert_eq!(g16.getpoint(3, 3), vec![4_000.0]);
+
+        // Byte-for-byte parity: the validated entry point, the panicking
+        // wrapper, and the raw op all produce the same bytes for valid ink.
+        let mut via_try = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        via_try.try_draw_rect(&[9, 8, 7, 6], 1, 1, 5, 4).unwrap();
+        let mut via_panic = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        via_panic.draw_rect(&[9, 8, 7, 6], 1, 1, 5, 4);
+        let mut via_raw = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        via_raw.draw(&Rectangle::outline(&[9, 8, 7, 6], 1, 1, 5, 4));
+        assert_eq!(via_try.data(), via_raw.data());
+        assert_eq!(via_panic.data(), via_raw.data());
     }
 }
