@@ -397,6 +397,40 @@ pub fn extract_page_image_dpi(
     }
 }
 
+/// A typed background fill colour for [`extract_page_image_with_background_typed`].
+///
+/// [`extract_page_image_with_background`] takes a loosely-typed `&[f64]` whose
+/// "3 (`r, g, b`) or 4 (`r, g, b, a`) channels" contract is only checked at
+/// runtime. This enum lifts that contract into the type system: a background is
+/// either three opaque RGB channels or four RGBA channels, each a `0..=255`
+/// `u8` intensity, so a wrong channel count is unrepresentable rather than an
+/// invalid-input error.
+///
+/// A `[u8; 3]` or `[u8; 4]` array converts in via [`From`]
+/// ([`Rgb`](Self::Rgb) is implicitly opaque), so callers can hand an array
+/// literal straight to [`extract_page_image_with_background_typed`], which
+/// accepts any `impl Into<BackgroundColor>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundColor {
+    /// Opaque `[r, g, b]`; the alpha channel is implicitly `255` (fully
+    /// opaque), matching a 3-channel `&[f64]` background.
+    Rgb([u8; 3]),
+    /// `[r, g, b, a]` with an explicit `0..=255` alpha channel.
+    Rgba([u8; 4]),
+}
+
+impl From<[u8; 3]> for BackgroundColor {
+    fn from(rgb: [u8; 3]) -> Self {
+        BackgroundColor::Rgb(rgb)
+    }
+}
+
+impl From<[u8; 4]> for BackgroundColor {
+    fn from(rgba: [u8; 4]) -> Self {
+        BackgroundColor::Rgba(rgba)
+    }
+}
+
 /// DPI at which [`extract_page_image_with_background`] rasterises a page.
 ///
 /// The background helper takes no DPI parameter, so it renders at libvips
@@ -461,6 +495,47 @@ pub fn extract_page_image_with_background(
         Err(decode_unavailable(
             "PDF rendering with a background fill (requires the `pdfium` feature)",
         ))
+    }
+}
+
+/// Extract a page image over a solid background fill, the typed counterpart of
+/// [`extract_page_image_with_background`], page numbers 1-based.
+///
+/// Identical to [`extract_page_image_with_background`] except the background is
+/// a [`BackgroundColor`] whose channel count is fixed by its type rather than a
+/// `&[f64]` slice validated at runtime. `background` accepts any
+/// `impl Into<BackgroundColor>`, so a `[u8; 3]` (opaque RGB) or `[u8; 4]`
+/// (RGBA) array literal passes straight in.
+///
+/// The colour is forwarded verbatim to [`extract_page_image_with_background`]
+/// as the equivalent 3- or 4-channel `&[f64]` slice, so the rendered result is
+/// byte-identical to the loosely-typed entry point for the same colour. The
+/// page renders at the same 72-DPI baseline; see
+/// [`extract_page_image_with_background`] for the clear-colour and DPI details.
+///
+/// # Errors
+///
+/// The same [`crate::codec::DecodeError`] as
+/// [`extract_page_image_with_background`]: an unsupported-capability error
+/// without `pdfium`, an invalid-input error for a zero page, otherwise the
+/// rasteriser's error folded into the decode error. The channel-count
+/// validation the slice form performs cannot fire here — [`BackgroundColor`]
+/// makes an invalid channel count unrepresentable.
+pub fn extract_page_image_with_background_typed(
+    path: &Path,
+    page: u32,
+    background: impl Into<BackgroundColor>,
+) -> Result<Raster, crate::codec::DecodeError> {
+    // Delegate to the `&[f64]` entry point with the equivalent 3- or 4-channel
+    // slice so the result is byte-identical to the loosely-typed form, and the
+    // non-`pdfium` build inherits its typed unsupported-capability error.
+    match background.into() {
+        BackgroundColor::Rgb(rgb) => {
+            extract_page_image_with_background(path, page, &rgb.map(f64::from))
+        }
+        BackgroundColor::Rgba(rgba) => {
+            extract_page_image_with_background(path, page, &rgba.map(f64::from))
+        }
     }
 }
 
@@ -2015,6 +2090,65 @@ mod tests {
                 .contains("3 (r, g, b) or 4 (r, g, b, a) channels"),
             "over-length background must report the channel-count error, got: {err}"
         );
+    }
+
+    /// [`BackgroundColor`]'s [`From`] conversions pick the variant that matches
+    /// the array's channel count: a `[u8; 3]` is opaque
+    /// [`BackgroundColor::Rgb`] and a `[u8; 4]` is [`BackgroundColor::Rgba`].
+    /// Runs without `pdfium` since it exercises only the typed conversion, not
+    /// a render (see #323).
+    #[test]
+    fn background_color_from_arrays_picks_channel_count() {
+        assert_eq!(
+            BackgroundColor::from([1u8, 2, 3]),
+            BackgroundColor::Rgb([1, 2, 3])
+        );
+        assert_eq!(
+            BackgroundColor::from([1u8, 2, 3, 4]),
+            BackgroundColor::Rgba([1, 2, 3, 4])
+        );
+        // The generic `impl Into<BackgroundColor>` bound the typed entry point
+        // uses accepts the same array literals.
+        fn take(c: impl Into<BackgroundColor>) -> BackgroundColor {
+            c.into()
+        }
+        assert_eq!(take([9u8, 8, 7]), BackgroundColor::Rgb([9, 8, 7]));
+        assert_eq!(take([9u8, 8, 7, 6]), BackgroundColor::Rgba([9, 8, 7, 6]));
+    }
+
+    /// The typed entry point [`extract_page_image_with_background_typed`]
+    /// produces a byte-identical render to the loosely-typed
+    /// [`extract_page_image_with_background`] for an equivalent colour: it
+    /// delegates to the `&[f64]` form with the same channels, so both the RGB
+    /// and RGBA variants match dimensions, format, and pixel data. Gated on
+    /// `pdfium` because it performs a real page render (see #323); without the
+    /// feature both entry points report an unsupported-capability decode error.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn typed_background_matches_slice_form() {
+        let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
+        let (_dir, path) = save_doc(doc);
+
+        // Byte-for-byte raster equality: dimensions, pixel format, and data.
+        fn assert_same(a: &Raster, b: &Raster) {
+            assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+            assert_eq!(a.format(), b.format());
+            assert_eq!(a.data(), b.data());
+        }
+
+        // 3-channel opaque RGB: typed `[u8; 3]` == slice `&[f64; 3]`.
+        let typed_rgb = extract_page_image_with_background_typed(&path, 1, [200u8, 40, 10])
+            .expect("typed RGB render succeeds");
+        let slice_rgb = extract_page_image_with_background(&path, 1, &[200.0, 40.0, 10.0])
+            .expect("slice RGB render succeeds");
+        assert_same(&typed_rgb, &slice_rgb);
+
+        // 4-channel RGBA: typed `[u8; 4]` == slice `&[f64; 4]`.
+        let typed_rgba = extract_page_image_with_background_typed(&path, 1, [200u8, 40, 10, 128])
+            .expect("typed RGBA render succeeds");
+        let slice_rgba = extract_page_image_with_background(&path, 1, &[200.0, 40.0, 10.0, 128.0])
+            .expect("slice RGBA render succeeds");
+        assert_same(&typed_rgba, &slice_rgba);
     }
 
     /// Regression for #91: `page_object_id` must range-check the `usize -> u32`
