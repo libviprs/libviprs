@@ -346,14 +346,17 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     ///
     /// # Precedence
     ///
-    /// `with_config` overwrites **every** field it carries *unconditionally*:
-    /// the incoming config wins over any earlier `.with_*` setter, and this
-    /// holds uniformly even for the config's `Option` fields whose "unset"
-    /// (`None`) value clears an earlier setter — e.g. a config with no dedupe
-    /// strategy clears an earlier `.with_dedupe(..)` just as `config.concurrency`
-    /// overwrites an earlier `.with_concurrency(..)`. To keep a value regardless
-    /// of the config, apply its setter *after* `with_config`; setters called
-    /// after `with_config` therefore take precedence.
+    /// `with_config` **fills only the fields no earlier setter has set** — an
+    /// explicit `.with_*` setter always wins over the config (issue #297).
+    /// A field left untouched on the builder takes its value from the config;
+    /// a field an earlier setter already set keeps that value, so
+    /// `.with_dedupe(..).with_config(cfg)` retains the dedupe strategy and
+    /// `.with_cancel(tok).with_config(cfg)` retains the token even when the
+    /// config carries none. This is the least-surprising rule and removes the
+    /// former order-sensitivity trap, where a coarse `with_config` silently
+    /// undid a fine-grained setter (dropping a cancellation token or dedupe
+    /// strategy with no signal). Setters applied *after* `with_config` still
+    /// overwrite it, so "explicit setter wins" holds in both directions.
     ///
     /// Also threads the config's `checkpoint_every` and `checkpoint_root`
     /// into an *existing* [`ResumePolicy`] — but only when one has already
@@ -363,21 +366,29 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// silently enable it. Callers that want a resumable run choose the mode
     /// explicitly; without one, the checkpoint knobs are simply inert.
     pub fn with_config(mut self, config: EngineConfig) -> Self {
-        self.concurrency = Some(config.concurrency);
-        self.buffer_size = Some(config.buffer_size);
-        self.background_rgb = Some(config.background_rgb);
-        self.blank_strategy = Some(config.blank_tile_strategy);
-        self.skip_blanks = Some(config.skip_blanks);
-        self.failure_policy = Some(config.failure_policy);
-        // Uniform precedence: every value the config carries overwrites any
-        // earlier setter unconditionally, including when the config field is
-        // its "unset" form. `dedupe_strategy` / `cancel` are `Option`s on the
-        // config, so a `None` there means "no dedupe" / "no cancellation" and
-        // must clear an earlier `.with_dedupe(..)` / `.with_cancel(..)` exactly
-        // as `config.concurrency` overwrites an earlier `.with_concurrency(..)`.
-        // Anything a caller wants to preserve is set *after* `with_config`.
-        self.dedupe = config.dedupe_strategy;
-        self.cancel = config.cancel;
+        // Fill-if-unset (issue #297): apply each config field only where the
+        // builder has no explicit value yet, so an earlier fine-grained `.with_*`
+        // setter always survives a later `with_config`. Every builder knob is an
+        // `Option<T>`, so `.or(..)` keeps a `Some` a setter already put there and
+        // otherwise adopts the config's value. A setter applied *after*
+        // `with_config` overwrites the slot with a fresh `Some`, so "explicit
+        // setter wins" holds in both directions.
+        self.concurrency = self.concurrency.or(Some(config.concurrency));
+        self.buffer_size = self.buffer_size.or(Some(config.buffer_size));
+        self.background_rgb = self.background_rgb.or(Some(config.background_rgb));
+        self.blank_strategy = self
+            .blank_strategy
+            .take()
+            .or(Some(config.blank_tile_strategy));
+        self.skip_blanks = self.skip_blanks.or(Some(config.skip_blanks));
+        self.failure_policy = self.failure_policy.take().or(Some(config.failure_policy));
+        // `dedupe_strategy` / `cancel` are already `Option`s on the config: a
+        // `None` there means the config carries no opinion, so it must not clear
+        // an earlier `.with_dedupe(..)` / `.with_cancel(..)`. Filling only when
+        // the builder slot is still empty preserves the token / strategy whose
+        // silent loss (a hung job / a bloated output) was the reported trap.
+        self.dedupe = self.dedupe.take().or(config.dedupe_strategy);
+        self.cancel = self.cancel.take().or(config.cancel);
         // Carry the checkpoint knobs into an EXPLICITLY-chosen ResumePolicy
         // only, so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
         // don't silently lose the cadence / root that used to live on the
@@ -2236,22 +2247,27 @@ mod with_config_precedence_tests {
             .plan()
     }
 
-    // `with_config` must apply one precedence rule to every field it carries:
-    // the incoming config overwrites any earlier setter unconditionally. The
-    // scalar fields (e.g. concurrency) already did this; `dedupe` and `cancel`
-    // used to overwrite *only* when the config value was `Some`, so an earlier
-    // `.with_dedupe(..)` / `.with_cancel(..)` survived a config that left them
-    // unset — while an earlier `.with_concurrency(..)` was clobbered by the
-    // config's default. This test pins the uniform rule: a config whose dedupe,
-    // cancel, and concurrency are all their default/unset values clears each of
-    // those earlier setters identically.
+    // Fill-if-unset (issue #297): `with_config` fills only the fields no earlier
+    // setter has set, so an explicit `.with_*` setter always survives a later
+    // `with_config`. Every field now behaves identically — an earlier
+    // `.with_concurrency` / `.with_dedupe` / `.with_skip_blanks` / `.with_cancel`
+    // all survive a config that would otherwise overwrite them, while a field no
+    // setter touched adopts the config's value.
+    //
+    // This is the RED->GREEN pin for the clobber fix: before the fix the four
+    // "survive" assertions failed (the config's default/`None` wiped each earlier
+    // setter, dropping cancellation tokens and dedupe strategies with no signal);
+    // after it they hold, and `with_config` still fills the untouched
+    // `buffer_size`.
     #[test]
-    fn with_config_overwrites_every_field_uniformly() {
+    fn with_config_fills_only_unset_fields_preserving_earlier_setters() {
         let src = source();
         let cancel = crate::cancel::CancelToken::new();
 
-        // Config in its default shape: concurrency 0, no dedupe, no cancel.
-        let cfg = EngineConfig::default();
+        // A config carrying a non-default buffer_size (a field no setter below
+        // touches) but otherwise in its default shape: concurrency 0, no dedupe,
+        // no cancel, skip_blanks false.
+        let cfg = EngineConfig::default().with_buffer_size(9);
 
         let builder = EngineBuilder::new(&src, plan(), MemorySink::new())
             .with_concurrency(4)
@@ -2260,26 +2276,31 @@ mod with_config_precedence_tests {
             .with_cancel(cancel)
             .with_config(cfg);
 
+        // Every earlier fine-grained setter survives the later with_config.
         assert_eq!(
             builder.concurrency,
-            Some(0),
-            "config concurrency must overwrite an earlier .with_concurrency"
+            Some(4),
+            "an earlier .with_concurrency must survive with_config"
         );
         assert_eq!(
-            builder.dedupe, None,
-            "a config with no dedupe strategy must clear an earlier .with_dedupe, \
-             matching how concurrency is overwritten"
+            builder.dedupe,
+            Some(DedupeStrategy::Blanks),
+            "an earlier .with_dedupe must survive a config that carries no dedupe"
         );
         assert_eq!(
             builder.skip_blanks,
-            Some(false),
-            "a config with skip_blanks=false must overwrite an earlier \
-             .with_skip_blanks(true), matching how concurrency is overwritten"
+            Some(true),
+            "an earlier .with_skip_blanks(true) must survive a config with skip_blanks=false"
         );
         assert!(
-            builder.cancel.is_none(),
-            "a config with no cancel token must clear an earlier .with_cancel, \
-             matching how concurrency is overwritten"
+            builder.cancel.is_some(),
+            "an earlier .with_cancel must survive a config that carries no cancel token"
+        );
+        // A field no setter touched still adopts the config's value.
+        assert_eq!(
+            builder.buffer_size,
+            Some(9),
+            "with_config must still fill a field no earlier setter set"
         );
     }
 
