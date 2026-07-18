@@ -79,11 +79,13 @@ fn root_workspace_contains_both_crates() {
 }
 
 /// The workspace must still pin `pdfium-render` to the libviprs fork
-/// (per-call thread-safety locking), now as a direct git dependency rather
-/// than a `[patch.crates-io]` entry, tracking the consolidated
-/// `libviprs/integration` branch (the 0.9.x line carrying all of our fork
-/// PRs). The workspace lockfile is the single source of truth for that
-/// resolution.
+/// (per-call thread-safety locking), as a direct git dependency rather than
+/// a `[patch.crates-io]` entry. It is pinned to an immutable commit `rev` on
+/// the consolidated `libviprs/integration` fork line (the 0.9.x branch
+/// carrying all of our fork PRs) rather than the bare mutable branch, so a
+/// force-push to that branch cannot silently change the resolved dependency
+/// (reproducible builds, libviprs#286). The workspace lockfile is the single
+/// source of truth for that resolution.
 #[test]
 fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock"))
@@ -113,8 +115,17 @@ fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
         source.contains("git+https://github.com/libviprs/pdfium-render.git"),
         "pdfium-render must resolve from the fork, got: {source}"
     );
+    // Must be pinned to an immutable commit rev (40-char hex), not a mutable
+    // branch, so the resolution is reproducible (libviprs#286). Cargo forbids
+    // `branch` and `rev` on the same source, so the fork line is documented in
+    // Cargo.toml prose while the rev is the actual pin.
+    let rev = source
+        .split("rev=")
+        .nth(1)
+        .map(|s| s.split(['#', '"']).next().unwrap_or(""))
+        .unwrap_or("");
     assert!(
-        source.contains("branch=libviprs%2Fintegration"),
-        "pdfium-render must track the consolidated libviprs/integration branch, got: {source}"
+        rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
+        "pdfium-render must be pinned to an immutable 40-char commit rev for reproducible builds, got: {source}"
     );
 }
