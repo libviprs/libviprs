@@ -1023,11 +1023,14 @@ mod tests {
             alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Rgba8),
             Err(RasterError::SizeOverflow { .. })
         ));
-        // Fits usize (1 bpp) but exceeds the Vec capacity ceiling, so
-        // try_reserve returns AllocationFailed instead of a SIGABRT.
+        // Fits usize (1 bpp) on a 64-bit target but exceeds the Vec capacity
+        // ceiling, so try_reserve returns AllocationFailed instead of a SIGABRT.
+        // On a 32-bit-usize target the u32::MAX x u32::MAX product overflows
+        // usize, so `buffer_len` narrows it to SizeOverflow before the allocator
+        // is reached; either typed error satisfies the abort-safety contract.
         assert!(matches!(
             alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Gray8),
-            Err(RasterError::AllocationFailed { .. })
+            Err(RasterError::AllocationFailed { .. } | RasterError::SizeOverflow { .. })
         ));
         // A normal request yields a zero-filled buffer of the exact size.
         let buf = alloc_op_output(4, 4, PixelFormat::Gray8).unwrap();
