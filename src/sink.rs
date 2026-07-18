@@ -20,7 +20,7 @@ use thiserror::Error;
 pub use crate::dedupe::DedupeStrategy;
 pub use crate::retry::{FailurePolicy, RetryPolicy, RetryingSink};
 
-#[cfg(feature = "s3")]
+#[cfg(feature = "object-store-sink")]
 pub use crate::sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 
 #[cfg(feature = "packfile")]

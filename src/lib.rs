@@ -92,8 +92,8 @@ pub mod resize;
 pub mod resume;
 pub mod retry;
 pub mod sink;
-#[cfg(feature = "s3")]
-#[cfg_attr(docsrs, doc(cfg(feature = "s3")))]
+#[cfg(feature = "object-store-sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
 pub mod sink_object_store;
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
@@ -189,8 +189,8 @@ pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use sink::{
     BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
 };
-#[cfg(feature = "s3")]
-#[cfg_attr(docsrs, doc(cfg(feature = "s3")))]
+#[cfg(feature = "object-store-sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
 pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
