@@ -126,27 +126,17 @@ impl ChecksumAlgo {
         match self {
             Self::Blake3 => {
                 let h = blake3::hash(bytes);
-                hex_lower(h.as_bytes())
+                crate::hex::hex_lower(h.as_bytes())
             }
             Self::Sha256 => {
                 use sha2::Digest;
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(bytes);
                 let out = hasher.finalize();
-                hex_lower(&out)
+                crate::hex::hex_lower(&out)
             }
         }
     }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
 }
 
 // ---------------------------------------------------------------------------

@@ -1221,7 +1221,7 @@ impl FsSink {
         let Ok(bytes) = std::fs::read(shared_abs_path) else {
             return false;
         };
-        let got = hex_encode_32(&hash_tile_raw(&bytes, self.dedupe_algo()));
+        let got = crate::hex::hex_lower(&hash_tile_raw(&bytes, self.dedupe_algo()));
         got.eq_ignore_ascii_case(expected_hex)
     }
 
@@ -1435,8 +1435,8 @@ impl FsSink {
             if got_bytes != *expected_bytes {
                 return Err(SinkError::ChecksumMismatch {
                     tile_rel_path: rel.clone(),
-                    expected: hex_encode_32(expected_bytes),
-                    got: hex_encode_32(&got_bytes),
+                    expected: crate::hex::hex_lower(expected_bytes),
+                    got: crate::hex::hex_lower(&got_bytes),
                 });
             }
         }
@@ -1554,7 +1554,7 @@ impl FsSink {
             let raw = self.lock_leaf(&self.tile_digests);
             let per_tile: BTreeMap<String, String> = raw
                 .iter()
-                .map(|(k, v)| (k.clone(), hex_encode_32(v)))
+                .map(|(k, v)| (k.clone(), crate::hex::hex_lower(v)))
                 .collect();
             self.checksum_algo.map(|algo| Checksums { algo, per_tile })
         } else {
@@ -1779,18 +1779,6 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
             buf
         }
     }
-}
-
-/// Lower-case hex encoding of a 32-byte digest, matching the format
-/// produced by [`crate::checksum::hash_tile`] (so on-disk manifests stay
-/// byte-identical to pre-refactor output).
-fn hex_encode_32(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    use std::fmt::Write;
-    for b in bytes {
-        let _ = write!(s, "{:02x}", b);
-    }
-    s
 }
 
 // ---------------------------------------------------------------------------

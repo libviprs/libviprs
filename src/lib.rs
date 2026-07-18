@@ -70,6 +70,7 @@ pub mod extract;
 pub mod foreign_stubs;
 pub mod freqfilt;
 pub mod geo;
+pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
 pub(crate) mod level_walk;
