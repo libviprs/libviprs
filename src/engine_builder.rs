@@ -817,6 +817,37 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 return Ok((result, sink));
             }
 
+            // Issue #272 stopgap (P0, data corruption): a resumed run
+            // reconstructs the checkpoint but NOT the sink-side manifest state
+            // (`manifest_refs` / `tile_digests` / the `DedupeIndex`).
+            // `ResumeAwareSink` short-circuits already-completed coordinates
+            // before they reach the inner sink, so with content deduplication
+            // or per-tile checksums active those maps start empty for every
+            // pre-crash tile and `finish()` rebuilds + atomically overwrites
+            // `manifest.json` from them — orphaning every pre-crash 1-byte
+            // placeholder (resolvable only via `blank_references`) and
+            // truncating the checksum table. Refuse the combination up front,
+            // before anything touches the output directory or takes the run
+            // lock, rather than proceed and silently corrupt output. Resume
+            // with neither dedupe nor checksums is safe and stays supported.
+            // The real fix — seed that state on resume — is tracked separately
+            // and lands after the dedupe-layout and single-writer changes.
+            if matches!(policy.mode(), ResumeMode::Resume) {
+                let engine_dedupe = matches!(
+                    engine_cfg.dedupe_strategy,
+                    Some(crate::dedupe::DedupeStrategy::Blanks)
+                        | Some(crate::dedupe::DedupeStrategy::All { .. })
+                );
+                let feature = if engine_dedupe {
+                    Some("content deduplication")
+                } else {
+                    sink.resume_incompatible_feature()
+                };
+                if let Some(feature) = feature {
+                    return Err(EngineError::ResumeUnsupportedWith { feature });
+                }
+            }
+
             // Refuse a mismatched Resume BEFORE anything touches the output
             // directory. `prepare_resume_state` re-checks the checkpoint under
             // the run lock (that check stays authoritative for the race where
@@ -2646,6 +2677,192 @@ mod live_resume_bookkeeping_tests {
         assert_eq!(
             r2.bytes_written, 0,
             "tiles skipped on resume must not be counted as bytes_written"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resume + dedupe/checksum stopgap guard (issue #272)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resume_dedupe_checksum_guard_tests {
+    //! Issue #272 stopgap: `ResumeMode::Resume` combined with content
+    //! deduplication or per-tile checksums must be refused up front with
+    //! [`EngineError::ResumeUnsupportedWith`], because a resumed run cannot
+    //! reconstruct the sink-side manifest state and would overwrite
+    //! `manifest.json` with an incomplete view (orphaning pre-crash placeholder
+    //! tiles). Resume with neither feature — and any non-resume run with either
+    //! feature — stays supported.
+    use super::*;
+    use crate::checksum::ChecksumMode;
+    use crate::dedupe::DedupeStrategy;
+    use crate::manifest::{ChecksumAlgo, ManifestBuilder};
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::ResumePolicy;
+    use crate::sink::FsSink;
+
+    fn solid_source() -> Raster {
+        // 8x8 RGB solid so every tile is uniform (dedupe-eligible) and small.
+        let data = vec![10u8; 8 * 8 * 3];
+        Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn solid_plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    /// Assert `result` is the stopgap refusal naming `feature`.
+    fn assert_refused(result: Result<EngineResult, EngineError>, feature: &str) {
+        match result {
+            Err(EngineError::ResumeUnsupportedWith { feature: got }) => {
+                assert_eq!(got, feature, "guard should name the incompatible feature");
+            }
+            Err(other) => {
+                panic!("expected ResumeUnsupportedWith, got a different error: {other:?}")
+            }
+            Ok(_) => panic!(
+                "resume + {feature} must be refused (issue #272 stopgap); the run \
+                 returned Ok and would have silently overwritten manifest.json"
+            ),
+        }
+    }
+
+    /// Resume + engine-level dedupe (`EngineBuilder::with_dedupe`) is refused.
+    /// The guard fires before any directory I/O, so a fresh output dir with no
+    /// checkpoint still triggers it.
+    #[test]
+    fn resume_plus_engine_dedupe_is_refused() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_resume(ResumePolicy::resume())
+            .run();
+
+        assert_refused(result, "content deduplication");
+    }
+
+    /// Resume + sink-level dedupe (`FsSink::with_dedupe`) is refused.
+    #[test]
+    fn resume_plus_sink_dedupe_is_refused() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink =
+            FsSink::new(out.path().to_path_buf(), plan.clone()).with_dedupe(DedupeStrategy::Blanks);
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run();
+
+        assert_refused(result, "content deduplication");
+    }
+
+    /// Resume + per-tile checksums (`FsSink::with_checksums`) is refused.
+    #[test]
+    fn resume_plus_checksum_is_refused() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone())
+            .with_manifest(ManifestBuilder::new())
+            .with_checksums(ChecksumMode::EmitOnly, ChecksumAlgo::Blake3);
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run();
+
+        assert_refused(result, "per-tile checksums");
+    }
+
+    /// Resume with NEITHER dedupe nor checksums must still run — the guard must
+    /// not over-reach onto the safe path.
+    #[test]
+    fn resume_without_dedupe_or_checksum_still_runs() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume())
+            .run();
+
+        assert!(
+            result.is_ok(),
+            "resume without dedupe or checksums must remain supported: {:?}",
+            result.err()
+        );
+    }
+
+    /// A NON-resume run (Overwrite) with dedupe is unaffected: the guard is
+    /// scoped to `ResumeMode::Resume`, so a fresh dedupe run still succeeds.
+    #[test]
+    fn non_resume_dedupe_still_runs() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink =
+            FsSink::new(out.path().to_path_buf(), plan.clone()).with_dedupe(DedupeStrategy::Blanks);
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_resume(ResumePolicy::overwrite())
+            .run();
+
+        assert!(
+            result.is_ok(),
+            "a non-resume (Overwrite) dedupe run must be unaffected by the \
+             resume guard: {:?}",
+            result.err()
+        );
+    }
+
+    /// Verify mode (read-only) with dedupe is unaffected: it never rewrites the
+    /// manifest, so the guard leaves it alone. Seeds a pyramid first so Verify
+    /// has something to audit.
+    #[test]
+    fn verify_dedupe_still_runs() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        // Seed a full pyramid with an Overwrite run so Verify has real tiles.
+        let seed =
+            FsSink::new(out.path().to_path_buf(), plan.clone()).with_dedupe(DedupeStrategy::Blanks);
+        EngineBuilder::new(&source, plan.clone(), seed)
+            .with_engine(EngineKind::Monolithic)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_resume(ResumePolicy::overwrite())
+            .run()
+            .expect("seed overwrite+dedupe run should succeed");
+
+        let sink =
+            FsSink::new(out.path().to_path_buf(), plan.clone()).with_dedupe(DedupeStrategy::Blanks);
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_resume(ResumePolicy::verify())
+            .run();
+
+        assert!(
+            result.is_ok(),
+            "read-only Verify with dedupe must be unaffected by the resume \
+             guard: {:?}",
+            result.err()
         );
     }
 }
