@@ -249,6 +249,7 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
     let bpp = fmt.bytes_per_pixel();
     let bpc = fmt.bytes_per_channel();
     let channels = fmt.channels();
+    let has_alpha = fmt.has_alpha();
     let src_stride = src.stride();
     let src_data = src.data();
     let src_w = src.width();
@@ -306,29 +307,104 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
                 continue;
             }
 
-            for c in 0..channels {
-                let mut sum: u64 = 0;
+            if has_alpha {
+                // Alpha-weighted area averaging, mirroring `downscale_half_alpha`
+                // for the arbitrary-ratio region `[sx0,sx1) x [sy0,sy1)`. Colour
+                // bands are weighted by each source pixel's alpha (premultiply
+                // before averaging, un-premultiply after) so the meaningless RGB
+                // of fully-transparent pixels cannot bleed into opaque neighbours
+                // and darken edges. The alpha band is a simple average. Truncates
+                // (`x as u8/u16`) exactly like the sibling half path so pyramid
+                // levels built by halving agree with a one-shot downscale.
+                let alpha_idx = channels - 1;
+
+                // First pass: total alpha over the region (== count * avg_alpha).
+                let mut alpha_sum = 0.0f64;
                 for sy in sy0..sy1 {
                     for sx in sx0..sx1 {
-                        let src_offset = sy as usize * src_stride + sx as usize * bpp + c * bpc;
-                        if bpc == 1 {
-                            sum += src_data[src_offset] as u64;
+                        let off = sy as usize * src_stride + sx as usize * bpp + alpha_idx * bpc;
+                        alpha_sum += if bpc == 1 {
+                            src_data[off] as f64
                         } else {
-                            let val = u16::from_ne_bytes([
-                                src_data[src_offset],
-                                src_data[src_offset + 1],
-                            ]);
-                            sum += val as u64;
-                        }
+                            u16::from_ne_bytes([src_data[off], src_data[off + 1]]) as f64
+                        };
                     }
                 }
-                let avg = (sum + count / 2) / count;
+
+                if alpha_sum == 0.0 {
+                    // Fully transparent region: every band stays zero (the
+                    // destination buffer is pre-zeroed), matching the sibling.
+                    continue;
+                }
+
+                // Alpha-weighted colour bands.
+                for c in 0..alpha_idx {
+                    let mut weighted = 0.0f64;
+                    for sy in sy0..sy1 {
+                        for sx in sx0..sx1 {
+                            let px = sy as usize * src_stride + sx as usize * bpp;
+                            let (a, v) = if bpc == 1 {
+                                (src_data[px + alpha_idx] as f64, src_data[px + c] as f64)
+                            } else {
+                                (
+                                    u16::from_ne_bytes([
+                                        src_data[px + alpha_idx * 2],
+                                        src_data[px + alpha_idx * 2 + 1],
+                                    ]) as f64,
+                                    u16::from_ne_bytes([
+                                        src_data[px + c * 2],
+                                        src_data[px + c * 2 + 1],
+                                    ]) as f64,
+                                )
+                            };
+                            weighted += a * v;
+                        }
+                    }
+                    // weighted / (count * avg_alpha), i.e. weighted / alpha_sum.
+                    let result = weighted / alpha_sum;
+                    if bpc == 1 {
+                        dst[dst_offset + c] = result as u8;
+                    } else {
+                        let bytes = (result as u16).to_ne_bytes();
+                        dst[dst_offset + c * 2] = bytes[0];
+                        dst[dst_offset + c * 2 + 1] = bytes[1];
+                    }
+                }
+
+                // Alpha band: simple average, truncated like the sibling.
+                let avg_alpha = alpha_sum / count as f64;
                 if bpc == 1 {
-                    dst[dst_offset + c] = avg as u8;
+                    dst[dst_offset + alpha_idx] = avg_alpha as u8;
                 } else {
-                    let bytes = (avg as u16).to_ne_bytes();
-                    dst[dst_offset + c * 2] = bytes[0];
-                    dst[dst_offset + c * 2 + 1] = bytes[1];
+                    let bytes = (avg_alpha as u16).to_ne_bytes();
+                    dst[dst_offset + alpha_idx * 2] = bytes[0];
+                    dst[dst_offset + alpha_idx * 2 + 1] = bytes[1];
+                }
+            } else {
+                for c in 0..channels {
+                    let mut sum: u64 = 0;
+                    for sy in sy0..sy1 {
+                        for sx in sx0..sx1 {
+                            let src_offset = sy as usize * src_stride + sx as usize * bpp + c * bpc;
+                            if bpc == 1 {
+                                sum += src_data[src_offset] as u64;
+                            } else {
+                                let val = u16::from_ne_bytes([
+                                    src_data[src_offset],
+                                    src_data[src_offset + 1],
+                                ]);
+                                sum += val as u64;
+                            }
+                        }
+                    }
+                    let avg = (sum + count / 2) / count;
+                    if bpc == 1 {
+                        dst[dst_offset + c] = avg as u8;
+                    } else {
+                        let bytes = (avg as u16).to_ne_bytes();
+                        dst[dst_offset + c * 2] = bytes[0];
+                        dst[dst_offset + c * 2 + 1] = bytes[1];
+                    }
                 }
             }
         }
@@ -574,6 +650,45 @@ mod tests {
         assert_eq!(dst.height(), 25);
         for chunk in dst.data().chunks(3) {
             assert_eq!(chunk, &[200, 100, 50]);
+        }
+    }
+
+    /**
+     * Regression for #287: `downscale_to` must alpha-weight colour channels so
+     * the RGB of fully-transparent pixels cannot bleed into opaque neighbours.
+     *
+     * A 4x1 RGBA raster alternates opaque red and *transparent green* so every
+     * 2-pixel destination region mixes an opaque and a transparent pixel across
+     * the boundary. Uniform averaging (the pre-fix behaviour) would pull the
+     * transparent green into the result (G ~= 128) and darken the red; the
+     * alpha-weighted average discards the zero-alpha contribution, so the
+     * surviving colour stays pure opaque red and the transparent green never
+     * appears.
+     *
+     * Input: 4x1 Rgba8 [red/A255, green/A0, green/A0, red/A255] -> downscale_to
+     * 2x1 -> both pixels (255, 0, 0, 127): red preserved, no green bleed.
+     */
+    #[test]
+    fn downscale_to_rgba_no_colour_bleed() {
+        #[rustfmt::skip]
+        let data = vec![
+            255, 0, 0, 255, // opaque red
+            0, 255, 0, 0,   // transparent green (must not bleed)
+            0, 255, 0, 0,   // transparent green (must not bleed)
+            255, 0, 0, 255, // opaque red
+        ];
+        let src = Raster::new(4, 1, PixelFormat::Rgba8, data).unwrap();
+        let dst = downscale_to(&src, 2, 1).unwrap();
+        assert_eq!(dst.width(), 2);
+        assert_eq!(dst.height(), 1);
+        // Each output pixel averages one opaque-red and one transparent-green
+        // source pixel. Alpha-weighted: R = (255*255 + 0*0)/255 = 255,
+        // G = (255*0 + 0*255)/255 = 0, A = (255 + 0)/2 = 127 (truncated).
+        for chunk in dst.data().chunks(4) {
+            assert_eq!(chunk[0], 255, "R: opaque red must be preserved");
+            assert_eq!(chunk[1], 0, "G: transparent green must NOT bleed in");
+            assert_eq!(chunk[2], 0, "B stays 0");
+            assert_eq!(chunk[3], 127, "A: simple average, truncated");
         }
     }
 
