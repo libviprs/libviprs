@@ -1,10 +1,13 @@
 //! Internal lowercase-hex encoding helper.
 //!
-//! Consolidates the byte-slice → lowercase hex string encoder that used to be
-//! copied into `dedupe.rs`, `manifest.rs`, and `sink.rs` (issue #302). Kept as
-//! a hand-rolled encoder — deliberately no external `hex` crate — so on-disk
-//! manifests and checksums stay byte-identical to the pre-consolidation output
-//! (same lowercase alphabet, fixed two chars per byte, empty input → "").
+//! Consolidates the byte-slice → lowercase hex string encoder that was
+//! previously open-coded across the crate. `dedupe.rs`, `manifest.rs`, and
+//! `sink.rs` were routed through this helper in the first pass (issue #302);
+//! the two remaining copies in `checksum.rs` (`hash_tile` and `hash_file`) were
+//! folded in as the #302 follow-up. Kept as a hand-rolled encoder —
+//! deliberately no external `hex` crate — so on-disk manifests and checksums
+//! stay byte-identical to the pre-consolidation output (same lowercase
+//! alphabet, fixed two chars per byte, empty input → "").
 
 /// Encode a byte slice as a lowercase hex string: two characters per byte, no
 /// separators, using the alphabet `0123456789abcdef`. Empty input yields an

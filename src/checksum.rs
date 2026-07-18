@@ -71,12 +71,7 @@ pub fn hash_tile(bytes: &[u8], algo: ChecksumAlgo) -> String {
             let mut hasher = sha2::Sha256::new();
             hasher.update(bytes);
             let out = hasher.finalize();
-            let mut s = String::with_capacity(out.len() * 2);
-            for b in out.iter() {
-                use std::fmt::Write;
-                let _ = write!(s, "{:02x}", b);
-            }
-            s
+            crate::hex::hex_lower(&out)
         }
     }
 }
@@ -151,12 +146,7 @@ pub(crate) fn hash_file(path: &Path, algo: ChecksumAlgo) -> std::io::Result<Stri
                 hasher.update(&buf[..n]);
             }
             let out = hasher.finalize();
-            let mut s = String::with_capacity(out.len() * 2);
-            for b in out.iter() {
-                use std::fmt::Write;
-                let _ = write!(s, "{:02x}", b);
-            }
-            Ok(s)
+            Ok(crate::hex::hex_lower(&out))
         }
     }
 }
@@ -385,6 +375,56 @@ mod tests {
         assert_eq!(
             got,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// Byte-for-byte reproduction of the open-coded lowercase-hex encoder that
+    /// `hash_tile` / `hash_file` used before they were routed through
+    /// `crate::hex::hex_lower` (the #302 follow-up). Kept local to the test so
+    /// the swap can be proven output-preserving.
+    fn old_inline_02x(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes.iter() {
+            let _ = write!(s, "{:02x}", b);
+        }
+        s
+    }
+
+    #[test]
+    fn hex_encoding_swap_is_byte_identical_on_checksum_path() {
+        // `hash_tile` / `hash_file` previously hex-encoded the SHA-256 digest
+        // with an inline `write!("{:02x}")` loop; both were replaced with
+        // `crate::hex::hex_lower`. The hashing is untouched, so proving the two
+        // encoders agree byte-for-byte proves the emitted digest strings — and
+        // therefore the checksum reference goldens — are unchanged. Cover empty
+        // input, each nibble in isolation, a full 0..=255 sweep, and the 32-byte
+        // SHA-256 digest width.
+        let digest_width: Vec<u8> = (0u8..32).collect();
+        let all_bytes: Vec<u8> = (0u8..=255).collect();
+        let cases: &[&[u8]] = &[
+            &[],           // empty input → ""
+            &[0x00],       // zero-padded low nibble
+            &[0x0f],       // low nibble only
+            &[0xf0],       // high nibble only
+            &[0xff],       // both nibbles set
+            &digest_width, // full SHA-256 digest width (32 bytes → 64 chars)
+            &all_bytes,    // every possible byte value
+        ];
+        for bytes in cases {
+            let via_helper = crate::hex::hex_lower(bytes);
+            let via_old = old_inline_02x(bytes);
+            assert_eq!(via_helper, via_old, "encoders diverged for {bytes:02x?}");
+            assert_eq!(via_helper.len(), bytes.len() * 2, "width not two-per-byte");
+        }
+        // Explicit empty-input contract shared with the checksum path.
+        assert_eq!(crate::hex::hex_lower(&[]), "");
+
+        // End-to-end pin: the real SHA-256 path still yields the known golden,
+        // now that it encodes via `hex_lower`.
+        assert_eq!(
+            hash_tile(b"abc", ChecksumAlgo::Sha256),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         );
     }
 
