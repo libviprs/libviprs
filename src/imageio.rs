@@ -1948,38 +1948,40 @@ mod tests {
 
     /// The `.v` reader enforces the single-axis ceiling from the per-decode
     /// [`DecodeLimits::max_coord`] field: an over-ceiling dimension returns
-    /// the typed [`SourceError::VipsFormat`] (never a panic or a wrapping
-    /// cast/overflow), while an in-bounds decode is unaffected. This
-    /// replaces the former process-global enforcement (#293).
+    /// the dedicated typed [`SourceError::CoordLimitExceeded`] (never a
+    /// panic or a wrapping cast/overflow), while an in-bounds decode is
+    /// unaffected. This replaces the former process-global enforcement
+    /// (#293).
     #[test]
     fn max_coord_enforced_per_decode() {
         let im = Raster::zeroed(2000, 1, PixelFormat::Gray8).unwrap();
         let bytes = im.encode_vips().unwrap();
 
-        // (a) Over the per-decode ceiling → typed error, not a panic.
-        let tight = DecodeLimits {
-            max_coord: 1000,
-            ..DecodeLimits::default()
-        };
+        // (a) Over the per-decode ceiling → dedicated typed error carrying
+        // the offending dimensions and ceiling, not a panic or an opaque
+        // substring-matched string. Built through the `#[non_exhaustive]`
+        // builder setter, the supported external construction path.
+        let tight = DecodeLimits::default().with_max_coord(1000);
         let err = decode_vips_bytes(&bytes, tight).unwrap_err();
         assert!(
-            matches!(err, SourceError::VipsFormat(ref m) if m.contains("max_coord")),
-            "expected a typed VipsFormat max_coord error, got {err}"
+            matches!(
+                err,
+                SourceError::CoordLimitExceeded {
+                    width: 2000,
+                    height: 1,
+                    max_coord: 1000,
+                }
+            ),
+            "expected a typed CoordLimitExceeded error, got {err}"
         );
 
         // Boundary: exactly at the ceiling is accepted; one below rejects.
-        let at = DecodeLimits {
-            max_coord: 2000,
-            ..DecodeLimits::default()
-        };
+        let at = DecodeLimits::default().with_max_coord(2000);
         assert!(decode_vips_bytes(&bytes, at).is_ok());
-        let below = DecodeLimits {
-            max_coord: 1999,
-            ..DecodeLimits::default()
-        };
+        let below = DecodeLimits::default().with_max_coord(1999);
         assert!(matches!(
             decode_vips_bytes(&bytes, below),
-            Err(SourceError::VipsFormat(_))
+            Err(SourceError::CoordLimitExceeded { .. })
         ));
 
         // (b) The default in-bounds decode is unaffected and round-trips.
