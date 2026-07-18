@@ -300,6 +300,30 @@ pub trait TileSink: Send + Sync {
         self.inner_sink()
             .is_some_and(|inner| inner.applies_retry_policy())
     }
+
+    /// Engine hook (issue #272 stopgap): report which resume-incompatible
+    /// feature this sink carries, if any.
+    ///
+    /// A resumed run reconstructs the checkpoint but NOT the sink-side manifest
+    /// state, and [`TileSink::finish`] rebuilds `manifest.json` from per-run
+    /// in-memory maps (`manifest_refs`, `tile_digests`, the `DedupeIndex`) that
+    /// start empty for every pre-crash tile. When content deduplication or
+    /// per-tile checksums are active, that overwrites the prior manifest with an
+    /// incomplete view and orphans pre-crash placeholder tiles — silent data
+    /// corruption. The engine builder consults this to refuse
+    /// [`ResumeMode::Resume`](crate::ResumeMode) on such a sink until the
+    /// seeding fix lands, returning
+    /// [`EngineError::ResumeUnsupportedWith`](crate::engine::EngineError::ResumeUnsupportedWith).
+    ///
+    /// `Some(feature)` names the feature (e.g. `"content deduplication"`),
+    /// `None` means the sink keeps no such state and resume is safe. The default
+    /// forwards to [`TileSink::inner_sink`] so a transparent wrapper reports its
+    /// inner sink's answer without overriding this method; terminal sinks that
+    /// hold no manifest state return `None`.
+    fn resume_incompatible_feature(&self) -> Option<&'static str> {
+        self.inner_sink()
+            .and_then(|inner| inner.resume_incompatible_feature())
+    }
 }
 
 /// Forwarding impl so `Box<dyn TileSink>` (and `Box<T>` where `T: TileSink`)
@@ -351,6 +375,9 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     fn applies_retry_policy(&self) -> bool {
         (**self).applies_retry_policy()
     }
+    fn resume_incompatible_feature(&self) -> Option<&'static str> {
+        (**self).resume_incompatible_feature()
+    }
 }
 
 /// Forwarding impl so `&T` satisfies [`TileSink`] wherever `T` does.
@@ -398,6 +425,9 @@ impl<T: TileSink + ?Sized> TileSink for &T {
     }
     fn applies_retry_policy(&self) -> bool {
         (*self).applies_retry_policy()
+    }
+    fn resume_incompatible_feature(&self) -> Option<&'static str> {
+        (*self).resume_incompatible_feature()
     }
 }
 
@@ -1145,6 +1175,24 @@ impl TileSink for FsSink {
 
     fn content_format(&self) -> Option<TileFormat> {
         Some(self.format)
+    }
+
+    fn resume_incompatible_feature(&self) -> Option<&'static str> {
+        // A resumed run cannot reconstruct `manifest_refs` / `tile_digests` /
+        // the `DedupeIndex`, yet `finish()` rebuilds and overwrites
+        // `manifest.json` from them whenever dedupe is active or checksums are
+        // emitted. Refuse those combos on resume (issue #272 stopgap). Dedupe
+        // is reported first: it also drives the checksum/manifest machinery, so
+        // it is the more informative label when both are set. A bare
+        // `ManifestBuilder` with a checksum algorithm forces `checksums` to
+        // `EmitOnly` (see `with_manifest`), so the checksum branch covers it.
+        if self.dedupe_active() {
+            Some("content deduplication")
+        } else if self.checksums != crate::checksum::ChecksumMode::None {
+            Some("per-tile checksums")
+        } else {
+            None
+        }
     }
 }
 
