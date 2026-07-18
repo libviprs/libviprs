@@ -126,6 +126,37 @@ fn alloc_zeroed_checked(
     Ok(data)
 }
 
+/// Allocate a zeroed output buffer for an operation whose size derives from an
+/// already-validated input raster, using fallible allocation.
+///
+/// Unlike [`alloc_zeroed_checked`], this does **not** re-impose the
+/// [`DEFAULT_MAX_ALLOC_BYTES`] budget. The size comes from an input that was
+/// already budget-checked when it was constructed, and a depth-promoting
+/// operation (for example 8-bit to `f32`, a 4x growth) legitimately produces
+/// an output larger than the input; re-applying the budget here would
+/// spuriously reject those legal outputs — and, at the panicking op forms,
+/// abort the process through the `.expect` that used to wrap [`Raster::new`].
+/// The allocation is still fallible via [`Vec::try_reserve_exact`], so a
+/// request the host cannot satisfy surfaces as [`RasterError::AllocationFailed`]
+/// (or [`RasterError::SizeOverflow`] for a length past `usize`) rather than
+/// aborting through `handle_alloc_error`.
+pub(crate) fn alloc_op_output(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+) -> Result<Vec<u8>, RasterError> {
+    let size = buffer_len(width, height, format.bytes_per_pixel())?;
+    let mut data: Vec<u8> = Vec::new();
+    data.try_reserve_exact(size)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes: size,
+        })?;
+    data.resize(size, 0);
+    Ok(data)
+}
+
 /// Compute `width * height * bpp` as a `usize`, checking for overflow.
 ///
 /// The multiplication is performed in `u64` so it never wraps for `u32`
@@ -232,6 +263,53 @@ impl Raster {
                 budget: max_bytes,
             });
         }
+        if data.len() != expected {
+            return Err(RasterError::BufferSizeMismatch {
+                width,
+                height,
+                format,
+                expected,
+                actual: data.len(),
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            format,
+            data,
+            meta: RasterMeta::default(),
+            fields: MetadataFields::default(),
+        })
+    }
+
+    /// Construct a raster from an operation's output buffer, validating the
+    /// length invariant but **not** the allocation budget.
+    ///
+    /// The buffer has already been produced (typically via [`alloc_op_output`])
+    /// from an input raster that was budget-checked at its own construction, so
+    /// re-applying [`DEFAULT_MAX_ALLOC_BYTES`] here — as [`Raster::new`] does —
+    /// would reject the legal, larger outputs of depth-promoting operations
+    /// (issue #279) and, at the panicking op forms, turn that rejection into a
+    /// process-ending `.expect`. This constructor keeps the
+    /// [`RasterError::ZeroDimension`] and [`RasterError::BufferSizeMismatch`]
+    /// invariants and omits only the budget check; the fallibility that guards
+    /// against oversized allocations lives in [`alloc_op_output`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::ZeroDimension`] if width or height is 0,
+    /// [`RasterError::SizeOverflow`] if the dimensions overflow `usize`, or
+    /// [`RasterError::BufferSizeMismatch`] if the buffer length is wrong.
+    pub(crate) fn from_op_output(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        data: Vec<u8>,
+    ) -> Result<Self, RasterError> {
+        if width == 0 || height == 0 {
+            return Err(RasterError::ZeroDimension { width, height });
+        }
+        let expected = buffer_len(width, height, format.bytes_per_pixel())?;
         if data.len() != expected {
             return Err(RasterError::BufferSizeMismatch {
                 width,
@@ -896,6 +974,65 @@ mod tests {
             matches!(result, Err(RasterError::ByteBudgetExceeded { .. })),
             "expected ByteBudgetExceeded from new, got {result:?}"
         );
+    }
+
+    /**
+     * Tests that the op-output constructor (issue #279) skips the allocation
+     * budget while keeping the length invariant. An operation output whose
+     * size derives from an already-validated input is legal even past
+     * DEFAULT_MAX_ALLOC_BYTES (a depth promotion grows it up to 4x), so
+     * from_op_output must NOT return ByteBudgetExceeded the way Raster::new
+     * does. With a deliberately short buffer the budget-free path instead
+     * surfaces BufferSizeMismatch, proving the budget check was skipped.
+     * Input: from_op_output(50000,50000,Rgba16, short) → Err(BufferSizeMismatch).
+     */
+    #[test]
+    fn from_op_output_skips_budget_but_keeps_length_invariant() {
+        let over_budget = Raster::from_op_output(50_000, 50_000, PixelFormat::Rgba16, vec![0u8; 8]);
+        assert!(
+            matches!(over_budget, Err(RasterError::BufferSizeMismatch { .. })),
+            "expected BufferSizeMismatch (budget skipped), got {over_budget:?}"
+        );
+        // Contrast: Raster::new rejects the identical shape on the budget.
+        assert!(matches!(
+            Raster::new(50_000, 50_000, PixelFormat::Rgba16, vec![0u8; 8]),
+            Err(RasterError::ByteBudgetExceeded { .. })
+        ));
+        // A well-formed output constructs successfully.
+        let ok = Raster::from_op_output(2, 2, PixelFormat::Gray8, vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(ok.data(), &[1, 2, 3, 4]);
+        assert_eq!((ok.width(), ok.height()), (2, 2));
+        // Overflowing dimensions are rejected, not `.expect`-panicked.
+        assert!(matches!(
+            Raster::from_op_output(u32::MAX, u32::MAX, PixelFormat::Rgba8, Vec::new()),
+            Err(RasterError::SizeOverflow { .. })
+        ));
+    }
+
+    /**
+     * Tests that the op-output allocation (issues #279 / #280) is fallible:
+     * an oversized request returns a typed error rather than aborting the
+     * process through handle_alloc_error, matching the crate's abort-safety
+     * design that the op modules previously bypassed with `vec![0u8; n]`.
+     * Input: alloc_op_output at overflowing / over-capacity sizes → Err.
+     */
+    #[test]
+    fn alloc_op_output_is_fallible_not_aborting() {
+        // Overflows usize entirely (4 bpp) — rejected before touching the allocator.
+        assert!(matches!(
+            alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Rgba8),
+            Err(RasterError::SizeOverflow { .. })
+        ));
+        // Fits usize (1 bpp) but exceeds the Vec capacity ceiling, so
+        // try_reserve returns AllocationFailed instead of a SIGABRT.
+        assert!(matches!(
+            alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Gray8),
+            Err(RasterError::AllocationFailed { .. })
+        ));
+        // A normal request yields a zero-filled buffer of the exact size.
+        let buf = alloc_op_output(4, 4, PixelFormat::Gray8).unwrap();
+        assert_eq!(buf.len(), 16);
+        assert!(buf.iter().all(|&b| b == 0));
     }
 
     /**
