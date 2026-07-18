@@ -1,6 +1,7 @@
 //! S3-compatible object-storage sink for libviprs Phase 3.
 //!
-//! This module is gated behind the `s3` feature flag. It introduces an
+//! This module is gated behind the `object-store-sink` feature flag (the
+//! deprecated `s3` alias also enables it). It introduces an
 //! injectable [`ObjectStore`] trait so tests can swap in in-memory backends,
 //! plus a concrete [`ObjectStoreSink`] that conforms to the crate's
 //! [`TileSink`](crate::sink::TileSink) contract.
@@ -307,14 +308,12 @@ impl ObjectStoreSink {
         Ok(Self { cfg, plan, format })
     }
 
-    /// List all object keys currently stored in the backing store under this
-    /// sink's configured key prefix.
-    ///
-    /// Phase 2b stub: returns an empty list when the sink was constructed via
-    /// the default S3 plumbing (a full implementation would issue a LIST
-    /// request against the configured endpoint). Primarily intended so
-    /// integration tests that want to diff the server-side state against a
-    /// filesystem reference can compile and run.
+    /// **Phase 2b stub — always returns an empty list.** A full implementation
+    /// would issue a LIST request against the configured endpoint to enumerate
+    /// the object keys stored under this sink's key prefix, but that transport
+    /// is not compiled into this build. Primarily intended so integration tests
+    /// that want to diff the server-side state against a filesystem reference
+    /// can compile and run.
     pub fn list_objects(&self) -> Result<Vec<String>, SinkError> {
         Ok(Vec::new())
     }
@@ -465,6 +464,36 @@ mod tests {
         assert!(
             msg.contains("with_object_store"),
             "error should point callers to the injection API: {msg}"
+        );
+    }
+
+    /// Minimal in-crate backend so a sink can be constructed for the stub test.
+    #[derive(Default)]
+    struct NoopStore;
+
+    impl ObjectStore for NoopStore {
+        fn put(&self, _key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn list_objects_is_an_empty_stub() {
+        // This module is now gated by the `object-store-sink` feature (with `s3`
+        // kept as a deprecated alias). Issue #298 also corrected the report's
+        // `list_keys` typo: the real method is `list_objects`, a documented
+        // Phase 2b stub that returns an empty list until a LIST transport lands.
+        use crate::planner::{Layout, PyramidPlanner};
+        let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket")
+            .with_object_store(Arc::new(NoopStore));
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom)
+            .expect("planner params are valid")
+            .plan();
+        let sink = ObjectStoreSink::new(cfg, plan, TileFormat::Png)
+            .expect("sink constructs once a backend is injected");
+        assert_eq!(
+            sink.list_objects().expect("stub never errors"),
+            Vec::<String>::new(),
         );
     }
 }

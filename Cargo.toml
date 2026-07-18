@@ -139,11 +139,17 @@ incompatible_msrv = "warn"
 default = []
 pdfium = ["dep:pdfium-render"]
 pdfium-static = ["pdfium", "pdfium-render/static"]
-# `s3` gates the ObjectStoreSink module. The in-tree sink uses a hand-rolled
-# `ObjectStore` trait and is wired for user-injected backends. A real S3 client
-# path (object_store + tokio) will land in a follow-up PR; until then the
-# feature pulls in no extra crates.
-s3 = []
+# `object-store-sink` gates the ObjectStoreSink module. The in-tree sink uses a
+# hand-rolled `ObjectStore` trait and is wired for user-injected backends: it
+# pulls in no extra crates and ships no built-in S3 transport (a real
+# object_store + tokio client will land in a follow-up PR). The name reflects
+# that the module is a generic object-store sink requiring an injected backend,
+# not a ready-to-use S3 client.
+object-store-sink = []
+# Deprecated alias for `object-store-sink`, retained so consumers that pinned the
+# old `s3` feature name keep building. Prefer `object-store-sink`; the `s3`
+# alias will be removed in a future release.
+s3 = ["object-store-sink"]
 tracing = ["dep:tracing"]
 packfile = ["dep:tar", "dep:zip"]
 # Gates public `Serialize` / `Deserialize` derives on the wire/config types
