@@ -40,14 +40,18 @@
 //! # Ink
 //!
 //! `ink` is the raw pixel value to paint, as bytes: one whole pixel wide, so
-//! `&[100]` paints a `Gray8` pixel and `&[r, g, b]` an `Rgb8` one. The
-//! `Raster::draw_*` convenience methods validate the ink against the target
-//! raster's pixel width
+//! `&[100]` paints a `Gray8` pixel and `&[r, g, b]` an `Rgb8` one. Ink is
+//! validated against the target raster's pixel width
 //! ([`PixelFormat::bytes_per_pixel`](crate::pixel::PixelFormat::bytes_per_pixel))
 //! before painting: a mismatch is a caller bug (for example a 3-byte RGB ink
-//! on an `Rgba8` raster would paint the alpha band from the red byte), so the
-//! panicking `draw_*` forms panic and the fallible `try_draw_*` forms return
-//! [`DrawError::InkLengthMismatch`] instead of silently corrupting channels.
+//! on an `Rgba8` raster would paint the alpha band from the red byte). The
+//! panicking `Raster::draw_*` forms panic and the fallible `try_draw_*` forms
+//! return [`DrawError::InkLengthMismatch`] instead of silently corrupting
+//! channels. The built-in ops enforce the same check inside their
+//! [`apply`](DrawOp::apply), so the generic [`Raster::draw`]`(&op)` entry point
+//! and the op constructors ([`Circle`], [`Rectangle`], [`Line`], [`Flood`],
+//! [`Mask`]) are guarded too — a wrong-width ink there panics rather than
+//! painting garbage.
 //!
 //! The low-level [`Raster::put_pixel`] writer is the raw escape hatch: it
 //! copies ink verbatim, cycling if it is shorter than the pixel's byte width
@@ -96,7 +100,8 @@ pub trait DrawOp {
 ///
 /// Ops themselves clip out-of-range coordinates rather than erroring; these
 /// errors surface from the `Raster` convenience methods that validate their
-/// inputs up front — the flood-fill seed and the ink channel width.
+/// inputs up front — the flood-fill seed, the ink channel width, and the
+/// target's pixel format for the sample-blending ops.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DrawError {
@@ -126,6 +131,24 @@ pub enum DrawError {
         /// Bytes required for one whole pixel of the target format.
         pixel_bytes: usize,
         /// The target raster's pixel format.
+        format: PixelFormat,
+    },
+    /// A draw operation that decodes samples as unsigned integers was asked to
+    /// operate on a 32-bit-float raster
+    /// ([`RgbaF32`](crate::pixel::PixelFormat::RgbaF32) /
+    /// [`FloatF32`](crate::pixel::PixelFormat::FloatF32)).
+    ///
+    /// The sample-blending ops (currently [`Mask`]) read and write channels as
+    /// unsigned 8/16-bit values and cannot yet interpret `f32` samples. Rather
+    /// than panicking deep in the sample decode — or, worse, misreading float
+    /// bytes as `u16` pairs — the fallible wrappers reject a float target up
+    /// front. Cast to an unsigned 8/16-bit format first.
+    #[error(
+        "draw operation does not support the 32-bit-float raster {format:?}; \
+         cast to an unsigned 8/16-bit format first"
+    )]
+    UnsupportedFloatRaster {
+        /// The target raster's (float) pixel format.
         format: PixelFormat,
     },
 }
@@ -178,6 +201,7 @@ impl<'a> Circle<'a> {
 
 impl DrawOp for Circle<'_> {
     fn apply(&self, raster: &mut Raster) {
+        assert_ink_pixel_width(raster, self.ink);
         if self.radius < 0 {
             return;
         }
@@ -239,6 +263,7 @@ impl<'a> Rectangle<'a> {
 
 impl DrawOp for Rectangle<'_> {
     fn apply(&self, raster: &mut Raster) {
+        assert_ink_pixel_width(raster, self.ink);
         if self.width <= 0 || self.height <= 0 {
             return;
         }
@@ -301,6 +326,7 @@ impl<'a> Line<'a> {
 
 impl DrawOp for Line<'_> {
     fn apply(&self, raster: &mut Raster) {
+        assert_ink_pixel_width(raster, self.ink);
         // Classic integer Bresenham over all octants. Runs in i64 so the
         // deltas of extreme i32 endpoints cannot overflow.
         let (mut x, mut y) = (self.x1 as i64, self.y1 as i64);
@@ -387,6 +413,7 @@ impl<'a> Flood<'a> {
 
 impl DrawOp for Flood<'_> {
     fn apply(&self, raster: &mut Raster) {
+        assert_ink_pixel_width(raster, self.ink);
         let w = raster.width() as i64;
         let h = raster.height() as i64;
         if self.x < 0 || self.y < 0 || (self.x as i64) >= w || (self.y as i64) >= h {
@@ -499,6 +526,7 @@ impl<'a> Mask<'a> {
 
 impl DrawOp for Mask<'_> {
     fn apply(&self, raster: &mut Raster) {
+        assert_ink_pixel_width(raster, self.ink);
         let mfmt = self.mask.format();
         if mfmt.channels() != 1 || mfmt.bytes_per_channel() != 1 {
             return;
@@ -836,6 +864,27 @@ fn expect_draw<T>(op: &str, r: Result<T, DrawError>) -> T {
     }
 }
 
+/// Panic unless `ink` is exactly one pixel wide for `raster`'s format.
+///
+/// The built-in ink-bearing ops call this at the top of their [`DrawOp::apply`]
+/// so the public [`Raster::draw`]`(&op)` entry point and the op constructors are
+/// guarded exactly like the `draw_*` wrappers, closing the #294 corruption
+/// route: a wrong-width ink would otherwise cycle (too short) or truncate (too
+/// long) through [`Raster::put_pixel`], painting channels from the wrong bytes.
+///
+/// The `try_draw_*` / `draw_*` wrappers validate up front and short-circuit
+/// before `apply`, so for them this is a redundant re-check that always passes;
+/// it fires only on the infallible `draw(&op)` path, where a mismatch is a
+/// documented caller bug and panicking mirrors the `draw_*` wrappers' behaviour.
+/// Custom third-party ops that paint through `put_pixel` still opt out of the
+/// check by not calling this.
+#[track_caller]
+fn assert_ink_pixel_width(raster: &Raster, ink: &[u8]) {
+    if let Err(e) = raster.check_ink(ink) {
+        panic!("{e}");
+    }
+}
+
 impl Raster {
     /// Apply any [`DrawOp`] to this raster in place.
     ///
@@ -1059,8 +1108,14 @@ impl Raster {
     ///
     /// # Panics
     ///
-    /// Panics if `ink` is not exactly one pixel wide for this raster's format;
-    /// see [`Raster::try_draw_mask`] for the fallible form.
+    /// Panics if `ink` is not exactly one pixel wide for this raster's format,
+    /// or if this raster is a 32-bit-float format
+    /// ([`RgbaF32`](crate::pixel::PixelFormat::RgbaF32) /
+    /// [`FloatF32`](crate::pixel::PixelFormat::FloatF32)) — the mask blend
+    /// decodes unsigned 8/16-bit samples and does not support float targets.
+    /// See [`Raster::try_draw_mask`] for the fallible form that returns
+    /// [`DrawError::InkLengthMismatch`] / [`DrawError::UnsupportedFloatRaster`]
+    /// instead.
     #[track_caller]
     pub fn draw_mask(&mut self, ink: &[u8], mask: &Raster, x: i32, y: i32) {
         expect_draw("draw_mask", self.try_draw_mask(ink, mask, x, y));
@@ -1071,7 +1126,10 @@ impl Raster {
     /// # Errors
     ///
     /// [`DrawError::InkLengthMismatch`] if `ink` is not exactly one pixel wide
-    /// for this raster's format.
+    /// for this raster's format, or [`DrawError::UnsupportedFloatRaster`] if
+    /// this raster is a 32-bit-float format — the mask blend decodes unsigned
+    /// 8/16-bit samples and cannot yet operate on `f32` rasters, so it rejects
+    /// them up front rather than panicking inside the sample decode.
     pub fn try_draw_mask(
         &mut self,
         ink: &[u8],
@@ -1080,6 +1138,7 @@ impl Raster {
         y: i32,
     ) -> Result<(), DrawError> {
         self.check_ink(ink)?;
+        self.reject_float_target()?;
         self.draw(&Mask::new(ink, mask, x, y));
         Ok(())
     }
@@ -1107,6 +1166,20 @@ impl Raster {
             return Err(DrawError::InkLengthMismatch {
                 ink_len: ink.len(),
                 pixel_bytes,
+                format: self.format(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Reject a 32-bit-float target for the sample-decoding draw ops (the mask
+    /// blend), which only understand unsigned 8/16-bit channels. Returns
+    /// [`DrawError::UnsupportedFloatRaster`] so the fallible wrappers surface a
+    /// typed error instead of the panic [`channel_at`] would raise when it hit
+    /// float bytes.
+    fn reject_float_target(&self) -> Result<(), DrawError> {
+        if self.format().is_float() {
+            return Err(DrawError::UnsupportedFloatRaster {
                 format: self.format(),
             });
         }
@@ -1947,5 +2020,136 @@ mod tests {
         via_raw.draw(&Rectangle::outline(&[9, 8, 7, 6], 1, 1, 5, 4));
         assert_eq!(via_try.data(), via_raw.data());
         assert_eq!(via_panic.data(), via_raw.data());
+    }
+
+    // ---- draw(&op) path ink validation (#294 follow-up, #346) ----
+
+    /// The raw `draw(&op)` / direct-construction path is guarded against the
+    /// #294 ink corruption exactly like the `draw_*` wrappers: a wrong-width
+    /// ink through the `put_pixel` mechanism (here a 3-byte RGB ink on a 4-byte
+    /// `Rgba8` pixel) panics instead of cycling and painting alpha from red.
+    /// The `try_draw_*` wrappers reject it up front and never reach `apply`, so
+    /// the guard fires only on this infallible entry point.
+    #[test]
+    #[should_panic(expected = "does not match")]
+    fn draw_op_rect_path_panics_on_mismatched_ink() {
+        let mut rgba = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        rgba.draw(&Rectangle::filled(&[10, 20, 30], 0, 0, 2, 2));
+    }
+
+    /// Same guard through `Circle` (also `put_pixel`): a 1-byte ink on a 2-byte
+    /// `Gray16` pixel would repeat the low byte across both channels.
+    #[test]
+    #[should_panic(expected = "does not match")]
+    fn draw_op_circle_path_panics_on_mismatched_ink() {
+        let mut g16 = Raster::zeroed(4, 4, PixelFormat::Gray16).unwrap();
+        g16.draw(&Circle::filled(&[200], 2, 2, 1));
+    }
+
+    /// Same guard through `Line` (also `put_pixel`).
+    #[test]
+    #[should_panic(expected = "does not match")]
+    fn draw_op_line_path_panics_on_mismatched_ink() {
+        let mut rgba = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        rgba.draw(&Line::new(&[10, 20, 30], 0, 0, 3, 3));
+    }
+
+    /// Same guard through the `ink_pixel` mechanism used by `Mask`.
+    #[test]
+    #[should_panic(expected = "does not match")]
+    fn draw_op_mask_path_panics_on_mismatched_ink() {
+        let mut mask = black(2, 2);
+        mask.draw_rect_filled(&[255], 0, 0, 2, 2);
+        let mut rgba = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        rgba.draw(&Mask::new(&[10, 20, 30], &mask, 0, 0));
+    }
+
+    /// Same guard through `Flood`, whose `ink_pixel` + whole-pixel copy is the
+    /// third distinct ink mechanism.
+    #[test]
+    #[should_panic(expected = "does not match")]
+    fn draw_op_flood_path_panics_on_mismatched_ink() {
+        let mut rgba = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        rgba.draw(&Flood::bounded(&[10, 20, 30], 0, 0));
+    }
+
+    /// The op-application guard is invisible to correct-length ink: every
+    /// ink-bearing op painted through the raw `draw(&op)` path stays
+    /// byte-identical to its validated wrapper, so valid draws are unchanged.
+    #[test]
+    fn guarded_ops_match_wrappers_for_correct_ink() {
+        let ink = [9u8, 8, 7, 6]; // one Rgba8 pixel
+        let mut mask = black(4, 4);
+        mask.draw_rect_filled(&[200], 0, 0, 4, 4);
+
+        let mut raw = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        raw.draw(&Rectangle::filled(&ink, 1, 1, 3, 3));
+        raw.draw(&Circle::outline(&ink, 5, 5, 2));
+        raw.draw(&Line::new(&ink, 0, 0, 7, 7));
+        raw.draw(&Mask::new(&ink, &mask, 2, 2));
+
+        let mut wrapped = Raster::zeroed(8, 8, PixelFormat::Rgba8).unwrap();
+        wrapped.try_draw_rect_filled(&ink, 1, 1, 3, 3).unwrap();
+        wrapped.try_draw_circle(&ink, 5, 5, 2).unwrap();
+        wrapped.try_draw_line(&ink, 0, 0, 7, 7).unwrap();
+        wrapped.try_draw_mask(&ink, &mask, 2, 2).unwrap();
+
+        assert_eq!(raw.data(), wrapped.data());
+
+        // Flood on a fresh raster (order-independent).
+        let mut raw_f = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        raw_f.draw(&Flood::bounded(&ink, 0, 0));
+        let mut wrapped_f = Raster::zeroed(4, 4, PixelFormat::Rgba8).unwrap();
+        wrapped_f.draw_flood(&ink, 0, 0).unwrap();
+        assert_eq!(raw_f.data(), wrapped_f.data());
+    }
+
+    // ---- try_draw_mask on float rasters (#346) ----
+
+    /// The fallible `try_draw_mask` returns a typed error on a 32-bit-float
+    /// target instead of panicking inside the unsigned-sample decode. The ink
+    /// is correct width (4 x f32 = 16 bytes), so the float format is the only
+    /// reason to fail, and the raster is left untouched.
+    #[test]
+    fn try_draw_mask_float_target_is_typed_error() {
+        let mut mask = black(2, 2);
+        mask.draw_rect_filled(&[255], 0, 0, 2, 2);
+        let ink: Vec<u8> = [0.0f32; 4].iter().flat_map(|f| f.to_ne_bytes()).collect();
+
+        let mut im = Raster::zeroed(2, 2, PixelFormat::RgbaF32).unwrap();
+        let err = im.try_draw_mask(&ink, &mask, 0, 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DrawError::UnsupportedFloatRaster {
+                    format: PixelFormat::RgbaF32,
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("float"), "{err}");
+        assert!(
+            im.data().iter().all(|&b| b == 0),
+            "a rejected float draw must not touch the raster"
+        );
+
+        // FloatF32(n) is rejected as well.
+        let mut im = Raster::from_f32_samples(1, 1, PixelFormat::RgbaF32, &[0.0; 4]).unwrap();
+        assert!(matches!(
+            im.try_draw_mask(&ink, &mask, 0, 0).unwrap_err(),
+            DrawError::UnsupportedFloatRaster { .. }
+        ));
+    }
+
+    /// The panicking `draw_mask` surfaces the float rejection as a tagged panic,
+    /// matching the `# Panics` contract.
+    #[test]
+    #[should_panic(expected = "draw_mask: draw operation does not support")]
+    fn draw_mask_float_target_panics() {
+        let mut mask = black(2, 2);
+        mask.draw_rect_filled(&[255], 0, 0, 2, 2);
+        let ink: Vec<u8> = [0.0f32; 4].iter().flat_map(|f| f.to_ne_bytes()).collect();
+        let mut im = Raster::zeroed(2, 2, PixelFormat::RgbaF32).unwrap();
+        im.draw_mask(&ink, &mask, 0, 0);
     }
 }
