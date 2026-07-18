@@ -151,9 +151,14 @@ pub use histogram::HistogramError;
 // the module path) because the ported tests import them from the crate
 // root (`use libviprs::{tokenize, get_max_coord, ...}`).
 pub use imageio::{
-    MetadataError, MetadataValue, SaveError, ThumbnailGeometry, get_max_coord, init_from_env,
-    parse_thumbnail_geometry, set_max_coord, tokenize,
+    MetadataError, MetadataValue, SaveError, ThumbnailGeometry, parse_thumbnail_geometry, tokenize,
 };
+// Kept at the crate root for one release for callers pinned to the
+// pre-#293 API. The process-global coordinate ceiling is deprecated in
+// favour of the per-decode `DecodeLimits::max_coord` field, and no decoder
+// consults these globals any more.
+#[allow(deprecated)]
+pub use imageio::{get_max_coord, init_from_env, set_max_coord};
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,

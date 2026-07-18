@@ -249,7 +249,7 @@ pub enum SourceError {
     },
     /// A malformed or unsupported native `.v` file (bad magic, truncated
     /// header or pixel data, unsupported coding/band format, or header
-    /// geometry past the [`crate::imageio::get_max_coord`] ceiling).
+    /// geometry past the [`DecodeLimits::max_coord`] ceiling).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
 }
@@ -269,6 +269,14 @@ pub struct DecodeLimits {
     pub max_width: u32,
     /// Maximum decoded height, in pixels.
     pub max_height: u32,
+    /// Maximum single-axis dimension permitted in untrusted header
+    /// geometry, in pixels per axis (the libvips `VIPS_MAX_COORD`
+    /// ceiling, default [`crate::imageio::DEFAULT_MAX_COORD`]). Enforced
+    /// per decode by the native `.v` reader before any allocation; see
+    /// [`DecodeLimits::check_coord`]. This replaces the former
+    /// process-global `set_max_coord`/`get_max_coord` knob, whose races
+    /// under concurrent jobs made the ceiling unreadable from the API.
+    pub max_coord: u32,
     /// Maximum total pixel count (`width * height`).
     pub max_pixels: u64,
     /// Maximum number of bytes the decoder may allocate at one time.
@@ -282,6 +290,10 @@ impl Default for DecodeLimits {
             // express and covers every format libviprs targets.
             max_width: 65_535,
             max_height: 65_535,
+            // The libvips `VIPS_MAX_COORD` single-axis ceiling. Kept equal
+            // to the former process-global default so an in-bounds decode
+            // is byte-identical to prior releases.
+            max_coord: crate::imageio::DEFAULT_MAX_COORD,
             // ~1 gigapixel; large enough for legitimate scans, small
             // enough to reject a decompression bomb before allocation.
             max_pixels: 1u64 << 30,
@@ -299,6 +311,24 @@ impl DecodeLimits {
         limits.max_image_height = Some(self.max_height);
         limits.max_alloc = Some(self.max_alloc_bytes);
         limits
+    }
+
+    /// Enforce the single-axis [`max_coord`](DecodeLimits::max_coord)
+    /// ceiling on untrusted header geometry before a [`Raster`] is built.
+    /// Crate-visible so the `.v` decoder in [`crate::imageio`] applies the
+    /// same per-decode budget it once read from a mutable process-global.
+    /// Returns the typed [`SourceError::VipsFormat`] on an over-ceiling
+    /// dimension rather than allowing a later wrapping cast or oversized
+    /// allocation.
+    pub(crate) fn check_coord(self, width: u32, height: u32) -> Result<(), SourceError> {
+        if width > self.max_coord || height > self.max_coord {
+            return Err(SourceError::VipsFormat(format!(
+                "dimensions {width}x{height} exceed the max_coord ceiling ({}); \
+                 raise DecodeLimits::max_coord",
+                self.max_coord
+            )));
+        }
+        Ok(())
     }
 
     /// Enforce the `width * height` ceiling before a [`Raster`] is built.
