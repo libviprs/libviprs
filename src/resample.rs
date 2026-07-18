@@ -676,8 +676,23 @@ fn reduce_axis(
     let mut extra = out_dim as f64 * shrink - dim as f64;
     let mut shrink = shrink;
 
+    // Alpha handling (#288): premultiply colour by alpha once so both the
+    // integer box pre-shrink and the kernel convolution average coverage-
+    // weighted colour, then un-premultiply the result. Convolving straight
+    // (non-premultiplied) alpha bleeds the RGB of transparent pixels into
+    // opaque neighbours and produces the classic dark fringe at transparency
+    // boundaries. This mirrors the affine path, which premultiplies per tap.
+    let premultiply = src.format().has_alpha();
+    let premult_src;
+    let work: &Raster = if premultiply {
+        premult_src = premultiply_raster(src)?;
+        &premult_src
+    } else {
+        src
+    };
+
     // Gap-driven integer box shrink first (`vips_shrinkh` with ceil), then
-    // reduce the residual.
+    // reduce the residual. Runs on the premultiplied working raster.
     let mut boxed: Option<Raster> = None;
     if gap > 0.0 && kernel != ReduceKernel::Nearest {
         if gap < 1.0 {
@@ -685,15 +700,27 @@ fn reduce_axis(
         }
         let int_shrink = (dim as f64 / out_dim as f64 / gap).floor().max(1.0) as u32;
         if int_shrink > 1 {
-            boxed = Some(shrink_axis(src, int_shrink, true, axis)?);
+            boxed = Some(shrink_axis(work, int_shrink, true, axis)?);
             shrink /= f64::from(int_shrink);
             extra /= f64::from(int_shrink);
         }
     }
-    let cur = boxed.as_ref().unwrap_or(src);
+    let cur = boxed.as_ref().unwrap_or(work);
 
     if shrink == 1.0 {
-        return Ok(cur.clone());
+        // No residual convolution. If the box pre-shrink did the work, restore
+        // straight alpha; if nothing ran, this is a pure no-op, so return the
+        // original straight-alpha source unchanged (avoids a premultiply /
+        // un-premultiply rounding round-trip on a passthrough).
+        return if premultiply {
+            if boxed.is_some() {
+                unpremultiply_raster(cur)
+            } else {
+                Ok(src.clone())
+            }
+        } else {
+            Ok(cur.clone())
+        };
     }
 
     let n = kernel.points(shrink);
@@ -740,13 +767,16 @@ fn reduce_axis(
     let mut out = vec![0u8; ow * oh * format.bytes_per_pixel()];
 
     let clamp_dim = |v: i64| -> usize { v.clamp(0, cur_dim as i64 - 1) as usize };
+    // Accumulate all bands of a destination pixel before writing so the colour
+    // bands can be un-premultiplied against the convolved alpha (#288).
+    let mut px = vec![0.0f64; bands];
     for oy in 0..oh {
         for ox in 0..ow {
             let (start, c) = match axis {
                 Axis::Horizontal => &masks[ox],
                 Axis::Vertical => &masks[oy],
             };
-            for band in 0..bands {
+            for (band, p) in px.iter_mut().enumerate() {
                 let mut acc = 0.0f64;
                 for (k, ck) in c.iter().enumerate() {
                     let tap = clamp_dim(start + k as i64);
@@ -756,7 +786,14 @@ fn reduce_axis(
                     };
                     acc += ck * layout.read(data, (sy * w + sx) * bands + band);
                 }
-                layout.write(&mut out, (oy * ow + ox) * bands + band, acc);
+                *p = acc;
+            }
+            if premultiply {
+                unpremultiply(&mut px, layout.max);
+            }
+            let obase = (oy * ow + ox) * bands;
+            for (band, &p) in px.iter().enumerate() {
+                layout.write(&mut out, obase + band, p);
             }
         }
     }
@@ -1666,6 +1703,56 @@ fn unpremultiply(px: &mut [f64], max: f64) {
             *v *= max / alpha;
         }
     }
+}
+
+/// Premultiply the colour bands of an alpha raster by `alpha / max`, returning
+/// a same-format raster (`vips_premultiply`). The alpha band is copied
+/// unchanged. Used to bracket the reduce pipeline so colour is averaged
+/// weighted by coverage — the same thing the affine path does per tap via
+/// [`TapFetch::fetch`] — instead of mixing the meaningless RGB of transparent
+/// pixels into opaque neighbours (dark fringes at transparency boundaries).
+fn premultiply_raster(src: &Raster) -> Result<Raster, ResampleError> {
+    let format = src.format();
+    let layout = SampleLayout::of(format);
+    let bands = format.channels();
+    let data = src.data();
+    let count = src.width() as usize * src.height() as usize;
+    let mut out = vec![0u8; data.len()];
+    for p in 0..count {
+        let base = p * bands;
+        let alpha = layout.read(data, base + bands - 1);
+        let a = alpha / layout.max;
+        for b in 0..bands - 1 {
+            layout.write(&mut out, base + b, layout.read(data, base + b) * a);
+        }
+        layout.write(&mut out, base + bands - 1, alpha);
+    }
+    Ok(Raster::new(src.width(), src.height(), format, out)?)
+}
+
+/// Un-premultiply every pixel of an alpha raster, the inverse of
+/// [`premultiply_raster`]. Used to restore straight alpha when the reduce
+/// pipeline degenerates to a passthrough (integer box pre-shrink consumed the
+/// whole factor).
+fn unpremultiply_raster(src: &Raster) -> Result<Raster, ResampleError> {
+    let format = src.format();
+    let layout = SampleLayout::of(format);
+    let bands = format.channels();
+    let data = src.data();
+    let count = src.width() as usize * src.height() as usize;
+    let mut out = vec![0u8; data.len()];
+    let mut px = vec![0.0f64; bands];
+    for p in 0..count {
+        let base = p * bands;
+        for (b, v) in px.iter_mut().enumerate() {
+            *v = layout.read(data, base + b);
+        }
+        unpremultiply(&mut px, layout.max);
+        for (b, &v) in px.iter().enumerate() {
+            layout.write(&mut out, base + b, v);
+        }
+    }
+    Ok(Raster::new(src.width(), src.height(), format, out)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -3013,6 +3100,69 @@ mod tests {
         assert_eq!((v.width(), v.height()), (10, 4));
         assert!(h.data().iter().all(|&p| p == 33));
         assert!(v.data().iter().all(|&p| p == 33));
+    }
+
+    /// Regression for #288: the reduce (Lanczos) path must premultiply alpha
+    /// so the RGB of transparent pixels cannot bleed across a transparency
+    /// boundary. A 24x2 RGBA raster is opaque red on the left (cols 0..11) and
+    /// *transparent green* on the right (cols 12..23); a Lanczos3 reduceh has
+    /// taps that cross the seam. Under straight-alpha convolution (the pre-fix
+    /// behaviour) the transparent green leaks into the output (G > 0) and the
+    /// opaque red darkens at the seam. With the premultiply bracket the green,
+    /// carrying zero coverage, contributes nothing: G stays 0 everywhere and
+    /// the opaque colour stays saturated wherever any coverage survives.
+    #[test]
+    fn reduce_premultiplies_alpha_no_colour_bleed() {
+        let w = 24u32;
+        let h = 2u32;
+        let mut data = Vec::with_capacity((w * h) as usize * 4);
+        for _ in 0..h {
+            for x in 0..w {
+                if x < 12 {
+                    data.extend_from_slice(&[255, 0, 0, 255]); // opaque red
+                } else {
+                    data.extend_from_slice(&[0, 255, 0, 0]); // transparent green
+                }
+            }
+        }
+        let im = Raster::new(w, h, PixelFormat::Rgba8, data).unwrap();
+        let out = im.reduceh(2.0, "lanczos3");
+        assert_eq!((out.width(), out.height()), (12, 2));
+
+        let ow = out.width() as usize;
+        let mut saw_opaque = false;
+        let mut saw_transparent = false;
+        for (i, chunk) in out.data().chunks(4).enumerate() {
+            let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            let col = i % ow;
+            // The transparent green must never bleed into any output pixel.
+            assert!(
+                g <= 1,
+                "G bled at col {col}: {g} (transparent green leaked)"
+            );
+            assert!(b <= 1, "B bled at col {col}: {b}");
+            // Wherever coverage survives, the opaque red is preserved intact
+            // (no dark fringe): un-premultiply restores the saturated colour.
+            if a > 0 {
+                assert!(r >= 254, "R darkened at col {col}: {r} (dark fringe)");
+            }
+            // Deep opaque columns stay fully opaque saturated red...
+            if col == 0 {
+                assert_eq!((r, a), (255, 255), "deep opaque column must survive");
+                saw_opaque = true;
+            }
+            // ...and deep transparent columns stay fully transparent (colour
+            // zeroed, no leaked green).
+            if col == ow - 1 {
+                assert_eq!(a, 0, "deep transparent column must stay transparent");
+                assert_eq!((r, g, b), (0, 0, 0), "transparent colour must be zeroed");
+                saw_transparent = true;
+            }
+        }
+        assert!(
+            saw_opaque && saw_transparent,
+            "fixture must span both regions"
+        );
     }
 
     /// resize is honest about invalid scales.
