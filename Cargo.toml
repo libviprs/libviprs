@@ -60,9 +60,18 @@ moxcms = { version = "0.8.1", features = ["any_to_any"] }
 # fix that are tracked in issue #149: upstream the per-call locking
 # (ajrcarey/pdfium-render#262) or publish the fork under a distinct
 # crate name and depend on it by version.
+#
+# The `rev` below is an immutable pin on the head of the `libviprs/integration`
+# branch. A bare `branch` pin lets a force-push to that branch silently change
+# the dependency on the next resolve, so builds are non-reproducible. Cargo
+# forbids `branch` and `rev` on the same source, so the branch name lives here
+# in prose as provenance and the `rev` is the actual pin: it is exactly the
+# commit the lockfile already resolved from `libviprs/integration`, so the pin
+# is behaviour-preserving (issue #286). When intentionally advancing the fork,
+# fast-forward the branch and update this `rev` to the new head in lockstep.
 pdfium-render = { version = "0.9", features = [
 	"sync",
-], git = "https://github.com/libviprs/pdfium-render.git", branch = "libviprs/integration" }
+], git = "https://github.com/libviprs/pdfium-render.git", rev = "1000a1aff1888425004c11432b376d2c36a4d3f2" }
 proptest = "1"
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
