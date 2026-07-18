@@ -104,7 +104,7 @@ pub struct PyramidPlanner {
     layout: Layout,
     centre: bool,
     /// Optional IIIF `info.json` `@id` base URL. `None` selects the default
-    /// placeholder ([`DEFAULT_IIIF_ID`]). Only consulted for [`Layout::Iiif`].
+    /// placeholder (`DEFAULT_IIIF_ID`). Only consulted for [`Layout::Iiif`].
     iiif_id: Option<String>,
 }
 
@@ -160,7 +160,7 @@ pub struct PyramidPlan {
     pub centre_offset_y: u32,
     /// IIIF `info.json` `@id` base URL, as configured via
     /// [`PyramidPlanner::with_iiif_id`]. `None` means the default placeholder
-    /// ([`DEFAULT_IIIF_ID`]) is emitted. Only used for [`Layout::Iiif`]; see
+    /// (`DEFAULT_IIIF_ID`) is emitted. Only used for [`Layout::Iiif`]; see
     /// [`properties_sidecar`](Self::properties_sidecar).
     ///
     /// `#[serde(default)]` keeps deserialization of a plan envelope produced
@@ -798,6 +798,15 @@ impl PyramidPlan {
     /// # Example usage
     ///
     /// * [pyramid_fs_sink tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pyramid_fs_sink.rs)
+    ///
+    /// **Layout sidecars.** DeepZoom's `.dzi` is a *sibling* of the tile
+    /// directory (its file name derives from that directory, which only the
+    /// sink knows), so it is returned here as content only. The *in-directory*
+    /// sidecars for the other layouts (Zoomify `ImageProperties.xml`, IIIF
+    /// `info.json`) are returned instead by
+    /// [`properties_sidecar`](Self::properties_sidecar) as
+    /// `(relative_path, content)`. The two accessors differ in shape for that
+    /// reason; together they cover every layout's sidecar.
     pub fn dzi_manifest(&self, format: &str) -> Option<String> {
         if self.layout != Layout::DeepZoom {
             return None;
@@ -826,9 +835,11 @@ impl PyramidPlan {
     ///   and `TILESIZE`).
     /// * [`Layout::Iiif`]: `info.json` (the IIIF Image API v2 image
     ///   information document with `@context`, `width`, `height`, and the
-    ///   `tiles` descriptor). Its `@id` is a placeholder base URL: IIIF binds
-    ///   `@id` to the serving location, which is unknown at planning time, so
-    ///   the caller must rewrite it to the real image endpoint when serving.
+    ///   `tiles` descriptor). Its `@id` defaults to a placeholder base URL —
+    ///   IIIF binds `@id` to the serving location, which is unknown at planning
+    ///   time — that a caller can either set up-front with
+    ///   [`PyramidPlanner::with_iiif_id`](PyramidPlanner::with_iiif_id) or
+    ///   rewrite to the real image endpoint when serving.
     ///
     /// Returns `None` for layouts whose sidecar lives outside the tile
     /// directory or that have none. [`Layout::DeepZoom`] is one such case: its
