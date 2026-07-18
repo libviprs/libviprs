@@ -918,6 +918,23 @@ fn de76(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
 /// CIEDE2000 colour difference, following the libvips `vips_col_dE00`
 /// arrangement of the published formula (which the ported reference
 /// values pin).
+///
+/// # Parity ceiling: the mean-hue wrap arm
+///
+/// The mean-hue wrap branch below uses `(h1' + h2' - 360).abs() / 2`
+/// (an `.abs()` **reflection**), matching `vips_col_dE00` in
+/// vips-8.18.x byte-for-byte. This deviates from the published Sharma
+/// 2005 CIEDE2000 formulation, which requires
+/// `(h1' + h2' ± 360) / 2` with the sign chosen by whether
+/// `h1' + h2' < 360`. On symmetric hue-wrap pairs (`h1' + h2' == 360`)
+/// the two agree; on **asymmetric** hue-wrap pairs (colours straddling
+/// the 0/360 red boundary) the reflection diverges from Sharma by up to
+/// ~2x (verified against `vips dE00` on vips-8.18.4: e.g.
+/// Lab `[50,0,2.49]`/`[50,0,-2.49]` gives 4.746 here and in vips vs.
+/// 4.804 for Sharma). This is intentional libvips parity, not a bug: a
+/// naive Sharma "fix" here would regress the pinned `vips dE00` oracle.
+/// [`de00_sharma`] computes the true Sharma mean hue off this parity
+/// path for callers who want the published standard.
 fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     let [l1, a1, b1] = lab1;
     let [l2, a2, b2] = lab2;
@@ -984,6 +1001,86 @@ fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     let dhd = 2.0 * (c1d * c2d).sqrt() * deg_to_rad(dhd / 2.0).sin();
 
     // Parametric factors are 1 for reference viewing conditions.
+    let nl = dld / sl;
+    let nc = dcd / sc;
+    let nh = dhd / sh;
+
+    (nl * nl + nc * nc + nh * nh + rt * nc * nh).sqrt()
+}
+
+/// CIEDE2000 colour difference using the **published Sharma 2005**
+/// mean-hue arm, off the libvips parity path used by [`de00`].
+///
+/// This is identical to [`de00`] except for the mean-hue `h̄'`: where
+/// [`de00`] mirrors `vips_col_dE00`'s `.abs()` reflection (and its
+/// `< 180` boundary), this uses Sharma's `|Δh'| <= 180` plain-mean plus
+/// the sign-correct `(h1' + h2' ± 360) / 2` wrap. On asymmetric hue-wrap
+/// pairs the two differ by up to ~2x (e.g. Lab `[50,0,2.49]`/`[50,0,-2.49]`:
+/// [`de00`] returns ~4.746, this returns ~4.804); on non-wrapping and
+/// symmetric-wrap pairs they agree. Provided for callers who want the
+/// textbook value rather than libvips parity; it is **not** wired into
+/// the pinned `vips dE00` oracle (see [`de00`]).
+fn de00_sharma(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
+    let [l1, a1, b1] = lab1;
+    let [l2, a2, b2] = lab2;
+
+    let c1 = a1.hypot(b1);
+    let c2 = a2.hypot(b2);
+    let cb = (c1 + c2) / 2.0;
+
+    let cb7 = cb.powi(7);
+    let g = 0.5 * (1.0 - (cb7 / (cb7 + 25.0_f64.powi(7))).sqrt());
+
+    let l1d = l1;
+    let a1d = (1.0 + g) * a1;
+    let b1d = b1;
+    let c1d = a1d.hypot(b1d);
+    let h1d = ab_to_h(a1d, b1d);
+
+    let l2d = l2;
+    let a2d = (1.0 + g) * a2;
+    let b2d = b2;
+    let c2d = a2d.hypot(b2d);
+    let h2d = ab_to_h(a2d, b2d);
+
+    let ldb = (l1d + l2d) / 2.0;
+    let cdb = (c1d + c2d) / 2.0;
+    // Published Sharma mean hue: plain mean when |Δh'| <= 180, else the
+    // sign-correct ±360 wrap (contrast the `.abs()` reflection in `de00`).
+    let hdb = if (h1d - h2d).abs() <= 180.0 {
+        (h1d + h2d) / 2.0
+    } else if h1d + h2d < 360.0 {
+        (h1d + h2d + 360.0) / 2.0
+    } else {
+        (h1d + h2d - 360.0) / 2.0
+    };
+
+    let hdbd = (hdb - 275.0) / 25.0;
+    let dtheta = 30.0 * (-(hdbd * hdbd)).exp();
+    let cdb7 = cdb.powi(7);
+    let rc = 2.0 * (cdb7 / (cdb7 + 25.0_f64.powi(7))).sqrt();
+
+    let rt = -deg_to_rad(2.0 * dtheta).sin() * rc;
+    let t = 1.0 - 0.17 * deg_to_rad(hdb - 30.0).cos()
+        + 0.24 * deg_to_rad(2.0 * hdb).cos()
+        + 0.32 * deg_to_rad(3.0 * hdb + 6.0).cos()
+        - 0.20 * deg_to_rad(4.0 * hdb - 63.0).cos();
+
+    let ldb50 = ldb - 50.0;
+    let sl = 1.0 + (0.015 * ldb50 * ldb50) / (20.0 + ldb50 * ldb50).sqrt();
+    let sc = 1.0 + 0.045 * cdb;
+    let sh = 1.0 + 0.015 * cdb * t;
+
+    let dhd = if (h1d - h2d).abs() < 180.0 {
+        h1d - h2d
+    } else {
+        360.0 - (h1d - h2d)
+    };
+
+    let dld = l1d - l2d;
+    let dcd = c1d - c2d;
+    let dhd = 2.0 * (c1d * c2d).sqrt() * deg_to_rad(dhd / 2.0).sin();
+
     let nl = dld / sl;
     let nc = dcd / sc;
     let nh = dhd / sh;
@@ -1317,7 +1414,19 @@ fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
 
 /// Read a raster's first `channels` bands per pixel as normalised (0..1)
 /// device samples, mirroring the libvips input casts: 8-bit / 255,
-/// 16-bit / 65535, float round-clipped to 8 bits first.
+/// 16-bit / 65535, float clipped to the `0..255` device convention.
+///
+/// The float arm keeps the crate's `0..255` float scaling but divides
+/// straight into `0..1` **without** rounding to 8 bits first, so
+/// sub-8-bit precision survives into the f32-native CMS transform
+/// (moxcms `create_transform_f32`, driven by `icc_device_to_lab`).
+/// libvips itself
+/// casts float ICC input to 8-bit before the transform; this deliberately
+/// deviates from that cast to preserve precision on genuine float device
+/// rasters (issue #301). The historical `v.round()` behaviour quantised a
+/// `0..1`-normalised float to just `{0, 1/255}` at the exact boundary
+/// callers assume is full precision. The 8-bit integer (`/255`) and
+/// 16-bit (`/65535`) arms are unchanged and remain byte-parity with libvips.
 fn read_device_normalised(raster: &Raster, channels: usize) -> Vec<f32> {
     let total = raster.width() as usize * raster.height() as usize;
     let all = raster.format().channels();
@@ -1329,7 +1438,11 @@ fn read_device_normalised(raster: &Raster, channels: usize) -> Vec<f32> {
             out.push(match bpc {
                 1 => (v / 255.0) as f32,
                 2 => (v / 65535.0) as f32,
-                _ => (v.round().clamp(0.0, 255.0) / 255.0) as f32,
+                // Float device raster: preserve sub-8-bit precision for the
+                // f32 CMS transform (issue #301). Do NOT re-add `.round()`
+                // here — it collapses float input to 8-bit before the
+                // transform and regresses precision for float callers.
+                _ => (v.clamp(0.0, 255.0) / 255.0) as f32,
             });
         }
     }
@@ -1395,6 +1508,18 @@ impl Raster {
     /// The source space is [`Raster::interpretation`];
     /// [`Interpretation::Rgb`] sources are treated as sRGB and
     /// [`Interpretation::Matrix`] as mono, mirroring libvips.
+    ///
+    /// # Precision ceiling: routes through HSV are 8-bit
+    ///
+    /// Any conversion that passes through [`Interpretation::Hsv`] routes
+    /// via **8-bit sRGB regardless of the source depth**, because both
+    /// the sRGB->HSV and HSV->sRGB arms round through an 8-bit sRGB code
+    /// (`hsv_to_srgb8`/`srgb8_to_hsv`), matching libvips' HSV-through-sRGB
+    /// route. So a round trip such as `Rgb16 -> Hsv -> Rgb16` is **lossy**
+    /// — it quantises to 8-bit precision. Avoid HSV as an intermediate
+    /// space when > 8-bit precision must survive. (The sRGB<->XYZ matrix
+    /// pair itself is mutually inverse to ~5e-7, i.e. ~0.06 counts at
+    /// 16-bit, so the XYZ hub is effectively lossless by comparison.)
     ///
     /// # Errors
     ///
@@ -1564,6 +1689,13 @@ impl Raster {
     /// `vips_dE00`). Both images convert to Lab first; the result is a
     /// one-band float image plus this image's extra bands.
     ///
+    /// This is a faithful port of libvips `vips_col_dE00`, whose mean-hue
+    /// wrap arm deviates from published Sharma 2000 CIEDE2000 by up to
+    /// ~2x on asymmetric hue-wrap pairs (colours straddling the 0/360 red
+    /// boundary) — an intentional libvips parity ceiling, not a bug. See
+    /// [`de00`] for the numeric detail. Use [`Raster::try_de00_sharma`]
+    /// for the textbook value instead of libvips parity.
+    ///
     /// # Errors
     ///
     /// See [`Raster::try_de76`].
@@ -1581,6 +1713,33 @@ impl Raster {
         match self.try_de00(other) {
             Ok(out) => out,
             Err(e) => panic!("de00: {e}"),
+        }
+    }
+
+    /// CIEDE2000 colour difference using the **published Sharma 2005**
+    /// mean-hue arm rather than the libvips parity arm of
+    /// [`Raster::try_de00`]. See [`de00_sharma`] for the exact deviation
+    /// (up to ~2x on asymmetric hue-wrap pairs; identical elsewhere).
+    ///
+    /// This does not match the pinned `vips dE00` oracle and is offered
+    /// only for callers who want the textbook standard.
+    ///
+    /// # Errors
+    ///
+    /// See [`Raster::try_de76`].
+    pub fn try_de00_sharma(&self, other: &Raster) -> Result<Raster, ColourError> {
+        self.colour_difference(other, de00_sharma)
+    }
+
+    /// Panicking form of [`Raster::try_de00_sharma`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ColourError`].
+    pub fn de00_sharma(&self, other: &Raster) -> Raster {
+        match self.try_de00_sharma(other) {
+            Ok(out) => out,
+            Err(e) => panic!("de00_sharma: {e}"),
         }
     }
 
@@ -2159,6 +2318,49 @@ mod tests {
     }
 
     /**
+     * Tests the documented dE00 parity ceiling (issue #274): on the
+     * asymmetric hue-wrap pair Lab [50,0,2.49] / [50,0,-2.49] the default
+     * `de00` matches libvips `vips_col_dE00` (~4.746) while `de00_sharma`
+     * returns the published Sharma value (~4.804); on the non-wrapping
+     * reference pair the two are identical. Locks the intentional
+     * deviation so neither arm can silently change.
+     */
+    #[test]
+    fn de00_sharma_documents_wrap_deviation() {
+        // Free-function level: exact numeric contract.
+        let p1 = [50.0, 0.0, 2.49];
+        let p2 = [50.0, 0.0, -2.49];
+        let libvips = de00(p1, p2);
+        let sharma = de00_sharma(p1, p2);
+        assert!(
+            (libvips - 4.7460).abs() < 5e-3,
+            "libvips-parity de00 should be ~4.746, got {libvips}"
+        );
+        assert!(
+            (sharma - 4.8045).abs() < 5e-3,
+            "published Sharma de00 should be ~4.804, got {sharma}"
+        );
+        assert!(
+            (sharma - libvips).abs() > 0.05,
+            "wrap arms must diverge on asymmetric pairs: {sharma} vs {libvips}"
+        );
+
+        // Non-wrapping pair: both arms must agree exactly.
+        let n1 = [50.0, 10.0, 20.0];
+        let n2 = [40.0, -20.0, 10.0];
+        assert!(
+            (de00(n1, n2) - de00_sharma(n1, n2)).abs() < 1e-9,
+            "non-wrap pair must be arm-independent"
+        );
+
+        // Raster surface parity with the free functions.
+        let r1 = Raster::constant(4, 4, &[50.0, 0.0, 2.49], Interpretation::Lab);
+        let r2 = Raster::constant(4, 4, &[50.0, 0.0, -2.49], Interpretation::Lab);
+        assert!((r1.de00(&r2).getpoint(0, 0)[0] - libvips).abs() < 1e-6);
+        assert!((r1.de00_sharma(&r2).getpoint(0, 0)[0] - sharma).abs() < 1e-6);
+    }
+
+    /**
      * Tests dECMC against the ported reference: Lab [50,10,20] vs
      * [55,11,23] is ~4.97 within the ported 0.5 tolerance, and the extra
      * band rides along.
@@ -2473,6 +2675,38 @@ mod tests {
         let de = exported.de76(&im);
         let max_de = float_max(&de);
         assert!(max_de < 6.0, "dE76 should be < 6, got {max_de}");
+    }
+
+    /**
+     * Tests that ICC import of a *float* device raster preserves
+     * sub-8-bit precision (issue #301). Two pixels whose device values
+     * both round to the same 8-bit code (118.6 and 119.4 -> 119) must
+     * still import to *distinct* Lab values: the f32 CMS transform sees
+     * the un-rounded 118.6/255 and 119.4/255. Before the fix,
+     * `read_device_normalised` rounded float input to 8 bits first, so
+     * both pixels collapsed to an identical Lab and this assertion
+     * (difference > 1e-3) failed.
+     */
+    #[test]
+    fn icc_import_float_preserves_subcount_precision() {
+        let fmt = PixelFormat::with_channels(3, 4).unwrap();
+        assert!(fmt.is_float(), "3-band float device raster");
+        // Two grey pixels that both round to the 8-bit code 119.
+        let samples = [118.6f32, 118.6, 118.6, 119.4, 119.4, 119.4];
+        let mut im = Raster::from_f32_samples(2, 1, fmt, &samples).unwrap();
+        im.set_icc_profile(&srgb_profile_bytes());
+
+        let lab = im.icc_import();
+        assert_eq!(lab.interpretation(), Interpretation::Lab);
+        let l0 = lab.getpoint(0, 0)[0];
+        let l1 = lab.getpoint(1, 0)[0];
+        assert!(
+            (l1 - l0).abs() > 1e-3,
+            "sub-8-bit float precision must survive ICC import: \
+             L0={l0}, L1={l1} (would be identical if rounded to 8-bit)"
+        );
+        // Higher device value maps to higher L (sanity on direction).
+        assert!(l1 > l0, "monotonic: L1={l1} should exceed L0={l0}");
     }
 
     /**
