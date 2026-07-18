@@ -682,7 +682,14 @@ fn reduce_axis(
     // (non-premultiplied) alpha bleeds the RGB of transparent pixels into
     // opaque neighbours and produces the classic dark fringe at transparency
     // boundaries. This mirrors the affine path, which premultiplies per tap.
-    let premultiply = src.format().has_alpha();
+    //
+    // Skip it for the Nearest kernel (follow-up to #287/#288): a single-tap
+    // pick does no averaging, so there is nothing for premultiplication to
+    // coverage-weight. Bracketing a pure pick in a premultiply -> un-premultiply
+    // round-trip through the same-bit-depth integer raster would only requantise
+    // and thus corrupt the straight-alpha RGB of semi-transparent pixels. Gated
+    // like the box pre-shrink below, which is likewise a no-op for Nearest.
+    let premultiply = src.format().has_alpha() && kernel != ReduceKernel::Nearest;
     let premult_src;
     let work: &Raster = if premultiply {
         premult_src = premultiply_raster(src)?;
@@ -3163,6 +3170,53 @@ mod tests {
             saw_opaque && saw_transparent,
             "fixture must span both regions"
         );
+    }
+
+    /// Follow-up to #287/#288: the reduce path must NOT premultiply for the
+    /// Nearest kernel. Nearest is a single-tap pick with no averaging, so a
+    /// premultiply -> un-premultiply round-trip through the same-bit-depth
+    /// integer raster would only requantise — and thus corrupt — the straight-
+    /// alpha RGB of semi-transparent pixels (e.g. `(200,100,50,10)` round-trips
+    /// to `(204,102,51,10)`). A single-tap nearest pick must return each
+    /// selected source pixel byte-identically.
+    #[test]
+    fn reduce_nearest_preserves_exact_alpha_pixels() {
+        // Four semi-transparent colours whose RGB does not survive the
+        // premultiply/un-premultiply integer round-trip. Tiled on a 2x2 lattice
+        // so every source pixel is one of the four; a single-tap pick can only
+        // ever return one of them exactly.
+        const PALETTE: [[u8; 4]; 4] = [
+            [200, 100, 50, 10],
+            [30, 220, 140, 3],
+            [170, 90, 240, 7],
+            [90, 200, 60, 5],
+        ];
+        let (w, h) = (4u32, 4u32);
+        let mut data = Vec::with_capacity((w * h) as usize * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (x % 2) as usize + 2 * (y % 2) as usize;
+                data.extend_from_slice(&PALETTE[idx]);
+            }
+        }
+        let im = Raster::new(w, h, PixelFormat::Rgba8, data).unwrap();
+
+        for (label, out) in [
+            ("reduceh", im.reduceh(2.0, "nearest")),
+            ("reducev", im.reducev(2.0, "nearest")),
+            ("reduce", im.reduce(2.0, 2.0, "nearest")),
+            ("reduce-fractional", im.reduce(1.5, 1.5, "nearest")),
+        ] {
+            assert_eq!(out.format(), PixelFormat::Rgba8);
+            for chunk in out.data().chunks_exact(4) {
+                let px = [chunk[0], chunk[1], chunk[2], chunk[3]];
+                assert!(
+                    PALETTE.contains(&px),
+                    "{label} nearest corrupted a semi-transparent pixel: {px:?} \
+                     is not an exact source sample (premultiply round-trip)"
+                );
+            }
+        }
     }
 
     /// resize is honest about invalid scales.
