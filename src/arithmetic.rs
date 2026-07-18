@@ -112,7 +112,7 @@
 //! `insert`) live in their own batches.
 
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError};
+use crate::raster::{Raster, RasterError, alloc_op_output};
 use thiserror::Error;
 
 /// Typed errors for the arithmetic operations in [`crate::arithmetic`].
@@ -175,8 +175,16 @@ pub enum ArithmeticError {
     /// `hough_circle` was given an empty radius range.
     #[error("hough_circle radius range is empty: min {min} exceeds max {max}")]
     EmptyRadiusRange { min: u32, max: u32 },
-    /// Constructing the result raster failed (allocation budget, size
-    /// overflow).
+    /// An integer-only arithmetic operation (the mutating add/sub/mul family
+    /// and the per-band constant forms) was given a float raster. These
+    /// operations round-and-saturate into an unsigned integer output, so a
+    /// float input has no representable result; cast to an unsigned 8/16-bit
+    /// format first, or use the float-output family (`div`, `linear`, the
+    /// transcendental ops). Mirrors [`RasterError::FloatUnsupported`] so the
+    /// `try_*` forms return a typed error instead of panicking.
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatUnsupported { op: &'static str },
+    /// Constructing the result raster failed (allocation, size overflow).
     #[error(transparent)]
     Raster(#[from] RasterError),
 }
@@ -316,18 +324,34 @@ fn expect_arith<T>(op: &str, r: Result<T, ArithmeticError>) -> T {
     }
 }
 
-/// Reject float inputs on the mutating (integer-writing) paths with the
-/// long-standing loud message, now that [`read_f64`] itself reads floats
-/// for the reductions. Without this, an op that forces an integer output
-/// depth (`add_const` promotes to 16-bit) would silently round-trip a
-/// float raster through `u16` instead of failing.
+/// Reject float inputs on the mutating (integer-writing) `try_*` paths,
+/// returning a typed error, now that [`read_f64`] itself reads floats for the
+/// reductions. Without this, an op that forces an integer output depth
+/// (`add_const` promotes to 16-bit) would silently round-trip a float raster
+/// through `u16` instead of failing.
+///
+/// The fallible helpers ([`vec_map`], [`binary_map`]) propagate the returned
+/// [`ArithmeticError::FloatUnsupported`] with `?`, so their public `try_*`
+/// forms surface it to the caller instead of panicking (issue #271). The
+/// infallible panicking helpers ([`unary_map`]) keep asserting directly.
+fn reject_float_input(op: &'static str, r: &Raster) -> Result<(), ArithmeticError> {
+    if r.format().is_float() {
+        return Err(ArithmeticError::FloatUnsupported { op });
+    }
+    Ok(())
+}
+
+/// Allocate an op-output buffer for the infallible (panicking) op forms.
+///
+/// The fallible `try_*` forms call [`alloc_op_output`] directly and return
+/// [`RasterError::AllocationFailed`] / [`RasterError::SizeOverflow`]; the
+/// panicking forms have no error channel, so an output the allocator cannot
+/// satisfy surfaces here as a panic — never a process abort through
+/// `handle_alloc_error` (issue #280).
 #[track_caller]
-fn reject_float_input(r: &Raster) {
-    assert!(
-        !r.format().is_float(),
-        "the arithmetic operations do not support float rasters yet; \
-         cast to an unsigned 8/16-bit format first"
-    );
+fn op_output_or_panic(width: u32, height: u32, format: PixelFormat) -> Vec<u8> {
+    alloc_op_output(width, height, format)
+        .unwrap_or_else(|e| panic!("arithmetic output allocation failed: {e}"))
 }
 
 /// Write `v` as the flat `i`-th native-endian `f32` sample.
@@ -346,12 +370,13 @@ fn unary_map_float(r: &Raster, f: impl Fn(f64) -> f64) -> Raster {
     let out_fmt = PixelFormat::with_channels(bands, 4)
         .expect("band count unchanged, so the float output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
-    let mut out = vec![0u8; n * 4];
+    let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
     let data = r.data();
     for i in 0..n {
         write_f32(&mut out, i, f(read_f64(data, in_bpc, i)));
     }
-    Raster::new(r.width(), r.height(), out_fmt, out).expect("arithmetic output is well-formed")
+    Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed")
 }
 
 /// Apply per-band `f(sample, band_constant)` to every sample, producing
@@ -374,12 +399,12 @@ fn vec_map_float(
     let out_fmt = PixelFormat::with_channels(bands, 4)
         .expect("band count unchanged, so the float output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
-    let mut out = vec![0u8; n * 4];
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
     let data = r.data();
     for i in 0..n {
         write_f32(&mut out, i, f(read_f64(data, in_bpc, i), v[i % bands]));
     }
-    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
 }
 
 /// Apply `f` samplewise across two compatible images, producing a float
@@ -399,7 +424,7 @@ fn binary_map_float(
     let out_fmt = PixelFormat::with_channels(bands, 4)
         .expect("band count unchanged, so the float output format exists");
     let n = a.width() as usize * a.height() as usize * bands;
-    let mut out = vec![0u8; n * 4];
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
     let (a_data, b_data) = (a.data(), b.data());
     for i in 0..n {
         write_f32(
@@ -408,7 +433,7 @@ fn binary_map_float(
             f(read_f64(a_data, a_bpc, i), read_f64(b_data, b_bpc, i)),
         );
     }
-    Ok(Raster::new(a.width(), a.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
 }
 
 /// The pair count of a complex image, or `NotComplex` for an odd band
@@ -431,14 +456,14 @@ fn complex_map(r: &Raster, f: impl Fn(f64, f64) -> (f64, f64)) -> Result<Raster,
     let out_fmt = PixelFormat::with_channels(bands, 4)
         .expect("band count unchanged, so the float output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
-    let mut out = vec![0u8; n * 4];
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
     let data = r.data();
     for i in (0..n).step_by(2) {
         let (re, im) = f(read_f64(data, bpc, i), read_f64(data, bpc, i + 1));
         write_f32(&mut out, i, re);
         write_f32(&mut out, i + 1, im);
     }
-    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
 }
 
 /// Extract one half of every complex pair (`part` is 0 for real, 1 for
@@ -450,7 +475,7 @@ fn complex_get(r: &Raster, part: usize) -> Result<Raster, ArithmeticError> {
     let out_fmt = PixelFormat::with_channels(pairs, 4)
         .expect("pair count is at least 1 and at most half the input band count");
     let pixels = r.width() as usize * r.height() as usize;
-    let mut out = vec![0u8; pixels * pairs * 4];
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
     let data = r.data();
     for p in 0..pixels {
         for pair in 0..pairs {
@@ -458,13 +483,18 @@ fn complex_get(r: &Raster, part: usize) -> Result<Raster, ArithmeticError> {
             write_f32(&mut out, p * pairs + pair, v);
         }
     }
-    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
 }
 
 /// Apply `f` to every sample, writing a result of the same shape at
 /// `out_bpc` depth (rounded and saturated).
+#[track_caller]
 fn unary_map(r: &Raster, out_bpc: usize, f: impl Fn(f64) -> f64) -> Raster {
-    reject_float_input(r);
+    assert!(
+        !r.format().is_float(),
+        "the arithmetic operations do not support float rasters yet; \
+         cast to an unsigned 8/16-bit format first"
+    );
     let fmt = r.format();
     let bands = fmt.channels();
     let in_bpc = fmt.bytes_per_channel();
@@ -472,12 +502,13 @@ fn unary_map(r: &Raster, out_bpc: usize, f: impl Fn(f64) -> f64) -> Raster {
         .expect("band count unchanged, so the output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
     let max = depth_max(out_bpc);
-    let mut out = vec![0u8; n * out_bpc];
+    let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
     let data = r.data();
     for i in 0..n {
         write_f64(&mut out, out_bpc, i, f(read_f64(data, in_bpc, i)), max);
     }
-    Raster::new(r.width(), r.height(), out_fmt, out).expect("arithmetic output is well-formed")
+    Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed")
 }
 
 /// Apply integer `f` to every sample, keeping the input depth. `f` results
@@ -486,22 +517,25 @@ fn unary_map_u32(r: &Raster, f: impl Fn(u32) -> u32) -> Raster {
     let fmt = r.format();
     let bpc = fmt.bytes_per_channel();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
-    let mut out = vec![0u8; n * bpc];
+    let mut out = op_output_or_panic(r.width(), r.height(), fmt);
     let data = r.data();
     for i in 0..n {
         write_u32(&mut out, bpc, i, f(read_u32(data, bpc, i)));
     }
-    Raster::new(r.width(), r.height(), fmt, out).expect("arithmetic output is well-formed")
+    Raster::from_op_output(r.width(), r.height(), fmt, out)
+        .expect("arithmetic output is well-formed")
 }
 
-/// Apply per-band `f(sample, band_constant)` to every sample.
+/// Apply per-band `f(sample, band_constant)` to every sample. `op` names the
+/// caller for the [`ArithmeticError::FloatUnsupported`] error.
 fn vec_map(
+    op: &'static str,
     r: &Raster,
     v: &[f64],
     out_bpc: usize,
     f: impl Fn(f64, f64) -> f64,
 ) -> Result<Raster, ArithmeticError> {
-    reject_float_input(r);
+    reject_float_input(op, r)?;
     let fmt = r.format();
     let bands = fmt.channels();
     if v.len() != bands {
@@ -514,7 +548,7 @@ fn vec_map(
     let out_fmt = format_for(bands, out_bpc)?;
     let n = r.width() as usize * r.height() as usize * bands;
     let max = depth_max(out_bpc);
-    let mut out = vec![0u8; n * out_bpc];
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
     let data = r.data();
     for i in 0..n {
         write_f64(
@@ -525,19 +559,21 @@ fn vec_map(
             max,
         );
     }
-    Ok(Raster::new(r.width(), r.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
 }
 
 /// Apply `f` samplewise across two compatible images. Output depth is the
-/// wider input depth, widened to 16-bit when `widen` is set.
+/// wider input depth, widened to 16-bit when `widen` is set. `op` names the
+/// caller for the [`ArithmeticError::FloatUnsupported`] error.
 fn binary_map(
+    op: &'static str,
     a: &Raster,
     b: &Raster,
     widen: bool,
     f: impl Fn(f64, f64) -> f64,
 ) -> Result<Raster, ArithmeticError> {
-    reject_float_input(a);
-    reject_float_input(b);
+    reject_float_input(op, a)?;
+    reject_float_input(op, b)?;
     ensure_compatible(a, b)?;
     let (a_bpc, b_bpc) = (
         a.format().bytes_per_channel(),
@@ -547,7 +583,7 @@ fn binary_map(
     let out_fmt = format_for(a.format().channels(), out_bpc)?;
     let n = a.width() as usize * a.height() as usize * a.format().channels();
     let max = depth_max(out_bpc);
-    let mut out = vec![0u8; n * out_bpc];
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
     let (a_data, b_data) = (a.data(), b.data());
     for i in 0..n {
         write_f64(
@@ -558,7 +594,7 @@ fn binary_map(
             max,
         );
     }
-    Ok(Raster::new(a.width(), a.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
 }
 
 /// Apply integer `f` samplewise across two compatible images, masking into
@@ -577,13 +613,13 @@ fn binary_map_u32(
     let mask = depth_max_u32(out_bpc);
     let out_fmt = format_for(a.format().channels(), out_bpc)?;
     let n = a.width() as usize * a.height() as usize * a.format().channels();
-    let mut out = vec![0u8; n * out_bpc];
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
     let (a_data, b_data) = (a.data(), b.data());
     for i in 0..n {
         let v = f(read_u32(a_data, a_bpc, i), read_u32(b_data, b_bpc, i)) & mask;
         write_u32(&mut out, out_bpc, i, v);
     }
-    Ok(Raster::new(a.width(), a.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
 }
 
 /// Samplewise relational op across two compatible images: 8-bit output with
@@ -599,8 +635,7 @@ fn compare_map(
         b.format().bytes_per_channel(),
     );
     let out_fmt = format_for(a.format().channels(), 1)?;
-    let n = a.width() as usize * a.height() as usize * a.format().channels();
-    let mut out = vec![0u8; n];
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
     let (a_data, b_data) = (a.data(), b.data());
     for (i, o) in out.iter_mut().enumerate() {
         *o = if f(read_f64(a_data, a_bpc, i), read_f64(b_data, b_bpc, i)) {
@@ -609,7 +644,7 @@ fn compare_map(
             0
         };
     }
-    Ok(Raster::new(a.width(), a.height(), out_fmt, out)?)
+    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
 }
 
 /// Samplewise relational op against a constant: 8-bit output with `255`
@@ -619,13 +654,13 @@ fn compare_const_map(r: &Raster, c: f64, f: impl Fn(f64, f64) -> bool) -> Raster
     let bpc = fmt.bytes_per_channel();
     let out_fmt = PixelFormat::with_channels(fmt.channels(), 1)
         .expect("band count unchanged, so the output format exists");
-    let n = r.width() as usize * r.height() as usize * fmt.channels();
-    let mut out = vec![0u8; n];
+    let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
     let data = r.data();
     for (i, o) in out.iter_mut().enumerate() {
         *o = if f(read_f64(data, bpc, i), c) { 255 } else { 0 };
     }
-    Raster::new(r.width(), r.height(), out_fmt, out).expect("arithmetic output is well-formed")
+    Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed")
 }
 
 mod comparand_sealed {
@@ -991,7 +1026,7 @@ impl Raster {
             .expect("band count unchanged, so the output format exists");
         let data = self.data();
 
-        let mut cols = vec![0u8; w * bands * 2];
+        let mut cols = op_output_or_panic(self.width(), 1, out_fmt);
         for x in 0..w {
             for c in 0..bands {
                 let first = (0..h)
@@ -1000,7 +1035,7 @@ impl Raster {
                 write_u32(&mut cols, 2, x * bands + c, first.min(0xFFFF) as u32);
             }
         }
-        let mut rows = vec![0u8; h * bands * 2];
+        let mut rows = op_output_or_panic(1, self.height(), out_fmt);
         for y in 0..h {
             for c in 0..bands {
                 let first = (0..w)
@@ -1010,8 +1045,10 @@ impl Raster {
             }
         }
         (
-            Raster::new(self.width(), 1, out_fmt, cols).expect("profile output is well-formed"),
-            Raster::new(1, self.height(), out_fmt, rows).expect("profile output is well-formed"),
+            Raster::from_op_output(self.width(), 1, out_fmt, cols)
+                .expect("profile output is well-formed"),
+            Raster::from_op_output(1, self.height(), out_fmt, rows)
+                .expect("profile output is well-formed"),
         )
     }
 
@@ -1041,17 +1078,19 @@ impl Raster {
                 }
             }
         }
-        let mut cols = vec![0u8; w * bands * 2];
+        let mut cols = op_output_or_panic(self.width(), 1, out_fmt);
         for (i, &s) in col_sums.iter().enumerate() {
             write_f64(&mut cols, 2, i, s, 65535.0);
         }
-        let mut rows = vec![0u8; h * bands * 2];
+        let mut rows = op_output_or_panic(1, self.height(), out_fmt);
         for (i, &s) in row_sums.iter().enumerate() {
             write_f64(&mut rows, 2, i, s, 65535.0);
         }
         (
-            Raster::new(self.width(), 1, out_fmt, cols).expect("project output is well-formed"),
-            Raster::new(1, self.height(), out_fmt, rows).expect("project output is well-formed"),
+            Raster::from_op_output(self.width(), 1, out_fmt, cols)
+                .expect("project output is well-formed"),
+            Raster::from_op_output(1, self.height(), out_fmt, rows)
+                .expect("project output is well-formed"),
         )
     }
 
@@ -1135,15 +1174,14 @@ impl Raster {
         let (bands, in_bpc) = (fmt.channels(), fmt.bytes_per_channel());
         let out_fmt = PixelFormat::with_channels(bands, 1)
             .expect("band count unchanged, so the 8-bit output format exists");
-        let n = self.width() as usize * self.height() as usize * bands;
-        let mut out = vec![0u8; n];
+        let mut out = op_output_or_panic(self.width(), self.height(), out_fmt);
         let data = self.data();
         for (i, o) in out.iter_mut().enumerate() {
             // C-style cast: clip, then truncate toward zero (NaN casts
             // to 0 in Rust, which VIPS_FCLIP's comparisons also yield).
             *o = (a * read_f64(data, in_bpc, i) + b).clamp(0.0, 255.0) as u8;
         }
-        Raster::new(self.width(), self.height(), out_fmt, out)
+        Raster::from_op_output(self.width(), self.height(), out_fmt, out)
             .expect("arithmetic output is well-formed")
     }
 
@@ -1155,7 +1193,7 @@ impl Raster {
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
     /// one element per band.
     pub fn try_add_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
-        vec_map(self, v, 2, |s, c| s + c)
+        vec_map("add_vec", self, v, 2, |s, c| s + c)
     }
 
     /// Panicking form of [`Raster::try_add_vec`], matching the ported-test
@@ -1176,7 +1214,13 @@ impl Raster {
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
     /// one element per band.
     pub fn try_sub_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
-        vec_map(self, v, self.format().bytes_per_channel(), |s, c| s - c)
+        vec_map(
+            "sub_vec",
+            self,
+            v,
+            self.format().bytes_per_channel(),
+            |s, c| s - c,
+        )
     }
 
     /// Panicking form of [`Raster::try_sub_vec`], matching the ported-test
@@ -1197,7 +1241,7 @@ impl Raster {
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
     /// one element per band.
     pub fn try_mul_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
-        vec_map(self, v, 2, |s, c| s * c)
+        vec_map("mul_vec", self, v, 2, |s, c| s * c)
     }
 
     /// Panicking form of [`Raster::try_mul_vec`], matching the ported-test
@@ -1345,7 +1389,7 @@ impl Raster {
     /// Returns [`ArithmeticError::DimensionMismatch`] or
     /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
     pub fn try_sub(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
-        binary_map(self, other, false, |a, b| a - b)
+        binary_map("sub", self, other, false, |a, b| a - b)
     }
 
     /// Panicking form of [`Raster::try_sub`], matching the ported-test
@@ -1467,7 +1511,7 @@ impl Raster {
     /// Returns [`ArithmeticError::DimensionMismatch`] or
     /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
     pub fn try_mul(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
-        binary_map(self, other, true, |a, b| a * b)
+        binary_map("mul", self, other, true, |a, b| a * b)
     }
 
     /// Panicking form of [`Raster::try_mul`], matching the ported-test
@@ -1514,7 +1558,7 @@ impl Raster {
     /// Returns [`ArithmeticError::DimensionMismatch`] or
     /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
     pub fn try_minpair(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
-        binary_map(self, other, false, f64::min)
+        binary_map("minpair", self, other, false, f64::min)
     }
 
     /// Panicking form of [`Raster::try_minpair`], matching the ported-test
@@ -1536,7 +1580,7 @@ impl Raster {
     /// Returns [`ArithmeticError::DimensionMismatch`] or
     /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
     pub fn try_maxpair(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
-        binary_map(self, other, false, f64::max)
+        binary_map("maxpair", self, other, false, f64::max)
     }
 
     /// Panicking form of [`Raster::try_maxpair`], matching the ported-test
@@ -1567,7 +1611,7 @@ impl Raster {
         let bands = first.format().channels();
         let out_fmt = format_for(bands, 2)?;
         let n = first.width() as usize * first.height() as usize * bands;
-        let mut out = vec![0u8; n * 2];
+        let mut out = alloc_op_output(first.width(), first.height(), out_fmt)?;
         for i in 0..n {
             let total: f64 = images
                 .iter()
@@ -1575,7 +1619,12 @@ impl Raster {
                 .sum();
             write_f64(&mut out, 2, i, total, 65535.0);
         }
-        Ok(Raster::new(first.width(), first.height(), out_fmt, out)?)
+        Ok(Raster::from_op_output(
+            first.width(),
+            first.height(),
+            out_fmt,
+            out,
+        )?)
     }
 
     /// Panicking form of [`Raster::try_sum`], matching the ported-test
@@ -1934,7 +1983,7 @@ impl Raster {
         let (w, h) = (self.width() as usize, self.height() as usize);
         let max = depth_max(bpc);
         let data = self.data();
-        let mut out = vec![0u8; w * h * bands * bpc];
+        let mut out = alloc_op_output(self.width(), self.height(), fmt)?;
 
         // Integral images per band: s[y][x] holds the sum over the
         // rectangle [0, x) x [0, y), so any window sum is four lookups.
@@ -1972,7 +2021,12 @@ impl Raster {
                 }
             }
         }
-        Ok(Raster::new(self.width(), self.height(), fmt, out)?)
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            fmt,
+            out,
+        )?)
     }
 
     /// Panicking form of [`Raster::try_stdif`], matching the ported-test
@@ -2018,7 +2072,7 @@ impl Raster {
         let pixels = self.width() as usize * self.height() as usize;
         let max = depth_max(bpc);
         let data = self.data();
-        let mut out = vec![0u8; pixels * out_bands * bpc];
+        let mut out = alloc_op_output(self.width(), self.height(), out_fmt)?;
         for p in 0..pixels {
             for (r, coeffs) in matrix.iter().enumerate() {
                 let acc: f64 = coeffs
@@ -2029,7 +2083,12 @@ impl Raster {
                 write_f64(&mut out, bpc, p * out_bands + r, acc, max);
             }
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            out_fmt,
+            out,
+        )?)
     }
 
     /// Panicking form of [`Raster::try_recomb`], matching the ported-test
@@ -2106,7 +2165,7 @@ impl Raster {
         let pixels = self.width() as usize * self.height() as usize;
         let max = depth_max(bpc);
         let data = self.data();
-        let mut out = vec![0u8; pixels * bands * bpc];
+        let mut out = alloc_op_output(self.width(), self.height(), fmt)?;
         for p in 0..pixels {
             let alpha = read_f64(data, bpc, p * bands + bands - 1);
             for c in 0..bands - 1 {
@@ -2115,7 +2174,12 @@ impl Raster {
             }
             write_f64(&mut out, bpc, p * bands + bands - 1, alpha, max);
         }
-        Ok(Raster::new(self.width(), self.height(), fmt, out)?)
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            fmt,
+            out,
+        )?)
     }
 
     // -----------------------------------------------------------------
@@ -2312,7 +2376,7 @@ impl Raster {
             imag.format().bytes_per_channel(),
         );
         let pixels = real.width() as usize * real.height() as usize;
-        let mut out = vec![0u8; pixels * bands * 2 * 4];
+        let mut out = alloc_op_output(real.width(), real.height(), out_fmt)?;
         let (re_data, im_data) = (real.data(), imag.data());
         for p in 0..pixels {
             for b in 0..bands {
@@ -2321,7 +2385,12 @@ impl Raster {
                 write_f32(&mut out, 2 * i + 1, read_f64(im_data, im_bpc, i));
             }
         }
-        Ok(Raster::new(real.width(), real.height(), out_fmt, out)?)
+        Ok(Raster::from_op_output(
+            real.width(),
+            real.height(),
+            out_fmt,
+            out,
+        )?)
     }
 
     /// Panicking form of [`Raster::try_complexform`], matching the
@@ -2499,11 +2568,11 @@ impl Raster {
         }
 
         let out_fmt = PixelFormat::with_channels(1, 2).expect("Gray16 exists");
-        let mut out = vec![0u8; aw * ah * 2];
+        let mut out = op_output_or_panic(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt);
         for (i, &v) in acc.iter().enumerate() {
             write_u32(&mut out, 2, i, v.min(0xFFFF));
         }
-        Raster::new(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt, out)
+        Raster::from_op_output(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt, out)
             .expect("hough accumulator is well-formed")
     }
 
@@ -2587,11 +2656,16 @@ impl Raster {
             }
         }
 
-        let mut out = vec![0u8; w * h * radii * 2];
+        let mut out = alloc_op_output(self.width(), self.height(), out_fmt)?;
         for (i, &v) in acc.iter().enumerate() {
             write_u32(&mut out, 2, i, v.min(0xFFFF));
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            out_fmt,
+            out,
+        )?)
     }
 
     /// Panicking form of [`Raster::try_hough_circle`], matching the
@@ -2622,6 +2696,90 @@ mod tests {
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
         let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
         Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// Issue #271: the fallible per-band `try_*` ops return the typed
+    /// [`ArithmeticError::FloatUnsupported`] error on float input instead of
+    /// panicking through the old `assert!` in `vec_map`. The error carries the
+    /// specific op name so callers can act on it, and no panic escapes.
+    #[test]
+    fn try_vec_ops_on_float_return_float_unsupported() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::zeroed(2, 2, f1).unwrap();
+
+        assert!(matches!(
+            im.try_add_vec(&[1.0]),
+            Err(ArithmeticError::FloatUnsupported { op: "add_vec" })
+        ));
+        assert!(matches!(
+            im.try_sub_vec(&[1.0]),
+            Err(ArithmeticError::FloatUnsupported { op: "sub_vec" })
+        ));
+        assert!(matches!(
+            im.try_mul_vec(&[1.0]),
+            Err(ArithmeticError::FloatUnsupported { op: "mul_vec" })
+        ));
+    }
+
+    /// Issue #271: the fallible image-image `try_*` ops likewise return
+    /// [`ArithmeticError::FloatUnsupported`] on float input rather than
+    /// panicking through the old `assert!` in `binary_map`.
+    #[test]
+    fn try_binary_ops_on_float_return_float_unsupported() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let a = Raster::zeroed(2, 2, f1).unwrap();
+        let b = Raster::zeroed(2, 2, f1).unwrap();
+
+        assert!(matches!(
+            a.try_sub(&b),
+            Err(ArithmeticError::FloatUnsupported { op: "sub" })
+        ));
+        assert!(matches!(
+            a.try_mul(&b),
+            Err(ArithmeticError::FloatUnsupported { op: "mul" })
+        ));
+    }
+
+    /// Issues #279 / #280: an arithmetic op's output is built through the
+    /// fallible, budget-free op-output path ([`alloc_op_output`] +
+    /// [`Raster::from_op_output`]) that every op now funnels its result
+    /// through, so an oversized declared output returns a typed `Err` instead
+    /// of the old `Raster::new(...).expect(...)` panic, and an out-of-memory
+    /// request returns `AllocationFailed` instead of aborting the process.
+    ///
+    /// The oversize contract is asserted at that shared boundary: a genuine
+    /// multi-gigabyte op *input* cannot be allocated in a unit test (an op
+    /// output is at most 4x its already-allocated input), so exercising the
+    /// constructor the ops delegate to is the deterministic, cheap proof.
+    #[test]
+    fn op_output_path_rejects_oversize_without_panicking() {
+        // 4 bytes-per-pixel at u32::MAX x u32::MAX overflows usize, so the
+        // op-output constructor returns SizeOverflow rather than `.expect`.
+        let rgba8 = PixelFormat::Rgba8;
+        let built = Raster::from_op_output(u32::MAX, u32::MAX, rgba8, Vec::new());
+        assert!(
+            matches!(built, Err(RasterError::SizeOverflow { .. })),
+            "expected SizeOverflow, got {built:?}"
+        );
+
+        // 1 byte-per-pixel fits usize but exceeds the Vec capacity ceiling,
+        // so the fallible allocation returns AllocationFailed (never SIGABRT).
+        let alloc = alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Gray8);
+        assert!(
+            matches!(alloc, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed, got {alloc:?}"
+        );
+    }
+
+    /// Issue #279: a depth-promoting op still produces correct values through
+    /// the budget-free op-output path (the panic fix must not perturb output).
+    #[test]
+    fn op_output_path_preserves_values() {
+        let a = gray(1, 1, vec![200]);
+        // add_const promotes 8-bit to 16-bit; the sum survives past 255.
+        let out = a.add_const(100.0);
+        assert_eq!(out.format().bytes_per_channel(), 2);
+        assert_eq!(read_u32(out.data(), 2, 0), 300);
     }
 
     /// A 1-band float raster from `f32` sample values.
