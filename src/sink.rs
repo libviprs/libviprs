@@ -683,6 +683,13 @@ pub struct FsSink {
     /// first tile's bytes into `_shared/` and then link both tile paths to
     /// the shared file.
     pending_first: Mutex<HashMap<String, PendingFirst>>,
+    /// Per-shared-key occurrence tracking. Records every tile occurrence of a
+    /// given deduplicated content so [`FsSink::canonicalize_dedupe_layout`] can,
+    /// at `finish()`, reassign the single full-payload holder to the
+    /// coordinate-minimal occurrence — making the on-disk dedupe layout a pure
+    /// function of content + coordinates rather than of tile arrival order
+    /// (issue #275). A leaf lock.
+    dedupe_groups: Mutex<BTreeMap<String, DedupeGroup>>,
     /// Per-level tile counters, indexed by level. Each entry is
     /// `[produced, skipped]` atomically-updated from the hot path. `skipped`
     /// tracks blank placeholders or deduped references. The Vec is sized
@@ -807,6 +814,24 @@ struct PendingFirst {
     bytes: Vec<u8>,
 }
 
+/// Per-content bookkeeping consumed by [`FsSink::canonicalize_dedupe_layout`]
+/// to make dedupe placement a pure function of tile CONTENT + COORDINATE rather
+/// than of arrival order (issue #275).
+///
+/// One entry per distinct shared key. It records every tile occurrence of that
+/// content so `finish()` can reassign the single full-payload / hardlink holder
+/// deterministically to the coordinate-minimal occurrence, independent of the
+/// order in which the tiles reached the sink.
+#[derive(Debug, Clone)]
+struct DedupeGroup {
+    /// Shared file path relative to `base_dir`, e.g. `_shared/blank_<hash>.png`.
+    shared_rel: String,
+    /// Absolute shared file path (`base_dir/_shared/blank_<hash>.png`).
+    shared_abs: PathBuf,
+    /// Every tile occurrence of this content: `(coord, tile_rel_path)`.
+    occurrences: Vec<(TileCoord, String)>,
+}
+
 impl std::fmt::Debug for FsSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FsSink")
@@ -876,6 +901,7 @@ impl FsSink {
             tile_digests: Mutex::new(BTreeMap::new()),
             manifest_refs: Mutex::new(HashMap::new()),
             pending_first: Mutex::new(HashMap::new()),
+            dedupe_groups: Mutex::new(BTreeMap::new()),
             per_level_counts,
             pixel_format: OnceLock::new(),
             completed_tiles: Mutex::new(Vec::with_capacity(completed_cap)),
@@ -1083,7 +1109,7 @@ impl TileSink for FsSink {
             // materializes at each tile path (a full payload for the first
             // occurrence, a 1-byte placeholder for references / hardlink
             // fallbacks), so no digest is recorded for the dedupe path here.
-            self.dedupe_write(&rel_string, &abs_path, &bytes)?;
+            self.dedupe_write(tile.coord, &rel_string, &abs_path, &bytes)?;
             true
         } else {
             std::fs::write(&abs_path, &bytes)?;
@@ -1112,6 +1138,15 @@ impl TileSink for FsSink {
     }
 
     fn finish(&self) -> Result<(), SinkError> {
+        // Canonicalise dedupe placement so the on-disk layout is a pure
+        // function of tile content + coordinates, independent of the order in
+        // which tiles reached the sink (issue #275). Must run before checksum
+        // verification and manifest emission below so both observe the final,
+        // canonical layout.
+        if self.dedupe_active() {
+            self.canonicalize_dedupe_layout()?;
+        }
+
         // DZI sidecar for DeepZoom layouts is still emitted exactly as
         // before: a sibling of the output directory named `{base}.dzi`.
         if let Some(manifest) = self.plan.dzi_manifest(self.format.extension()) {
@@ -1286,6 +1321,7 @@ impl FsSink {
 
     fn dedupe_write(
         &self,
+        coord: TileCoord,
         rel_string: &str,
         abs_path: &Path,
         bytes: &[u8],
@@ -1309,6 +1345,38 @@ impl FsSink {
         let _promote = crate::poison::recover(&self.dedupe_promote);
 
         let decision = idx.record(rel_string, bytes);
+
+        // Record this occurrence against its shared key so `finish()` can pick
+        // the full-payload holder deterministically by coordinate order,
+        // independent of the arrival order that decided `WriteNew` vs
+        // `Reference` above (issue #275). Both decision variants carry the same
+        // shared key / path for a given content hash, so the group is stable.
+        {
+            let (shared_key, shared_rel, shared_abs) = match &decision {
+                DedupeDecision::WriteNew {
+                    shared_key,
+                    shared_path,
+                }
+                | DedupeDecision::Reference {
+                    shared_key,
+                    shared_path,
+                } => (
+                    shared_key.clone(),
+                    shared_path.to_string_lossy().replace('\\', "/"),
+                    self.base_dir.join(shared_path),
+                ),
+            };
+            self.lock_leaf(&self.dedupe_groups)
+                .entry(shared_key)
+                .or_insert_with(|| DedupeGroup {
+                    shared_rel,
+                    shared_abs,
+                    occurrences: Vec::new(),
+                })
+                .occurrences
+                .push((coord, rel_string.to_string()));
+        }
+
         match decision {
             DedupeDecision::WriteNew {
                 shared_key,
@@ -1446,6 +1514,120 @@ impl FsSink {
                 self.track_unsynced(&shared_abs_path);
                 self.lock_leaf(&self.manifest_refs)
                     .insert(rel_string.to_string(), shared_rel_string);
+            }
+        }
+        Ok(())
+    }
+
+    /// Make the dedupe on-disk layout a pure function of tile content and
+    /// coordinates (issue #275).
+    ///
+    /// The runtime "promote on 2nd hit" path (see [`FsSink::dedupe_write`])
+    /// leaves the *arrival-first* occurrence of each duplicated content as the
+    /// full-payload holder — a hardlink to `_shared/<key>` — with every other
+    /// occurrence a 1-byte placeholder recorded in
+    /// `manifest.json::blank_references`. Which occurrence arrives first is
+    /// scheduling-dependent under `tile_concurrency > 0`, so the choice of
+    /// holder — and therefore the byte layout and the `blank_references` map —
+    /// varied run to run, violating the [`TileSink`] commutative-placement
+    /// contract.
+    ///
+    /// Run once from `finish()` after all writer threads have joined (so there
+    /// is no concurrency here), this pass reassigns the single full-payload
+    /// holder of every duplicated content to its **coordinate-minimal**
+    /// occurrence, sorted by `(level, row, col)` — the same canonical order
+    /// [`crate::mapreduce_hot_cache`] uses to make write order deterministic.
+    /// The layout *shape* is unchanged: exactly one hardlink per shared blob
+    /// plus 1-byte placeholders for the rest; singletons (content seen once)
+    /// keep their full file at the tile path and never touch `_shared/`. The
+    /// result is identical regardless of the order tiles reached the sink.
+    ///
+    /// Idempotent: when the holder is already the coordinate-minimal tile (the
+    /// common case when tiles arrive in row-major order) it is a pure no-op.
+    fn canonicalize_dedupe_layout(&self) -> Result<(), SinkError> {
+        // Snapshot the group table, then release the lock before any I/O or
+        // other leaf-lock access (lock discipline: at most one leaf lock held
+        // at a time — see the type-level `# Lock discipline`).
+        let groups: Vec<DedupeGroup> = {
+            let g = self.lock_leaf(&self.dedupe_groups);
+            g.values().cloned().collect()
+        };
+
+        // Only re-read shared bytes to re-record digests when checksums are on.
+        let need_digests =
+            self.checksums != crate::checksum::ChecksumMode::None && self.checksum_algo.is_some();
+
+        for group in groups {
+            // Singletons keep their full file at the tile path; nothing to do.
+            if group.occurrences.len() < 2 {
+                continue;
+            }
+            // Reconcile only genuinely promoted content: a valid shared blob
+            // must exist. On a filesystem without hardlink support every
+            // occurrence is already a placeholder — already order-independent —
+            // so there is nothing to reassign.
+            if !self.shared_blob_valid(&group.shared_abs) {
+                continue;
+            }
+
+            // Deterministic target = coordinate-minimal occurrence.
+            let mut occ = group.occurrences.clone();
+            occ.sort_by_key(|(c, _)| (c.level, c.row, c.col));
+            let target_rel = occ[0].1.clone();
+
+            // The current full-payload holder is the sole occurrence NOT
+            // recorded as a placeholder in `blank_references`. If every
+            // occurrence is a placeholder (no hardlink was materialised) the
+            // layout is already order-independent — skip.
+            let refs = self.lock_leaf(&self.manifest_refs).clone();
+            let current_rel = occ
+                .iter()
+                .map(|(_, r)| r.clone())
+                .find(|r| !refs.contains_key(r));
+            let Some(current_rel) = current_rel else {
+                continue;
+            };
+            if current_rel == target_rel {
+                continue; // already canonical
+            }
+
+            let target_abs = self.base_dir.join(&target_rel);
+            let current_abs = self.base_dir.join(&current_rel);
+
+            // Promote the coordinate-minimal tile to the hardlink FIRST, so a
+            // (near-impossible, same-filesystem) hardlink failure never leaves
+            // the shared blob with no full-payload reference at all.
+            if target_abs.exists() || target_abs.is_symlink() {
+                let _ = std::fs::remove_file(&target_abs);
+            }
+            if std::fs::hard_link(&group.shared_abs, &target_abs).is_err() {
+                // Could not hardlink the new canonical; leave the existing
+                // holder in place. Filesystem hardlink capability is constant
+                // for a given run, so this is still deterministic and does not
+                // reintroduce order-dependence.
+                continue;
+            }
+
+            // Target now resolves to the full payload: drop its placeholder ref.
+            self.lock_leaf(&self.manifest_refs).remove(&target_rel);
+            self.track_unsynced(&target_abs);
+
+            // Demote the previous holder to a 1-byte placeholder + manifest ref.
+            if current_abs.exists() || current_abs.is_symlink() {
+                let _ = std::fs::remove_file(&current_abs);
+            }
+            std::fs::write(&current_abs, [0u8])?;
+            self.lock_leaf(&self.manifest_refs)
+                .insert(current_rel.clone(), group.shared_rel.clone());
+            self.track_unsynced(&current_abs);
+
+            // Keep recorded checksums consistent with the rewritten on-disk
+            // bytes (issue #92): the new holder now hashes to the full shared
+            // payload, the demoted tile to the 1-byte sentinel.
+            if need_digests {
+                let shared_bytes = std::fs::read(&group.shared_abs)?;
+                self.record_tile_digest(&target_rel, &shared_bytes);
+                self.record_tile_digest(&current_rel, &[0u8]);
             }
         }
         Ok(())
@@ -3257,5 +3439,139 @@ mod tests {
         }
         sink.finish()
             .expect("full dedupe+checksum+resume run must finish without nesting leaf locks");
+    }
+
+    /**
+     * Issue #275: the tile that holds the full payload (a hardlink to the
+     * shared blob) must be the coordinate-minimal occurrence, NOT the first to
+     * arrive. Three identical (zeroed => uniform => blank) tiles are fed in
+     * REVERSE coordinate order (col 2, then 1, then 0). Before the fix the
+     * first arrival — col 2 — kept the full bytes and cols 0/1 became
+     * placeholders (RED). After it, `finish()` canonicalises the full-payload
+     * holder to col 0 (GREEN).
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn dedupe_full_payload_holder_is_coordinate_minimal_regardless_of_arrival() {
+        use crate::dedupe::DedupeStrategy;
+
+        let planner = PyramidPlanner::new(24, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let top = plan.levels.last().unwrap();
+        assert!(top.cols >= 3, "test needs a level with >=3 tiles");
+        let level = top.level;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("output_files");
+        let sink = FsSink::new(base.clone(), plan.clone())
+            .with_format(TileFormat::Png)
+            .with_dedupe(DedupeStrategy::Blanks);
+
+        for col in [2u32, 1, 0] {
+            let rect = plan.tile_rect(TileCoord::new(level, col, 0)).unwrap();
+            let tile = Tile {
+                coord: TileCoord::new(level, col, 0),
+                raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                blank: false,
+            };
+            sink.write_tile(&tile).unwrap();
+        }
+        sink.finish().unwrap();
+
+        let tile_len = |col: u32| -> u64 {
+            let rel = plan
+                .tile_path(TileCoord::new(level, col, 0), "png")
+                .unwrap();
+            std::fs::metadata(base.join(rel)).unwrap().len()
+        };
+        assert!(
+            tile_len(0) > 1,
+            "coordinate-minimal tile (col 0) must hold the full payload; got {} bytes \
+             (the first tile to arrive under reverse feed was col 2)",
+            tile_len(0)
+        );
+        assert_eq!(tile_len(1), 1, "col 1 must be a 1-byte placeholder");
+        assert_eq!(tile_len(2), 1, "col 2 must be a 1-byte placeholder");
+
+        // Exactly one shared blob backs all three occurrences.
+        let shared: Vec<_> = std::fs::read_dir(base.join("_shared"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(shared.len(), 1, "expected exactly one shared blob");
+    }
+
+    /**
+     * Issue #275: replaying the same tiles in opposite arrival orders must
+     * yield an identical on-disk dedupe layout — the same full-vs-placeholder
+     * assignment at every tile path and a byte-identical shared blob. Before
+     * the fix the forward run promotes col 0 while the reverse run promotes
+     * col 2, so the tile sizes diverge (RED); after it both canonicalise to the
+     * coordinate-minimal holder (GREEN).
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn dedupe_layout_identical_across_arrival_orders() {
+        use crate::dedupe::DedupeStrategy;
+
+        let planner = PyramidPlanner::new(24, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let level = plan.levels.last().unwrap().level;
+
+        let run = |base: &Path, cols: &[u32]| {
+            let sink = FsSink::new(base.to_path_buf(), plan.clone())
+                .with_format(TileFormat::Png)
+                .with_dedupe(DedupeStrategy::Blanks);
+            for &col in cols {
+                let rect = plan.tile_rect(TileCoord::new(level, col, 0)).unwrap();
+                let tile = Tile {
+                    coord: TileCoord::new(level, col, 0),
+                    raster: Raster::zeroed(rect.width, rect.height, PixelFormat::Rgb8).unwrap(),
+                    blank: false,
+                };
+                sink.write_tile(&tile).unwrap();
+            }
+            sink.finish().unwrap();
+        };
+
+        let dir_fwd = tempfile::tempdir().unwrap();
+        let dir_rev = tempfile::tempdir().unwrap();
+        let base_fwd = dir_fwd.path().join("out");
+        let base_rev = dir_rev.path().join("out");
+        run(&base_fwd, &[0, 1, 2]);
+        run(&base_rev, &[2, 1, 0]);
+
+        for col in 0..3u32 {
+            let rel = plan
+                .tile_path(TileCoord::new(level, col, 0), "png")
+                .unwrap();
+            let len_fwd = std::fs::metadata(base_fwd.join(&rel)).unwrap().len();
+            let len_rev = std::fs::metadata(base_rev.join(&rel)).unwrap().len();
+            assert_eq!(
+                len_fwd, len_rev,
+                "tile col {col} differs in size between arrival orders \
+                 ({len_fwd} vs {len_rev}) — dedupe placement is order-dependent"
+            );
+        }
+
+        let read_shared = |base: &Path| -> Vec<(String, Vec<u8>)> {
+            let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(base.join("_shared"))
+                .unwrap()
+                .map(|e| {
+                    let p = e.unwrap().path();
+                    (
+                        p.file_name().unwrap().to_string_lossy().into_owned(),
+                        std::fs::read(&p).unwrap(),
+                    )
+                })
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        assert_eq!(
+            read_shared(&base_fwd),
+            read_shared(&base_rev),
+            "shared blobs differ between arrival orders"
+        );
     }
 }
