@@ -532,15 +532,20 @@ impl Raster {
         };
         let base_max = interpretation_max(base_tag).unwrap_or(joint);
         let overlay_max = interpretation_max(overlay_tag).unwrap_or(joint);
+        // A genuine-16 (`Rgb16`/`Grey16`) input makes the output a genuine
+        // 16-bit compositing space: it is written on the 0..65535 scale (see
+        // `out_max`) and must be *tagged* as such (see the write-back below),
+        // so a re-composite reads it on the same scale instead of the 255
+        // ceiling. This is decided only by the explicit input tags; an
+        // untagged 16-bit container stays ambiguous (genuine vs promoted) and
+        // keeps the historical joint rule, so the promoted-16 / fully-16
+        // goldens are byte-identical.
+        let out_is_genuine16 = is_genuine_16bit(base_tag) || is_genuine_16bit(overlay_tag);
         // Write-back scale = the output (compositing-space) max: genuine
         // 16-bit whenever either input is an explicit genuine-16 layer, so
         // a mixed-depth result fills the 16-bit range and its alpha is not
         // capped at 255; otherwise the joint rule (matching the goldens).
-        let out_max = if is_genuine_16bit(base_tag) || is_genuine_16bit(overlay_tag) {
-            65535.0
-        } else {
-            joint
-        };
+        let out_max = if out_is_genuine16 { 65535.0 } else { joint };
         let inv_base = 1.0 / base_max;
         let inv_overlay = 1.0 / overlay_max;
 
@@ -630,6 +635,21 @@ impl Raster {
 
         out.meta = self.meta;
         out.fields = self.fields.clone();
+        // The result inherits the base's metadata, but when a genuine-16
+        // input drove the write-back onto the 0..65535 scale (`out_max`), the
+        // base tag (typically an 8-bit or absent interpretation) would
+        // mislabel the samples: re-compositing this output would read it on
+        // the 255 scale and re-introduce #289, and its saved metadata would
+        // disagree with the samples. Stamp the genuine-16 interpretation that
+        // matches the scale it was actually written at — `Grey16` for a
+        // single colour band, `Rgb16` for RGB.
+        if out_is_genuine16 {
+            out.meta.interpretation = Some(if colour == 1 {
+                Interpretation::Grey16
+            } else {
+                Interpretation::Rgb16
+            });
+        }
         Ok(out)
     }
 
@@ -1087,6 +1107,84 @@ mod tests {
         );
         // Opaque result written across the full 16-bit range.
         assert_eq!(px[3], 65535.0, "{px:?}");
+    }
+
+    /**
+     * Tests the #289 output-tag fix: a mixed-depth result written on the
+     * genuine 16-bit scale (because a genuine-`Rgb16` overlay is present) is
+     * tagged `Rgb16`, not left with the 8-bit base's interpretation. The
+     * payoff is behavioural: chaining the result back through `composite2`
+     * must re-read it on the 16-bit scale so its alpha survives, instead of
+     * being clamped to the 255 ceiling and re-introducing #289.
+     * Input: Rgba8 base, genuine Rgba16 overlay alpha 0x8000, Source.
+     * Output tag: Rgb16; re-chained alpha stays ~0x8000 (not <= 255).
+     */
+    #[test]
+    fn genuine_16bit_result_is_tagged_and_survives_rechain() {
+        let base8 = Raster::new(1, 1, PixelFormat::Rgba8, vec![40, 50, 60, 255]).unwrap();
+        let overlay = genuine_rgba16([10000, 20000, 30000], 0x8000);
+        let mid = base8.composite(&overlay, CompositeMode::Source);
+        assert_eq!(mid.format(), PixelFormat::Rgba16);
+        // The fix stamps the genuine-16 tag that matches the 65535 write-back
+        // scale; the bug left this as the base's (untagged) interpretation.
+        assert_eq!(
+            mid.meta.interpretation,
+            Some(Interpretation::Rgb16),
+            "mixed-depth genuine-16 result must be tagged Rgb16, got {:?}",
+            mid.meta.interpretation
+        );
+        // First-hop alpha already survives under #340.
+        assert!(mid.getpoint(0, 0)[3] > 255.0);
+
+        // Re-chain: feed the result back as a genuine-16 overlay. Its alpha
+        // and colour must re-read on the 16-bit scale.
+        let base2 = Raster::new(1, 1, PixelFormat::Rgba8, vec![0, 0, 0, 255]).unwrap();
+        let px = base2.composite(&mid, CompositeMode::Source).getpoint(0, 0);
+        assert!(
+            px[3] > 255.0,
+            "re-chained genuine-16 alpha must survive the 255 ceiling: {px:?}"
+        );
+        assert!(
+            (px[3] - 32768.0).abs() < 256.0,
+            "re-chained alpha should stay ~0x8000: {px:?}"
+        );
+        assert!(
+            (px[2] - 30000.0).abs() < 256.0,
+            "re-chained blue should stay ~30000 on the 16-bit scale: {px:?}"
+        );
+    }
+
+    /**
+     * Tests the #289 output-tag fix for a single colour band: a genuine
+     * `Grey16` overlay over an 8-bit grey base yields a grey+alpha 16-bit
+     * result tagged `Grey16` (not the base's `Bw`), so it re-reads on the
+     * 16-bit scale.
+     * Input: Gray8 base, genuine Grey16-tagged Gray16 overlay, Source.
+     * Output tag: Grey16.
+     */
+    #[test]
+    fn genuine_grey16_result_is_tagged_grey16() {
+        let base = Raster::new(1, 1, PixelFormat::Gray8, vec![100]).unwrap();
+        let overlay = Raster::new(1, 1, PixelFormat::Gray16, 40000u16.to_ne_bytes().to_vec())
+            .unwrap()
+            .copy()
+            .interpretation(Interpretation::Grey16)
+            .build();
+        let out = base.composite(&overlay, CompositeMode::Source);
+        assert_eq!(out.format(), PixelFormat::with_channels(2, 2).unwrap());
+        assert_eq!(
+            out.meta.interpretation,
+            Some(Interpretation::Grey16),
+            "grey genuine-16 result must be tagged Grey16, got {:?}",
+            out.meta.interpretation
+        );
+        // Written on the 16-bit scale: the Source colour is the overlay's
+        // 40000, not a 255-clamped value.
+        assert!(
+            (out.getpoint(0, 0)[0] - 40000.0).abs() < 2.0,
+            "{:?}",
+            out.getpoint(0, 0)
+        );
     }
 
     /**
