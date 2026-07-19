@@ -403,6 +403,30 @@ fn write_f32(data: &mut [u8], i: usize, v: f64) {
     data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes());
 }
 
+/// Stamp an integer arithmetic output with the *resolved* interpretation of
+/// its `source` input, mirroring libvips copying the input header onto the
+/// operation result.
+///
+/// The constant ops that widen depth — `add_const` / `mul_const` / `pow_const`
+/// / `add_vec` (`unary_map` / `vec_map` with `out_bpc == 2`), and the widening
+/// binary path (`binary_map` with `widen`) — promote an 8-bit input into a
+/// 16-bit container while keeping the samples numerically on the 0..255 scale
+/// (the crate's promoted-container idiom). If that `Rgb16` / `Grey16`-shaped
+/// buffer were left untagged, [`Raster::interpretation`] (like libvips'
+/// `vips_image_guess_interpretation`) would *resolve* it to the genuine 16-bit
+/// space, and a downstream [`Raster::composite2`] — which keys its 0..65535 vs
+/// 0..255 scale on that resolved interpretation — would read the promoted
+/// buffer on the 65535 scale, collapsing a fully-opaque promoted overlay to
+/// ~0.4% of its value (silent data loss). Stamping the source interpretation
+/// (`Srgb` / `Bw` / `Multiband` for an 8-bit input) keeps the promoted buffer
+/// resolving to a *non*-genuine-16 space, while a genuinely 16-bit input
+/// (already resolving `Rgb16` / `Grey16`) stays honoured. It is a no-op for a
+/// same-depth output whose resolved interpretation already matches.
+fn stamp_source_interpretation(mut out: Raster, source: &Raster) -> Raster {
+    out.meta.interpretation = Some(source.interpretation());
+    out
+}
+
 /// Apply `f` to every sample, producing a float raster of the same shape.
 /// Accepts every input depth including float; results keep IEEE semantics
 /// (no rounding, clamping, or NaN rewriting).
@@ -550,8 +574,9 @@ fn unary_map(r: &Raster, out_bpc: usize, f: impl Fn(f64) -> f64) -> Raster {
     for i in 0..n {
         write_f64(&mut out, out_bpc, i, f(read_f64(data, in_bpc, i)), max);
     }
-    Raster::from_op_output(r.width(), r.height(), out_fmt, out)
-        .expect("arithmetic output is well-formed")
+    let out = Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed");
+    stamp_source_interpretation(out, r)
 }
 
 /// Apply integer `f` to every sample, keeping the input depth. `f` results
@@ -565,8 +590,9 @@ fn unary_map_u32(r: &Raster, f: impl Fn(u32) -> u32) -> Raster {
     for i in 0..n {
         write_u32(&mut out, bpc, i, f(read_u32(data, bpc, i)));
     }
-    Raster::from_op_output(r.width(), r.height(), fmt, out)
-        .expect("arithmetic output is well-formed")
+    let out = Raster::from_op_output(r.width(), r.height(), fmt, out)
+        .expect("arithmetic output is well-formed");
+    stamp_source_interpretation(out, r)
 }
 
 /// Apply per-band `f(sample, band_constant)` to every sample. `op` names the
@@ -602,7 +628,8 @@ fn vec_map(
             max,
         );
     }
-    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
+    let out = Raster::from_op_output(r.width(), r.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, r))
 }
 
 /// Apply `f` samplewise across two compatible images. Output depth is the
@@ -637,7 +664,8 @@ fn binary_map(
             max,
         );
     }
-    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
+    let out = Raster::from_op_output(a.width(), a.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, a))
 }
 
 /// Apply integer `f` samplewise across two compatible images, masking into
@@ -662,7 +690,8 @@ fn binary_map_u32(
         let v = f(read_u32(a_data, a_bpc, i), read_u32(b_data, b_bpc, i)) & mask;
         write_u32(&mut out, out_bpc, i, v);
     }
-    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
+    let out = Raster::from_op_output(a.width(), a.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, a))
 }
 
 /// Samplewise relational op across two compatible images: 8-bit output with
