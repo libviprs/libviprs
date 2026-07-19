@@ -96,11 +96,15 @@ fn downscale_half_noalpha(src: &Raster) -> Result<Raster, RasterError> {
 /// Matches libvips `SHRINK_ALPHA_TYPE` from `region.c`:
 /// - Alpha channel (last band) is averaged normally: `(a1+a2+a3+a4) / 4`
 /// - Color channels are weighted by their pixel's alpha:
-///   `(a1*c1 + a2*c2 + a3*c3 + a4*c4) / (4 * avg_alpha)`
-/// - If the averaged alpha is zero, all channels are set to zero
+///   `(a1*c1 + a2*c2 + a3*c3 + a4*c4) / (a1 + a2 + a3 + a4)`
+/// - If the summed alpha is zero, all channels are set to zero
 ///
 /// This prevents transparent pixels from darkening opaque neighbors
-/// when averaged together.
+/// when averaged together. Every sum is accumulated in `u64` and the final
+/// divides round half-up (colour `(w + alpha_sum/2)/alpha_sum`, alpha
+/// `(alpha_sum + count/2)/count`), matching [`downscale_to`] and the no-alpha
+/// box filter so a fully-opaque RGBA image downscales bit-identically to its
+/// RGB twin instead of carrying a systematic -0.5 LSB truncation bias.
 fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
     let dst_w = src.width().div_ceil(2);
     let dst_h = src.height().div_ceil(2);
@@ -125,77 +129,65 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
 
             let dst_offset = (dy as usize * dst_w as usize + dx as usize) * bpp;
 
-            // Gather alpha values from the contributing pixels
-            let mut alphas = [0.0f64; 4];
-            let mut pixel_offsets = [0usize; 4];
-            let mut n = 0;
+            // Read a single 8- or 16-bit sample as `u64`.
+            let read = |off: usize| -> u64 {
+                if bpc == 1 {
+                    u64::from(src_data[off])
+                } else {
+                    u64::from(u16::from_ne_bytes([src_data[off], src_data[off + 1]]))
+                }
+            };
+
+            // Accumulate the alpha-weighted colour sums and the total alpha over
+            // the (up-to) 2x2 source block in `u64`, mirroring `downscale_to`:
+            // colour is premultiplied by each pixel's alpha before averaging and
+            // un-premultiplied after, so the meaningless RGB of fully-transparent
+            // pixels cannot bleed into opaque neighbours. All sums stay integer so
+            // this path and `downscale_to` produce bit-identical output for the
+            // same block.
+            let mut alpha_sum: u64 = 0;
+            let mut weighted = [0u64; 4];
             for oy in 0..y_count {
                 for ox in 0..x_count {
                     let off = (sy + oy) as usize * src_stride + (sx + ox) as usize * bpp;
-                    pixel_offsets[n] = off;
-                    alphas[n] = if bpc == 1 {
-                        src_data[off + alpha_idx] as f64
-                    } else {
-                        u16::from_ne_bytes([
-                            src_data[off + alpha_idx * 2],
-                            src_data[off + alpha_idx * 2 + 1],
-                        ]) as f64
-                    };
-                    n += 1;
+                    let a = read(off + alpha_idx * bpc);
+                    alpha_sum += a;
+                    for (c, w) in weighted[..alpha_idx].iter_mut().enumerate() {
+                        *w += a * read(off + c * bpc);
+                    }
                 }
             }
 
-            // Average alpha
-            let alpha_sum: f64 = alphas[..n].iter().sum();
-            let avg_alpha = alpha_sum / count as f64;
+            if alpha_sum == 0 {
+                // Fully transparent block — leave every band zero (`dst` is
+                // pre-zeroed), matching `downscale_to`.
+                continue;
+            }
 
-            if avg_alpha == 0.0 {
-                // All transparent — zero all channels
-                for c in 0..channels {
-                    if bpc == 1 {
-                        dst[dst_offset + c] = 0;
-                    } else {
-                        dst[dst_offset + c * 2] = 0;
-                        dst[dst_offset + c * 2 + 1] = 0;
-                    }
-                }
-            } else {
-                // Alpha-weighted average for color channels
-                for c in 0..alpha_idx {
-                    let mut weighted_sum = 0.0f64;
-                    for i in 0..n {
-                        let val = if bpc == 1 {
-                            src_data[pixel_offsets[i] + c] as f64
-                        } else {
-                            u16::from_ne_bytes([
-                                src_data[pixel_offsets[i] + c * 2],
-                                src_data[pixel_offsets[i] + c * 2 + 1],
-                            ]) as f64
-                        };
-                        weighted_sum += alphas[i] * val;
-                    }
-
-                    let result = weighted_sum / (count as f64 * avg_alpha);
-
-                    if bpc == 1 {
-                        // vips truncates (C cast from double to int)
-                        dst[dst_offset + c] = result as u8;
-                    } else {
-                        let bytes = (result as u16).to_ne_bytes();
-                        dst[dst_offset + c * 2] = bytes[0];
-                        dst[dst_offset + c * 2 + 1] = bytes[1];
-                    }
-                }
-
-                // Alpha channel — simple average
+            // Alpha-weighted colour bands, `weighted / alpha_sum` round-half-up
+            // (matches the `downscale_to` fix, not a truncating C double→int cast),
+            // so a fully-opaque RGBA image downscales bit-identically to its RGB
+            // twin instead of carrying a systematic -0.5 LSB bias.
+            for (c, &w) in weighted[..alpha_idx].iter().enumerate() {
+                let result = (w + alpha_sum / 2) / alpha_sum;
                 if bpc == 1 {
-                    // vips truncates alpha too (C double→int cast)
-                    dst[dst_offset + alpha_idx] = avg_alpha as u8;
+                    dst[dst_offset + c] = result as u8;
                 } else {
-                    let bytes = (avg_alpha as u16).to_ne_bytes();
-                    dst[dst_offset + alpha_idx * 2] = bytes[0];
-                    dst[dst_offset + alpha_idx * 2 + 1] = bytes[1];
+                    let bytes = (result as u16).to_ne_bytes();
+                    dst[dst_offset + c * 2] = bytes[0];
+                    dst[dst_offset + c * 2 + 1] = bytes[1];
                 }
+            }
+
+            // Alpha band: simple average, round-half-up like the no-alpha branch
+            // (`(alpha_sum + count / 2) / count`).
+            let avg_alpha = (alpha_sum + count as u64 / 2) / count as u64;
+            if bpc == 1 {
+                dst[dst_offset + alpha_idx] = avg_alpha as u8;
+            } else {
+                let bytes = (avg_alpha as u16).to_ne_bytes();
+                dst[dst_offset + alpha_idx * 2] = bytes[0];
+                dst[dst_offset + alpha_idx * 2 + 1] = bytes[1];
             }
         }
     }
@@ -800,9 +792,9 @@ mod tests {
         let src = Raster::new(2, 2, PixelFormat::Rgba8, data).unwrap();
         let dst = downscale_half(&src).unwrap();
 
-        // Alpha average = (255+255+0+0)/4 = 127 (truncated from 127.5)
-        // R = (255*255 + 255*255 + 0*0 + 0*0) / (4 * 127.5) = 130050/510 = 255
-        // G = (255*0 + 255*0 + 0*255 + 0*255) / (4 * 127.5) = 0
+        // Alpha average = (255+255+0+0)/4 = 127.5 → 128 (round half up)
+        // R = (255*255 + 255*255 + 0*0 + 0*0) / (255+255) = 130050/510 = 255
+        // G = (255*0 + 255*0 + 0*255 + 0*255) / 510 = 0
         // B = 0
         assert_eq!(dst.data()[0], 255, "R should be 255 (alpha-weighted)");
         assert_eq!(
@@ -811,7 +803,11 @@ mod tests {
             "G should be 0 (transparent pixels ignored)"
         );
         assert_eq!(dst.data()[2], 0, "B should be 0");
-        assert_eq!(dst.data()[3], 127, "A should be 127 (truncated from 127.5)");
+        assert_eq!(
+            dst.data()[3],
+            128,
+            "A should be 128 (127.5 rounded half up)"
+        );
     }
 
     /// Alpha-weighted: partial alpha correctly weights the contribution.
@@ -828,12 +824,12 @@ mod tests {
         let src = Raster::new(2, 2, PixelFormat::Rgba8, data).unwrap();
         let dst = downscale_half(&src).unwrap();
 
-        // Alpha = (200+50+0+0)/4 = 62.5 → 62 (truncated)
-        // R = (200*100 + 50*200 + 0 + 0) / (4 * 62.5) = 30000/250 = 120
-        let avg_alpha = (200.0 + 50.0) / 4.0;
-        let expected_r = (200.0 * 100.0 + 50.0 * 200.0) / (4.0 * avg_alpha);
-        assert_eq!(dst.data()[0], expected_r as u8, "R alpha-weighted");
-        assert_eq!(dst.data()[3], avg_alpha as u8, "A averaged");
+        // Alpha_sum = 200+50+0+0 = 250; count = 4.
+        // Alpha = (250 + 4/2) / 4 = 252/4 = 63 (62.5 rounded half up).
+        // R = (200*100 + 50*200 + alpha_sum/2) / alpha_sum
+        //   = (30000 + 125) / 250 = 120 (round half up).
+        assert_eq!(dst.data()[0], 120, "R alpha-weighted (round half up)");
+        assert_eq!(dst.data()[3], 63, "A averaged (62.5 rounded half up)");
     }
 
     /// Alpha-weighted averaging with odd dimensions handles edge pixels.
@@ -849,10 +845,10 @@ mod tests {
         let dst = downscale_half(&src).unwrap();
         assert_eq!(dst.width(), 2);
         assert_eq!(dst.height(), 1);
-        // First pixel: average of red+green (both alpha=255) → (127,127,0,255)
+        // First pixel: average of red+green (both alpha=255) → (128,128,0,255)
         // (with alpha-weighted: same as uniform since alpha is equal)
-        assert_eq!(dst.data()[0], 127); // R: (255*255+255*0)/(2*255) = 127
-        assert_eq!(dst.data()[1], 127); // G: (255*0+255*255)/(2*255) = 127 (truncated)
+        assert_eq!(dst.data()[0], 128); // R: (255*255 + 510/2)/510 = 65280/510 = 128
+        assert_eq!(dst.data()[1], 128); // G: (255*255 + 510/2)/510 = 128 (round half up)
         assert_eq!(dst.data()[3], 255); // A: (255+255)/2 = 255
     }
 

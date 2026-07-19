@@ -135,14 +135,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `downscale_to` now rounds the alpha-weighted colour and averaged alpha
-  half-up, matching its own no-alpha branch, so a fully-opaque RGBA image
-  downscales bit-identically to its RGB twin instead of carrying the
-  systematic -0.5 LSB truncation bias the alpha path previously introduced.
-  The alpha-weighted region is also scanned once (each source alpha read a
-  single time) with integer `u64` accumulators that stay exact where the
-  former `f64` colour accumulator would drop low bits on extreme 16-bit
-  downscales.
+- `downscale_to` and the 2x box halver `downscale_half` (via
+  `downscale_half_alpha`) now round the alpha-weighted colour and averaged
+  alpha half-up, matching their own no-alpha branches, so a fully-opaque
+  RGBA image downscales bit-identically to its RGB twin — and identically
+  through both paths — instead of carrying the systematic -0.5 LSB
+  truncation bias the alpha path previously introduced. Both alpha-weighted
+  regions are also scanned with integer `u64` accumulators that stay exact
+  where the former `f64` colour accumulator would drop low bits on extreme
+  16-bit downscales.
 - A `Resume` refused on a plan-hash mismatch now returns
   `EngineError::PlanHashMismatch` before anything touches the output
   directory: the plan-hash gate runs ahead of the advisory run-lock
