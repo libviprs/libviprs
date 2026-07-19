@@ -222,6 +222,17 @@ impl DrawOp for Circle<'_> {
         if self.radius < 0 {
             return;
         }
+        // If the circle's bounding box lies wholly off-canvas, no pixel can be
+        // painted, so return before walking the O(radius) midpoint octant. This
+        // paints the same (zero) pixels as vips — which clips each point/scanline
+        // during its walk — while a huge off-canvas radius can no longer spin for
+        // seconds. (An on-canvas huge radius still walks, matching vips, but
+        // `fill_circle`/`outline_circle` keep each step O(canvas), not O(radius).)
+        let (cx, cy, r) = (self.cx as i64, self.cy as i64, self.radius as i64);
+        let (w, h) = (raster.width() as i64, raster.height() as i64);
+        if cx + r < 0 || cx - r >= w || cy + r < 0 || cy - r >= h {
+            return;
+        }
         if self.fill {
             fill_circle(raster, self.ink, self.cx, self.cy, self.radius);
         } else {
@@ -384,6 +395,19 @@ impl<'a> Line<'a> {
 impl DrawOp for Line<'_> {
     fn apply(&self, raster: &mut Raster) {
         assert_ink_pixel_width(raster, self.ink);
+        // If the segment's bounding box is wholly off-canvas, no point can be
+        // painted; return before the Bresenham walk so a max-coord off-canvas
+        // line can't spin through ~1e9 no-op steps. vips (`vips__draw_line_direct`)
+        // clips per point across the whole walk, so this changes no on-canvas
+        // pixel — it only drops a walk that would paint nothing. A line that
+        // does cross the canvas is still walked in full, exactly matching vips's
+        // pointwise-clipped trajectory (endpoint clipping would diverge from it).
+        let (w, h) = (raster.width() as i64, raster.height() as i64);
+        let (x1, y1) = (self.x1 as i64, self.y1 as i64);
+        let (bx2, by2) = (self.x2 as i64, self.y2 as i64);
+        if x1.max(bx2) < 0 || x1.min(bx2) >= w || y1.max(by2) < 0 || y1.min(by2) >= h {
+            return;
+        }
         // Classic integer Bresenham over all octants. Runs in i64 so the
         // deltas of extreme i32 endpoints cannot overflow.
         let (mut x, mut y) = (self.x1 as i64, self.y1 as i64);
@@ -896,15 +920,33 @@ fn fill_circle(raster: &mut Raster, ink: &[u8], cx: i32, cy: i32, radius: i32) {
         raster.put_pixel(cx, cy, ink);
         return;
     }
+    // Widen to i64 so a large centre plus radius cannot overflow i32, and clip
+    // each span to the canvas before painting. `put_pixel` already no-ops
+    // off-canvas, so the painted pixels are byte-for-byte identical to an
+    // unclipped span; this only skips writes that would have been no-ops.
+    // Without it every octant step iterates its full ~2*radius-wide span, so a
+    // huge but in-range radius is O(radius^2) — a denial-of-service hang. This
+    // clips the span (and drops off-canvas rows) exactly as `vips_draw_circle`
+    // does in `vips_draw_circle_draw_scanline`, keeping the fill O(radius).
+    let w = raster.width() as i64;
+    let h = raster.height() as i64;
+    let (cx, cy) = (cx as i64, cy as i64);
     for_each_octant_step(radius, |x, y| {
+        let (x, y) = (x as i64, y as i64);
         for (x0, x1, py) in [
             (cx - x, cx + x, cy + y),
             (cx - x, cx + x, cy - y),
             (cx - y, cx + y, cy + x),
             (cx - y, cx + y, cy - x),
         ] {
-            for px in x0..=x1 {
-                raster.put_pixel(px, py, ink);
+            if py < 0 || py >= h {
+                continue;
+            }
+            let py = py as i32;
+            let lo = x0.max(0);
+            let hi = x1.min(w - 1);
+            for px in lo..=hi {
+                raster.put_pixel(px as i32, py, ink);
             }
         }
     });
@@ -1421,6 +1463,80 @@ mod tests {
         assert_eq!(at(&outline, 6, 6), 0, "interior untouched");
         assert_eq!(at(&outline, 4, 5), 0, "left of the corner untouched");
         assert_eq!(at(&outline, 9, 9), 0, "far corner has no edge on-canvas");
+    }
+
+    /// A huge but in-range circle (filled and outline) terminates quickly by
+    /// clipping each scanline to the canvas, instead of running an O(radius^2)
+    /// span walk (filled) or spinning off-canvas (both). The painted pixels
+    /// match libvips `vips_draw_circle`, which clips every scanline the same
+    /// way. Regression for the `draw_circle --fill` DoS (#493).
+    #[test]
+    fn draw_circle_huge_radius_clips_and_terminates() {
+        use std::time::Instant;
+
+        // Filled: centre on a 10x10 canvas with a 1e6 radius covers every
+        // pixel. Unclipped the inner span walk is ~radius per octant step, so
+        // ~1e12 writes; clipped it is O(radius) octant steps of <=10px each.
+        let mut fill = black(10, 10);
+        let t0 = Instant::now();
+        fill.draw_circle_filled(&[255], 5, 5, 1_000_000);
+        assert!(
+            t0.elapsed().as_secs() < 5,
+            "huge filled circle must clip its scanlines, not iterate their full width"
+        );
+        assert!(
+            fill.data().iter().all(|&b| b == 255),
+            "vips parity: a huge filled disc covers the whole canvas"
+        );
+
+        // A circle whose bounding box is wholly off-canvas paints nothing and
+        // returns immediately, never walking the O(radius) octant. Both fill
+        // and outline short-circuit.
+        let mut off_fill = black(10, 10);
+        let t1 = Instant::now();
+        off_fill.draw_circle_filled(&[255], -2_000_000_000, -2_000_000_000, 1_000_000_000);
+        assert!(
+            t1.elapsed().as_secs() < 5,
+            "off-canvas filled circle short-circuits"
+        );
+        assert!(
+            off_fill.data().iter().all(|&b| b == 0),
+            "nothing painted off-canvas"
+        );
+
+        let mut off_outline = black(10, 10);
+        let t2 = Instant::now();
+        off_outline.draw_circle(&[255], 2_000_000_000, 2_000_000_000, 1_000_000_000);
+        assert!(
+            t2.elapsed().as_secs() < 5,
+            "off-canvas circle outline short-circuits"
+        );
+        assert!(
+            off_outline.data().iter().all(|&b| b == 0),
+            "nothing painted off-canvas"
+        );
+    }
+
+    /// A line whose bounding box is wholly off-canvas paints nothing and
+    /// returns before the Bresenham walk, so a max-coordinate off-canvas line
+    /// can't spin through ~1e9 no-op steps. On-canvas lines are unaffected
+    /// (they still walk in full, matching vips's pointwise clipping).
+    #[test]
+    fn draw_line_offcanvas_bbox_short_circuits() {
+        use std::time::Instant;
+
+        let mut im = black(10, 10);
+        let t0 = Instant::now();
+        // Entirely to the right of the canvas: max-coordinate endpoints.
+        im.draw_line(&[255], 1_000_000_000, 0, 1_000_000_000, 1_000_000_000);
+        assert!(
+            t0.elapsed().as_secs() < 5,
+            "off-canvas line must short-circuit, not walk its full extent"
+        );
+        assert!(
+            im.data().iter().all(|&b| b == 0),
+            "nothing painted off-canvas"
+        );
     }
 
     /// Degenerate inputs are safe no-ops: negative radius, zero-size rect.
