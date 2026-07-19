@@ -224,30 +224,52 @@ fn ported_thumbnail_geometry_call_site() {
     assert_eq!(geom.height, Some(150));
 }
 
-/// The ported `test_cli_max_coord_flag` and `test_cli_max_coord_env`
-/// bodies, run sequentially in one test because they exercise the same
-/// process-wide setting (and restored afterwards so parallel tests are
-/// unaffected: the values used stay far above any fixture size).
+/// The ported `test_cli_max_coord_flag` and `test_cli_max_coord_env` call
+/// sites, migrated to the per-decode ceiling that superseded the removed
+/// process-global shims (libviprs#462): the ceiling is configured with
+/// [`DecodeLimits::with_max_coord`] and enforced by the decoder, and the
+/// `VIPS_MAX_COORD` environment variable is read by the caller into a
+/// [`DecodeLimits`] rather than a global.
 #[test]
-#[allow(deprecated)]
 fn ported_max_coord_call_sites() {
-    use libviprs::{get_max_coord, init_from_env, set_max_coord};
+    use libviprs::source::{DecodeLimits, SourceError, decode_bytes_with_limits};
 
-    set_max_coord(1000);
-    assert_eq!(get_max_coord(), 1000);
+    let limits = DecodeLimits::default().with_max_coord(1000);
 
-    // A small image should succeed regardless of the ceiling.
-    let result = Raster::zeroed(500, 500, PixelFormat::Gray8).unwrap();
+    // A small image decodes regardless of the ceiling.
+    let small = Raster::zeroed(500, 500, PixelFormat::Gray8)
+        .unwrap()
+        .encode_vips()
+        .unwrap();
+    let result = decode_bytes_with_limits(&small, limits).unwrap();
     assert_eq!(result.width(), 500);
 
-    // SAFETY: test-local mutation of this process's environment; the
-    // variable is removed again before the test ends.
-    unsafe { std::env::set_var("VIPS_MAX_COORD", "500") };
-    init_from_env();
-    assert_eq!(get_max_coord(), 500);
-    unsafe { std::env::remove_var("VIPS_MAX_COORD") };
+    // A width past the ceiling is rejected before allocation.
+    let big = Raster::zeroed(2000, 1, PixelFormat::Gray8)
+        .unwrap()
+        .encode_vips()
+        .unwrap();
+    assert!(matches!(
+        decode_bytes_with_limits(&big, limits),
+        Err(SourceError::CoordLimitExceeded {
+            max_coord: 1000,
+            ..
+        })
+    ));
 
-    set_max_coord(libviprs::imageio::DEFAULT_MAX_COORD);
+    // The env variable is read by the caller into a `DecodeLimits`.
+    // SAFETY: test-local mutation of this process's environment; the
+    // variable is removed again before it is used.
+    unsafe { std::env::set_var("VIPS_MAX_COORD", "500") };
+    let ceiling: u32 = std::env::var("VIPS_MAX_COORD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap();
+    unsafe { std::env::remove_var("VIPS_MAX_COORD") };
+    assert_eq!(
+        DecodeLimits::default().with_max_coord(ceiling).max_coord,
+        500
+    );
 }
 
 /// `Raster::save` accepts a `&Path` directly, the other argument shape
