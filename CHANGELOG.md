@@ -120,6 +120,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The cargo feature that gates the `sink_object_store` module
+  (`ObjectStoreSink`) has been **renamed** from `s3` to `object-store-sink`
+  (libviprs#345). The new name reflects that the module is a generic
+  object-store sink driven by a user-injected `ObjectStore` backend — it pulls
+  in no extra crates and ships no built-in S3 transport — rather than a
+  ready-to-use S3 client. `s3` is kept as a deprecated alias
+  (`s3 = ["object-store-sink"]`) so consumers pinned to the old feature name
+  keep building; see the _Deprecated_ entry below. The README feature/module
+  tables and the crate-root "Feature flags" rustdoc now present
+  `object-store-sink` as the canonical name.
 - The averaging resamplers `Raster::reduce` / `reduceh` / `reducev`,
   `shrink` / `shrinkh` / `shrinkv`, and `resize` now premultiply alpha
   around the whole operation for images with an alpha band: the source is
@@ -160,6 +170,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
+- The `s3` cargo feature is deprecated in favour of `object-store-sink`
+  (libviprs#345). It survives only as an alias (`s3 = ["object-store-sink"]`)
+  that enables the same `sink_object_store` module, so a consumer pinned to the
+  old feature name keeps building unchanged. It carries no `since` version
+  because the rename and deprecation happen within the same post-0.4.0
+  unreleased cycle — no released version ever gated the module under a name
+  other than `s3`, and the alias is scheduled for removal in a future release.
 - `get_max_coord`, `set_max_coord`, and `init_from_env` (the process-global
   coordinate-ceiling accessors) are deprecated and inert: no decoder
   consults the global any more (superseded by `DecodeLimits::max_coord`).
