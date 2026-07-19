@@ -63,12 +63,18 @@
 //!   (`W`, `WxH`, `Wx`, `xH`, with trailing `<` / `>` / `!` modifiers
 //!   tolerated).
 //! * [`get_max_coord`] / [`set_max_coord`] / [`init_from_env`] —
-//!   **deprecated.** A mutable process-global that raced between
+//!   **deprecated and inert.** A mutable process-global that raced between
 //!   concurrent jobs and was consulted by only the `.v` reader. The
 //!   `VIPS_MAX_COORD` ceiling now lives on the per-decode
-//!   [`DecodeLimits::max_coord`] field (same 10,000,000 default), so no
-//!   decoder reads these globals any more; they remain for one release so
-//!   old callers keep compiling.
+//!   [`DecodeLimits::max_coord`] field (same 10,000,000 default) and is
+//!   enforced by *every* decoder, so no decoder reads these globals any
+//!   more. They carry no `since` version because they were added and
+//!   deprecated in the same unreleased cycle (no released version exposed
+//!   them); they survive only as inert shims for callers ported against
+//!   the pre-#293 libvips surface. **Security note:** because the global
+//!   is inert, a deployment that hardened the ceiling via `set_max_coord`
+//!   or `VIPS_MAX_COORD` now decodes at the default ceiling unless it
+//!   passes a [`DecodeLimits`] to a `*_with_limits` decode call.
 //!
 //! # Decode limits
 //!
@@ -76,8 +82,11 @@
 //! more: a per-decode [`DecodeLimits`] (single-axis `max_coord`, total
 //! `max_pixels`, and decoder `max_alloc_bytes`, all applied before the
 //! pixels are materialised) and a per-constructor allocation budget
-//! enforced by the [`Raster`] constructors. The former process-global
-//! `MAX_COORD` third regime has been folded into `DecodeLimits`.
+//! enforced by the [`Raster`] constructors. `max_coord` is honoured
+//! uniformly by both the native `.v` reader and the `image`-crate raster
+//! path (PNG/JPEG/TIFF); see [`DecodeLimits`] for the full per-format
+//! field mapping. The former process-global `MAX_COORD` third regime has
+//! been folded into `DecodeLimits`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1207,8 +1216,8 @@ pub fn parse_thumbnail_geometry(spec: &str) -> ThumbnailGeometry {
     }
 }
 
-/// The default [`get_max_coord`] ceiling: 10,000,000 pixels per axis,
-/// the libvips `VIPS_MAX_COORD` value.
+/// The default [`DecodeLimits::max_coord`] ceiling: 10,000,000 pixels per
+/// axis, the libvips `VIPS_MAX_COORD` value.
 pub const DEFAULT_MAX_COORD: u32 = 10_000_000;
 
 /// Process-wide dimension ceiling, mirrored from libvips'
@@ -1220,14 +1229,30 @@ static MAX_COORD: AtomicU32 = AtomicU32::new(DEFAULT_MAX_COORD);
 /// # Deprecated
 ///
 /// Superseded by the per-decode [`DecodeLimits::max_coord`] field. The
-/// `.v` reader no longer consults this global, so its value no longer
-/// affects any decode; it is retained only so callers pinned to the old
-/// API keep compiling for one release.
+/// decoders no longer consult this global, so its value no longer affects
+/// any decode; it is retained only as an inert compatibility shim for
+/// callers ported against the pre-#293 libvips surface.
+///
+/// No `since` version is recorded: these accessors were **added and
+/// deprecated within the same unreleased cycle** (post-0.4.0), so no
+/// released version ever exposed them as live API — a `since = "0.4.0"`
+/// stamp would name a release that never contained them (libviprs#349).
+///
+/// # Security note
+///
+/// This global is now inert. Deployments that previously tightened the
+/// coordinate ceiling below the [10,000,000-px
+/// default](DEFAULT_MAX_COORD) via [`set_max_coord`] or the
+/// `VIPS_MAX_COORD` environment variable no longer get that hardening from
+/// the global — every non-`_with_limits` decode entry point reverts to the
+/// default ceiling. Pass a [`DecodeLimits`] with the desired
+/// [`max_coord`](DecodeLimits::max_coord) to the `*_with_limits` decode
+/// calls to reinstate a tighter bound.
 #[deprecated(
-    since = "0.4.0",
     note = "the process-global coordinate ceiling raced between concurrent jobs and \
             is superseded by the per-decode DecodeLimits::max_coord field; no decoder \
-            consults this global any more"
+            consults this global any more (added and deprecated in the same unreleased \
+            cycle, so no since version applies)"
 )]
 pub fn get_max_coord() -> u32 {
     MAX_COORD.load(Ordering::Relaxed)
@@ -1239,13 +1264,24 @@ pub fn get_max_coord() -> u32 {
 ///
 /// Superseded by the per-decode [`DecodeLimits::max_coord`] field. Setting
 /// this global no longer influences any decode; construct a
-/// [`DecodeLimits`] with the desired `max_coord` and pass it to the decode
-/// call instead.
+/// [`DecodeLimits`] with the desired `max_coord` and pass it to a
+/// `*_with_limits` decode call instead.
+///
+/// No `since` version is recorded: added and deprecated within the same
+/// unreleased (post-0.4.0) cycle, so no released version exposed it
+/// (libviprs#349).
+///
+/// # Security note
+///
+/// Calling this no longer tightens any decode ceiling — the store is inert.
+/// A caller relying on it to bound untrusted geometry is silently running
+/// at the [default ceiling](DEFAULT_MAX_COORD); migrate to
+/// [`DecodeLimits::with_max_coord`] to restore the hardening.
 #[deprecated(
-    since = "0.4.0",
     note = "the process-global coordinate ceiling raced between concurrent jobs and \
             is superseded by the per-decode DecodeLimits::max_coord field; setting it \
-            no longer affects any decode"
+            no longer affects any decode (added and deprecated in the same unreleased \
+            cycle, so no since version applies)"
 )]
 pub fn set_max_coord(max: u32) {
     MAX_COORD.store(max, Ordering::Relaxed);
@@ -1261,11 +1297,22 @@ pub fn set_max_coord(max: u32) {
 /// Superseded by the per-decode [`DecodeLimits::max_coord`] field. This
 /// re-init no longer influences any decode; read the environment in the
 /// caller and populate a [`DecodeLimits`] instead.
+///
+/// No `since` version is recorded: added and deprecated within the same
+/// unreleased (post-0.4.0) cycle, so no released version exposed it
+/// (libviprs#349).
+///
+/// # Security note
+///
+/// `VIPS_MAX_COORD` no longer tightens the decode ceiling through this
+/// function — the environment value is parsed into an inert global. To
+/// honour the variable, read it in the caller and build a
+/// [`DecodeLimits`] with the parsed [`max_coord`](DecodeLimits::max_coord).
 #[deprecated(
-    since = "0.4.0",
     note = "the process-global coordinate ceiling raced between concurrent jobs and \
             is superseded by the per-decode DecodeLimits::max_coord field; env re-init \
-            no longer affects any decode"
+            no longer affects any decode (added and deprecated in the same unreleased \
+            cycle, so no since version applies)"
 )]
 pub fn init_from_env() {
     if let Some(n) = std::env::var("VIPS_MAX_COORD")
@@ -1987,6 +2034,36 @@ mod tests {
         // (b) The default in-bounds decode is unaffected and round-trips.
         let decoded = decode_vips_bytes(&bytes, DecodeLimits::default()).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (2000, 1));
+
+        // (c) Security-critical ordering (#422): a malicious header claiming
+        // a width far above the ceiling with a body far shorter than the
+        // promised pixel data must reject on the coordinate ceiling *before*
+        // the truncation/allocation check — proving the ceiling is enforced
+        // ahead of reading or allocating pixels, not after. A 4x4 Gray8 `.v`
+        // whose width field is overwritten with 20,000,000 (past the default
+        // 10,000,000 ceiling) and whose body is truncated to a few bytes must
+        // surface CoordLimitExceeded, never the truncated-pixel-data
+        // VipsFormat error and never an oversized allocation or wrapping cast.
+        let small = Raster::zeroed(4, 4, PixelFormat::Gray8).unwrap();
+        let mut malicious = small.encode_vips().unwrap();
+        // Width lives at header offset 4 (native-endian i32); see
+        // `encode_vips_impl`. A 20,000,000-px width promises 80 MB of body.
+        let huge: i32 = 20_000_000;
+        malicious[4..8].copy_from_slice(&huge.to_ne_bytes());
+        // Truncate so only a handful of the promised body bytes are present.
+        malicious.truncate(VIPS_HEADER_LEN + 8);
+        let err = decode_vips_bytes(&malicious, DecodeLimits::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SourceError::CoordLimitExceeded {
+                    width: 20_000_000,
+                    height: 4,
+                    max_coord: DEFAULT_MAX_COORD,
+                }
+            ),
+            "expected CoordLimitExceeded before the truncation check, got {err}"
+        );
     }
 
     /// The deprecated process-global accessors still round-trip and

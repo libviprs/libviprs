@@ -68,18 +68,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_typeof` / `set_typeof` over the new `MetadataValue` enum, with
   the built-in header fields reading through to the raster header),
   `Raster::set_icc_profile` / `Raster::icc_profile`, and the free
-  functions `tokenize`, `parse_thumbnail_geometry` (returning the new
-  `ThumbnailGeometry`), `get_max_coord` / `set_max_coord`, and
-  `init_from_env` (re-exported at the crate root, where the ported
-  tests import them). JPEG save embeds the `icc-profile-data` and raw
+  functions `tokenize` and `parse_thumbnail_geometry` (returning the new
+  `ThumbnailGeometry`). JPEG save embeds the `icc-profile-data` and raw
   `exif-data` blobs as APP2/APP1 segments and the decoder captures them
   back; `.v` files round-trip the full header (both byte orders) plus
   every attached field, and reject unsupported band formats (float `.v`
   arrives with the float-format batch) and header geometry past the
-  `max_coord` ceiling. `decode_file` now also records the source path
-  in the `filename` field. Structured EXIF tag encoding (`exif-ifd*-*`
+  configured coordinate ceiling. `decode_file` now also records the source
+  path in the `filename` field. Structured EXIF tag encoding (`exif-ifd*-*`
   into the JPEG APP1 TIFF directory) and PNG iCCP embedding are
   deferred to the foreign-format batch.
+- `DecodeLimits` gains a `max_coord` field (with the `with_max_coord`
+  builder setter) carrying the libvips `VIPS_MAX_COORD` single-axis
+  dimension ceiling (10,000,000 px per axis default) as per-decode state.
+  It is enforced on untrusted header geometry — before any pixel
+  allocation — by **every** decoder: the native `.v` reader and the
+  `image`-crate raster path (PNG/JPEG/TIFF) alike, returning the new
+  typed `SourceError::CoordLimitExceeded` on an over-ceiling axis.
+  `DecodeLimits` remains `#[non_exhaustive]`, so the field is additive.
 - Porter-Duff and PDF blend-mode compositing ported from libvips, in
   the new `composite` module: `Raster::composite` /
   `Raster::composite2` with the typed `try_composite2` form
@@ -132,6 +138,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / `vips_shrink*` namesakes, which do not premultiply (only `vips_resize`
   does); it matches a premultiplied vips pipeline
   (`premultiply | reduce/shrink | unpremultiply`).
+- The `max_coord` single-axis coordinate ceiling (libvips `VIPS_MAX_COORD`)
+  is now per-decode state on `DecodeLimits::max_coord` instead of a mutable
+  process-global, and it is enforced uniformly by **every** decoder. The
+  `image`-crate raster path (PNG/JPEG/TIFF) previously honoured only
+  `max_width` / `max_height` / `max_alloc_bytes` and silently ignored the
+  coordinate ceiling; it now rejects an over-ceiling declared dimension
+  with the typed `SourceError::CoordLimitExceeded`, on the header geometry
+  before the frame is allocated, matching the native `.v` reader
+  (libviprs#349). **Security note:** the former process-global
+  (`set_max_coord` / `VIPS_MAX_COORD`) is now inert — a deployment that
+  relied on it to *tighten* the ceiling below the 10,000,000-px default
+  now decodes at that default on every non-`_with_limits` entry point with
+  no runtime signal. Reinstate a tighter bound by passing a `DecodeLimits`
+  with the desired `max_coord` to a `*_with_limits` decode call.
+- The total `max_pixels` ceiling is now enforced on the raster path
+  (PNG/JPEG/TIFF) against the declared header geometry *before* the output
+  frame is allocated — matching the native `.v` reader — in addition to the
+  existing post-decode re-verification in raster construction. Previously an
+  over-`max_pixels` raster was only rejected after the frame was materialised.
+
+### Deprecated
+
+- `get_max_coord`, `set_max_coord`, and `init_from_env` (the process-global
+  coordinate-ceiling accessors) are deprecated and inert: no decoder
+  consults the global any more (superseded by `DecodeLimits::max_coord`).
+  They carry no `since` version because they were added and deprecated
+  within the same post-0.4.0 unreleased cycle — no released version ever
+  exposed them as live API, so a `since = "0.4.0"` stamp would name a
+  release that never contained them. They survive only as compatibility
+  shims for callers ported against the pre-#293 libvips surface; migrate to
+  `DecodeLimits::with_max_coord`.
 
 ### Fixed
 
