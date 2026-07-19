@@ -320,28 +320,33 @@ pub trait TileSink: Send + Sync {
             .is_some_and(|inner| inner.applies_retry_policy())
     }
 
-    /// Engine hook (issue #272 stopgap): report which resume-incompatible
-    /// feature this sink carries, if any.
+    /// Engine hook (issue #272): rebuild the sink-side manifest / dedupe /
+    /// checksum state a *pre-crash* tile contributes, WITHOUT advancing the
+    /// resume checkpoint.
     ///
-    /// A resumed run reconstructs the checkpoint but NOT the sink-side manifest
-    /// state, and [`TileSink::finish`] rebuilds `manifest.json` from per-run
-    /// in-memory maps (`manifest_refs`, `tile_digests`, the `DedupeIndex`) that
-    /// start empty for every pre-crash tile. When content deduplication or
-    /// per-tile checksums are active, that overwrites the prior manifest with an
-    /// incomplete view and orphans pre-crash placeholder tiles — silent data
-    /// corruption. The engine builder consults this to refuse
-    /// [`ResumeMode::Resume`](crate::ResumeMode) on such a sink until the
-    /// seeding fix lands, returning
-    /// [`EngineError::ResumeUnsupportedWith`](crate::engine::EngineError::ResumeUnsupportedWith).
+    /// On resume, [`ResumeAwareSink`](crate::resume) skips the coordinates the
+    /// checkpoint already records — they were durably written before the crash.
+    /// But the sink's per-run manifest state (`manifest_refs`, `tile_digests`,
+    /// the `DedupeIndex`, per-level counts) starts empty, and
+    /// [`TileSink::finish`] rebuilds `manifest.json` from it. Without
+    /// reconstructing that state a resumed dedupe/checksum run would overwrite
+    /// the manifest with a view that omits every pre-crash placeholder and
+    /// truncates the checksum table — silent, reader-visible data corruption.
     ///
-    /// `Some(feature)` names the feature (e.g. `"content deduplication"`),
-    /// `None` means the sink keeps no such state and resume is safe. The default
-    /// forwards to [`TileSink::inner_sink`] so a transparent wrapper reports its
-    /// inner sink's answer without overriding this method; terminal sinks that
-    /// hold no manifest state return `None`.
-    fn resume_incompatible_feature(&self) -> Option<&'static str> {
-        self.inner_sink()
-            .and_then(|inner| inner.resume_incompatible_feature())
+    /// The engine calls this for each already-completed coordinate, passing the
+    /// re-rendered tile, so the sink reconstructs exactly the state an
+    /// uninterrupted run would hold; a resumed [`TileSink::finish`] then
+    /// reproduces byte-identical output. Implementations MUST NOT advance any
+    /// resume checkpoint from here — the caller deliberately does not mark these
+    /// coordinates as newly completed. The default forwards to
+    /// [`TileSink::inner_sink`], bottoming out at `Ok` for terminal sinks that
+    /// keep no manifest state (so external impls keep compiling and a plain,
+    /// non-dedupe/checksum resume still short-circuits skipped tiles).
+    fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.seed_completed_tile(tile),
+            None => Ok(()),
+        }
     }
 }
 
@@ -400,8 +405,8 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     fn applies_retry_policy(&self) -> bool {
         (**self).applies_retry_policy()
     }
-    fn resume_incompatible_feature(&self) -> Option<&'static str> {
-        (**self).resume_incompatible_feature()
+    fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        (**self).seed_completed_tile(tile)
     }
 }
 
@@ -457,8 +462,8 @@ impl<T: TileSink + ?Sized> TileSink for &T {
     fn applies_retry_policy(&self) -> bool {
         (*self).applies_retry_policy()
     }
-    fn resume_incompatible_feature(&self) -> Option<&'static str> {
-        (*self).resume_incompatible_feature()
+    fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        (*self).seed_completed_tile(tile)
     }
 }
 
@@ -1264,22 +1269,34 @@ impl TileSink for FsSink {
         Some(self.format)
     }
 
-    fn resume_incompatible_feature(&self) -> Option<&'static str> {
-        // A resumed run cannot reconstruct `manifest_refs` / `tile_digests` /
-        // the `DedupeIndex`, yet `finish()` rebuilds and overwrites
-        // `manifest.json` from them whenever dedupe is active or checksums are
-        // emitted. Refuse those combos on resume (issue #272 stopgap). Dedupe
-        // is reported first: it also drives the checksum/manifest machinery, so
-        // it is the more informative label when both are set. A bare
-        // `ManifestBuilder` with a checksum algorithm forces `checksums` to
-        // `EmitOnly` (see `with_manifest`), so the checksum branch covers it.
-        if self.dedupe_active() {
-            Some("content deduplication")
-        } else if self.checksums != crate::checksum::ChecksumMode::None {
-            Some("per-tile checksums")
-        } else {
-            None
+    fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        // Rebuild only the state `finish()` consumes to (re)emit the manifest
+        // and dedupe layout: the `DedupeIndex`, `dedupe_groups`, `manifest_refs`,
+        // `tile_digests`, per-level counts, `saw_blank` and `pixel_format`. When
+        // none of that machinery is active there is nothing for `finish()` to
+        // rebuild from a pre-crash tile, so the skipped tile short-circuits as
+        // before — preserving resume's I/O savings on the plain path.
+        if !(self.dedupe_active()
+            || self.checksums != crate::checksum::ChecksumMode::None
+            || self.manifest_builder.is_some())
+        {
+            return Ok(());
         }
+        // Re-run the full sink-side write for this already-completed tile so the
+        // dedupe index/groups, `manifest_refs`, `tile_digests` and per-level
+        // counters end up exactly as an uninterrupted run would leave them —
+        // after which `finish()`'s canonicalize + manifest emit reproduce a
+        // byte-identical manifest and dedupe layout (issue #272). Tile content
+        // is deterministic, so the bytes re-materialised here match what was
+        // written pre-crash, and the dedupe write path is already
+        // resume-rerun-safe against the on-disk state a prior run left (it
+        // revalidates shared blobs and relinks placeholders — issues #93/#97).
+        //
+        // This intentionally does NOT advance the resume checkpoint:
+        // `ResumeAwareSink` calls `mark_tile_completed` only for coordinates it
+        // does *not* skip, so seeded coordinates are never re-certified and the
+        // checkpoint's `completed_tiles` set stays free of duplicates.
+        self.write_tile(tile)
     }
 }
 

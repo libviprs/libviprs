@@ -110,41 +110,6 @@ pub enum EngineError {
     /// plan cannot trigger an arithmetic underflow or a silent zero-tile run.
     #[error("invalid plan: {reason}")]
     InvalidPlan { reason: &'static str },
-    /// A resuming [`ResumePolicy`](crate::ResumePolicy) (`ResumeMode::Resume`)
-    /// was combined with a feature whose sink-side manifest state a resumed run
-    /// cannot yet reconstruct — content deduplication
-    /// ([`DedupeStrategy`](crate::dedupe::DedupeStrategy) other than `None`) or
-    /// per-tile checksums / an attached manifest
-    /// ([`ChecksumMode`](crate::checksum::ChecksumMode) other than `None`).
-    ///
-    /// This is the issue #272 **stopgap**. On resume,
-    /// [`ResumeAwareSink`](crate::resume) short-circuits already-completed
-    /// coordinates before they reach the inner sink, so the sink's
-    /// `manifest_refs` / `tile_digests` / `DedupeIndex` start empty for every
-    /// pre-crash tile. [`FsSink::finish`](crate::sink::FsSink) then rebuilds and
-    /// atomically overwrites `manifest.json` from those empty-for-pre-crash
-    /// in-memory maps, orphaning every pre-crash 1-byte placeholder tile
-    /// (resolvable only through `blank_references`) and truncating the checksum
-    /// table — silent, reader-visible data corruption. Until resume learns to
-    /// seed that state (the real fix, tracked separately after the dedupe-layout
-    /// and single-writer changes), the engine refuses the combination up front
-    /// instead of proceeding and corrupting output.
-    ///
-    /// Re-run with [`ResumePolicy::overwrite`](crate::ResumePolicy::overwrite),
-    /// or disable dedupe / checksums, to proceed. Resume with neither dedupe nor
-    /// checksums is unaffected and remains supported.
-    #[error(
-        "resume is not yet supported together with {feature}: a resumed run \
-         cannot reconstruct the sink-side manifest/dedupe state, so it would \
-         overwrite manifest.json with an incomplete view and orphan pre-crash \
-         tiles (issue #272). Re-run with ResumePolicy::overwrite() or disable \
-         {feature}."
-    )]
-    ResumeUnsupportedWith {
-        /// Human-readable name of the incompatible feature, e.g.
-        /// `"content deduplication"` or `"per-tile checksums"`.
-        feature: &'static str,
-    },
 }
 
 /// Controls how blank (uniform-color) tiles are handled during pyramid generation.

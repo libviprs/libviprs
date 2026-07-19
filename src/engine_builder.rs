@@ -817,36 +817,18 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 return Ok((result, sink));
             }
 
-            // Issue #272 stopgap (P0, data corruption): a resumed run
-            // reconstructs the checkpoint but NOT the sink-side manifest state
-            // (`manifest_refs` / `tile_digests` / the `DedupeIndex`).
-            // `ResumeAwareSink` short-circuits already-completed coordinates
-            // before they reach the inner sink, so with content deduplication
-            // or per-tile checksums active those maps start empty for every
-            // pre-crash tile and `finish()` rebuilds + atomically overwrites
-            // `manifest.json` from them — orphaning every pre-crash 1-byte
-            // placeholder (resolvable only via `blank_references`) and
-            // truncating the checksum table. Refuse the combination up front,
-            // before anything touches the output directory or takes the run
-            // lock, rather than proceed and silently corrupt output. Resume
-            // with neither dedupe nor checksums is safe and stays supported.
-            // The real fix — seed that state on resume — is tracked separately
-            // and lands after the dedupe-layout and single-writer changes.
-            if matches!(policy.mode(), ResumeMode::Resume) {
-                let engine_dedupe = matches!(
-                    engine_cfg.dedupe_strategy,
-                    Some(crate::dedupe::DedupeStrategy::Blanks)
-                        | Some(crate::dedupe::DedupeStrategy::All { .. })
-                );
-                let feature = if engine_dedupe {
-                    Some("content deduplication")
-                } else {
-                    sink.resume_incompatible_feature()
-                };
-                if let Some(feature) = feature {
-                    return Err(EngineError::ResumeUnsupportedWith { feature });
-                }
-            }
+            // Issue #272 (P0, data corruption) — resolved by sink-side seeding.
+            // A resumed dedupe/checksum run used to be refused up front (the
+            // #450 stopgap `ResumeUnsupportedWith`) because `ResumeAwareSink`
+            // short-circuits already-completed coordinates, leaving the sink's
+            // `manifest_refs` / `tile_digests` / `DedupeIndex` empty for every
+            // pre-crash tile so `finish()` overwrote `manifest.json` with an
+            // incomplete view. That guard is gone: `ResumeAwareSink` now calls
+            // `TileSink::seed_completed_tile` for each skipped coordinate, which
+            // reconstructs exactly the state an uninterrupted run holds (the
+            // dedupe layout is a deterministic function of content + coordinates
+            // since #275, and tile production is deterministic), so a resumed
+            // `finish()` reproduces a byte-identical manifest + dedupe layout.
 
             // Refuse a mismatched Resume BEFORE anything touches the output
             // directory. `prepare_resume_state` re-checks the checkpoint under
@@ -1480,6 +1462,15 @@ mod resume {
                 self.skipped.fetch_add(1, Ordering::Relaxed);
                 self.skipped_bytes
                     .fetch_add(tile.raster.data().len() as u64, Ordering::Relaxed);
+                // Rebuild the sink-side manifest / dedupe / checksum state this
+                // pre-crash tile contributes so a resumed `finish()` reproduces
+                // the same complete manifest + dedupe layout as an uninterrupted
+                // run (issue #272). Deliberately NOT followed by
+                // `mark_tile_completed`: the coordinate is already recorded in
+                // the checkpoint, and re-marking it would duplicate it in
+                // `completed_tiles`. For a plain (non-dedupe/checksum) resume the
+                // sink short-circuits this to a no-op, so the skip stays free.
+                self.inner.seed_completed_tile(tile)?;
                 return Ok(());
             }
             self.inner.write_tile(tile)?;
@@ -2687,18 +2678,19 @@ mod live_resume_bookkeeping_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Resume + dedupe/checksum stopgap guard (issue #272)
+// Resume + dedupe/checksum seeding (issue #272 real fix)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod resume_dedupe_checksum_guard_tests {
-    //! Issue #272 stopgap: `ResumeMode::Resume` combined with content
-    //! deduplication or per-tile checksums must be refused up front with
-    //! [`EngineError::ResumeUnsupportedWith`], because a resumed run cannot
-    //! reconstruct the sink-side manifest state and would overwrite
-    //! `manifest.json` with an incomplete view (orphaning pre-crash placeholder
-    //! tiles). Resume with neither feature — and any non-resume run with either
-    //! feature — stays supported.
+mod resume_dedupe_checksum_seeding_tests {
+    //! Issue #272 real fix: `ResumeMode::Resume` combined with content
+    //! deduplication or per-tile checksums used to be refused by the #450
+    //! stopgap. It now runs, because [`ResumeAwareSink`] seeds the sink-side
+    //! manifest / dedupe / checksum state for each skipped (pre-crash)
+    //! coordinate via [`TileSink::seed_completed_tile`], so a resumed
+    //! [`TileSink::finish`] reproduces the same complete `manifest.json`
+    //! (`blank_references` + checksum table) and dedupe layout as an
+    //! uninterrupted run.
     use super::*;
     use crate::checksum::ChecksumMode;
     use crate::dedupe::DedupeStrategy;
@@ -2707,10 +2699,37 @@ mod resume_dedupe_checksum_guard_tests {
     use crate::planner::{Layout, PyramidPlanner};
     use crate::raster::Raster;
     use crate::resume::ResumePolicy;
-    use crate::sink::FsSink;
+    use crate::sink::{FsSink, SinkError, Tile, TileSink};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Mostly-white raster with a small central feature: most tiles are uniform
+    /// white and collapse under `DedupeStrategy::Blanks` into one `_shared/`
+    /// blob + many 1-byte placeholders recorded in `blank_references` — the
+    /// exact state a resumed run must reconstruct.
+    fn blank_heavy_source() -> Raster {
+        let (w, h) = (128u32, 128u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0xFFu8; w as usize * h as usize * bpp];
+        for y in 56..72 {
+            for x in 56..72 {
+                let off = (y * w as usize + x) * bpp;
+                data[off] = 0x10;
+                data[off + 1] = 0x20;
+                data[off + 2] = 0xF0;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn blank_plan() -> PyramidPlan {
+        PyramidPlanner::new(128, 128, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
 
     fn solid_source() -> Raster {
-        // 8x8 RGB solid so every tile is uniform (dedupe-eligible) and small.
         let data = vec![10u8; 8 * 8 * 3];
         Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap()
     }
@@ -2721,44 +2740,163 @@ mod resume_dedupe_checksum_guard_tests {
             .plan()
     }
 
-    /// Assert `result` is the stopgap refusal naming `feature`.
-    fn assert_refused(result: Result<EngineResult, EngineError>, feature: &str) {
-        match result {
-            Err(EngineError::ResumeUnsupportedWith { feature: got }) => {
-                assert_eq!(got, feature, "guard should name the incompatible feature");
+    fn dedupe_checksum_sink(base: &Path, plan: &PyramidPlan) -> FsSink {
+        FsSink::new(base.to_path_buf(), plan.clone())
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_manifest(ManifestBuilder::new())
+            .with_checksums(ChecksumMode::EmitOnly, ChecksumAlgo::Blake3)
+    }
+
+    fn read_manifest_value(base: &Path) -> serde_json::Value {
+        let raw = std::fs::read(base.join("manifest.json")).expect("manifest.json must exist");
+        serde_json::from_slice(&raw).expect("manifest.json must be valid JSON")
+    }
+
+    fn map_field(m: &serde_json::Value, ptr: &[&str]) -> BTreeMap<String, String> {
+        let mut cur = m;
+        for k in ptr {
+            match cur.get(*k) {
+                Some(v) => cur = v,
+                None => return BTreeMap::new(),
             }
-            Err(other) => {
-                panic!("expected ResumeUnsupportedWith, got a different error: {other:?}")
+        }
+        cur.as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Wraps an inner sink and returns a terminal error after `ok` successful
+    /// writes, modelling a crash midway through a run. Forwards `inner_sink`
+    /// so every engine hook (checkpoint root, durability arming, seeding) reaches
+    /// the wrapped `FsSink`.
+    struct FailAfterSink<S: TileSink> {
+        inner: S,
+        ok_left: AtomicU32,
+    }
+    impl<S: TileSink> FailAfterSink<S> {
+        fn new(inner: S, ok: u32) -> Self {
+            Self {
+                inner,
+                ok_left: AtomicU32::new(ok),
             }
-            Ok(_) => panic!(
-                "resume + {feature} must be refused (issue #272 stopgap); the run \
-                 returned Ok and would have silently overwritten manifest.json"
-            ),
+        }
+    }
+    impl<S: TileSink> TileSink for FailAfterSink<S> {
+        fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+            if self.ok_left.load(Ordering::SeqCst) == 0 {
+                return Err(SinkError::Other("deliberate mid-run failure".into()));
+            }
+            self.ok_left.fetch_sub(1, Ordering::SeqCst);
+            self.inner.write_tile(tile)
+        }
+        fn finish(&self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+        fn inner_sink(&self) -> Option<&dyn TileSink> {
+            Some(&self.inner)
         }
     }
 
-    /// Resume + engine-level dedupe (`EngineBuilder::with_dedupe`) is refused.
-    /// The guard fires before any directory I/O, so a fresh output dir with no
-    /// checkpoint still triggers it.
-    #[test]
-    fn resume_plus_engine_dedupe_is_refused() {
-        let out = tempfile::tempdir().unwrap();
-        let source = solid_source();
-        let plan = solid_plan();
-
-        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
-        let result = EngineBuilder::new(&source, plan.clone(), sink)
-            .with_engine(EngineKind::Monolithic)
-            .with_dedupe(DedupeStrategy::Blanks)
-            .with_resume(ResumePolicy::resume())
-            .run();
-
-        assert_refused(result, "content deduplication");
+    /// Recursively count files under `dir` whose length is exactly one byte
+    /// (the deduped placeholders / blank markers).
+    fn count_one_byte_files(dir: &Path) -> usize {
+        let mut n = 0;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    n += count_one_byte_files(&p);
+                } else if std::fs::metadata(&p).map(|m| m.len() == 1).unwrap_or(false) {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
-    /// Resume + sink-level dedupe (`FsSink::with_dedupe`) is refused.
+    /// The headline #272 correctness test: a dedupe + per-tile-checksum run
+    /// crashed partway (a terminal sink error persists the checkpoint) and
+    /// resumed must reproduce the same `blank_references` map, checksum table
+    /// and 1-byte-placeholder layout as a clean single-run reference.
     #[test]
-    fn resume_plus_sink_dedupe_is_refused() {
+    fn crash_resume_dedupe_checksum_reproduces_uninterrupted_manifest() {
+        let src = blank_heavy_source();
+        let plan = blank_plan();
+        let total = plan.total_tile_count();
+        assert!(total >= 8, "fixture must have enough tiles to crash midway");
+
+        // --- reference: clean run to completion ---
+        let ref_dir = tempfile::tempdir().unwrap();
+        let ref_base = ref_dir.path().join("out");
+        EngineBuilder::new(&src, plan.clone(), dedupe_checksum_sink(&ref_base, &plan))
+            .with_engine(EngineKind::Monolithic)
+            .with_config(EngineConfig::default().with_concurrency(1))
+            .run()
+            .expect("clean reference dedupe+checksum run must succeed");
+        let ref_manifest = read_manifest_value(&ref_base);
+        let ref_blanks = map_field(&ref_manifest, &["blank_references"]);
+        let ref_checksums = map_field(&ref_manifest, &["checksums", "per_tile"]);
+        assert!(
+            !ref_blanks.is_empty(),
+            "reference dedupe produced no blank_references — fixture is not deduping"
+        );
+        assert!(!ref_checksums.is_empty(), "reference recorded no checksums");
+
+        // --- crash run: terminal error after ~half the tiles persists a
+        // checkpoint on the engine's error path ---
+        let crash_dir = tempfile::tempdir().unwrap();
+        let crash_base = crash_dir.path().join("out");
+        let crashing =
+            FailAfterSink::new(dedupe_checksum_sink(&crash_base, &plan), total as u32 / 2);
+        let crash_result = EngineBuilder::new(&src, plan.clone(), &crashing)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::resume().with_checkpoint_every(2))
+            .with_config(EngineConfig::default().with_concurrency(1))
+            .run();
+        assert!(crash_result.is_err(), "the crash run must fail mid-way");
+
+        // --- resume run into the same directory ---
+        let resume_result =
+            EngineBuilder::new(&src, plan.clone(), dedupe_checksum_sink(&crash_base, &plan))
+                .with_engine(EngineKind::Monolithic)
+                .with_resume(ResumePolicy::resume().with_checkpoint_every(2))
+                .with_config(EngineConfig::default().with_concurrency(1))
+                .run()
+                .expect("resumed dedupe+checksum run must succeed (seeding, issue #272)");
+        assert!(
+            resume_result.tiles_produced < total,
+            "resume produced all {total} tiles — it never resumed from a \
+             checkpoint, so seeding was not exercised (produced {})",
+            resume_result.tiles_produced
+        );
+
+        // --- resumed manifest + layout must match the reference exactly ---
+        let crash_manifest = read_manifest_value(&crash_base);
+        assert_eq!(
+            map_field(&crash_manifest, &["blank_references"]),
+            ref_blanks,
+            "resumed blank_references differs — pre-crash placeholders orphaned (#272)"
+        );
+        assert_eq!(
+            map_field(&crash_manifest, &["checksums", "per_tile"]),
+            ref_checksums,
+            "resumed checksum table differs — pre-crash digests dropped (#272)"
+        );
+        assert_eq!(
+            count_one_byte_files(&crash_base),
+            count_one_byte_files(&ref_base),
+            "resumed run has a different number of 1-byte placeholders"
+        );
+    }
+
+    /// Resume + sink-level dedupe on a fresh directory now runs (the #450
+    /// stopgap is gone).
+    #[test]
+    fn resume_plus_sink_dedupe_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
         let plan = solid_plan();
@@ -2770,12 +2908,37 @@ mod resume_dedupe_checksum_guard_tests {
             .with_resume(ResumePolicy::resume())
             .run();
 
-        assert_refused(result, "content deduplication");
+        assert!(
+            result.is_ok(),
+            "resume + dedupe must run now that seeding lands (#272): {:?}",
+            result.err()
+        );
     }
 
-    /// Resume + per-tile checksums (`FsSink::with_checksums`) is refused.
+    /// Resume + engine-level dedupe (`EngineBuilder::with_dedupe`) now runs.
     #[test]
-    fn resume_plus_checksum_is_refused() {
+    fn resume_plus_engine_dedupe_now_runs() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let result = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_dedupe(DedupeStrategy::Blanks)
+            .with_resume(ResumePolicy::resume())
+            .run();
+
+        assert!(
+            result.is_ok(),
+            "resume + engine-level dedupe must run now (#272): {:?}",
+            result.err()
+        );
+    }
+
+    /// Resume + per-tile checksums now runs.
+    #[test]
+    fn resume_plus_checksum_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
         let plan = solid_plan();
@@ -2788,11 +2951,15 @@ mod resume_dedupe_checksum_guard_tests {
             .with_resume(ResumePolicy::resume())
             .run();
 
-        assert_refused(result, "per-tile checksums");
+        assert!(
+            result.is_ok(),
+            "resume + checksums must run now that seeding lands (#272): {:?}",
+            result.err()
+        );
     }
 
-    /// Resume with NEITHER dedupe nor checksums must still run — the guard must
-    /// not over-reach onto the safe path.
+    /// Resume with NEITHER dedupe nor checksums stays supported and keeps
+    /// short-circuiting skipped tiles (no seeding work).
     #[test]
     fn resume_without_dedupe_or_checksum_still_runs() {
         let out = tempfile::tempdir().unwrap();
@@ -2812,8 +2979,7 @@ mod resume_dedupe_checksum_guard_tests {
         );
     }
 
-    /// A NON-resume run (Overwrite) with dedupe is unaffected: the guard is
-    /// scoped to `ResumeMode::Resume`, so a fresh dedupe run still succeeds.
+    /// A NON-resume run (Overwrite) with dedupe is unaffected.
     #[test]
     fn non_resume_dedupe_still_runs() {
         let out = tempfile::tempdir().unwrap();
@@ -2830,22 +2996,19 @@ mod resume_dedupe_checksum_guard_tests {
 
         assert!(
             result.is_ok(),
-            "a non-resume (Overwrite) dedupe run must be unaffected by the \
-             resume guard: {:?}",
+            "a non-resume (Overwrite) dedupe run must still succeed: {:?}",
             result.err()
         );
     }
 
-    /// Verify mode (read-only) with dedupe is unaffected: it never rewrites the
-    /// manifest, so the guard leaves it alone. Seeds a pyramid first so Verify
-    /// has something to audit.
+    /// Verify mode (read-only) with dedupe is unaffected. Seeds a pyramid first
+    /// so Verify has something to audit.
     #[test]
     fn verify_dedupe_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
         let plan = solid_plan();
 
-        // Seed a full pyramid with an Overwrite run so Verify has real tiles.
         let seed =
             FsSink::new(out.path().to_path_buf(), plan.clone()).with_dedupe(DedupeStrategy::Blanks);
         EngineBuilder::new(&source, plan.clone(), seed)
@@ -2865,8 +3028,7 @@ mod resume_dedupe_checksum_guard_tests {
 
         assert!(
             result.is_ok(),
-            "read-only Verify with dedupe must be unaffected by the resume \
-             guard: {:?}",
+            "read-only Verify with dedupe must be unaffected: {:?}",
             result.err()
         );
     }
