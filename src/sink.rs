@@ -59,6 +59,14 @@ pub enum SinkError {
     /// a typed variant. New code should prefer the typed variants below.
     #[error("sink error: {0}")]
     Other(String),
+    /// A sink operation is not implemented in this build because the transport
+    /// or capability it needs was not compiled in. Distinct from
+    /// [`SinkError::Other`] so callers can tell "unsupported in this build"
+    /// apart from a runtime failure, and so a stub cannot masquerade as a
+    /// successful-but-empty result. The payload names the operation and what
+    /// is missing.
+    #[error("unsupported sink operation: {0}")]
+    Unsupported(String),
     /// A tile coordinate fell outside the plan's level bounds. Raised from
     /// [`FsSink::write_tile`] when [`PyramidPlan::tile_path`] returns `None`.
     #[error("tile coord {coord:?} is outside level bounds")]
