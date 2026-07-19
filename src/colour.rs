@@ -915,35 +915,83 @@ fn de76(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     (dl * dl + da * da + db * db).sqrt()
 }
 
-/// CIEDE2000 colour difference, following the libvips `vips_col_dE00`
-/// arrangement of the published formula (which the ported reference
-/// values pin).
+/// Which hue-wrap convention a [`de00_impl`] evaluation follows. Every
+/// other term of the CIEDE2000 kernel is identical between the two
+/// colour-difference entry points, so the hue rule is the *only*
+/// parameter — factoring it out keeps [`de00`] and [`de00_sharma`] on one
+/// arithmetic path (libviprs#370).
+#[derive(Clone, Copy)]
+enum HueRule {
+    /// libvips `vips_col_dE00` parity (vips-8.18.x, byte-for-byte): the
+    /// `.abs()` mean-hue reflection `(h1' + h2' - 360).abs() / 2` and the
+    /// `360 - (h1' - h2')` delta-hue wrap, both entered at the
+    /// `|Δh'| < 180` cutoff. Pins the `vips dE00` oracle.
+    VipsParity,
+    /// Published Sharma 2005: the signed `(h1' + h2' ± 360) / 2` mean hue
+    /// and the sign-consistent `(h1' - h2') ∓ 360` delta hue — matching
+    /// the `C1' - C2'` (1->2) chroma order so the `RT · ΔC' · Δh'` cross
+    /// term keeps its sign — both entered at the `|Δh'| <= 180` cutoff.
+    Sharma,
+}
+
+impl HueRule {
+    /// The mean hue `h̄'` and the *degrees* delta hue `Δh'` under this
+    /// rule, from the two G-adjusted hues `h1'`, `h2'`. These are the only
+    /// two quantities in the CIEDE2000 kernel that depend on the rule.
+    fn mean_and_delta_hue(self, h1d: f64, h2d: f64) -> (f64, f64) {
+        match self {
+            HueRule::VipsParity => {
+                // libvips mirrors the `.abs()` reflection in the mean and a
+                // `360 - Δh'` wrap in the delta; see libviprs#332 for why
+                // the delta sign differs from Sharma.
+                let hdb = if (h1d - h2d).abs() < 180.0 {
+                    (h1d + h2d) / 2.0
+                } else {
+                    (h1d + h2d - 360.0).abs() / 2.0
+                };
+                let dhd = if (h1d - h2d).abs() < 180.0 {
+                    h1d - h2d
+                } else {
+                    360.0 - (h1d - h2d)
+                };
+                (hdb, dhd)
+            }
+            HueRule::Sharma => {
+                // Published Sharma: sign-correct ±360 wraps in both the
+                // mean and the delta, so the `RT · ΔC' · Δh'` cross term
+                // keeps its sign on asymmetric hue-wrap pairs (e.g.
+                // [50,2.5,0]/[56,-27,-3]: 31.9030, not the sign-flipped
+                // 21.12 the parity delta would give here). See libviprs#332.
+                let hdb = if (h1d - h2d).abs() <= 180.0 {
+                    (h1d + h2d) / 2.0
+                } else if h1d + h2d < 360.0 {
+                    (h1d + h2d + 360.0) / 2.0
+                } else {
+                    (h1d + h2d - 360.0) / 2.0
+                };
+                let d = h1d - h2d;
+                let dhd = if d.abs() <= 180.0 {
+                    d
+                } else if d > 180.0 {
+                    d - 360.0
+                } else {
+                    d + 360.0
+                };
+                (hdb, dhd)
+            }
+        }
+    }
+}
+
+/// The shared CIEDE2000 kernel behind [`de00`] and [`de00_sharma`].
 ///
-/// # Parity ceiling: the hue-wrap arms
-///
-/// Two hue branches below mirror `vips_col_dE00` (vips-8.18.x,
-/// byte-for-byte) rather than the published Sharma 2005 formulation:
-///
-/// - the **mean** hue uses `(h1' + h2' - 360).abs() / 2` (an `.abs()`
-///   reflection) where Sharma uses the signed `(h1' + h2' ± 360) / 2`;
-/// - the **delta** hue uses `360 - (h1' - h2')` in the wrap branch where
-///   Sharma uses the signed `(h1' - h2') ∓ 360`.
-///
-/// On symmetric hue-wrap pairs (`h1' + h2' == 360`) the mean-hue arms
-/// agree; the delta-hue arm is masked whenever `ΔC' == 0`, since it
-/// enters the result only through the `RT · ΔC' · Δh'` cross term. So the
-/// deviation from Sharma appears only on **asymmetric** hue-wrap pairs
-/// (colours straddling the 0/360 red boundary), and it is modest: across
-/// the published Sharma 2005 dataset (34 pairs) `de00` departs from the
-/// reference dE00 by at most ~4.67 units (~1.17×), on Lab
-/// `[50,2.5,0]`/`[56,-27,-3]` (27.23 here vs 31.90 for Sharma). On the
-/// `ΔC' == 0` pair Lab `[50,0,2.49]`/`[50,0,-2.49]` only the mean-hue arm
-/// contributes: 4.746 (here and in `vips dE00` on vips-8.18.4) vs 4.804
-/// for Sharma. This is intentional libvips parity, not a bug: a Sharma
-/// "fix" here would regress the pinned `vips dE00` oracle. [`de00_sharma`]
-/// applies both signed Sharma arms off this parity path for callers who
-/// want the published standard.
-fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
+/// Every term — G, C'/h', dθ, RC, RT, the four-term T polynomial,
+/// SL/SC/SH, and the ΔL'/ΔC'/Δh' assembly — is identical between the two
+/// entry points; they differ *only* in the hue-wrap `rule` (see
+/// [`HueRule`]). Keeping one kernel means a correctness fix to any shared
+/// line lands on both paths at once, which a former copy-paste pair could
+/// not guarantee (libviprs#370).
+fn de00_impl(lab1: [f64; 3], lab2: [f64; 3], rule: HueRule) -> f64 {
     let [l1, a1, b1] = lab1;
     let [l2, a2, b2] = lab2;
 
@@ -969,14 +1017,11 @@ fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     let c2d = a2d.hypot(b2d);
     let h2d = ab_to_h(a2d, b2d);
 
-    // Mean L', C', h'.
+    // Mean L', C', and the rule-dependent mean and (degrees) delta hue —
+    // the sole point where `de00` and `de00_sharma` differ.
     let ldb = (l1d + l2d) / 2.0;
     let cdb = (c1d + c2d) / 2.0;
-    let hdb = if (h1d - h2d).abs() < 180.0 {
-        (h1d + h2d) / 2.0
-    } else {
-        (h1d + h2d - 360.0).abs() / 2.0
-    };
+    let (hdb, dhd_deg) = rule.mean_and_delta_hue(h1d, h2d);
 
     // dtheta, RC.
     let hdbd = (hdb - 275.0) / 25.0;
@@ -997,16 +1042,9 @@ fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     let sc = 1.0 + 0.045 * cdb;
     let sh = 1.0 + 0.015 * cdb * t;
 
-    // Hue difference.
-    let dhd = if (h1d - h2d).abs() < 180.0 {
-        h1d - h2d
-    } else {
-        360.0 - (h1d - h2d)
-    };
-
     let dld = l1d - l2d;
     let dcd = c1d - c2d;
-    let dhd = 2.0 * (c1d * c2d).sqrt() * deg_to_rad(dhd / 2.0).sin();
+    let dhd = 2.0 * (c1d * c2d).sqrt() * deg_to_rad(dhd_deg / 2.0).sin();
 
     // Parametric factors are 1 for reference viewing conditions.
     let nl = dld / sl;
@@ -1016,19 +1054,64 @@ fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     (nl * nl + nc * nc + nh * nh + rt * nc * nh).sqrt()
 }
 
-/// CIEDE2000 colour difference computing the **published Sharma 2005**
-/// value, off the libvips parity path used by [`de00`].
+/// CIEDE2000 colour difference, following the libvips `vips_col_dE00`
+/// arrangement of the published formula (which the ported reference
+/// values pin). Thin wrapper over [`de00_impl`] with the
+/// [`HueRule::VipsParity`] hue rule; [`de00_sharma`] is the same kernel
+/// with [`HueRule::Sharma`].
 ///
-/// This differs from [`de00`] in *both* hue-wrap arms. Where [`de00`]
-/// mirrors `vips_col_dE00` — the `.abs()` mean-hue reflection and the
-/// `360 - (h1' - h2')` delta-hue wrap — this uses Sharma's signed
-/// `(h1' + h2' ± 360) / 2` mean hue and the sign-consistent
-/// `(h1' - h2') ∓ 360` delta hue (matching the `C1' - C2'` chroma order,
-/// so the `RT · ΔC' · Δh'` cross term keeps the correct sign). On
-/// non-wrapping pairs the two agree exactly; on asymmetric hue-wrap pairs
-/// they diverge, most visibly on `ΔC' != 0` pairs such as Lab
+/// # Parity ceiling: the hue-wrap arms
+///
+/// Two hue branches deviate from the published Sharma 2005 formulation to
+/// stay byte-for-byte with `vips_col_dE00` (vips-8.18.x):
+///
+/// - the **mean** hue uses the `.abs()` reflection `(h1' + h2' - 360).abs()
+///   / 2` where Sharma uses the signed `(h1' + h2' ± 360) / 2`;
+/// - the **delta** hue uses `360 - (h1' - h2')` in the wrap branch where
+///   Sharma uses the signed `(h1' - h2') ∓ 360`;
+/// - and the two rules enter their wrap branches at different cutoffs:
+///   `|Δh'| < 180` here versus `|Δh'| <= 180` for Sharma.
+///
+/// So `de00` and [`de00_sharma`] coincide **exactly** on every
+/// non-wrapping pair (`|Δh'| < 180`) and diverge only on hue-wrap pairs,
+/// of which there are two kinds:
+///
+/// - **Asymmetric wrap** (`|Δh'| > 180`, so `h1' + h2' != 360`) — colours
+///   straddling the 0/360 red boundary. This is where the deviation is
+///   largest: across the published Sharma 2005 dataset (34 pairs) `de00`
+///   departs from the reference dE00 by at most ~4.67 units (~1.17×), on
+///   Lab `[50,2.5,0]`/`[56,-27,-3]` (hues ~0°/186°): 27.23 here vs 31.90
+///   for Sharma.
+/// - **The antipodal boundary** (`|Δh'| == 180` exactly) — a *symmetric*
+///   `h1' + h2' == 360` pair whose colours are diametrically opposite in
+///   hue. Here the `< 180` / `<= 180` cutoff split *alone* routes `de00`
+///   into the mean-hue reflection while Sharma keeps the plain mean, so
+///   only the mean-hue term differs (`ΔC'` and the delta-hue term are
+///   identical between the arms). Example Lab `[50,0,2.49]`/`[50,0,-2.49]`,
+///   whose hues sit on the yellow/blue b* axis (90°/270°, *not* the red
+///   boundary): 4.746 here (and in `vips dE00` on vips-8.18.4) vs 4.804
+///   for Sharma.
+///
+/// This is intentional libvips parity, not a bug: a Sharma "fix" here
+/// would regress the pinned `vips dE00` oracle. [`de00_sharma`] applies
+/// both signed Sharma arms off this parity path for callers who want the
+/// published standard.
+fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
+    de00_impl(lab1, lab2, HueRule::VipsParity)
+}
+
+/// CIEDE2000 colour difference computing the **published Sharma 2005**
+/// value, off the libvips parity path used by [`de00`]. Thin wrapper over
+/// [`de00_impl`] with the [`HueRule::Sharma`] hue rule.
+///
+/// This differs from [`de00`] in *both* hue-wrap arms (mean and delta) and
+/// in the `|Δh'| <= 180` versus `|Δh'| < 180` branch cutoff. On
+/// non-wrapping pairs the two agree exactly; they diverge on hue-wrap
+/// pairs — most visibly on asymmetric `ΔC' != 0` pairs such as Lab
 /// `[50,2.5,0]`/`[56,-27,-3]`, where this returns the published 31.9030
-/// while [`de00`] returns 27.23.
+/// while [`de00`] returns 27.23, and also on the antipodal `|Δh'| == 180`
+/// boundary where only the mean-hue term parts. See [`de00`] for the full
+/// geometry.
 ///
 /// Verified against the full published Sharma / Wu / Dalal 2005 CIEDE2000
 /// test dataset (Table 1, 34 pairs): every pair reproduces the reference
@@ -1036,81 +1119,7 @@ fn de00(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
 /// rather than libvips parity; it is **not** wired into the pinned
 /// `vips dE00` oracle (see [`de00`]).
 fn de00_sharma(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
-    let [l1, a1, b1] = lab1;
-    let [l2, a2, b2] = lab2;
-
-    let c1 = a1.hypot(b1);
-    let c2 = a2.hypot(b2);
-    let cb = (c1 + c2) / 2.0;
-
-    let cb7 = cb.powi(7);
-    let g = 0.5 * (1.0 - (cb7 / (cb7 + 25.0_f64.powi(7))).sqrt());
-
-    let l1d = l1;
-    let a1d = (1.0 + g) * a1;
-    let b1d = b1;
-    let c1d = a1d.hypot(b1d);
-    let h1d = ab_to_h(a1d, b1d);
-
-    let l2d = l2;
-    let a2d = (1.0 + g) * a2;
-    let b2d = b2;
-    let c2d = a2d.hypot(b2d);
-    let h2d = ab_to_h(a2d, b2d);
-
-    let ldb = (l1d + l2d) / 2.0;
-    let cdb = (c1d + c2d) / 2.0;
-    // Published Sharma mean hue: plain mean when |Δh'| <= 180, else the
-    // sign-correct ±360 wrap (contrast the `.abs()` reflection in `de00`).
-    let hdb = if (h1d - h2d).abs() <= 180.0 {
-        (h1d + h2d) / 2.0
-    } else if h1d + h2d < 360.0 {
-        (h1d + h2d + 360.0) / 2.0
-    } else {
-        (h1d + h2d - 360.0) / 2.0
-    };
-
-    let hdbd = (hdb - 275.0) / 25.0;
-    let dtheta = 30.0 * (-(hdbd * hdbd)).exp();
-    let cdb7 = cdb.powi(7);
-    let rc = 2.0 * (cdb7 / (cdb7 + 25.0_f64.powi(7))).sqrt();
-
-    let rt = -deg_to_rad(2.0 * dtheta).sin() * rc;
-    let t = 1.0 - 0.17 * deg_to_rad(hdb - 30.0).cos()
-        + 0.24 * deg_to_rad(2.0 * hdb).cos()
-        + 0.32 * deg_to_rad(3.0 * hdb + 6.0).cos()
-        - 0.20 * deg_to_rad(4.0 * hdb - 63.0).cos();
-
-    let ldb50 = ldb - 50.0;
-    let sl = 1.0 + (0.015 * ldb50 * ldb50) / (20.0 + ldb50 * ldb50).sqrt();
-    let sc = 1.0 + 0.045 * cdb;
-    let sh = 1.0 + 0.015 * cdb * t;
-
-    // Published Sharma delta-hue: a sign-consistent ±360 wrap matching the
-    // `c1' - c2'` (1->2) chroma-difference order, so the RT * dC' * dh'
-    // cross term keeps the correct sign on asymmetric hue-wrap pairs.
-    // `de00` deliberately mirrors vips's `360 - (h1'-h2')` here instead
-    // (parity, not Sharma); using that form off this arm negates the cross
-    // term and undercounts asymmetric pairs (e.g. [50,2.5,0]/[56,-27,-3]:
-    // 21.12 vs the published 31.9030). See libviprs#332.
-    let d = h1d - h2d;
-    let dhd = if d.abs() <= 180.0 {
-        d
-    } else if d > 180.0 {
-        d - 360.0
-    } else {
-        d + 360.0
-    };
-
-    let dld = l1d - l2d;
-    let dcd = c1d - c2d;
-    let dhd = 2.0 * (c1d * c2d).sqrt() * deg_to_rad(dhd / 2.0).sin();
-
-    let nl = dld / sl;
-    let nc = dcd / sc;
-    let nh = dhd / sh;
-
-    (nl * nl + nc * nc + nh * nh + rt * nc * nh).sqrt()
+    de00_impl(lab1, lab2, HueRule::Sharma)
 }
 
 /// CMC colour difference: the published CMC(l:c) formula at l = c = 1
@@ -1448,10 +1457,12 @@ fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
 /// libvips itself
 /// casts float ICC input to 8-bit before the transform; this deliberately
 /// deviates from that cast to preserve precision on genuine float device
-/// rasters (issue #301). The historical `v.round()` behaviour quantised a
-/// `0..1`-normalised float to just `{0, 1/255}` at the exact boundary
-/// callers assume is full precision. The 8-bit integer (`/255`) and
-/// 16-bit (`/65535`) arms are unchanged and remain byte-parity with libvips.
+/// rasters (issue #301). The historical `v.round()` behaviour rounded the
+/// `0..255` device sample to the nearest integer before dividing by 255,
+/// quantising genuine float input to the 256 8-bit levels and discarding
+/// the sub-integer precision callers assume survives. The 8-bit integer
+/// (`/255`) and 16-bit (`/65535`) arms are unchanged and remain
+/// byte-parity with libvips.
 fn read_device_normalised(raster: &Raster, channels: usize) -> Vec<f32> {
     let total = raster.width() as usize * raster.height() as usize;
     let all = raster.format().channels();
@@ -1715,12 +1726,12 @@ impl Raster {
     /// one-band float image plus this image's extra bands.
     ///
     /// This is a faithful port of libvips `vips_col_dE00`, whose hue-wrap
-    /// arms deviate from published Sharma 2005 CIEDE2000 on asymmetric
-    /// hue-wrap pairs (colours straddling the 0/360 red boundary) — by at
+    /// arms deviate from published Sharma 2005 CIEDE2000 on hue-wrap pairs
+    /// (asymmetric wrap and the antipodal `|Δh'| == 180` boundary) — by at
     /// most ~4.67 units (~1.17×) across the Sharma dataset. This is an
     /// intentional libvips parity ceiling, not a bug. See [`de00`] for the
-    /// numeric detail. Use [`Raster::try_de00_sharma`] for the textbook
-    /// value instead of libvips parity.
+    /// exact geometry and numeric detail. Use [`Raster::try_de00_sharma`]
+    /// for the textbook value instead of libvips parity.
     ///
     /// # Errors
     ///
@@ -2347,11 +2358,12 @@ mod tests {
 
     /**
      * Tests the documented dE00 parity ceiling (issue #274): on the
-     * asymmetric hue-wrap pair Lab [50,0,2.49] / [50,0,-2.49] the default
-     * `de00` matches libvips `vips_col_dE00` (~4.746) while `de00_sharma`
-     * returns the published Sharma value (~4.804); on the non-wrapping
-     * reference pair the two are identical. Locks the intentional
-     * deviation so neither arm can silently change.
+     * antipodal boundary pair Lab [50,0,2.49] / [50,0,-2.49] — a symmetric
+     * (h1'+h2'==360), |Δh'|==180 pair on the yellow/blue b* axis — the
+     * default `de00` matches libvips `vips_col_dE00` (~4.746) while
+     * `de00_sharma` returns the published Sharma value (~4.804); on the
+     * non-wrapping reference pair the two are identical. Locks the
+     * intentional deviation so neither arm can silently change.
      *
      * Also pins a `dC' != 0` asymmetric-wrap pair from the published
      * Sharma dataset (Lab [50,2.5,0] / [56,-27,-3], dE00 = 31.9030). The
