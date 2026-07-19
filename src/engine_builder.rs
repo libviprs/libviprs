@@ -859,36 +859,77 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 }
             }
 
-            // Overwrite / Resume: take the advisory run lock on the checkpoint
-            // root BEFORE any work touches the directory, and hold it for the
-            // whole run. This is the engine-side half of issue #126: unique
-            // temp filenames alone stop torn renames, but two live jobs sharing
-            // one directory can still (a) clobber each other's `completed_tiles`
-            // when their periodic flushes race, and (b) wipe each other's output
-            // if one runs Overwrite. `RunLock::acquire` is non-blocking, so a
-            // second job is refused with `ResumeError::Locked` (surfaced as
-            // `EngineError::ResumeFailed`) rather than allowed to race. The lock
-            // is dropped when `_run_lock` leaves this block, i.e. after the final
-            // checkpoint flush below. The guard sits ahead of `prepare_resume_state`
-            // so the Overwrite wipe in that helper only ever runs while held.
+            // Overwrite / Resume: take the advisory run lock(s) BEFORE any work
+            // touches the directory, and hold them for the whole run. This is
+            // the engine-side half of issue #126: unique temp filenames alone
+            // stop torn renames, but two live jobs can still (a) clobber each
+            // other's `completed_tiles` when their periodic checkpoint flushes
+            // race, and (b) wipe each other's in-flight output if one runs
+            // Overwrite. `RunLock::acquire` is non-blocking, so a second job is
+            // refused with `ResumeError::Locked` (surfaced as
+            // `EngineError::ResumeFailed`) rather than allowed to race. The
+            // guards are dropped when `_run_locks` leaves this block, i.e. after
+            // the final checkpoint flush below, and they sit ahead of
+            // `prepare_resume_state`, so the Overwrite wipe in that helper only
+            // ever runs while every directory it targets is held.
             //
-            // The directory to guard MUST be the one the checkpoint I/O actually
-            // uses, so the lock guards the file it protects. That is exactly
-            // `resolve_checkpoint_root` — the same resolver used to read, write,
-            // and preflight-verify the checkpoint: the explicit `checkpoint_root`
-            // config wins, falling back to the sink's own output directory.
-            // Resolving the lock dir any other way (e.g. sink-first) can guard
-            // `out/` while the checkpoint lives in `cp/`, leaving the concurrent
-            // segment appends and header renames in `cp/` unguarded (issue #276).
-            // A purely in-memory sink with no checkpoint root resolves to `None`
-            // and takes no lock — nothing on disk to clobber.
-            let lock_dir = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink);
-            let _run_lock = match &lock_dir {
-                Some(dir) => {
-                    Some(crate::resume::RunLock::acquire(dir).map_err(EngineError::ResumeFailed)?)
-                }
-                None => None,
+            // A run mutates up to TWO distinct directories, so a single lock is
+            // not enough (issues #362/#364/#365/#366):
+            //   * the resolved checkpoint root — where the segment appends and
+            //     header renames land. `resolve_checkpoint_root` prefers an
+            //     explicit `checkpoint_root` over the sink's own dir; guarding it
+            //     closes the #276 checkpoint-flush race.
+            //   * the sink's own output dir — the target of the Overwrite wipe
+            //     (`prepare_resume_state` wipes `sink.checkpoint_root()`) and of
+            //     every tile write. Guarding it closes issue #126 hazard (b).
+            // When an explicit `checkpoint_root` differs from the sink dir these
+            // are two different paths; locking only one leaves the other exposed
+            // (guarding just the checkpoint root reopens the #126 output-wipe
+            // hazard, guarding just the sink dir reopens #276). We therefore lock
+            // the union of the two and hold every guard for the run, so no
+            // concurrent job can Overwrite-wipe or append to a directory another
+            // run is using. A purely in-memory sink with no checkpoint root
+            // contributes no directory and takes no lock — nothing on disk to
+            // clobber.
+            //
+            // The dirs are locked in a deterministic (sorted, de-duplicated)
+            // order so two jobs contending the same pair can never each grab one
+            // directory and then refuse the other: one job wins both locks, the
+            // other is cleanly refused. Acquisition stays non-blocking, so the
+            // fixed order introduces no deadlock or blocking wait.
+            //
+            // De-duplication keys on the CANONICAL path, not the raw `PathBuf`.
+            // When the explicit `checkpoint_root` and the sink dir name the SAME
+            // physical directory through different spellings (`out` vs `./out`,
+            // relative vs absolute, `a/../out`, a symlink alias), a raw-path
+            // dedup keeps both entries and `RunLock::acquire` is then called
+            // twice on the one `.libviprs-job.lock` file: the second `try_lock`
+            // returns `WouldBlock` and the run refuses ITSELF with
+            // `ResumeError::Locked`, blaming a nonexistent concurrent job on a
+            // perfectly valid single-directory config. Keying on
+            // `canonicalize(dir)` collapses the aliases to one lock. The dirs
+            // are materialised (the sink dir exists and `acquire`'s
+            // `create_dir_all` backs the checkpoint root), so `canonicalize`
+            // resolves; `unwrap_or_else(|_| dir.clone())` degrades to the raw
+            // path on exotic filesystems where it cannot. We still acquire and
+            // report the lock on the original (un-canonicalized) `PathBuf` so
+            // the surfaced `Locked { path }` matches the directory as spelled.
+            let mut lock_dirs: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(dir) = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink) {
+                lock_dirs.push(dir);
+            }
+            if let Some(dir) = sink.checkpoint_root() {
+                lock_dirs.push(dir.to_path_buf());
+            }
+            let canonical_key = |dir: &std::path::PathBuf| -> std::path::PathBuf {
+                std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone())
             };
+            lock_dirs.sort_by_cached_key(&canonical_key);
+            lock_dirs.dedup_by_key(|dir| canonical_key(dir));
+            let _run_locks = lock_dirs
+                .iter()
+                .map(|dir| crate::resume::RunLock::acquire(dir).map_err(EngineError::ResumeFailed))
+                .collect::<Result<Vec<_>, _>>()?;
 
             // Overwrite / Resume: shared (skip, cp) setup + ResumeAwareSink.
             let (skip, cp) = prepare_resume_state(&sink, &plan, &engine_cfg, policy.mode())?;
@@ -3206,6 +3247,192 @@ mod run_lock_wiring_tests {
         }
 
         drop(held);
+    }
+
+    // Issues #362/#364/#365/#366 — cross-directory mutual exclusion, direction
+    // one. A run mutates BOTH the checkpoint root and the sink's own output dir,
+    // but moving the lock onto the checkpoint root (the #276 fix) left the sink
+    // dir — the target of the Overwrite wipe (`prepare_resume_state` wipes
+    // `sink.checkpoint_root()`) and of every tile write — unguarded whenever an
+    // explicit `checkpoint_root` differs from it. That reopened issue #126
+    // hazard (b): an Overwrite job locking only `cp/` could wipe the live output
+    // of a concurrent job holding `out/`.
+    //
+    // Proof: a stand-in job holds the lock on the SINK dir `out/`, and `out/`
+    // already carries a `.libviprs-job.json` marker (so an unguarded wipe would
+    // consider it owned and clear it) plus a sentinel standing in for the live
+    // job's in-flight output. A builder run with sink `out/` and checkpoint root
+    // `cp/` must be refused with `Locked` naming `out/`'s lock file, and the
+    // sentinel must survive.
+    //
+    // Pre-fix (RED): the run locked only the free `cp/`, then wiped `out/` and
+    // destroyed the sentinel. Post-fix (GREEN): the run also locks `out/`,
+    // collides, and fails fast before any wipe.
+    #[test]
+    fn overwrite_is_refused_while_the_sink_dir_is_locked_with_distinct_checkpoint_root() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        assert_ne!(
+            RunLock::lock_path(cp.path()),
+            RunLock::lock_path(out.path()),
+            "sink and checkpoint dirs must be distinct for this test to be meaningful"
+        );
+
+        // Stand in for a live job that already owns the SINK dir out/.
+        let held = RunLock::acquire(out.path()).expect("first holder locks the sink dir");
+
+        // Make out/ "wipe-owned" so an unguarded Overwrite wipe would proceed
+        // and clear it, and drop a sentinel representing the live job's output.
+        std::fs::write(out.path().join(crate::resume::CHECKPOINT_FILENAME), b"{}").unwrap();
+        let sentinel = out.path().join("live-output.dat");
+        std::fs::write(&sentinel, b"do not clobber").unwrap();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let err = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite().with_checkpoint_root(cp.path().to_path_buf()))
+            .run()
+            .expect_err("the run must be refused: the sink dir it must wipe-guard is held");
+
+        match err {
+            EngineError::ResumeFailed(ResumeError::Locked { path }) => {
+                assert_eq!(
+                    path,
+                    RunLock::lock_path(out.path()),
+                    "the run must ALSO lock the sink dir out/ (the Overwrite wipe target), \
+                     not just the checkpoint dir cp/"
+                );
+            }
+            other => panic!("expected ResumeFailed(Locked) on the sink dir, got {other:?}"),
+        }
+
+        assert!(
+            sentinel.exists(),
+            "the refused Overwrite must not have wiped the live job's output in out/"
+        );
+
+        drop(held);
+    }
+
+    // Issues #362/#364/#365/#366 — cross-directory mutual exclusion, direction
+    // two (the mirror). Locking both directories must NOT weaken the #276 guard:
+    // holding the CHECKPOINT dir `cp/` must still refuse a run whose checkpoint
+    // root is `cp/`, even though its sink lives at a distinct `out/`.
+    //
+    // Proof: a stand-in holds the lock on the checkpoint dir `cp/`. A builder
+    // run with sink `out/` and checkpoint root `cp/` must be refused with
+    // `Locked` naming `cp/`'s lock file, and a sentinel in `out/` must survive
+    // (the run bails before `prepare_resume_state` ever wipes). This direction
+    // passes both before and after the two-lock fix — it pins that #276 stays
+    // closed — and together with the direction-one test above proves mutual
+    // exclusion across the two dirs in BOTH directions.
+    #[test]
+    fn overwrite_is_refused_while_the_checkpoint_dir_is_locked_with_distinct_sink_dir() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        assert_ne!(
+            RunLock::lock_path(cp.path()),
+            RunLock::lock_path(out.path()),
+            "sink and checkpoint dirs must be distinct for this test to be meaningful"
+        );
+
+        // Stand in for a live job already holding the lock on the CHECKPOINT dir.
+        let held = RunLock::acquire(cp.path()).expect("first holder locks the checkpoint dir");
+
+        // A sentinel in out/ that a wipe would destroy — it must survive because
+        // the run is refused before `prepare_resume_state` runs.
+        std::fs::write(out.path().join(crate::resume::CHECKPOINT_FILENAME), b"{}").unwrap();
+        let sentinel = out.path().join("live-output.dat");
+        std::fs::write(&sentinel, b"do not clobber").unwrap();
+
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        let err = EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite().with_checkpoint_root(cp.path().to_path_buf()))
+            .run()
+            .expect_err("the run must be refused: the checkpoint dir it locks is held");
+
+        match err {
+            EngineError::ResumeFailed(ResumeError::Locked { path }) => {
+                assert_eq!(
+                    path,
+                    RunLock::lock_path(cp.path()),
+                    "the #276 guard on the checkpoint dir cp/ must still refuse the run"
+                );
+            }
+            other => panic!("expected ResumeFailed(Locked) on the checkpoint dir, got {other:?}"),
+        }
+
+        assert!(
+            sentinel.exists(),
+            "the refused run must not have wiped the sentinel in out/"
+        );
+
+        drop(held);
+    }
+
+    // Self-lockout regression: an explicit `checkpoint_root` that names the SAME
+    // physical directory as the sink through a DIFFERENT spelling must not make
+    // the run refuse itself. The union-lock builds two entries — the resolved
+    // checkpoint root and the sink dir — and de-duplicates them. A raw-`PathBuf`
+    // dedup treats `out/` and its alias `out/.` as distinct, so `RunLock::acquire`
+    // fires twice on the one `.libviprs-job.lock`; the second `try_lock` returns
+    // `WouldBlock` and the run reports `ResumeError::Locked` against ITSELF —
+    // a bogus failure on a supported single-directory config with no concurrent
+    // job in sight.
+    //
+    // Proof: sink at `out/` (otherwise clean, no live holder) plus an Overwrite
+    // policy whose checkpoint root is `out/../<out-basename>` — the same
+    // directory, spelled through a parent round-trip. A `..` (ParentDir)
+    // component is NOT normalised away by `Path`'s own equality (only a bare `.`
+    // is), so the two raw paths compare unequal and a raw-`PathBuf` dedup keeps
+    // both — while `canonicalize` resolves both to the one physical dir. Pre-fix
+    // (RED) this self-collides and returns `Locked`. Post-fix (GREEN) the
+    // canonical-key dedup collapses the aliases to a single lock and the run
+    // completes.
+    #[test]
+    fn distinct_spelling_of_the_sink_dir_as_checkpoint_root_does_not_self_lock() {
+        let out = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+
+        // A different spelling of `out/` (a parent round-trip) that resolves to
+        // the same physical dir but is NOT `Path`-equal to it.
+        let alias = out.path().join("..").join(
+            out.path()
+                .file_name()
+                .expect("tempdir has a final component"),
+        );
+        assert_ne!(
+            RunLock::lock_path(&alias),
+            RunLock::lock_path(out.path()),
+            "the alias must be a distinct raw path for this test to exercise the dedup"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&alias).unwrap(),
+            std::fs::canonicalize(out.path()).unwrap(),
+            "the alias must canonicalize to the same physical directory as the sink"
+        );
+
+        // No live holder: the only reason a lock could collide here is the run
+        // fighting itself over its own directory.
+        let sink = FsSink::new(out.path().to_path_buf(), plan.clone());
+        EngineBuilder::new(&source, plan.clone(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_resume(ResumePolicy::overwrite().with_checkpoint_root(alias))
+            .run()
+            .expect("a self-aliased checkpoint root must run to completion, not self-lock");
+
+        // And the single lock must have been released on completion.
+        let reacquired = RunLock::acquire(out.path())
+            .expect("the run must release its lock so a later job can acquire it");
+        drop(reacquired);
     }
 }
 

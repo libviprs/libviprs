@@ -201,6 +201,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Resume/Overwrite run now takes the advisory run lock on the *union* of the
+  directories it mutates — the resolved checkpoint root **and** the sink's own
+  output dir — instead of only one. Locking a single directory left the other
+  exposed: guarding just the checkpoint root reopened the issue #126 output-wipe
+  hazard, guarding just the sink dir reopened the issue #276 checkpoint-flush
+  race. The locks are taken in a deterministic order so contending jobs cannot
+  each grab one directory and deadlock; acquisition stays non-blocking. The two
+  entries are de-duplicated by *canonical* path, so an explicit `checkpoint_root`
+  that names the same physical directory as the sink through a different spelling
+  (`out` vs `./out`, relative vs absolute, `a/../out`, a symlink alias) collapses
+  to a single lock rather than making the run acquire the one `.libviprs-job.lock`
+  twice and refuse *itself* with `ResumeError::Locked`. That error's wording is
+  generalised from "checkpoint root is locked" to "run directory is locked",
+  since it can now name either guarded directory.
 - `downscale_to` and the 2x box halver `downscale_half` (via
   `downscale_half_alpha`) now round the alpha-weighted colour and averaged
   alpha half-up, matching their own no-alpha branches, so a fully-opaque

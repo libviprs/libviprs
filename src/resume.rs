@@ -472,16 +472,18 @@ pub enum ResumeError {
         #[source]
         source: serde_json::Error,
     },
-    /// Another live job already holds the advisory run lock on the checkpoint
-    /// root.
+    /// Another live job already holds the advisory run lock on a run/output
+    /// directory.
     ///
     /// Returned by [`RunLock::acquire`] when a concurrent Resume or Overwrite
-    /// run owns the same output directory. Refusing here — rather than running
-    /// anyway — is what stops two jobs from interleaving checkpoint flushes
-    /// (each overwriting the other's `completed_tiles`, last-writer-wins) or
-    /// letting one job's Overwrite wipe delete another job's in-flight output
-    /// (issue #126).
-    #[error("checkpoint root is locked by another live job: {path}")]
+    /// run owns the same directory. A run locks the union of the directories it
+    /// mutates — the resolved checkpoint root AND the sink's own output dir — so
+    /// `path` names whichever of those the colliding job already holds, not just
+    /// the checkpoint root. Refusing here — rather than running anyway — is what
+    /// stops two jobs from interleaving checkpoint flushes (each overwriting the
+    /// other's `completed_tiles`, last-writer-wins) or letting one job's
+    /// Overwrite wipe delete another job's in-flight output (issue #126).
+    #[error("run directory is locked by another live job: {path}")]
     Locked {
         /// Path of the lock file whose exclusive lock is already held.
         path: PathBuf,
