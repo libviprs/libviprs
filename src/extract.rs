@@ -37,8 +37,9 @@
 //!   numeric (a `200` stays `200`), matching [`crate::bands`].
 //! * **Backgrounds.** `embed`, `gravity`, and the expanded area of `insert`
 //!   fill new pixels with black (all-zero samples) unless an extend mode or
-//!   background vector says otherwise. Background constants are rounded to
-//!   nearest and clamped to the sample depth (`0..=255` or `0..=65535`).
+//!   background vector says otherwise. Background constants are truncated
+//!   toward zero (matching libvips' `double`->integer cast) and clamped to
+//!   the sample depth (`0..=255` or `0..=65535`).
 //!   A background vector must have one entry (replicated across bands) or
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
@@ -272,13 +273,15 @@ fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
     }
 }
 
-/// Round and clamp an `f64` background constant into `0..=max`.
+/// Truncate (toward zero) and clamp an `f64` background constant into
+/// `0..=max`, matching the C `double`->integer cast libvips performs when
+/// it casts a background colour to the image format.
 #[inline]
 fn ink_value(v: f64, max: u32) -> u32 {
     if v.is_nan() {
         0
     } else {
-        v.round().clamp(0.0, max as f64) as u32
+        v.trunc().clamp(0.0, max as f64) as u32
     }
 }
 
@@ -339,6 +342,21 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
                 let sc = if sbands == 1 { 0 } else { c };
                 write_s(ddata, dbpc, di + c, read_s(sdata, sbpc, si + sc));
             }
+        }
+    }
+}
+
+/// Fill every pixel of `dst` with the per-band `ink` samples. Used to lay
+/// down the `insert` background before the inputs are blitted on top.
+fn fill_ink(dst: &mut Raster, ink: &[u32]) {
+    let bands = dst.format().channels();
+    let bpc = dst.format().bytes_per_channel();
+    let count = dst.width() as usize * dst.height() as usize;
+    let data = dst.data_mut();
+    for p in 0..count {
+        let di = p * bands;
+        for (c, &v) in ink.iter().enumerate() {
+            write_s(data, bpc, di + c, v);
         }
     }
 }
@@ -743,23 +761,33 @@ impl Raster {
     ///
     /// With `expand` false the result keeps `self`'s size and `sub` is
     /// clipped; with `expand` true the result is the bounding box of both
-    /// rectangles and uncovered pixels are black. `sub` overwrites `self`
-    /// where they overlap (no alpha blending), as in libvips. The result
-    /// takes the wider depth and the larger band count; a one-band input
-    /// is replicated across the result bands, and band counts that differ
-    /// with neither being 1 are an error, matching libvips `bandalike`.
+    /// rectangles and uncovered pixels take `background` (black when it is
+    /// `None`, matching libvips `insert --background`). `sub` overwrites
+    /// `self` where they overlap (no alpha blending), as in libvips. The
+    /// result takes the wider depth and the larger band count; a one-band
+    /// input is replicated across the result bands, and band counts that
+    /// differ with neither being 1 are an error, matching libvips
+    /// `bandalike`.
+    ///
+    /// `background` is only read where neither input covers a pixel (the
+    /// gaps that appear when `expand` is true); a single value is
+    /// replicated across the result bands and a full-length vector is used
+    /// per band, exactly as [`Raster::try_embed`].
     ///
     /// # Errors
     ///
     /// Returns [`ExtractError::BandCountMismatch`] for incompatible band
-    /// counts, or [`ExtractError::SizeOverflow`] if the expanded canvas
-    /// would not fit `u32` dimensions.
+    /// counts, [`ExtractError::BackgroundLengthMismatch`] for a background
+    /// vector whose length is neither 1 nor the band count, or
+    /// [`ExtractError::SizeOverflow`] if the expanded canvas would not fit
+    /// `u32` dimensions.
     pub fn try_insert(
         &self,
         sub: &Raster,
         x: i32,
         y: i32,
         expand: bool,
+        background: Option<&[f64]>,
     ) -> Result<Raster, ExtractError> {
         let mb = self.format().channels();
         let sb = sub.format().channels();
@@ -771,6 +799,10 @@ impl Raster {
             .format()
             .bytes_per_channel()
             .max(sub.format().bytes_per_channel());
+        let max = if bpc == 1 { 255u32 } else { 65535u32 };
+        // Resolve the fill up front so a bad background vector errors even
+        // when `expand` leaves no visible gap.
+        let ink = resolve_ink(bands, max, background)?;
         let fmt = PixelFormat::with_channels(bands, bpc)
             .expect("band count is bounded by the two input formats");
         let (ox, oy, ow, oh) = if expand {
@@ -789,20 +821,27 @@ impl Raster {
             });
         }
         let mut out = Raster::zeroed(ow as u32, oh as u32, fmt)?;
+        // Pre-fill with the background so uncovered pixels keep it; `blit`
+        // then overwrites the pixels the two inputs actually cover. A black
+        // (all-zero) ink is already the zeroed state, so skip the fill.
+        if ink.iter().any(|&v| v != 0) {
+            fill_ink(&mut out, &ink);
+        }
         blit(&mut out, self, -ox, -oy);
         blit(&mut out, sub, x as i64 - ox, y as i64 - oy);
         Ok(out)
     }
 
     /// Panicking form of [`Raster::try_insert`], matching the ported-test
-    /// surface.
+    /// surface. New pixels are filled black; use [`Raster::try_insert`] for
+    /// a background colour.
     ///
     /// # Panics
     ///
     /// Panics on any [`ExtractError`]; see [`Raster::try_insert`].
     #[track_caller]
     pub fn insert(&self, sub: &Raster, x: i32, y: i32, expand: bool) -> Raster {
-        expect_extract("insert", self.try_insert(sub, x, y, expand))
+        expect_extract("insert", self.try_insert(sub, x, y, expand, None))
     }
 
     /// Crop to `width` x `height` around the most interesting part of the
@@ -1538,6 +1577,125 @@ mod tests {
     }
 
     #[test]
+    fn insert_expand_fills_gaps_with_the_background() {
+        // Pinned against vips 8.18.4:
+        //   vips insert main.v sub.v out.v 3 3 --expand --background 50
+        // where main is 4x4 value 100 and sub is 2x2 value 200. The 5x5
+        // result fills every pixel neither input covers with 50 and lets
+        // sub win the (3,3) overlap.
+        let main = gray(4, 4, vec![100; 16]);
+        let sub = gray(2, 2, vec![200; 4]);
+        let out = main.try_insert(&sub, 3, 3, true, Some(&[50.0])).unwrap();
+        assert_eq!((out.width(), out.height()), (5, 5));
+        #[rustfmt::skip]
+        let expected = [
+            100.0, 100.0, 100.0, 100.0,  50.0,
+            100.0, 100.0, 100.0, 100.0,  50.0,
+            100.0, 100.0, 100.0, 100.0,  50.0,
+            100.0, 100.0, 100.0, 200.0, 200.0,
+             50.0,  50.0,  50.0, 200.0, 200.0,
+        ];
+        for y in 0..5 {
+            for x in 0..5 {
+                assert_eq!(
+                    out.getpoint(x, y),
+                    vec![expected[(y * 5 + x) as usize]],
+                    "pixel ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn insert_fractional_background_truncates_toward_zero() {
+        // Pinned against vips 8.18.4: a fractional --background is cast to the
+        // integer image format by truncation toward zero, NOT rounded to
+        // nearest.
+        //   vips insert main.v sub.v out.v 3 3 --expand --background <bg>
+        // with main/sub 1x1 gives gap pixels of 0 (bg=0.9), 1 (bg=1.5) and
+        // 199 (bg=199.5) for uchar; ushort bg=1000.5 gives 1000.
+        let main = gray(1, 1, vec![0]);
+        let sub = gray(1, 1, vec![0]);
+        for (bg, want) in [(0.9_f64, 0.0), (1.5, 1.0), (3.5, 3.0), (199.5, 199.0)] {
+            let out = main.try_insert(&sub, 3, 3, true, Some(&[bg])).unwrap();
+            assert_eq!(out.getpoint(1, 1), vec![want], "uchar bg={bg}");
+        }
+
+        let main16 = gray16(1, 1, &[0]);
+        let sub16 = gray16(1, 1, &[0]);
+        let out16 = main16
+            .try_insert(&sub16, 3, 3, true, Some(&[1000.5]))
+            .unwrap();
+        assert_eq!(out16.getpoint(1, 1), vec![1000.0], "ushort bg=1000.5");
+    }
+
+    #[test]
+    fn embed_fractional_background_truncates_toward_zero() {
+        // The ink helper is shared with embed; vips embed also truncates
+        // (bg=0.9->0, 1.5->1, 199.5->199), so pin it here too.
+        let im = gray(1, 1, vec![9]);
+        for (bg, want) in [(0.9_f64, 0.0), (1.5, 1.0), (199.5, 199.0)] {
+            let out = im.embed(1, 1, 3, 3, Extend::Background, Some(&[bg]));
+            assert_eq!(out.getpoint(0, 0), vec![want], "embed bg={bg}");
+        }
+    }
+
+    #[test]
+    fn insert_default_background_is_black() {
+        // No background => black gaps, matching `vips insert ... --expand`
+        // with no --background flag (unchanged legacy behaviour).
+        let main = gray(4, 4, vec![100; 16]);
+        let sub = gray(2, 2, vec![200; 4]);
+        let out = main.try_insert(&sub, 3, 3, true, None).unwrap();
+        assert_eq!(out.getpoint(4, 0), vec![0.0]);
+        assert_eq!(out.getpoint(0, 4), vec![0.0]);
+        // And the panicking wrapper stays black-only.
+        let same = main.insert(&sub, 3, 3, true);
+        assert_eq!(same.getpoint(4, 0), vec![0.0]);
+    }
+
+    #[test]
+    fn insert_background_replicates_single_value_across_bands() {
+        // vips replicates a scalar --background across every result band;
+        // a mono main banded up by an rgb sub gets a 3-band background.
+        let main = gray(4, 4, vec![100; 16]);
+        let sub = rgb(
+            2,
+            2,
+            vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        );
+        let out = main.try_insert(&sub, 3, 3, true, Some(&[77.0])).unwrap();
+        assert_eq!(out.format(), PixelFormat::Rgb8);
+        assert_eq!(out.getpoint(4, 0), vec![77.0, 77.0, 77.0]);
+        assert_eq!(out.getpoint(0, 4), vec![77.0, 77.0, 77.0]);
+    }
+
+    #[test]
+    fn insert_background_full_vector_is_per_band() {
+        // A full-length --background "10 20 30" is applied per band.
+        let main = rgb(4, 4, vec![100; 48]);
+        let sub = rgb(2, 2, vec![200; 12]);
+        let out = main
+            .try_insert(&sub, 3, 3, true, Some(&[10.0, 20.0, 30.0]))
+            .unwrap();
+        assert_eq!(out.getpoint(4, 0), vec![10.0, 20.0, 30.0]);
+        assert_eq!(out.getpoint(0, 4), vec![10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn insert_background_length_mismatch_is_typed() {
+        let main = rgb(2, 2, vec![1; 12]);
+        let sub = rgb(1, 1, vec![9, 9, 9]);
+        assert!(matches!(
+            main.try_insert(&sub, 3, 3, true, Some(&[1.0, 2.0])),
+            Err(ExtractError::BackgroundLengthMismatch {
+                expected: 3,
+                got: 2
+            })
+        ));
+    }
+
+    #[test]
     fn insert_with_negative_position_and_expand_shifts_the_origin() {
         let main = gray(2, 2, vec![1; 4]);
         let sub = gray(2, 2, vec![9; 4]);
@@ -1588,7 +1746,7 @@ mod tests {
         let main = rgb(1, 1, vec![1, 2, 3]);
         let sub = rgba(1, 1, vec![1, 2, 3, 4]);
         assert!(matches!(
-            main.try_insert(&sub, 0, 0, false),
+            main.try_insert(&sub, 0, 0, false, None),
             Err(ExtractError::BandCountMismatch { main: 3, sub: 4 })
         ));
     }
