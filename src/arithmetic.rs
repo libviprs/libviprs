@@ -32,7 +32,8 @@
 //! | [`Raster::project`] | `vips_project` | column and row sums |
 //! | [`Raster::add_const`], [`Raster::sub_const`], ... | `vips_linear1` family | per-sample constant arithmetic |
 //! | [`Raster::add_vec`], [`Raster::sub_vec`], ... | `vips_linear` family | per-band constant arithmetic |
-//! | [`Raster::sub`], [`Raster::mul`] | `vips_subtract` / `vips_multiply` | image-image arithmetic |
+//! | [`Raster::sub`] | `vips_subtract` | float raster (signed differences survive) |
+//! | [`Raster::mul`] | `vips_multiply` | image-image arithmetic |
 //! | [`Raster::div`], [`Raster::div_const`], [`Raster::div_vec`] | `vips_divide` | float raster |
 //! | [`Raster::linear`] / [`Raster::linear_uchar`] | `vips_linear1` (default / `uchar` option) | `a * x + b`, float / uchar raster |
 //! | [`Raster::sum`] | `vips_sum` | pixelwise sum of an image list |
@@ -55,17 +56,19 @@
 //!   `0..=65535` (16-bit). Arithmetic is computed in `f64` and the result is
 //!   rounded to nearest and saturated into the output depth. This integer
 //!   round-and-saturate contract is kept exactly where libvips keeps
-//!   integer output: `vips_add` / `vips_subtract` / `vips_multiply` map
-//!   integer input to integer output, so `add` / `sub` / `mul` and their
-//!   constant forms stay integer here. The divide family and `linear`
-//!   promote to float output instead (see below), as does the
-//!   transcendental family.
+//!   integer output: `vips_add` / `vips_multiply` map integer input to
+//!   integer output, so `add` / `mul` and their constant forms stay integer
+//!   here. The divide family and `linear` promote to float output instead
+//!   (see below), as does the transcendental family, and — matching the
+//!   `vips_subtract` promotion to signed `short` — so does image-image
+//!   `sub` (issue #282; the constant/per-band `sub_const` / `sub_vec`
+//!   stay integer and saturate, see their own docs).
 //! * **Depth promotion.** Operations whose exact result can exceed the
 //!   input depth (`add_const`, `mul`, `pow_const`, `sum`, ...)
 //!   promote 8-bit input to 16-bit output, matching the promotion
 //!   [`Raster::add`] already performs. 16-bit input has no wider format and
-//!   saturates at `65535`. Operations that cannot exceed the input depth
-//!   (`sub`, `clamp`, ...) keep it; subtraction saturates at `0`.
+//!   saturates at `65535`. Operations whose result stays within the input
+//!   depth (`clamp`, ...) keep it.
 //! * **Comparisons.** The relational family returns an 8-bit image with the
 //!   input's band count holding `255` where the relation holds and `0`
 //!   where it does not, matching libvips.
@@ -76,13 +79,16 @@
 //! # Float-output operations
 //!
 //! The divide family ([`Raster::div`], [`Raster::div_const`],
-//! [`Raster::div_vec`]) and [`Raster::linear`] produce a float raster,
-//! matching the libvips promotion tables: `vips_divide` maps every
-//! integer input format to float, and `vips_linear` computes in float
-//! and only casts down when the caller asks for it (the `uchar` option,
-//! [`Raster::linear_uchar`] here). A quotient such as `128 / 255`
-//! therefore stays `0.502` instead of rounding to `1`, which keeps
-//! `atanh` and the other domain-limited maths finite on scaled input.
+//! [`Raster::div_vec`]), [`Raster::linear`], and image-image
+//! [`Raster::sub`] produce a float raster, matching the libvips promotion
+//! tables: `vips_divide` maps every integer input format to float,
+//! `vips_linear` computes in float and only casts down when the caller
+//! asks for it (the `uchar` option, [`Raster::linear_uchar`] here), and
+//! `vips_subtract` promotes `uchar` to signed `short` — carried here as
+//! float so negative differences survive (issue #282). A quotient such as
+//! `128 / 255` therefore stays `0.502` instead of rounding to `1`, which
+//! keeps `atanh` and the other domain-limited maths finite on scaled
+//! input, and `10 - 200` stays `-190` instead of saturating to `0`.
 //! Division by zero still produces `0`, matching `vips_divide`.
 //!
 //! The transcendental family (`vips_math`: `sin` through `atanh`, `log`,
@@ -175,13 +181,16 @@ pub enum ArithmeticError {
     /// `hough_circle` was given an empty radius range.
     #[error("hough_circle radius range is empty: min {min} exceeds max {max}")]
     EmptyRadiusRange { min: u32, max: u32 },
-    /// An integer-only arithmetic operation (the mutating add/sub/mul family
-    /// and the per-band constant forms) was given a float raster. These
-    /// operations round-and-saturate into an unsigned integer output, so a
-    /// float input has no representable result; cast to an unsigned 8/16-bit
-    /// format first, or use the float-output family (`div`, `linear`, the
-    /// transcendental ops). Mirrors [`RasterError::FloatUnsupported`] so the
-    /// `try_*` forms return a typed error instead of panicking.
+    /// An integer-only arithmetic operation (image-image `add` / `mul` and the
+    /// constant / per-band `*_const` / `*_vec` forms) was given a float raster.
+    /// These operations round-and-saturate into an unsigned integer output, so
+    /// a float input has no representable result; cast to an unsigned 8/16-bit
+    /// format first, or use the float-output family (image-image `sub`, `div`,
+    /// `linear`, the transcendental ops), which reads every input depth.
+    /// Image-image `sub` floats its output (libviprs#282) so it is a
+    /// float-output op and accepts float input — unlike `sub_const` / `sub_vec`,
+    /// which stay integer and saturate. Mirrors [`RasterError::FloatUnsupported`]
+    /// so the `try_*` forms return a typed error instead of panicking.
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
     FloatUnsupported { op: &'static str },
     /// Constructing the result raster failed (allocation, size overflow).
@@ -1177,6 +1186,12 @@ impl Raster {
     }
 
     /// Subtract a constant from every sample, saturating at `0`.
+    ///
+    /// This constant form keeps the integer round-and-saturate contract,
+    /// matching `vips_linear`'s requested- (integer-) format output. It
+    /// differs from image-image [`Raster::sub`], which floats its output and
+    /// preserves negative differences (libviprs#282, matching `vips_subtract`'s
+    /// promotion to signed `short`).
     pub fn sub_const(&self, c: f64) -> Raster {
         unary_map(self, self.format().bytes_per_channel(), |v| v - c)
     }
@@ -1282,6 +1297,11 @@ impl Raster {
     }
 
     /// Per-band constant subtraction, saturating at `0`.
+    ///
+    /// Like [`Raster::sub_const`], this per-band form keeps the integer
+    /// round-and-saturate contract (matching `vips_linear`'s requested-format
+    /// output) and so differs from image-image [`Raster::sub`], which floats
+    /// its output to preserve negative differences (libviprs#282).
     ///
     /// # Errors
     ///
@@ -1459,17 +1479,25 @@ impl Raster {
     // Image-image arithmetic
     // -----------------------------------------------------------------
 
-    /// Subtract `other` from `self` samplewise, saturating at `0` (libvips
-    /// `subtract`; unsigned formats cannot carry negative differences).
+    /// Subtract `other` from `self` samplewise, producing a float raster
+    /// (libvips `subtract`).
+    ///
+    /// The output is a float raster, matching the `vips_subtract` promotion
+    /// table: subtracting two `uchar` images promotes to signed `short` in
+    /// libvips so negative differences survive, and a caller consumes that
+    /// signed result exactly as this crate's float output. Promoting to
+    /// float (rather than adding a signed integer carrier) is the
+    /// proportionate fix for issue #282 — the pre-#282 integer path routed
+    /// through the round-and-saturate writer and collapsed every negative
+    /// difference to `0` (silent data loss). Because the output floats, this
+    /// op also accepts float input, so a cast-then-subtract chain works.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
-    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
-    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
-    /// (this integer op rounds and saturates into an unsigned output).
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
     pub fn try_sub(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
-        binary_map("sub", self, other, false, |a, b| a - b)
+        binary_map_float(self, other, |a, b| a - b)
     }
 
     /// Panicking form of [`Raster::try_sub`], matching the ported-test
@@ -2828,9 +2856,12 @@ mod tests {
         ));
     }
 
-    /// Issue #271: the fallible image-image `try_*` ops likewise return
+    /// Issue #271: the integer-output image-image `try_*` ops return
     /// [`ArithmeticError::FloatUnsupported`] on float input rather than
-    /// panicking through the old `assert!` in `binary_map`.
+    /// panicking through the old `assert!` in `binary_map`. Image-image
+    /// `sub` no longer belongs here — it floats its output (issue #282) and
+    /// so accepts float input; `mul` keeps the integer contract and its
+    /// float-input guard (see [`sub_accepts_float_input_and_stays_float`]).
     #[test]
     fn try_binary_ops_on_float_return_float_unsupported() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
@@ -2838,42 +2869,54 @@ mod tests {
         let b = Raster::zeroed(2, 2, f1).unwrap();
 
         assert!(matches!(
-            a.try_sub(&b),
-            Err(ArithmeticError::FloatUnsupported { op: "sub" })
-        ));
-        assert!(matches!(
             a.try_mul(&b),
             Err(ArithmeticError::FloatUnsupported { op: "mul" })
         ));
     }
 
+    /// Issue #282: because image-image `sub` promotes to a float raster, it
+    /// accepts float input too (the float-output family reads every depth),
+    /// so a cast-then-subtract chain over float intermediates works and
+    /// stays float instead of returning [`ArithmeticError::FloatUnsupported`].
+    #[test]
+    fn sub_accepts_float_input_and_stays_float() {
+        let a = grayf(2, 1, &[0.5, 10.0]);
+        let b = grayf(2, 1, &[2.0, 3.0]);
+        let out = a.sub(&b);
+        assert!(out.format().is_float());
+        assert_eq!(float_samples(&out), vec![-1.5, 7.0]);
+        assert!(a.try_sub(&b).is_ok());
+    }
+
     /// Follow-up to #339 (tracked by #350): `FloatUnsupported` embeds the op
     /// name in its `Display`, so the panicking op forms must not re-prefix it
-    /// via `expect_arith` — otherwise the diagnostic reads "sub: sub does not
+    /// via `expect_arith` — otherwise the diagnostic reads "mul: mul does not
     /// support float rasters yet ...". Both the fallible `try_*` error Display
     /// and the panicking form's panic message must name the op exactly once.
+    /// Uses `mul`, which keeps the integer contract and its float-input guard
+    /// (image-image `sub` now floats and accepts float input, issue #282).
     #[test]
     fn float_unsupported_names_op_exactly_once() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let a = Raster::zeroed(2, 2, f1).unwrap();
         let b = Raster::zeroed(2, 2, f1).unwrap();
 
-        // Fallible form: the typed error's Display already names "sub" once.
-        let display = a.try_sub(&b).unwrap_err().to_string();
+        // Fallible form: the typed error's Display already names "mul" once.
+        let display = a.try_mul(&b).unwrap_err().to_string();
         assert_eq!(
-            display.matches("sub").count(),
+            display.matches("mul").count(),
             1,
-            "try_sub error Display must name the op once, got: {display:?}"
+            "try_mul error Display must name the op once, got: {display:?}"
         );
-        assert!(display.starts_with("sub does not support float rasters yet"));
+        assert!(display.starts_with("mul does not support float rasters yet"));
 
-        // Panicking form: the caught panic payload must name "sub" once too
-        // (was doubled as "sub: sub does not support float rasters yet ...").
+        // Panicking form: the caught panic payload must name "mul" once too
+        // (was doubled as "mul: mul does not support float rasters yet ...").
         // Silence the default hook so the intentional panic stays off stderr.
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.sub(&b)))
-            .expect_err("sub() on a float raster must panic");
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.mul(&b)))
+            .expect_err("mul() on a float raster must panic");
         std::panic::set_hook(prev);
         let panic_msg = payload
             .downcast_ref::<String>()
@@ -2881,9 +2924,9 @@ mod tests {
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .expect("panic payload is a string");
         assert_eq!(
-            panic_msg.matches("sub").count(),
+            panic_msg.matches("mul").count(),
             1,
-            "sub() panic message must name the op once, got: {panic_msg:?}"
+            "mul() panic message must name the op once, got: {panic_msg:?}"
         );
     }
 
@@ -3455,9 +3498,10 @@ mod tests {
     /// The libvips promotion table for the linear / divide family:
     /// divide always outputs float (the `vips_divide` table maps every
     /// integer format to float); linear outputs float (`vips_linear`)
-    /// unless the caller requests uchar; add / subtract / multiply keep
-    /// the integer contract (`vips_add` / `vips_subtract` /
-    /// `vips_multiply` keep integer formats for integer input).
+    /// unless the caller requests uchar; image-image `sub` outputs float
+    /// (`vips_subtract` promotes `uchar` to signed `short`, carried here
+    /// as float, issue #282); add / multiply and the constant `sub_const`
+    /// / `sub_vec` keep the integer contract.
     #[test]
     fn linear_divide_promotion_table() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
@@ -3480,6 +3524,10 @@ mod tests {
         assert_eq!(im16.linear(1.0, 0.0).format(), f1);
         assert_eq!(im8.linear_uchar(1.0, 0.0).format(), PixelFormat::Gray8);
 
+        // Image-image sub: float (signed short in libvips, issue #282).
+        assert_eq!(im8.sub(&im8).format(), f1);
+        assert_eq!(im16.sub(&im16).format(), f1);
+
         // Integer contract unchanged everywhere libvips keeps integer.
         assert_eq!(im8.add_const(1.0).format(), PixelFormat::Gray16);
         assert_eq!(im8.sub_const(1.0).format(), PixelFormat::Gray8);
@@ -3487,7 +3535,6 @@ mod tests {
         assert_eq!(im8.add_vec(&[1.0]).format(), PixelFormat::Gray16);
         assert_eq!(im8.sub_vec(&[1.0]).format(), PixelFormat::Gray8);
         assert_eq!(im8.mul_vec(&[2.0]).format(), PixelFormat::Gray16);
-        assert_eq!(im8.sub(&im8).format(), PixelFormat::Gray8);
         assert_eq!(im8.mul(&im8).format(), PixelFormat::Gray16);
         assert_eq!(im8.floordiv_const(2.0).format(), PixelFormat::Gray8);
         assert_eq!(im8.rem_const(2.0).format(), PixelFormat::Gray8);
@@ -3549,15 +3596,19 @@ mod tests {
 
     // ---- image-image arithmetic ----
 
-    /// sub of an image from itself is all zeros; differences saturate at
-    /// zero instead of wrapping.
+    /// sub of an image from itself is all zeros; negative differences
+    /// survive as signed float values instead of saturating to `0`
+    /// (issue #282, matching the `vips_subtract` promotion to signed short).
     #[test]
-    fn sub_zeros_and_saturation() {
+    fn sub_zeros_and_signed_difference() {
         let a = gray(2, 1, vec![100, 10]);
-        assert_eq!(a.sub(&a).avg(), 0.0);
+        let z = a.sub(&a);
+        assert!(z.format().is_float());
+        assert_eq!(z.avg(), 0.0);
         let b = gray(2, 1, vec![50, 200]);
         assert_eq!(a.sub(&b).getpoint(0, 0), vec![50.0]);
-        assert_eq!(a.sub(&b).getpoint(1, 0), vec![0.0]);
+        // 10 - 200 = -190 survives instead of the pre-#282 saturated `0`.
+        assert_eq!(a.sub(&b).getpoint(1, 0), vec![-190.0]);
     }
 
     /// mul promotes 8-bit products to 16-bit.
