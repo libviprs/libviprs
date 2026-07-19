@@ -71,17 +71,29 @@ impl Raster {
 
     /// Add two rasters pixel-by-pixel, returning a new raster.
     ///
-    /// Both inputs must have identical dimensions and channel counts. To avoid
-    /// wrap-around, an 8-bit result is promoted to the matching 16-bit format
-    /// (`Gray8 -> Gray16`, `Rgb8 -> Rgb16`, `Rgba8 -> Rgba16`), so summing two
-    /// `Gray8` images whose values exceed 255 keeps the true sum. 16-bit inputs
-    /// have no wider format available, so their sums saturate at `65535`.
+    /// The inputs must share dimensions. Band counts may differ only when one
+    /// operand is single-band: it is then **broadcast** across the other's
+    /// bands (vips band-broadcast semantics, so `RGB + gray` adds the gray
+    /// value to each colour band). The result has `max(bands)` bands.
+    ///
+    /// The result format follows the libvips `add` promotion table so sums
+    /// never wrap:
+    ///
+    /// * `uchar + uchar` promotes to the matching 16-bit format
+    ///   (`Gray8 -> Gray16`, `Rgb8 -> Rgb16`, `Rgba8 -> Rgba16`); a 8-bit sum
+    ///   never exceeds `510`, so it is kept exactly.
+    /// * if **either** operand is 16-bit, vips promotes to `uint`. This crate
+    ///   has no unsigned-32 format, so the promoted result is carried as `f32`
+    ///   (a matching `FloatF32` / `RgbaF32`). Every `u16 + u16` sum (at most
+    ///   `131070`) is an integer below `2^24` and so is representable in `f32`
+    ///   exactly — the true sum is kept, not saturated at `65535`.
     ///
     /// # Panics
     ///
-    /// Panics if the two rasters differ in width, height, or channel count,
-    /// or if either input is a float raster (float addition lands with a
-    /// later arithmetic batch; cast to an unsigned format first). The
+    /// Panics if the two rasters differ in width or height; if their band
+    /// counts differ and *neither* is single-band (so broadcasting is
+    /// ambiguous); or if either input is a float raster (float addition lands
+    /// with a later arithmetic batch; cast to an unsigned format first). The
     /// libvips-derived callers always add conformable images; the panic turns a
     /// caller bug into an immediate, clear failure rather than silent garbage.
     pub fn add(&self, other: &Raster) -> Raster {
@@ -90,40 +102,66 @@ impl Raster {
             (other.width(), other.height()),
             "add: dimension mismatch"
         );
-        assert_eq!(
-            self.format().channels(),
-            other.format().channels(),
-            "add: channel-count mismatch"
-        );
         assert!(
             !self.format().is_float() && !other.format().is_float(),
             "add: float rasters are not supported yet; cast to an unsigned 8/16-bit format first"
         );
+        let a_bands = self.format().channels();
+        let b_bands = other.format().channels();
+        assert!(
+            a_bands == b_bands || a_bands == 1 || b_bands == 1,
+            "add: channel-count mismatch: {a_bands} vs {b_bands} \
+             (broadcasting requires one operand to be single-band)"
+        );
 
         let width = self.width();
         let height = self.height();
-        let channels = self.format().channels();
-        let out_fmt = widen(self.format());
-        let out_bpc = out_fmt.bytes_per_channel();
-        let count = width as usize * height as usize * channels;
+        let pixels = width as usize * height as usize;
+        let out_bands = a_bands.max(b_bands);
+        // Flat sample index into an operand for output band `c` at pixel `p`,
+        // folding the single-band broadcast: a 1-band operand always reads
+        // band 0.
+        let idx = |bands: usize, p: usize, c: usize| p * bands + if bands == 1 { 0 } else { c };
 
-        let mut out = vec![0u8; count * out_bpc];
-        for i in 0..count {
-            let a = read_sample(self, i);
-            let b = read_sample(other, i);
-            let sum = a + b;
-            if out_bpc == 1 {
-                out[i] = sum.min(255) as u8;
-            } else {
-                let v = sum.min(u16::MAX as u32) as u16;
-                let bytes = v.to_ne_bytes();
-                out[i * 2] = bytes[0];
-                out[i * 2 + 1] = bytes[1];
+        // vips add promotion: uchar+uchar -> ushort; if either operand is
+        // 16-bit -> uint (carried here as f32; see the doc comment).
+        let promote_float =
+            self.format().bytes_per_channel() == 2 || other.format().bytes_per_channel() == 2;
+
+        if promote_float {
+            let out_fmt = PixelFormat::with_channels(out_bands, 4)
+                .expect("out_bands is 1..=max(input bands), so the float format exists");
+            let mut samples = Vec::with_capacity(pixels * out_bands);
+            for p in 0..pixels {
+                for c in 0..out_bands {
+                    let a = read_sample(self, idx(a_bands, p, c));
+                    let b = read_sample(other, idx(b_bands, p, c));
+                    samples.push((a + b) as f32);
+                }
             }
+            Raster::from_f32_samples(width, height, out_fmt, &samples)
+                .expect("add output is well-formed")
+        } else {
+            // Both operands are 8-bit: promote to 16-bit (vips uchar+uchar ->
+            // ushort). The sum is at most 510, so `.min` never actually clips.
+            let out_fmt = PixelFormat::with_channels(out_bands, 2)
+                .expect("out_bands is 1..=max(input bands), so the 16-bit format exists");
+            let mut out = vec![0u8; pixels * out_bands * 2];
+            for p in 0..pixels {
+                for c in 0..out_bands {
+                    let a = read_sample(self, idx(a_bands, p, c));
+                    let b = read_sample(other, idx(b_bands, p, c));
+                    let v = (a + b).min(u16::MAX as u32) as u16;
+                    let bytes = v.to_ne_bytes();
+                    let o = (p * out_bands + c) * 2;
+                    out[o] = bytes[0];
+                    out[o + 1] = bytes[1];
+                }
+            }
+            // The output size is exactly `pixels * out_bands * 2`, computed
+            // from validated input dimensions, so construction cannot fail.
+            Raster::new(width, height, out_fmt, out).expect("add output is well-formed")
         }
-        // The output size is exactly `count * out_bpc`, computed from validated
-        // input dimensions, so construction cannot fail.
-        Raster::new(width, height, out_fmt, out).expect("add output is well-formed")
     }
 }
 
@@ -138,17 +176,6 @@ fn read_sample(raster: &Raster, i: usize) -> u32 {
         1 => data[i] as u32,
         2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
         _ => panic!("read_sample: float rasters have no u32 sample view"),
-    }
-}
-
-/// The format one bit-depth wider, used so 8-bit sums do not wrap. 16-bit
-/// formats have no wider form here and are returned unchanged (sums saturate).
-fn widen(fmt: PixelFormat) -> PixelFormat {
-    match fmt {
-        PixelFormat::Gray8 => PixelFormat::Gray16,
-        PixelFormat::Rgb8 => PixelFormat::Rgb16,
-        PixelFormat::Rgba8 => PixelFormat::Rgba16,
-        other => other,
     }
 }
 
@@ -203,14 +230,42 @@ mod tests {
         assert_eq!(a.add(&b).getpoint(0, 0), vec![11.0, 22.0, 33.0]);
     }
 
-    /// 16-bit sums saturate at u16::MAX rather than wrapping.
+    /// 16-bit sums promote to float and keep the true sum instead of
+    /// saturating at `u16::MAX`. vips `add ushort ushort` promotes to `uint`
+    /// (verified with the oracle: `60000 + 10000 = 70000`, format `uint`);
+    /// this crate has no unsigned-32 format, so the promoted result is carried
+    /// as `f32`, which represents the sum exactly.
     #[test]
-    fn add_16bit_saturates() {
+    fn add_16bit_promotes_to_float_true_sum() {
         let hi = 60000u16.to_ne_bytes();
+        let lo = 10000u16.to_ne_bytes();
         let a = Raster::new(1, 1, PixelFormat::Gray16, vec![hi[0], hi[1]]).unwrap();
-        let sum = a.add(&a);
-        assert_eq!(sum.format(), PixelFormat::Gray16);
-        assert_eq!(sum.getpoint(0, 0), vec![65535.0]);
+        let b = Raster::new(1, 1, PixelFormat::Gray16, vec![lo[0], lo[1]]).unwrap();
+        let sum = a.add(&b);
+        assert!(sum.format().is_float());
+        assert_eq!(sum.format().channels(), 1);
+        // 70000 > u16::MAX (65535); the old behaviour clamped to 65535.
+        assert_eq!(sum.getpoint(0, 0), vec![70000.0]);
+        // The largest possible u16 + u16 sum is representable exactly in f32.
+        let m = u16::MAX.to_ne_bytes();
+        let big = Raster::new(1, 1, PixelFormat::Gray16, vec![m[0], m[1]]).unwrap();
+        assert_eq!(big.add(&big).getpoint(0, 0), vec![131070.0]);
+    }
+
+    /// A single-band operand broadcasts across the other operand's bands
+    /// (vips band-broadcast). `RGB + gray` adds the gray value to each colour
+    /// band (verified with the oracle: `[10,20,30] + 5 = [15,25,35]`).
+    #[test]
+    fn add_broadcasts_single_band() {
+        let rgb = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        let gray = Raster::new(1, 1, PixelFormat::Gray8, vec![5]).unwrap();
+        // 8-bit + 8-bit promotes to 16-bit; the gray band is added to each.
+        let out = rgb.add(&gray);
+        assert_eq!(out.format().channels(), 3);
+        assert_eq!(out.format().bytes_per_channel(), 2);
+        assert_eq!(out.getpoint(0, 0), vec![15.0, 25.0, 35.0]);
+        // Broadcast is symmetric.
+        assert_eq!(gray.add(&rgb).getpoint(0, 0), vec![15.0, 25.0, 35.0]);
     }
 
     /// add rejects mismatched dimensions.
@@ -219,6 +274,16 @@ mod tests {
     fn add_dimension_mismatch_panics() {
         let a = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
         let b = Raster::zeroed(3, 2, PixelFormat::Gray8).unwrap();
+        let _ = a.add(&b);
+    }
+
+    /// add rejects a band-count mismatch when neither operand is single-band
+    /// (broadcasting is only defined against a single band).
+    #[test]
+    #[should_panic(expected = "channel-count mismatch")]
+    fn add_incompatible_band_counts_panic() {
+        let a = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
+        let b = Raster::zeroed(2, 2, PixelFormat::Rgba8).unwrap();
         let _ = a.add(&b);
     }
 
