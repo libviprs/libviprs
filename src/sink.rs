@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -666,25 +666,44 @@ impl TileFormat {
 ///
 /// * `dedupe_promote` is the sole **outer** lock. It guards the whole
 ///   promote-on-2nd-hit critical section and is only ever taken at the top of
-///   [`FsSink::dedupe_write`], never while a field mutex is already held.
+///   [`FsSink::dedupe_write`], never while a field mutex is already held. It is
+///   *sharded by content digest* (see [`DEDUPE_PROMOTE_SHARDS`] and
+///   [`FsSink::promote_shard`]): all occurrences of a given content map to the
+///   same shard — preserving the per-key atomicity the at-least-one-hardlink
+///   invariant requires (issue #111) — while distinct content maps to
+///   (usually) distinct shards, so tiles of different content no longer
+///   serialise on one process-wide lock (issue #296). Exactly one shard is
+///   taken per `dedupe_write` call.
 /// * Every other mutex — `tile_digests`, `manifest_refs`, `pending_first`,
-///   `unsynced_tiles`, `engine_config` — is a **leaf**
+///   `unsynced_tiles`, `validated_shared`, `engine_config` — is a **leaf**
 ///   lock. A leaf lock is held only long enough to read, mutate, or snapshot
 ///   its map/vec (the read paths clone or `mem::take` and release
 ///   immediately), and is **never** held while acquiring any other leaf lock,
-///   `dedupe_promote`, or while calling back into `self`.
+///   a `dedupe_promote` shard, or while calling back into `self`.
 ///
 /// The consequence — and the actual invariant to preserve — is that **at most
 /// one leaf lock is ever held on a thread at a time**. The only legal nesting
-/// is `dedupe_promote` wrapping a single leaf lock inside `dedupe_write`;
-/// no leaf-over-leaf nesting exists, so there is no lock cycle and no AB-BA
-/// deadlock is reachable. `pixel_format` (a `OnceLock`) and `per_level_counts`
-/// (atomics) take no mutex and are irrelevant to this rule.
+/// is a `dedupe_promote` shard wrapping a single leaf lock inside
+/// `dedupe_write`; no leaf-over-leaf nesting exists, so there is no lock cycle
+/// and no AB-BA deadlock is reachable. Because a thread only ever holds one
+/// shard at a time (taken at the top of `dedupe_write` and dropped at its end),
+/// sharding cannot introduce a shard-over-shard cycle either. `pixel_format`
+/// (a `OnceLock`) and `per_level_counts` (atomics) take no mutex and are
+/// irrelevant to this rule.
 ///
 /// Field mutexes are acquired through [`FsSink::lock_leaf`], which in debug
 /// builds trips a panic the instant a second leaf lock is taken while one is
 /// still held — turning an accidental nesting into an immediate, local
 /// failure instead of a latent deadlock (issue #112).
+///
+/// # Sharded promote lock
+///
+/// The `dedupe_promote` outer lock is striped across
+/// [`DEDUPE_PROMOTE_SHARDS`] shards, indexed by a hash of the tile content
+/// (see [`FsSink::promote_shard`]). All occurrences of a given content select
+/// the same shard, so the per-key atomicity issue #111 relies on is preserved;
+/// distinct content selects (usually) distinct shards, so it no longer
+/// serialises on one process-wide lock (issue #296).
 pub struct FsSink {
     base_dir: PathBuf,
     plan: PyramidPlan,
@@ -705,7 +724,23 @@ pub struct FsSink {
     /// invariant (issue #111). This is the outermost lock (see the
     /// type-level `# Lock discipline`); it is only ever taken at the top of
     /// [`FsSink::dedupe_write`] and never while holding a leaf mutex.
-    dedupe_promote: Mutex<()>,
+    ///
+    /// Sharded across [`DEDUPE_PROMOTE_SHARDS`] entries and indexed by content
+    /// digest (see [`FsSink::promote_shard`]): occurrences of the same content
+    /// hash always take the same shard — so the promote-on-2nd-hit sequence
+    /// stays atomic per key and the at-least-one-hardlink invariant holds —
+    /// while tiles of distinct content take (usually) distinct shards and no
+    /// longer serialise on a single process-wide lock (issue #296).
+    dedupe_promote: [Mutex<()>; DEDUPE_PROMOTE_SHARDS],
+    /// Shared keys whose `_shared/<key>` blob has already been materialised or
+    /// revalidated during this run. Once a key is present, the expensive
+    /// [`FsSink::shared_blob_valid`] full-file read + rehash is skipped for
+    /// every later duplicate of that content, so a shared blob is read and
+    /// hashed at most once per key per run rather than once per duplicate
+    /// (issue #296). The pre-existing-blob revalidation the resume path needs
+    /// (issue #97) still runs on the *first* touch of each key this run; only
+    /// the redundant re-reads that follow are elided. A leaf lock.
+    validated_shared: Mutex<HashSet<String>>,
     /// Armed by [`TileSink::arm_durability_tracking`] when the engine stands up
     /// a [`CheckpointState`](crate::engine) for this run. While armed,
     /// [`FsSink::write_tile`] records each freshly-written tile path in
@@ -767,10 +802,26 @@ pub struct FsSink {
     engine_config: Mutex<Option<crate::engine::EngineConfig>>,
 }
 
+/// Number of shards backing the `dedupe_promote` outer lock (issue #296).
+///
+/// The promote-on-2nd-hit critical section must be atomic *per content key*
+/// (issue #111), but two tiles of *distinct* content share nothing — different
+/// shared blob, different `pending_first` entry, different tile paths — so they
+/// need not serialise. Striping the lock across a fixed set of shards, chosen
+/// by a hash of the tile content, lets distinct-content writers run
+/// concurrently while all occurrences of one content still funnel through a
+/// single shard (see [`FsSink::promote_shard`]).
+///
+/// A power of two so shard selection is a cheap mask. Sized well above any
+/// realistic external-writer thread count so distinct-content tiles rarely
+/// collide on a shard (a collision only costs an unnecessary wait, never
+/// correctness).
+const DEDUPE_PROMOTE_SHARDS: usize = 64;
+
 // Per-thread counter of currently-held `FsSink` leaf locks. Only compiled in
 // debug builds, where it backs the "at most one leaf lock at a time" assertion
-// in `LeafGuard`. `dedupe_promote` is intentionally *not* counted here — it is
-// the permitted outer lock (see `FsSink`'s `# Lock discipline`).
+// in `LeafGuard`. A `dedupe_promote` shard is intentionally *not* counted here
+// — it is the permitted outer lock (see `FsSink`'s `# Lock discipline`).
 #[cfg(debug_assertions)]
 thread_local! {
     static FS_SINK_LEAF_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -930,7 +981,8 @@ impl FsSink {
             checksum_algo: None,
             dedupe: None,
             dedupe_index: None,
-            dedupe_promote: Mutex::new(()),
+            dedupe_promote: std::array::from_fn(|_| Mutex::new(())),
+            validated_shared: Mutex::new(HashSet::new()),
             durability_tracking: AtomicBool::new(false),
             tile_digests: Mutex::new(BTreeMap::new()),
             manifest_refs: Mutex::new(HashMap::new()),
@@ -1386,6 +1438,66 @@ impl FsSink {
         got.eq_ignore_ascii_case(expected_hex)
     }
 
+    /// Select the `dedupe_promote` shard for a tile with the given content
+    /// `bytes` (issue #296).
+    ///
+    /// The shard is a pure function of the content, so every occurrence of the
+    /// same content selects the same shard — preserving the per-key atomicity
+    /// the at-least-one-hardlink invariant depends on (issue #111) — while
+    /// distinct content selects (usually) distinct shards, letting
+    /// distinct-content tiles promote concurrently instead of serialising on
+    /// one process-wide lock. [`std::hash::BuildHasher`]-free
+    /// [`std::hash::DefaultHasher`] keeps this deterministic within (and
+    /// across) runs; determinism is not required for correctness — only that
+    /// identical content maps to one shard — but it keeps behaviour
+    /// reproducible.
+    fn promote_shard(&self, bytes: &[u8]) -> &Mutex<()> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        // DEDUPE_PROMOTE_SHARDS is a power of two, so the mask is exact.
+        let idx = (hasher.finish() as usize) & (DEDUPE_PROMOTE_SHARDS - 1);
+        &self.dedupe_promote[idx]
+    }
+
+    /// Whether the `_shared/<shared_key>` blob is known-good, consulting the
+    /// per-run [`FsSink::validated_shared`] cache before touching disk (issue
+    /// #296).
+    ///
+    /// The first time a key is validated this run — the resume-safety
+    /// revalidation of a possibly-pre-existing blob (issue #97) — the full
+    /// on-disk read + rehash runs and, on success, the key is remembered.
+    /// Every later duplicate of that content short-circuits on the cached
+    /// verdict, so a shared blob is read and hashed at most once per key per
+    /// run instead of once per duplicate.
+    ///
+    /// Correctness note: nothing in a single run removes or corrupts a shared
+    /// blob after it has been materialised, so a cached "valid" verdict cannot
+    /// go stale mid-run; the #97 guard against a *prior* run's truncated blob
+    /// still fires on the first touch. Callers must hold the content's
+    /// [`FsSink::promote_shard`], so concurrent duplicates of the same content
+    /// never race the cache.
+    fn shared_blob_cached_valid(&self, shared_key: &str, shared_abs_path: &Path) -> bool {
+        if self.lock_leaf(&self.validated_shared).contains(shared_key) {
+            return true;
+        }
+        if self.shared_blob_valid(shared_abs_path) {
+            self.mark_shared_validated(shared_key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Record that the `_shared/<shared_key>` blob is materialised and valid
+    /// for the remainder of this run, so later duplicates skip the redundant
+    /// full-file revalidation (issue #296). Callers must hold the content's
+    /// [`FsSink::promote_shard`].
+    fn mark_shared_validated(&self, shared_key: &str) {
+        self.lock_leaf(&self.validated_shared)
+            .insert(shared_key.to_string());
+    }
+
     fn record_tile_digest(&self, rel: &str, materialized: &[u8]) {
         if self.checksums == crate::checksum::ChecksumMode::None {
             return;
@@ -1420,7 +1532,15 @@ impl FsSink {
         // leave the first tile as a full private copy — breaking the
         // at-least-one-hardlink invariant (issue #111). Serialising here
         // makes the promote-on-2nd-hit sequence atomic.
-        let _promote = crate::poison::recover(&self.dedupe_promote);
+        //
+        // The lock is sharded by content digest (issue #296): all occurrences
+        // of THIS content take the same shard, so the sequence above is still
+        // fully serialised per key, but tiles of distinct content take
+        // distinct shards and promote concurrently instead of contending on a
+        // single process-wide lock. The shard is chosen from `bytes` — a pure
+        // function of content — so the same-key funnelling the invariant needs
+        // is guaranteed.
+        let _promote = crate::poison::recover(self.promote_shard(bytes));
 
         let decision = idx.record(rel_string, bytes);
 
@@ -1557,18 +1677,27 @@ impl FsSink {
                                 .insert(p.tile_rel_path, shared_rel_string.clone());
                         }
                     }
+
+                    // The shared blob is now materialised on disk (renamed
+                    // across, atomic-written, or already present and valid).
+                    // Remember it so every later duplicate of this content
+                    // skips the full revalidation re-read below (issue #296).
+                    self.mark_shared_validated(&shared_key);
                 }
 
                 // The shared file should now exist and be valid; if it is
                 // missing (resume mode with a wiped `_shared/`) or present but
                 // corrupt (a crash truncated a prior run's blob), materialize
                 // it from the current tile's bytes via an atomic tmp+rename so
-                // a reader never sees a partial blob (issue #97).
-                if !self.shared_blob_valid(&shared_abs_path) {
+                // a reader never sees a partial blob (issue #97). The cached
+                // check makes the full-file read + rehash happen at most once
+                // per key per run rather than once per duplicate (issue #296).
+                if !self.shared_blob_cached_valid(&shared_key, &shared_abs_path) {
                     if let Some(parent) = shared_abs_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
                     atomic_write(&shared_abs_path, bytes)?;
+                    self.mark_shared_validated(&shared_key);
                 }
 
                 // Write a 1-byte placeholder at the current tile path and
@@ -3338,6 +3467,170 @@ mod tests {
                 "iter {iter}: neither tile path is hardlinked to the shared inode"
             );
         }
+    }
+
+    /// Build a dedupe-enabled `FsSink` over a throwaway tempdir plus the base
+    /// dir it is rooted at, keeping the `TempDir` alive for the caller. Used by
+    /// the sharded-promote-lock tests below, which drive `dedupe_write`
+    /// directly with synthesised paths rather than through a plan.
+    fn dedupe_sink_for_promote_tests() -> (tempfile::TempDir, PathBuf, FsSink) {
+        use crate::dedupe::DedupeStrategy;
+        use crate::manifest::ChecksumAlgo;
+        let planner = PyramidPlanner::new(8, 8, 8, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("out_files");
+        std::fs::create_dir_all(base.join("0")).unwrap();
+        let sink = FsSink::new(base.clone(), plan)
+            .with_format(TileFormat::Png)
+            .with_dedupe(DedupeStrategy::All {
+                algo: ChecksumAlgo::Blake3,
+            });
+        (dir, base, sink)
+    }
+
+    /// Promote-lock sharding (issue #296): tiles of DISTINCT content take
+    /// distinct shards, so one content's held critical section must NOT block a
+    /// writer of unrelated content.
+    ///
+    /// Hold the promote shard for content A, then run a full promote-on-2nd-hit
+    /// sequence for content B (mapped to a different shard) on another thread.
+    /// It must complete promptly — under the old single process-wide
+    /// `dedupe_promote` mutex holding A's lock would block ALL deduped writes,
+    /// so B would hang until the shard is released (RED); with the sharded lock
+    /// B proceeds concurrently (GREEN).
+    #[cfg(not(miri))]
+    #[test]
+    fn dedupe_distinct_content_promotes_without_serialising() {
+        use std::time::Duration;
+
+        let (_dir, base, sink) = dedupe_sink_for_promote_tests();
+
+        // Content A: never written, we only pin its shard.
+        let bytes_a = b"promote-shard-content-A".to_vec();
+        let shard_a = sink.promote_shard(&bytes_a);
+
+        // Find content B on a different shard so the two genuinely don't
+        // contend (a same-shard collision would legitimately serialise).
+        let mut bytes_b = None;
+        for n in 0..4096u32 {
+            let cand = format!("promote-shard-content-B-{n}").into_bytes();
+            if !std::ptr::eq(sink.promote_shard(&cand), shard_a) {
+                bytes_b = Some(cand);
+                break;
+            }
+        }
+        let bytes_b = bytes_b.expect("a content mapping to a different shard must exist");
+
+        // Two distinct occurrences of B force WriteNew then Reference — the
+        // full promote sequence, acquiring B's shard.
+        let abs_b1 = base.join("0/0_0.png");
+        let abs_b2 = base.join("0/0_1.png");
+        let sink_ref = &sink;
+        let held = crate::poison::recover(sink_ref.promote_shard(&bytes_a));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                sink_ref
+                    .dedupe_write(TileCoord::new(0, 0, 0), "0/0_0.png", &abs_b1, &bytes_b)
+                    .unwrap();
+                sink_ref
+                    .dedupe_write(TileCoord::new(0, 1, 0), "0/0_1.png", &abs_b2, &bytes_b)
+                    .unwrap();
+                tx.send(()).unwrap();
+            });
+            rx.recv_timeout(Duration::from_secs(10)).expect(
+                "a distinct-content writer must not be serialised behind an \
+                 unrelated content's held promote shard (issue #296)",
+            );
+        });
+        drop(held);
+    }
+
+    /// Sharded promote lock still serialises SAME content (issue #111 preserved
+    /// under issue #296). Holding content A's shard must block another writer of
+    /// the same content until the shard is released — this is what guarantees
+    /// the promote-on-2nd-hit sequence stays atomic per key. It also proves the
+    /// concurrency in the sibling test is genuine (distinct shards) rather than
+    /// vacuous (no locking at all).
+    #[cfg(not(miri))]
+    #[test]
+    fn dedupe_same_content_serialises_on_promote_shard() {
+        use std::time::Duration;
+
+        let (_dir, base, sink) = dedupe_sink_for_promote_tests();
+
+        let bytes_a = b"same-content-serialisation-probe".to_vec();
+        let abs_a = base.join("0/0_0.png");
+        let sink_ref = &sink;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            let held = crate::poison::recover(sink_ref.promote_shard(&bytes_a));
+            s.spawn(move || {
+                sink_ref
+                    .dedupe_write(TileCoord::new(0, 0, 0), "0/0_0.png", &abs_a, &bytes_a)
+                    .unwrap();
+                tx.send(()).unwrap();
+            });
+            // Still holding A's shard: the same-content writer must be blocked.
+            assert!(
+                rx.recv_timeout(Duration::from_millis(500)).is_err(),
+                "a same-content writer must block on the held promote shard \
+                 (issue #111 atomicity)"
+            );
+            drop(held);
+            // Released: it must now make progress.
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("writer must proceed once the promote shard is released");
+        });
+    }
+
+    /// Per-key validation-verdict cache (issue #296): a shared blob is read and
+    /// hashed at most once per key per run, not once per duplicate. After
+    /// several duplicates of one content the key is recorded in
+    /// `validated_shared` (so later duplicates short-circuit the full-file
+    /// revalidation) while exactly one shared blob exists and stays valid.
+    #[cfg(not(miri))]
+    #[test]
+    fn dedupe_shared_blob_validated_once_per_key() {
+        let (_dir, base, sink) = dedupe_sink_for_promote_tests();
+
+        let bytes = b"validate-once-per-key-content".to_vec();
+        // WriteNew + three References of identical content.
+        for (col, rel) in [
+            (0u32, "0/0_0.png"),
+            (1, "0/0_1.png"),
+            (2, "0/0_2.png"),
+            (3, "0/0_3.png"),
+        ] {
+            let abs = base.join(rel);
+            sink.dedupe_write(TileCoord::new(0, col, 0), rel, &abs, &bytes)
+                .unwrap();
+        }
+
+        // Exactly one content key validated and cached for the run.
+        let cached = crate::poison::recover(&sink.validated_shared);
+        assert_eq!(
+            cached.len(),
+            1,
+            "exactly one shared key should be cached as validated, got {cached:?}"
+        );
+
+        // Exactly one shared blob on disk, and it is valid (hashes to its name).
+        let shared_dir = base.join("_shared");
+        let shared_files: Vec<_> = std::fs::read_dir(&shared_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(
+            shared_files.len(),
+            1,
+            "expected exactly one shared blob, got {shared_files:?}"
+        );
+        assert!(
+            sink.shared_blob_valid(&shared_files[0]),
+            "the materialised shared blob must be valid"
+        );
     }
 
     /**
