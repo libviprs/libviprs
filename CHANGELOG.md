@@ -112,8 +112,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"multi8:N"` / `"multi16:N"` while the six named formats keep their
   historical tags.
 
+### Changed
+
+- The averaging resamplers `Raster::reduce` / `reduceh` / `reducev`,
+  `shrink` / `shrinkh` / `shrinkv`, and `resize` now premultiply alpha
+  around the whole operation for images with an alpha band: the source is
+  premultiplied once into a float working buffer, every separable box /
+  kernel / affine pass runs in that premultiplied space, and the result is
+  un-premultiplied once at the end (the `vips_resize` bracket). This
+  coverage-weights the colour so the meaningless RGB of transparent pixels
+  can no longer bleed into opaque neighbours (the dark fringe at
+  transparency boundaries), and it fixes a mixed downscale-one-axis /
+  upscale-other-axis `resize` that previously fed straight-alpha colour to
+  the affine enlargement. Bracketing once into float (instead of once per
+  axis into a same-bit-depth integer intermediate) also removes the
+  low-alpha colour banding a per-axis integer round-trip introduced. The
+  single-tap Nearest kernel is unchanged — it stays an exact pick with no
+  premultiply. This is a deliberate divergence from the bare `vips_reduce*`
+  / `vips_shrink*` namesakes, which do not premultiply (only `vips_resize`
+  does); it matches a premultiplied vips pipeline
+  (`premultiply | reduce/shrink | unpremultiply`).
+
 ### Fixed
 
+- `downscale_to` and the 2x box halver `downscale_half` (via
+  `downscale_half_alpha`) now round the alpha-weighted colour and averaged
+  alpha half-up, matching their own no-alpha branches, so a fully-opaque
+  RGBA image downscales bit-identically to its RGB twin — and identically
+  through both paths — instead of carrying the systematic -0.5 LSB
+  truncation bias the alpha path previously introduced. Both alpha-weighted
+  regions are also scanned with integer `u64` accumulators that stay exact
+  where the former `f64` colour accumulator would drop low bits on extreme
+  16-bit downscales.
 - A `Resume` refused on a plan-hash mismatch now returns
   `EngineError::PlanHashMismatch` before anything touches the output
   directory: the plan-hash gate runs ahead of the advisory run-lock

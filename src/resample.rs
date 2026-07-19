@@ -80,7 +80,20 @@
 //!   are premultiplied before interpolation and unpremultiplied afterwards
 //!   unless [`AffineOptions::premultiplied`] says the input already is. The
 //!   alpha ceiling is 255 for 8-bit and float samples and 65535 for 16-bit
-//!   samples, the `vips_premultiply` defaults.
+//!   samples, the `vips_premultiply` defaults. The averaging resamplers —
+//!   `reduce` / `reduceh` / `reducev`, `shrink` / `shrinkh` / `shrinkv`, and
+//!   `resize` — do the same: an alpha image is premultiplied once into a float
+//!   working buffer, the separable box / kernel / affine passes all run in that
+//!   premultiplied space, and the result is unpremultiplied once at the end
+//!   (the `vips_resize` bracket). This coverage-weights the colour so the
+//!   meaningless RGB of transparent pixels cannot bleed into opaque neighbours
+//!   (the dark fringe at transparency boundaries). Note this is a deliberate
+//!   divergence from the bare `vips_reduce*` / `vips_shrink*` namesakes, which
+//!   do *not* premultiply — only `vips_resize` does — but it is the behaviour
+//!   the pyramid pipeline needs by default and matches a premultiplied vips
+//!   pipeline (`premultiply | reduce/shrink | unpremultiply`). The single-tap
+//!   Nearest kernel is exempt: it does no averaging, so it stays an exact pick
+//!   with no premultiply round-trip.
 //! * **`similarity` / `rotate`.** `similarity(angle, scale)` builds the
 //!   matrix `a = scale*cos, b = -scale*sin, c = -b, d = a` and calls
 //!   `affine` with the default bilinear interpolator; `rotate(angle)` is
@@ -676,30 +689,19 @@ fn reduce_axis(
     let mut extra = out_dim as f64 * shrink - dim as f64;
     let mut shrink = shrink;
 
-    // Alpha handling (#288): premultiply colour by alpha once so both the
-    // integer box pre-shrink and the kernel convolution average coverage-
-    // weighted colour, then un-premultiply the result. Convolving straight
-    // (non-premultiplied) alpha bleeds the RGB of transparent pixels into
-    // opaque neighbours and produces the classic dark fringe at transparency
-    // boundaries. This mirrors the affine path, which premultiplies per tap.
-    //
-    // Skip it for the Nearest kernel (follow-up to #287/#288): a single-tap
-    // pick does no averaging, so there is nothing for premultiplication to
-    // coverage-weight. Bracketing a pure pick in a premultiply -> un-premultiply
-    // round-trip through the same-bit-depth integer raster would only requantise
-    // and thus corrupt the straight-alpha RGB of semi-transparent pixels. Gated
-    // like the box pre-shrink below, which is likewise a no-op for Nearest.
-    let premultiply = src.format().has_alpha() && kernel != ReduceKernel::Nearest;
-    let premult_src;
-    let work: &Raster = if premultiply {
-        premult_src = premultiply_raster(src)?;
-        &premult_src
-    } else {
-        src
-    };
+    // Alpha coverage-weighting (#288/#348) is bracketed once by the caller in
+    // [`with_premultiply`], not here: an alpha image arrives already
+    // premultiplied in a float working raster, so `reduce_axis` just convolves
+    // its input linearly, whatever it is — straight colour for the no-alpha
+    // (and Nearest single-tap) paths, premultiplied float for the bracketed
+    // alpha paths. Keeping the premultiply outside means the inter-axis
+    // intermediate stays premultiplied and full-precision instead of being
+    // un-premultiplied and requantised to straight 8/16-bit alpha between the
+    // vertical and horizontal passes (the low-alpha colour-banding of a
+    // per-axis integer bracket).
 
     // Gap-driven integer box shrink first (`vips_shrinkh` with ceil), then
-    // reduce the residual. Runs on the premultiplied working raster.
+    // reduce the residual.
     let mut boxed: Option<Raster> = None;
     if gap > 0.0 && kernel != ReduceKernel::Nearest {
         if gap < 1.0 {
@@ -707,27 +709,17 @@ fn reduce_axis(
         }
         let int_shrink = (dim as f64 / out_dim as f64 / gap).floor().max(1.0) as u32;
         if int_shrink > 1 {
-            boxed = Some(shrink_axis(work, int_shrink, true, axis)?);
+            boxed = Some(shrink_axis(src, int_shrink, true, axis)?);
             shrink /= f64::from(int_shrink);
             extra /= f64::from(int_shrink);
         }
     }
-    let cur = boxed.as_ref().unwrap_or(work);
+    let cur = boxed.as_ref().unwrap_or(src);
 
     if shrink == 1.0 {
-        // No residual convolution. If the box pre-shrink did the work, restore
-        // straight alpha; if nothing ran, this is a pure no-op, so return the
-        // original straight-alpha source unchanged (avoids a premultiply /
-        // un-premultiply rounding round-trip on a passthrough).
-        return if premultiply {
-            if boxed.is_some() {
-                unpremultiply_raster(cur)
-            } else {
-                Ok(src.clone())
-            }
-        } else {
-            Ok(cur.clone())
-        };
+        // The integer box pre-shrink consumed the whole factor, or this is a
+        // pure passthrough: no residual convolution to run.
+        return Ok(cur.clone());
     }
 
     let n = kernel.points(shrink);
@@ -774,8 +766,7 @@ fn reduce_axis(
     let mut out = vec![0u8; ow * oh * format.bytes_per_pixel()];
 
     let clamp_dim = |v: i64| -> usize { v.clamp(0, cur_dim as i64 - 1) as usize };
-    // Accumulate all bands of a destination pixel before writing so the colour
-    // bands can be un-premultiplied against the convolved alpha (#288).
+    // Accumulate every band of a destination pixel before writing.
     let mut px = vec![0.0f64; bands];
     for oy in 0..oh {
         for ox in 0..ow {
@@ -794,9 +785,6 @@ fn reduce_axis(
                     acc += ck * layout.read(data, (sy * w + sx) * bands + band);
                 }
                 *p = acc;
-            }
-            if premultiply {
-                unpremultiply(&mut px, layout.max);
             }
             let obase = (oy * ow + ox) * bands;
             for (band, &p) in px.iter().enumerate() {
@@ -1712,54 +1700,96 @@ fn unpremultiply(px: &mut [f64], max: f64) {
     }
 }
 
-/// Premultiply the colour bands of an alpha raster by `alpha / max`, returning
-/// a same-format raster (`vips_premultiply`). The alpha band is copied
-/// unchanged. Used to bracket the reduce pipeline so colour is averaged
-/// weighted by coverage — the same thing the affine path does per tap via
-/// [`TapFetch::fetch`] — instead of mixing the meaningless RGB of transparent
-/// pixels into opaque neighbours (dark fringes at transparency boundaries).
-fn premultiply_raster(src: &Raster) -> Result<Raster, ResampleError> {
-    let format = src.format();
-    let layout = SampleLayout::of(format);
-    let bands = format.channels();
+/// Premultiply the colour bands of an alpha raster by `alpha / max` into a
+/// four-band **float** working raster (`RgbaF32`); the alpha band is copied
+/// unchanged. `max` is the source sample ceiling.
+///
+/// Premultiplying into float — the way `vips_resize` premultiplies once into a
+/// float buffer — is what lets [`with_premultiply`] bracket the whole separable
+/// pipeline (see there): colour is averaged weighted by coverage, the same
+/// thing the affine path does per tap via [`TapFetch::fetch`], so the
+/// meaningless RGB of transparent pixels cannot bleed into opaque neighbours
+/// (dark fringes at transparency boundaries). Unlike a same-bit-depth integer
+/// intermediate, the float buffer does not requantise `round(c * a / max)` to a
+/// couple of bits for near-transparent pixels — quantisation that
+/// un-premultiply would then amplify by `max / a` into visible colour banding.
+fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError> {
+    let in_layout = SampleLayout::of(src.format());
+    let out_fmt = PixelFormat::RgbaF32;
+    let out_layout = SampleLayout::of(out_fmt);
+    let bands = src.format().channels();
     let data = src.data();
     let count = src.width() as usize * src.height() as usize;
-    let mut out = vec![0u8; data.len()];
+    let mut out = vec![0u8; count * out_fmt.bytes_per_pixel()];
     for p in 0..count {
         let base = p * bands;
-        let alpha = layout.read(data, base + bands - 1);
-        let a = alpha / layout.max;
+        let alpha = in_layout.read(data, base + bands - 1);
+        let a = alpha / max;
         for b in 0..bands - 1 {
-            layout.write(&mut out, base + b, layout.read(data, base + b) * a);
+            out_layout.write(&mut out, base + b, in_layout.read(data, base + b) * a);
         }
-        layout.write(&mut out, base + bands - 1, alpha);
+        out_layout.write(&mut out, base + bands - 1, alpha);
     }
-    Ok(Raster::new(src.width(), src.height(), format, out)?)
+    Ok(Raster::new(src.width(), src.height(), out_fmt, out)?)
 }
 
-/// Un-premultiply every pixel of an alpha raster, the inverse of
-/// [`premultiply_raster`]. Used to restore straight alpha when the reduce
-/// pipeline degenerates to a passthrough (integer box pre-shrink consumed the
-/// whole factor).
-fn unpremultiply_raster(src: &Raster) -> Result<Raster, ResampleError> {
-    let format = src.format();
-    let layout = SampleLayout::of(format);
-    let bands = format.channels();
+/// Un-premultiply the float working raster produced by [`premultiply_to_float`]
+/// back into `dst_fmt` (the original source format), dividing each colour band
+/// by the alpha and requantising exactly once. `max` is the source sample
+/// ceiling used for the premultiply, so the round-trip cancels.
+fn unpremultiply_from_float(
+    src: &Raster,
+    dst_fmt: PixelFormat,
+    max: f64,
+) -> Result<Raster, ResampleError> {
+    let in_layout = SampleLayout::of(src.format());
+    let out_layout = SampleLayout::of(dst_fmt);
+    let bands = dst_fmt.channels();
     let data = src.data();
     let count = src.width() as usize * src.height() as usize;
-    let mut out = vec![0u8; data.len()];
+    let mut out = vec![0u8; count * dst_fmt.bytes_per_pixel()];
     let mut px = vec![0.0f64; bands];
     for p in 0..count {
         let base = p * bands;
         for (b, v) in px.iter_mut().enumerate() {
-            *v = layout.read(data, base + b);
+            *v = in_layout.read(data, base + b);
         }
-        unpremultiply(&mut px, layout.max);
+        unpremultiply(&mut px, max);
         for (b, &v) in px.iter().enumerate() {
-            layout.write(&mut out, base + b, v);
+            out_layout.write(&mut out, base + b, v);
         }
     }
-    Ok(Raster::new(src.width(), src.height(), format, out)?)
+    Ok(Raster::new(src.width(), src.height(), dst_fmt, out)?)
+}
+
+/// Bracket the alpha premultiply exactly once around a separable resample
+/// `pipeline`, mirroring how `vips_resize` premultiplies before its reduce and
+/// affine passes and un-premultiplies after.
+///
+/// When `bracket` is set and the source carries an alpha band, the source is
+/// premultiplied into a float working raster, `pipeline` runs entirely in
+/// premultiplied float space — so the intermediate between the vertical and
+/// horizontal passes stays full-precision, with no per-axis requantisation of
+/// low-alpha colour and no straight/premultiplied round-trip between axes — and
+/// the result is un-premultiplied back to the source format once. Otherwise
+/// `pipeline` runs directly on the source: no-alpha images need no coverage
+/// weighting, and the Nearest single-tap kernel must stay an exact pick, since
+/// bracketing would only requantise its semi-transparent RGB (#287/#288).
+///
+/// Callers pass `bracket = false` for the pure-passthrough cases (an identity
+/// factor that does no work) so a no-op never pays for a premultiply /
+/// un-premultiply round-trip.
+fn with_premultiply<F>(src: &Raster, bracket: bool, pipeline: F) -> Result<Raster, ResampleError>
+where
+    F: FnOnce(&Raster) -> Result<Raster, ResampleError>,
+{
+    if !bracket || !src.format().has_alpha() {
+        return pipeline(src);
+    }
+    let max = SampleLayout::of(src.format()).max;
+    let work = premultiply_to_float(src, max)?;
+    let reduced = pipeline(&work)?;
+    unpremultiply_from_float(&reduced, src.format(), max)
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,14 +1870,23 @@ impl Raster {
                 });
             }
         }
+        // Alpha is coverage-weighted once around both axes (#348): premultiply
+        // into float, run the separable box / kernel passes, un-premultiply.
         if hshrink.fract() != 0.0 || vshrink.fract() != 0.0 {
             // Fractional factors delegate to reduce with the default
             // lanczos3 kernel and gap 1 (`vips_shrink_build`).
-            let t = reduce_axis(self, vshrink, ReduceKernel::Lanczos3, 1.0, Axis::Vertical)?;
-            reduce_axis(&t, hshrink, ReduceKernel::Lanczos3, 1.0, Axis::Horizontal)
+            with_premultiply(self, true, |w| {
+                let t = reduce_axis(w, vshrink, ReduceKernel::Lanczos3, 1.0, Axis::Vertical)?;
+                reduce_axis(&t, hshrink, ReduceKernel::Lanczos3, 1.0, Axis::Horizontal)
+            })
         } else {
-            let t = shrink_axis(self, vshrink as u32, false, Axis::Vertical)?;
-            shrink_axis(&t, hshrink as u32, false, Axis::Horizontal)
+            // Integer factors run the plain box average on both axes; bracket
+            // them the same way so integer and fractional shrink handle alpha
+            // consistently (no factor-dependent bleed).
+            with_premultiply(self, hshrink > 1.0 || vshrink > 1.0, |w| {
+                let t = shrink_axis(w, vshrink as u32, false, Axis::Vertical)?;
+                shrink_axis(&t, hshrink as u32, false, Axis::Horizontal)
+            })
         }
     }
 
@@ -1857,6 +1896,11 @@ impl Raster {
     /// `lanczos3` kernel, exactly as libvips composes it. Output dimensions
     /// are `round(dim / factor)`. Panicking form of [`Raster::try_shrink`],
     /// matching the ported-test call surface.
+    ///
+    /// Alpha images are premultiplied around the whole shrink (both the integer
+    /// and fractional paths) so transparent colour cannot bleed into opaque
+    /// neighbours; see the module-level *Premultiplied alpha* note. This
+    /// diverges from bare `vips_shrink`, which does not premultiply.
     ///
     /// # Panics
     ///
@@ -1872,7 +1916,9 @@ impl Raster {
     ///
     /// See [`Raster::try_shrink`].
     pub fn try_shrinkh(&self, hshrink: u32) -> Result<Raster, ResampleError> {
-        shrink_axis(self, hshrink, false, Axis::Horizontal)
+        with_premultiply(self, hshrink > 1, |w| {
+            shrink_axis(w, hshrink, false, Axis::Horizontal)
+        })
     }
 
     /// Horizontal integer box shrink (libvips `vips_shrinkh`); the output
@@ -1892,7 +1938,9 @@ impl Raster {
     ///
     /// See [`Raster::try_shrink`].
     pub fn try_shrinkv(&self, vshrink: u32) -> Result<Raster, ResampleError> {
-        shrink_axis(self, vshrink, false, Axis::Vertical)
+        with_premultiply(self, vshrink > 1, |w| {
+            shrink_axis(w, vshrink, false, Axis::Vertical)
+        })
     }
 
     /// Vertical integer box shrink (libvips `vips_shrinkv`); the output
@@ -1921,8 +1969,14 @@ impl Raster {
         vshrink: f64,
         kernel: ReduceKernel,
     ) -> Result<Raster, ResampleError> {
-        let t = reduce_axis(self, vshrink, kernel, 0.0, Axis::Vertical)?;
-        reduce_axis(&t, hshrink, kernel, 0.0, Axis::Horizontal)
+        // Bracket the alpha premultiply once around both axes (#348); Nearest
+        // is a single-tap pick that must not premultiply, and an identity
+        // factor does no work so it needs no bracket either.
+        let bracket = kernel != ReduceKernel::Nearest && (hshrink > 1.0 || vshrink > 1.0);
+        with_premultiply(self, bracket, |w| {
+            let t = reduce_axis(w, vshrink, kernel, 0.0, Axis::Vertical)?;
+            reduce_axis(&t, hshrink, kernel, 0.0, Axis::Horizontal)
+        })
     }
 
     /// Downsample with an anti-aliasing kernel (libvips `vips_reduce`):
@@ -1931,6 +1985,11 @@ impl Raster {
     /// `"nearest"`, `"linear"`, `"cubic"`, `"mitchell"`, `"lanczos2"`, or
     /// `"lanczos3"`. Panicking form of [`Raster::try_reduce`], matching the
     /// ported-test call surface.
+    ///
+    /// Alpha images (every kernel except Nearest) are premultiplied once around
+    /// both axes so transparent colour cannot bleed into opaque neighbours; see
+    /// the module-level *Premultiplied alpha* note. This diverges from bare
+    /// `vips_reduce`, which does not premultiply.
     ///
     /// # Panics
     ///
@@ -1948,7 +2007,10 @@ impl Raster {
     ///
     /// See [`Raster::try_reduce`].
     pub fn try_reduceh(&self, hshrink: f64, kernel: ReduceKernel) -> Result<Raster, ResampleError> {
-        reduce_axis(self, hshrink, kernel, 0.0, Axis::Horizontal)
+        let bracket = kernel != ReduceKernel::Nearest && hshrink > 1.0;
+        with_premultiply(self, bracket, |w| {
+            reduce_axis(w, hshrink, kernel, 0.0, Axis::Horizontal)
+        })
     }
 
     /// Horizontal kernel reduce (libvips `vips_reduceh`); the kernel is a
@@ -1970,7 +2032,10 @@ impl Raster {
     ///
     /// See [`Raster::try_reduce`].
     pub fn try_reducev(&self, vshrink: f64, kernel: ReduceKernel) -> Result<Raster, ResampleError> {
-        reduce_axis(self, vshrink, kernel, 0.0, Axis::Vertical)
+        let bracket = kernel != ReduceKernel::Nearest && vshrink > 1.0;
+        with_premultiply(self, bracket, |w| {
+            reduce_axis(w, vshrink, kernel, 0.0, Axis::Vertical)
+        })
     }
 
     /// Vertical kernel reduce (libvips `vips_reducev`); the kernel is a
@@ -2005,11 +2070,12 @@ impl Raster {
             }
         }
 
-        let mut cur = self.clone();
+        let nearest = options.kernel == ReduceKernel::Nearest;
+        let mut start = self.clone();
 
         // The nearest kernel subsamples the integer part first
         // (`vips_resize_build`).
-        if options.kernel == ReduceKernel::Nearest {
+        if nearest {
             let int_shrink = |dim: u32, s: f64| -> u32 {
                 let f = if options.gap < 1.0 {
                     (1.0 / s).floor()
@@ -2019,63 +2085,80 @@ impl Raster {
                 };
                 f.max(1.0) as u32
             };
-            let int_h = int_shrink(cur.width(), hscale);
-            let int_v = int_shrink(cur.height(), vscale);
+            let int_h = int_shrink(start.width(), hscale);
+            let int_v = int_shrink(start.height(), vscale);
             if int_h > 1 || int_v > 1 {
-                cur = subsample(&cur, int_h, int_v)?;
+                start = subsample(&start, int_h, int_v)?;
                 hscale *= f64::from(int_h);
                 vscale *= f64::from(int_v);
             }
         }
 
         // Don't let either axis drop below one pixel.
-        hscale = hscale.max(1.0 / f64::from(cur.width()));
-        vscale = vscale.max(1.0 / f64::from(cur.height()));
+        hscale = hscale.max(1.0 / f64::from(start.width()));
+        vscale = vscale.max(1.0 / f64::from(start.height()));
 
-        // Any residual downsizing, vertical then horizontal.
-        if vscale < 1.0 {
-            cur = reduce_axis(
-                &cur,
-                1.0 / vscale,
-                options.kernel,
-                options.gap,
-                Axis::Vertical,
-            )?;
-        }
-        if hscale < 1.0 {
-            cur = reduce_axis(
-                &cur,
-                1.0 / hscale,
-                options.kernel,
-                options.gap,
-                Axis::Horizontal,
-            )?;
-        }
+        // Premultiply once around the *whole* resize — the residual reduce
+        // passes and the affine enlargement together (#348/#406) — so every
+        // separable pass is coverage-weighted and internally consistent. This
+        // fixes the mixed downscale-one-axis / upscale-other-axis case (the
+        // reduce emits premultiplied colour and the affine, running with
+        // `premultiplied: true`, keeps it premultiplied rather than
+        // interpolating straight-alpha colour across transparency boundaries)
+        // and premultiplies a pure upscale too. The single un-premultiply
+        // happens once after, in `with_premultiply`. Nearest never averages, so
+        // it is not bracketed; nor is a no-op resize that neither reduces nor
+        // enlarges.
+        let will_reduce = vscale < 1.0 || hscale < 1.0;
+        let will_upscale = hscale > 1.0 || vscale > 1.0;
+        let bracket = !nearest && (will_reduce || will_upscale);
+        with_premultiply(&start, bracket, |w| {
+            let mut cur = w.clone();
 
-        // Any upsizing: affine with the interpolator mapped from the
-        // kernel, or pixel replication for integral nearest enlargement.
-        if hscale > 1.0 || vscale > 1.0 {
-            let nearest = options.kernel == ReduceKernel::Nearest;
-            if nearest && hscale.fract() == 0.0 && vscale.fract() == 0.0 {
-                cur = zoom(&cur, hscale as u32, vscale as u32)?;
-            } else {
-                let id = if nearest { 0.0 } else { 0.5 };
-                let matrix = [hscale.max(1.0), 0.0, 0.0, vscale.max(1.0)];
-                cur = cur.try_affine_with(
-                    matrix,
-                    options.kernel.upsize_interpolator(),
-                    AffineOptions {
-                        idx: id,
-                        idy: id,
-                        extend: Extend::Copy,
-                        premultiplied: true,
-                        ..AffineOptions::default()
-                    },
+            // Any residual downsizing, vertical then horizontal.
+            if vscale < 1.0 {
+                cur = reduce_axis(
+                    &cur,
+                    1.0 / vscale,
+                    options.kernel,
+                    options.gap,
+                    Axis::Vertical,
                 )?;
             }
-        }
+            if hscale < 1.0 {
+                cur = reduce_axis(
+                    &cur,
+                    1.0 / hscale,
+                    options.kernel,
+                    options.gap,
+                    Axis::Horizontal,
+                )?;
+            }
 
-        Ok(cur)
+            // Any upsizing: affine with the interpolator mapped from the
+            // kernel, or pixel replication for integral nearest enlargement.
+            if hscale > 1.0 || vscale > 1.0 {
+                if nearest && hscale.fract() == 0.0 && vscale.fract() == 0.0 {
+                    cur = zoom(&cur, hscale as u32, vscale as u32)?;
+                } else {
+                    let id = if nearest { 0.0 } else { 0.5 };
+                    let matrix = [hscale.max(1.0), 0.0, 0.0, vscale.max(1.0)];
+                    cur = cur.try_affine_with(
+                        matrix,
+                        options.kernel.upsize_interpolator(),
+                        AffineOptions {
+                            idx: id,
+                            idy: id,
+                            extend: Extend::Copy,
+                            premultiplied: true,
+                            ..AffineOptions::default()
+                        },
+                    )?;
+                }
+            }
+
+            Ok(cur)
+        })
     }
 
     /// Fallible form of [`Raster::resize`].
@@ -2091,6 +2174,11 @@ impl Raster {
     /// default `lanczos3` kernel for downscales, affine with bicubic for
     /// upscales. Output dimensions are `round(dim * scale)`. Panicking form
     /// of [`Raster::try_resize`], matching the ported-test call surface.
+    ///
+    /// As in `vips_resize`, an alpha image is premultiplied once around the
+    /// whole operation — the reduce passes and the affine enlargement together
+    /// — and unpremultiplied once at the end, so every axis is coverage-weighted
+    /// consistently; see the module-level *Premultiplied alpha* note.
     ///
     /// # Panics
     ///
