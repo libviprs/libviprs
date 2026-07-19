@@ -23,6 +23,14 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pdfium -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The object-store-sink module (and its `#[cfg(test)] mod tests`) is
+      # feature-gated, so it is invisible to the default clippy/test jobs above.
+      # Lint it explicitly so regressions in the sink are caught (issue #382).
+      - run: cargo clippy --all-targets --features object-store-sink -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # `s3` is a deprecated alias for `object-store-sink`, retained for consumers
+      # that pinned the old feature name. Nothing else in CI exercises it, so a
+      # broken alias would go unnoticed; build it explicitly so it keeps resolving.
+      - run: cargo build --features s3
 
   msrv:
     name: MSRV (1.85)
@@ -55,6 +63,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+      # The object-store-sink module and its unit tests are feature-gated, so
+      # bare `cargo test` never compiles or runs them. Exercise the feature so
+      # the sink's tests and doctests actually execute in CI (issue #382).
+      - run: cargo test --features object-store-sink
 
   integration-test:
     name: Integration Tests (libviprs-tests)
@@ -77,3 +89,9 @@ jobs:
       - name: Run integration tests
         working-directory: libviprs-tests
         run: cargo test
+      # Compile and run the feature-gated object-store sink integration tests
+      # (the S3 leg of phase3 and the stub-contract test) so they are not
+      # silently excluded from CI (issue #382).
+      - name: Run object-store sink integration tests
+        working-directory: libviprs-tests
+        run: cargo test --features object-store-sink

@@ -128,6 +128,16 @@ impl ObjectStoreConfig {
         self
     }
 
+    /// Set the multipart-upload threshold (in bytes).
+    ///
+    /// **Currently inert in this build.** The threshold is stored on the config
+    /// and observed only by a real multipart-capable object-store transport,
+    /// which is not compiled in (see [`ObjectStoreSink::list_objects`] and the
+    /// Phase 3 TODO in [`ObjectStoreSink::new`]). The injectable [`ObjectStore`]
+    /// trait exposes only a single `put`, so no chunking boundary is applied to
+    /// uploads regardless of this value. It is retained so callers can configure
+    /// the intended threshold ahead of that transport landing, at which point
+    /// this setting will take effect.
     pub fn with_multipart_threshold(mut self, threshold: usize) -> Self {
         self.multipart_threshold = threshold;
         self
@@ -251,8 +261,9 @@ fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError
 ///
 /// Tile keys follow the plan's layout (Deep Zoom, XYZ, or Google) rooted at
 /// `<key_prefix>/<image_name>…`. The backend is injected via
-/// [`ObjectStoreConfig::with_object_store`]; a built-in ureq-based S3 client
-/// is not wired into this build (see the TODO stub in [`ObjectStoreSink::new`]).
+/// [`ObjectStoreConfig::with_object_store`]; a built-in object-store transport
+/// (the planned `object_store` + `tokio` client) is not wired into this build
+/// (see the TODO stub in [`ObjectStoreSink::new`]).
 ///
 /// This sink performs **no** retries of its own — if the underlying store's
 /// `put` fails, the error is returned verbatim. Callers wanting automatic
@@ -283,39 +294,54 @@ impl ObjectStoreSink {
     /// Construct a new sink.
     ///
     /// Requires a backend to have been attached to `cfg` via
-    /// [`ObjectStoreConfig::with_object_store`]. The internal ureq-based S3
-    /// signer is not wired up in this build (tracking: Phase 3 TODO — add a
-    /// native HTTP path so production callers don't need to inject a
-    /// backend), so calling `new` without an injected backend returns
-    /// [`SinkError::Other`] with a message pointing at the injection API.
+    /// [`ObjectStoreConfig::with_object_store`]. The built-in object-store
+    /// transport (the planned `object_store` + `tokio` client) is not wired up
+    /// in this build (tracking: Phase 3 TODO — add a native transport so
+    /// production callers don't need to inject a backend), so calling `new`
+    /// without an injected backend returns [`SinkError::Other`] with a message
+    /// pointing at the injection API.
     pub fn new(
         cfg: ObjectStoreConfig,
         plan: PyramidPlan,
         format: TileFormat,
     ) -> Result<Self, SinkError> {
         if cfg.store.is_none() {
-            // Phase 3 TODO: wire up a built-in ureq-based S3 client so this
-            // branch becomes unreachable. For now, all callers (tests and
-            // production) must inject a backend via `.with_object_store(...)`.
+            // Phase 3 TODO: wire up the built-in object-store transport (the
+            // planned `object_store` + `tokio` client) so this branch becomes
+            // unreachable. For now, all callers (tests and production) must
+            // inject a backend via `.with_object_store(...)`.
             return Err(SinkError::Other(
                 "ObjectStoreSink: no backend attached. Call \
                  ObjectStoreConfig::with_object_store(Arc<dyn ObjectStore>) \
-                 to inject an ObjectStore implementation (the built-in S3 \
-                 HTTP client is not compiled into this build)."
+                 to inject an ObjectStore implementation."
                     .into(),
             ));
         }
         Ok(Self { cfg, plan, format })
     }
 
-    /// **Phase 2b stub — always returns an empty list.** A full implementation
-    /// would issue a LIST request against the configured endpoint to enumerate
-    /// the object keys stored under this sink's key prefix, but that transport
-    /// is not compiled into this build. Primarily intended so integration tests
-    /// that want to diff the server-side state against a filesystem reference
-    /// can compile and run.
+    /// Enumerate the object keys stored under this sink's key prefix.
+    ///
+    /// **Unsupported in this build.** A full implementation would issue a LIST
+    /// request against the configured endpoint (or delegate to a listing-capable
+    /// backend), but the [`ObjectStore`] trait exposes only `put` — the sink
+    /// structurally cannot enumerate what was uploaded — and no LIST transport is
+    /// compiled in. Rather than return a silently-empty `Ok(vec![])` (which a
+    /// caller diffing server-side keys against a filesystem reference cannot
+    /// distinguish from "nothing was uploaded", making the diff pass falsely or
+    /// fail spuriously), this fails loud with [`SinkError::Unsupported`].
+    ///
+    /// When a listing-capable transport lands, this method will delegate to it;
+    /// callers should treat [`SinkError::Unsupported`] as "listing not available
+    /// in this build" rather than "the store is empty".
     pub fn list_objects(&self) -> Result<Vec<String>, SinkError> {
-        Ok(Vec::new())
+        Err(SinkError::Unsupported(
+            "list_objects: no LIST transport is compiled into this build \
+             (the ObjectStore trait exposes only `put`); a listing-capable \
+             object-store client will land in a follow-up. Do not treat this \
+             as an empty object set."
+                .into(),
+        ))
     }
 
     /// Build the object key for a given tile coordinate, respecting the
@@ -467,33 +493,86 @@ mod tests {
         );
     }
 
-    /// Minimal in-crate backend so a sink can be constructed for the stub test.
+    /// In-crate recording backend: captures every `(key, bytes)` handed to
+    /// `put` so a test can prove the sink actually uploaded, then confront that
+    /// with what `list_objects` reports.
     #[derive(Default)]
-    struct NoopStore;
+    struct RecordingStore {
+        puts: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    }
 
-    impl ObjectStore for NoopStore {
-        fn put(&self, _key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+    impl RecordingStore {
+        fn keys(&self) -> Vec<String> {
+            self.puts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect()
+        }
+    }
+
+    impl ObjectStore for RecordingStore {
+        fn put(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
+            self.puts
+                .lock()
+                .unwrap()
+                .push((key.to_string(), bytes.to_vec()));
             Ok(())
         }
     }
 
     #[test]
-    fn list_objects_is_an_empty_stub() {
-        // This module is now gated by the `object-store-sink` feature (with `s3`
-        // kept as a deprecated alias). Issue #298 also corrected the report's
-        // `list_keys` typo: the real method is `list_objects`, a documented
-        // Phase 2b stub that returns an empty list until a LIST transport lands.
+    fn list_objects_is_unsupported_even_after_writes() {
+        // Regression guard for the silent-empty-list footgun (issues #379,
+        // #380, #383, #384): the earlier test asserted `list_objects() == []`
+        // over a sink that had never uploaded anything, a property a *correct*
+        // LIST implementation would also satisfy — so it locked in nothing.
+        //
+        // Here we upload a real tile through the sink (the recording backend
+        // captures it), then assert the sink cannot enumerate it. Because the
+        // `ObjectStore` trait exposes only `put`, `list_objects` fails loud
+        // with `SinkError::Unsupported` rather than masquerading the backend's
+        // populated state as an empty `Ok(vec![])`.
         use crate::planner::{Layout, PyramidPlanner};
+        use crate::sink::TileSink;
+
+        let store = Arc::new(RecordingStore::default());
         let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket")
-            .with_object_store(Arc::new(NoopStore));
+            .with_object_store(store.clone());
         let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom)
             .expect("planner params are valid")
             .plan();
         let sink = ObjectStoreSink::new(cfg, plan, TileFormat::Png)
             .expect("sink constructs once a backend is injected");
+
+        let tile = Tile {
+            coord: TileCoord::new(0, 0, 0),
+            raster: Raster::zeroed(256, 256, PixelFormat::Rgb8).unwrap(),
+            blank: false,
+        };
+        sink.write_tile(&tile).expect("tile upload succeeds");
+
+        // The backend really recorded the upload...
         assert_eq!(
-            sink.list_objects().expect("stub never errors"),
-            Vec::<String>::new(),
+            store.keys().len(),
+            1,
+            "backend must have recorded exactly one put"
+        );
+
+        // ...yet the sink still cannot enumerate it: the stub fails loud
+        // instead of returning a misleading empty list.
+        let err = sink
+            .list_objects()
+            .expect_err("list_objects must not report success while unimplemented");
+        assert!(
+            matches!(err, SinkError::Unsupported(_)),
+            "expected SinkError::Unsupported, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("list_objects") && msg.contains("LIST"),
+            "error must name the operation and the missing transport: {msg}"
         );
     }
 }
