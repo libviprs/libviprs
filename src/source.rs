@@ -342,10 +342,10 @@ pub struct DecodeLimits {
     /// allocation — by **every** decoder: the native `.v` reader and the
     /// `image`-crate raster path (PNG/JPEG/TIFF) alike, both routing
     /// through [`DecodeLimits::check_coord`] and returning
-    /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This
-    /// replaces the former process-global `set_max_coord`/`get_max_coord`
-    /// knob, whose races under concurrent jobs made the ceiling unreadable
-    /// from the API.
+    /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This is
+    /// the sole coordinate-ceiling knob: it replaced an earlier
+    /// process-global whose races under concurrent jobs made the ceiling
+    /// unreadable from the API.
     pub max_coord: u32,
     /// Maximum total pixel count (`width * height`).
     pub max_pixels: u64,

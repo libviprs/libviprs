@@ -188,15 +188,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the rename and deprecation happen within the same post-0.4.0
   unreleased cycle — no released version ever gated the module under a name
   other than `s3`, and the alias is scheduled for removal in a future release.
-- `get_max_coord`, `set_max_coord`, and `init_from_env` (the process-global
-  coordinate-ceiling accessors) are deprecated and inert: no decoder
-  consults the global any more (superseded by `DecodeLimits::max_coord`).
-  They carry no `since` version because they were added and deprecated
-  within the same post-0.4.0 unreleased cycle — no released version ever
-  exposed them as live API, so a `since = "0.4.0"` stamp would name a
-  release that never contained them. They survive only as compatibility
-  shims for callers ported against the pre-#293 libvips surface; migrate to
-  `DecodeLimits::with_max_coord`.
 - **Breaking (drawing): a wrong-width ink is now rejected instead of broadcast.**
   The `draw` module entry points validate that `ink` is exactly one whole pixel
   wide for the target raster (issues #294/#346). Earlier the ops cycled a
@@ -209,6 +200,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `draw_flood_blob`) return `Err(DrawError::InkLengthMismatch)`. The raw
   `Raster::put_pixel` escape hatch is unchanged and remains the deliberate
   opt-in for the shorter-ink cycling broadcast.
+
+### Removed
+
+- The inert process-global coordinate-ceiling shims `get_max_coord`,
+  `set_max_coord`, and `init_from_env`, the backing `MAX_COORD` static, and
+  their crate-root re-exports (libviprs#462). They were deprecated on
+  arrival and consulted by no decoder; the single-axis ceiling lives solely
+  on the per-decode `DecodeLimits::max_coord` field, enforced by every
+  decoder — build it with `DecodeLimits::with_max_coord`. No `since` version
+  applied because no released version ever exposed them as live API. The
+  `DEFAULT_MAX_COORD` constant is retained as the `DecodeLimits::max_coord`
+  default.
 
 ### Fixed
 

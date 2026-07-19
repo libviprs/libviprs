@@ -155,18 +155,10 @@ pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
 // The imageio free functions are re-exported at the root (not just behind
 // the module path) because the ported tests import them from the crate
-// root (`use libviprs::{tokenize, get_max_coord, ...}`).
+// root (`use libviprs::{tokenize, parse_thumbnail_geometry, ...}`).
 pub use imageio::{
     MetadataError, MetadataValue, SaveError, ThumbnailGeometry, parse_thumbnail_geometry, tokenize,
 };
-// Kept at the crate root as inert compatibility shims for callers ported
-// against the pre-#293 libvips surface. The process-global coordinate
-// ceiling is deprecated in favour of the per-decode
-// `DecodeLimits::max_coord` field, enforced by every decoder; no decoder
-// consults these globals any more. They were added and deprecated in the
-// same unreleased cycle, so the deprecation carries no `since` version.
-#[allow(deprecated)]
-pub use imageio::{get_max_coord, init_from_env, set_max_coord};
 pub use manifest::{
     ChecksumAlgo, Checksums, GenerationSettings, LevelMetadata, Manifest, ManifestBuilder,
     ManifestError, ManifestV1, SourceMetadata, SparsePolicy,
