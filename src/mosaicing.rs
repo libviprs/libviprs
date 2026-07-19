@@ -190,6 +190,16 @@ const AREAS: usize = 3;
 const TRIVIAL: i64 = 400;
 /// Default source gamma for global balancing.
 const BALANCE_GAMMA: f64 = 1.6;
+/// Stack size of the worker thread [`Raster::try_global_balance`] runs its tree
+/// walk on.
+///
+/// `merge` builds left-deep join trees, so a linear stitch of `N` tiles nests
+/// `N - 1` joins and the `collect_leaves` / `rebuild` walks recurse once per
+/// tile. `deserialize` no longer caps depth (it parses iteratively, matching
+/// vips's handling of deep mosaics), so the walk is run on a thread with this
+/// much stack — far beyond the ~16k-frame ceiling of the default 8 MiB stack —
+/// to keep a deep long-strip panorama, or a crafted deep blob, from overflowing.
+const GLOBAL_BALANCE_STACK_BYTES: usize = 256 * 1024 * 1024;
 /// Metadata field carrying the serialized join tree.
 const JOIN_TREE_FIELD: &str = "mosaic-join-tree";
 
@@ -706,6 +716,45 @@ enum JoinTree {
     },
 }
 
+impl Drop for JoinTree {
+    fn drop(&mut self) {
+        // Dismantle iteratively: a left-deep tree nests one join per stitched
+        // tile, so the default recursive `Box<JoinTree>` drop would overflow the
+        // stack on a deep mosaic (exactly the input `deserialize` now accepts
+        // without a depth cap). Each join's children are swapped out for a
+        // trivial childless leaf and pushed onto a heap worklist, so every node
+        // that actually drops has no children left to recurse into.
+        fn placeholder() -> JoinTree {
+            JoinTree::Leaf(
+                Raster::new(
+                    1,
+                    1,
+                    PixelFormat::with_channels(1, 1).expect("1x1 gray"),
+                    vec![0],
+                )
+                .expect("1x1 leaf raster"),
+            )
+        }
+        fn take_children(node: &mut JoinTree, pending: &mut Vec<JoinTree>) {
+            if let JoinTree::Join {
+                ref_node, sec_node, ..
+            } = node
+            {
+                pending.push(std::mem::replace(&mut **ref_node, placeholder()));
+                pending.push(std::mem::replace(&mut **sec_node, placeholder()));
+            }
+        }
+
+        let mut pending: Vec<JoinTree> = Vec::new();
+        take_children(self, &mut pending);
+        while let Some(mut node) = pending.pop() {
+            take_children(&mut node, &mut pending);
+            // `node` now has only placeholder children and drops without
+            // recursing when it goes out of scope here.
+        }
+    }
+}
+
 impl JoinTree {
     fn serialize(&self) -> Vec<u8> {
         let mut out = b"VMJ1".to_vec();
@@ -756,6 +805,16 @@ impl JoinTree {
         Ok(tree)
     }
 
+    /// Parse one join tree from `cursor`, consuming exactly its preorder bytes.
+    ///
+    /// Iterative with an explicit heap `Vec` stack rather than recursive.
+    /// `merge` builds left-deep trees, so a linear stitch of `N` tiles nests
+    /// `N - 1` joins along the reference spine; whole-slide / long-strip
+    /// panoramas run to hundreds or thousands of tiles, and vips balances
+    /// arbitrarily deep mosaics. A recursive parse overflows the stack on such
+    /// input, and a depth cap would reject legitimate deep panoramas that vips
+    /// accepts — so the preorder walk is driven off the heap instead. Work and
+    /// peak memory stay O(blob length), which already bounds a crafted blob.
     fn read_node(cursor: &mut &[u8]) -> Result<JoinTree, MosaicError> {
         let corrupt = || MosaicError::CorruptMosaicMetadata;
         let take = |cursor: &mut &[u8], n: usize| -> Result<Vec<u8>, MosaicError> {
@@ -774,43 +833,82 @@ impl JoinTree {
             let b = take(cursor, 4)?;
             Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         };
-        match take(cursor, 1)?[0] {
-            0 => {
-                let width = take_u32(cursor)?;
-                let height = take_u32(cursor)?;
-                let ch = take(cursor, 2)?;
-                let channels = u16::from_le_bytes([ch[0], ch[1]]) as usize;
-                let bpc = take(cursor, 1)?[0] as usize;
-                let format = PixelFormat::with_channels(channels, bpc).ok_or_else(corrupt)?;
-                let len = (width as usize)
-                    .checked_mul(height as usize)
-                    .and_then(|p| p.checked_mul(format.bytes_per_pixel()))
-                    .ok_or_else(corrupt)?;
-                let data = take(cursor, len)?;
-                let raster = Raster::new(width, height, format, data).map_err(|_| corrupt())?;
-                Ok(JoinTree::Leaf(raster))
-            }
-            1 => {
-                let direction = match take(cursor, 1)?[0] {
-                    0 => MergeDirection::Horizontal,
-                    1 => MergeDirection::Vertical,
-                    _ => return Err(corrupt()),
+
+        // A join whose header has been read but whose children are still being
+        // assembled. Its reference child fills first, then its secondary child;
+        // once both are in hand the frame pops and folds into a `Join`.
+        struct Frame {
+            direction: MergeDirection,
+            dx: i32,
+            dy: i32,
+            mblend: i32,
+            ref_node: Option<JoinTree>,
+        }
+
+        let mut stack: Vec<Frame> = Vec::new();
+        loop {
+            // Read the next node header in preorder. A leaf is a complete
+            // subtree; a join header defers to its children, which follow it.
+            let mut done = match take(cursor, 1)?[0] {
+                0 => {
+                    let width = take_u32(cursor)?;
+                    let height = take_u32(cursor)?;
+                    let ch = take(cursor, 2)?;
+                    let channels = u16::from_le_bytes([ch[0], ch[1]]) as usize;
+                    let bpc = take(cursor, 1)?[0] as usize;
+                    let format = PixelFormat::with_channels(channels, bpc).ok_or_else(corrupt)?;
+                    let len = (width as usize)
+                        .checked_mul(height as usize)
+                        .and_then(|p| p.checked_mul(format.bytes_per_pixel()))
+                        .ok_or_else(corrupt)?;
+                    let data = take(cursor, len)?;
+                    let raster = Raster::new(width, height, format, data).map_err(|_| corrupt())?;
+                    JoinTree::Leaf(raster)
+                }
+                1 => {
+                    let direction = match take(cursor, 1)?[0] {
+                        0 => MergeDirection::Horizontal,
+                        1 => MergeDirection::Vertical,
+                        _ => return Err(corrupt()),
+                    };
+                    let dx = take_i32(cursor)?;
+                    let dy = take_i32(cursor)?;
+                    let mblend = take_i32(cursor)?;
+                    stack.push(Frame {
+                        direction,
+                        dx,
+                        dy,
+                        mblend,
+                        ref_node: None,
+                    });
+                    // The reference child is the next node in the stream.
+                    continue;
+                }
+                _ => return Err(corrupt()),
+            };
+
+            // `done` is a completed subtree. Slot it into the innermost pending
+            // join, folding joins whose second child has now arrived, until it
+            // lands as a reference child (more stream to read) or, with the
+            // stack empty, becomes the root.
+            loop {
+                let Some(frame) = stack.last_mut() else {
+                    return Ok(done);
                 };
-                let dx = take_i32(cursor)?;
-                let dy = take_i32(cursor)?;
-                let mblend = take_i32(cursor)?;
-                let ref_node = Box::new(Self::read_node(cursor)?);
-                let sec_node = Box::new(Self::read_node(cursor)?);
-                Ok(JoinTree::Join {
-                    direction,
-                    dx,
-                    dy,
-                    mblend,
-                    ref_node,
-                    sec_node,
-                })
+                if frame.ref_node.is_none() {
+                    frame.ref_node = Some(done);
+                    break; // its secondary child is read next
+                }
+                let frame = stack.pop().expect("last_mut just returned Some");
+                done = JoinTree::Join {
+                    direction: frame.direction,
+                    dx: frame.dx,
+                    dy: frame.dy,
+                    mblend: frame.mblend,
+                    ref_node: Box::new(frame.ref_node.expect("reference filled before secondary")),
+                    sec_node: Box::new(done),
+                };
             }
-            _ => Err(corrupt()),
         }
     }
 }
@@ -1653,6 +1751,43 @@ fn rebuild(
     }
 }
 
+/// Solve the least-mean-square balance for the join tree serialized in `blob`
+/// and re-render the mosaic with the resulting per-leaf factors.
+///
+/// Split out of [`Raster::try_global_balance`] so the recursive tree walk can
+/// run on a worker thread with a large stack (see `GLOBAL_BALANCE_STACK_BYTES`).
+fn balance_join_tree(blob: &[u8]) -> Result<Raster, MosaicError> {
+    let tree = JoinTree::deserialize(blob)?;
+
+    let mut leaves = Vec::new();
+    collect_leaves(&tree, 0, 0, &mut leaves);
+    let nim = leaves.len();
+
+    // Every leaf pair with a significant overlap contributes one equation
+    // (test_overlap).
+    let mut stats = Vec::new();
+    for i in 0..nim {
+        for j in i + 1..nim {
+            let overlap = leaves[i].rect.intersect(&leaves[j].rect);
+            if overlap.is_empty() || overlap.width * overlap.height < TRIVIAL {
+                continue;
+            }
+            if let Some((nstat, ostat)) = overlap_stats(&leaves[i], &leaves[j], &overlap) {
+                stats.push(OverlapStat {
+                    node: i,
+                    other: j,
+                    nstat,
+                    ostat,
+                });
+            }
+        }
+    }
+
+    let facs = find_factors(&stats, nim, BALANCE_GAMMA)?;
+    let mut next_leaf = 0usize;
+    rebuild(&tree, &facs, BALANCE_GAMMA, &mut next_leaf)
+}
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
@@ -1777,35 +1912,19 @@ impl Raster {
             Some(_) => return Err(MosaicError::CorruptMosaicMetadata),
             None => return Err(MosaicError::NoMosaicMetadata),
         };
-        let tree = JoinTree::deserialize(&blob)?;
-
-        let mut leaves = Vec::new();
-        collect_leaves(&tree, 0, 0, &mut leaves);
-        let nim = leaves.len();
-
-        // Every leaf pair with a significant overlap contributes one
-        // equation (test_overlap).
-        let mut stats = Vec::new();
-        for i in 0..nim {
-            for j in i + 1..nim {
-                let overlap = leaves[i].rect.intersect(&leaves[j].rect);
-                if overlap.is_empty() || overlap.width * overlap.height < TRIVIAL {
-                    continue;
-                }
-                if let Some((nstat, ostat)) = overlap_stats(&leaves[i], &leaves[j], &overlap) {
-                    stats.push(OverlapStat {
-                        node: i,
-                        other: j,
-                        nstat,
-                        ostat,
-                    });
-                }
-            }
-        }
-
-        let facs = find_factors(&stats, nim, BALANCE_GAMMA)?;
-        let mut next_leaf = 0usize;
-        rebuild(&tree, &facs, BALANCE_GAMMA, &mut next_leaf)
+        // The tree walk (`collect_leaves` / `rebuild`) recurses once per mosaic
+        // tile, so a deep long-strip mosaic would overflow the default stack now
+        // that the join-tree parse is uncapped. Run it on a worker thread with a
+        // large explicit stack; the computation and result are identical to
+        // running inline (see `GLOBAL_BALANCE_STACK_BYTES`).
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(GLOBAL_BALANCE_STACK_BYTES)
+                .spawn_scoped(scope, || balance_join_tree(&blob))
+                .expect("spawn global-balance worker thread")
+                .join()
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+        })
     }
 
     /// Remove brightness differences across an assembled mosaic (libvips
@@ -2194,6 +2313,79 @@ mod tests {
     }
 
     /**
+     * Tests that a very deep left-deep join tree — the shape a long linear
+     * mosaic produces — deserialises without a depth cap and without
+     * overflowing the stack, matching vips which balances arbitrarily deep
+     * mosaics. `merge` nests each new join's reference child, so a stitch of
+     * `N + 1` tiles is a spine of `N` joins; `N` here is far past both the old
+     * 512 cap and the recursive stack-overflow threshold (a few thousand
+     * frames on a 2 MiB test-thread stack). Works by emitting the tree's
+     * preorder bytes directly (N join headers then N + 1 one-pixel leaves) so
+     * the blob itself is never built through the recursive `serialize`.
+     */
+    #[test]
+    fn deep_join_tree_deserializes_without_stack_overflow() {
+        const N: usize = 50_000;
+        let mut blob = b"VMJ1".to_vec();
+        for _ in 0..N {
+            blob.push(1); // Join tag
+            blob.push(0); // MergeDirection::Horizontal
+            blob.extend_from_slice(&0i32.to_le_bytes()); // dx
+            blob.extend_from_slice(&0i32.to_le_bytes()); // dy
+            blob.extend_from_slice(&0i32.to_le_bytes()); // mblend
+        }
+        for _ in 0..(N + 1) {
+            blob.push(0); // Leaf tag
+            blob.extend_from_slice(&1u32.to_le_bytes()); // width
+            blob.extend_from_slice(&1u32.to_le_bytes()); // height
+            blob.extend_from_slice(&1u16.to_le_bytes()); // channels
+            blob.push(1); // bytes per channel
+            blob.push(0); // one pixel
+        }
+
+        let tree = JoinTree::deserialize(&blob).expect("deep linear mosaic deserialises");
+        // Walk the reference spine iteratively (recursion here would overflow
+        // just as the old parser did) and confirm the full depth survived.
+        let mut depth = 0usize;
+        let mut node = &tree;
+        while let JoinTree::Join { ref_node, .. } = node {
+            depth += 1;
+            node = ref_node;
+        }
+        assert_eq!(depth, N, "every join level round-trips, no depth cap");
+    }
+
+    /**
+     * Tests that a truncated deeply-nested blob still fails with a clean typed
+     * error rather than overflowing the stack: an all-`Join` header run with no
+     * leaves runs the cursor dry, and the iterative parse reports
+     * `CorruptMosaicMetadata` both directly and through global balance's
+     * metadata path (the frame stack lives on the heap, so it cannot abort).
+     */
+    #[test]
+    fn deep_truncated_join_tree_blob_errors_cleanly() {
+        let mut blob = b"VMJ1".to_vec();
+        for _ in 0..50_000 {
+            blob.push(1); // Join tag
+            blob.push(0); // MergeDirection::Horizontal
+            blob.extend_from_slice(&0i32.to_le_bytes()); // dx
+            blob.extend_from_slice(&0i32.to_le_bytes()); // dy
+            blob.extend_from_slice(&0i32.to_le_bytes()); // mblend
+        }
+        assert!(matches!(
+            JoinTree::deserialize(&blob),
+            Err(MosaicError::CorruptMosaicMetadata)
+        ));
+
+        let mut raster = uniform(10, 10, 50);
+        raster.set_field(JOIN_TREE_FIELD, MetadataValue::Blob(blob));
+        assert!(matches!(
+            raster.try_global_balance(),
+            Err(MosaicError::CorruptMosaicMetadata)
+        ));
+    }
+
+    /**
      * Tests the join-tree metadata round trip: a merge of a merge
      * serialises a three-leaf tree that deserialises back to the same
      * geometry, sizes, and pixel data.
@@ -2212,26 +2404,28 @@ mod tests {
             other => panic!("expected join-tree blob, got {other:?}"),
         };
         let tree = JoinTree::deserialize(&blob).unwrap();
+        // Borrow rather than move: `JoinTree` implements `Drop` (iterative, to
+        // stay stack-safe on deep trees), so its fields cannot be moved out.
         let JoinTree::Join {
             direction: MergeDirection::Vertical,
             dy: -22,
             ref_node,
             sec_node,
             ..
-        } = tree
+        } = &tree
         else {
             panic!("root must be the vertical join at dy -22");
         };
-        let JoinTree::Leaf(leaf_c) = *sec_node else {
+        let JoinTree::Leaf(leaf_c) = &**sec_node else {
             panic!("secondary of the root is leaf c");
         };
         assert_eq!(leaf_c.data(), c.data());
-        assert_eq!(tree_size(&ref_node), (65, 30));
+        assert_eq!(tree_size(ref_node), (65, 30));
         let JoinTree::Join {
             direction: MergeDirection::Horizontal,
             dx: -25,
             ..
-        } = *ref_node
+        } = &**ref_node
         else {
             panic!("reference of the root is the horizontal join at dx -25");
         };
