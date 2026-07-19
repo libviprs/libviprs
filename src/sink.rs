@@ -239,24 +239,43 @@ pub trait TileSink: Send + Sync {
         self.inner_sink().and_then(|inner| inner.checkpoint_root())
     }
 
-    /// Engine hook: tell the sink that resume checkpointing is being driven
-    /// externally (by the engine's [`CheckpointState`](crate::engine)) for
-    /// this run, so the sink must NOT also publish its own `.libviprs-job.json`.
+    /// Engine hook: arm durability tracking for a checkpointed run.
     ///
     /// The engine builder calls this once, before the run, whenever it stands
-    /// up a `CheckpointState` for an on-disk sink. It makes the engine's
-    /// checkpoint writer the single component that publishes the checkpoint
-    /// file: a resume run would otherwise have both [`FsSink::finish`] and the
-    /// `CheckpointState` write the file in sequence with different views, and a
-    /// crash between the two could discard prior-run completions (issue #124).
-    /// The sink still fsyncs its own tile data at `finish`, preserving the
-    /// tile-data-before-checkpoint durability ordering (issue #122).
+    /// up a [`CheckpointState`](crate::engine) for an on-disk sink. It tells the
+    /// sink to record every freshly-written tile path so that the durability
+    /// barrier [`TileSink::sync_pending`] — invoked by the engine's checkpoint
+    /// writer before it certifies a checkpoint delta — can fsync exactly those
+    /// files. Sinks driven without a checkpoint (a plain, non-resume run) are
+    /// never armed and pay no per-tile bookkeeping.
     ///
     /// The default forwards to [`TileSink::inner_sink`] (a no-op for terminal
-    /// sinks that keep no resume state).
-    fn suppress_own_checkpoint(&self) {
+    /// sinks that keep no durability state).
+    fn arm_durability_tracking(&self) {
         if let Some(inner) = self.inner_sink() {
-            inner.suppress_own_checkpoint();
+            inner.arm_durability_tracking();
+        }
+    }
+
+    /// Durability barrier (issue #122 / #273): make the bytes of every tile
+    /// written so far durable (fsync) so a checkpoint that is about to certify
+    /// them never records tiles whose bytes are still only in the page cache.
+    ///
+    /// The engine's [`CheckpointState`](crate::engine) — the single checkpoint
+    /// authority — calls this immediately before it appends a checkpoint delta
+    /// to the segment log and publishes the header. A crash after the checkpoint
+    /// but before this barrier would otherwise leave the certified checkpoint
+    /// pointing at tiles whose bytes never reached stable storage, and resume
+    /// would skip those coordinates forever.
+    ///
+    /// The default forwards to [`TileSink::inner_sink`], bottoming out at `Ok`
+    /// for terminal sinks with no durability concept (in-memory sinks, test
+    /// doubles). External `TileSink` implementations therefore keep compiling
+    /// and behaving unchanged without overriding it.
+    fn sync_pending(&self) -> Result<(), SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.sync_pending(),
+            None => Ok(()),
         }
     }
 
@@ -366,6 +385,12 @@ impl<T: TileSink + ?Sized> TileSink for Box<T> {
     fn checkpoint_root(&self) -> Option<&Path> {
         (**self).checkpoint_root()
     }
+    fn arm_durability_tracking(&self) {
+        (**self).arm_durability_tracking()
+    }
+    fn sync_pending(&self) -> Result<(), SinkError> {
+        (**self).sync_pending()
+    }
     fn init_level_count(&self, levels: usize) {
         (**self).init_level_count(levels)
     }
@@ -416,6 +441,12 @@ impl<T: TileSink + ?Sized> TileSink for &T {
     }
     fn checkpoint_root(&self) -> Option<&Path> {
         (*self).checkpoint_root()
+    }
+    fn arm_durability_tracking(&self) {
+        (*self).arm_durability_tracking()
+    }
+    fn sync_pending(&self) -> Result<(), SinkError> {
+        (*self).sync_pending()
     }
     fn init_level_count(&self, levels: usize) {
         (*self).init_level_count(levels)
@@ -624,7 +655,7 @@ impl TileFormat {
 ///   promote-on-2nd-hit critical section and is only ever taken at the top of
 ///   [`FsSink::dedupe_write`], never while a field mutex is already held.
 /// * Every other mutex — `tile_digests`, `manifest_refs`, `pending_first`,
-///   `completed_tiles`, `unsynced_tiles`, `engine_config` — is a **leaf**
+///   `unsynced_tiles`, `engine_config` — is a **leaf**
 ///   lock. A leaf lock is held only long enough to read, mutate, or snapshot
 ///   its map/vec (the read paths clone or `mem::take` and release
 ///   immediately), and is **never** held while acquiring any other leaf lock,
@@ -662,13 +693,14 @@ pub struct FsSink {
     /// type-level `# Lock discipline`); it is only ever taken at the top of
     /// [`FsSink::dedupe_write`] and never while holding a leaf mutex.
     dedupe_promote: Mutex<()>,
-    resume_enabled: bool,
-    /// Set by [`TileSink::suppress_own_checkpoint`] when the engine's
-    /// [`CheckpointState`](crate::engine) is the checkpoint writer for this
-    /// run. While set, [`FsSink::finish`] still fsyncs freshly-written tile
-    /// data (issue #122) but does NOT publish its own `.libviprs-job.json`, so
-    /// the engine's writer is the single source of the checkpoint (issue #124).
-    checkpoint_suppressed: AtomicBool,
+    /// Armed by [`TileSink::arm_durability_tracking`] when the engine stands up
+    /// a [`CheckpointState`](crate::engine) for this run. While armed,
+    /// [`FsSink::write_tile`] records each freshly-written tile path in
+    /// `unsynced_tiles` so [`TileSink::sync_pending`] can fsync it before the
+    /// engine certifies the checkpoint delta covering it (issue #122 / #273). A
+    /// plain, non-checkpointed run leaves this `false` and pays no per-tile
+    /// tracking cost.
+    durability_tracking: AtomicBool,
     /// Running per-tile checksum table, populated only when `checksums` is
     /// non-[`ChecksumMode::None`]. Keyed by the relative tile path inside
     /// `base_dir`. Stores the raw 32-byte digest to keep the hot path
@@ -700,13 +732,8 @@ pub struct FsSink {
     /// `source.pixel_format`. Written once at first tile; readers use
     /// `.get()`.
     pixel_format: OnceLock<crate::pixel::PixelFormat>,
-    /// Completed tile coordinates. Populated when resume is enabled so
-    /// [`FsSink::finish`] can write a [`JobMetadata`](crate::resume::JobMetadata)
-    /// checkpoint. Capacity is pre-reserved from the plan's total tile
-    /// count at construction so per-tile pushes never reallocate.
-    completed_tiles: Mutex<Vec<TileCoord>>,
     /// Absolute paths of tile files written since the last checkpoint flush,
-    /// populated only when resume is enabled. Before a checkpoint is
+    /// populated only when durability tracking is armed. Before a checkpoint is
     /// certified these are fsynced so the checkpoint never records tiles
     /// whose bytes are still in the page cache (issue #122). Includes the
     /// planned tile paths and any `_shared/` files materialised by the
@@ -840,7 +867,10 @@ impl std::fmt::Debug for FsSink {
             .field("checksums", &self.checksums)
             .field("checksum_algo", &self.checksum_algo)
             .field("dedupe", &self.dedupe)
-            .field("resume_enabled", &self.resume_enabled)
+            .field(
+                "durability_tracking",
+                &self.durability_tracking.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -878,14 +908,6 @@ impl FsSink {
         for _ in 0..level_slots {
             per_level_counts.push([AtomicU64::new(0), AtomicU64::new(0)]);
         }
-        // Pre-reserve the completed-tiles Vec so resume-mode runs don't
-        // reallocate under the mutex on every tile.
-        let total_tiles: u64 = plan
-            .levels
-            .iter()
-            .map(|lp| (lp.cols as u64) * (lp.rows as u64))
-            .sum();
-        let completed_cap = usize::try_from(total_tiles).unwrap_or(0);
         Self {
             base_dir,
             plan,
@@ -896,15 +918,13 @@ impl FsSink {
             dedupe: None,
             dedupe_index: None,
             dedupe_promote: Mutex::new(()),
-            resume_enabled: false,
-            checkpoint_suppressed: AtomicBool::new(false),
+            durability_tracking: AtomicBool::new(false),
             tile_digests: Mutex::new(BTreeMap::new()),
             manifest_refs: Mutex::new(HashMap::new()),
             pending_first: Mutex::new(HashMap::new()),
             dedupe_groups: Mutex::new(BTreeMap::new()),
             per_level_counts,
             pixel_format: OnceLock::new(),
-            completed_tiles: Mutex::new(Vec::with_capacity(completed_cap)),
             unsynced_tiles: Mutex::new(Vec::new()),
             durability: Arc::new(crate::resume::RealDurability),
             saw_blank: AtomicBool::new(false),
@@ -986,12 +1006,20 @@ impl FsSink {
         self
     }
 
-    /// Enable resume metadata. When set, [`FsSink::finish`] writes a small
-    /// `.libviprs-job.json` checkpoint alongside the pyramid.
+    /// Arm resume tile-durability tracking for a standalone (non-builder) run.
+    ///
+    /// When set, [`FsSink::write_tile`] records each freshly-written tile path
+    /// so [`TileSink::sync_pending`] can fsync it before a checkpoint certifies
+    /// it (issue #122 / #273). The sink no longer publishes its own checkpoint
+    /// file — the engine's [`CheckpointState`](crate::engine) is the single
+    /// checkpoint authority (issue #277) — so under the documented
+    /// [`EngineBuilder::with_resume`](crate::engine::EngineBuilder::with_resume)
+    /// path this is armed automatically and calling it here is redundant (but
+    /// harmless). Retained so existing callers keep compiling.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-resume)
-    pub fn with_resume(mut self, enabled: bool) -> Self {
-        self.resume_enabled = enabled;
+    pub fn with_resume(self, enabled: bool) -> Self {
+        self.durability_tracking.store(enabled, Ordering::Relaxed);
         self
     }
 
@@ -1130,10 +1158,6 @@ impl TileSink for FsSink {
             }
         }
 
-        if self.resume_enabled {
-            self.lock_leaf(&self.completed_tiles).push(tile.coord);
-        }
-
         Ok(())
     }
 
@@ -1177,10 +1201,6 @@ impl TileSink for FsSink {
             self.write_manifest_json()?;
         }
 
-        if self.resume_enabled {
-            self.write_resume_checkpoint()?;
-        }
-
         Ok(())
     }
 
@@ -1204,8 +1224,40 @@ impl TileSink for FsSink {
         Some(&self.base_dir)
     }
 
-    fn suppress_own_checkpoint(&self) {
-        self.checkpoint_suppressed.store(true, Ordering::Relaxed);
+    fn arm_durability_tracking(&self) {
+        self.durability_tracking.store(true, Ordering::Relaxed);
+    }
+
+    /// Durability barrier (issue #122 / #273): fsync every tile file written
+    /// since the last barrier so the checkpoint about to certify them never
+    /// records tiles whose bytes are still only in the page cache. Drains the
+    /// tracked `unsynced_tiles` set and fsyncs each path via the sink's
+    /// [`Durability`](crate::resume::Durability) backend.
+    fn sync_pending(&self) -> Result<(), SinkError> {
+        // Take the pending set under the leaf lock, then release it before any
+        // I/O so the fsyncs never run while a leaf lock is held (the
+        // at-most-one-leaf-lock discipline; issue #112).
+        let to_sync: Vec<PathBuf> = {
+            let mut guard = self.lock_leaf(&self.unsynced_tiles);
+            std::mem::take(&mut *guard)
+        };
+        let mut seen = std::collections::HashSet::new();
+        for path in &to_sync {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            match self.durability.sync_file(path) {
+                Ok(()) => {}
+                // A path can legitimately be absent by barrier time — e.g. a
+                // dedupe first-occurrence file promoted into `_shared/` and
+                // replaced by a hardlink. The surviving link/target is synced
+                // via its own tracked entry, so a missing path here is not a
+                // durability failure.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SinkError::Io(e)),
+            }
+        }
+        Ok(())
     }
 
     fn content_format(&self) -> Option<TileFormat> {
@@ -1257,10 +1309,11 @@ impl FsSink {
     ///
     /// A no-op when checksums are disabled or no algorithm has been selected.
     /// Record a freshly-written absolute path as needing an `fsync` before
-    /// the next checkpoint flush. A no-op when resume is disabled (nothing
-    /// certifies durability, so the cost is not warranted). Issue #122.
+    /// the next checkpoint flush. A no-op unless durability tracking has been
+    /// armed (nothing certifies durability on a plain run, so the cost is not
+    /// warranted). Issue #122 / #273.
     fn track_unsynced(&self, abs_path: &Path) {
-        if !self.resume_enabled {
+        if !self.durability_tracking.load(Ordering::Relaxed) {
             return;
         }
         self.lock_leaf(&self.unsynced_tiles)
@@ -1832,105 +1885,6 @@ impl FsSink {
 
         Ok(())
     }
-
-    /// Persist the completed-tile checkpoint when resume is enabled.
-    ///
-    /// Always fsyncs the tile data written since the last flush (issue #122).
-    /// It then publishes its own `.libviprs-job.json` only when checkpointing
-    /// is NOT being driven by the engine's
-    /// [`CheckpointState`](crate::engine): when the engine builder has called
-    /// [`TileSink::suppress_own_checkpoint`], that writer is the single source
-    /// of the checkpoint file, so the sink skips its own write to avoid two
-    /// writers publishing divergent views (issue #124). The tile-data fsync
-    /// still runs first, so the engine's terminal flush (which happens after
-    /// the sink's `finish`) certifies data that is already durable.
-    fn write_resume_checkpoint(&self) -> Result<(), SinkError> {
-        use crate::resume::{JobCheckpoint, JobMetadata, SCHEMA_VERSION, compute_plan_hash};
-
-        // Durability ordering (issue #122): fsync the tile data written since
-        // the last flush *before* the checkpoint that certifies it is
-        // published. Otherwise a power loss can leave the synced checkpoint
-        // pointing at tiles whose bytes were still in the page cache, and
-        // resume would skip those coordinates forever. This runs regardless of
-        // which component publishes the checkpoint.
-        let to_sync: Vec<PathBuf> = {
-            let mut guard = self.lock_leaf(&self.unsynced_tiles);
-            std::mem::take(&mut *guard)
-        };
-        let mut seen = std::collections::HashSet::new();
-        for path in &to_sync {
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            match self.durability.sync_file(path) {
-                Ok(()) => {}
-                // A path can legitimately be absent by flush time — e.g. a
-                // dedupe first-occurrence file promoted into `_shared/` and
-                // replaced by a hardlink. The surviving link/target is synced
-                // via its own tracked entry, so a missing path here is not a
-                // durability failure.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(SinkError::Io(e)),
-            }
-        }
-
-        // The engine's `CheckpointState` is the sole checkpoint writer when it
-        // is driving this run; the sink must not also publish (issue #124).
-        if self.checkpoint_suppressed.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        let completed = self.lock_leaf(&self.completed_tiles).clone();
-        // Derive the content contract from the same engine config the resume
-        // gate will see, so a legitimate resume matches while a changed
-        // format/background/strategy/source is rejected. Falls back to the
-        // default config when no snapshot was recorded (e.g. a sink written
-        // without an engine run).
-        let eng_cfg = self
-            .lock_leaf(&self.engine_config)
-            .clone()
-            .unwrap_or_default();
-        let contract = crate::resume::PlanContract::from_engine(&eng_cfg, self);
-        let plan_hash = compute_plan_hash(&self.plan, &contract);
-        let timestamp = now_rfc3339();
-        let meta = JobMetadata {
-            schema_version: SCHEMA_VERSION.to_string(),
-            plan_hash,
-            completed_tiles: completed,
-            levels_completed: self
-                .plan
-                .levels
-                .iter()
-                .filter_map(|lp| {
-                    let (produced, skipped) = self
-                        .per_level_counts
-                        .get(lp.level as usize)
-                        .map(|slot| {
-                            (
-                                slot[0].load(Ordering::Relaxed),
-                                slot[1].load(Ordering::Relaxed),
-                            )
-                        })
-                        .unwrap_or((0, 0));
-                    let level_total = (lp.cols as u64) * (lp.rows as u64);
-                    if produced + skipped >= level_total {
-                        Some(lp.level)
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            started_at: timestamp.clone(),
-            last_checkpoint_at: timestamp,
-            content_format: contract.format,
-        };
-
-        // `save_with` fsyncs the checkpoint payload and then its directory,
-        // so the rename that publishes the checkpoint is itself durable.
-        JobCheckpoint::save_with(&self.base_dir, &meta, &*self.durability)
-            .map_err(SinkError::Io)?;
-        Ok(())
-    }
 }
 
 /// Compute the current UTC timestamp as an RFC-3339 / ISO-8601 string, e.g.
@@ -2137,8 +2091,8 @@ mod tests {
     /// Reproducer for #117 on the primary cascade site: the `FsSink` leaf-lock
     /// chokepoint. One worker panic that poisons a leaf field mutex must not
     /// turn every subsequent `write_tile` into a second panic (which, on the
-    /// write path, would also drop the final checkpoint). We poison the
-    /// `completed_tiles` leaf, then keep writing tiles. Before the fix
+    /// write path, would also drop the durability bookkeeping). We poison the
+    /// `unsynced_tiles` leaf, then keep writing tiles. Before the fix
     /// (`m.lock().unwrap()` in `LeafGuard::new`) the next write panicked (RED);
     /// after it the guard recovers and the run continues (GREEN).
     #[test]
@@ -2146,22 +2100,22 @@ mod tests {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
         let dir = tempfile::tempdir().unwrap();
-        // Resume-enabled so `write_tile` records each coord into the
-        // `completed_tiles` leaf through the `lock_leaf` chokepoint.
+        // Durability tracking armed so `write_tile` records each tile path into
+        // the `unsynced_tiles` leaf through the `lock_leaf` chokepoint.
         let sink = FsSink::new(dir.path().join("out_files"), plan).with_resume(true);
 
         sink.write_tile(&make_tile(0, 0, 0)).unwrap();
 
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = sink.completed_tiles.lock().unwrap();
+            let _guard = sink.unsynced_tiles.lock().unwrap();
             panic!("worker panic while holding an FsSink leaf lock");
         }));
         assert!(poisoned.is_err());
-        assert!(sink.completed_tiles.is_poisoned());
+        assert!(sink.unsynced_tiles.is_poisoned());
 
         // The write path must not cascade the poison into a second panic.
         sink.write_tile(&make_tile(0, 0, 0)).unwrap();
-        let recorded = crate::poison::recover(&sink.completed_tiles).len();
+        let recorded = crate::poison::recover(&sink.unsynced_tiles).len();
         assert_eq!(
             recorded, 2,
             "recovered leaf must retain the pre-poison bookkeeping and accept new writes"
@@ -3145,23 +3099,24 @@ mod tests {
     }
 
     /**
-     * Tests the durability ordering fix for issue #122: with resume enabled,
-     * every tile written must be fsynced *before* the checkpoint that
-     * certifies it, and the checkpoint directory must be fsynced *after* the
-     * checkpoint file is renamed into place.
+     * The durability barrier `TileSink::sync_pending` (issue #122 / #273) must
+     * fsync every tile written since the last barrier, so a checkpoint that is
+     * about to certify those tiles never records bytes still in the page cache.
      *
-     * Works by injecting a recording durability backend, writing a small
-     * pyramid, and calling finish(). The recorded event log must contain one
-     * file-fsync per tile (durability of the certified data) and end with a
-     * directory-fsync of the base dir (durability of the checkpoint's rename),
-     * with every tile-data sync strictly preceding that directory sync.
+     * Arms durability tracking, writes a small pyramid, and calls
+     * `sync_pending()` (the exact call the engine's single `CheckpointState`
+     * makes before it certifies a delta). The injected recording durability
+     * backend must show exactly one file-fsync per written tile — and, because
+     * the sink no longer publishes its own checkpoint (the engine's writer is
+     * now the sole authority; issue #277), NO directory fsync.
      *
-     * Fails on the pre-fix code because no fsync of tile data or the
-     * checkpoint directory occurred at all (the recorder log would be empty).
+     * RED against the pre-fix code: there was no `sync_pending` barrier at all,
+     * and the sink-side writer only fsynced from `finish()` under a
+     * standalone-only flag the builder never set.
      */
     #[test]
     #[cfg(not(miri))]
-    fn resume_checkpoint_syncs_tile_data_before_certifying() {
+    fn sync_pending_fsyncs_every_written_tile() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
 
@@ -3174,8 +3129,10 @@ mod tests {
 
         let sink = FsSink::new(base.clone(), plan.clone())
             .with_format(TileFormat::Raw)
-            .with_resume(true)
             .with_durability(recorder.clone());
+        // Arm durability tracking exactly as the engine builder does when it
+        // stands up a `CheckpointState` for this sink.
+        sink.arm_durability_tracking();
 
         // Write every tile in the plan.
         let mut written = 0usize;
@@ -3194,41 +3151,22 @@ mod tests {
         }
         assert!(written > 0, "plan should produce at least one tile");
 
-        sink.finish().unwrap();
+        // The durability barrier the engine invokes before certifying a
+        // checkpoint delta.
+        sink.sync_pending().unwrap();
 
         let events = recorder.events.lock().unwrap().clone();
+
+        // No directory fsync: the sink does not publish its own checkpoint
+        // anymore (issue #277 — single writer).
         assert!(
-            !events.is_empty(),
-            "durability backend must record fsyncs (issue #122 regression)"
+            events.iter().all(|e| matches!(e, DurEvent::File(_))),
+            "sync_pending must only fsync tile files, never publish a checkpoint \
+             directory; got events: {events:?}"
         );
 
-        // Exactly one directory fsync, of the base dir, and it is the last
-        // event: the checkpoint's directory entry is made durable only after
-        // all tile data has been synced.
-        let dir_positions: Vec<usize> = events
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| matches!(e, DurEvent::Dir(_)).then_some(i))
-            .collect();
-        assert_eq!(
-            dir_positions.len(),
-            1,
-            "expected exactly one directory fsync, got events: {events:?}"
-        );
-        let dir_idx = dir_positions[0];
-        assert_eq!(
-            events[dir_idx],
-            DurEvent::Dir(base.clone()),
-            "directory fsync must target the checkpoint base dir"
-        );
-        assert_eq!(
-            dir_idx,
-            events.len() - 1,
-            "directory fsync must be the final durability op"
-        );
-
-        // Every tile written must have been fsynced, and all tile-data syncs
-        // must precede the directory sync that certifies the checkpoint.
+        // Exactly one file fsync per written tile, and every tile path is
+        // covered.
         let file_events: Vec<&PathBuf> = events
             .iter()
             .filter_map(|e| match e {
@@ -3239,7 +3177,7 @@ mod tests {
         assert_eq!(
             file_events.len(),
             written,
-            "expected one tile-data fsync per written tile"
+            "expected one tile-data fsync per written tile, got {events:?}"
         );
         for lp in &plan.levels {
             for col in 0..lp.cols {
@@ -3250,11 +3188,20 @@ mod tests {
                     let abs = base.join(&rel);
                     assert!(
                         file_events.iter().any(|p| **p == abs),
-                        "tile {abs:?} was never fsynced before the checkpoint"
+                        "tile {abs:?} was never fsynced by the durability barrier"
                     );
                 }
             }
         }
+
+        // A second barrier with nothing newly written drains to nothing: the
+        // pending set was consumed by the first barrier.
+        recorder.events.lock().unwrap().clear();
+        sink.sync_pending().unwrap();
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "a barrier with no new writes must fsync nothing"
+        );
     }
 
     /**
@@ -3395,9 +3342,9 @@ mod tests {
 
     /**
      * The production write/finish paths must uphold the at-most-one-leaf-lock
-     * invariant. A full run with dedupe, checksums, and resume all active
-     * exercises every leaf mutex — `tile_digests`, `manifest_refs`,
-     * `pending_first`, `completed_tiles`, `unsynced_tiles`, `engine_config` —
+     * invariant. A full run with dedupe, checksums, and durability tracking all
+     * active exercises every leaf mutex — `tile_digests`, `manifest_refs`,
+     * `pending_first`, `unsynced_tiles`, `engine_config` —
      * plus the `dedupe_promote` outer lock wrapping leaf acquisitions inside
      * `dedupe_write`. If any path nested two leaf locks the debug guard would
      * panic mid-run; a clean finish proves the documented invariant holds in
@@ -3424,8 +3371,8 @@ mod tests {
             .with_resume(true);
 
         // engine_config leaf; two identical uniform tiles drive the dedupe
-        // promote path (pending_first, manifest_refs, tile_digests); resume
-        // drives completed_tiles and unsynced_tiles; finish() re-reads
+        // promote path (pending_first, manifest_refs, tile_digests); durability
+        // tracking drives unsynced_tiles; finish() re-reads
         // tile_digests + manifest_refs + engine_config.
         sink.record_engine_config(&crate::engine::EngineConfig::default());
         for col in 0..2 {
