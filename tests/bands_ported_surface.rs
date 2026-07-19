@@ -75,13 +75,15 @@ fn ported_surface_bandbool() {
     assert_eq!(result.getpoint(50, 50), vec![expected as f64]);
 }
 
-/// The ported `test_bandmean` call site: floor((b0+b1+b2)/3).
+/// The ported `test_bandmean` call site: round-to-nearest of the per-pixel
+/// mean, matching vips `(sum + bands / 2) / bands` (not truncation).
 #[test]
 fn ported_surface_bandmean() {
     let colour = make_test_colour();
     let result = colour.bandmean();
     let px = colour.getpoint(50, 50);
-    let expected = ((px[0] + px[1] + px[2]) / 3.0).floor();
+    let sum = px[0] as u64 + px[1] as u64 + px[2] as u64;
+    let expected = ((sum + 3 / 2) / 3) as f64;
     assert_eq!(result.getpoint(50, 50), vec![expected]);
 }
 

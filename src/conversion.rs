@@ -1231,9 +1231,22 @@ impl Raster {
         let bpc = self.format().bytes_per_channel();
         let mx = if bpc == 1 { 255u32 } else { 65535u32 };
         let mxf = mx as f64;
-        let scale = mxf.powf(power) / mxf;
+        // Match vips_gamma bit-for-bit (gamma.c): the curve is built as an
+        // identity LUT put through `vips_pow_const1(power)` then
+        // `vips_linear1(mx / pow(mx, power), 0)`, then cast back to the
+        // integer format. Because `pow_const`/`linear` promote uchar/ushort
+        // to single-precision float, the multiply happens in f32 and the
+        // final integer cast TRUNCATES toward zero (it does not round to
+        // nearest). Reproduce that exactly: pow in f64, coefficient and
+        // product in f32, then truncate. Verified against vips 8.18.4 over
+        // the full 0..=255 and 0..=65535 domains (0 divergences).
+        let scale = (mxf / mxf.powf(power)) as f32;
+        let mxf32 = mxf as f32;
         let lut: Vec<u32> = (0..=mx)
-            .map(|i| ((i as f64).powf(power) / scale).round().clamp(0.0, mxf) as u32)
+            .map(|i| {
+                let powered = (i as f64).powf(power) as f32;
+                (scale * powered).clamp(0.0, mxf32) as u32
+            })
             .collect();
         let mut out = Raster::zeroed(self.width(), self.height(), self.format())?;
         let samples = self.width() as usize * self.height() as usize * self.format().channels();
@@ -2570,23 +2583,35 @@ mod tests {
     // ------------------------------------------------------------------
 
     /**
-     * Tests the default curve against the ported test_gamma formula:
-     * out = in^2.4 / (255^2.4 / 255), within rounding.
-     * Input: Gray8 ramp of sample values.
+     * Tests the default curve against exact vips 8.18.4 `vips_gamma` output.
+     * vips TRUNCATES the scaled power curve (does not round to nearest), so
+     * e.g. input 100 -> 26 even though the continuous value is 26.97. Pinned
+     * values captured from the oracle over an identity ramp:
+     *   `vips identity id.v; vips gamma id.v g.v; vips getpoint g.v <i> 0`.
      */
     #[test]
     fn gamma_default_matches_libvips_formula() {
-        let vals = [0u8, 1, 16, 100, 115, 200, 254, 255];
-        let im = gray8(vals.len() as u32, 1, vals.to_vec());
+        // (input, exact vips 8.18.4 uchar output)
+        let cases = [
+            (0u8, 0u8),
+            (1, 0),
+            (16, 0),
+            (19, 0), // continuous ~0.500, vips truncates to 0
+            (50, 5),
+            (100, 26), // continuous 26.97 -> truncated 26 (round would give 27)
+            (115, 37),
+            (127, 47),
+            (128, 48),
+            (200, 142),
+            (254, 252),
+            (255, 255),
+        ];
+        let vals: Vec<u8> = cases.iter().map(|&(i, _)| i).collect();
+        let im = gray8(vals.len() as u32, 1, vals.clone());
         let out = im.gamma(None);
-        let norm = 255.0f64.powf(2.4) / 255.0;
-        for (x, v) in vals.iter().enumerate() {
-            let expected = (*v as f64).powf(2.4) / norm;
+        for (x, &(v, expected)) in cases.iter().enumerate() {
             let got = out.getpoint(x as u32, 0)[0];
-            assert!(
-                (got - expected).abs() <= 0.5 + 1e-9,
-                "v={v}: got {got}, expected {expected}"
-            );
+            assert_eq!(got, expected as f64, "input v={v}");
         }
     }
 
@@ -2616,16 +2641,23 @@ mod tests {
     }
 
     /**
-     * Tests the 16-bit curve against the formula at a midpoint.
-     * Input: Gray16 30000 with default exponent.
+     * Tests the 16-bit curve against exact vips 8.18.4 output. vips
+     * truncates the scaled power curve, and the intermediate is computed in
+     * single-precision float, so parity is exact only when both are matched.
+     * Values captured from the oracle over a ushort identity ramp:
+     *   `vips identity id16.v --ushort; vips gamma id16.v g16.v`.
+     * 30000 -> 10046; 21755 -> 4646; 23843 -> 5789 (each a truncation edge
+     * the old round-to-nearest path missed by 1 LSB).
      */
     #[test]
     fn gamma_16bit_path() {
-        let im = gray16(1, 1, &[30000]);
+        let cases = [(30000u16, 10046.0f64), (21755, 4646.0), (23843, 5789.0)];
+        let vals: Vec<u16> = cases.iter().map(|&(i, _)| i).collect();
+        let im = gray16(vals.len() as u32, 1, &vals);
         let out = im.gamma(None);
-        let norm = 65535.0f64.powf(2.4) / 65535.0;
-        let expected = 30000.0f64.powf(2.4) / norm;
-        assert!((out.getpoint(0, 0)[0] - expected).abs() <= 0.5 + 1e-9);
+        for (x, &(v, expected)) in cases.iter().enumerate() {
+            assert_eq!(out.getpoint(x as u32, 0)[0], expected, "input v={v}");
+        }
     }
 
     /**
@@ -2635,12 +2667,9 @@ mod tests {
     fn gamma_multiband_per_channel() {
         let im = rgb8(1, 1, vec![10, 100, 255]);
         let out = im.gamma(None);
-        let norm = 255.0f64.powf(2.4) / 255.0;
+        // Exact vips 8.18.4 uchar outputs: 10 -> 0, 100 -> 26, 255 -> 255.
         let px = out.getpoint(0, 0);
-        for (c, v) in [10.0f64, 100.0, 255.0].iter().enumerate() {
-            let expected = v.powf(2.4) / norm;
-            assert!((px[c] - expected).abs() <= 0.5 + 1e-9, "channel {c}");
-        }
+        assert_eq!(px, vec![0.0, 26.0, 255.0]);
     }
 
     /**

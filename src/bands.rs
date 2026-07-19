@@ -409,9 +409,10 @@ impl Raster {
     /// Per-pixel mean across bands, producing a single-band image (libvips
     /// `bandmean`).
     ///
-    /// The mean uses truncating integer division (`sum / bands`), matching
-    /// the libvips integer path: `floor` for these unsigned formats. The
-    /// result keeps `self`'s depth (`Gray8` or `Gray16`).
+    /// The mean rounds to nearest (`(sum + bands / 2) / bands`), matching
+    /// the libvips integer path (`bandmean.c`: `q[i] = (sum + bands / 2) /
+    /// bands`), which rounds halves up rather than truncating. The result
+    /// keeps `self`'s depth (`Gray8` or `Gray16`).
     ///
     /// # Errors
     ///
@@ -428,7 +429,8 @@ impl Raster {
             let sum: u64 = (0..bands)
                 .map(|c| read_flat(data, bpc, p * bands + c) as u64)
                 .sum();
-            write_flat(&mut out, bpc, p, (sum / bands as u64) as u32);
+            let bands64 = bands as u64;
+            write_flat(&mut out, bpc, p, ((sum + bands64 / 2) / bands64) as u32);
         }
         Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
     }
@@ -916,16 +918,30 @@ mod tests {
 
     // ---- bandmean ----
 
-    /// bandmean floors the per-pixel mean (truncating integer division),
-    /// matching the libvips integer path: (1+2+3)/3 = 2, (10+20+31)/3 =
-    /// 20.33 -> 20.
+    /// bandmean rounds the per-pixel mean to nearest (halves up), matching
+    /// the libvips integer path `(sum + bands / 2) / bands`. Verified against
+    /// vips 8.18.4 `vips_bandmean`: sum 5 / 3 bands -> 2 (not floor 1),
+    /// sum 61 / 3 -> 20, sum 6 / 3 -> 2.
     #[test]
-    fn bandmean_floors_integer_mean() {
-        let im = Raster::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 10, 20, 31]).unwrap();
+    fn bandmean_rounds_to_nearest() {
+        // Pixel 0: [1,2,2] sum 5 -> round(5/3) = 2 (truncation would give 1).
+        // Pixel 1: [10,20,31] sum 61 -> round(61/3) = 20.
+        let im = Raster::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 2, 10, 20, 31]).unwrap();
         let mean = im.bandmean();
         assert_eq!(mean.format(), PixelFormat::Gray8);
         assert_eq!(mean.getpoint(0, 0), vec![2.0]);
         assert_eq!(mean.getpoint(1, 0), vec![20.0]);
+    }
+
+    /// bandmean rounds exact halves up like vips on an even band count.
+    /// Verified against vips 8.18.4 `vips_bandmean`: 4-band [1,1,0,0]
+    /// sum 2 -> (2 + 2) / 4 = 1 (truncation would give 0).
+    #[test]
+    fn bandmean_rounds_halves_up() {
+        let im = Raster::new(1, 1, PixelFormat::Rgba8, vec![1, 1, 0, 0]).unwrap();
+        let mean = im.bandmean();
+        assert_eq!(mean.format(), PixelFormat::Gray8);
+        assert_eq!(mean.getpoint(0, 0), vec![1.0]);
     }
 
     /// bandmean keeps 16-bit depth and handles sums beyond u16 range.
