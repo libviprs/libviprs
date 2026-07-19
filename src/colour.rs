@@ -785,41 +785,52 @@ fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
     }
 }
 
-/// Convert one pixel from D65 XYZ to `space`, producing
-/// `space_bands(space)` samples in the space's numeric convention
-/// (unrounded; integer spaces quantise on write).
-fn from_xyz(space: Interpretation, xyz: [f64; 3]) -> Vec<f64> {
+/// Convert one pixel from D65 XYZ to `space`, writing the
+/// `space_bands(space)` output samples into the front of `out` (in the
+/// space's numeric convention, unrounded; integer spaces quantise on
+/// write).
+///
+/// This is the allocation-free form the per-pixel conversion loop drives:
+/// the caller supplies one scratch array (`[f64; 4]` covers every space,
+/// CMYK being the widest at four bands) and reuses it across the whole
+/// image, so the hot path allocates nothing per pixel. `out` must hold at
+/// least `space_bands(space)` slots; only that prefix is written.
+fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
     match space {
-        Interpretation::Xyz => xyz.to_vec(),
-        Interpretation::Lab => xyz_to_lab(xyz, D65).to_vec(),
-        Interpretation::Lch => lab_to_lch(xyz_to_lab(xyz, D65)).to_vec(),
+        Interpretation::Xyz => out[..3].copy_from_slice(&xyz),
+        Interpretation::Lab => out[..3].copy_from_slice(&xyz_to_lab(xyz, D65)),
+        Interpretation::Lch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_lab(xyz, D65))),
         Interpretation::Cmc => {
             let lch = lab_to_lch(xyz_to_lab(xyz, D65));
-            vec![
-                l_to_lcmc(lch[0]),
-                c_to_ccmc(lch[1]),
-                ch_to_hcmc(lch[1], lch[2]),
-            ]
+            out[0] = l_to_lcmc(lch[0]);
+            out[1] = c_to_ccmc(lch[1]);
+            out[2] = ch_to_hcmc(lch[1], lch[2]);
         }
-        Interpretation::Labs => lab_to_labs(xyz_to_lab(xyz, D65)).map(f64::round).to_vec(),
-        Interpretation::ScRgb => xyz_to_scrgb(xyz).to_vec(),
+        Interpretation::Labs => {
+            out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65)).map(f64::round));
+        }
+        Interpretation::ScRgb => out[..3].copy_from_slice(&xyz_to_scrgb(xyz)),
         Interpretation::Hsv => {
             // The libvips HSV encode goes through 8-bit sRGB.
             let rgb = xyz_to_scrgb(xyz).map(|c| (255.0 * srgb_encode(c.clamp(0.0, 1.0))).round());
-            srgb8_to_hsv(rgb).to_vec()
+            out[..3].copy_from_slice(&srgb8_to_hsv(rgb));
         }
-        Interpretation::Srgb => xyz_to_scrgb(xyz)
-            .map(|c| 255.0 * srgb_encode(c.clamp(0.0, 1.0)))
-            .to_vec(),
-        Interpretation::Rgb16 => xyz_to_scrgb(xyz)
-            .map(|c| 65535.0 * srgb_encode(c.clamp(0.0, 1.0)))
-            .to_vec(),
-        Interpretation::Yxy => xyz_to_yxy(xyz).to_vec(),
-        Interpretation::OkLab => xyz_to_oklab(xyz).to_vec(),
-        Interpretation::OkLch => lab_to_lch(xyz_to_oklab(xyz)).to_vec(),
-        Interpretation::Bw => vec![255.0 * scrgb_to_bw(xyz_to_scrgb(xyz))],
-        Interpretation::Grey16 => vec![65535.0 * scrgb_to_bw(xyz_to_scrgb(xyz))],
-        Interpretation::Cmyk => xyz_to_cmyk(xyz).to_vec(),
+        Interpretation::Srgb => {
+            out[..3].copy_from_slice(
+                &xyz_to_scrgb(xyz).map(|c| 255.0 * srgb_encode(c.clamp(0.0, 1.0))),
+            );
+        }
+        Interpretation::Rgb16 => {
+            out[..3].copy_from_slice(
+                &xyz_to_scrgb(xyz).map(|c| 65535.0 * srgb_encode(c.clamp(0.0, 1.0))),
+            );
+        }
+        Interpretation::Yxy => out[..3].copy_from_slice(&xyz_to_yxy(xyz)),
+        Interpretation::OkLab => out[..3].copy_from_slice(&xyz_to_oklab(xyz)),
+        Interpretation::OkLch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_oklab(xyz))),
+        Interpretation::Bw => out[0] = 255.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
+        Interpretation::Grey16 => out[0] = 65535.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
+        Interpretation::Cmyk => out[..4].copy_from_slice(&xyz_to_cmyk(xyz)),
         other => unreachable!("no colourspace route for {other:?}"),
     }
 }
@@ -880,6 +891,28 @@ fn format_for(channels: usize, depth: SpaceDepth) -> PixelFormat {
         .expect("colour op output has a valid channel count")
 }
 
+/// Wrap an already-quantised sample byte buffer into a raster, carrying
+/// `like`'s metadata block and attached fields, tagged `tag`. The hot
+/// [`Raster::try_colourspace`] loop writes its output samples straight
+/// into `buf` (via [`write_sample`]) and finishes through here, so no
+/// intermediate full-image `Vec<f64>` staging is materialised.
+fn raster_from_bytes(
+    width: u32,
+    height: u32,
+    channels: usize,
+    depth: SpaceDepth,
+    buf: Vec<u8>,
+    like: &Raster,
+    tag: Interpretation,
+) -> Raster {
+    let mut out = Raster::new(width, height, format_for(channels, depth), buf)
+        .expect("colour op output is well-formed");
+    out.meta = like.meta;
+    out.meta.interpretation = Some(tag);
+    out.fields = like.fields.clone();
+    out
+}
+
 /// Build a raster from per-channel `f64` samples at `depth`, carrying
 /// `like`'s metadata block and attached fields, tagged `tag`.
 fn build_raster(
@@ -895,12 +928,7 @@ fn build_raster(
     for (i, &v) in samples.iter().enumerate() {
         write_sample(&mut buf, depth, i, v);
     }
-    let mut out = Raster::new(width, height, format_for(channels, depth), buf)
-        .expect("colour op output is well-formed");
-    out.meta = like.meta;
-    out.meta.interpretation = Some(tag);
-    out.fields = like.fields.clone();
-    out
+    raster_from_bytes(width, height, channels, depth, buf, like, tag)
 }
 
 // ---------------------------------------------------------------------------
@@ -1593,33 +1621,52 @@ impl Raster {
         let bpc = self.format().bytes_per_channel();
 
         let total = self.width() as usize * self.height() as usize;
-        let mut samples = Vec::with_capacity(total * out_channels);
+        // Stream row by row straight into the output byte buffer: no
+        // per-pixel heap allocation and no full-image f64 staging vector
+        // (libviprs#284). `src_px` is reused across pixels for the source
+        // colour bands, and `tgt_px` is a reused stack scratch wide enough
+        // for every space (CMYK is the widest at four bands) that
+        // `from_xyz_into` writes into.
+        let mut buf = vec![0u8; total * out_channels * tgt_depth.bytes()];
         let mut src_px = vec![0.0f64; src_bands];
+        let mut tgt_px = [0.0f64; 4];
         let identity = src == target;
 
         for p in 0..total {
+            let in_base = p * channels;
             for (c, slot) in src_px.iter_mut().enumerate() {
-                *slot = normalise_sample(read_sample_f64(self, p * channels + c), bpc, src_depth);
+                *slot = normalise_sample(read_sample_f64(self, in_base + c), bpc, src_depth);
             }
+            let out_base = p * out_channels;
             if identity {
-                samples.extend_from_slice(&src_px);
+                for (c, &v) in src_px.iter().enumerate() {
+                    write_sample(&mut buf, tgt_depth, out_base + c, v);
+                }
             } else {
-                samples.extend_from_slice(&from_xyz(target, to_xyz(src, &src_px)));
+                from_xyz_into(target, to_xyz(src, &src_px), &mut tgt_px);
+                for (c, &v) in tgt_px.iter().take(tgt_bands).enumerate() {
+                    write_sample(&mut buf, tgt_depth, out_base + c, v);
+                }
             }
             for c in src_bands..channels {
                 // Extra bands: plain cast (clip, no rescale), mirroring
                 // vips__colourspace_process_n. Clipping happens on write.
-                let v = read_sample_f64(self, p * channels + c);
-                samples.push(v.min(tgt_depth.max_value()));
+                let v = read_sample_f64(self, in_base + c).min(tgt_depth.max_value());
+                write_sample(
+                    &mut buf,
+                    tgt_depth,
+                    out_base + tgt_bands + (c - src_bands),
+                    v,
+                );
             }
         }
 
-        Ok(build_raster(
+        Ok(raster_from_bytes(
             self.width(),
             self.height(),
             out_channels,
             tgt_depth,
-            &samples,
+            buf,
             self,
             target,
         ))
