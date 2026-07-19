@@ -144,6 +144,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regions are also scanned with integer `u64` accumulators that stay exact
   where the former `f64` colour accumulator would drop low bits on extreme
   16-bit downscales.
+- `composite2` mixed bit-depth blends now key the 0..65535 vs 0..255
+  read/write scale on each input's *resolved* interpretation
+  (`Raster::interpretation`, gated on the actual 2-byte storage depth),
+  matching libvips' per-input `max_band` from `vips_interpretation_max_alpha`
+  after `formatalike`. A genuine 16-bit layer (e.g. a decoded 16-bit PNG,
+  untagged through `Raster::new`) is honoured on the 65535 scale so it blends
+  against an 8-bit layer at a true ratio instead of 257:1 and its alpha is not
+  capped at 255; a genuine-16 result is stamped `Rgb16` / `Grey16` so a
+  re-composite reads it on the same scale (issues #443–#449). To keep the
+  crate's promoted-container idiom working across the module boundary, the
+  constant arithmetic ops (`add_const` / `mul_const` / `pow_const` /
+  `add_vec`, and the widening binary path) now stamp their widened 16-bit
+  output with the source interpretation, so an 8-bit input promoted into a
+  16-bit container resolves to a non-genuine-16 space and a fully-opaque
+  promoted overlay stays visible over an 8-bit base instead of collapsing to
+  ~0.4%. The genuine-16 write-back scale and interpretation stamp are gated to
+  integer output containers, so a genuine-16 input composited against a float
+  raster no longer inflates the float output ~257x or mis-tags it as USHORT.
 - A `Resume` refused on a plan-hash mismatch now returns
   `EngineError::PlanHashMismatch` before anything touches the output
   directory: the plan-hash gate runs ahead of the advisory run-lock

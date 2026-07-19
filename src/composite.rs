@@ -46,8 +46,15 @@
 //!   which — exactly like libvips' `vips_image_guess_interpretation` —
 //!   infers `Rgb16` / `Grey16` for an untagged 16-bit buffer, so a genuine
 //!   16-bit image built through [`Raster::new`] is honoured on the 65535
-//!   scale without an explicit tag (this is the primary #289 path). It is
-//!   additionally gated on the actual storage depth
+//!   scale without an explicit tag (this is the primary #289 path). A
+//!   *promoted* 16-bit container is the counterpart case: the constant ops
+//!   (`add_const`, `mul_const`, `pow_const`, `add_vec`, ...) widen an 8-bit
+//!   input into a 16-bit buffer whose samples stay numerically on 0..255, and
+//!   they stamp that output with the *source* interpretation (`Srgb` / `Bw`,
+//!   see [`crate::arithmetic`]) precisely so it resolves to a non-genuine-16
+//!   space and reads here on 0..255 rather than being mistaken for a genuine
+//!   16-bit layer and washed out. The genuine-16 decision is additionally
+//!   gated on the actual storage depth
 //!   (`bytes_per_channel() == 2`): an interpretation tag is advisory and can
 //!   disagree with the bytes (the copy builder accepts any tag), so an
 //!   8-bit buffer mislabelled `Rgb16` / `Grey16` is *not* read on the 65535
@@ -82,13 +89,21 @@
 //!   (resolution, offsets, orientation, and attached fields), like libvips
 //!   which copies the header from the first input. The colour
 //!   interpretation is the one exception: when a genuine-16 input drove the
-//!   write-back onto the 0..65535 scale, the result is stamped `Rgb16` /
-//!   `Grey16` so its saved metadata matches the samples and a re-composite
-//!   reads it on the same scale, instead of inheriting the base's 8-bit tag
-//!   and re-introducing the 255 ceiling; otherwise it keeps the base's
-//!   interpretation unchanged. (The write-back scale and the stamped tag are
-//!   thus always consistent — there is no state in which the samples and
-//!   their interpretation disagree.)
+//!   write-back onto the 0..65535 scale *into an integer container*, the
+//!   result is stamped `Rgb16` / `Grey16` so its saved metadata matches the
+//!   samples and a re-composite reads it on the same scale, instead of
+//!   inheriting the base's 8-bit tag and re-introducing the 255 ceiling;
+//!   otherwise it keeps the base's interpretation unchanged. The stamp and
+//!   the write-back scale are driven by the same `out_is_genuine16` decision,
+//!   so for the integer output the tag and the samples agree. This is a
+//!   best-effort alignment, not a global invariant: an interpretation tag is
+//!   advisory and the public API can still construct a raster whose tag
+//!   disagrees with its samples (e.g. the copy builder accepts any tag, or a
+//!   float output keeps a base tag that never described a float space), so
+//!   downstream code must not assume the tag and the samples can never
+//!   diverge — it is exactly why the genuine-16 read is gated on the 2-byte
+//!   storage depth (see [`is_genuine_16bit`]) rather than trusting the tag
+//!   alone.
 //!
 //! # Blend mode table
 //!
@@ -476,6 +491,14 @@ fn non_separable_blend(mode: CompositeMode, cb: [f64; 3], cs: [f64; 3]) -> [f64;
 /// tag, and two rasters indistinguishable across the public API composite
 /// identically.
 ///
+/// A *promoted* 16-bit container — an 8-bit input widened by a constant op
+/// (`add_const` / `mul_const` / `pow_const` / `add_vec`) whose samples remain
+/// numerically 0..255 — is the case this must *not* treat as genuine-16.
+/// Those ops stamp the promoted output with the source interpretation (`Srgb`
+/// / `Bw`, see [`crate::arithmetic`]), so [`Raster::interpretation`] resolves
+/// it to a non-genuine-16 space and this returns `false` for it, keeping a
+/// fully-opaque promoted overlay visible instead of collapsing it to ~0.4%.
+///
 /// The decision is additionally gated on the actual storage depth
 /// (`bytes_per_channel() == 2`). An interpretation tag is advisory and may
 /// disagree with the bytes — [`crate::conversion::RasterCopyBuilder::interpretation`]
@@ -565,11 +588,23 @@ impl Raster {
         // space: it is written on the 0..65535 scale (see `out_max`) and must
         // be *tagged* as such (see the write-back below), so a re-composite
         // reads it on the same scale instead of the 255 ceiling.
-        let out_is_genuine16 = base_genuine16 || overlay_genuine16;
+        //
+        // This applies only to an *integer* output container. When the deeper
+        // input is a float raster the output is float (`out_bpc == 4`), and a
+        // float image has no genuine-16 quantisation: writing it on the 65535
+        // scale would inflate its samples ~257x, and stamping it `Rgb16` /
+        // `Grey16` would mis-tag a float raster (the genuine-16 tags imply a
+        // USHORT buffer). libvips likewise resolves the float compositing
+        // space to sRGB, not a 16-bit space. So the genuine-16 write-back and
+        // tag are gated on `out_bpc != 4`; a genuine-16 input is still *read*
+        // on its own 0..65535 scale (`base_max` / `overlay_max` above),
+        // matching libvips' per-input `max_band`.
+        let output_is_integer = out_bpc != 4;
+        let out_is_genuine16 = output_is_integer && (base_genuine16 || overlay_genuine16);
         // Write-back scale = the output (compositing-space) max: genuine
-        // 16-bit whenever either input is a genuine-16 layer, so a mixed-depth
-        // result fills the 16-bit range and its alpha is not capped at 255;
-        // otherwise the joint rule.
+        // 16-bit whenever either input is a genuine-16 layer *and* the output
+        // is an integer container, so a mixed-depth result fills the 16-bit
+        // range and its alpha is not capped at 255; otherwise the joint rule.
         let out_max = if out_is_genuine16 { 65535.0 } else { joint };
         let inv_base = 1.0 / base_max;
         let inv_overlay = 1.0 / overlay_max;
@@ -661,13 +696,16 @@ impl Raster {
         out.meta = self.meta;
         out.fields = self.fields.clone();
         // The result inherits the base's metadata, but when a genuine-16
-        // input drove the write-back onto the 0..65535 scale (`out_max`), the
-        // base tag (typically an 8-bit or absent interpretation) would
+        // input drove the write-back onto the 0..65535 scale (`out_max`, only
+        // for an integer output container — see the `out_is_genuine16` gate),
+        // the base tag (typically an 8-bit or absent interpretation) would
         // mislabel the samples: re-compositing this output would read it on
         // the 255 scale and re-introduce #289, and its saved metadata would
         // disagree with the samples. Stamp the genuine-16 interpretation that
         // matches the scale it was actually written at — `Grey16` for a
-        // single colour band, `Rgb16` for RGB.
+        // single colour band, `Rgb16` for RGB. A float output is never
+        // stamped genuine-16 (the gate excludes it), so a float raster keeps
+        // the base interpretation and is never mis-tagged as USHORT.
         if out_is_genuine16 {
             out.meta.interpretation = Some(if colour == 1 {
                 Interpretation::Grey16
