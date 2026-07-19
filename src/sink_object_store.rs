@@ -38,6 +38,32 @@ use crate::sink::{BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, enco
 /// without the network.
 pub trait ObjectStore: Send + Sync {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError>;
+
+    /// Enumerate the object keys stored under `prefix`.
+    ///
+    /// **Defaulted to a loud refusal.** A listing-capable backend — a real
+    /// object-store client, or a test double that tracks its own key space —
+    /// overrides this to return the keys it holds. Write-only backends (any
+    /// store that only implements `put`) inherit this default, which fails loud
+    /// with [`SinkError::Unsupported`] rather than returning a misleading empty
+    /// `Ok(vec![])`. A silent empty list is a footgun: a caller diffing
+    /// server-side keys against a filesystem reference cannot distinguish
+    /// "nothing was uploaded" from "this backend cannot list", so the diff
+    /// passes falsely or fails spuriously.
+    ///
+    /// [`ObjectStoreSink::list_objects`] delegates here, so the sink no longer
+    /// hardcodes the refusal — listing capability now lives with the backend,
+    /// and no sink edit is needed when a listing-capable transport lands.
+    fn list(&self, prefix: &str) -> Result<Vec<String>, SinkError> {
+        let _ = prefix;
+        Err(SinkError::Unsupported(
+            "list_objects: this ObjectStore backend does not implement a LIST \
+             operation (ObjectStore::list is defaulted to refuse). A \
+             listing-capable backend overrides it; write-only backends inherit \
+             this loud failure. Do not treat this as an empty object set."
+                .into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -322,26 +348,27 @@ impl ObjectStoreSink {
 
     /// Enumerate the object keys stored under this sink's key prefix.
     ///
-    /// **Unsupported in this build.** A full implementation would issue a LIST
-    /// request against the configured endpoint (or delegate to a listing-capable
-    /// backend), but the [`ObjectStore`] trait exposes only `put` — the sink
-    /// structurally cannot enumerate what was uploaded — and no LIST transport is
-    /// compiled in. Rather than return a silently-empty `Ok(vec![])` (which a
-    /// caller diffing server-side keys against a filesystem reference cannot
-    /// distinguish from "nothing was uploaded", making the diff pass falsely or
-    /// fail spuriously), this fails loud with [`SinkError::Unsupported`].
-    ///
-    /// When a listing-capable transport lands, this method will delegate to it;
-    /// callers should treat [`SinkError::Unsupported`] as "listing not available
-    /// in this build" rather than "the store is empty".
+    /// Delegates to the injected backend's [`ObjectStore::list`], passing the
+    /// sink's configured `key_prefix`. The sink no longer hardcodes a refusal:
+    /// a listing-capable backend overrides `ObjectStore::list` and returns real
+    /// keys, while a write-only backend inherits the trait's defaulted loud
+    /// failure ([`SinkError::Unsupported`]). Rather than a silently-empty
+    /// `Ok(vec![])` — which a caller diffing server-side keys against a
+    /// filesystem reference cannot distinguish from "nothing was uploaded",
+    /// making the diff pass falsely or fail spuriously — the default path fails
+    /// loud. Callers should treat [`SinkError::Unsupported`] as "this backend
+    /// cannot list" rather than "the store is empty".
     pub fn list_objects(&self) -> Result<Vec<String>, SinkError> {
-        Err(SinkError::Unsupported(
-            "list_objects: no LIST transport is compiled into this build \
-             (the ObjectStore trait exposes only `put`); a listing-capable \
-             object-store client will land in a follow-up. Do not treat this \
-             as an empty object set."
-                .into(),
-        ))
+        let store =
+            self.cfg.store.as_ref().ok_or_else(|| {
+                SinkError::Other("ObjectStoreSink: backend is not configured".into())
+            })?;
+        // Forward the *trimmed* prefix so a listing observes the same key space
+        // the write path produces: every `*_key` helper (and the Zoomify/IIIF
+        // branch) normalises `key_prefix` with `trim_matches('/')` before it
+        // builds an object key, so a raw `"/run-1/"` would list under a prefix
+        // no written key ever carries. Match that normalisation here.
+        store.list(self.cfg.key_prefix.trim_matches('/'))
     }
 
     /// Build the object key for a given tile coordinate, respecting the
@@ -573,6 +600,103 @@ mod tests {
         assert!(
             msg.contains("list_objects") && msg.contains("LIST"),
             "error must name the operation and the missing transport: {msg}"
+        );
+    }
+
+    /// A listing-capable backend: records every `put` and *overrides*
+    /// [`ObjectStore::list`] to return the keys it holds (filtered by prefix).
+    /// Proves the sink delegates enumeration to the backend rather than
+    /// hardcoding a refusal.
+    #[derive(Default)]
+    struct ListingStore {
+        puts: std::sync::Mutex<Vec<String>>,
+        last_prefix: std::sync::Mutex<Option<String>>,
+    }
+
+    impl ObjectStore for ListingStore {
+        fn put(&self, key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+            self.puts.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+
+        fn list(&self, prefix: &str) -> Result<Vec<String>, SinkError> {
+            *self.last_prefix.lock().unwrap() = Some(prefix.to_string());
+            Ok(self
+                .puts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn list_objects_delegates_to_overriding_backend() {
+        // A backend that overrides `ObjectStore::list` makes `list_objects`
+        // return real keys — proving the sink delegates to the backend's
+        // `list` instead of hardcoding `SinkError::Unsupported`, and that the
+        // sink's `key_prefix` is forwarded as the `list` argument.
+        use crate::planner::{Layout, PyramidPlanner};
+        use crate::sink::TileSink;
+
+        let store = Arc::new(ListingStore::default());
+        // Wrap the prefix in slashes: the write path trims them via
+        // `trim_matches('/')` before building keys, so `list_objects` must
+        // forward the same trimmed prefix ("run-1"), not the raw "/run-1/".
+        let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket")
+            .with_key_prefix("/run-1/")
+            .with_image_name("deleg")
+            .with_object_store(store.clone());
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom)
+            .expect("planner params are valid")
+            .plan();
+        let sink = ObjectStoreSink::new(cfg, plan, TileFormat::Png)
+            .expect("sink constructs once a backend is injected");
+
+        let tile = Tile {
+            coord: TileCoord::new(0, 0, 0),
+            raster: Raster::zeroed(256, 256, PixelFormat::Rgb8).unwrap(),
+            blank: false,
+        };
+        sink.write_tile(&tile).expect("tile upload succeeds");
+
+        let listed = sink
+            .list_objects()
+            .expect("list_objects delegates to the overriding backend");
+        assert_eq!(
+            listed,
+            vec!["run-1/deleg_files/0/0_0.png".to_string()],
+            "list_objects must return the keys the backend holds"
+        );
+
+        // The sink forwarded its configured key_prefix to the backend's `list`,
+        // *trimmed* to match the write path — the backend sees "run-1", not
+        // the raw "/run-1/".
+        assert_eq!(
+            store.last_prefix.lock().unwrap().as_deref(),
+            Some("run-1"),
+            "list_objects must delegate with the write-path-trimmed key_prefix"
+        );
+    }
+
+    /// The trait's *defaulted* `list` refuses loud on a write-only backend that
+    /// does not override it — the behaviour the sink used to hardcode now lives
+    /// on the trait.
+    #[test]
+    fn default_trait_list_refuses_loud() {
+        let store = RecordingStore::default();
+        let err = ObjectStore::list(&store, "any-prefix")
+            .expect_err("defaulted ObjectStore::list must refuse");
+        assert!(
+            matches!(err, SinkError::Unsupported(_)),
+            "expected SinkError::Unsupported, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("list_objects") && msg.contains("LIST"),
+            "default list error must name the operation and the missing transport: {msg}"
         );
     }
 }
