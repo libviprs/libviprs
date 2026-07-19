@@ -47,16 +47,30 @@
 //! on an `Rgba8` raster would paint the alpha band from the red byte). The
 //! panicking `Raster::draw_*` forms panic and the fallible `try_draw_*` forms
 //! return [`DrawError::InkLengthMismatch`] instead of silently corrupting
-//! channels. The built-in ops enforce the same check inside their
-//! [`apply`](DrawOp::apply), so the generic [`Raster::draw`]`(&op)` entry point
-//! and the op constructors ([`Circle`], [`Rectangle`], [`Line`], [`Flood`],
-//! [`Mask`]) are guarded too — a wrong-width ink there panics rather than
-//! painting garbage.
+//! channels. The two flood wrappers are the documented exception to that
+//! `draw_*`-panics / `try_draw_*`-returns split: [`Raster::draw_flood`] and
+//! [`Raster::draw_flood_blob`] are `draw_*`-named but inherently fallible — they
+//! also reject an off-canvas seed with [`DrawError::SeedOutOfBounds`] — so they
+//! return an ink mismatch as `Err(DrawError::InkLengthMismatch)` rather than
+//! panicking, and there is deliberately no `try_draw_flood`. The built-in ops
+//! enforce the same check inside their [`apply`](DrawOp::apply), so the generic
+//! [`Raster::draw`]`(&op)` entry point and the op constructors ([`Circle`],
+//! [`Rectangle`], [`Line`], [`Flood`], [`Mask`]) are guarded too — a wrong-width
+//! ink there panics rather than painting garbage.
+//!
+//! **Breaking change (from the pre-#294 drawing seam):** a shorter ink is no
+//! longer broadcast by the draw ops. Earlier versions cycled a too-short ink to
+//! fill the pixel, so a single-value ink such as `&[128]` painted a uniform
+//! shade on a multi-band raster; that silent cycle is the channel-corruption
+//! route the length check now closes, so a shorter ink is rejected (panic /
+//! `Err`) on every `draw_*` / `try_draw_*` / `draw(&op)` path. The only surface
+//! that still broadcasts is the raw [`Raster::put_pixel`] escape hatch below.
 //!
 //! The low-level [`Raster::put_pixel`] writer is the raw escape hatch: it
 //! copies ink verbatim, cycling if it is shorter than the pixel's byte width
 //! and truncating if longer, so custom [`DrawOp`]s that paint through it opt
-//! out of the length check.
+//! out of the length check — and it is the deliberate opt-in for the
+//! shorter-ink broadcast the draw ops no longer perform.
 //!
 //! # Example: a custom op
 //!
@@ -123,7 +137,10 @@ pub enum DrawError {
     /// band from the red byte — so a mismatch is rejected instead of drawing
     /// garbage. Paint through [`Raster::put_pixel`] to opt out of the check.
     #[error(
-        "ink of {ink_len} bytes does not match the {pixel_bytes}-byte pixel width of {format:?}"
+        "ink of {ink_len} bytes does not match the {pixel_bytes}-byte pixel width of {format:?}; \
+         a mismatched ink is no longer broadcast to fit (a shorter ink cycled, a longer one \
+         truncated) — supply exactly {pixel_bytes} bytes, or paint through Raster::put_pixel to \
+         opt into that broadcast"
     )]
     InkLengthMismatch {
         /// Length of the supplied ink slice, in bytes.
