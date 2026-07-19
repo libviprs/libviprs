@@ -75,6 +75,8 @@ pub mod histogram;
 pub mod imageio;
 pub(crate) mod level_walk;
 #[cfg(loom)]
+mod loom_checkpoint_dedupe;
+#[cfg(loom)]
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
