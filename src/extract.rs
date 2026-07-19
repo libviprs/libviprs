@@ -37,8 +37,9 @@
 //!   numeric (a `200` stays `200`), matching [`crate::bands`].
 //! * **Backgrounds.** `embed`, `gravity`, and the expanded area of `insert`
 //!   fill new pixels with black (all-zero samples) unless an extend mode or
-//!   background vector says otherwise. Background constants are rounded to
-//!   nearest and clamped to the sample depth (`0..=255` or `0..=65535`).
+//!   background vector says otherwise. Background constants are truncated
+//!   toward zero (matching libvips' `double`->integer cast) and clamped to
+//!   the sample depth (`0..=255` or `0..=65535`).
 //!   A background vector must have one entry (replicated across bands) or
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
@@ -272,13 +273,15 @@ fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
     }
 }
 
-/// Round and clamp an `f64` background constant into `0..=max`.
+/// Truncate (toward zero) and clamp an `f64` background constant into
+/// `0..=max`, matching the C `double`->integer cast libvips performs when
+/// it casts a background colour to the image format.
 #[inline]
 fn ink_value(v: f64, max: u32) -> u32 {
     if v.is_nan() {
         0
     } else {
-        v.round().clamp(0.0, max as f64) as u32
+        v.trunc().clamp(0.0, max as f64) as u32
     }
 }
 
@@ -1600,6 +1603,40 @@ mod tests {
                     "pixel ({x}, {y})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn insert_fractional_background_truncates_toward_zero() {
+        // Pinned against vips 8.18.4: a fractional --background is cast to the
+        // integer image format by truncation toward zero, NOT rounded to
+        // nearest.
+        //   vips insert main.v sub.v out.v 3 3 --expand --background <bg>
+        // with main/sub 1x1 gives gap pixels of 0 (bg=0.9), 1 (bg=1.5) and
+        // 199 (bg=199.5) for uchar; ushort bg=1000.5 gives 1000.
+        let main = gray(1, 1, vec![0]);
+        let sub = gray(1, 1, vec![0]);
+        for (bg, want) in [(0.9_f64, 0.0), (1.5, 1.0), (3.5, 3.0), (199.5, 199.0)] {
+            let out = main.try_insert(&sub, 3, 3, true, Some(&[bg])).unwrap();
+            assert_eq!(out.getpoint(1, 1), vec![want], "uchar bg={bg}");
+        }
+
+        let main16 = gray16(1, 1, &[0]);
+        let sub16 = gray16(1, 1, &[0]);
+        let out16 = main16
+            .try_insert(&sub16, 3, 3, true, Some(&[1000.5]))
+            .unwrap();
+        assert_eq!(out16.getpoint(1, 1), vec![1000.0], "ushort bg=1000.5");
+    }
+
+    #[test]
+    fn embed_fractional_background_truncates_toward_zero() {
+        // The ink helper is shared with embed; vips embed also truncates
+        // (bg=0.9->0, 1.5->1, 199.5->199), so pin it here too.
+        let im = gray(1, 1, vec![9]);
+        for (bg, want) in [(0.9_f64, 0.0), (1.5, 1.0), (199.5, 199.0)] {
+            let out = im.embed(1, 1, 3, 3, Extend::Background, Some(&[bg]));
+            assert_eq!(out.getpoint(0, 0), vec![want], "embed bg={bg}");
         }
     }
 
