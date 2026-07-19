@@ -130,16 +130,23 @@ fn alloc_zeroed_checked(
 /// already-validated input raster, using fallible allocation.
 ///
 /// Unlike [`alloc_zeroed_checked`], this does **not** re-impose the
-/// [`DEFAULT_MAX_ALLOC_BYTES`] budget. The size comes from an input that was
-/// already budget-checked when it was constructed, and a depth-promoting
-/// operation (for example 8-bit to `f32`, a 4x growth) legitimately produces
-/// an output larger than the input; re-applying the budget here would
-/// spuriously reject those legal outputs — and, at the panicking op forms,
-/// abort the process through the `.expect` that used to wrap [`Raster::new`].
-/// The allocation is still fallible via [`Vec::try_reserve_exact`], so a
-/// request the host cannot satisfy surfaces as [`RasterError::AllocationFailed`]
-/// (or [`RasterError::SizeOverflow`] for a length past `usize`) rather than
-/// aborting through `handle_alloc_error`.
+/// [`DEFAULT_MAX_ALLOC_BYTES`] budget. That budget is a backstop against
+/// *untrusted file-header dimensions* flowing straight into an allocation; an
+/// op output, by contrast, is derived from an input raster that was already
+/// budget-checked when it was constructed. A depth-promoting op (8-bit to
+/// `f32`) grows the byte size, and — note — a *band-expanding* op grows it
+/// further still: `recomb` produces one output band per matrix row (up to
+/// `u16::MAX`) and `complexform` doubles the band count, so an output is **not**
+/// bounded by any small multiple of its input. Re-applying the byte budget
+/// here would therefore spuriously reject legal large outputs (and, at the
+/// panicking op forms, abort through the `.expect` that used to wrap
+/// [`Raster::new`]).
+///
+/// Abort-safety does not depend on that budget: the allocation is fallible via
+/// [`Vec::try_reserve_exact`], so however large a band-expanding op makes the
+/// output, a request the host cannot satisfy surfaces as
+/// [`RasterError::AllocationFailed`] (or [`RasterError::SizeOverflow`] for a
+/// length past `usize`) rather than aborting through `handle_alloc_error`.
 pub(crate) fn alloc_op_output(
     width: u32,
     height: u32,
