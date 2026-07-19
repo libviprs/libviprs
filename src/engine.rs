@@ -828,10 +828,18 @@ struct EmitContext<'a> {
 /// increasing counter tracks how many tiles have been appended *since the
 /// last flush* so the "every N tiles" cadence can be implemented without
 /// poking the filesystem on every write.
-pub(crate) struct CheckpointState {
+pub(crate) struct CheckpointState<'a> {
     /// The directory where `.libviprs-job.json` lives — typically the sink's
     /// `base_dir`. Every call to [`CheckpointState::flush`] writes there.
     root: std::path::PathBuf,
+    /// The sink this checkpoint certifies. Before every flush appends a delta
+    /// to the segment log, [`CheckpointState::flush`] calls
+    /// [`TileSink::sync_pending`] on it so the tile bytes the delta certifies
+    /// are on stable storage first — closing the gap where a periodic
+    /// checkpoint recorded tiles still only in the page cache (issue #273).
+    /// Borrowed for the life of the run; the sink is already `Send + Sync` and
+    /// held for the whole run by the caller.
+    sink: &'a dyn TileSink,
     /// Running metadata. Only its small scalar fields (schema, plan hash,
     /// completed levels, timestamps, format) plus the fixed `inline` slice of
     /// coordinates are re-serialised into the header on every flush; the bulk
@@ -868,12 +876,13 @@ pub(crate) struct CheckpointState {
     checkpoint_every: u64,
 }
 
-impl CheckpointState {
+impl<'a> CheckpointState<'a> {
     fn new(
         root: std::path::PathBuf,
         meta: JobMetadata,
         _plan: &PyramidPlan,
         checkpoint_every: u64,
+        sink: &'a dyn TileSink,
     ) -> Self {
         // Coordinates already durable in the segment log occupy the front of
         // `completed_tiles` (see `JobCheckpoint::load`, which lists segment
@@ -889,6 +898,7 @@ impl CheckpointState {
         let inline_end = total;
         Self {
             root,
+            sink,
             meta: std::sync::Mutex::new(meta),
             inline_start,
             inline_end,
@@ -985,9 +995,19 @@ impl CheckpointState {
     /// marked after a successful write), so recovering them as completed is
     /// safe; a resume simply skips already-done work.
     ///
+    /// Tile durability (issue #273): before the delta is appended, the sink's
+    /// [`TileSink::sync_pending`] barrier is invoked so the tile bytes the
+    /// checkpoint is about to certify are on stable storage first. The delta is
+    /// snapshotted *before* the barrier so that every coordinate in it had its
+    /// tile path recorded (during `write_tile`, which precedes
+    /// `mark_tile_completed`) before the barrier drained the pending set —
+    /// guaranteeing the barrier fsyncs every tile this flush certifies, even
+    /// when a concurrent worker is writing more tiles.
+    ///
     /// The `seg_cursor` lock serialises concurrent flushes so two workers
     /// cannot interleave partial segment frames or double-append the same
-    /// delta.
+    /// delta, and so the snapshot → barrier → append sequence is atomic with
+    /// respect to other flushes.
     pub(crate) fn flush(&self) -> Result<(), ResumeError> {
         let mut cursor = crate::poison::recover(&self.seg_cursor);
 
@@ -1014,13 +1034,32 @@ impl CheckpointState {
             (header_meta, delta, len)
         };
 
-        // Append the delta first so its bytes are durable before the header
-        // that certifies the completed set is published.
+        // Make the tile bytes durable BEFORE certifying them. Every coordinate
+        // in `delta` had its tile path pushed onto the sink's unsynced set
+        // (during `write_tile`) before it was marked completed and thus before
+        // this snapshot, so draining the sink's pending set here fsyncs at least
+        // every tile the delta certifies (issue #273 / #277).
+        self.sink.sync_pending().map_err(sink_err_to_resume)?;
+
+        // Append the delta so its bytes are durable before the header that
+        // certifies the completed set is published.
         crate::resume::append_segments(&self.root, &delta, &crate::resume::RealDurability)
             .map_err(ResumeError::from)?;
         JobCheckpoint::save(&self.root, &header_meta).map_err(ResumeError::from)?;
         *cursor = new_cursor;
         Ok(())
+    }
+}
+
+/// Map a [`SinkError`] surfaced by the durability barrier into a
+/// [`ResumeError`] so [`CheckpointState::flush`] can fail with a single error
+/// type. The barrier only ever produces `SinkError::Io` in practice; anything
+/// else is folded into an I/O error so a durability failure still aborts the
+/// flush rather than being silently dropped.
+fn sink_err_to_resume(err: SinkError) -> ResumeError {
+    match err {
+        SinkError::Io(io) => ResumeError::Io(io),
+        other => ResumeError::Io(std::io::Error::other(other.to_string())),
     }
 }
 
@@ -1185,13 +1224,13 @@ pub(crate) fn resolve_checkpoint_root(cfg: &EngineConfig, sink: &dyn TileSink) -
 /// Build a `CheckpointState` rooted at the sink's checkpoint directory, or
 /// `None` if the sink does not expose a filesystem root (no on-disk
 /// checkpoint is possible in that case).
-pub(crate) fn cp_for_sink(
-    sink: &dyn TileSink,
+pub(crate) fn cp_for_sink<'a>(
+    sink: &'a dyn TileSink,
     plan: &PyramidPlan,
     config: &EngineConfig,
     completed_tiles: Vec<TileCoord>,
     levels_completed: Vec<u32>,
-) -> Option<CheckpointState> {
+) -> Option<CheckpointState<'a>> {
     let root = resolve_checkpoint_root(config, sink)?;
     let now = now_rfc3339_engine();
     let contract = crate::resume::PlanContract::from_engine(config, sink);
@@ -1209,6 +1248,7 @@ pub(crate) fn cp_for_sink(
         meta,
         plan,
         config.checkpoint_every,
+        sink,
     ))
 }
 
@@ -2235,7 +2275,8 @@ mod tests {
             .unwrap()
             .plan();
         let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
-        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 1);
+        let sink = MemorySink::new();
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 1, &sink);
 
         let header = dir.path().join(CHECKPOINT_FILENAME);
 
@@ -2260,6 +2301,74 @@ mod tests {
         assert!(loaded.completed_tiles.len() >= 5_000);
     }
 
+    /// Issue #273 / #277: every periodic checkpoint flush must make the tile
+    /// bytes it is about to certify durable BEFORE it appends the delta to the
+    /// segment log. The engine's `CheckpointState` is the single checkpoint
+    /// authority, and it drives durability through the sink's
+    /// [`TileSink::sync_pending`] barrier.
+    ///
+    /// A probe sink records, on each barrier, how many frames the on-disk
+    /// segment log already holds. With `checkpoint_every = 1` a flush fires per
+    /// tile, so the barrier for the k-th tile must observe exactly `k` prior
+    /// frames — never the frame it is certifying (that append happens *after*
+    /// the barrier). RED before the fix: `flush` never called the barrier, so
+    /// the probe recorded nothing. GREEN after: the recorded sequence is
+    /// `[0, 1, 2, ...]`, proving barrier-before-append ordering.
+    #[test]
+    fn flush_syncs_sink_before_certifying_delta() {
+        use crate::resume::{JobCheckpoint, JobMetadata};
+        use crate::sink::{SinkError, Tile, TileSink};
+        use std::sync::Mutex;
+
+        struct FrameProbeSink {
+            segments_path: std::path::PathBuf,
+            observed: Mutex<Vec<usize>>,
+        }
+        impl TileSink for FrameProbeSink {
+            fn write_tile(&self, _tile: &Tile) -> Result<(), SinkError> {
+                Ok(())
+            }
+            fn sync_pending(&self) -> Result<(), SinkError> {
+                let frames = crate::resume::count_segment_frames(&self.segments_path).unwrap_or(0);
+                self.observed.lock().unwrap().push(frames);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = PyramidPlanner::new(64, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
+        let sink = FrameProbeSink {
+            segments_path: JobCheckpoint::segments_path(dir.path()),
+            observed: Mutex::new(Vec::new()),
+        };
+        // checkpoint_every = 1 => a flush (and thus a durability barrier) per
+        // completed tile.
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 1, &sink);
+
+        cp.mark_tile_completed(TileCoord::new(0, 0, 0)).unwrap();
+        cp.mark_tile_completed(TileCoord::new(0, 1, 0)).unwrap();
+        cp.mark_tile_completed(TileCoord::new(0, 0, 1)).unwrap();
+
+        let observed = sink.observed.lock().unwrap().clone();
+        assert!(
+            !observed.is_empty(),
+            "the durability barrier was never invoked during flush (issue #273)"
+        );
+        assert_eq!(
+            observed,
+            vec![0, 1, 2],
+            "each durability barrier must run before its delta is appended to the \
+             segment log; observed frame counts at barrier time: {observed:?}"
+        );
+
+        // The segment log ends with all three coordinates certified.
+        let loaded = JobCheckpoint::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.completed_tiles.len(), 3);
+    }
+
     /// Reproducer for #117: a poisoned checkpoint-`meta` lock must not cascade
     /// a second panic into every later `mark_tile_completed` — which, on the
     /// write path, would also abort the final checkpoint flush. We poison the
@@ -2277,7 +2386,8 @@ mod tests {
         let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
         // checkpoint_every = 0 keeps the test off the disk-flush path so it
         // isolates the in-memory `meta` lock recovery.
-        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 0);
+        let sink = MemorySink::new();
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 0, &sink);
 
         cp.mark_tile_completed(TileCoord::new(0, 0, 0)).unwrap();
 
@@ -2360,7 +2470,8 @@ mod tests {
         let meta = JobMetadata::new("deadbeef".to_string(), "1970-01-01T00:00:00Z".into());
         // checkpoint_every == 0 keeps this a pure in-memory bookkeeping test
         // (no intermediate disk flushes).
-        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 0);
+        let sink = MemorySink::new();
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, 0, &sink);
 
         // Enumerate every tile of the level, then hold one back — emulating a
         // tile dropped by `FailurePolicy::RetryThenSkip`, which records the
@@ -2428,37 +2539,30 @@ mod tests {
         let total = THREADS * PER_THREAD;
         let expected = total / EVERY;
 
-        let cp = Arc::new(CheckpointState::new(
-            dir.path().to_path_buf(),
-            meta,
-            &plan,
-            EVERY,
-        ));
+        // `CheckpointState` now borrows the sink for the run, so it is no longer
+        // `'static`; use scoped threads (which can borrow it and the local
+        // counters) instead of `thread::spawn` + `Arc`.
+        let sink = MemorySink::new();
+        let cp = CheckpointState::new(dir.path().to_path_buf(), meta, &plan, EVERY, &sink);
         // Count cadence boundaries directly off the atomic decision so the
         // stress loop stays in-memory (no per-tile disk flush) and hammers the
         // exact increment path that raced. All threads start together to
         // maximise contention on the shared counter.
-        let boundaries = Arc::new(AtomicU64::new(0));
-        let barrier = Arc::new(Barrier::new(THREADS as usize));
+        let boundaries = AtomicU64::new(0);
+        let barrier = Barrier::new(THREADS as usize);
 
-        let handles: Vec<_> = (0..THREADS)
-            .map(|_| {
-                let cp = Arc::clone(&cp);
-                let boundaries = Arc::clone(&boundaries);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
+        std::thread::scope(|s| {
+            for _ in 0..THREADS {
+                s.spawn(|| {
                     barrier.wait();
                     for _ in 0..PER_THREAD {
                         if cp.cadence_reached() {
                             boundaries.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
+                });
+            }
+        });
 
         let hit = boundaries.load(Ordering::Relaxed);
         assert_eq!(

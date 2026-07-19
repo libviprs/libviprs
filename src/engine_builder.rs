@@ -1322,15 +1322,15 @@ fn resolve_engine_kind(
 ///   build the skip set from its `completed_tiles`. Surfaces
 ///   [`EngineError::PlanHashMismatch`] when the on-disk checkpoint was
 ///   produced from a different plan.
-fn prepare_resume_state(
-    sink: &dyn TileSink,
+fn prepare_resume_state<'a>(
+    sink: &'a dyn TileSink,
     plan: &PyramidPlan,
     config: &EngineConfig,
     mode: ResumeMode,
 ) -> Result<
     (
         std::collections::HashSet<crate::planner::TileCoord>,
-        Option<crate::engine::CheckpointState>,
+        Option<crate::engine::CheckpointState<'a>>,
     ),
     EngineError,
 > {
@@ -1372,10 +1372,11 @@ fn prepare_resume_state(
             }
             let cp = crate::engine::cp_for_sink(sink, plan, config, Vec::new(), Vec::new());
             if cp.is_some() {
-                // The engine's CheckpointState is now the checkpoint writer for
-                // this run; tell the sink not to publish its own copy too
-                // (issue #124).
-                sink.suppress_own_checkpoint();
+                // The engine's CheckpointState is the single checkpoint writer
+                // for this run (issue #277). Arm the sink's durability tracking
+                // so its tile writes are recorded for the checkpoint's
+                // `sync_pending` barrier (issue #273).
+                sink.arm_durability_tracking();
             }
             Ok((std::collections::HashSet::new(), cp))
         }
@@ -1403,10 +1404,11 @@ fn prepare_resume_state(
                 completed.iter().copied().collect();
             let cp = crate::engine::cp_for_sink(sink, plan, config, completed, levels);
             if cp.is_some() {
-                // The engine's CheckpointState is now the checkpoint writer for
-                // this run; tell the sink not to publish its own copy too
-                // (issue #124).
-                sink.suppress_own_checkpoint();
+                // The engine's CheckpointState is the single checkpoint writer
+                // for this run (issue #277). Arm the sink's durability tracking
+                // so its tile writes are recorded for the checkpoint's
+                // `sync_pending` barrier (issue #273).
+                sink.arm_durability_tracking();
             }
             Ok((skip, cp))
         }
@@ -1434,7 +1436,7 @@ mod resume {
     pub(super) struct ResumeAwareSink<'a> {
         pub(super) inner: &'a dyn TileSink,
         pub(super) skip: &'a HashSet<TileCoord>,
-        pub(super) cp: Option<&'a CheckpointState>,
+        pub(super) cp: Option<&'a CheckpointState<'a>>,
         /// Running count of skipped writes, used after `.run()` to adjust
         /// [`crate::engine::EngineResult::tiles_produced`] down so that
         /// callers see "tiles actually written this run" rather than
@@ -1452,7 +1454,7 @@ mod resume {
         pub(super) fn new(
             inner: &'a dyn TileSink,
             skip: &'a HashSet<TileCoord>,
-            cp: Option<&'a CheckpointState>,
+            cp: Option<&'a CheckpointState<'a>>,
         ) -> Self {
             Self {
                 inner,
@@ -2055,23 +2057,24 @@ mod checkpoint_durability_tests {
         }
     }
 
-    /// Issue #124: a resume run must have exactly one component write the
-    /// checkpoint file. The engine's `CheckpointState` is that writer, so when
-    /// an `FsSink` (which has its own resume-checkpoint writer) is driven by
-    /// the builder, the sink must NOT also publish its own `.libviprs-job.json`.
+    /// Issue #273 / #277: a builder-driven resume run must (a) have exactly one
+    /// component write the checkpoint — the engine's `CheckpointState`, never
+    /// the sink — and (b) still fsync tile data, even though the sink is a
+    /// PLAIN `FsSink` the caller never flagged for resume. The builder arms the
+    /// sink's durability tracking automatically, and the engine's checkpoint
+    /// barrier fsyncs the tile files.
     ///
-    /// A directory fsync of the sink's base dir is how `FsSink::finish`
-    /// publishes its checkpoint (via `JobCheckpoint::save_with`). We inject a
-    /// counting durability into the sink and assert that, after a builder-driven
-    /// resume run, the sink issued zero directory fsyncs (it published nothing)
-    /// while still fsyncing tile data (issue #122 preserved). The checkpoint
-    /// nonetheless exists and records every tile, proving the engine's writer
-    /// is the single, complete source.
+    /// We inject a counting durability into the sink and assert that, after a
+    /// builder-driven resume run, the sink issued zero directory fsyncs (it
+    /// publishes no checkpoint of its own) while its tile-data fsyncs are
+    /// non-zero (the durability barrier ran). The checkpoint nonetheless exists
+    /// and records every tile, proving the engine's writer is the single,
+    /// complete source.
     ///
-    /// Before the fix the sink also wrote the checkpoint, so its counting
-    /// durability recorded a directory fsync of the base dir (RED). After the
-    /// fix the builder suppresses the sink's writer, so that count is zero
-    /// (GREEN).
+    /// RED before the fix: a plain builder-path `FsSink` was never told to
+    /// track or fsync anything (`resume_enabled` stayed false and the builder
+    /// never set it), so `recorder.files` was zero. GREEN after: the builder
+    /// arms durability tracking and the checkpoint barrier fsyncs every tile.
     #[test]
     fn resume_run_has_single_checkpoint_writer() {
         use crate::sink::{FsSink, TileFormat};
@@ -2089,14 +2092,15 @@ mod checkpoint_durability_tests {
         let base = dir.path().join("out_files");
 
         let recorder = Arc::new(SyncCounter::default());
+        // A PLAIN FsSink: the caller does NOT flag it for resume. The builder
+        // arms durability tracking on its own (the #273 regression was that it
+        // did not, so the builder path never fsynced tiles).
         let sink = FsSink::new(base.clone(), plan.clone())
             .with_format(TileFormat::Raw)
-            .with_resume(true)
             .with_durability(recorder.clone());
 
         // A very coarse cadence guarantees no periodic flush fires: only the
-        // builder's terminal `CheckpointState::flush` and (pre-fix) the sink's
-        // own `finish` writer could publish, isolating the double-write.
+        // builder's terminal `CheckpointState::flush` publishes and fsyncs.
         EngineBuilder::new(&source, plan.clone(), sink)
             .with_resume(ResumePolicy::resume().with_checkpoint_every(1_000_000))
             .run_collect()
@@ -2105,12 +2109,13 @@ mod checkpoint_durability_tests {
         assert_eq!(
             recorder.dirs.load(Ordering::Relaxed),
             0,
-            "the sink must not publish its own checkpoint (directory fsync) when \
-             the engine's CheckpointState is the writer (issue #124)"
+            "the sink must not publish its own checkpoint (directory fsync); the \
+             engine's CheckpointState is the sole writer (issue #277)"
         );
         assert!(
             recorder.files.load(Ordering::Relaxed) > 0,
-            "the sink must still fsync tile data before the checkpoint (issue #122)"
+            "the builder must arm durability tracking so tile data is fsynced \
+             before the checkpoint certifies it (issue #273)"
         );
 
         // The engine's writer is the single, complete source of the checkpoint.
