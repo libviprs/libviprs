@@ -362,6 +362,41 @@ fn op_output_or_panic(width: u32, height: u32, format: PixelFormat) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("arithmetic output allocation failed: {e}"))
 }
 
+/// Allocate a zero-filled scratch buffer of `len` elements fallibly.
+///
+/// Several `try_*` ops build intermediate buffers far larger than their
+/// output: the [`Raster::try_stdif`] integral images (two `f64` buffers,
+/// each ~8x a Gray8 input) and the [`Raster::try_hough_circle`] vote
+/// accumulator (`w * h * radii` `u32`s — twice the output and sized by the
+/// caller-controlled radius range). PR #339 made only the *output*
+/// allocation fallible ([`alloc_op_output`], issue #280) but left these
+/// dominant scratch buffers as infallible `vec![..]`, so an over-capacity
+/// size still reached `handle_alloc_error` and aborted the process (SIGABRT)
+/// before the fallible output path ever ran — the exact remote-DoS abort
+/// #280 set out to remove (issues #433 / #434 / #435).
+///
+/// Routing the scratch through [`Vec::try_reserve_exact`] surfaces an
+/// unsatisfiable request as [`RasterError::AllocationFailed`], so the `try_*`
+/// op returns a typed `Err` (and its panicking form panics) instead of
+/// aborting. `width` / `height` name the driving raster for the error; the
+/// reported byte count is `len * size_of::<T>()`.
+fn try_scratch<T: Clone>(
+    width: u32,
+    height: u32,
+    len: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut v: Vec<T> = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes: len.saturating_mul(std::mem::size_of::<T>()),
+        })?;
+    v.resize(len, fill);
+    Ok(v)
+}
+
 /// Write `v` as the flat `i`-th native-endian `f32` sample.
 #[inline]
 fn write_f32(data: &mut [u8], i: usize, v: f64) {
@@ -1199,7 +1234,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
-    /// one element per band.
+    /// one element per band, or [`ArithmeticError::FloatUnsupported`] if the
+    /// input is a float raster (this integer op rounds and saturates into an
+    /// unsigned output).
     pub fn try_add_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
         vec_map("add_vec", self, v, 2, |s, c| s + c)
     }
@@ -1220,7 +1257,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
-    /// one element per band.
+    /// one element per band, or [`ArithmeticError::FloatUnsupported`] if the
+    /// input is a float raster (this integer op rounds and saturates into an
+    /// unsigned output).
     pub fn try_sub_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
         vec_map(
             "sub_vec",
@@ -1247,7 +1286,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
-    /// one element per band.
+    /// one element per band, or [`ArithmeticError::FloatUnsupported`] if the
+    /// input is a float raster (this integer op rounds and saturates into an
+    /// unsigned output).
     pub fn try_mul_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
         vec_map("mul_vec", self, v, 2, |s, c| s * c)
     }
@@ -1395,7 +1436,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
-    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
     pub fn try_sub(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
         binary_map("sub", self, other, false, |a, b| a - b)
     }
@@ -1517,7 +1560,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
-    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
     pub fn try_mul(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
         binary_map("mul", self, other, true, |a, b| a * b)
     }
@@ -1564,7 +1609,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
-    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
     pub fn try_minpair(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
         binary_map("minpair", self, other, false, f64::min)
     }
@@ -1586,7 +1633,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ArithmeticError::DimensionMismatch`] or
-    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
     pub fn try_maxpair(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
         binary_map("maxpair", self, other, false, f64::max)
     }
@@ -1995,9 +2044,17 @@ impl Raster {
 
         // Integral images per band: s[y][x] holds the sum over the
         // rectangle [0, x) x [0, y), so any window sum is four lookups.
+        // These two f64 buffers dwarf the output (~16x a Gray8 input), so
+        // they allocate fallibly — an over-capacity size returns a typed
+        // error rather than aborting through `handle_alloc_error` (#435).
         let stride = w + 1;
-        let mut s = vec![0.0f64; stride * (h + 1)];
-        let mut s2 = vec![0.0f64; stride * (h + 1)];
+        let scratch_len = stride.checked_mul(h + 1).ok_or(RasterError::SizeOverflow {
+            width: self.width(),
+            height: self.height(),
+            bpp: 8,
+        })?;
+        let mut s = try_scratch(self.width(), self.height(), scratch_len, 0.0f64)?;
+        let mut s2 = try_scratch(self.width(), self.height(), scratch_len, 0.0f64)?;
         for band in 0..bands {
             for y in 0..h {
                 for x in 0..w {
@@ -2618,7 +2675,20 @@ impl Raster {
         let (w, h) = (self.width() as usize, self.height() as usize);
         let data = self.data();
 
-        let mut acc = vec![0u32; w * h * radii];
+        // The vote accumulator is `radii` bands deep — twice the output and
+        // sized by the caller-controlled radius range — so it dominates the
+        // op's memory. Allocate it fallibly: an over-capacity range returns a
+        // typed error rather than aborting through `handle_alloc_error`, which
+        // making only the output fallible left open (#433 / #434).
+        let acc_len = w
+            .checked_mul(h)
+            .and_then(|wh| wh.checked_mul(radii))
+            .ok_or(RasterError::SizeOverflow {
+                width: self.width(),
+                height: self.height(),
+                bpp: radii.saturating_mul(4),
+            })?;
+        let mut acc = try_scratch(self.width(), self.height(), acc_len, 0u32)?;
         {
             let mut vote = |cx: i32, cy: i32, band: usize, votes: u32| {
                 if cx >= 0 && cy >= 0 && (cx as usize) < w && (cy as usize) < h {
