@@ -12,10 +12,16 @@
 //!   arguments; and
 //! * a panicking convenience method matching the ported-test call surface
 //!   (`sub`, `add_vec`, `recomb`, ...) exactly, delegating to the `try_*`
-//!   form.
+//!   form and `expect`ing the result.
 //!
-//! Operations with no argument validation (reductions, constant ops) have
-//! only the direct form.
+//! The integer constant family (`add_const`, `sub_const`, `mul_const`,
+//! `floordiv_const`, `pow_const`, `rem_const`) follows this convention too:
+//! it rounds and saturates into an unsigned output and so rejects float
+//! input, a data-dependent failure surfaced by the `try_*_const` forms
+//! (libviprs#281). Operations that genuinely cannot fail on caller input —
+//! the whole-image reductions and the float-output family that accepts every
+//! depth ([`Raster::div_const`], [`Raster::linear`]) — have only the single
+//! infallible form.
 //!
 //! # Operations
 //!
@@ -676,6 +682,39 @@ fn unary_map(r: &Raster, out_bpc: usize, f: impl Fn(f64) -> f64) -> Raster {
     stamp_source_interpretation(out, r)
 }
 
+/// Fallible twin of [`unary_map`]: apply `f` samplewise at `out_bpc` depth,
+/// returning a typed error instead of panicking. `op` names the caller for the
+/// [`ArithmeticError::FloatUnsupported`] error.
+///
+/// This is the shared body of the constant-arithmetic `try_*` forms
+/// (`try_add_const`, `try_rem_const`, ...); their panicking twins are
+/// [`unary_map`] callers via [`expect_arith`]. It rejects float input up front
+/// (the integer ops round-and-saturate into an unsigned output, which a float
+/// raster has no representable result for) and routes allocation through the
+/// fallible [`alloc_op_output`], so an over-capacity output returns
+/// [`RasterError::AllocationFailed`] rather than aborting.
+fn try_unary_map(
+    op: &'static str,
+    r: &Raster,
+    out_bpc: usize,
+    f: impl Fn(f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    reject_float_input(op, r)?;
+    let fmt = r.format();
+    let bands = fmt.channels();
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = format_for(bands, out_bpc)?;
+    let n = r.width() as usize * r.height() as usize * bands;
+    let max = depth_max(out_bpc);
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
+    let data = r.data();
+    for i in 0..n {
+        write_f64(&mut out, out_bpc, i, f(read_f64(data, in_bpc, i)), max);
+    }
+    let out = Raster::from_op_output(r.width(), r.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, r))
+}
+
 /// Apply integer `f` to every sample, keeping the input depth. `f` results
 /// are masked into the depth by the caller-provided closure contract.
 fn unary_map_u32(r: &Raster, f: impl Fn(u32) -> u32) -> Raster {
@@ -1275,8 +1314,24 @@ impl Raster {
 
     /// Add a constant to every sample (libvips `linear` with `a = 1`).
     /// 8-bit input promotes to 16-bit so sums above 255 survive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_add_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map("add_const", self, 2, move |v| v + c)
+    }
+
+    /// Panicking form of [`Raster::try_add_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_add_const`].
+    #[track_caller]
     pub fn add_const(&self, c: f64) -> Raster {
-        unary_map(self, 2, |v| v + c)
+        expect_arith("add_const", self.try_add_const(c))
     }
 
     /// Subtract a constant from every sample, saturating at `0`.
@@ -1286,14 +1341,51 @@ impl Raster {
     /// differs from image-image [`Raster::sub`], which floats its output and
     /// preserves negative differences (libviprs#282, matching `vips_subtract`'s
     /// promotion to signed `short`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_sub_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map(
+            "sub_const",
+            self,
+            self.format().bytes_per_channel(),
+            move |v| v - c,
+        )
+    }
+
+    /// Panicking form of [`Raster::try_sub_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_sub_const`].
+    #[track_caller]
     pub fn sub_const(&self, c: f64) -> Raster {
-        unary_map(self, self.format().bytes_per_channel(), |v| v - c)
+        expect_arith("sub_const", self.try_sub_const(c))
     }
 
     /// Multiply every sample by a constant. 8-bit input promotes to 16-bit
     /// so products above 255 survive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_mul_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map("mul_const", self, 2, move |v| v * c)
+    }
+
+    /// Panicking form of [`Raster::try_mul_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_mul_const`].
+    #[track_caller]
     pub fn mul_const(&self, c: f64) -> Raster {
-        unary_map(self, 2, |v| v * c)
+        expect_arith("mul_const", self.try_mul_const(c))
     }
 
     /// Divide every sample by a constant. The output is a float raster,
@@ -1313,24 +1405,78 @@ impl Raster {
     /// representable at the input depth, so the sample values match the
     /// pyvips float result exactly and the integer format serves the
     /// index-building callers ([`crate::histogram`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_floordiv_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map(
+            "floordiv_const",
+            self,
+            self.format().bytes_per_channel(),
+            move |v| if c == 0.0 { 0.0 } else { (v / c).floor() },
+        )
+    }
+
+    /// Panicking form of [`Raster::try_floordiv_const`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_floordiv_const`].
+    #[track_caller]
     pub fn floordiv_const(&self, c: f64) -> Raster {
-        unary_map(self, self.format().bytes_per_channel(), move |v| {
-            if c == 0.0 { 0.0 } else { (v / c).floor() }
-        })
+        expect_arith("floordiv_const", self.try_floordiv_const(c))
     }
 
     /// Raise every sample to a power. 8-bit input promotes to 16-bit;
     /// results saturate at the output depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_pow_const(&self, exp: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map("pow_const", self, 2, move |v| v.powf(exp))
+    }
+
+    /// Panicking form of [`Raster::try_pow_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_pow_const`].
+    #[track_caller]
     pub fn pow_const(&self, exp: f64) -> Raster {
-        unary_map(self, 2, move |v| v.powf(exp))
+        expect_arith("pow_const", self.try_pow_const(exp))
     }
 
     /// Remainder of every sample divided by a constant (libvips
     /// `remainder_const`); a zero divisor produces `0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_rem_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map(
+            "rem_const",
+            self,
+            self.format().bytes_per_channel(),
+            move |v| if c == 0.0 { 0.0 } else { v % c },
+        )
+    }
+
+    /// Panicking form of [`Raster::try_rem_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_rem_const`].
+    #[track_caller]
     pub fn rem_const(&self, c: f64) -> Raster {
-        unary_map(self, self.format().bytes_per_channel(), move |v| {
-            if c == 0.0 { 0.0 } else { v % c }
-        })
+        expect_arith("rem_const", self.try_rem_const(c))
     }
 
     /// `a * sample + b` for every sample (libvips `linear`). The output
@@ -4207,9 +4353,12 @@ mod tests {
     /// The integer-writing arithmetic ops still reject float rasters
     /// loudly instead of writing garbage (the linear / divide family
     /// floats; cast to an unsigned format first for the rest). The
-    /// read-only reductions accept floats since the create batch.
+    /// read-only reductions accept floats since the create batch. The
+    /// panicking constant forms now delegate to their `try_*_const` twin,
+    /// so the diagnostic is the typed [`ArithmeticError::FloatUnsupported`]
+    /// message, which names the op (libviprs#281).
     #[test]
-    #[should_panic(expected = "do not support float rasters")]
+    #[should_panic(expected = "does not support float rasters")]
     fn arithmetic_float_write_panics() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();

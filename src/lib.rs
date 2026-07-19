@@ -41,6 +41,50 @@
 //! - **`packfile`** — gates [`PackfileSink`] for writing tiles into tar or zip
 //!   archives.
 //!
+//! ## Error handling and the dual API
+//!
+//! Image operations come in two forms, and this pairing is a deliberate design
+//! choice rather than incidental duplication:
+//!
+//! - a **fallible** `try_*` method returning `Result<_, `*module*`Error>` —
+//!   the primary form for production code, surfacing data-dependent failures
+//!   (dimension / band-count mismatches, float input to an integer op,
+//!   out-of-range indices) as typed errors; and
+//! - a **panicking** short name (`add`, `sub`, `rem_const`, ...) that delegates
+//!   to the `try_*` form and `expect`s the result — an ergonomic convenience
+//!   for tests, examples, and call sites where the inputs are statically known
+//!   to be valid. Each carries a `# Panics` section naming exactly what its
+//!   fallible twin rejects.
+//!
+//! Operations that cannot fail on the value domain — the whole-image
+//! reductions and the float-output `linear` / `div` family
+//! ([`Raster::div_const`], [`Raster::linear`], [`Raster::linear_uchar`]),
+//! which accept every input depth and always produce a representable result —
+//! expose only the single infallible form.
+//!
+//! "Cannot fail on the value domain" is the exact claim, and it is narrower
+//! than "cannot fail". These infallible forms still allocate a
+//! dimension-sized output, and having no error channel they *panic* when the
+//! allocator cannot satisfy that request — an oversized-raster failure driven
+//! by the image dimensions, never by the sample values. Their `# Panics`
+//! contract is therefore the same allocation panic the panicking twins carry;
+//! only the value-domain path is guaranteed infallible.
+//!
+//! Each op module owns a typed error enum ([`ArithmeticError`], [`BandError`],
+//! ...), which keeps a single-family caller's error surface tight. A caller
+//! *composing* several families can funnel them all through the
+//! `#[non_exhaustive]` crate-level [`OpError`] umbrella and lean on `?` without
+//! bespoke mapping glue (see the [`error`] module).
+//!
+//! The umbrella's boundary is deliberate, not exhaustive: it carries a
+//! `#[from]` conversion for each **in-memory pixel-transform** op-family error
+//! (arithmetic, bands, colour, composite, convolution, conversion, create,
+//! draw, extract, freqfilt, histogram, matrix, morphology, mosaicing, resample,
+//! plus the core [`Raster`] error). The I/O, codec, and pipeline error families
+//! (source / sink / save / metadata, encode, engine / planner / resume /
+//! manifest) are intentionally **excluded** — they belong to different call
+//! surfaces than the pixel-transform ops and are not funnelled here.
+//!
 //! ## Examples
 //!
 //! See the [libviprs-tests](https://github.com/libviprs/libviprs-tests) repository
@@ -68,6 +112,7 @@ pub mod encode;
 pub mod encode_tiff;
 pub mod engine;
 pub mod engine_builder;
+pub mod error;
 pub mod extensions;
 pub mod extract;
 pub mod foreign_stubs;
@@ -140,6 +185,7 @@ pub use engine::{
     generate_pyramid_region, is_blank_tile,
 };
 pub use engine_builder::{EngineBuilder, EngineKind, EngineSource, IntoEngineSource};
+pub use error::OpError;
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
 // The deferred foreign-format free functions and options are re-exported at
 // the root because the ported foreign cell reaches them there
