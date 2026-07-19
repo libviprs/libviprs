@@ -523,8 +523,31 @@ impl MemorySink {
         }
     }
 
+    /// Return an owned snapshot of every collected tile.
+    ///
+    /// This **clones** the entire `Vec<CollectedTile>`, including every tile's
+    /// pixel bytes, on each call — so repeated progress polling is
+    /// O(pyramid bytes) per poll. When you only need to *read* the collected
+    /// tiles (count them, sum their sizes, inspect coordinates), prefer the
+    /// borrowing [`MemorySink::with_tiles`] accessor, which copies nothing.
+    /// Keep using `tiles()` when you genuinely need owned data to sort or
+    /// retain past the borrow.
     pub fn tiles(&self) -> Vec<CollectedTile> {
         crate::poison::recover(&self.tiles).clone()
+    }
+
+    /// Borrow the collected tiles in place, without cloning them.
+    ///
+    /// Runs `f` while holding the internal lock and hands it a borrowed slice
+    /// of the collected tiles, so no pixel data is copied — the cheap
+    /// counterpart to [`MemorySink::tiles`] for read-only inspection and
+    /// progress polling.
+    ///
+    /// The closure must not call back into the same sink (`write_tile`,
+    /// `tiles`, `tile_count`, or `with_tiles`): that would deadlock on the
+    /// `Mutex` this method holds for the duration of `f`.
+    pub fn with_tiles<R>(&self, f: impl FnOnce(&[CollectedTile]) -> R) -> R {
+        f(&crate::poison::recover(&self.tiles))
     }
 
     pub fn tile_count(&self) -> usize {
@@ -552,7 +575,7 @@ impl TileSink for MemorySink {
 }
 
 // ---------------------------------------------------------------------------
-// SlowSink (testing)
+// SlowSink (test double)
 // ---------------------------------------------------------------------------
 
 /// A sink that artificially delays every `write_tile` call by a fixed duration.
@@ -561,16 +584,25 @@ impl TileSink for MemorySink {
 /// to test backpressure and concurrency behaviour in the engine: by making the
 /// sink slow, you can verify that the engine correctly limits in-flight work.
 ///
+/// This is a **test double**, not part of the production public API: a sink
+/// that deliberately sleeps has no use to real callers. It is therefore gated
+/// behind `cfg(test)` (for this crate's own unit tests) and the `test-util`
+/// Cargo feature (for out-of-crate stress suites such as `libviprs-tests`,
+/// which never see `cfg(test)`). A default build does not expose it.
+///
 /// # Examples
 ///
 /// See [stress tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/stress.rs)
 /// for backpressure scenarios.
+#[cfg(any(test, feature = "test-util"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 #[derive(Debug)]
 pub struct SlowSink {
     inner: MemorySink,
     delay: std::time::Duration,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl SlowSink {
     pub fn new(delay: std::time::Duration) -> Self {
         Self {
@@ -588,6 +620,7 @@ impl SlowSink {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl TileSink for SlowSink {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
         std::thread::sleep(self.delay);

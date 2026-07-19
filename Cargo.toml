@@ -183,6 +183,15 @@ packfile = ["dep:tar", "dep:zip"]
 # internally), so this feature adds no dependencies; it only widens the
 # public API surface, keeping the default build's API unchanged.
 serde = []
+# Exposes the crate's test-only sink doubles (currently `SlowSink`, a sink that
+# sleeps in `write_tile` to exercise engine backpressure/timing) to *dependent*
+# crates — chiefly the external `libviprs-tests` stress suite. These doubles are
+# compiled for the crate's own unit tests unconditionally (via `cfg(test)`), but
+# a dependent crate never sees `cfg(test)`, so this feature is what makes them
+# reachable there. They are intentionally kept out of the default public API:
+# production callers have no use for a sink that deliberately sleeps, and
+# shipping it unconditionally invites accidental use. Adds no dependencies.
+test-util = []
 
 [dependencies]
 ab_glyph = { workspace = true }

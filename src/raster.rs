@@ -190,6 +190,15 @@ fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError>
 /// Use [`Raster::region`] for zero-copy sub-region access or [`Raster::extract`]
 /// to copy a sub-rectangle into a new `Raster`.
 ///
+/// # Cloning
+///
+/// `Raster` derives [`Clone`], but cloning is **not** cheap.
+/// Cloning copies the entire owned pixel buffer, which for a full-resolution
+/// image can be multiple gigabytes, so a stray `.clone()` duplicates the whole
+/// image in memory. Pass `&Raster` and use [`Raster::region`] for zero-copy
+/// views wherever possible, and reach for `.clone()` only when you genuinely
+/// need a second owned copy.
+///
 /// # Example usage
 ///
 /// * [pdf_to_pyramid tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/pdf_to_pyramid.rs)
