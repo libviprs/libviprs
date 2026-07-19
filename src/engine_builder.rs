@@ -756,14 +756,41 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         //     threaded into engine_cfg before prepare_resume_state runs.
         //   * cp.flush() runs on every non-Verify success; Verify is
         //     read-only and has no checkpoint to persist.
-        if let Some(policy) = resume {
+        // Resume invariant (issue #290): thread the checkpoint cadence / root
+        // onto the config BEFORE any dispatch, so `prepare_resume_state`,
+        // `cp_for_sink`, the Verify helpers, and every engine driver all observe
+        // them. A `None` resume leaves the config untouched, so the plain path
+        // below is unaffected.
+        if let Some(policy) = &resume {
             if policy.checkpoint_every() > 0 {
                 engine_cfg = engine_cfg.with_checkpoint_every(policy.checkpoint_every());
             }
             if let Some(root) = policy.checkpoint_root() {
                 engine_cfg = engine_cfg.with_checkpoint_root(root.to_path_buf());
             }
+        }
 
+        // The single (EngineKind × EngineSource) render dispatch, shared by the
+        // plain and resume paths (issue #290). Built once — after the checkpoint
+        // knobs are threaded and before either path runs — so the ~10-arm match
+        // and the eight verbatim `build_mapreduce_config` calls live in ONE place
+        // (`RenderDispatch::run`) instead of a copy per path. A new engine kind or
+        // source is now a single-site edit.
+        let dispatch = RenderDispatch {
+            plan: &plan,
+            engine_cfg: &engine_cfg,
+            observer: observer_ref,
+            executor: executor_ref,
+            memory_budget_bytes,
+            budget_policy,
+            concurrency,
+            buffer_size,
+            background_rgb,
+            blank_strategy,
+            cancel: cancel.clone(),
+        };
+
+        if let Some(policy) = &resume {
             if matches!(kind, EngineKind::Monolithic) && matches!(source, EngineSource::Strip(_)) {
                 return Err(EngineError::IncompatibleSource {
                     kind: EngineKind::Monolithic,
@@ -771,49 +798,12 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 });
             }
 
-            // Verify: read-only, no skip set, no checkpoint. Route by
-            // engine kind to the matching verify helper.
+            // Verify: read-only, no skip set, no checkpoint. Routed by engine
+            // kind to the matching verify helper through the single
+            // `dispatch_verify` site (issue #290).
             if matches!(policy.mode(), ResumeMode::Verify) {
-                let result = match (kind, source) {
-                    (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
-                        crate::verify::raster_verify(
-                            raster,
-                            &plan,
-                            &sink,
-                            &engine_cfg,
-                            observer_ref,
-                        )?
-                    }
-                    (EngineKind::Streaming, EngineSource::Raster(raster))
-                    | (EngineKind::MapReduce, EngineSource::Raster(raster))
-                    | (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
-                        let strip = RasterStripSource::new(raster);
-                        crate::verify::verify_from_strip_source(
-                            &strip,
-                            &plan,
-                            &sink,
-                            &engine_cfg,
-                            observer_ref,
-                        )?
-                    }
-                    (EngineKind::Streaming, EngineSource::Strip(strip))
-                    | (EngineKind::MapReduce, EngineSource::Strip(strip))
-                    | (EngineKind::MapReduceHotCache, EngineSource::Strip(strip)) => {
-                        crate::verify::verify_from_strip_source(
-                            strip.as_ref(),
-                            &plan,
-                            &sink,
-                            &engine_cfg,
-                            observer_ref,
-                        )?
-                    }
-                    (EngineKind::Monolithic, EngineSource::Strip(_)) => {
-                        unreachable!("Monolithic + Strip rejected above")
-                    }
-                    (EngineKind::Auto, _) => {
-                        unreachable!("Auto should have been resolved before match")
-                    }
-                };
+                let result =
+                    dispatch_verify(kind, source, &plan, &sink, &engine_cfg, observer_ref)?;
                 return Ok((result, sink));
             }
 
@@ -940,269 +930,24 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
             // Capture the run outcome rather than propagating it with `?`
             // straight away: the checkpoint must be flushed on *both* the
-            // success and the error path (see the flush below).
-            let run_result: Result<EngineResult, EngineError> = match (kind, source) {
-                (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
-                    generate_pyramid_observed(raster, &plan, &wrapped, &engine_cfg, observer_ref)
-                }
-                (EngineKind::Streaming, EngineSource::Raster(raster)) => {
-                    let strip = RasterStripSource::new(raster);
-                    let cfg =
-                        build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                    generate_pyramid_streaming(&strip, &plan, &wrapped, &cfg, observer_ref)
-                }
-                (EngineKind::Streaming, EngineSource::Strip(strip)) => {
-                    let cfg =
-                        build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                    generate_pyramid_streaming(strip.as_ref(), &plan, &wrapped, &cfg, observer_ref)
-                }
-                (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
-                    let strip = RasterStripSource::new(raster);
-                    let cfg = build_mapreduce_config(
-                        memory_budget_bytes,
-                        concurrency,
-                        buffer_size,
-                        background_rgb,
-                        blank_strategy,
-                        &engine_cfg.failure_policy,
-                        cancel.clone(),
-                    );
-                    generate_pyramid_mapreduce(
-                        &strip,
-                        &plan,
-                        &wrapped,
-                        &cfg,
-                        observer_ref,
-                        executor_ref,
-                    )
-                }
-                (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
-                    let cfg = build_mapreduce_config(
-                        memory_budget_bytes,
-                        concurrency,
-                        buffer_size,
-                        background_rgb,
-                        blank_strategy,
-                        &engine_cfg.failure_policy,
-                        cancel.clone(),
-                    );
-                    generate_pyramid_mapreduce(
-                        strip.as_ref(),
-                        &plan,
-                        &wrapped,
-                        &cfg,
-                        observer_ref,
-                        executor_ref,
-                    )
-                }
-                (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
-                    let strip = RasterStripSource::new(raster);
-                    let cfg = build_mapreduce_config(
-                        memory_budget_bytes,
-                        concurrency,
-                        buffer_size,
-                        background_rgb,
-                        blank_strategy,
-                        &engine_cfg.failure_policy,
-                        cancel.clone(),
-                    );
-                    generate_pyramid_mapreduce_hot_cache(
-                        &strip,
-                        &plan,
-                        &wrapped,
-                        &cfg,
-                        observer_ref,
-                        executor_ref,
-                    )
-                }
-                (EngineKind::MapReduceHotCache, EngineSource::Strip(strip)) => {
-                    let cfg = build_mapreduce_config(
-                        memory_budget_bytes,
-                        concurrency,
-                        buffer_size,
-                        background_rgb,
-                        blank_strategy,
-                        &engine_cfg.failure_policy,
-                        cancel.clone(),
-                    );
-                    generate_pyramid_mapreduce_hot_cache(
-                        strip.as_ref(),
-                        &plan,
-                        &wrapped,
-                        &cfg,
-                        observer_ref,
-                        executor_ref,
-                    )
-                }
-                (EngineKind::Monolithic, EngineSource::Strip(_)) => {
-                    unreachable!("Monolithic + Strip rejected above")
-                }
-                (EngineKind::Auto, _) => {
-                    unreachable!("Auto should have been resolved before match")
-                }
-            };
+            // success and the error path (see `flush_checkpoint_dual_path`).
+            // The render dispatch is the SAME shared site the plain path uses;
+            // only the sink differs (the `ResumeAwareSink` wrapper here).
+            let run_result = dispatch.run(kind, source, &wrapped);
 
-            // Advance `levels_completed` under the live resume path. The
-            // engine driver no longer touches the checkpoint (resume lives
-            // entirely in `ResumeAwareSink`), so level promotion has to happen
-            // here, once every tile the run was going to emit has passed
-            // through the wrapper. `mark_level_completed` is gated on every
-            // tile of the level being present in `completed_tiles`, so a level
-            // left partial by a failed run — or by `RetryThenSkip` dropping a
-            // tile — is withheld rather than falsely recorded (issue #125).
-            if let Some(cp) = cp.as_ref() {
-                for level in &plan.levels {
-                    cp.mark_level_completed(level.level, level.tile_count());
-                }
-            }
-
-            // Persist the checkpoint whether the run succeeded or failed.
-            // On the error path this is the only chance to make completed
-            // tiles durable: an interrupted run (kill -9 / OOM / preemption
-            // surfaced as a sink error, or an exhausted retry budget) would
-            // otherwise drop the in-memory `CheckpointState` here and force a
-            // later `--resume` to re-render everything. On the failure path a
-            // checkpoint I/O error is swallowed so the original engine error
-            // — the reason the run stopped — is what propagates to the
-            // caller.
-            if let Some(cp) = cp.as_ref() {
-                match &run_result {
-                    Ok(_) => cp.flush().map_err(EngineError::ResumeFailed)?,
-                    Err(_) => {
-                        let _ = cp.flush();
-                    }
-                }
-            }
-
+            // Resume invariants, each lifted into a named helper so the rule
+            // lives in code rather than a prose comment (issue #290):
+            //   * every fully-written level is promoted to `levels_completed`,
+            //   * the checkpoint is flushed on both the success and error path,
+            //   * `tiles_produced` / `bytes_written` exclude short-circuited skips.
+            promote_completed_levels(cp.as_ref(), &plan);
+            flush_checkpoint_dual_path(cp.as_ref(), &run_result)?;
             let mut result = run_result?;
-
-            // Adjust tiles_produced down by the number of tiles the
-            // resume wrapper short-circuited. This restores the
-            // pre-unification contract that `tiles_produced` reports
-            // "tiles actually written this run" rather than "tiles the
-            // engine visited" — the difference matters for Resume runs
-            // where most or all tiles skip the write path.
-            let skipped = wrapped.skipped_count();
-            if skipped > 0 {
-                result.tiles_produced = result.tiles_produced.saturating_sub(skipped);
-            }
-
-            // The monolithic engine credits `bytes_written` on every `Ok`
-            // returned by the sink, including the wrapper's short-circuited
-            // skips. Subtract the bytes of the skipped tiles so `bytes_written`
-            // counts only tiles this run actually emitted rather than every
-            // tile the engine visited.
-            let skipped_bytes = wrapped.skipped_bytes();
-            if skipped_bytes > 0 {
-                result.bytes_written = result.bytes_written.saturating_sub(skipped_bytes);
-            }
+            adjust_result_for_resume_skips(&mut result, &wrapped);
             return Ok((result, sink));
         }
 
-        let result = match (kind, source) {
-            (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
-                generate_pyramid_observed(raster, &plan, engine_sink, &engine_cfg, observer_ref)?
-            }
-            (EngineKind::Monolithic, EngineSource::Strip(_)) => {
-                return Err(EngineError::IncompatibleSource {
-                    kind: EngineKind::Monolithic,
-                    reason: "Monolithic engine requires an in-memory Raster source",
-                });
-            }
-            (EngineKind::Streaming, EngineSource::Raster(raster)) => {
-                let source = RasterStripSource::new(raster);
-                let cfg = build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                generate_pyramid_streaming(&source, &plan, engine_sink, &cfg, observer_ref)?
-            }
-            (EngineKind::Streaming, EngineSource::Strip(source)) => {
-                let cfg = build_streaming_config(engine_cfg, memory_budget_bytes, budget_policy);
-                generate_pyramid_streaming(source.as_ref(), &plan, engine_sink, &cfg, observer_ref)?
-            }
-            (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
-                let source = RasterStripSource::new(raster);
-                let cfg = build_mapreduce_config(
-                    memory_budget_bytes,
-                    concurrency,
-                    buffer_size,
-                    background_rgb,
-                    blank_strategy,
-                    &engine_cfg.failure_policy,
-                    cancel.clone(),
-                );
-                generate_pyramid_mapreduce(
-                    &source,
-                    &plan,
-                    engine_sink,
-                    &cfg,
-                    observer_ref,
-                    executor_ref,
-                )?
-            }
-            (EngineKind::MapReduce, EngineSource::Strip(source)) => {
-                let cfg = build_mapreduce_config(
-                    memory_budget_bytes,
-                    concurrency,
-                    buffer_size,
-                    background_rgb,
-                    blank_strategy,
-                    &engine_cfg.failure_policy,
-                    cancel.clone(),
-                );
-                generate_pyramid_mapreduce(
-                    source.as_ref(),
-                    &plan,
-                    engine_sink,
-                    &cfg,
-                    observer_ref,
-                    executor_ref,
-                )?
-            }
-            (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
-                let source = RasterStripSource::new(raster);
-                let cfg = build_mapreduce_config(
-                    memory_budget_bytes,
-                    concurrency,
-                    buffer_size,
-                    background_rgb,
-                    blank_strategy,
-                    &engine_cfg.failure_policy,
-                    cancel.clone(),
-                );
-                generate_pyramid_mapreduce_hot_cache(
-                    &source,
-                    &plan,
-                    engine_sink,
-                    &cfg,
-                    observer_ref,
-                    executor_ref,
-                )?
-            }
-            (EngineKind::MapReduceHotCache, EngineSource::Strip(source)) => {
-                let cfg = build_mapreduce_config(
-                    memory_budget_bytes,
-                    concurrency,
-                    buffer_size,
-                    background_rgb,
-                    blank_strategy,
-                    &engine_cfg.failure_policy,
-                    cancel.clone(),
-                );
-                generate_pyramid_mapreduce_hot_cache(
-                    source.as_ref(),
-                    &plan,
-                    engine_sink,
-                    &cfg,
-                    observer_ref,
-                    executor_ref,
-                )?
-            }
-            (EngineKind::Auto, _) => {
-                // `resolve_engine_kind` already flattened Auto to a concrete
-                // kind; reaching this arm means we missed a case above.
-                unreachable!("Auto should have been resolved before match")
-            }
-        };
-
+        let result = dispatch.run(kind, source, engine_sink)?;
         Ok((result, sink))
     }
 }
@@ -1328,6 +1073,266 @@ fn resolve_engine_kind(
         }
         (EngineKind::Auto, EngineSource::Strip(_)) => EngineKind::Streaming,
         (k, _) => k,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared engine dispatch (issue #290)
+// ---------------------------------------------------------------------------
+
+/// The inputs the `(EngineKind × EngineSource)` render dispatch needs, bundled
+/// so the plain and resume paths can share ONE dispatch site instead of each
+/// carrying its own ~10-arm copy of the match (issue #290).
+///
+/// Before this, the match — and the seven-argument `build_mapreduce_config`
+/// call inside four of its arms — was written out verbatim in both paths (and a
+/// third, read-only variant for Verify). Every new engine kind or source
+/// multiplied the arms across the sites and, being hand-copied, was a standing
+/// drift hazard. Threading the shared inputs through this struct lets
+/// [`RenderDispatch::run`] be the single site both paths call; the only
+/// per-path difference — which sink the tiles are written through (the user
+/// sink, or the resume [`ResumeAwareSink`](resume::ResumeAwareSink) wrapper) —
+/// stays a parameter.
+struct RenderDispatch<'a> {
+    plan: &'a PyramidPlan,
+    /// The resolved config, already carrying any resume checkpoint knobs.
+    engine_cfg: &'a EngineConfig,
+    observer: &'a dyn EngineObserver,
+    executor: &'a dyn WorkExecutor,
+    memory_budget_bytes: Option<u64>,
+    budget_policy: Option<BudgetPolicy>,
+    // Raw builder knobs consumed only when lowering to a `MapReduceConfig`,
+    // which reads them as `Option`s (a `None` keeps the map-reduce default) —
+    // exactly as the pre-refactor arms did.
+    concurrency: Option<usize>,
+    buffer_size: Option<usize>,
+    background_rgb: Option<[u8; 3]>,
+    blank_strategy: Option<BlankTileStrategy>,
+    cancel: Option<crate::cancel::CancelToken>,
+}
+
+impl<'a> RenderDispatch<'a> {
+    /// Lower to a [`StreamingConfig`] exactly as the pre-refactor arms did.
+    fn streaming_config(&self) -> StreamingConfig {
+        build_streaming_config(
+            self.engine_cfg.clone(),
+            self.memory_budget_bytes,
+            self.budget_policy,
+        )
+    }
+
+    /// Lower to a [`MapReduceConfig`] exactly as the pre-refactor arms did —
+    /// the seven-argument call that used to be copied verbatim eight times.
+    fn mapreduce_config(&self) -> MapReduceConfig {
+        build_mapreduce_config(
+            self.memory_budget_bytes,
+            self.concurrency,
+            self.buffer_size,
+            self.background_rgb,
+            self.blank_strategy,
+            &self.engine_cfg.failure_policy,
+            self.cancel.clone(),
+        )
+    }
+
+    /// Run the engine selected by `(kind, source)` against `sink`, returning the
+    /// engine's `Result` without touching it. This is the single render
+    /// dispatch shared by [`EngineBuilder::run_collect`]'s plain and resume
+    /// paths (issue #290).
+    ///
+    /// `Monolithic` + `Strip` is the one rejected pairing and yields
+    /// [`EngineError::IncompatibleSource`]; the resume path rejects it earlier
+    /// still (before taking the run lock) so a refused run never touches the
+    /// output directory. Reaching the `Auto` arm is a bug — `resolve_engine_kind`
+    /// flattens `Auto` before dispatch.
+    fn run(
+        &self,
+        kind: EngineKind,
+        source: EngineSource<'_>,
+        sink: &dyn TileSink,
+    ) -> Result<EngineResult, EngineError> {
+        match (kind, source) {
+            (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
+                generate_pyramid_observed(raster, self.plan, sink, self.engine_cfg, self.observer)
+            }
+            (EngineKind::Monolithic, EngineSource::Strip(_)) => {
+                Err(EngineError::IncompatibleSource {
+                    kind: EngineKind::Monolithic,
+                    reason: "Monolithic engine requires an in-memory Raster source",
+                })
+            }
+            (EngineKind::Streaming, EngineSource::Raster(raster)) => {
+                let strip = RasterStripSource::new(raster);
+                let cfg = self.streaming_config();
+                generate_pyramid_streaming(&strip, self.plan, sink, &cfg, self.observer)
+            }
+            (EngineKind::Streaming, EngineSource::Strip(strip)) => {
+                let cfg = self.streaming_config();
+                generate_pyramid_streaming(strip.as_ref(), self.plan, sink, &cfg, self.observer)
+            }
+            (EngineKind::MapReduce, EngineSource::Raster(raster)) => {
+                let strip = RasterStripSource::new(raster);
+                let cfg = self.mapreduce_config();
+                generate_pyramid_mapreduce(
+                    &strip,
+                    self.plan,
+                    sink,
+                    &cfg,
+                    self.observer,
+                    self.executor,
+                )
+            }
+            (EngineKind::MapReduce, EngineSource::Strip(strip)) => {
+                let cfg = self.mapreduce_config();
+                generate_pyramid_mapreduce(
+                    strip.as_ref(),
+                    self.plan,
+                    sink,
+                    &cfg,
+                    self.observer,
+                    self.executor,
+                )
+            }
+            (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
+                let strip = RasterStripSource::new(raster);
+                let cfg = self.mapreduce_config();
+                generate_pyramid_mapreduce_hot_cache(
+                    &strip,
+                    self.plan,
+                    sink,
+                    &cfg,
+                    self.observer,
+                    self.executor,
+                )
+            }
+            (EngineKind::MapReduceHotCache, EngineSource::Strip(strip)) => {
+                let cfg = self.mapreduce_config();
+                generate_pyramid_mapreduce_hot_cache(
+                    strip.as_ref(),
+                    self.plan,
+                    sink,
+                    &cfg,
+                    self.observer,
+                    self.executor,
+                )
+            }
+            (EngineKind::Auto, _) => {
+                unreachable!("Auto should have been resolved before match")
+            }
+        }
+    }
+}
+
+/// The read-only Verify counterpart to [`RenderDispatch::run`]: routes
+/// `(kind, source)` to the matching verify helper (issue #290). Verify writes
+/// nothing and keeps no checkpoint, so it drives the dedicated
+/// [`crate::verify`] walks rather than the generate engines, but the dispatch
+/// shape is the same — kept in one place so it cannot drift from the render
+/// dispatch's source/kind handling.
+fn dispatch_verify(
+    kind: EngineKind,
+    source: EngineSource<'_>,
+    plan: &PyramidPlan,
+    sink: &dyn TileSink,
+    engine_cfg: &EngineConfig,
+    observer: &dyn EngineObserver,
+) -> Result<EngineResult, EngineError> {
+    match (kind, source) {
+        (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
+            crate::verify::raster_verify(raster, plan, sink, engine_cfg, observer)
+        }
+        (EngineKind::Streaming, EngineSource::Raster(raster))
+        | (EngineKind::MapReduce, EngineSource::Raster(raster))
+        | (EngineKind::MapReduceHotCache, EngineSource::Raster(raster)) => {
+            let strip = RasterStripSource::new(raster);
+            crate::verify::verify_from_strip_source(&strip, plan, sink, engine_cfg, observer)
+        }
+        (EngineKind::Streaming, EngineSource::Strip(strip))
+        | (EngineKind::MapReduce, EngineSource::Strip(strip))
+        | (EngineKind::MapReduceHotCache, EngineSource::Strip(strip)) => {
+            crate::verify::verify_from_strip_source(
+                strip.as_ref(),
+                plan,
+                sink,
+                engine_cfg,
+                observer,
+            )
+        }
+        (EngineKind::Monolithic, EngineSource::Strip(_)) => {
+            unreachable!("Monolithic + Strip rejected above")
+        }
+        (EngineKind::Auto, _) => {
+            unreachable!("Auto should have been resolved before match")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resume invariants, as named helpers (issue #290)
+// ---------------------------------------------------------------------------
+//
+// The live resume path used to carry each of these rules as a prose comment
+// wrapped around inline code. Lifting them into named functions puts the
+// invariant in the signature and one body, so the plain and resume paths share
+// the render dispatch above without re-describing what resume then owes.
+
+/// Resume invariant — **level promotion**: after the run returns, promote every
+/// FULLY-written level to `levels_completed`. The engine driver no longer
+/// touches the checkpoint (resume lives entirely in the
+/// [`ResumeAwareSink`](resume::ResumeAwareSink)), so promotion happens here once
+/// every tile has passed through the wrapper. [`CheckpointState::mark_level_completed`](crate::engine::CheckpointState::mark_level_completed)
+/// is gated on every tile of the level being present in `completed_tiles`, so a
+/// level left partial by a failed run — or by `RetryThenSkip` dropping a tile —
+/// is withheld rather than falsely recorded (issue #125).
+fn promote_completed_levels(cp: Option<&crate::engine::CheckpointState<'_>>, plan: &PyramidPlan) {
+    if let Some(cp) = cp {
+        for level in &plan.levels {
+            cp.mark_level_completed(level.level, level.tile_count());
+        }
+    }
+}
+
+/// Resume invariant — **flush on BOTH paths**: persist the checkpoint whether
+/// the run succeeded or failed. On the error path this is the only chance to
+/// make completed tiles durable — an interrupted run (kill -9 / OOM /
+/// preemption surfaced as a sink error, or an exhausted retry budget) would
+/// otherwise drop the in-memory [`CheckpointState`](crate::engine::CheckpointState)
+/// and force a later `--resume` to re-render everything. A flush error on the
+/// success path aborts the run; on the failure path it is swallowed so the
+/// original engine error — the reason the run stopped — is what propagates.
+fn flush_checkpoint_dual_path(
+    cp: Option<&crate::engine::CheckpointState<'_>>,
+    run_result: &Result<EngineResult, EngineError>,
+) -> Result<(), EngineError> {
+    if let Some(cp) = cp {
+        match run_result {
+            Ok(_) => cp.flush().map_err(EngineError::ResumeFailed)?,
+            Err(_) => {
+                let _ = cp.flush();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resume invariant — **skipped-count adjustment**: `tiles_produced` and
+/// `bytes_written` must report tiles this run actually emitted, not every tile
+/// the engine visited. The [`ResumeAwareSink`](resume::ResumeAwareSink)
+/// short-circuits already-completed coordinates and returns `Ok` without
+/// writing, which the monolithic engine still credits toward both counters, so
+/// subtract exactly what the wrapper skipped. `saturating_sub` guards the
+/// (impossible-by-construction) underflow.
+fn adjust_result_for_resume_skips(
+    result: &mut EngineResult,
+    wrapped: &resume::ResumeAwareSink<'_>,
+) {
+    let skipped = wrapped.skipped_count();
+    if skipped > 0 {
+        result.tiles_produced = result.tiles_produced.saturating_sub(skipped);
+    }
+    let skipped_bytes = wrapped.skipped_bytes();
+    if skipped_bytes > 0 {
+        result.bytes_written = result.bytes_written.saturating_sub(skipped_bytes);
     }
 }
 
