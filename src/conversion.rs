@@ -1231,9 +1231,32 @@ impl Raster {
         let bpc = self.format().bytes_per_channel();
         let mx = if bpc == 1 { 255u32 } else { 65535u32 };
         let mxf = mx as f64;
-        let scale = mxf.powf(power) / mxf;
+        // Match vips_gamma bit-for-bit (gamma.c): the curve is built as an
+        // identity LUT put through `vips_pow_const1(power)` then
+        // `vips_linear1(mx / pow(mx, power), 0)`, then cast back to the
+        // integer format. `vips_pow_const1` promotes uchar/ushort to a
+        // single-precision float image. For a float image `vips_linear1`
+        // takes its FLOOP path, which pre-rounds the scale coefficient to
+        // f32 (`linear->a_float[]`) and computes `a_float * powered_f32`
+        // entirely in f32 (both operands single-precision), storing the f32
+        // result back to the float image. The final `vips_cast` to the
+        // integer format then TRUNCATES toward zero (it does not round to
+        // nearest). Reproduce that ordering exactly so parity holds by
+        // construction: coefficient rounded to f32, pow in f64 truncated to
+        // f32, product in f32, then clamp and truncate. NB. keeping the
+        // coefficient in f64 (multiplying `(double)coeff * (double)powered`)
+        // does NOT match vips and diverges by 1 LSB on truncation edges
+        // (e.g. ushort 23843 -> 5788 vs vips 5789, uchar 255@power2.1 -> 255
+        // vs vips 254). Verified against vips 8.18.4 over the full 0..=255
+        // and 0..=65535 default domains and at custom powers 2.1/2.3
+        // (0 divergences).
+        let scale = (mxf / mxf.powf(power)) as f32;
+        let mxf32 = mxf as f32;
         let lut: Vec<u32> = (0..=mx)
-            .map(|i| ((i as f64).powf(power) / scale).round().clamp(0.0, mxf) as u32)
+            .map(|i| {
+                let powered = (i as f64).powf(power) as f32;
+                (scale * powered).clamp(0.0, mxf32) as u32
+            })
             .collect();
         let mut out = Raster::zeroed(self.width(), self.height(), self.format())?;
         let samples = self.width() as usize * self.height() as usize * self.format().channels();
@@ -2570,23 +2593,35 @@ mod tests {
     // ------------------------------------------------------------------
 
     /**
-     * Tests the default curve against the ported test_gamma formula:
-     * out = in^2.4 / (255^2.4 / 255), within rounding.
-     * Input: Gray8 ramp of sample values.
+     * Tests the default curve against exact vips 8.18.4 `vips_gamma` output.
+     * vips TRUNCATES the scaled power curve (does not round to nearest), so
+     * e.g. input 100 -> 26 even though the continuous value is 26.97. Pinned
+     * values captured from the oracle over an identity ramp:
+     *   `vips identity id.v; vips gamma id.v g.v; vips getpoint g.v <i> 0`.
      */
     #[test]
     fn gamma_default_matches_libvips_formula() {
-        let vals = [0u8, 1, 16, 100, 115, 200, 254, 255];
-        let im = gray8(vals.len() as u32, 1, vals.to_vec());
+        // (input, exact vips 8.18.4 uchar output)
+        let cases = [
+            (0u8, 0u8),
+            (1, 0),
+            (16, 0),
+            (19, 0), // continuous ~0.500, vips truncates to 0
+            (50, 5),
+            (100, 26), // continuous 26.97 -> truncated 26 (round would give 27)
+            (115, 37),
+            (127, 47),
+            (128, 48),
+            (200, 142),
+            (254, 252),
+            (255, 255),
+        ];
+        let vals: Vec<u8> = cases.iter().map(|&(i, _)| i).collect();
+        let im = gray8(vals.len() as u32, 1, vals.clone());
         let out = im.gamma(None);
-        let norm = 255.0f64.powf(2.4) / 255.0;
-        for (x, v) in vals.iter().enumerate() {
-            let expected = (*v as f64).powf(2.4) / norm;
+        for (x, &(v, expected)) in cases.iter().enumerate() {
             let got = out.getpoint(x as u32, 0)[0];
-            assert!(
-                (got - expected).abs() <= 0.5 + 1e-9,
-                "v={v}: got {got}, expected {expected}"
-            );
+            assert_eq!(got, expected as f64, "input v={v}");
         }
     }
 
@@ -2599,6 +2634,55 @@ mod tests {
         let im = gray8(2, 1, vec![16, 255]);
         let out = im.gamma(Some(0.5));
         assert_eq!(out.data(), &[1, 255]);
+    }
+
+    /**
+     * Pins custom-exponent parity at the upper-domain endpoints on both
+     * depths, at powers 2.1 and 2.3. These are the samples where the f32
+     * multiply ordering decides the last LSB (the format maximum does not
+     * always map back to itself: at power 2.1 uchar 255 -> 254, at power 2.3
+     * ushort 65535 -> 65534). Values captured from vips 8.18.4:
+     *   `vips gamma id.v g.v --exponent <1/power>; vips getpoint g.v <i> 0`
+     * so any future drift in the pow/scale arithmetic is caught, not left to
+     * rest on empirical f32/f64 coincidence.
+     */
+    #[test]
+    fn gamma_custom_exponent_endpoints_match_libvips() {
+        // exponent = 1/power, so power 2.1 -> exp 1/2.1, power 2.3 -> 1/2.3.
+        let e21 = 1.0 / 2.1;
+        let e23 = 1.0 / 2.3;
+
+        // uchar endpoints. (input, exact vips uchar output)
+        let u21 = [(253u8, 250u8), (254, 252), (255, 254)];
+        let u23 = [(253u8, 250u8), (254, 252), (255, 255)];
+        for (exp, cases) in [(e21, u21), (e23, u23)] {
+            let vals: Vec<u8> = cases.iter().map(|&(i, _)| i).collect();
+            let im = gray8(vals.len() as u32, 1, vals.clone());
+            let out = im.gamma(Some(exp));
+            for (x, &(v, expected)) in cases.iter().enumerate() {
+                assert_eq!(
+                    out.getpoint(x as u32, 0)[0],
+                    expected as f64,
+                    "uchar exp={exp} v={v}"
+                );
+            }
+        }
+
+        // ushort endpoints. (input, exact vips ushort output)
+        let s21 = [(65533u16, 65530.0f64), (65534, 65532.0), (65535, 65535.0)];
+        let s23 = [(65533u16, 65530.0f64), (65534, 65532.0), (65535, 65534.0)];
+        for (exp, cases) in [(e21, s21), (e23, s23)] {
+            let vals: Vec<u16> = cases.iter().map(|&(i, _)| i).collect();
+            let im = gray16(vals.len() as u32, 1, &vals);
+            let out = im.gamma(Some(exp));
+            for (x, &(v, expected)) in cases.iter().enumerate() {
+                assert_eq!(
+                    out.getpoint(x as u32, 0)[0],
+                    expected,
+                    "ushort exp={exp} v={v}"
+                );
+            }
+        }
     }
 
     /**
@@ -2616,16 +2700,23 @@ mod tests {
     }
 
     /**
-     * Tests the 16-bit curve against the formula at a midpoint.
-     * Input: Gray16 30000 with default exponent.
+     * Tests the 16-bit curve against exact vips 8.18.4 output. vips
+     * truncates the scaled power curve, and the intermediate is computed in
+     * single-precision float, so parity is exact only when both are matched.
+     * Values captured from the oracle over a ushort identity ramp:
+     *   `vips identity id16.v --ushort; vips gamma id16.v g16.v`.
+     * 30000 -> 10046; 21755 -> 4646; 23843 -> 5789 (each a truncation edge
+     * the old round-to-nearest path missed by 1 LSB).
      */
     #[test]
     fn gamma_16bit_path() {
-        let im = gray16(1, 1, &[30000]);
+        let cases = [(30000u16, 10046.0f64), (21755, 4646.0), (23843, 5789.0)];
+        let vals: Vec<u16> = cases.iter().map(|&(i, _)| i).collect();
+        let im = gray16(vals.len() as u32, 1, &vals);
         let out = im.gamma(None);
-        let norm = 65535.0f64.powf(2.4) / 65535.0;
-        let expected = 30000.0f64.powf(2.4) / norm;
-        assert!((out.getpoint(0, 0)[0] - expected).abs() <= 0.5 + 1e-9);
+        for (x, &(v, expected)) in cases.iter().enumerate() {
+            assert_eq!(out.getpoint(x as u32, 0)[0], expected, "input v={v}");
+        }
     }
 
     /**
@@ -2635,12 +2726,9 @@ mod tests {
     fn gamma_multiband_per_channel() {
         let im = rgb8(1, 1, vec![10, 100, 255]);
         let out = im.gamma(None);
-        let norm = 255.0f64.powf(2.4) / 255.0;
+        // Exact vips 8.18.4 uchar outputs: 10 -> 0, 100 -> 26, 255 -> 255.
         let px = out.getpoint(0, 0);
-        for (c, v) in [10.0f64, 100.0, 255.0].iter().enumerate() {
-            let expected = v.powf(2.4) / norm;
-            assert!((px[c] - expected).abs() <= 0.5 + 1e-9, "channel {c}");
-        }
+        assert_eq!(px, vec![0.0, 26.0, 255.0]);
     }
 
     /**

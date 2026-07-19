@@ -75,14 +75,24 @@ fn ported_surface_bandbool() {
     assert_eq!(result.getpoint(50, 50), vec![expected as f64]);
 }
 
-/// The ported `test_bandmean` call site: floor((b0+b1+b2)/3).
+/// The ported `test_bandmean` call site: round-to-nearest of the per-pixel
+/// mean, matching vips `(sum + bands / 2) / bands` (not truncation).
+///
+/// The expected value is pinned as a hard literal captured from the vips
+/// 8.18.4 oracle rather than recomputed from the production formula, so this
+/// stays an independent regression guard instead of a change-detector that
+/// would move in lockstep with a formula regression. For `make_test_colour`
+/// pixel (50,50) the sample is [50, 50, 100] (sum 200), and vips bandmean
+/// yields `(200 + 3/2)/3 = 67`:
+///   `vips rawload colour.raw c.v 100 100 3 --format uchar`
+///   `vips bandmean c.v bm.v; vips getpoint bm.v 50 50` -> `67`.
 #[test]
 fn ported_surface_bandmean() {
     let colour = make_test_colour();
     let result = colour.bandmean();
-    let px = colour.getpoint(50, 50);
-    let expected = ((px[0] + px[1] + px[2]) / 3.0).floor();
-    assert_eq!(result.getpoint(50, 50), vec![expected]);
+    // Pixel (50,50) is [50, 50, 100]; the vips oracle bandmean there is 67.
+    assert_eq!(colour.getpoint(50, 50), vec![50.0, 50.0, 100.0]);
+    assert_eq!(result.getpoint(50, 50), vec![67.0]);
 }
 
 /// The ported `test_bandrank` call site: `bandrank(&[&colour], None)`.
