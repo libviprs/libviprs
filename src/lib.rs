@@ -32,8 +32,11 @@
 //! - **`pdfium`** — enables [`render_page_pdfium`], [`render_page_pdfium_budgeted`],
 //!   and [`PdfiumStripSource`] for full vector PDF rendering via the pdfium library.
 //! - **`pdfium-static`** — implies `pdfium` and statically links libpdfium.
-//! - **`s3`** — gates the [`sink_object_store`] module ([`ObjectStoreSink`])
-//!   against a user-injected [`ObjectStore`] backend.
+//! - **`object-store-sink`** — gates the [`sink_object_store`] module
+//!   ([`ObjectStoreSink`]) against a user-injected [`ObjectStore`] backend. The
+//!   former name **`s3`** is retained as a deprecated alias
+//!   (`s3 = ["object-store-sink"]`) that enables the same module; prefer
+//!   `object-store-sink`, as the `s3` alias will be removed in a future release.
 //! - **`tracing`** — emits structured spans and events via the `tracing` crate.
 //! - **`packfile`** — gates [`PackfileSink`] for writing tiles into tar or zip
 //!   archives.
