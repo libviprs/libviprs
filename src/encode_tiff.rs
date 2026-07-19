@@ -39,11 +39,23 @@
 //! samples. (A 4-band uchar/ushort raster is the named [`PixelFormat::Rgba8`] /
 //! [`PixelFormat::Rgba16`] and travels the RGBA path.) See [`encode_multiband`]
 //! for why the `BlackIsZero` layout is used in place of vips's RGB-plus-extra
-//! layout for `>= 3` bands. The float [`PixelFormat`] variants remain compute
+//! layout for `>= 3` bands.
+//!
+//! On the decode side, a *foreign* `>= 5`-band raster that vips wrote is an RGB
+//! photometric carrying `N - 3` extra samples, a layout the pure-Rust `tiff`
+//! decoder rejects at every entry point (it funnels through `expand_chunk`,
+//! which calls `colortype()` and errors for RGB-with-extra). [`decode_tiff_page`]
+//! and [`Raster::tiff_load`] first relabel that file's `PhotometricInterpretation`
+//! tag from RGB to `BlackIsZero` (see [`normalize_multiband_photometric`]); the
+//! relabel never alters a sample byte, so the decoder then reads the N-band
+//! raster as a `Multiband{N}` carrier with the exact samples vips stored.
+//!
+//! The float [`PixelFormat`] variants remain compute
 //! intermediates with no TIFF representation here and surface a typed error.
 //! Sixteen-bit samples are read from and written back to the raster buffer in
 //! native byte order, matching the convention the rest of the crate uses.
 
+use std::borrow::Cow;
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 
@@ -206,7 +218,11 @@ fn encode_to_vec(raster: &Raster, compression: TiffCompression) -> Result<Vec<u8
 /// with the same values) and, unlike vips's RGB-plus-extra layout for `>= 5`
 /// bands, is one the pure-Rust `tiff` decoder can read — `read_image` rejects
 /// an RGB photometric carrying extra samples, so an RGB layout would not
-/// round-trip within this crate. The one difference from vips is the reported
+/// round-trip within this crate. That load-bearing external invariant (the
+/// `tiff` crate accepting `BlackIsZero`+extra but rejecting RGB+extra) is pinned
+/// by `decode_rgb_plus_extra_like_vips_round_trips` so a crate upgrade that
+/// changed it would fail loudly rather than silently. The one difference from
+/// vips is the reported
 /// interpretation tag (`b-w`/`multiband` here vs `srgb` for vips's `>= 3` band
 /// files); the carried integer samples are byte-identical.
 ///
@@ -322,24 +338,145 @@ fn interpret(
 /// Resolve the channel count of the current image.
 ///
 /// `colortype()` maps the common photometrics and the `BlackIsZero`-with-extra
-/// Multiband case, but *rejects* an RGB/CMYK photometric that carries extra
-/// samples — which is exactly how vips writes a 5+-band uchar/ushort raster.
-/// For that case the raw `SamplesPerPixel` is recovered so the N-band raster
-/// still decodes into a portable integer carrier instead of being turned away.
+/// Multiband case. A vips-written `>= 5`-band raster is an RGB photometric with
+/// extra samples, which `colortype()` rejects — but by the time the decoder
+/// reaches here that file has already been relabelled to `BlackIsZero` by
+/// [`normalize_multiband_photometric`], so it resolves as `Multiband{N}`. Any
+/// residual colour type the decoder still refuses (e.g. CMYK-with-extra, which
+/// vips does not write for these rasters) surfaces as a typed error rather than
+/// a silent, wrong channel count.
 fn resolve_channels<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<usize, DecodeError> {
-    match decoder.colortype() {
-        Ok(ColorType::Gray(_)) => Ok(1),
-        Ok(ColorType::RGB(_)) => Ok(3),
-        Ok(ColorType::RGBA(_)) => Ok(4),
-        Ok(ColorType::Multiband { num_samples, .. }) => Ok(num_samples as usize),
-        Ok(other) => Err(decode_err(format!(
+    match decoder.colortype().map_err(tiff_decode_err)? {
+        ColorType::Gray(_) => Ok(1),
+        ColorType::RGB(_) => Ok(3),
+        ColorType::RGBA(_) => Ok(4),
+        ColorType::Multiband { num_samples, .. } => Ok(num_samples as usize),
+        other => Err(decode_err(format!(
             "unsupported TIFF color type {other:?} \
              (gray, RGB, RGBA, and multiband uchar/ushort are decoded here)"
         ))),
-        Err(_) => Ok(decoder
-            .get_tag_unsigned::<u16>(Tag::SamplesPerPixel)
-            .map_err(tiff_decode_err)? as usize),
     }
+}
+
+/// Relabel a vips-style RGB-plus-extra-samples raster so the pure-Rust decoder
+/// can read it.
+///
+/// vips writes an N-band (`>= 5`) uchar/ushort raster as an RGB photometric base
+/// plus `N - 3` unassociated-alpha extra samples. The `tiff` crate rejects an
+/// RGB (or CMYK/YCbCr) photometric carrying extra samples at *every* decode
+/// entry point — `read_image`, `read_chunk`, and `read_chunk_bytes` all funnel
+/// through `expand_chunk`, which begins by calling `colortype()` and errors for
+/// that layout — so the file cannot be read as-is. Rewriting the
+/// `PhotometricInterpretation` tag (262) in place from RGB (2) to `BlackIsZero`
+/// (1) makes the decoder resolve the samples as a `Multiband{N}` raster. That is
+/// a pure relabel: the decoder applies a colour transform only for `WhiteIsZero`
+/// and none for `BlackIsZero`/`Multiband`, so the recovered interleaved N-band
+/// buffer is byte-identical to the samples vips stored.
+///
+/// The rewrite is confined to classic-TIFF IFDs whose `PhotometricInterpretation`
+/// is RGB (2) and whose `SamplesPerPixel` is `> 4` (3 = RGB and 4 = RGBA are read
+/// natively and left untouched). Malformed input, BigTIFF, and non-matching IFDs
+/// are left exactly as-is so the normal decoder reports its own typed error; all
+/// reads are bounds-checked and the IFD walk is iteration-bounded, so hostile or
+/// truncated bytes can neither panic nor loop.
+fn photometric_patch_offsets(bytes: &[u8]) -> Vec<usize> {
+    let little_endian = match bytes.get(0..2) {
+        Some(b"II") => true,
+        Some(b"MM") => false,
+        _ => return Vec::new(),
+    };
+    let read_u16 = |offset: usize| -> Option<u16> {
+        let s = bytes.get(offset..offset + 2)?;
+        let b = [s[0], s[1]];
+        Some(if little_endian {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    };
+    let read_u32 = |offset: usize| -> Option<u32> {
+        let s = bytes.get(offset..offset + 4)?;
+        let b = [s[0], s[1], s[2], s[3]];
+        Some(if little_endian {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
+
+    // Classic TIFF (magic 42) only; a BigTIFF (43) header has a different IFD
+    // layout, and vips does not write these rasters as BigTIFF, so leave it.
+    if read_u16(2) != Some(42) {
+        return Vec::new();
+    }
+    let mut ifd_offset = match read_u32(4) {
+        Some(o) => o as usize,
+        None => return Vec::new(),
+    };
+
+    let mut offsets = Vec::new();
+    // Bound the IFD walk so a malformed next-IFD pointer cannot spin forever.
+    let mut guard = 0u32;
+    while ifd_offset != 0 && guard < 1 << 16 {
+        guard += 1;
+        let count = match read_u16(ifd_offset) {
+            Some(c) => c as usize,
+            None => break,
+        };
+        let entries = ifd_offset + 2;
+        // PhotometricInterpretation (262) and SamplesPerPixel (277) are both
+        // SHORT/count-1 tags whose value sits inline in the first two bytes of
+        // the entry's 12-byte value/offset field (offset + 8).
+        let mut photometric = None;
+        let mut photometric_value_off = None;
+        let mut samples_per_pixel = None;
+        for i in 0..count {
+            let entry = entries + i * 12;
+            let value_off = entry + 8;
+            match read_u16(entry) {
+                Some(262) => {
+                    photometric = read_u16(value_off);
+                    photometric_value_off = Some(value_off);
+                }
+                Some(277) => samples_per_pixel = read_u16(value_off),
+                Some(_) => {}
+                None => break,
+            }
+        }
+        if photometric == Some(2) && samples_per_pixel.is_some_and(|n| n > 4) {
+            if let Some(off) = photometric_value_off {
+                offsets.push(off);
+            }
+        }
+        ifd_offset = match read_u32(entries + count * 12) {
+            Some(o) => o as usize,
+            None => break,
+        };
+    }
+    offsets
+}
+
+/// Return the TIFF bytes with any vips RGB-plus-extra `>= 5`-band raster relabelled
+/// to `BlackIsZero` (see [`photometric_patch_offsets`]). Borrows the input
+/// unchanged when there is nothing to rewrite, cloning only when a patch applies.
+fn normalize_multiband_photometric(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let offsets = photometric_patch_offsets(bytes);
+    if offsets.is_empty() {
+        return Cow::Borrowed(bytes);
+    }
+    let little_endian = bytes.first() == Some(&b'I');
+    let mut owned = bytes.to_vec();
+    let value = if little_endian {
+        1u16.to_le_bytes()
+    } else {
+        1u16.to_be_bytes()
+    };
+    for off in offsets {
+        if let Some(slot) = owned.get_mut(off..off + 2) {
+            slot.copy_from_slice(&value);
+        }
+    }
+    Cow::Owned(owned)
 }
 
 /// Read the EXIF-style orientation from the TIFF `Orientation` tag (274),
@@ -395,8 +532,9 @@ pub fn decode_tiff_page(path: &Path, page: u32) -> Result<Raster, DecodeError> {
     if page == 0 {
         return Err(decode_err("TIFF pages are 1-indexed; page 0 is invalid"));
     }
-    let file = std::fs::File::open(path)?;
-    let mut decoder = Decoder::new(std::io::BufReader::new(file)).map_err(tiff_decode_err)?;
+    let bytes = std::fs::read(path)?;
+    let bytes = normalize_multiband_photometric(&bytes);
+    let mut decoder = Decoder::new(Cursor::new(bytes.as_ref())).map_err(tiff_decode_err)?;
     decoder
         .seek_to_image((page - 1) as usize)
         .map_err(tiff_decode_err)?;
@@ -490,7 +628,8 @@ impl Raster {
     /// Returns [`DecodeError`] if the bytes are not a valid TIFF, or the
     /// first page uses a color or sample type this lane does not decode.
     pub fn tiff_load(data: &[u8]) -> Result<Raster, DecodeError> {
-        let mut decoder = Decoder::new(Cursor::new(data)).map_err(tiff_decode_err)?;
+        let data = normalize_multiband_photometric(data);
+        let mut decoder = Decoder::new(Cursor::new(data.as_ref())).map_err(tiff_decode_err)?;
         decode_current_image(&mut decoder)
     }
 }
@@ -834,6 +973,76 @@ mod tests {
         let back = decode_tiff_page(&out, 1).unwrap();
         assert_eq!(back.format(), PixelFormat::with_channels(2, 1).unwrap());
         assert_eq!(back.data(), im.data());
+    }
+
+    /// Build a vips-style RGB-photometric raster with `n - 3` unassociated-alpha
+    /// extra samples: byte-for-byte the layout `vips tiffsave` emits for an
+    /// `n >= 5`-band raster (confirmed with `tiffinfo`, which reports `RGB color`,
+    /// `Extra Samples: 2<unassoc-alpha, ...>`, and `Samples/Pixel: n`). Pass a
+    /// band count of five or more, so there is at least one extra sample beyond
+    /// RGBA.
+    fn rgb_plus_extra_multiband8(im: &Raster, n: usize) -> Vec<u8> {
+        let w = im.width();
+        let h = im.height();
+        let wide = w * n as u32;
+        let mut buf = Vec::new();
+        {
+            let mut encoder = TiffEncoder::new(Cursor::new(&mut buf)).unwrap();
+            let mut image = encoder.new_image::<colortype::Gray8>(wide, h).unwrap();
+            {
+                let dir = image.encoder();
+                dir.write_tag(Tag::ImageWidth, w).unwrap();
+                dir.write_tag(Tag::SamplesPerPixel, n as u16).unwrap();
+                dir.write_tag(Tag::BitsPerSample, &vec![8u16; n][..])
+                    .unwrap();
+                dir.write_tag(Tag::SampleFormat, &vec![1u16; n][..])
+                    .unwrap();
+                dir.write_tag(Tag::ExtraSamples, &vec![2u16; n - 3][..])
+                    .unwrap();
+                // The vips choice: RGB photometric with extra samples.
+                dir.write_tag(Tag::PhotometricInterpretation, 2u16).unwrap();
+            }
+            image.write_data(im.data()).unwrap();
+        }
+        buf
+    }
+
+    /// A vips-native `>= 5`-band raster (RGB photometric + extra samples) decodes
+    /// back to `Multi8(n)` with byte-identical samples. This also pins the
+    /// load-bearing invariant that the `tiff` crate itself rejects RGB+extra
+    /// (the reason [`encode_multiband`] writes `BlackIsZero`): if a crate upgrade
+    /// started accepting it, the first assertion fails and the encode-layout
+    /// choice can be revisited instead of silently drifting.
+    #[test]
+    fn decode_rgb_plus_extra_like_vips_round_trips() {
+        let im = ramp_multi8(6, 4, 5);
+        let bytes = rgb_plus_extra_multiband8(&im, 5);
+
+        // Invariant pin: the raw `tiff` crate must still refuse RGB+extra.
+        let mut raw = Decoder::new(Cursor::new(&bytes)).unwrap();
+        assert!(
+            raw.read_image().is_err(),
+            "tiff crate unexpectedly accepts RGB+extra; revisit the encode layout"
+        );
+
+        // Our decode path relabels the photometric and recovers the exact
+        // N-band samples vips stored.
+        let back = Raster::tiff_load(&bytes).unwrap();
+        assert_eq!(back.width(), 6);
+        assert_eq!(back.height(), 4);
+        assert_eq!(back.format(), PixelFormat::with_channels(5, 1).unwrap());
+        assert_eq!(
+            back.data(),
+            im.data(),
+            "vips RGB+extra 5-band TIFF must decode byte-exact"
+        );
+
+        // And a 3-band RGB / 4-band RGBA file (samples <= 4) is left untouched
+        // by the relabel and still decodes through the native colour path.
+        let rgb = ramp_rgb8(6, 4);
+        let rgb_back = Raster::tiff_load(&rgb.tiff_save()).unwrap();
+        assert_eq!(rgb_back.format(), PixelFormat::Rgb8);
+        assert_eq!(rgb_back.data(), rgb.data());
     }
 
     /// A 6-band ushort raster round-trips losslessly through the in-memory
