@@ -174,6 +174,29 @@ pub struct Tile {
 /// for how the CLI wires up a sink.
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
+///
+/// # Implementing a sink
+///
+/// [`write_tile`](TileSink::write_tile) is the *only* required method: it has no
+/// default, so every third-party sink must provide it. Every other method is
+/// default-provided. [`finish`](TileSink::finish) defaults to `Ok(())` — a sink
+/// with a flush / commit step overrides it, but it is not mandatory — and each
+/// remaining method is an *engine-bookkeeping hook* — retry / skip counters, the
+/// checkpoint root, durability tracking, manifest-config capture, level-count
+/// pre-sizing, on-disk format, retry-policy detection — whose default forwards
+/// through [`inner_sink`](TileSink::inner_sink) (bottoming out at a no-op / `0` /
+/// `None` for a terminal sink). An external author writing a "byte bucket"
+/// therefore implements `write_tile` alone (plus `finish` if it needs one) and
+/// never has to understand the engine's resume / checkpoint / retry internals.
+/// The wrappers ([`Box<T>`], [`&T`], [`Arc<T>`]) forward every method through a
+/// single macro so a wrapper cannot drop one relative to its siblings.
+///
+/// The engine hooks remain part of this one public trait for now because
+/// sealing them behind a default-provided sub-trait (an `EngineSinkHooks`
+/// reached via `as_hooks()`, as the review suggested) is a breaking change to
+/// the trait's object-safety and supertrait shape; the non-breaking default-impl
+/// form here already gives external implementers the one-method contract, and
+/// the fuller split is deferred to a semver-major pass (issue #292).
 pub trait TileSink: Send + Sync {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError>;
     fn finish(&self) -> Result<(), SinkError> {
@@ -358,122 +381,104 @@ pub trait TileSink: Send + Sync {
     }
 }
 
-/// Forwarding impl so `Box<dyn TileSink>` (and `Box<T>` where `T: TileSink`)
-/// satisfies [`TileSink`] itself.
+/// Generate a transparent [`TileSink`] forwarding impl for a wrapper type
+/// `$ty` (a smart pointer or reference) that derefs to a `TileSink`.
 ///
-/// Required so callers can unify match arms that return different concrete
-/// sink types under `Box<dyn TileSink>` and feed the boxed form to
-/// [`EngineBuilder::new`](crate::EngineBuilder::new):
-///
-/// ```ignore
-/// let sink: Box<dyn TileSink> = match mode {
-///     "mem" => Box::new(MemorySink::new()),
-///     "fs"  => Box::new(FsSink::new(dir, plan)),
-///     _ => unreachable!(),
-/// };
-/// EngineBuilder::new(&src, plan, sink).run()?;
-/// ```
-impl<T: TileSink + ?Sized> TileSink for Box<T> {
-    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        (**self).write_tile(tile)
-    }
-    fn finish(&self) -> Result<(), SinkError> {
-        (**self).finish()
-    }
-    fn inner_sink(&self) -> Option<&dyn TileSink> {
-        (**self).inner_sink()
-    }
-    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
-        (**self).record_engine_config(config)
-    }
-    fn sink_retry_count(&self) -> u64 {
-        (**self).sink_retry_count()
-    }
-    fn sink_skipped_due_to_failure(&self) -> u64 {
-        (**self).sink_skipped_due_to_failure()
-    }
-    fn note_sink_skipped(&self) {
-        (**self).note_sink_skipped()
-    }
-    fn checkpoint_root(&self) -> Option<&Path> {
-        (**self).checkpoint_root()
-    }
-    fn arm_durability_tracking(&self) {
-        (**self).arm_durability_tracking()
-    }
-    fn sync_pending(&self) -> Result<(), SinkError> {
-        (**self).sync_pending()
-    }
-    fn init_level_count(&self, levels: usize) {
-        (**self).init_level_count(levels)
-    }
-    fn content_format(&self) -> Option<TileFormat> {
-        (**self).content_format()
-    }
-    fn applies_retry_policy(&self) -> bool {
-        (**self).applies_retry_policy()
-    }
-    fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        (**self).seed_completed_tile(tile)
-    }
+/// Every `TileSink` method still has to be forwarded — the single real
+/// obligation (`write_tile`) plus each engine-bookkeeping hook — straight
+/// through the deref with `(**self)`, which resolves to the wrapped `T` for
+/// `Box<T>`, `&T` and `Arc<T>` alike. What the macro changes is *where* that
+/// forwarding lives: it consolidates the per-method forwarding into one site
+/// instead of the hand-duplicated copies the `Box` and `&T` impls previously
+/// carried side by side. That is the fix for the drift hazard the review
+/// (issue #292) flagged — two near-identical copies of a dozen-plus forwarding
+/// methods kept in sync by hand, where a method re-forwarded in one wrapper but
+/// forgotten in another would silently drop through (the class of omission
+/// behind the silent-data-loss trap in issue #137). A method added to
+/// [`TileSink`] must still be forwarded in the macro body, but only once, and
+/// all three wrappers (`Box`, `&T`, `Arc`) stay in lock-step by construction.
+macro_rules! forward_tile_sink {
+    ($ty:ty) => {
+        impl<T: TileSink + ?Sized> TileSink for $ty {
+            fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+                (**self).write_tile(tile)
+            }
+            fn finish(&self) -> Result<(), SinkError> {
+                (**self).finish()
+            }
+            fn inner_sink(&self) -> Option<&dyn TileSink> {
+                (**self).inner_sink()
+            }
+            fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+                (**self).record_engine_config(config)
+            }
+            fn sink_retry_count(&self) -> u64 {
+                (**self).sink_retry_count()
+            }
+            fn sink_skipped_due_to_failure(&self) -> u64 {
+                (**self).sink_skipped_due_to_failure()
+            }
+            fn note_sink_skipped(&self) {
+                (**self).note_sink_skipped()
+            }
+            fn checkpoint_root(&self) -> Option<&Path> {
+                (**self).checkpoint_root()
+            }
+            fn arm_durability_tracking(&self) {
+                (**self).arm_durability_tracking()
+            }
+            fn sync_pending(&self) -> Result<(), SinkError> {
+                (**self).sync_pending()
+            }
+            fn init_level_count(&self, levels: usize) {
+                (**self).init_level_count(levels)
+            }
+            fn content_format(&self) -> Option<TileFormat> {
+                (**self).content_format()
+            }
+            fn applies_retry_policy(&self) -> bool {
+                (**self).applies_retry_policy()
+            }
+            fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+                (**self).seed_completed_tile(tile)
+            }
+        }
+    };
 }
 
-/// Forwarding impl so `&T` satisfies [`TileSink`] wherever `T` does.
-///
-/// Parallels the [`Box<T>`] impl above. Lets callers feed the
-/// [`EngineBuilder`](crate::EngineBuilder) a borrowed sink when they need
-/// to keep ownership (e.g. the CLI, which uses the same sink for both the
-/// builder path and the resumable free function):
-///
-/// ```ignore
-/// let sink = FsSink::new(dir, plan);
-/// EngineBuilder::new(&raster, plan.clone(), &sink).run()?;
-/// // `sink` still usable here.
-/// ```
-impl<T: TileSink + ?Sized> TileSink for &T {
-    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        (*self).write_tile(tile)
-    }
-    fn finish(&self) -> Result<(), SinkError> {
-        (*self).finish()
-    }
-    fn inner_sink(&self) -> Option<&dyn TileSink> {
-        (*self).inner_sink()
-    }
-    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
-        (*self).record_engine_config(config)
-    }
-    fn sink_retry_count(&self) -> u64 {
-        (*self).sink_retry_count()
-    }
-    fn sink_skipped_due_to_failure(&self) -> u64 {
-        (*self).sink_skipped_due_to_failure()
-    }
-    fn note_sink_skipped(&self) {
-        (*self).note_sink_skipped()
-    }
-    fn checkpoint_root(&self) -> Option<&Path> {
-        (*self).checkpoint_root()
-    }
-    fn arm_durability_tracking(&self) {
-        (*self).arm_durability_tracking()
-    }
-    fn sync_pending(&self) -> Result<(), SinkError> {
-        (*self).sync_pending()
-    }
-    fn init_level_count(&self, levels: usize) {
-        (*self).init_level_count(levels)
-    }
-    fn content_format(&self) -> Option<TileFormat> {
-        (*self).content_format()
-    }
-    fn applies_retry_policy(&self) -> bool {
-        (*self).applies_retry_policy()
-    }
-    fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        (*self).seed_completed_tile(tile)
-    }
-}
+// `Box<dyn TileSink>` (and `Box<T>`) so callers can unify match arms that
+// return different concrete sink types under one boxed type and feed it to
+// [`EngineBuilder::new`](crate::EngineBuilder::new):
+//
+// ```ignore
+// let sink: Box<dyn TileSink> = match mode {
+//     "mem" => Box::new(MemorySink::new()),
+//     "fs"  => Box::new(FsSink::new(dir, plan)),
+//     _ => unreachable!(),
+// };
+// EngineBuilder::new(&src, plan, sink).run()?;
+// ```
+forward_tile_sink!(Box<T>);
+
+// `&T` so callers can feed a borrowed sink to the
+// [`EngineBuilder`](crate::EngineBuilder) when they need to keep ownership
+// (e.g. the CLI, which uses the same sink for both the builder path and the
+// resumable free function):
+//
+// ```ignore
+// let sink = FsSink::new(dir, plan);
+// EngineBuilder::new(&raster, plan.clone(), &sink).run()?;
+// // `sink` still usable here.
+// ```
+forward_tile_sink!(&T);
+
+// `Arc<T>` (and `Arc<dyn TileSink>`) so a third-party author can hand the
+// engine a *shared* handle and still hold one after the run — e.g. to read
+// back the tiles a custom in-memory sink collected — without wrapping the sink
+// in `&` and juggling borrows across the `run()` call. Generated from the same
+// macro as the `Box`/`&T` wrappers, so the three stay in lock-step (issue
+// #292).
+forward_tile_sink!(Arc<T>);
 
 // ---------------------------------------------------------------------------
 // MemorySink
