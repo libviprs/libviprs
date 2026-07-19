@@ -6,8 +6,7 @@
 //! [`crate::composite`]): saving a [`Raster`] to a file by extension, the
 //! named metadata field system (`vips_image_get` / `vips_image_set`), the
 //! native `.v` container, and the small library-level helpers
-//! ([`tokenize`], [`parse_thumbnail_geometry`], [`get_max_coord`] /
-//! [`set_max_coord`], [`init_from_env`]).
+//! ([`tokenize`], [`parse_thumbnail_geometry`]).
 //!
 //! # Saving
 //!
@@ -62,19 +61,13 @@
 //! * [`parse_thumbnail_geometry`] — the vipsthumbnail size parser
 //!   (`W`, `WxH`, `Wx`, `xH`, with trailing `<` / `>` / `!` modifiers
 //!   tolerated).
-//! * [`get_max_coord`] / [`set_max_coord`] / [`init_from_env`] —
-//!   **deprecated and inert.** A mutable process-global that raced between
-//!   concurrent jobs and was consulted by only the `.v` reader. The
-//!   `VIPS_MAX_COORD` ceiling now lives on the per-decode
-//!   [`DecodeLimits::max_coord`] field (same 10,000,000 default) and is
-//!   enforced by *every* decoder, so no decoder reads these globals any
-//!   more. They carry no `since` version because they were added and
-//!   deprecated in the same unreleased cycle (no released version exposed
-//!   them); they survive only as inert shims for callers ported against
-//!   the pre-#293 libvips surface. **Security note:** because the global
-//!   is inert, a deployment that hardened the ceiling via `set_max_coord`
-//!   or `VIPS_MAX_COORD` now decodes at the default ceiling unless it
-//!   passes a [`DecodeLimits`] to a `*_with_limits` decode call.
+//!
+//! The single-axis coordinate ceiling (libvips `VIPS_MAX_COORD`) is not a
+//! library-level free function: it lives on the per-decode
+//! [`DecodeLimits::max_coord`] field (default [`DEFAULT_MAX_COORD`]),
+//! enforced by *every* decoder. Build a [`DecodeLimits`] with
+//! [`DecodeLimits::with_max_coord`] and pass it to a `*_with_limits` decode
+//! call to tighten it; there is no process-global to set.
 //!
 //! # Decode limits
 //!
@@ -85,11 +78,10 @@
 //! enforced by the [`Raster`] constructors. `max_coord` is honoured
 //! uniformly by both the native `.v` reader and the `image`-crate raster
 //! path (PNG/JPEG/TIFF); see [`DecodeLimits`] for the full per-format
-//! field mapping. The former process-global `MAX_COORD` third regime has
-//! been folded into `DecodeLimits`.
+//! field mapping. There is no third process-global regime: the coordinate
+//! ceiling lives solely on `DecodeLimits`.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1220,126 +1212,6 @@ pub fn parse_thumbnail_geometry(spec: &str) -> ThumbnailGeometry {
 /// axis, the libvips `VIPS_MAX_COORD` value.
 pub const DEFAULT_MAX_COORD: u32 = 10_000_000;
 
-/// Process-wide dimension ceiling, mirrored from libvips'
-/// `VIPS_MAX_COORD`.
-static MAX_COORD: AtomicU32 = AtomicU32::new(DEFAULT_MAX_COORD);
-
-/// The current value of the (deprecated) process-wide dimension global.
-///
-/// # Deprecated
-///
-/// Superseded by the per-decode [`DecodeLimits::max_coord`] field. The
-/// decoders no longer consult this global, so its value no longer affects
-/// any decode; it is retained only as an inert compatibility shim for
-/// callers ported against the pre-#293 libvips surface.
-///
-/// No `since` version is recorded: these accessors were **added and
-/// deprecated within the same unreleased cycle** (post-0.4.0), so no
-/// released version ever exposed them as live API — a `since = "0.4.0"`
-/// stamp would name a release that never contained them (libviprs#349).
-///
-/// # Security note
-///
-/// This global is now inert. Deployments that previously tightened the
-/// coordinate ceiling below the [10,000,000-px
-/// default](DEFAULT_MAX_COORD) via [`set_max_coord`] or the
-/// `VIPS_MAX_COORD` environment variable no longer get that hardening from
-/// the global — every non-`_with_limits` decode entry point reverts to the
-/// default ceiling. Pass a [`DecodeLimits`] with the desired
-/// [`max_coord`](DecodeLimits::max_coord) to the `*_with_limits` decode
-/// calls to reinstate a tighter bound.
-#[deprecated(
-    note = "the process-global coordinate ceiling raced between concurrent jobs and \
-            is superseded by the per-decode DecodeLimits::max_coord field; no decoder \
-            consults this global any more (added and deprecated in the same unreleased \
-            cycle, so no since version applies)"
-)]
-pub fn get_max_coord() -> u32 {
-    MAX_COORD.load(Ordering::Relaxed)
-}
-
-/// Set the (deprecated) process-wide dimension global.
-///
-/// # Deprecated
-///
-/// Superseded by the per-decode [`DecodeLimits::max_coord`] field. Setting
-/// this global no longer influences any decode; construct a
-/// [`DecodeLimits`] with the desired `max_coord` and pass it to a
-/// `*_with_limits` decode call instead.
-///
-/// No `since` version is recorded: added and deprecated within the same
-/// unreleased (post-0.4.0) cycle, so no released version exposed it
-/// (libviprs#349).
-///
-/// # Security note
-///
-/// Calling this no longer tightens any decode ceiling — the store is inert.
-/// A caller relying on it to bound untrusted geometry is silently running
-/// at the [default ceiling](DEFAULT_MAX_COORD); migrate to
-/// [`DecodeLimits::with_max_coord`] to restore the hardening.
-#[deprecated(
-    note = "the process-global coordinate ceiling raced between concurrent jobs and \
-            is superseded by the per-decode DecodeLimits::max_coord field; setting it \
-            no longer affects any decode (added and deprecated in the same unreleased \
-            cycle, so no since version applies)"
-)]
-pub fn set_max_coord(max: u32) {
-    MAX_COORD.store(max, Ordering::Relaxed);
-}
-
-/// Re-initialise the (deprecated) process-wide dimension global from
-/// `VIPS_MAX_COORD` in the environment (a plain integer, optionally with a
-/// binary `k` / `m` / `g` suffix). Unset or unparseable variables leave
-/// the current value untouched.
-///
-/// # Deprecated
-///
-/// Superseded by the per-decode [`DecodeLimits::max_coord`] field. This
-/// re-init no longer influences any decode; read the environment in the
-/// caller and populate a [`DecodeLimits`] instead.
-///
-/// No `since` version is recorded: added and deprecated within the same
-/// unreleased (post-0.4.0) cycle, so no released version exposed it
-/// (libviprs#349).
-///
-/// # Security note
-///
-/// `VIPS_MAX_COORD` no longer tightens the decode ceiling through this
-/// function — the environment value is parsed into an inert global. To
-/// honour the variable, read it in the caller and build a
-/// [`DecodeLimits`] with the parsed [`max_coord`](DecodeLimits::max_coord).
-#[deprecated(
-    note = "the process-global coordinate ceiling raced between concurrent jobs and \
-            is superseded by the per-decode DecodeLimits::max_coord field; env re-init \
-            no longer affects any decode (added and deprecated in the same unreleased \
-            cycle, so no since version applies)"
-)]
-pub fn init_from_env() {
-    if let Some(n) = std::env::var("VIPS_MAX_COORD")
-        .ok()
-        .and_then(|v| parse_size(&v))
-    {
-        // Inlined store (rather than calling the deprecated `set_max_coord`)
-        // so this deprecated shim does not itself trip the `deprecated` deny
-        // lint on internal use.
-        MAX_COORD.store(n, Ordering::Relaxed);
-    }
-}
-
-/// Parse a libvips-style size string: digits with an optional binary
-/// `k` / `m` / `g` suffix (case-insensitive), saturating at `u32::MAX`.
-fn parse_size(s: &str) -> Option<u32> {
-    let s = s.trim();
-    let (digits, multiplier) = match s.chars().last() {
-        Some('k') | Some('K') => (&s[..s.len() - 1], 1u64 << 10),
-        Some('m') | Some('M') => (&s[..s.len() - 1], 1u64 << 20),
-        Some('g') | Some('G') => (&s[..s.len() - 1], 1u64 << 30),
-        _ => (s, 1),
-    };
-    let n: u64 = digits.trim().parse().ok()?;
-    Some(u32::try_from(n.saturating_mul(multiplier)).unwrap_or(u32::MAX))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2064,60 +1936,5 @@ mod tests {
             ),
             "expected CoordLimitExceeded before the truncation check, got {err}"
         );
-    }
-
-    /// The deprecated process-global accessors still round-trip and
-    /// [`init_from_env`] still parses `VIPS_MAX_COORD` (kept for one
-    /// release), but the global is now inert for decoding: the ceiling
-    /// lives on [`DecodeLimits::max_coord`], so a header past the global no
-    /// longer affects a default decode. Runs as one serialised test so the
-    /// process-global and env state are exercised in order and restored.
-    #[test]
-    #[allow(deprecated)]
-    fn deprecated_max_coord_globals_still_round_trip() {
-        assert_eq!(get_max_coord(), DEFAULT_MAX_COORD);
-
-        set_max_coord(1000);
-        assert_eq!(get_max_coord(), 1000);
-
-        // The global no longer governs decoding: a 2000 px header decodes
-        // fine under the default DecodeLimits even with the global at 1000.
-        let im = Raster::zeroed(2000, 1, PixelFormat::Gray8).unwrap();
-        let bytes = im.encode_vips().unwrap();
-        assert!(decode_vips_bytes(&bytes, DecodeLimits::default()).is_ok());
-
-        // Env re-init still parses, including the binary suffix form.
-        // SAFETY: test-local mutation of this process's environment; the
-        // variable is removed again before the test ends.
-        unsafe { std::env::set_var("VIPS_MAX_COORD", "500") };
-        init_from_env();
-        assert_eq!(get_max_coord(), 500);
-        unsafe { std::env::set_var("VIPS_MAX_COORD", "2k") };
-        init_from_env();
-        assert_eq!(get_max_coord(), 2048);
-        // Garbage leaves the setting untouched.
-        unsafe { std::env::set_var("VIPS_MAX_COORD", "lots") };
-        init_from_env();
-        assert_eq!(get_max_coord(), 2048);
-        unsafe { std::env::remove_var("VIPS_MAX_COORD") };
-        init_from_env();
-        assert_eq!(get_max_coord(), 2048);
-
-        set_max_coord(DEFAULT_MAX_COORD);
-    }
-
-    /**
-     * Tests parse_size suffixes and saturation.
-     */
-    #[test]
-    fn parse_size_suffixes() {
-        assert_eq!(parse_size("123"), Some(123));
-        assert_eq!(parse_size("2k"), Some(2048));
-        assert_eq!(parse_size("3M"), Some(3 * 1024 * 1024));
-        assert_eq!(parse_size("1g"), Some(1 << 30));
-        assert_eq!(parse_size("999g"), Some(u32::MAX));
-        assert_eq!(parse_size(""), None);
-        assert_eq!(parse_size("k"), None);
-        assert_eq!(parse_size("-5"), None);
     }
 }
