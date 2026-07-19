@@ -30,10 +30,11 @@ lopdf = "0.36"
 # LUT engine so LUT-based (non-matrix-shaper) device profiles transform
 # too, keeping icc_import honest for arbitrary profiles.
 moxcms = { version = "0.8.1", features = ["any_to_any"] }
-# Direct git dependency on the libviprs/pdfium-render fork, pinned to its
-# `libviprs/integration` branch. That branch is the consolidated fork: it
-# carries every one of our pdfium-render PRs (as though merged), so all
-# fixes are single-sourced from one branch rather than one branch per PR.
+# Direct git dependency on the libviprs/pdfium-render fork, pinned to an
+# immutable `rev` (the pin paragraph below) whose provenance is the
+# consolidated `libviprs/integration` branch. That branch is the consolidated
+# fork: it carries every one of our pdfium-render PRs (as though merged), so
+# all fixes are single-sourced from one branch rather than one branch per PR.
 # The headline fix is proper per-call thread-safety locking in
 # `ThreadSafePdfiumBindings`. Upstream pdfium-render's wrapper (0.9.x on
 # crates.io) acquires the pdfium global mutex only once on
@@ -56,19 +57,35 @@ moxcms = { version = "0.8.1", features = ["any_to_any"] }
 # `pdfium-render ^0.9` and crates.io consumers still link the unpatched
 # wrapper. libviprs's own FPDF calls stay safe there via the internal
 # process-wide lock (`src/pdf.rs::pdfium_lock`), but the wrapper's
-# `Send + Sync` remains unsound for direct use. The remaining paths to
-# fix that are tracked in issue #149: upstream the per-call locking
-# (ajrcarey/pdfium-render#262) or publish the fork under a distinct
-# crate name and depend on it by version.
+# `Send + Sync` remains unsound for direct use by crates.io consumers.
+# PR #333 (which closed #286) deliberately descoped this published-crate
+# soundness leg. The two real fixes — upstream the per-call locking
+# (ajrcarey/pdfium-render#262) or publish the fork under a distinct crate
+# name and depend on it by version — were the original #149 plan, which is
+# now closed; the divergence is therefore carried as a known, accepted
+# limitation and any renewed work is tracked under the PR #333 follow-up
+# epic (#344), not #149.
 #
-# The `rev` below is an immutable pin on the head of the `libviprs/integration`
-# branch. A bare `branch` pin lets a force-push to that branch silently change
-# the dependency on the next resolve, so builds are non-reproducible. Cargo
-# forbids `branch` and `rev` on the same source, so the branch name lives here
-# in prose as provenance and the `rev` is the actual pin: it is exactly the
-# commit the lockfile already resolved from `libviprs/integration`, so the pin
-# is behaviour-preserving (issue #286). When intentionally advancing the fork,
-# fast-forward the branch and update this `rev` to the new head in lockstep.
+# The `rev` below pins an exact commit SHA rather than a bare `branch`. A
+# `branch` pin lets a force-push silently change the dependency on the next
+# resolve, so builds would be non-reproducible; the `rev` fixes the resolved
+# content and is behaviour-preserving — it is exactly the commit the lockfile
+# already resolved from `libviprs/integration` (issue #286). Cargo forbids
+# `branch` and `rev` on the same source, so the branch name lives here in
+# prose as provenance and the `rev` is the actual pin.
+#
+# Caveat — the pin is content-stable, not GC-proof: reproducibility holds
+# only while this commit stays REACHABLE from an advertised ref on the
+# remote. GitHub serves a bare SHA to Cargo only when it is reachable from
+# some ref (allowReachableSHA1InWant is on, allowAnySHA1InWant is off), so if
+# `libviprs/integration` is force-pushed/rebased past this commit and GitHub
+# GCs it, a cold-cache `cargo fetch` hard-fails to find the rev. Durability
+# therefore still rests on the mutable branch keeping the commit reachable;
+# anchoring to an immutable ref (an annotated tag on a protected tag ref that
+# is never force-pushed) or publishing the fork as a renamed versioned crate
+# is the deeper fix, tracked under #344. When intentionally advancing the
+# fork, fast-forward the branch and update this `rev` to the new head in
+# lockstep.
 pdfium-render = { version = "0.9", features = [
 	"sync",
 ], git = "https://github.com/libviprs/pdfium-render.git", rev = "1000a1aff1888425004c11432b376d2c36a4d3f2" }
@@ -146,9 +163,14 @@ pdfium-static = ["pdfium", "pdfium-render/static"]
 # that the module is a generic object-store sink requiring an injected backend,
 # not a ready-to-use S3 client.
 object-store-sink = []
-# Deprecated alias for `object-store-sink`, retained so consumers that pinned the
-# old `s3` feature name keep building. Prefer `object-store-sink`; the `s3`
-# alias will be removed in a future release.
+# Documentation-only deprecated alias for `object-store-sink`. Cargo has no
+# mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
+# warning: consumers pinned to `features = ["s3"]` get zero automated signal
+# and must migrate by hand. The alias is retained purely so those consumers
+# keep building and is exactly equivalent to `object-store-sink` (it enables
+# nothing else). Prefer `object-store-sink` in new code; the `s3` alias will
+# be removed in a future release, which will be a breaking change for anyone
+# still enabling it.
 s3 = ["object-store-sink"]
 tracing = ["dep:tracing"]
 packfile = ["dep:tar", "dep:zip"]
