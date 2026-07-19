@@ -126,7 +126,7 @@ println!(
 | `streaming_mapreduce` | Parallel strip engine and `MapReduceConfig` |
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
-| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `s3`) |
+| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
 | `resume` | Job checkpoints and resume policy for restart-safe runs |
 | `retry` | Failure / retry policy and `RetryingSink` wrapper |
 | `dedupe` | Content-addressed tile deduplication |
@@ -142,7 +142,8 @@ println!(
 |---|---|---|
 | `pdfium` | off | Enables `render_page_pdfium()`, `render_page_pdfium_budgeted()`, and `PdfiumStripSource` for vector PDF rendering. Requires libpdfium at runtime. |
 | `pdfium-static` | off | Implies `pdfium` and links libpdfium statically via `pdfium-render/static`. |
-| `s3` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). |
+| `object-store-sink` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). Ships no built-in S3 transport — a backend must be injected. |
+| `s3` | off | **Deprecated alias** for `object-store-sink`, retained so consumers pinned to the old feature name keep building. Prefer `object-store-sink`; the `s3` alias will be removed in a future release. |
 | `tracing` | off | Emits structured `tracing` spans and events from the engine pipeline. |
 | `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |
 
