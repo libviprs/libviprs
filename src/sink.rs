@@ -763,12 +763,16 @@ pub struct FsSink {
     /// first tile's bytes into `_shared/` and then link both tile paths to
     /// the shared file.
     pending_first: Mutex<HashMap<String, PendingFirst>>,
-    /// Per-shared-key occurrence tracking. Records every tile occurrence of a
-    /// given deduplicated content so [`FsSink::canonicalize_dedupe_layout`] can,
-    /// at `finish()`, reassign the single full-payload holder to the
-    /// coordinate-minimal occurrence — making the on-disk dedupe layout a pure
-    /// function of content + coordinates rather than of tile arrival order
-    /// (issue #275). A leaf lock.
+    /// Per-shared-key occurrence tracking. One entry per distinct shared key,
+    /// holding a BOUNDED summary of that content's occurrences rather than a
+    /// record of every one: an `occurrence_count` plus a running
+    /// coordinate-minimal occurrence updated in place (and the single `WriteNew`
+    /// holder). This lets [`FsSink::canonicalize_dedupe_layout`], at `finish()`,
+    /// reassign the single full-payload holder to the coordinate-minimal
+    /// occurrence — making the on-disk dedupe layout a pure function of
+    /// content + coordinates rather than of tile arrival order (issue #275) —
+    /// while retention stays O(distinct shared keys), independent of how many
+    /// duplicate tiles collapse onto a key (issue #452). A leaf lock.
     dedupe_groups: Mutex<BTreeMap<String, DedupeGroup>>,
     /// Per-level tile counters, indexed by level. Each entry is
     /// `[produced, skipped]` atomically-updated from the hot path. `skipped`
@@ -909,18 +913,38 @@ struct PendingFirst {
 /// to make dedupe placement a pure function of tile CONTENT + COORDINATE rather
 /// than of arrival order (issue #275).
 ///
-/// One entry per distinct shared key. It records every tile occurrence of that
-/// content so `finish()` can reassign the single full-payload / hardlink holder
-/// deterministically to the coordinate-minimal occurrence, independent of the
-/// order in which the tiles reached the sink.
-#[derive(Debug, Clone)]
+/// One entry per distinct shared key. Rather than retain every tile occurrence
+/// of that content for the whole run — an unbounded, later-cloned allocation
+/// that on the sparse-blueprint workload (millions of blank tiles collapsing
+/// onto one key) is a scalability / OOM hazard (issue #452) — it keeps only the
+/// two facts `finish()` actually consumes: the running coordinate-minimal
+/// occurrence (the canonical full-payload target) and the single `WriteNew`
+/// holder. Retention is therefore O(distinct shared keys), independent of how
+/// many duplicates a key absorbs, while the deterministic holder reassignment
+/// (issue #275) is unchanged.
+#[derive(Debug)]
 struct DedupeGroup {
     /// Shared file path relative to `base_dir`, e.g. `_shared/blank_<hash>.png`.
     shared_rel: String,
     /// Absolute shared file path (`base_dir/_shared/blank_<hash>.png`).
     shared_abs: PathBuf,
-    /// Every tile occurrence of this content: `(coord, tile_rel_path)`.
-    occurrences: Vec<(TileCoord, String)>,
+    /// Number of tile occurrences recorded for this content. Canonicalization
+    /// only acts on genuinely-shared content (`>= 2` occurrences); a singleton
+    /// keeps its full file at the tile path.
+    occurrence_count: usize,
+    /// Running coordinate-minimal occurrence `(coord, tile_rel_path)` by
+    /// `(level, row, col)`. Updated in place under the `dedupe_groups` leaf
+    /// lock, so the final value is the global minimum regardless of arrival
+    /// order — the same target [`FsSink::canonicalize_dedupe_layout`] would pick
+    /// after sorting a full occurrence list, but without retaining that list.
+    min_occurrence: (TileCoord, String),
+    /// Tile rel-path of the sole `WriteNew` occurrence (the [`crate::dedupe`]
+    /// index emits exactly one per content — issue #99). It is the arrival-first
+    /// full-payload holder at `finish()`, UNLESS a hardlink failure demoted it
+    /// to a 1-byte placeholder, in which case it appears in `manifest_refs` and
+    /// canonicalization leaves the already-order-independent all-placeholder
+    /// layout untouched.
+    holder_rel: Option<String>,
 }
 
 impl std::fmt::Debug for FsSink {
@@ -1498,6 +1522,24 @@ impl FsSink {
             .insert(shared_key.to_string());
     }
 
+    /// Test seam (issue #452): total number of per-occurrence records retained
+    /// in `dedupe_groups`.
+    ///
+    /// Canonicalization needs only the running coordinate-minimal occurrence and
+    /// the single `WriteNew` holder per shared key, so retention is O(distinct
+    /// shared keys) — at most the minimal occurrence plus the holder per group —
+    /// and MUST NOT grow with the number of duplicate tiles collapsed onto a key
+    /// (the sparse-blueprint retained-allocation the fix removes). Exposed only
+    /// under `cfg(test)` so no production surface depends on the internal
+    /// bookkeeping shape.
+    #[cfg(test)]
+    fn dedupe_group_retained_occurrences(&self) -> usize {
+        self.lock_leaf(&self.dedupe_groups)
+            .values()
+            .map(|g| 1 + usize::from(g.holder_rel.is_some()))
+            .sum()
+    }
+
     fn record_tile_digest(&self, rel: &str, materialized: &[u8]) {
         if self.checksums == crate::checksum::ChecksumMode::None {
             return;
@@ -1550,6 +1592,7 @@ impl FsSink {
         // `Reference` above (issue #275). Both decision variants carry the same
         // shared key / path for a given content hash, so the group is stable.
         {
+            let is_write_new = matches!(decision, DedupeDecision::WriteNew { .. });
             let (shared_key, shared_rel, shared_abs) = match &decision {
                 DedupeDecision::WriteNew {
                     shared_key,
@@ -1564,15 +1607,34 @@ impl FsSink {
                     self.base_dir.join(shared_path),
                 ),
             };
-            self.lock_leaf(&self.dedupe_groups)
-                .entry(shared_key)
-                .or_insert_with(|| DedupeGroup {
-                    shared_rel,
-                    shared_abs,
-                    occurrences: Vec::new(),
-                })
-                .occurrences
-                .push((coord, rel_string.to_string()));
+            let mut groups = self.lock_leaf(&self.dedupe_groups);
+            let group = groups.entry(shared_key).or_insert_with(|| DedupeGroup {
+                shared_rel,
+                shared_abs,
+                occurrence_count: 0,
+                min_occurrence: (coord, rel_string.to_string()),
+                holder_rel: None,
+            });
+            group.occurrence_count += 1;
+            // Retain only the running coordinate-minimal occurrence instead of
+            // the whole list (issue #452): its `(level, row, col)` key is the
+            // same canonical target `canonicalize_dedupe_layout` would pick after
+            // sorting every occurrence, and the update is commutative so the
+            // final holder is arrival-order-independent (issue #275 preserved).
+            let incoming = (coord.level, coord.row, coord.col);
+            let current = {
+                let c = &group.min_occurrence.0;
+                (c.level, c.row, c.col)
+            };
+            if incoming < current {
+                group.min_occurrence = (coord, rel_string.to_string());
+            }
+            // Exactly one occurrence per content is a `WriteNew` (issue #99); it
+            // is the arrival-first full-payload holder that canonicalization may
+            // later demote in favour of the coordinate-minimal tile.
+            if is_write_new {
+                group.holder_rel = Some(rel_string.to_string());
+            }
         }
 
         match decision {
@@ -1752,21 +1814,32 @@ impl FsSink {
     /// Idempotent: when the holder is already the coordinate-minimal tile (the
     /// common case when tiles arrive in row-major order) it is a pure no-op.
     fn canonicalize_dedupe_layout(&self) -> Result<(), SinkError> {
-        // Snapshot the group table, then release the lock before any I/O or
-        // other leaf-lock access (lock discipline: at most one leaf lock held
-        // at a time — see the type-level `# Lock discipline`).
+        // Consume the group table by value (issue #452): every writer thread
+        // has joined, so nothing else touches it, and moving the entries out
+        // avoids cloning the (very large, on the sparse-blueprint workload)
+        // table — and, per group, re-cloning its occurrence bookkeeping. Lock
+        // discipline: at most one leaf lock held at a time — see the type-level
+        // `# Lock discipline` — so the map is taken and the lock released before
+        // any I/O or other leaf-lock access below.
         let groups: Vec<DedupeGroup> = {
-            let g = self.lock_leaf(&self.dedupe_groups);
-            g.values().cloned().collect()
+            let mut g = self.lock_leaf(&self.dedupe_groups);
+            std::mem::take(&mut *g).into_values().collect()
         };
 
         // Only re-read shared bytes to re-record digests when checksums are on.
         let need_digests =
             self.checksums != crate::checksum::ChecksumMode::None && self.checksum_algo.is_some();
 
+        // Snapshot the placeholder-reference map ONCE, not once per group (issue
+        // #452): the loop below mutates `manifest_refs`, but each group's tile
+        // paths are disjoint (distinct content => distinct tiles), so a group's
+        // holder-membership test never depends on another group's later
+        // mutation. Cloning inside the loop was O(groups × refs).
+        let refs = self.lock_leaf(&self.manifest_refs).clone();
+
         for group in groups {
             // Singletons keep their full file at the tile path; nothing to do.
-            if group.occurrences.len() < 2 {
+            if group.occurrence_count < 2 {
                 continue;
             }
             // Reconcile only genuinely promoted content: a valid shared blob
@@ -1777,22 +1850,19 @@ impl FsSink {
                 continue;
             }
 
-            // Deterministic target = coordinate-minimal occurrence.
-            let mut occ = group.occurrences.clone();
-            occ.sort_by_key(|(c, _)| (c.level, c.row, c.col));
-            let target_rel = occ[0].1.clone();
+            // Deterministic target = coordinate-minimal occurrence, tracked
+            // incrementally during `dedupe_write` (issue #452) rather than
+            // recovered by sorting a retained occurrence list.
+            let target_rel = group.min_occurrence.1;
 
-            // The current full-payload holder is the sole occurrence NOT
-            // recorded as a placeholder in `blank_references`. If every
-            // occurrence is a placeholder (no hardlink was materialised) the
-            // layout is already order-independent — skip.
-            let refs = self.lock_leaf(&self.manifest_refs).clone();
-            let current_rel = occ
-                .iter()
-                .map(|(_, r)| r.clone())
-                .find(|r| !refs.contains_key(r));
-            let Some(current_rel) = current_rel else {
-                continue;
+            // The current full-payload holder is the sole `WriteNew` occurrence
+            // (issue #99). If a hardlink failure demoted it to a placeholder it
+            // is recorded in `blank_references` — then every occurrence is a
+            // placeholder, the layout is already order-independent, and there is
+            // nothing to reassign.
+            let current_rel = match group.holder_rel {
+                Some(h) if !refs.contains_key(&h) => h,
+                _ => continue,
             };
             if current_rel == target_rel {
                 continue; // already canonical
@@ -3837,6 +3907,60 @@ mod tests {
             read_shared(&base_fwd),
             read_shared(&base_rev),
             "shared blobs differ between arrival orders"
+        );
+    }
+
+    /**
+     * Issue #452: `dedupe_groups` must NOT retain a per-occurrence record for
+     * every deduped tile. On the sparse-blueprint workload millions of blank
+     * tiles collapse onto ONE shared key; retaining every `(coord, path)`
+     * occurrence (and cloning that list at `finish()`) is a large retained
+     * allocation and an OOM hazard. Canonicalization needs only the running
+     * coordinate-minimal occurrence and the single `WriteNew` holder, so
+     * retention must be bounded by the number of distinct shared keys, not the
+     * number of duplicates.
+     *
+     * RED before the fix: `DedupeGroup` pushed every occurrence, so retention
+     * scaled 1:1 with the duplicate count — a key hit by 64 duplicates retained
+     * 64 records, one hit by 8 retained 8, and the two runs diverged. GREEN
+     * after: each single-key run retains the same small, occurrence-independent
+     * footprint (the minimal occurrence plus the holder).
+     */
+    #[cfg(not(miri))]
+    #[test]
+    fn dedupe_groups_retention_is_occurrence_independent() {
+        let drive = |dups: u32| -> usize {
+            let (_dir, base, sink) = dedupe_sink_for_promote_tests();
+            let bytes = b"sparse-blueprint-blank-content".to_vec();
+            for col in 0..dups {
+                let rel = format!("0/0_{col}.png");
+                let abs = base.join(&rel);
+                sink.dedupe_write(TileCoord::new(0, col, 0), &rel, &abs, &bytes)
+                    .unwrap();
+            }
+            // All duplicates are identical, so they collapse onto one shared key.
+            assert_eq!(
+                crate::poison::recover(&sink.dedupe_groups).len(),
+                1,
+                "all {dups} duplicates must collapse onto a single shared key"
+            );
+            sink.dedupe_group_retained_occurrences()
+        };
+
+        let small = drive(8);
+        let large = drive(64);
+        assert_eq!(
+            small, large,
+            "dedupe_groups retained {small} records for 8 duplicates but {large} \
+             for 64 — retention scales with the duplicate count instead of \
+             staying bounded per shared key (issue #452)"
+        );
+        // The retained footprint is O(1) per key (minimal occurrence + holder),
+        // never O(duplicates).
+        assert!(
+            large <= 2,
+            "a single shared key must retain at most the coordinate-minimal \
+             occurrence plus the WriteNew holder; retained {large}"
         );
     }
 }
