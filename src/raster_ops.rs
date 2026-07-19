@@ -39,6 +39,14 @@ impl Raster {
     /// libvips `getpoint`, giving arithmetic and LUT code a depth-independent
     /// view of a pixel.
     ///
+    /// # Performance
+    ///
+    /// Allocates a fresh `Vec<f64>` (one entry per channel) on **every** call,
+    /// so reading a pixel in a hot per-pixel loop allocates once per pixel.
+    /// It is intended for occasional point reads (LUT/arithmetic setup, tests);
+    /// for scanning many pixels, walk [`Raster::data`] with [`Raster::region`]
+    /// and decode samples inline instead.
+    ///
     /// # Panics
     ///
     /// Panics if `(x, y)` is outside the raster, matching the "known-good
