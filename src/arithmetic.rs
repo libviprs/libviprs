@@ -168,6 +168,15 @@ pub enum ArithmeticError {
     /// A `stdif` window dimension is zero.
     #[error("stdif window dimensions must be greater than zero")]
     ZeroWindow,
+    /// A `stdif` window dimension exceeds the image (vips rejects this as
+    /// `stdif: window too large`).
+    #[error("stdif window {win_w}x{win_h} is larger than image {width}x{height}")]
+    WindowTooLarge {
+        win_w: u32,
+        win_h: u32,
+        width: u32,
+        height: u32,
+    },
     /// A `measure` patch grid dimension is zero.
     #[error("measure patch grid dimensions must be greater than zero")]
     ZeroPatches,
@@ -315,14 +324,17 @@ fn format_for(bands: usize, bpc: usize) -> Result<PixelFormat, ArithmeticError> 
 
 /// `base ** exp` with libvips `math2` POW semantics.
 ///
-/// Matches vips 8.18.4, where `0 ** 0` is `0` (verified with the oracle:
-/// `vips math2 zero zero out pow` yields `0`), rather than the IEEE / C
-/// `pow(0, 0) = 1` that [`f64::powf`] returns. Every other operand pair is
-/// left to [`f64::powf`], so only the `(0, 0)` corner changes. `wop` reuses
-/// this with the operands swapped, since it is the same `math2` operation.
+/// Matches vips 8.18.4, whose `math2` POW guards the whole `base == 0 &&
+/// exp <= 0` range to `0` rather than the IEEE / C values [`f64::powf`]
+/// returns there (`0 ** 0 = 1`, `0 ** -1 = +inf`, `0 ** -0.5 = +inf`).
+/// Verified with the oracle: `vips math2_const zero out pow c` yields `0`
+/// for `c` in `{0, -1, -2, -0.5}`, while a positive base is untouched
+/// (`2 ** -1 = 0.5`). Every other operand pair is left to [`f64::powf`], so
+/// only the `base == 0, exp <= 0` quadrant changes. `wop` reuses this with
+/// the operands swapped, since it is the same `math2` operation.
 #[inline]
 fn pow_vips(base: f64, exp: f64) -> f64 {
-    if base == 0.0 && exp == 0.0 {
+    if base == 0.0 && exp <= 0.0 {
         0.0
     } else {
         base.powf(exp)
@@ -2336,17 +2348,32 @@ impl Raster {
     /// deviation of `50` relative to the statistics of the window centred
     /// on it: `out = a*m0 + (1-a)*mean + (in - mean) * b*s0 / (b*dev + s0)`
     /// with `a = 0.5, m0 = 128, b = 0.5, s0 = 50`. Bands are processed
-    /// independently; at the edges the window is clipped to the image
-    /// (libvips mirrors instead, which differs only in a border of
-    /// `window/2` pixels). The output keeps the input format.
+    /// independently; at the edges the window is edge-replicated
+    /// (`VIPS_EXTEND_COPY`, extending the border pixel) to match vips exactly,
+    /// with no remaining border divergence. The output keeps the input format.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::ZeroWindow`] if either window dimension
-    /// is zero.
+    /// is zero, or [`ArithmeticError::WindowTooLarge`] if a window dimension
+    /// exceeds the corresponding image dimension (vips: `stdif: window too
+    /// large`).
     pub fn try_stdif(&self, width: u32, height: u32) -> Result<Raster, ArithmeticError> {
         if width == 0 || height == 0 {
             return Err(ArithmeticError::ZeroWindow);
+        }
+        // vips rejects a window larger than the image ("stdif: window too
+        // large"): with a 5-wide image, window 5 is accepted but 6+ errors
+        // (verified with the oracle). Mirror that instead of silently
+        // computing a result the differential harness could never obtain
+        // from vips.
+        if width > self.width() || height > self.height() {
+            return Err(ArithmeticError::WindowTooLarge {
+                win_w: width,
+                win_h: height,
+                width: self.width(),
+                height: self.height(),
+            });
         }
         let fmt = self.format();
         let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
@@ -2488,16 +2515,23 @@ impl Raster {
                     .enumerate()
                     .map(|(b, &m)| m * read_f64(data, bpc, p * bands + b))
                     .sum();
-                // vips recomb accumulates in float and produces a float image;
-                // the differential comparison casts that float into the input
-                // depth, and vips's float->integer cast truncates toward zero
-                // (verified with the oracle: `vips cast` of 2.6 -> 2, 3.5 -> 3,
-                // 0.5 -> 0). Rounding to nearest here diverged by up to 1 LSB,
-                // so truncate the clamped accumulator instead. NaN -> 0.
-                let v = if acc.is_nan() {
+                // vips recomb accumulates in double but STORES the result as
+                // float32 (VIPS_FORMAT_FLOAT); the differential comparison then
+                // casts that float32 into the input depth, and vips's
+                // float->integer cast truncates toward zero (verified with the
+                // oracle: `vips cast` of 2.6 -> 2, 3.5 -> 3, 0.5 -> 0). We must
+                // round the f64 accumulator to f32 *before* truncating, because
+                // an accumulator just below an integer (e.g. 6.99999988 for
+                // input [10,20,30] with coeff row [0,0,0.23333332933333335])
+                // rounds up to 7.0 in f32 storage, and `vips recomb` + `vips
+                // cast`->uchar yields 7 there, not the 6 a direct f64 truncation
+                // would give. Rounding to nearest here diverged by up to 1 LSB,
+                // so truncate the f32-clamped value instead. NaN -> 0.
+                let f = acc as f32;
+                let v = if f.is_nan() {
                     0.0
                 } else {
-                    acc.clamp(0.0, max)
+                    f.clamp(0.0, max as f32)
                 };
                 write_u32(&mut out, bpc, p * out_bands + r, v as u32);
             }
@@ -4245,15 +4279,35 @@ mod tests {
         assert_eq!(r.getpoint(10, 10), vec![84.0]);
     }
 
-    /// stdif processes bands independently and accepts windows larger than
-    /// the image.
+    /// stdif processes bands independently. A window equal to the image is
+    /// the largest vips accepts; on a constant image the deviation term
+    /// vanishes so every band is `0.5*128 + 0.5*band`.
     #[test]
-    fn stdif_multiband_and_large_window() {
+    fn stdif_multiband() {
         let im = Raster::new(2, 2, PixelFormat::Rgb8, [10u8, 40, 70].repeat(4)).unwrap();
-        let r = im.stdif(10, 10);
+        let r = im.stdif(2, 2);
         assert_eq!(r.format(), PixelFormat::Rgb8);
         // Constant bands: 0.5*128 + 0.5*band.
         assert_eq!(r.getpoint(0, 0), vec![69.0, 84.0, 99.0]);
+    }
+
+    /// A window larger than the image is a typed error, matching vips, which
+    /// rejects it as `stdif: window too large` (verified with the oracle: on a
+    /// 5-wide image, window 5 is accepted but 6+ errors). The core previously
+    /// computed a silent result for any window; #490 aligns it with vips.
+    #[test]
+    fn stdif_window_larger_than_image_is_typed_error() {
+        let im = Raster::new(2, 2, PixelFormat::Rgb8, [10u8, 40, 70].repeat(4)).unwrap();
+        assert!(matches!(
+            im.try_stdif(3, 2),
+            Err(ArithmeticError::WindowTooLarge { .. })
+        ));
+        assert!(matches!(
+            im.try_stdif(2, 3),
+            Err(ArithmeticError::WindowTooLarge { .. })
+        ));
+        // A window exactly the image size is still accepted.
+        assert!(im.try_stdif(2, 2).is_ok());
     }
 
     /// Edge pixels use a replicated (edge-extended) window, matching vips.
@@ -4366,6 +4420,21 @@ mod tests {
         // A negative accumulator clamps to 0 (not wrapping).
         let mneg: &[&[f64]] = &[&[-1.0, 0.0, 0.0]];
         assert_eq!(im.recomb(mneg).getpoint(0, 0), vec![0.0]);
+    }
+
+    /// vips stores the recomb accumulator as float32 before the cast truncates,
+    /// so an f64 accumulator that lands just below an integer inside the f32
+    /// round-up band rounds *up* first. Pinned against the oracle: input
+    /// `[10,20,30]` with coeff row `[0,0,0.23333332933333335]` gives an f64
+    /// accumulator of `6.99999988`, which `vips recomb` stores as f32 `7.0` and
+    /// `vips cast`->uchar yields `7` (not the `6` a direct f64 truncation would
+    /// give). Regression for #491.
+    #[test]
+    fn recomb_rounds_to_f32_before_truncating_like_vips() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        // f64 acc = 6.99999988; f32 storage -> 7.0; cast -> 7.
+        let m: &[&[f64]] = &[&[0.0, 0.0, 0.233_333_329_333_333_35]];
+        assert_eq!(im.recomb(m).getpoint(0, 0), vec![7.0]);
     }
 
     /// Malformed recomb matrices are typed errors.
@@ -4620,11 +4689,13 @@ mod tests {
         assert!((v - 100.0).abs() < 1e-3, "10^2 = 100, got {v}");
     }
 
-    /// vips `math2` POW defines `0 ** 0 = 0`, not the IEEE / `f64::powf`
-    /// value of `1` (verified with the oracle: `vips math2 zero zero out pow`
-    /// yields `0`). This holds for `pow`, the reversed `wop`, and the
-    /// depth-preserving `pow_const`; every other operand pair is unchanged
-    /// (`0 ** 5 = 0`, `5 ** 0 = 1`).
+    /// vips `math2` POW guards the whole `base == 0 && exp <= 0` quadrant to
+    /// `0`, not the IEEE / `f64::powf` values (`0 ** 0 = 1`, `0 ** -1 = +inf`,
+    /// `0 ** -0.5 = +inf`). Verified with the oracle: `vips math2_const zero
+    /// out pow c` yields `0` for `c` in `{0, -1, -2, -0.5}`, while a positive
+    /// base is untouched (`2 ** -1 = 0.5`). This holds for `pow`, the reversed
+    /// `wop`, and the depth-preserving `pow_const`; every other operand pair is
+    /// unchanged (`0 ** 5 = 0`, `5 ** 0 = 1`).
     #[test]
     fn pow_zero_zero_matches_vips() {
         let zero = gray(1, 1, vec![0]);
@@ -4644,6 +4715,33 @@ mod tests {
             vec![1.0],
             "pow_const(5,0)=1"
         );
+    }
+
+    /// vips POW keeps `0 ** exp = 0` for every `exp <= 0`, not just `exp == 0`:
+    /// `f64::powf(0, negative)` is `+inf`, but vips returns `0` (verified with
+    /// the oracle: `vips math2_const zero out pow c` yields `0` for `c` in
+    /// `{-1, -2, -0.5}`). A positive base still uses the normal power
+    /// (`2 ** -1 = 0.5`). Pinned across `pow`, `wop`, and `pow_const`.
+    #[test]
+    fn pow_zero_negative_exponent_matches_vips() {
+        let zero = gray(1, 1, vec![0]);
+        // pow_const: 0 ** -1 and 0 ** -0.5 are 0, not +inf.
+        assert_eq!(zero.pow_const(-1.0).getpoint(0, 0), vec![0.0], "0 ** -1");
+        assert_eq!(zero.pow_const(-2.0).getpoint(0, 0), vec![0.0], "0 ** -2");
+        assert_eq!(zero.pow_const(-0.5).getpoint(0, 0), vec![0.0], "0 ** -0.5");
+
+        // Image-image pow / wop with a zero base and a negative exponent.
+        let neg1 = grayf(1, 1, &[-1.0]);
+        assert_eq!(float_samples(&zero.pow(&neg1))[0], 0.0, "pow: 0 ** -1");
+        // wop(a, b) = b ** a, so wop(neg1, zero) = zero ** neg1 = 0.
+        assert_eq!(float_samples(&neg1.wop(&zero))[0], 0.0, "wop: 0 ** -1");
+
+        let neghalf = grayf(1, 1, &[-0.5]);
+        assert_eq!(float_samples(&zero.pow(&neghalf))[0], 0.0, "pow: 0 ** -0.5");
+
+        // A positive base keeps the ordinary power.
+        let two = grayf(1, 1, &[2.0]);
+        assert_eq!(float_samples(&two.pow(&neg1))[0], 0.5, "2 ** -1 = 0.5");
     }
 
     /// The math2 ops validate image compatibility like the other binary
