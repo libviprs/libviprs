@@ -948,14 +948,42 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     raster.meta.xoffset = xoffset;
     raster.meta.yoffset = yoffset;
     raster.meta.interpretation = interpretation_from_code(type_code);
-    // Trailer: libviprs JSON, or (from real libvips) XML we treat as absent.
+    // Trailer: libviprs JSON carries the orientation tag and every attached
+    // field. A `.v` written by real libvips instead carries an XML metadata
+    // block here; we still recover the orientation tag from it so `autorot`
+    // has the same cross-oracle vips does (the remaining XML fields are not
+    // parsed yet). Anything we cannot read is treated as absent.
     if end < bytes.len() {
-        if let Ok(trailer) = serde_json::from_slice::<VTrailer>(&bytes[end..]) {
-            raster.meta.orientation = trailer.orientation;
-            raster.fields = trailer.fields;
+        let trailer = &bytes[end..];
+        if let Ok(parsed) = serde_json::from_slice::<VTrailer>(trailer) {
+            raster.meta.orientation = parsed.orientation;
+            raster.fields = parsed.fields;
+        } else if let Some(orientation) = parse_vips_xml_orientation(trailer) {
+            raster.meta.orientation = orientation;
         }
     }
     Ok(raster)
+}
+
+/// Recover the EXIF-style orientation tag from a real-libvips `.v` XML
+/// metadata trailer.
+///
+/// libvips serialises image metadata as an XML block after the pixel data,
+/// storing the orientation as `<field type="gint" name="orientation">N</field>`.
+/// This extracts that integer (1-8) so a `.v` file vips itself wrote decodes
+/// with the correct orientation for [`Raster::autorot`]; the distinct
+/// lowercase `name="orientation"` is not shared by the `exif-ifd0-Orientation`
+/// string field. Returns `None` when the trailer is not valid UTF-8, carries
+/// no such field, or the value is out of the 1-8 range.
+fn parse_vips_xml_orientation(trailer: &[u8]) -> Option<u8> {
+    let text = std::str::from_utf8(trailer).ok()?;
+    let anchor = text.find(r#"name="orientation""#)?;
+    let after = &text[anchor..];
+    let open = after.find('>')?;
+    let rest = &after[open + 1..];
+    let close = rest.find('<')?;
+    let value: u16 = rest[..close].trim().parse().ok()?;
+    (1..=8).contains(&value).then_some(value as u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -1789,6 +1817,54 @@ mod tests {
         let back = decode_bytes(&bytes).unwrap();
         assert_eq!(back.data(), im.data());
         assert_eq!(back.get_field("note"), None);
+    }
+
+    /// A `.v` file written by real libvips stores metadata as an XML block
+    /// (not our JSON), so its orientation was previously lost and `autorot`
+    /// had no cross-oracle. The decoder now recovers the orientation tag from
+    /// the `<field type="gint" name="orientation">N</field>` element that vips
+    /// writes, matching what `vipsheader -a` reports for the same file.
+    #[test]
+    fn vips_decode_reads_orientation_from_xml_trailer() {
+        let im = rgb_2x2();
+        let mut bytes = im.encode_vips_impl(false);
+        bytes.extend_from_slice(
+            b"<?xml version=\"1.0\"?>\n<root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n\
+              <meta>\n    <field type=\"VipsRefString\" name=\"exif-ifd0-Orientation\">\
+              1 (Top-left, Short, 1 components, 2 bytes)</field>\n\
+              <field type=\"gint\" name=\"orientation\">6</field>\n  </meta>\n</root>\n",
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        // Pixels and geometry are untouched; only the orientation is recovered.
+        assert_eq!(back.data(), im.data());
+        assert_eq!(back.orientation(), 6);
+        // And autorot of the orientation-6 image rotates 2x2 → 2x2 (rot90) and
+        // clears the tag, as `vips autorot` does.
+        let rot = back.autorot();
+        assert_eq!(rot.orientation(), 1);
+    }
+
+    /// Unit-covers the XML orientation extractor: it finds the lowercase
+    /// `orientation` gint field, ignores the distinct `exif-ifd0-Orientation`
+    /// string field, and rejects malformed / out-of-range values.
+    #[test]
+    fn parse_vips_xml_orientation_cases() {
+        let good = b"<field type=\"gint\" name=\"orientation\">8</field>";
+        assert_eq!(parse_vips_xml_orientation(good), Some(8));
+        // The exif string field alone must not be mistaken for the tag.
+        let exif_only =
+            b"<field type=\"VipsRefString\" name=\"exif-ifd0-Orientation\">1 (Top-left)</field>";
+        assert_eq!(parse_vips_xml_orientation(exif_only), None);
+        // Out of range and non-numeric are rejected.
+        assert_eq!(
+            parse_vips_xml_orientation(b"<field name=\"orientation\">9</field>"),
+            None
+        );
+        assert_eq!(
+            parse_vips_xml_orientation(b"<field name=\"orientation\">x</field>"),
+            None
+        );
+        assert_eq!(parse_vips_xml_orientation(b"no field here"), None);
     }
 
     // -- free functions -----------------------------------------------------

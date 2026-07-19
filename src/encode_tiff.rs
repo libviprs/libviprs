@@ -31,18 +31,28 @@
 //!
 //! ## Pixel formats
 //!
-//! The encoder handles the 8- and 16-bit gray, RGB, and RGBA formats. The
-//! float and multiband [`PixelFormat`] variants are compute intermediates
-//! with no TIFF representation here, so they surface the same typed error.
+//! The encoder handles the 8- and 16-bit gray, RGB, and RGBA formats, plus the
+//! N-band [`PixelFormat::Multi8`] / [`PixelFormat::Multi16`] carriers: a
+//! multiband uchar/ushort raster is written as a `BlackIsZero` base plus
+//! `N - 1` unassociated-alpha extra samples, so it round-trips as a portable
+//! integer carrier and vips reads the file back with the same band count and
+//! samples. (A 4-band uchar/ushort raster is the named [`PixelFormat::Rgba8`] /
+//! [`PixelFormat::Rgba16`] and travels the RGBA path.) See [`encode_multiband`]
+//! for why the `BlackIsZero` layout is used in place of vips's RGB-plus-extra
+//! layout for `>= 3` bands. The float [`PixelFormat`] variants remain compute
+//! intermediates with no TIFF representation here and surface a typed error.
 //! Sixteen-bit samples are read from and written back to the raster buffer in
 //! native byte order, matching the convention the rest of the crate uses.
 
-use std::io::{Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
-use tiff::encoder::{Compression, DeflateLevel, Predictor, TiffEncoder, colortype};
+use tiff::encoder::{
+    Compression, DeflateLevel, DirectoryEncoder, Predictor, TiffEncoder, TiffKind, colortype,
+};
+use tiff::tags::Tag;
 
 use crate::codec::{DecodeError, TiffCompression};
 use crate::imageio::SaveError;
@@ -122,6 +132,20 @@ fn as_u16_samples(bytes: &[u8]) -> Vec<u16> {
 /// what makes those modes actually shrink natural images (and keeps this in
 /// line with what libvips writes). `None` writes raw strips.
 fn encode_to_vec(raster: &Raster, compression: TiffCompression) -> Result<Vec<u8>, SaveError> {
+    // N-band multiband uchar/ushort rasters have no named TIFF colour type;
+    // route them through the dedicated writer, which emits the vips tag layout
+    // (Gray/RGB base + unassociated-alpha extra samples). The named 1/3/4-band
+    // formats fall through to the standard `write_image` path below.
+    match raster.format() {
+        PixelFormat::Multi8(n) => {
+            return encode_multiband(raster, compression, n.get() as usize, 1);
+        }
+        PixelFormat::Multi16(n) => {
+            return encode_multiband(raster, compression, n.get() as usize, 2);
+        }
+        _ => {}
+    }
+
     let (comp, predictor) = match compression {
         TiffCompression::None => (Compression::Uncompressed, Predictor::None),
         TiffCompression::Lzw => (Compression::Lzw, Predictor::Horizontal),
@@ -172,27 +196,110 @@ fn encode_to_vec(raster: &Raster, compression: TiffCompression) -> Result<Vec<u8
     Ok(buf)
 }
 
+/// Encode an N-band multiband raster as a portable, round-trippable TIFF.
+///
+/// vips has no "multiband" TIFF colour type: `tiffsave` emits an N-band
+/// uchar/ushort raster as a `BlackIsZero` base (`<= 2` bands) or an RGB base
+/// (`>= 3` bands) plus `N - base` unassociated-alpha extra samples. We write
+/// the `BlackIsZero`-plus-extra layout for *every* multiband count, which
+/// carries the identical pixel samples and band count (so vips reads it back
+/// with the same values) and, unlike vips's RGB-plus-extra layout for `>= 5`
+/// bands, is one the pure-Rust `tiff` decoder can read — `read_image` rejects
+/// an RGB photometric carrying extra samples, so an RGB layout would not
+/// round-trip within this crate. The one difference from vips is the reported
+/// interpretation tag (`b-w`/`multiband` here vs `srgb` for vips's `>= 3` band
+/// files); the carried integer samples are byte-identical.
+///
+/// The pixel buffer is handed to the `tiff` crate as a single wide "gray"
+/// image of `width * channels` columns, then the directory tags are overridden
+/// (`ImageWidth`, `SamplesPerPixel`, `BitsPerSample`, `SampleFormat`,
+/// `ExtraSamples`) to describe the true N-band geometry. That trick keeps the
+/// strip bytes identical to a real N-band write only when no per-sample
+/// predictor is applied, so [`Predictor::None`] is forced here (the
+/// compression itself stays lossless).
+fn encode_multiband(
+    raster: &Raster,
+    compression: TiffCompression,
+    channels: usize,
+    depth_bytes: usize,
+) -> Result<Vec<u8>, SaveError> {
+    let comp = match compression {
+        TiffCompression::None => Compression::Uncompressed,
+        TiffCompression::Lzw => Compression::Lzw,
+        TiffCompression::Deflate => Compression::Deflate(DeflateLevel::default()),
+        TiffCompression::Jpeg => return Err(unsupported_compression("JPEG")),
+        TiffCompression::Ccitt => return Err(unsupported_compression("CCITT G4")),
+        TiffCompression::Jp2k => return Err(unsupported_compression("JPEG 2000")),
+    };
+    let width = raster.width();
+    let height = raster.height();
+    let wide = u32::try_from(width as usize * channels).map_err(|_| {
+        SaveError::Encode(SinkError::Other(
+            "multiband TIFF width * bands exceeds the 32-bit TIFF dimension limit".to_string(),
+        ))
+    })?;
+
+    let mut buf = Vec::new();
+    {
+        let mut encoder = TiffEncoder::new(Cursor::new(&mut buf))
+            .map_err(tiff_encode_err)?
+            .with_compression(comp)
+            .with_predictor(Predictor::None);
+        match depth_bytes {
+            1 => {
+                let mut image = encoder
+                    .new_image::<colortype::Gray8>(wide, height)
+                    .map_err(tiff_encode_err)?;
+                write_multiband_tags(image.encoder(), width, channels, 8)
+                    .map_err(tiff_encode_err)?;
+                image.write_data(raster.data()).map_err(tiff_encode_err)?;
+            }
+            _ => {
+                let samples = as_u16_samples(raster.data());
+                let mut image = encoder
+                    .new_image::<colortype::Gray16>(wide, height)
+                    .map_err(tiff_encode_err)?;
+                write_multiband_tags(image.encoder(), width, channels, 16)
+                    .map_err(tiff_encode_err)?;
+                image.write_data(&samples).map_err(tiff_encode_err)?;
+            }
+        }
+    }
+    Ok(buf)
+}
+
+/// Override the base-image directory tags to describe an N-band `BlackIsZero`
+/// raster with `channels - 1` unassociated-alpha extra samples. Re-writing a
+/// tag replaces the earlier entry in the directory, so this corrects the
+/// geometry the single-band base write recorded. The base `new_image` already
+/// wrote `PhotometricInterpretation = BlackIsZero`, which is kept.
+fn write_multiband_tags<W: Write + Seek, K: TiffKind>(
+    dir: &mut DirectoryEncoder<'_, W, K>,
+    width: u32,
+    channels: usize,
+    bits: u16,
+) -> tiff::TiffResult<()> {
+    dir.write_tag(Tag::ImageWidth, width)?;
+    dir.write_tag(Tag::SamplesPerPixel, u16::try_from(channels)?)?;
+    dir.write_tag(Tag::BitsPerSample, &vec![bits; channels][..])?;
+    // SampleFormat 1 = unsigned integer, one entry per sample.
+    dir.write_tag(Tag::SampleFormat, &vec![1u16; channels][..])?;
+    // ExtraSamples 2 = unassociated alpha, one per non-colour sample, as vips
+    // writes. The single colour sample is the BlackIsZero base.
+    dir.write_tag(Tag::ExtraSamples, &vec![2u16; channels - 1][..])?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Decode
 // ---------------------------------------------------------------------------
 
-/// Turn the `tiff` decoder's color type and sample buffer into a canonical
-/// [`PixelFormat`] and native-byte-order pixel buffer.
+/// Turn a channel count and the `tiff` decoder's sample buffer into a
+/// canonical [`PixelFormat`] and native-byte-order pixel buffer.
 fn interpret(
-    color: ColorType,
+    channels: usize,
     result: DecodingResult,
 ) -> Result<(PixelFormat, Vec<u8>), DecodeError> {
-    let channels = match color {
-        ColorType::Gray(_) => 1usize,
-        ColorType::RGB(_) => 3,
-        ColorType::RGBA(_) => 4,
-        other => {
-            return Err(decode_err(format!(
-                "unsupported TIFF color type {other:?} \
-                 (only gray, RGB, and RGBA are decoded here)"
-            )));
-        }
-    };
     match result {
         DecodingResult::U8(values) => {
             let format = PixelFormat::with_channels(channels, 1)
@@ -212,13 +319,49 @@ fn interpret(
     }
 }
 
+/// Resolve the channel count of the current image.
+///
+/// `colortype()` maps the common photometrics and the `BlackIsZero`-with-extra
+/// Multiband case, but *rejects* an RGB/CMYK photometric that carries extra
+/// samples — which is exactly how vips writes a 5+-band uchar/ushort raster.
+/// For that case the raw `SamplesPerPixel` is recovered so the N-band raster
+/// still decodes into a portable integer carrier instead of being turned away.
+fn resolve_channels<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<usize, DecodeError> {
+    match decoder.colortype() {
+        Ok(ColorType::Gray(_)) => Ok(1),
+        Ok(ColorType::RGB(_)) => Ok(3),
+        Ok(ColorType::RGBA(_)) => Ok(4),
+        Ok(ColorType::Multiband { num_samples, .. }) => Ok(num_samples as usize),
+        Ok(other) => Err(decode_err(format!(
+            "unsupported TIFF color type {other:?} \
+             (gray, RGB, RGBA, and multiband uchar/ushort are decoded here)"
+        ))),
+        Err(_) => Ok(decoder
+            .get_tag_unsigned::<u16>(Tag::SamplesPerPixel)
+            .map_err(tiff_decode_err)? as usize),
+    }
+}
+
+/// Read the EXIF-style orientation from the TIFF `Orientation` tag (274),
+/// which vips writes when saving an oriented raster. An absent or
+/// out-of-range tag reads as `1` (upright), matching vips.
+fn read_tiff_orientation<R: Read + Seek>(decoder: &mut Decoder<R>) -> u8 {
+    match decoder.find_tag_unsigned::<u16>(Tag::Orientation) {
+        Ok(Some(v)) if (1..=8).contains(&v) => v as u8,
+        _ => 1,
+    }
+}
+
 /// Read the decoder's currently-selected image into a [`Raster`].
 fn decode_current_image<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<Raster, DecodeError> {
     let (width, height) = decoder.dimensions().map_err(tiff_decode_err)?;
-    let color = decoder.colortype().map_err(tiff_decode_err)?;
+    let channels = resolve_channels(decoder)?;
+    let orientation = read_tiff_orientation(decoder);
     let result = decoder.read_image().map_err(tiff_decode_err)?;
-    let (format, data) = interpret(color, result)?;
-    Ok(Raster::new(width, height, format, data)?)
+    let (format, data) = interpret(channels, result)?;
+    let mut raster = Raster::new(width, height, format, data)?;
+    raster.meta.orientation = orientation;
+    Ok(raster)
 }
 
 /// Count the pages (IFDs) in a multi-page TIFF file.
@@ -320,18 +463,18 @@ impl Raster {
     /// save). Uses Deflate so the round-trip through [`Raster::tiff_load`]
     /// stays lossless.
     ///
-    /// The contract is infallible: the 8- and 16-bit gray/RGB/RGBA formats
-    /// always encode, and encoding into memory does no fallible I/O. A float
-    /// or multiband raster (a compute intermediate with no TIFF form) yields
-    /// an empty buffer rather than a spurious error.
+    /// The contract is infallible: the 8- and 16-bit gray/RGB/RGBA and N-band
+    /// multiband formats always encode, and encoding into memory does no
+    /// fallible I/O. A float raster (a compute intermediate with no TIFF form)
+    /// yields an empty buffer rather than a spurious error.
     pub fn tiff_save(&self) -> Vec<u8> {
         match encode_to_vec(self, TiffCompression::Deflate) {
             Ok(bytes) => bytes,
             Err(_err) => {
                 // An empty save is otherwise silent and undiagnosable, so I
                 // surface the reason in debug builds. The contract stays
-                // infallible: float and multiband rasters have no TIFF form
-                // and legitimately yield an empty buffer here.
+                // infallible: float rasters have no TIFF form and legitimately
+                // yield an empty buffer here.
                 #[cfg(debug_assertions)]
                 eprintln!("tiff_save: encoding produced no bytes ({_err})");
                 Vec::new()
@@ -627,5 +770,112 @@ mod tests {
             im.save_tiff_tiled(&out, TiffCompression::Jp2k, 128, 128, true, true)
                 .is_err()
         );
+    }
+
+    /// Build an `n`-band uchar raster whose sample `(x, y, band)` is a
+    /// distinct value, so a round-trip that scrambled bands or rows would be
+    /// caught. `n` must not be 1/3/4 (those canonicalize to named formats).
+    fn ramp_multi8(w: u32, h: u32, n: usize) -> Raster {
+        let mut data = Vec::with_capacity(w as usize * h as usize * n);
+        for y in 0..h {
+            for x in 0..w {
+                for b in 0..n {
+                    data.push(((x as usize + y as usize * 7 + b * 40) & 0xFF) as u8);
+                }
+            }
+        }
+        let fmt = PixelFormat::with_channels(n, 1).unwrap();
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn ramp_multi16(w: u32, h: u32, n: usize) -> Raster {
+        let mut samples = Vec::with_capacity(w as usize * h as usize * n);
+        for y in 0..h {
+            for x in 0..w {
+                for b in 0..n {
+                    samples.push(((x as usize + y as usize * 100 + b * 5000) & 0xFFFF) as u16);
+                }
+            }
+        }
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
+        let fmt = PixelFormat::with_channels(n, 2).unwrap();
+        Raster::new(w, h, fmt, bytes).unwrap()
+    }
+
+    /// A 5-band uchar multiband raster (vips writes it as RGB + 2 unassoc-alpha
+    /// extra samples, which the `tiff` crate's `colortype()` rejects) must
+    /// round-trip losslessly, back to `Multi8(5)` with identical samples.
+    #[test]
+    fn save_tiff_multiband8_round_trips_bit_exact() {
+        let im = ramp_multi8(6, 4, 5);
+        assert_eq!(im.format(), PixelFormat::with_channels(5, 1).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("multi5.tif");
+        im.save_tiff(&out, TiffCompression::None).unwrap();
+
+        let back = decode_tiff_page(&out, 1).unwrap();
+        assert_eq!(back.width(), 6);
+        assert_eq!(back.height(), 4);
+        assert_eq!(back.format(), PixelFormat::with_channels(5, 1).unwrap());
+        assert_eq!(back.data(), im.data(), "5-band uchar TIFF must be lossless");
+    }
+
+    /// A 2-band uchar raster (vips writes it as BlackIsZero + 1 unassoc-alpha
+    /// extra sample, decoded by the `tiff` crate as `Multiband{num_samples:2}`)
+    /// must round-trip back to `Multi8(2)`.
+    #[test]
+    fn save_tiff_multiband_two_band_round_trips() {
+        let im = ramp_multi8(5, 3, 2);
+        assert_eq!(im.format(), PixelFormat::with_channels(2, 1).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("multi2.tif");
+        im.save_tiff(&out, TiffCompression::Deflate).unwrap();
+
+        let back = decode_tiff_page(&out, 1).unwrap();
+        assert_eq!(back.format(), PixelFormat::with_channels(2, 1).unwrap());
+        assert_eq!(back.data(), im.data());
+    }
+
+    /// A 6-band ushort raster round-trips losslessly through the in-memory
+    /// `tiff_save` / `tiff_load` pair (Deflate), back to `Multi16(6)`.
+    #[test]
+    fn tiff_save_load_multiband16_round_trips() {
+        let im = ramp_multi16(4, 5, 6);
+        assert_eq!(im.format(), PixelFormat::with_channels(6, 2).unwrap());
+        let bytes = im.tiff_save();
+        assert!(!bytes.is_empty(), "multiband ushort must encode");
+        let back = Raster::tiff_load(&bytes).unwrap();
+        assert_eq!(back.width(), 4);
+        assert_eq!(back.height(), 5);
+        assert_eq!(back.format(), PixelFormat::with_channels(6, 2).unwrap());
+        assert_eq!(back.data(), im.data());
+    }
+
+    /// The decoder reads the TIFF `Orientation` tag (274) that vips writes for
+    /// an oriented raster, so `autorot` has a real cross-oracle. A file with
+    /// tag 274 = 6 decodes to orientation 6; the absence of the tag reads as 1.
+    #[test]
+    fn decode_reads_tiff_orientation_tag() {
+        // A plain Gray8 write has no Orientation tag → upright (1).
+        let plain = ramp_gray8(4, 3);
+        let plain_bytes = plain.tiff_save();
+        assert_eq!(Raster::tiff_load(&plain_bytes).unwrap().orientation(), 1);
+
+        // Hand-build a TIFF carrying Orientation = 6 (as vips does when it
+        // saves an orientation-6 raster).
+        let mut buf = Vec::new();
+        {
+            let mut encoder = TiffEncoder::new(Cursor::new(&mut buf)).unwrap();
+            let mut image = encoder.new_image::<colortype::Gray8>(4, 3).unwrap();
+            image.encoder().write_tag(Tag::Orientation, 6u16).unwrap();
+            image.write_data(&[7u8; 12]).unwrap();
+        }
+        let back = Raster::tiff_load(&buf).unwrap();
+        assert_eq!(back.orientation(), 6);
+        // And autorot of a 4x3 orientation-6 raster rotates it to 3x4, as vips
+        // (`vips autorot`) does.
+        let rot = back.autorot();
+        assert_eq!((rot.width(), rot.height()), (3, 4));
+        assert_eq!(rot.orientation(), 1);
     }
 }
