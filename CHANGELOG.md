@@ -169,6 +169,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release that never contained them. They survive only as compatibility
   shims for callers ported against the pre-#293 libvips surface; migrate to
   `DecodeLimits::with_max_coord`.
+- **Breaking (drawing): a wrong-width ink is now rejected instead of broadcast.**
+  The `draw` module entry points validate that `ink` is exactly one whole pixel
+  wide for the target raster (issues #294/#346). Earlier the ops cycled a
+  too-short ink to fill the pixel, so a single-value ink such as `&[128]`
+  broadcast to a uniform shade on a multi-band raster (and a 3-byte RGB ink
+  silently painted an `Rgba8` alpha band from the red byte). That silent cycle
+  is a channel-corruption route, so a mismatched ink now fails up front: the
+  panicking `Raster::draw_*` forms and the generic `Raster::draw(&op)` path
+  panic, and the `try_draw_*` forms (plus the inherently fallible `draw_flood` /
+  `draw_flood_blob`) return `Err(DrawError::InkLengthMismatch)`. The raw
+  `Raster::put_pixel` escape hatch is unchanged and remains the deliberate
+  opt-in for the shorter-ink cycling broadcast.
 
 ### Fixed
 
@@ -238,7 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ships `Circle` and `Rectangle` ops (outline + filled), the inherent
   convenience methods `Raster::draw`, `draw_circle`, `draw_circle_filled`,
   `draw_rect`, `draw_rect_filled`, and `put_pixel` (clipping, format-agnostic
-  pixel write). All drawing clips to the raster bounds and is infallible.
+  pixel write). All drawing clips to the raster bounds. (Ink-width validation
+  was added later; see the **Breaking (drawing)** entry under _Changed_ — the
+  draw ops now reject a wrong-width ink rather than broadcasting it.)
 - Pixel utilities on `Raster` (issue #55): `getpoint(x, y) -> Vec<f64>` reads a
   pixel as one `f64` per band (native byte order for 16-bit), and
   `add(&other) -> Raster` combines two rasters pixel-by-pixel, promoting 8-bit
