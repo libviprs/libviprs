@@ -27,6 +27,25 @@
 //!    relationship is recorded in `manifest.json`'s `blank_references` map.
 //!    Readers consult the manifest to resolve the pointer.
 //!
+//! # Deterministic placement (issue #275)
+//!
+//! [`DedupeIndex::record`] returns `WriteNew` for whichever occurrence of a
+//! content hash it sees *first*, and under `tile_concurrency > 0` that is
+//! producer-completion order over an MPSC queue — non-deterministic. If the
+//! sink kept the arrival-first occurrence as the full-payload holder, the byte
+//! layout and the `blank_references` map would depend on thread scheduling,
+//! breaking the [`crate::sink::TileSink`] commutative-placement contract.
+//!
+//! To make placement a pure function of content + coordinates, `FsSink` runs
+//! the promote-on-second-hit scheme above *during* the run for its
+//! at-least-one-hardlink guarantee, then, at `finish()` (after all writers have
+//! joined), reassigns the single full-payload holder of each duplicated content
+//! to its **coordinate-minimal** occurrence — sorted by `(level, row, col)`,
+//! the canonical order used by [`crate::mapreduce_hot_cache`]. The layout shape
+//! is otherwise identical; only *which* occurrence keeps the full bytes changes,
+//! and it changes to a value fixed by the input alone. See
+//! [`crate::sink::FsSink::canonicalize_dedupe_layout`].
+//!
 //! The standalone [`materialize_reference`] helper (symlink → hardlink →
 //! placeholder fallback, reported via [`LinkResult`]) is provided for
 //! *alternative* sinks that prefer link-based references over the manifest
