@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use image::{GenericImageView, ImageReader, Limits};
+use image::{GenericImageView, ImageDecoder, ImageReader, Limits};
 use thiserror::Error;
 
 use crate::imageio::MetadataValue;
@@ -252,9 +252,15 @@ pub enum SourceError {
     /// `VIPS_MAX_COORD` limit). Distinct from
     /// [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded),
     /// which bounds the *total* `width * height` pixel count. Raised by the
-    /// native `.v` reader before any allocation so callers can match the
+    /// native `.v` reader — and, since libviprs#349, the `image`-crate
+    /// raster path — before any allocation so callers can match the
     /// over-ceiling case as a typed variant instead of substring-matching
-    /// [`VipsFormat`](SourceError::VipsFormat).
+    /// [`VipsFormat`](SourceError::VipsFormat). This variant reports only the
+    /// [`max_coord`](DecodeLimits::max_coord) ceiling; a raster dimension
+    /// above [`max_width`](DecodeLimits::max_width) /
+    /// [`max_height`](DecodeLimits::max_height) is rejected by the `image`
+    /// crate instead and surfaces as [`Decode`](SourceError::Decode) wrapping
+    /// [`image::ImageError::Limits`], not as this variant.
     #[error(
         "image dimensions {width}x{height} exceed the single-axis coordinate \
          ceiling ({max_coord} px per axis); raise DecodeLimits::max_coord"
@@ -278,7 +284,39 @@ pub enum SourceError {
 /// height, and allocation ceilings are pushed down into the underlying
 /// decoder via [`image::Limits`] (so an oversized image is rejected
 /// *before* it is fully allocated), and the combined `width * height`
-/// pixel count is checked explicitly just before raster construction.
+/// pixel count is checked explicitly on the declared header geometry
+/// before the output frame is allocated (and re-verified just before
+/// raster construction).
+///
+/// # Which decoder enforces which field
+///
+/// The two decode paths — the `image`-crate raster path (PNG/JPEG/TIFF)
+/// and the native `.v` reader — bound untrusted geometry with different
+/// mechanisms, so not every field is consulted by both:
+///
+/// | Field | `image` raster path | native `.v` reader |
+/// |---|---|---|
+/// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation |
+/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation |
+/// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`] | — (`.v` is an uncompressed body sized by its header, gated by `max_coord`/`max_pixels`) |
+///
+/// The single-axis [`max_coord`](Self::max_coord) and total
+/// [`max_pixels`](Self::max_pixels) ceilings are the two universally
+/// honoured knobs; `max_width`/`max_height`/`max_alloc_bytes` shape only
+/// the `image`-crate decoders they are pushed into.
+///
+/// Note the [`max_width`](Self::max_width) / [`max_height`](Self::max_height)
+/// ceilings and [`max_coord`](Self::max_coord) surface *different* errors on
+/// the raster path: a declared dimension above `max_width` / `max_height` is
+/// rejected inside the `image` crate via [`image::Limits`], so it arrives as
+/// [`SourceError::Decode`] wrapping [`image::ImageError::Limits`] — **not**
+/// [`SourceError::CoordLimitExceeded`], which is reserved for the
+/// `max_coord` check applied by [`decode_reader`] / the `.v` reader. Because
+/// the default `max_width` / `max_height` (65,535) sit far below the default
+/// `max_coord` (10,000,000), a raster dimension between those bounds trips
+/// the `image::Limits` path first; `CoordLimitExceeded` is what you see once
+/// `max_coord` is tightened at or below `max_width` / `max_height`.
 ///
 /// The struct is `#[non_exhaustive]`: new limit fields can be added in a
 /// future minor release without it being a breaking change, so external
@@ -300,10 +338,14 @@ pub struct DecodeLimits {
     /// Maximum single-axis dimension permitted in untrusted header
     /// geometry, in pixels per axis (the libvips `VIPS_MAX_COORD`
     /// ceiling, default [`crate::imageio::DEFAULT_MAX_COORD`]). Enforced
-    /// per decode by the native `.v` reader before any allocation; see
-    /// [`DecodeLimits::check_coord`]. This replaces the former
-    /// process-global `set_max_coord`/`get_max_coord` knob, whose races
-    /// under concurrent jobs made the ceiling unreadable from the API.
+    /// per decode on the declared header geometry — before any pixel
+    /// allocation — by **every** decoder: the native `.v` reader and the
+    /// `image`-crate raster path (PNG/JPEG/TIFF) alike, both routing
+    /// through [`DecodeLimits::check_coord`] and returning
+    /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This
+    /// replaces the former process-global `set_max_coord`/`get_max_coord`
+    /// knob, whose races under concurrent jobs made the ceiling unreadable
+    /// from the API.
     pub max_coord: u32,
     /// Maximum total pixel count (`width * height`).
     pub max_pixels: u64,
@@ -384,11 +426,14 @@ impl DecodeLimits {
 
     /// Enforce the single-axis [`max_coord`](DecodeLimits::max_coord)
     /// ceiling on untrusted header geometry before a [`Raster`] is built.
-    /// Crate-visible so the `.v` decoder in [`crate::imageio`] applies the
-    /// same per-decode budget it once read from a mutable process-global.
-    /// Returns the typed [`SourceError::CoordLimitExceeded`] on an
-    /// over-ceiling dimension rather than allowing a later wrapping cast or
-    /// oversized allocation.
+    /// Applied by both decode paths — the native `.v` reader in
+    /// [`crate::imageio`] and the `image`-crate raster path (via
+    /// [`decode_reader`], on the decoder's declared dimensions before the
+    /// frame is allocated) — so the ceiling the `.v` decoder once read from
+    /// a mutable process-global is now the same per-decode budget every
+    /// decoder honours. Returns the typed
+    /// [`SourceError::CoordLimitExceeded`] on an over-ceiling dimension
+    /// rather than allowing a later wrapping cast or oversized allocation.
     pub(crate) fn check_coord(self, width: u32, height: u32) -> Result<(), SourceError> {
         if width > self.max_coord || height > self.max_coord {
             return Err(SourceError::CoordLimitExceeded {
@@ -662,8 +707,44 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
     mut reader: ImageReader<R>,
     limits: DecodeLimits,
 ) -> Result<Raster, SourceError> {
-    reader.limits(limits.to_image_limits());
-    let img = reader.decode()?;
+    let image_limits = limits.to_image_limits();
+    reader.limits(image_limits.clone());
+    // Split what `ImageReader::decode` does in one call (build decoder →
+    // reserve the output buffer → materialise pixels) so the single-axis
+    // `max_coord` ceiling is enforced on the untrusted header geometry
+    // *before* the frame is allocated, matching the native `.v` reader.
+    // Without this the `image`-crate decoders (PNG/JPEG/TIFF) honoured only
+    // `max_width`/`max_height`/`max_alloc_bytes` and silently ignored
+    // `max_coord` (libviprs#349). An over-ceiling declared dimension now
+    // returns the same typed `SourceError::CoordLimitExceeded` on every
+    // raster decoder instead of decoding anyway.
+    let mut decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    limits.check_coord(width, height)?;
+    // Also enforce the total-pixel ceiling on the declared header geometry
+    // here, before the output buffer is reserved, for true pre-allocation
+    // parity with the `.v` reader (`build_raster` re-verifies it after
+    // materialisation as a defence-in-depth backstop). Strictly tightens:
+    // an over-`max_pixels` image is now rejected ahead of allocation rather
+    // than only after the frame is decoded.
+    limits.check_pixels(width, height)?;
+    // Drift guard: this block hand-rolls the sequence `image` 0.25's
+    // `ImageReader::decode` runs internally — build decoder → `reserve` the
+    // output-buffer budget → `set_limits` → `from_decoder` — so that we can
+    // slot the `max_coord` / `max_pixels` checks in ahead of the allocation.
+    // It assumes that ordering (reserve-then-set_limits, with `total_bytes`
+    // as the reserve size) and that `from_decoder` honours the limits set on
+    // the decoder. If a future `image` release reorders these steps or
+    // changes what `decode` reserves, revisit this and the allocation guard
+    // below; a plain `reader.decode()` would silently drop the pre-alloc
+    // coordinate/pixel enforcement.
+    //
+    // Preserve `decode`'s allocation guard: refuse to reserve an output
+    // buffer larger than the decode budget permits before the pixel copy.
+    let mut alloc_limits = image_limits;
+    alloc_limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(alloc_limits)?;
+    let img = image::DynamicImage::from_decoder(decoder)?;
     build_raster(img, limits)
 }
 

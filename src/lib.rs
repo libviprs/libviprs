@@ -156,10 +156,12 @@ pub use histogram::HistogramError;
 pub use imageio::{
     MetadataError, MetadataValue, SaveError, ThumbnailGeometry, parse_thumbnail_geometry, tokenize,
 };
-// Kept at the crate root for one release for callers pinned to the
-// pre-#293 API. The process-global coordinate ceiling is deprecated in
-// favour of the per-decode `DecodeLimits::max_coord` field, and no decoder
-// consults these globals any more.
+// Kept at the crate root as inert compatibility shims for callers ported
+// against the pre-#293 libvips surface. The process-global coordinate
+// ceiling is deprecated in favour of the per-decode
+// `DecodeLimits::max_coord` field, enforced by every decoder; no decoder
+// consults these globals any more. They were added and deprecated in the
+// same unreleased cycle, so the deprecation carries no `since` version.
 #[allow(deprecated)]
 pub use imageio::{get_max_coord, init_from_env, set_max_coord};
 pub use manifest::{
