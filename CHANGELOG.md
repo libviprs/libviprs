@@ -120,6 +120,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Image-image `Raster::sub` / `try_sub` now promotes to a `Float32` raster
+  instead of routing through the integer round-and-saturate writer, so
+  negative differences are preserved instead of saturating to `0`
+  (e.g. `10 - 200` now reads back `-190`, not `0`). This matches the
+  `vips_subtract` promotion table, which outputs signed `short` for `uchar`
+  input — carried here as float so the signed result survives. Because the
+  output floats, `try_sub` no longer returns
+  `ArithmeticError::FloatUnsupported` for float inputs; a cast-then-subtract
+  chain over float intermediates now works. The constant / per-band
+  `sub_const` / `sub_vec` forms are unchanged — they still saturate at `0`,
+  matching `vips_linear`'s requested-format (integer) output (libviprs#282).
 - The cargo feature that gates the `sink_object_store` module
   (`ObjectStoreSink`) has been **renamed** from `s3` to `object-store-sink`
   (libviprs#345). The new name reflects that the module is a generic
