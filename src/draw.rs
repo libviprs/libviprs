@@ -286,22 +286,62 @@ impl DrawOp for Rectangle<'_> {
         }
         // `right`/`bottom` are the inclusive far edges. Widen to i64 so a large
         // `left + width` cannot overflow i32.
-        let right = (self.left as i64 + self.width as i64 - 1) as i32;
-        let bottom = (self.top as i64 + self.height as i64 - 1) as i32;
+        let right = self.left as i64 + self.width as i64 - 1;
+        let bottom = self.top as i64 + self.height as i64 - 1;
+        let w = raster.width() as i64;
+        let h = raster.height() as i64;
+        // Clip the drawn extents to the canvas before iterating. `put_pixel`
+        // already no-ops off-canvas, so the painted pixels are unchanged; this
+        // only skips the writes that would have been no-ops. Without it a huge
+        // but in-range rect (libvips caps coordinates at 1e9) spins through up
+        // to ~1e18 no-op iterations — a denial-of-service hang. libvips
+        // `vips_draw_rect` clips the rect to the image the same way.
+        let top = self.top as i64;
+        let left = self.left as i64;
         if self.fill {
-            for y in self.top..=bottom {
-                for x in self.left..=right {
-                    raster.put_pixel(x, y, self.ink);
+            let x0 = left.max(0);
+            let y0 = top.max(0);
+            let x1 = right.min(w - 1);
+            let y1 = bottom.min(h - 1);
+            if x0 > x1 || y0 > y1 {
+                return;
+            }
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    raster.put_pixel(x as i32, y as i32, self.ink);
                 }
             }
         } else {
-            for x in self.left..=right {
-                raster.put_pixel(x, self.top, self.ink);
-                raster.put_pixel(x, bottom, self.ink);
+            // Border edges: clip the span to the canvas and skip an edge whose
+            // fixed coordinate is itself off-canvas (which also avoids casting
+            // an out-of-range far edge back to i32).
+            let x0 = left.max(0);
+            let x1 = right.min(w - 1);
+            let y0 = top.max(0);
+            let y1 = bottom.min(h - 1);
+            if x0 <= x1 {
+                if (0..h).contains(&top) {
+                    for x in x0..=x1 {
+                        raster.put_pixel(x as i32, top as i32, self.ink);
+                    }
+                }
+                if (0..h).contains(&bottom) {
+                    for x in x0..=x1 {
+                        raster.put_pixel(x as i32, bottom as i32, self.ink);
+                    }
+                }
             }
-            for y in self.top..=bottom {
-                raster.put_pixel(self.left, y, self.ink);
-                raster.put_pixel(right, y, self.ink);
+            if y0 <= y1 {
+                if (0..w).contains(&left) {
+                    for y in y0..=y1 {
+                        raster.put_pixel(left as i32, y as i32, self.ink);
+                    }
+                }
+                if (0..w).contains(&right) {
+                    for y in y0..=y1 {
+                        raster.put_pixel(right as i32, y as i32, self.ink);
+                    }
+                }
             }
         }
     }
@@ -1336,6 +1376,51 @@ mod tests {
         assert_eq!(at(&im2, 0, 0), 5);
         assert_eq!(at(&im2, 2, 2), 5);
         assert_eq!(at(&im2, 3, 3), 0);
+    }
+
+    /// A huge but in-range rectangle (fill and outline) terminates quickly by
+    /// clipping its iteration to the canvas, instead of spinning through
+    /// billions of off-canvas no-op writes (DoS regression). The painted
+    /// pixels match libvips `vips_draw_rect`, which clips the rect to the
+    /// image the same way.
+    #[test]
+    fn draw_rect_huge_extent_clips_and_terminates() {
+        use std::time::Instant;
+
+        // Fill: an extent 1e6 x 1e6 on a 10x10 canvas covers every pixel and
+        // must finish essentially instantly. Unclipped this is ~1e12 writes.
+        let mut fill = black(10, 10);
+        let t0 = Instant::now();
+        fill.draw_rect_filled(&[255], 0, 0, 1_000_000, 1_000_000);
+        assert!(
+            t0.elapsed().as_secs() < 5,
+            "huge filled rect must clip, not iterate its full extent"
+        );
+        assert!(
+            fill.data().iter().all(|&b| b == 255),
+            "vips parity: a huge fill covers the whole canvas"
+        );
+
+        // Outline: a rect whose top-left corner is at (5,5) with a huge size
+        // paints only the on-canvas top and left edges (the far edges are
+        // off-canvas), exactly matching the oracle's CSV for the same call.
+        let mut outline = black(10, 10);
+        let t1 = Instant::now();
+        outline.draw_rect(&[255], 5, 5, 1_000_000, 1_000_000);
+        assert!(
+            t1.elapsed().as_secs() < 5,
+            "huge rect outline must clip, not iterate its full extent"
+        );
+        for x in 5..10 {
+            assert_eq!(at(&outline, x, 5), 255, "top edge ({x},5)");
+        }
+        for y in 5..10 {
+            assert_eq!(at(&outline, 5, y), 255, "left edge (5,{y})");
+        }
+        // Interior and everything left/above the corner stay background.
+        assert_eq!(at(&outline, 6, 6), 0, "interior untouched");
+        assert_eq!(at(&outline, 4, 5), 0, "left of the corner untouched");
+        assert_eq!(at(&outline, 9, 9), 0, "far corner has no edge on-canvas");
     }
 
     /// Degenerate inputs are safe no-ops: negative radius, zero-size rect.

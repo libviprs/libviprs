@@ -190,6 +190,15 @@ const AREAS: usize = 3;
 const TRIVIAL: i64 = 400;
 /// Default source gamma for global balancing.
 const BALANCE_GAMMA: f64 = 1.6;
+/// Maximum join-tree nesting depth accepted by [`JoinTree::deserialize`].
+///
+/// A mosaic assembled from `N` source images produces at most `N - 1` nested
+/// join nodes, and even a fully linear stitch of hundreds of tiles stays far
+/// below this bound. The cap exists only to stop a crafted `mosaic-join-tree`
+/// blob with pathological nesting from overflowing the stack while it is
+/// parsed (a denial-of-service): such a blob is rejected up front with
+/// [`MosaicError::CorruptMosaicMetadata`] instead of recursing without limit.
+const MAX_JOIN_TREE_DEPTH: usize = 512;
 /// Metadata field carrying the serialized join tree.
 const JOIN_TREE_FIELD: &str = "mosaic-join-tree";
 
@@ -749,15 +758,20 @@ impl JoinTree {
         let corrupt = || MosaicError::CorruptMosaicMetadata;
         let rest = blob.strip_prefix(b"VMJ1".as_slice()).ok_or_else(corrupt)?;
         let mut cursor = rest;
-        let tree = Self::read_node(&mut cursor)?;
+        let tree = Self::read_node(&mut cursor, 0)?;
         if !cursor.is_empty() {
             return Err(corrupt());
         }
         Ok(tree)
     }
 
-    fn read_node(cursor: &mut &[u8]) -> Result<JoinTree, MosaicError> {
+    fn read_node(cursor: &mut &[u8], depth: usize) -> Result<JoinTree, MosaicError> {
         let corrupt = || MosaicError::CorruptMosaicMetadata;
+        // Reject pathologically deep blobs before recursing, so a crafted
+        // join-tree cannot overflow the stack (see `MAX_JOIN_TREE_DEPTH`).
+        if depth > MAX_JOIN_TREE_DEPTH {
+            return Err(corrupt());
+        }
         let take = |cursor: &mut &[u8], n: usize| -> Result<Vec<u8>, MosaicError> {
             if cursor.len() < n {
                 return Err(MosaicError::CorruptMosaicMetadata);
@@ -799,8 +813,8 @@ impl JoinTree {
                 let dx = take_i32(cursor)?;
                 let dy = take_i32(cursor)?;
                 let mblend = take_i32(cursor)?;
-                let ref_node = Box::new(Self::read_node(cursor)?);
-                let sec_node = Box::new(Self::read_node(cursor)?);
+                let ref_node = Box::new(Self::read_node(cursor, depth + 1)?);
+                let sec_node = Box::new(Self::read_node(cursor, depth + 1)?);
                 Ok(JoinTree::Join {
                     direction,
                     dx,
@@ -2189,6 +2203,44 @@ mod tests {
         bad.set_field(JOIN_TREE_FIELD, MetadataValue::Blob(vec![1, 2, 3]));
         assert!(matches!(
             bad.try_global_balance(),
+            Err(MosaicError::CorruptMosaicMetadata)
+        ));
+    }
+
+    /**
+     * Tests that a pathologically deep join-tree blob is rejected with a
+     * clean typed error instead of overflowing the stack (DoS regression).
+     * Works by concatenating far more nested `Join` headers than
+     * `MAX_JOIN_TREE_DEPTH` allows and asserting `deserialize` returns
+     * `CorruptMosaicMetadata` — the depth guard trips before the recursion
+     * can exhaust the stack, so the call returns rather than aborting.
+     */
+    #[test]
+    fn deep_join_tree_blob_errors_without_stack_overflow() {
+        // Each level is a `Join` header: tag 1, direction 0 (horizontal),
+        // then dx/dy/mblend as little-endian i32 (14 bytes total). A left-deep
+        // chain is just these headers back to back, since `read_node` recurses
+        // into the reference child before reading any leaf.
+        let mut blob = b"VMJ1".to_vec();
+        let levels = MAX_JOIN_TREE_DEPTH + 500;
+        for _ in 0..levels {
+            blob.push(1); // Join tag
+            blob.push(0); // MergeDirection::Horizontal
+            blob.extend_from_slice(&0i32.to_le_bytes()); // dx
+            blob.extend_from_slice(&0i32.to_le_bytes()); // dy
+            blob.extend_from_slice(&0i32.to_le_bytes()); // mblend
+        }
+        assert!(matches!(
+            JoinTree::deserialize(&blob),
+            Err(MosaicError::CorruptMosaicMetadata)
+        ));
+
+        // The same blob reached through global balance's metadata path also
+        // errors cleanly rather than recursing without bound.
+        let mut raster = uniform(10, 10, 50);
+        raster.set_field(JOIN_TREE_FIELD, MetadataValue::Blob(blob));
+        assert!(matches!(
+            raster.try_global_balance(),
             Err(MosaicError::CorruptMosaicMetadata)
         ));
     }
