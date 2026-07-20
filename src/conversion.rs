@@ -776,7 +776,7 @@ impl Raster {
     /// square, or [`ConversionError::Raster`] on allocation failure.
     pub fn try_rot45(&self, angle: Angle45) -> Result<Raster, ConversionError> {
         let size = self.width();
-        if self.height() != size || size % 2 == 0 {
+        if self.height() != size || size.is_multiple_of(2) {
             return Err(ConversionError::NotOddSquare {
                 width: self.width(),
                 height: self.height(),

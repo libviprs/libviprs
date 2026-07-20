@@ -639,7 +639,7 @@ fn binary_map_float(
 /// `(re, im)` pairs; see the module docs.
 fn ensure_complex(r: &Raster) -> Result<usize, ArithmeticError> {
     let bands = r.format().channels();
-    if bands % 2 != 0 {
+    if !bands.is_multiple_of(2) {
         return Err(ArithmeticError::NotComplex { bands });
     }
     Ok(bands / 2)
