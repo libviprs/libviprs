@@ -54,7 +54,7 @@
 //! | [`Raster::atan2`], [`Raster::pow`], [`Raster::wop`] | `vips_math2` | float raster |
 //! | [`Raster::neg`] | pyvips `-image` | float raster |
 //! | [`Raster::complexform`], [`Raster::polar`], [`Raster::rect`], [`Raster::conj`], [`Raster::real`], [`Raster::imag`] | `vips_complexform` / `vips_complex` / `vips_complexget` | complex (re/im pair) float raster |
-//! | [`Raster::hough_line`] / [`Raster::hough_circle`] | `vips_hough_line` / `vips_hough_circle` | vote accumulator |
+//! | [`Raster::hough_line`] (vips-exact binning) / [`Raster::hough_circle`] (golden-only, see its docs) | `vips_hough_line` / `vips_hough_circle` | vote accumulator |
 //!
 //! # Semantics shared by the integer operations
 //!
@@ -1732,12 +1732,15 @@ impl Raster {
     }
 
     /// Round every sample to the nearest integer (libvips `rint`, which
-    /// rounds halves away from zero): float rasters map `v.round()`
-    /// samplewise and stay float; the integer formats are an exact
-    /// identity.
+    /// rounds halves to the nearest **even** integer — banker's rounding,
+    /// matching C99 `rint` under the default rounding mode that vips 8.18.4
+    /// uses): float rasters map `v.round_ties_even()` samplewise and stay
+    /// float; the integer formats are an exact identity. Verified against
+    /// `vips round in out rint`: `0.5 -> 0`, `1.5 -> 2`, `2.5 -> 2`,
+    /// `3.5 -> 4`, `-2.5 -> -2`.
     pub fn rint(&self) -> Raster {
         if self.format().is_float() {
-            unary_map_float(self, f64::round)
+            unary_map_float(self, f64::round_ties_even)
         } else {
             self.clone()
         }
@@ -2974,15 +2977,50 @@ impl Raster {
     /// Hough line transform (libvips `hough_line` with its default
     /// 256 x 256 accumulator).
     ///
-    /// Every non-zero sample votes for the lines through its pixel. The
-    /// output is a single-band 16-bit accumulator: column `i` is the angle
-    /// bin `theta = 180deg * i / 256`, row `r` is the normalized distance
-    /// bin, so a peak at `(i, r)` decodes as angle `180 * i / width` and
-    /// distance `input_height * r / height` (the normalization libvips
-    /// uses: pixel coordinates are divided by the image dimensions before
-    /// voting, so distances scale by the input height for square inputs).
-    /// Votes whose distance falls outside `[0, 1)` in normalized form are
-    /// discarded; counts saturate at `65535`.
+    /// Every non-zero sample votes for the lines through its pixel, and the
+    /// **binning** of those votes is vips-exact: the accumulator cell each
+    /// vote lands in matches vips 8.18.4 `hough_line` cell-for-cell (see the
+    /// oracle-pinned tests). The output is a single-band 16-bit accumulator:
+    /// column `i` is the angle bin `theta = 180deg * i / 256`. The vote
+    /// *counts* carried in those cells are ushort rather than vips's uint and
+    /// saturate at `65535` — an intentional format deviation, documented
+    /// below, that leaves the "vips-exact" claim scoped to the binning only.
+    ///
+    /// vips normalizes the pixel coordinates by the image **diagonal**
+    /// `d = sqrt(w^2 + h^2)` — not by width/height separately — so
+    /// `xd = x / d`, `yd = y / d`, and the signed line distance
+    /// `r = xd*cos(theta) + yd*sin(theta)` always lies in the open interval
+    /// `(-1, 1)`. That distance is mapped linearly onto the accumulator rows
+    /// with `ri = (r + 1) * (height / 2)` (so `r = -1` -> row 0, `r = +1`
+    /// -> row `height`), centring `r = 0` on the middle row. Because `r` is
+    /// strictly inside `(-1, 1)` no vote ever falls outside the accumulator,
+    /// so — unlike a raw `height * r` binning — no votes are discarded.
+    ///
+    /// A peak at `(i, ri)` therefore decodes as angle `180 * i / width` and
+    /// signed pixel distance `(2 * ri / height - 1) * sqrt(w^2 + h^2)`.
+    ///
+    /// # Intentional accumulator-format deviation from vips (#495)
+    ///
+    /// vips 8.18.4 emits the `hough_line` accumulator as a **32-bit `uint`**
+    /// image whose cells hold the full collinear-vote count with **no
+    /// saturation** (confirmed: `vipsheader` reports `uint`, and a 70000-wide
+    /// lit line peaks at exactly `70000`). This crate has no unsigned 32-bit
+    /// pixel format, so the accumulator is carried as `Gray16` (ushort) and
+    /// every cell is clamped with `v.min(0xFFFF)`. The two therefore diverge
+    /// only when a single accumulator cell would exceed `65535` — i.e. when
+    /// more than 65535 collinear lit pixels concentrate into one bin, which
+    /// requires an image dimension above 65535 (vips accepts such images).
+    /// On that case vips reports the true count while this op reports `65535`.
+    /// The *binning* (which cell each vote lands in) is unaffected and stays
+    /// vips-exact; only the cell's carrier width and the >65535 saturation
+    /// differ. This mirrors the format deviation disclosed for
+    /// [`Raster::hough_circle`] and is tracked by issue #495.
+    ///
+    /// The angle terms are read from a `sin` lookup table indexed by
+    /// `i` and `i + width/2` (vips uses `sin[i + width/2]` for the cosine
+    /// term); for the default even 256-wide accumulator `width/2` is an
+    /// exact quarter turn, but the table indexing is preserved so odd or
+    /// non-default widths bin identically to vips.
     pub fn hough_line(&self) -> Raster {
         let (aw, ah) = (HOUGH_LINE_WIDTH as usize, HOUGH_LINE_HEIGHT as usize);
         let fmt = self.format();
@@ -2990,18 +3028,20 @@ impl Raster {
         let (w, h) = (self.width() as usize, self.height() as usize);
         let data = self.data();
 
-        // Angle tables: theta spans [0, 180) degrees across the width.
-        let (mut cos_t, mut sin_t) = (vec![0.0f64; aw], vec![0.0f64; aw]);
-        for i in 0..aw {
-            let theta = std::f64::consts::PI * i as f64 / aw as f64;
-            let (s, c) = theta.sin_cos();
-            cos_t[i] = c;
-            sin_t[i] = s;
-        }
+        // vips normalizes coordinates by the image diagonal, so a pixel's
+        // signed distance to a line through the origin stays in (-1, 1).
+        let diag = ((w * w + h * h) as f64).sqrt();
+
+        // sin table: s[k] = sin(PI * k / width). vips reads the cosine term
+        // as s[i + width/2] rather than cos(theta), so replicate the table
+        // (indices run up to (aw - 1) + aw/2).
+        let sin_t: Vec<f64> = (0..aw + aw / 2)
+            .map(|k| (std::f64::consts::PI * k as f64 / aw as f64).sin())
+            .collect();
 
         let mut acc = vec![0u32; aw * ah];
         for y in 0..h {
-            let yd = y as f64 / h as f64;
+            let yd = y as f64 / diag;
             for x in 0..w {
                 let voters = (0..bands)
                     .filter(|&c| read_f64(data, bpc, (y * w + x) * bands + c) != 0.0)
@@ -3009,17 +3049,26 @@ impl Raster {
                 if voters == 0 {
                     continue;
                 }
-                let xd = x as f64 / w as f64;
+                let xd = x as f64 / diag;
                 for i in 0..aw {
-                    let r = xd * cos_t[i] + yd * sin_t[i];
-                    let ri = (ah as f64 * r).floor();
-                    if ri >= 0.0 && ri < ah as f64 {
-                        acc[ri as usize * aw + i] += voters;
+                    // r in (-1, 1); vips: r = xd*sin[i + width/2] + yd*sin[i].
+                    let r = xd * sin_t[i + aw / 2] + yd * sin_t[i];
+                    // vips: int ri = (r + 1) * (height / 2.0). r < 1 keeps
+                    // ri < height; the guard is defensive against a boundary
+                    // rounding to exactly height and never discards a vote.
+                    let ri = ((r + 1.0) * (ah as f64 / 2.0)) as usize;
+                    if ri < ah {
+                        acc[ri * aw + i] += voters;
                     }
                 }
             }
         }
 
+        // vips carries the accumulator as uint; this crate has no unsigned
+        // 32-bit format, so it is emitted as Gray16 and cells are clamped at
+        // 65535 (an intentional, documented deviation — see the rustdoc and
+        // issue #495). The u32 accumulator above keeps the binning exact; only
+        // cells with >65535 votes (a >65535-pixel collinear line) saturate.
         let out_fmt = PixelFormat::with_channels(1, 2).expect("Gray16 exists");
         let mut out = op_output_or_panic(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt);
         for (i, &v) in acc.iter().enumerate() {
@@ -3039,6 +3088,33 @@ impl Raster {
     /// (`min_radius..=max_radius`); the peak's pixel is the detected
     /// centre and its strongest band index plus `min_radius` is the
     /// detected radius. Counts saturate at `65535`.
+    ///
+    /// # Intentional accumulator-model deviation from vips (#495)
+    ///
+    /// This op does **not** reproduce vips 8.18.4's exact per-cell vote
+    /// counts, and is deliberately kept as a golden-only op (no vips
+    /// cross-oracle in the differential suite). vips votes by running its
+    /// Bresenham circle walker (`vips__draw_circle_direct`) and, for every
+    /// scanline it emits, incrementing **both** span endpoints
+    /// *unconditionally* — with no deduplication at the cardinal (`x == 0`)
+    /// and diagonal (`x == y`) points where octant reflections coincide,
+    /// and re-emitting the final `x == y` scanlines. The result is a
+    /// radius-dependent vote multiplicity: a single lit pixel yields
+    /// accumulator cells as high as `4` for small radii (e.g. vips totals
+    /// `64/36/40/48/48` votes for radii `4..=8` of one point), where the
+    /// multiplier collapses back to `1` only once the radius is large
+    /// enough that no two octant points share a cell.
+    ///
+    /// This crate instead casts **one** vote per *distinct* circle point
+    /// (the deduplicated octant walk shared with [`Raster::draw_circle`]),
+    /// so a single pixel produces a clean max of `1` per cell. Peak
+    /// **location** and the detected radius agree with vips; only the raw
+    /// vote magnitudes differ. Matching vips's counts exactly would require
+    /// porting its non-deduplicating scanline-endpoint accumulation, whose
+    /// small-radius multiplicity could not be reproduced faithfully even
+    /// from the 8.18.4 source; the deduplicated model is retained as an
+    /// intentional, internally-consistent deviation rather than risk a
+    /// subtly-wrong rewrite of a correctly-peaking transform.
     ///
     /// # Errors
     ///
@@ -4775,8 +4851,8 @@ mod tests {
     }
 
     /// floor, ceil, and rint round float rasters samplewise (rint rounds
-    /// halves away from zero, the libvips VIPS_RINT behavior) and stay
-    /// identities on integer input.
+    /// halves to the nearest even integer — banker's rounding, the libvips
+    /// VIPS_RINT / C99 `rint` behavior) and stay identities on integer input.
     #[test]
     fn rounding_on_float_rasters() {
         let im = grayf(2, 1, &[1.5, -1.5]);
@@ -4787,6 +4863,23 @@ mod tests {
         let ints = gray(2, 1, vec![3, 200]);
         assert_eq!(ints.floor().data(), ints.data());
         assert_eq!(ints.ceil().format(), PixelFormat::Gray8);
+    }
+
+    /// rint rounds exact halves to the nearest even integer (banker's
+    /// rounding), matching vips 8.18.4 `vips round in out rint`, which was
+    /// verified against the oracle to map the half-integers as pinned below.
+    /// `f64::round` (half away from zero) would give `1, 2, 3, 4, -1, -2, -3`
+    /// for these inputs — the old, divergent behavior this replaces.
+    #[test]
+    fn rint_rounds_half_to_even() {
+        let im = grayf(8, 1, &[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, -3.5]);
+        assert_eq!(
+            float_samples(&im.rint()),
+            vec![0.0, 2.0, 2.0, 4.0, 0.0, -2.0, -2.0, -4.0]
+        );
+        // Non-half values still round to nearest as usual.
+        let f = grayf(4, 1, &[0.4, 0.6, -0.4, 2.9]);
+        assert_eq!(float_samples(&f.rint()), vec![0.0, 1.0, 0.0, 3.0]);
     }
 
     /// The unary maths accept float input (a chained result) without
@@ -4869,8 +4962,19 @@ mod tests {
 
     // ---- hough transforms ----
 
+    /// Decode a hough_line accumulator row back to a signed pixel distance,
+    /// inverting vips's `ri = (r + 1) * (height / 2)` mapping over the
+    /// image-diagonal normalization.
+    fn hough_distance(row: u32, acc_height: u32, w: u32, h: u32) -> f64 {
+        let diag = ((w * w + h * h) as f64).sqrt();
+        (2.0 * row as f64 / acc_height as f64 - 1.0) * diag
+    }
+
     /// A horizontal line at y = 30 peaks at the 90-degree angle bin and
-    /// the distance bin decoding to 30.
+    /// the distance bin decoding to ~30. Verified against vips 8.18.4
+    /// `hough_line`: the peak lands at accumulator cell (x=128, y=155) with
+    /// exactly 100 votes (`vips csvsave` of the accumulator), matching this
+    /// crate's output cell-for-cell.
     #[test]
     fn hough_line_horizontal_peak() {
         let mut data = vec![0u8; 100 * 100];
@@ -4882,8 +4986,10 @@ mod tests {
         assert_eq!((acc.width(), acc.height()), (256, 256));
         let (votes, x, y) = acc.maxpos();
         assert_eq!(votes, 100.0, "all 100 line pixels vote in one bin");
+        // vips places the peak at exactly (128, 155).
+        assert_eq!((x, y), (128, 155), "vips peak cell (angle, distance)");
         let angle = 180.0 * x as f64 / acc.width() as f64;
-        let distance = 100.0 * y as f64 / acc.height() as f64;
+        let distance = hough_distance(y, acc.height(), 100, 100);
         assert!(
             (angle - 90.0).abs() < 2.0,
             "angle should be ~90, got {angle}"
@@ -4895,7 +5001,8 @@ mod tests {
     }
 
     /// The ported diagonal: a line along x + y = 100 peaks at 45 degrees
-    /// and normalized distance 100 / sqrt(2).
+    /// and signed distance ~ 100 / sqrt(2), decoded through vips's
+    /// diagonal-normalized `(r + 1) * height / 2` binning.
     #[test]
     fn hough_line_diagonal_peak() {
         let mut data = vec![0u8; 100 * 100];
@@ -4906,7 +5013,7 @@ mod tests {
         let acc = im.hough_line();
         let (_votes, x, y) = acc.maxpos();
         let angle = 180.0 * x as f64 / acc.width() as f64;
-        let distance = 100.0 * y as f64 / acc.height() as f64;
+        let distance = hough_distance(y, acc.height(), 100, 100);
         assert!(
             (angle - 45.0).abs() < 5.0,
             "angle should be ~45, got {angle}"
@@ -4914,6 +5021,59 @@ mod tests {
         assert!(
             (distance - 100.0 / 2.0f64.sqrt()).abs() < 5.0,
             "distance should be ~70.7, got {distance}"
+        );
+    }
+
+    /// Pins the exact vips 8.18.4 binning for a single lit pixel against the
+    /// oracle. A 16x16 image with one pixel at (3, 4) produces, at the
+    /// theta = 0 column (i = 0, so `r = xd = x / sqrt(w^2+h^2)`), a vote in
+    /// row `(r + 1) * 128`. vips `hough_line` (default 256x256) casts every
+    /// column's vote — 256 votes total for one pixel, none discarded — and
+    /// the theta=0 vote lands in row 144 (`vips hough_line` + `csvsave`
+    /// confirm exactly `[144]` in column 0), matching this computation.
+    #[test]
+    fn hough_line_single_pixel_matches_vips_binning() {
+        let mut data = vec![0u8; 16 * 16];
+        data[4 * 16 + 3] = 255;
+        let acc = gray(16, 16, data).hough_line();
+        // One lit pixel votes in every one of the 256 angle columns, and
+        // none fall outside the accumulator (diagonal normalization).
+        let total: f64 = {
+            let (w, h) = (acc.width(), acc.height());
+            (0..w)
+                .flat_map(|x| (0..h).map(move |y| (x, y)))
+                .map(|(x, y)| acc.getpoint(x, y)[0])
+                .sum()
+        };
+        assert_eq!(total, 256.0, "one pixel votes once per angle column");
+        // theta = 0 column: r = 3 / sqrt(16^2+16^2), ri = (r + 1) * 128.
+        let diag = ((16 * 16 + 16 * 16) as f64).sqrt();
+        let r = 3.0 / diag;
+        let ri = ((r + 1.0) * 128.0) as u32;
+        assert_eq!(ri, 144, "vips theta=0 row for pixel x=3");
+        assert_eq!(acc.getpoint(0, ri)[0], 1.0, "vote sits in the vips row");
+    }
+
+    /// Pins the intentional accumulator-format deviation from vips (#495): a
+    /// line with more than 65535 collinear lit pixels overflows a single
+    /// accumulator cell. vips carries the accumulator as 32-bit `uint` and
+    /// reports the true count; this crate carries `Gray16` (ushort) and clamps
+    /// at 65535. A 70000x1 all-lit row concentrates every vote into one cell at
+    /// the theta bin where the x-term vanishes (column 128, row 128), so vips
+    /// reports 70000 there (verified: `vips hough_line` + `vips max` on a
+    /// 70000x1 uchar line = 70000) while this op saturates to 65535. Peak
+    /// location still agrees; only the >65535 count is clamped.
+    #[test]
+    fn hough_line_saturates_above_65535_votes_deviation() {
+        let w = 70000usize;
+        let acc = gray(w as u32, 1, vec![255u8; w]).hough_line();
+        let (peak, x, y) = acc.maxpos();
+        // vips reports the uncapped 70000 here; core clamps to u16::MAX.
+        assert_eq!(peak, 65535.0, "ushort accumulator saturates (vips: 70000)");
+        assert_eq!(
+            (x, y),
+            (128, 128),
+            "all votes concentrate in the vanishing-x-term bin, as in vips"
         );
     }
 
