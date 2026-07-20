@@ -154,20 +154,20 @@ pub(crate) fn generate_pyramid_mapreduce_hot_cache(
     for tile in &tiles {
         // Cooperative cancellation between writes, matching the polling
         // cadence of the other engines' write loops.
-        if let Some(token) = &config.cancel {
-            if token.is_cancelled() {
-                return Err(EngineError::Cancelled);
-            }
+        if let Some(token) = &config.cancel
+            && token.is_cancelled()
+        {
+            return Err(EngineError::Cancelled);
         }
         if let Err(e) = sink.write_tile(tile) {
             // Same terminal-failure handling as the MapReduce emit paths: a
             // write whose retry backoff was interrupted by cancellation
             // surfaces as Cancelled, RetryThenSkip skips and accounts, and
             // every other policy aborts the run.
-            if let Some(token) = &config.cancel {
-                if token.is_cancelled() {
-                    return Err(EngineError::Cancelled);
-                }
+            if let Some(token) = &config.cancel
+                && token.is_cancelled()
+            {
+                return Err(EngineError::Cancelled);
             }
             match &config.failure_policy {
                 crate::retry::FailurePolicy::RetryThenSkip(_) => {

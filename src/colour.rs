@@ -1312,38 +1312,39 @@ fn icc_device_to_lab(
 ) -> Result<Vec<[f64; 3]>, ColourError> {
     let pixels = device.len() / channels;
 
-    if profile.color_space == DataColorSpace::Rgb && profile.is_matrix_shaper() {
-        if let Some(lin) = ShaperCurves::linear_rgb(profile) {
-            let m = profile.colorant_matrix();
-            let mut out = Vec::with_capacity(pixels);
-            for px in device.chunks_exact(3) {
-                let v = m.mul_vector(Vector3d {
-                    v: [
-                        lin.eval(0, px[0] as f64),
-                        lin.eval(1, px[1] as f64),
-                        lin.eval(2, px[2] as f64),
-                    ],
-                });
-                out.push(xyz_to_lab(v.v, ICC_D50));
-            }
-            return Ok(out);
+    if profile.color_space == DataColorSpace::Rgb
+        && profile.is_matrix_shaper()
+        && let Some(lin) = ShaperCurves::linear_rgb(profile)
+    {
+        let m = profile.colorant_matrix();
+        let mut out = Vec::with_capacity(pixels);
+        for px in device.chunks_exact(3) {
+            let v = m.mul_vector(Vector3d {
+                v: [
+                    lin.eval(0, px[0] as f64),
+                    lin.eval(1, px[1] as f64),
+                    lin.eval(2, px[2] as f64),
+                ],
+            });
+            out.push(xyz_to_lab(v.v, ICC_D50));
         }
+        return Ok(out);
     }
 
-    if profile.color_space == DataColorSpace::Gray {
-        if let Some(trc) = profile.gray_trc.as_ref() {
-            let lin = trc
-                .make_linear_evaluator()
-                .map_err(|e| ColourError::IccTransform {
-                    detail: format!("{e:?}"),
-                })?;
-            let mut out = Vec::with_capacity(pixels);
-            for px in device.chunks_exact(1) {
-                let v = lin.evaluate_value(px[0]) as f64;
-                out.push(xyz_to_lab([ICC_D50[0] * v, v, ICC_D50[2] * v], ICC_D50));
-            }
-            return Ok(out);
+    if profile.color_space == DataColorSpace::Gray
+        && let Some(trc) = profile.gray_trc.as_ref()
+    {
+        let lin = trc
+            .make_linear_evaluator()
+            .map_err(|e| ColourError::IccTransform {
+                detail: format!("{e:?}"),
+            })?;
+        let mut out = Vec::with_capacity(pixels);
+        for px in device.chunks_exact(1) {
+            let v = lin.evaluate_value(px[0]) as f64;
+            out.push(xyz_to_lab([ICC_D50[0] * v, v, ICC_D50[2] * v], ICC_D50));
         }
+        return Ok(out);
     }
 
     icc_device_to_lab_fallback(profile, device, channels, intent)
@@ -1395,35 +1396,36 @@ fn icc_lab_to_device(
     labs: &[[f64; 3]],
     intent: Intent,
 ) -> Result<Vec<f32>, ColourError> {
-    if profile.color_space == DataColorSpace::Rgb && profile.is_matrix_shaper() {
-        if let Some(gamma) = ShaperCurves::gamma_rgb(profile) {
-            let inv = profile.colorant_matrix().inverse();
-            let mut out = Vec::with_capacity(labs.len() * 3);
-            for lab in labs {
-                let xyz = lab_to_xyz(*lab, ICC_D50);
-                let v = inv.mul_vector(Vector3d { v: xyz });
-                for (i, lin) in v.v.iter().enumerate() {
-                    out.push(gamma.eval(i, lin.clamp(0.0, 1.0)).clamp(0.0, 1.0) as f32);
-                }
+    if profile.color_space == DataColorSpace::Rgb
+        && profile.is_matrix_shaper()
+        && let Some(gamma) = ShaperCurves::gamma_rgb(profile)
+    {
+        let inv = profile.colorant_matrix().inverse();
+        let mut out = Vec::with_capacity(labs.len() * 3);
+        for lab in labs {
+            let xyz = lab_to_xyz(*lab, ICC_D50);
+            let v = inv.mul_vector(Vector3d { v: xyz });
+            for (i, lin) in v.v.iter().enumerate() {
+                out.push(gamma.eval(i, lin.clamp(0.0, 1.0)).clamp(0.0, 1.0) as f32);
             }
-            return Ok(out);
         }
+        return Ok(out);
     }
 
-    if profile.color_space == DataColorSpace::Gray {
-        if let Some(trc) = profile.gray_trc.as_ref() {
-            let gamma = trc
-                .make_gamma_evaluator()
-                .map_err(|e| ColourError::IccTransform {
-                    detail: format!("{e:?}"),
-                })?;
-            let mut out = Vec::with_capacity(labs.len());
-            for lab in labs {
-                let y = lab_to_xyz(*lab, ICC_D50)[1];
-                out.push((gamma.evaluate_value(y.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0));
-            }
-            return Ok(out);
+    if profile.color_space == DataColorSpace::Gray
+        && let Some(trc) = profile.gray_trc.as_ref()
+    {
+        let gamma = trc
+            .make_gamma_evaluator()
+            .map_err(|e| ColourError::IccTransform {
+                detail: format!("{e:?}"),
+            })?;
+        let mut out = Vec::with_capacity(labs.len());
+        for lab in labs {
+            let y = lab_to_xyz(*lab, ICC_D50)[1];
+            out.push((gamma.evaluate_value(y.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0));
         }
+        return Ok(out);
     }
 
     icc_lab_to_device_fallback(profile, labs, intent)

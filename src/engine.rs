@@ -1245,13 +1245,13 @@ pub fn raster_verify(
     // verifying against — otherwise we'd walk every tile just to report a
     // byte mismatch on the first one, which is strictly less useful than
     // failing fast with the structural error.
-    if let Some(meta) = JobCheckpoint::load(root)? {
-        if let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
-            return Err(EngineError::PlanHashMismatch {
-                expected: current,
-                actual: meta.plan_hash,
-            });
-        }
+    if let Some(meta) = JobCheckpoint::load(root)?
+        && let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink)
+    {
+        return Err(EngineError::PlanHashMismatch {
+            expected: current,
+            actual: meta.plan_hash,
+        });
     }
 
     // Probe only the sink's *active* on-disk format. A previous run in a
@@ -1293,66 +1293,63 @@ pub fn raster_verify(
     // If the manifest includes a checksum table, re-hash each listed tile
     // and fail on the first mismatch. This mirrors the bits of
     // `verify_output` that are relevant for in-run verification.
-    if let Some(manifest) = read_manifest(root) {
-        if let Some(checksums) = manifest.get("checksums") {
-            if let (Some(algo_str), Some(per_tile)) = (
-                checksums.get("algo").and_then(|v| v.as_str()),
-                checksums.get("per_tile").and_then(|v| v.as_object()),
-            ) {
-                // Route through the single shared parser. An unknown / future
-                // / typo'd algorithm is a hard verification failure here, not
-                // something to silently skip — otherwise a manifest stamped
-                // with a bogus algo would pass with zero digests checked
-                // (issue #95).
-                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(
-                    || {
-                        EngineError::Sink(SinkError::Other(format!(
-                            "Verify: unknown checksum algorithm {algo_str:?} in manifest"
-                        )))
-                    },
-                )?;
-                {
-                    // A recorded tile that is gone from disk is a verification
-                    // failure, not something to skip — unless it is a
-                    // manifest-referenced blank whose content lives in
-                    // `_shared/` (issue #93).
-                    let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
-                    for (rel, expected) in per_tile {
-                        let expected_s = match expected.as_str() {
-                            Some(s) => s,
-                            None => continue,
-                        };
-                        // Reject traversal / absolute / prefixed manifest keys
-                        // before any filesystem access, and stream the tile
-                        // through the hasher to cap memory (see #79).
-                        let abs = match crate::checksum::safe_manifest_join(root, rel) {
-                            Some(p) => p,
-                            None => {
-                                return Err(EngineError::Sink(SinkError::Other(format!(
-                                    "Verify: manifest tile path escapes checkpoint root: {rel}"
-                                ))));
-                            }
-                        };
-                        let got = match crate::checksum::hash_file(&abs, algo) {
-                            Ok(g) => g,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                if blank_refs.is_some_and(|m| m.contains_key(rel)) {
-                                    continue;
-                                }
-                                return Err(EngineError::Sink(SinkError::MissingTile {
-                                    tile_rel_path: rel.clone(),
-                                }));
-                            }
-                            Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
-                        };
-                        if !got.eq_ignore_ascii_case(expected_s) {
-                            return Err(EngineError::ChecksumMismatch {
-                                tile: coord_for_manifest_rel(plan, rel),
-                                expected: expected_s.to_string(),
-                                got,
-                            });
-                        }
+    if let Some(manifest) = read_manifest(root)
+        && let Some(checksums) = manifest.get("checksums")
+        && let (Some(algo_str), Some(per_tile)) = (
+            checksums.get("algo").and_then(|v| v.as_str()),
+            checksums.get("per_tile").and_then(|v| v.as_object()),
+        )
+    {
+        // Route through the single shared parser. An unknown / future
+        // / typo'd algorithm is a hard verification failure here, not
+        // something to silently skip — otherwise a manifest stamped
+        // with a bogus algo would pass with zero digests checked
+        // (issue #95).
+        let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(|| {
+            EngineError::Sink(SinkError::Other(format!(
+                "Verify: unknown checksum algorithm {algo_str:?} in manifest"
+            )))
+        })?;
+        {
+            // A recorded tile that is gone from disk is a verification
+            // failure, not something to skip — unless it is a
+            // manifest-referenced blank whose content lives in
+            // `_shared/` (issue #93).
+            let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
+            for (rel, expected) in per_tile {
+                let expected_s = match expected.as_str() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                // Reject traversal / absolute / prefixed manifest keys
+                // before any filesystem access, and stream the tile
+                // through the hasher to cap memory (see #79).
+                let abs = match crate::checksum::safe_manifest_join(root, rel) {
+                    Some(p) => p,
+                    None => {
+                        return Err(EngineError::Sink(SinkError::Other(format!(
+                            "Verify: manifest tile path escapes checkpoint root: {rel}"
+                        ))));
                     }
+                };
+                let got = match crate::checksum::hash_file(&abs, algo) {
+                    Ok(g) => g,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        if blank_refs.is_some_and(|m| m.contains_key(rel)) {
+                            continue;
+                        }
+                        return Err(EngineError::Sink(SinkError::MissingTile {
+                            tile_rel_path: rel.clone(),
+                        }));
+                    }
+                    Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
+                };
+                if !got.eq_ignore_ascii_case(expected_s) {
+                    return Err(EngineError::ChecksumMismatch {
+                        tile: coord_for_manifest_rel(plan, rel),
+                        expected: expected_s.to_string(),
+                        got,
+                    });
                 }
             }
         }
@@ -1510,10 +1507,10 @@ fn read_manifest(root: &std::path::Path) -> Option<serde_json::Value> {
         let mut name = stem.to_os_string();
         name.push(".manifest.json");
         let sibling = parent.join(name);
-        if let Ok(bytes) = std::fs::read(&sibling) {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                return Some(v);
-            }
+        if let Ok(bytes) = std::fs::read(&sibling)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            return Some(v);
         }
     }
     let inside = root.join("manifest.json");

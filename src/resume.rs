@@ -814,10 +814,10 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
 /// process-wide counter) means two writers targeting the same destination
 /// never stage into or clobber each other's temp file.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let tmp = tmp_path_for(path);
     // Scope the handle so it is closed before the rename — some filesystems
@@ -1248,12 +1248,12 @@ pub(crate) fn verify_checkpoint_contract(
     // live sink pin a concrete — and different — encoding. Either side being
     // `None` means "format unknown", which we treat as compatible rather than
     // rejecting a valid resume behind a transparent wrapper.
-    if let (Some(recorded), Some(current)) = (meta.content_format, live.format) {
-        if recorded != current {
-            return Err(format!(
-                "{expected} (tile format changed from {recorded:?} to {current:?})"
-            ));
-        }
+    if let (Some(recorded), Some(current)) = (meta.content_format, live.format)
+        && recorded != current
+    {
+        return Err(format!(
+            "{expected} (tile format changed from {recorded:?} to {current:?})"
+        ));
     }
 
     Ok(())

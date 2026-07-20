@@ -443,10 +443,11 @@ fn photometric_patch_offsets(bytes: &[u8]) -> Vec<usize> {
                 None => break,
             }
         }
-        if photometric == Some(2) && samples_per_pixel.is_some_and(|n| n > 4) {
-            if let Some(off) = photometric_value_off {
-                offsets.push(off);
-            }
+        if photometric == Some(2)
+            && samples_per_pixel.is_some_and(|n| n > 4)
+            && let Some(off) = photometric_value_off
+        {
+            offsets.push(off);
         }
         ifd_offset = match read_u32(entries + count * 12) {
             Some(o) => o as usize,
