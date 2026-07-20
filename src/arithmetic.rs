@@ -1,0 +1,5114 @@
+//! Arithmetic and statistics operations ported from libvips.
+//!
+//! This module is the second batch of the libvips operation surface required
+//! by the ported integration tests (after [`crate::bands`]): whole-image
+//! reductions, per-sample arithmetic against constants and images,
+//! comparisons, bitwise operations, and the statistical enhancement ops.
+//! Operations that can fail on caller input exist in two forms, following
+//! the [`crate::bands`] convention:
+//!
+//! * a fallible `try_*` method returning `Result<_, ArithmeticError>` with
+//!   typed errors for mismatched dimensions, band counts, and malformed
+//!   arguments; and
+//! * a panicking convenience method matching the ported-test call surface
+//!   (`sub`, `add_vec`, `recomb`, ...) exactly, delegating to the `try_*`
+//!   form and `expect`ing the result.
+//!
+//! The integer constant family (`add_const`, `sub_const`, `mul_const`,
+//! `floordiv_const`, `pow_const`, `rem_const`) follows this convention too:
+//! it rounds and saturates into an unsigned output and so rejects float
+//! input, a data-dependent failure surfaced by the `try_*_const` forms
+//! (libviprs#281). Operations that genuinely cannot fail on caller input —
+//! the whole-image reductions and the float-output family that accepts every
+//! depth ([`Raster::div_const`], [`Raster::linear`]) — have only the single
+//! infallible form.
+//!
+//! # Operations
+//!
+//! | Method | libvips equivalent | Result |
+//! |---|---|---|
+//! | [`Raster::avg`] | `vips_avg` | mean of every sample, `f64` |
+//! | [`Raster::deviate`] | `vips_deviate` | sample standard deviation, `f64` |
+//! | [`Raster::min`] / [`Raster::max`] | `vips_min` / `vips_max` | extremum sample, `f64` |
+//! | [`Raster::minpos`] / [`Raster::maxpos`] | `vips_min` / `vips_max` with position | `(value, x, y)` |
+//! | [`Raster::stats`] | `vips_stats` | per-band and overall statistics matrix |
+//! | [`Raster::measure`] | `vips_measure` | patch-grid mean matrix |
+//! | [`Raster::find_trim`] | `vips_find_trim` | content bounding box |
+//! | [`Raster::profile`] | `vips_profile` | first non-zero positions |
+//! | [`Raster::project`] | `vips_project` | column and row sums |
+//! | [`Raster::add_const`], [`Raster::sub_const`], ... | `vips_linear1` family | per-sample constant arithmetic |
+//! | [`Raster::add_vec`], [`Raster::sub_vec`], ... | `vips_linear` family | per-band constant arithmetic |
+//! | [`Raster::sub`] | `vips_subtract` | float raster (signed differences survive) |
+//! | [`Raster::mul`] | `vips_multiply` | image-image arithmetic |
+//! | [`Raster::div`], [`Raster::div_const`], [`Raster::div_vec`] | `vips_divide` | float raster |
+//! | [`Raster::linear`] / [`Raster::linear_uchar`] | `vips_linear1` (default / `uchar` option) | `a * x + b`, float / uchar raster |
+//! | [`Raster::sum`] | `vips_sum` | pixelwise sum of an image list |
+//! | [`Raster::minpair`] / [`Raster::maxpair`] | `vips_minpair` / `vips_maxpair` | pixelwise extremum of two images |
+//! | [`Raster::more_than`] family | `vips_relational` | `0` / `255` uchar mask |
+//! | [`Raster::bitand`] family, [`Raster::lshift`], [`Raster::rshift`] | `vips_boolean` | bitwise arithmetic |
+//! | [`Raster::scaleimage`] | `vips_scale` | values scaled to `0..=255` |
+//! | [`Raster::stdif`] | `vips_stdif` | statistical differencing |
+//! | [`Raster::recomb`] | `vips_recomb` | band recombination matrix multiply |
+//! | [`Raster::premultiply`] / [`Raster::unpremultiply`] | `vips_premultiply` / `vips_unpremultiply` | alpha (un)premultiplication |
+//! | [`Raster::sin`] .. [`Raster::atanh`], [`Raster::log`], [`Raster::log10`], [`Raster::exp`], [`Raster::exp10`] | `vips_math` | float raster |
+//! | [`Raster::atan2`], [`Raster::pow`], [`Raster::wop`] | `vips_math2` | float raster |
+//! | [`Raster::neg`] | pyvips `-image` | float raster |
+//! | [`Raster::complexform`], [`Raster::polar`], [`Raster::rect`], [`Raster::conj`], [`Raster::real`], [`Raster::imag`] | `vips_complexform` / `vips_complex` / `vips_complexget` | complex (re/im pair) float raster |
+//! | [`Raster::hough_line`] (vips-exact binning) / [`Raster::hough_circle`] (golden-only, see its docs) | `vips_hough_line` / `vips_hough_circle` | vote accumulator |
+//!
+//! # Semantics shared by the integer operations
+//!
+//! * **Value domain.** Samples are unsigned integers, `0..=255` (8-bit) or
+//!   `0..=65535` (16-bit). Arithmetic is computed in `f64` and the result is
+//!   rounded to nearest and saturated into the output depth. This integer
+//!   round-and-saturate contract is kept exactly where libvips keeps
+//!   integer output: `vips_add` / `vips_multiply` map integer input to
+//!   integer output, so `add` / `mul` and their constant forms stay integer
+//!   here. The divide family and `linear` promote to float output instead
+//!   (see below), as does the transcendental family, and — matching the
+//!   `vips_subtract` promotion to signed `short` — so does image-image
+//!   `sub` (issue #282; the constant/per-band `sub_const` / `sub_vec`
+//!   stay integer and saturate, see their own docs).
+//! * **Depth promotion.** Operations whose exact result can exceed the
+//!   input depth (`add_const`, `mul`, `pow_const`, `sum`, ...)
+//!   promote 8-bit input to 16-bit output, matching the promotion
+//!   [`Raster::add`] already performs. 16-bit input has no wider format and
+//!   saturates at `65535`. Operations whose result stays within the input
+//!   depth (`clamp`, ...) keep it.
+//! * **Comparisons.** The relational family returns an 8-bit image with the
+//!   input's band count holding `255` where the relation holds and `0`
+//!   where it does not, matching libvips.
+//! * **Division by zero.** `x / 0` and `x % 0` produce `0`, matching
+//!   libvips `vips_divide`.
+//! * **NaN.** A NaN result (e.g. `0.0.powf(f64::NAN)`) writes `0`.
+//!
+//! # Float-output operations
+//!
+//! The divide family ([`Raster::div`], [`Raster::div_const`],
+//! [`Raster::div_vec`]), [`Raster::linear`], and image-image
+//! [`Raster::sub`] produce a float raster, matching the libvips promotion
+//! tables: `vips_divide` maps every integer input format to float,
+//! `vips_linear` computes in float and only casts down when the caller
+//! asks for it (the `uchar` option, [`Raster::linear_uchar`] here), and
+//! `vips_subtract` promotes `uchar` to signed `short` — carried here as
+//! float so negative differences survive (issue #282). A quotient such as
+//! `128 / 255` therefore stays `0.502` instead of rounding to `1`, which
+//! keeps `atanh` and the other domain-limited maths finite on scaled
+//! input, and `10 - 200` stays `-190` instead of saturating to `0`.
+//! Division by zero still produces `0`, matching `vips_divide`.
+//!
+//! The transcendental family (`vips_math`: `sin` through `atanh`, `log`,
+//! `log10`, `exp`, `exp10`; `vips_math2`: `atan2`, `pow`, `wop`; `neg`) and
+//! the complex family accept every sample depth, including float input,
+//! and produce a float raster ([`PixelFormat::RgbaF32`] or
+//! [`PixelFormat::FloatF32`]) so fractional and negative results survive,
+//! matching the libvips float promotion. Following libvips `vips_math`,
+//! `sin` / `cos` / `tan` take their input in degrees and `asin` / `acos` /
+//! `atan` / `atan2` produce degrees. Out-of-domain inputs keep IEEE
+//! semantics (`log(0)` is `-inf`, `acosh(0.5)` is NaN) rather than
+//! saturating.
+//!
+//! A complex image is a float raster with an even band count holding
+//! `(re, im)` pairs: [`Raster::complexform`] interleaves two real images,
+//! [`Raster::real`] / [`Raster::imag`] extract the halves, and
+//! [`Raster::polar`] / [`Raster::rect`] / [`Raster::conj`] map pairs
+//! (angles in degrees, matching `vips_complex`).
+//!
+//! `floor`, `ceil`, and `rint` round float rasters samplewise and are exact
+//! identities on the integer formats, which is also what libvips produces
+//! for integer input. `abs` and `sign` likewise gained float branches when
+//! `neg` made negative samples possible.
+//!
+//! The `hist_find*` family lives in [`crate::histogram`]; the creation /
+//! conversion helpers the ported statistics tests use for setup (`grey`,
+//! `insert`) live in their own batches.
+
+#[cfg(test)]
+use std::cell::Cell;
+
+use crate::pixel::PixelFormat;
+use crate::raster::{Raster, RasterError, alloc_op_output};
+use thiserror::Error;
+
+/// Typed errors for the arithmetic operations in [`crate::arithmetic`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ArithmeticError {
+    /// Two rasters that must share pixel dimensions do not.
+    #[error("dimension mismatch: {expected_w}x{expected_h} vs {got_w}x{got_h}")]
+    DimensionMismatch {
+        expected_w: u32,
+        expected_h: u32,
+        got_w: u32,
+        got_h: u32,
+    },
+    /// Two rasters that must share a band count do not.
+    #[error("band-count mismatch: expected {expected} bands, got {got}")]
+    BandCountMismatch { expected: usize, got: usize },
+    /// A per-band constant vector's length does not equal the band count.
+    #[error("constant count mismatch: expected {expected} constants, got {got}")]
+    ConstCountMismatch { expected: usize, got: usize },
+    /// `recomb` was given an empty matrix.
+    #[error("recomb requires at least one matrix row")]
+    EmptyMatrix,
+    /// A `recomb` matrix row's length does not equal the input band count.
+    #[error("recomb matrix row {row} has {got} coefficients, expected {expected}")]
+    MatrixRowMismatch {
+        row: usize,
+        expected: usize,
+        got: usize,
+    },
+    /// `sum` was given an empty image list.
+    #[error("sum requires at least one image")]
+    EmptyImageList,
+    /// `premultiply` / `unpremultiply` need at least two bands (the last
+    /// band is the alpha band).
+    #[error("alpha operation requires at least 2 bands, image has {bands}")]
+    NoAlphaBand { bands: usize },
+    /// A `stdif` window dimension is zero.
+    #[error("stdif window dimensions must be greater than zero")]
+    ZeroWindow,
+    /// A `stdif` window dimension exceeds the image (vips rejects this as
+    /// `stdif: window too large`).
+    #[error("stdif window {win_w}x{win_h} is larger than image {width}x{height}")]
+    WindowTooLarge {
+        win_w: u32,
+        win_h: u32,
+        width: u32,
+        height: u32,
+    },
+    /// A `measure` patch grid dimension is zero.
+    #[error("measure patch grid dimensions must be greater than zero")]
+    ZeroPatches,
+    /// A `measure` patch grid has more patches than pixels along an axis.
+    #[error("measure grid {across}x{down} does not fit image {width}x{height}")]
+    PatchGridTooFine {
+        across: u32,
+        down: u32,
+        width: u32,
+        height: u32,
+    },
+    /// The result would have more bands than [`PixelFormat`] can carry.
+    #[error("result band count {bands} exceeds the supported maximum of 65535")]
+    TooManyBands { bands: usize },
+    /// A complex operation (`polar`, `rect`, `conj`, `real`, `imag`) was
+    /// given an image whose band count is odd, so it cannot hold
+    /// `(re, im)` pairs.
+    #[error("complex operation requires an even band count of (re, im) pairs, image has {bands}")]
+    NotComplex { bands: usize },
+    /// `hough_circle` was given an empty radius range.
+    #[error("hough_circle radius range is empty: min {min} exceeds max {max}")]
+    EmptyRadiusRange { min: u32, max: u32 },
+    /// An integer-only arithmetic operation (image-image `add` / `mul` and the
+    /// constant / per-band `*_const` / `*_vec` forms) was given a float raster.
+    /// These operations round-and-saturate into an unsigned integer output, so
+    /// a float input has no representable result; cast to an unsigned 8/16-bit
+    /// format first, or use the float-output family (image-image `sub`, `div`,
+    /// `linear`, the transcendental ops), which reads every input depth.
+    /// Image-image `sub` floats its output (libviprs#282) so it is a
+    /// float-output op and accepts float input — unlike `sub_const` / `sub_vec`,
+    /// which stay integer and saturate. Mirrors [`RasterError::FloatUnsupported`]
+    /// so the `try_*` forms return a typed error instead of panicking.
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatUnsupported { op: &'static str },
+    /// Constructing the result raster failed (allocation, size overflow).
+    #[error(transparent)]
+    Raster(#[from] RasterError),
+}
+
+// ---------------------------------------------------------------------------
+// Sample-level helpers
+// ---------------------------------------------------------------------------
+
+/// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
+/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
+/// keeps the arithmetic ops, which predate the float formats, from
+/// misreading float bytes as `u16` pairs.
+#[inline]
+fn read_u32(data: &[u8], bpc: usize, i: usize) -> u32 {
+    match bpc {
+        1 => data[i] as u32,
+        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
+}
+
+/// Read the flat `i`-th sample as `f64`. Unlike [`read_u32`], this reads
+/// every depth including the `f32` formats (native byte order, matching
+/// [`crate::raster_ops`]), so the read-only reductions (`avg`, `deviate`,
+/// `min`/`max`, `minpos`/`maxpos`) and the relational ops work on the
+/// float rasters the create generators emit. The integer-writing ops
+/// still go through [`write_u32`] / [`depth_max`] and keep rejecting
+/// float input loudly; the float-output linear / divide family reads
+/// every depth.
+#[inline]
+fn read_f64(data: &[u8], bpc: usize, i: usize) -> f64 {
+    match bpc {
+        1 => f64::from(data[i]),
+        2 => f64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        _ => f64::from(f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+    }
+}
+
+/// Write the flat `i`-th sample. `v` must already fit the depth.
+/// Unsigned depths only; see [`read_u32`].
+#[inline]
+fn write_u32(data: &mut [u8], bpc: usize, i: usize, v: u32) {
+    match bpc {
+        1 => data[i] = v as u8,
+        2 => {
+            let b = (v as u16).to_ne_bytes();
+            data[2 * i] = b[0];
+            data[2 * i + 1] = b[1];
+        }
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
+}
+
+/// Round `v` to nearest, saturate into `0..=max`, and write it as the flat
+/// `i`-th sample. NaN writes `0`.
+#[inline]
+fn write_f64(data: &mut [u8], bpc: usize, i: usize, v: f64, max: f64) {
+    let v = if v.is_nan() {
+        0.0
+    } else {
+        v.round().clamp(0.0, max)
+    };
+    write_u32(data, bpc, i, v as u32);
+}
+
+/// Largest sample value representable at an unsigned depth, as `f64`.
+/// Unsigned depths only; see [`read_u32`].
+#[inline]
+fn depth_max(bpc: usize) -> f64 {
+    match bpc {
+        1 => 255.0,
+        2 => 65535.0,
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
+}
+
+/// Largest sample value representable at an unsigned depth, as `u32`.
+/// Unsigned depths only; see [`read_u32`].
+#[inline]
+fn depth_max_u32(bpc: usize) -> u32 {
+    match bpc {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        _ => panic!(
+            "the arithmetic operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
+}
+
+/// The output format for a band count and depth; the band count is bounded
+/// by the caller except for `recomb`, which maps `None` to `TooManyBands`.
+fn format_for(bands: usize, bpc: usize) -> Result<PixelFormat, ArithmeticError> {
+    PixelFormat::with_channels(bands, bpc).ok_or(ArithmeticError::TooManyBands { bands })
+}
+
+/// `base ** exp` with libvips `math2` POW semantics.
+///
+/// Matches vips 8.18.4, whose `math2` POW guards the whole `base == 0 &&
+/// exp <= 0` range to `0` rather than the IEEE / C values [`f64::powf`]
+/// returns there (`0 ** 0 = 1`, `0 ** -1 = +inf`, `0 ** -0.5 = +inf`).
+/// Verified with the oracle: `vips math2_const zero out pow c` yields `0`
+/// for `c` in `{0, -1, -2, -0.5}`, while a positive base is untouched
+/// (`2 ** -1 = 0.5`). Every other operand pair is left to [`f64::powf`], so
+/// only the `base == 0, exp <= 0` quadrant changes. `wop` reuses this with
+/// the operands swapped, since it is the same `math2` operation.
+#[inline]
+fn pow_vips(base: f64, exp: f64) -> f64 {
+    if base == 0.0 && exp <= 0.0 {
+        0.0
+    } else {
+        base.powf(exp)
+    }
+}
+
+/// Error unless `a` and `b` share pixel dimensions and band count.
+fn ensure_compatible(a: &Raster, b: &Raster) -> Result<(), ArithmeticError> {
+    if (a.width(), a.height()) != (b.width(), b.height()) {
+        return Err(ArithmeticError::DimensionMismatch {
+            expected_w: a.width(),
+            expected_h: a.height(),
+            got_w: b.width(),
+            got_h: b.height(),
+        });
+    }
+    if a.format().channels() != b.format().channels() {
+        return Err(ArithmeticError::BandCountMismatch {
+            expected: a.format().channels(),
+            got: b.format().channels(),
+        });
+    }
+    Ok(())
+}
+
+/// Unwrap an arithmetic result for the panicking ported-test surface.
+///
+/// Most [`ArithmeticError`] variants do not name the failing op, so the panic
+/// prefixes `"<op>: "` for context. [`ArithmeticError::FloatUnsupported`] is
+/// the exception: it embeds the op in its own `Display` (mirroring
+/// [`RasterError::FloatUnsupported`]), so prefixing it here as well would
+/// double the name ("sub: sub does not support float rasters yet ...", #339).
+/// That one variant is emitted verbatim; every other variant keeps the prefix.
+#[inline]
+#[track_caller]
+fn expect_arith<T>(op: &str, r: Result<T, ArithmeticError>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e @ ArithmeticError::FloatUnsupported { .. }) => panic!("{e}"),
+        Err(e) => panic!("{op}: {e}"),
+    }
+}
+
+/// Reject float inputs on the mutating (integer-writing) `try_*` paths,
+/// returning a typed error, now that [`read_f64`] itself reads floats for the
+/// reductions. Without this, an op that forces an integer output depth
+/// (`add_const` promotes to 16-bit) would silently round-trip a float raster
+/// through `u16` instead of failing.
+///
+/// The fallible helpers ([`vec_map`], [`binary_map`]) propagate the returned
+/// [`ArithmeticError::FloatUnsupported`] with `?`, so their public `try_*`
+/// forms surface it to the caller instead of panicking (issue #271). The
+/// infallible panicking helpers ([`unary_map`]) keep asserting directly.
+fn reject_float_input(op: &'static str, r: &Raster) -> Result<(), ArithmeticError> {
+    if r.format().is_float() {
+        return Err(ArithmeticError::FloatUnsupported { op });
+    }
+    Ok(())
+}
+
+/// Allocate an op-output buffer for the infallible (panicking) op forms.
+///
+/// The fallible `try_*` forms call [`alloc_op_output`] directly and return
+/// [`RasterError::AllocationFailed`] / [`RasterError::SizeOverflow`]; the
+/// panicking forms have no error channel, so an output the allocator cannot
+/// satisfy surfaces here as a panic — never a process abort through
+/// `handle_alloc_error` (issue #280).
+#[track_caller]
+fn op_output_or_panic(width: u32, height: u32, format: PixelFormat) -> Vec<u8> {
+    alloc_op_output(width, height, format)
+        .unwrap_or_else(|e| panic!("arithmetic output allocation failed: {e}"))
+}
+
+/// Allocate a zero-filled scratch buffer of `len` elements fallibly.
+///
+/// Several `try_*` ops build intermediate buffers far larger than their
+/// output: the [`Raster::try_stdif`] integral images (two `f64` buffers,
+/// each ~8x a Gray8 input) and the [`Raster::try_hough_circle`] vote
+/// accumulator (`w * h * radii` `u32`s — twice the output and sized by the
+/// caller-controlled radius range). PR #339 made only the *output*
+/// allocation fallible ([`alloc_op_output`], issue #280) but left these
+/// dominant scratch buffers as infallible `vec![..]`, so an over-capacity
+/// size still reached `handle_alloc_error` and aborted the process (SIGABRT)
+/// before the fallible output path ever ran — the exact remote-DoS abort
+/// #280 set out to remove (issues #433 / #434 / #435).
+///
+/// Routing the scratch through [`Vec::try_reserve_exact`] surfaces an
+/// unsatisfiable request as [`RasterError::AllocationFailed`], so the `try_*`
+/// op returns a typed `Err` (and its panicking form panics) instead of
+/// aborting. `width` / `height` name the driving raster for the error; the
+/// reported byte count is `len * size_of::<T>()`.
+///
+/// Like [`alloc_op_output`], this re-imposes no [`DEFAULT_MAX_ALLOC_BYTES`]
+/// budget: the scratch size derives from an already-budget-checked input and a
+/// legal large op (a wide integral image, a deep vote accumulator) can exceed
+/// `8 GiB` legitimately, so the only ceiling is what the allocator will
+/// satisfy. A test lowers that ceiling per-thread via a `cfg(test)`-only hook
+/// to reach the fallible path without a multi-TiB input (#460); no such hook
+/// or ceiling compiles into production builds.
+///
+/// Every current caller fills with a zero value, so the `resize` performs a
+/// redundant zeroing pass over memory the allocator could hand back already
+/// zeroed. A `calloc`-preserving fallible path (reserve, then `alloc_zeroed`
+/// rather than `resize`) would drop that pass; std exposes no fallible zeroed
+/// `Vec` today (even [`alloc_op_output`] zero-fills the same way), so it is
+/// left as a follow-up (#460) rather than hand-rolled `unsafe`.
+///
+/// [`DEFAULT_MAX_ALLOC_BYTES`]: crate::raster::DEFAULT_MAX_ALLOC_BYTES
+fn try_scratch<T: Clone>(
+    width: u32,
+    height: u32,
+    len: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let bytes = len.saturating_mul(std::mem::size_of::<T>());
+    // Test-only: honour a lowered per-thread ceiling so the fallible path is
+    // reachable at a buildable input size (#460). This branch — and the
+    // thread-local it reads — compile only under `cfg(test)`, so production
+    // scratch allocation is bounded solely by the allocator, exactly as
+    // `alloc_op_output`, and no test-support surface ships in release builds.
+    #[cfg(test)]
+    if bytes as u64 > SCRATCH_ALLOC_CAP.with(Cell::get) {
+        return Err(RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        });
+    }
+    let mut v: Vec<T> = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        })?;
+    v.resize(len, fill);
+    Ok(v)
+}
+
+/// Allocate a `fill`-initialised scratch buffer for an infallible (panicking)
+/// op form, fallibly.
+///
+/// The `try_*` forms call [`try_scratch`] and propagate its
+/// [`RasterError::AllocationFailed`]; an infallible form — e.g.
+/// [`Raster::project`], whose `(Raster, Raster)` signature has no error channel
+/// — instead surfaces an unsatisfiable scratch as a panic here, never a process
+/// abort through `handle_alloc_error` (#460). This mirrors how
+/// [`op_output_or_panic`] guards the *output* allocation of the same forms.
+#[track_caller]
+fn scratch_or_panic<T: Clone>(width: u32, height: u32, len: usize, fill: T) -> Vec<T> {
+    try_scratch(width, height, len, fill)
+        .unwrap_or_else(|e| panic!("arithmetic scratch allocation failed: {e}"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread ceiling, in bytes, on a single [`try_scratch`] allocation.
+    ///
+    /// Defaults to `u64::MAX` (no ceiling) so scratch allocation is bounded
+    /// only by the allocator, matching [`alloc_op_output`]. Lowered by
+    /// [`with_scratch_alloc_cap`] so a test can drive the fallible-scratch path
+    /// at a buildable input: the genuine overflow for `try_stdif` (~16x input)
+    /// and `project` (input-scaled) needs multi-TiB inputs far past the 8 GiB
+    /// construction budget (#460). Compiled only under `cfg(test)`, so it never
+    /// exists in production builds.
+    static SCRATCH_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
+}
+
+/// Test-only hook: run `f` with the calling thread's [`try_scratch`] allocation
+/// ceiling lowered to `max_bytes`, restoring the previous ceiling afterwards
+/// (including on unwind).
+///
+/// The fallible-scratch abort guard (`try_stdif`, `project`, `try_hough_circle`)
+/// only fires at scratch sizes the allocator refuses, which for the
+/// non-caller-scaled ops needs multi-TiB inputs beyond the construction budget.
+/// Lowering the per-thread ceiling makes the path reachable at a small input.
+/// The ceiling is thread-local, so parallel tests do not perturb one another.
+///
+/// This helper — and the thread-local it drives — compile only under
+/// `cfg(test)`, so no test-support symbol is shipped in production builds and
+/// the crate's public surface is unchanged (#460 panel follow-up).
+#[cfg(test)]
+fn with_scratch_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCRATCH_ALLOC_CAP.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(SCRATCH_ALLOC_CAP.with(|c| c.replace(max_bytes)));
+    f()
+}
+
+/// Write `v` as the flat `i`-th native-endian `f32` sample.
+#[inline]
+fn write_f32(data: &mut [u8], i: usize, v: f64) {
+    data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+}
+
+/// Stamp an integer arithmetic output with the *resolved* interpretation of
+/// its `source` input, mirroring libvips copying the input header onto the
+/// operation result.
+///
+/// The constant ops that widen depth — `add_const` / `mul_const` / `pow_const`
+/// / `add_vec` (`unary_map` / `vec_map` with `out_bpc == 2`), and the widening
+/// binary path (`binary_map` with `widen`) — promote an 8-bit input into a
+/// 16-bit container while keeping the samples numerically on the 0..255 scale
+/// (the crate's promoted-container idiom). If that `Rgb16` / `Grey16`-shaped
+/// buffer were left untagged, [`Raster::interpretation`] (like libvips'
+/// `vips_image_guess_interpretation`) would *resolve* it to the genuine 16-bit
+/// space, and a downstream [`Raster::composite2`] — which keys its 0..65535 vs
+/// 0..255 scale on that resolved interpretation — would read the promoted
+/// buffer on the 65535 scale, collapsing a fully-opaque promoted overlay to
+/// ~0.4% of its value (silent data loss). Stamping the source interpretation
+/// (`Srgb` / `Bw` / `Multiband` for an 8-bit input) keeps the promoted buffer
+/// resolving to a *non*-genuine-16 space, while a genuinely 16-bit input
+/// (already resolving `Rgb16` / `Grey16`) stays honoured. It is a no-op for a
+/// same-depth output whose resolved interpretation already matches.
+fn stamp_source_interpretation(mut out: Raster, source: &Raster) -> Raster {
+    out.meta.interpretation = Some(source.interpretation());
+    out
+}
+
+/// Apply `f` to every sample, producing a float raster of the same shape.
+/// Accepts every input depth including float; results keep IEEE semantics
+/// (no rounding, clamping, or NaN rewriting).
+fn unary_map_float(r: &Raster, f: impl Fn(f64) -> f64) -> Raster {
+    let fmt = r.format();
+    let bands = fmt.channels();
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
+    let data = r.data();
+    for i in 0..n {
+        write_f32(&mut out, i, f(read_f64(data, in_bpc, i)));
+    }
+    Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed")
+}
+
+/// Apply per-band `f(sample, band_constant)` to every sample, producing
+/// a float raster. Accepts every input depth including float; see
+/// [`unary_map_float`].
+fn vec_map_float(
+    r: &Raster,
+    v: &[f64],
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    let fmt = r.format();
+    let bands = fmt.channels();
+    if v.len() != bands {
+        return Err(ArithmeticError::ConstCountMismatch {
+            expected: bands,
+            got: v.len(),
+        });
+    }
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
+    let data = r.data();
+    for i in 0..n {
+        write_f32(&mut out, i, f(read_f64(data, in_bpc, i), v[i % bands]));
+    }
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
+}
+
+/// Apply `f` samplewise across two compatible images, producing a float
+/// raster. Accepts every input depth including float; see
+/// [`unary_map_float`].
+fn binary_map_float(
+    a: &Raster,
+    b: &Raster,
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    ensure_compatible(a, b)?;
+    let (a_bpc, b_bpc) = (
+        a.format().bytes_per_channel(),
+        b.format().bytes_per_channel(),
+    );
+    let bands = a.format().channels();
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = a.width() as usize * a.height() as usize * bands;
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
+    let (a_data, b_data) = (a.data(), b.data());
+    for i in 0..n {
+        write_f32(
+            &mut out,
+            i,
+            f(read_f64(a_data, a_bpc, i), read_f64(b_data, b_bpc, i)),
+        );
+    }
+    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
+}
+
+/// The pair count of a complex image, or `NotComplex` for an odd band
+/// count. A complex image is a raster with an even band count holding
+/// `(re, im)` pairs; see the module docs.
+fn ensure_complex(r: &Raster) -> Result<usize, ArithmeticError> {
+    let bands = r.format().channels();
+    if bands % 2 != 0 {
+        return Err(ArithmeticError::NotComplex { bands });
+    }
+    Ok(bands / 2)
+}
+
+/// Apply `f(re, im) -> (re', im')` to every complex pair, producing a float
+/// raster with the input band count.
+fn complex_map(r: &Raster, f: impl Fn(f64, f64) -> (f64, f64)) -> Result<Raster, ArithmeticError> {
+    ensure_complex(r)?;
+    let fmt = r.format();
+    let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+    let out_fmt = PixelFormat::with_channels(bands, 4)
+        .expect("band count unchanged, so the float output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
+    let data = r.data();
+    for i in (0..n).step_by(2) {
+        let (re, im) = f(read_f64(data, bpc, i), read_f64(data, bpc, i + 1));
+        write_f32(&mut out, i, re);
+        write_f32(&mut out, i + 1, im);
+    }
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
+}
+
+/// Extract one half of every complex pair (`part` is 0 for real, 1 for
+/// imaginary), producing a float raster with half the band count.
+fn complex_get(r: &Raster, part: usize) -> Result<Raster, ArithmeticError> {
+    let pairs = ensure_complex(r)?;
+    let fmt = r.format();
+    let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+    let out_fmt = PixelFormat::with_channels(pairs, 4)
+        .expect("pair count is at least 1 and at most half the input band count");
+    let pixels = r.width() as usize * r.height() as usize;
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
+    let data = r.data();
+    for p in 0..pixels {
+        for pair in 0..pairs {
+            let v = read_f64(data, bpc, p * bands + 2 * pair + part);
+            write_f32(&mut out, p * pairs + pair, v);
+        }
+    }
+    Ok(Raster::from_op_output(r.width(), r.height(), out_fmt, out)?)
+}
+
+/// Apply `f` to every sample, writing a result of the same shape at
+/// `out_bpc` depth (rounded and saturated).
+#[track_caller]
+fn unary_map(r: &Raster, out_bpc: usize, f: impl Fn(f64) -> f64) -> Raster {
+    assert!(
+        !r.format().is_float(),
+        "the arithmetic operations do not support float rasters yet; \
+         cast to an unsigned 8/16-bit format first"
+    );
+    let fmt = r.format();
+    let bands = fmt.channels();
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = PixelFormat::with_channels(bands, out_bpc)
+        .expect("band count unchanged, so the output format exists");
+    let n = r.width() as usize * r.height() as usize * bands;
+    let max = depth_max(out_bpc);
+    let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
+    let data = r.data();
+    for i in 0..n {
+        write_f64(&mut out, out_bpc, i, f(read_f64(data, in_bpc, i)), max);
+    }
+    let out = Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed");
+    stamp_source_interpretation(out, r)
+}
+
+/// Fallible twin of [`unary_map`]: apply `f` samplewise at `out_bpc` depth,
+/// returning a typed error instead of panicking. `op` names the caller for the
+/// [`ArithmeticError::FloatUnsupported`] error.
+///
+/// This is the shared body of the constant-arithmetic `try_*` forms
+/// (`try_add_const`, `try_rem_const`, ...); their panicking twins are
+/// [`unary_map`] callers via [`expect_arith`]. It rejects float input up front
+/// (the integer ops round-and-saturate into an unsigned output, which a float
+/// raster has no representable result for) and routes allocation through the
+/// fallible [`alloc_op_output`], so an over-capacity output returns
+/// [`RasterError::AllocationFailed`] rather than aborting.
+fn try_unary_map(
+    op: &'static str,
+    r: &Raster,
+    out_bpc: usize,
+    f: impl Fn(f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    reject_float_input(op, r)?;
+    let fmt = r.format();
+    let bands = fmt.channels();
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = format_for(bands, out_bpc)?;
+    let n = r.width() as usize * r.height() as usize * bands;
+    let max = depth_max(out_bpc);
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
+    let data = r.data();
+    for i in 0..n {
+        write_f64(&mut out, out_bpc, i, f(read_f64(data, in_bpc, i)), max);
+    }
+    let out = Raster::from_op_output(r.width(), r.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, r))
+}
+
+/// Apply integer `f` to every sample, keeping the input depth. `f` results
+/// are masked into the depth by the caller-provided closure contract.
+fn unary_map_u32(r: &Raster, f: impl Fn(u32) -> u32) -> Raster {
+    let fmt = r.format();
+    let bpc = fmt.bytes_per_channel();
+    let n = r.width() as usize * r.height() as usize * fmt.channels();
+    let mut out = op_output_or_panic(r.width(), r.height(), fmt);
+    let data = r.data();
+    for i in 0..n {
+        write_u32(&mut out, bpc, i, f(read_u32(data, bpc, i)));
+    }
+    let out = Raster::from_op_output(r.width(), r.height(), fmt, out)
+        .expect("arithmetic output is well-formed");
+    stamp_source_interpretation(out, r)
+}
+
+/// Apply per-band `f(sample, band_constant)` to every sample. `op` names the
+/// caller for the [`ArithmeticError::FloatUnsupported`] error.
+fn vec_map(
+    op: &'static str,
+    r: &Raster,
+    v: &[f64],
+    out_bpc: usize,
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    reject_float_input(op, r)?;
+    let fmt = r.format();
+    let bands = fmt.channels();
+    if v.len() != bands {
+        return Err(ArithmeticError::ConstCountMismatch {
+            expected: bands,
+            got: v.len(),
+        });
+    }
+    let in_bpc = fmt.bytes_per_channel();
+    let out_fmt = format_for(bands, out_bpc)?;
+    let n = r.width() as usize * r.height() as usize * bands;
+    let max = depth_max(out_bpc);
+    let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
+    let data = r.data();
+    for i in 0..n {
+        write_f64(
+            &mut out,
+            out_bpc,
+            i,
+            f(read_f64(data, in_bpc, i), v[i % bands]),
+            max,
+        );
+    }
+    let out = Raster::from_op_output(r.width(), r.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, r))
+}
+
+/// Apply `f` samplewise across two compatible images. Output depth is the
+/// wider input depth, widened to 16-bit when `widen` is set. `op` names the
+/// caller for the [`ArithmeticError::FloatUnsupported`] error.
+fn binary_map(
+    op: &'static str,
+    a: &Raster,
+    b: &Raster,
+    widen: bool,
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Raster, ArithmeticError> {
+    reject_float_input(op, a)?;
+    reject_float_input(op, b)?;
+    ensure_compatible(a, b)?;
+    let (a_bpc, b_bpc) = (
+        a.format().bytes_per_channel(),
+        b.format().bytes_per_channel(),
+    );
+    let out_bpc = if widen { 2 } else { a_bpc.max(b_bpc) };
+    let out_fmt = format_for(a.format().channels(), out_bpc)?;
+    let n = a.width() as usize * a.height() as usize * a.format().channels();
+    let max = depth_max(out_bpc);
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
+    let (a_data, b_data) = (a.data(), b.data());
+    for i in 0..n {
+        write_f64(
+            &mut out,
+            out_bpc,
+            i,
+            f(read_f64(a_data, a_bpc, i), read_f64(b_data, b_bpc, i)),
+            max,
+        );
+    }
+    let out = Raster::from_op_output(a.width(), a.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, a))
+}
+
+/// Apply integer `f` samplewise across two compatible images, masking into
+/// the wider input depth.
+fn binary_map_u32(
+    a: &Raster,
+    b: &Raster,
+    f: impl Fn(u32, u32) -> u32,
+) -> Result<Raster, ArithmeticError> {
+    ensure_compatible(a, b)?;
+    let (a_bpc, b_bpc) = (
+        a.format().bytes_per_channel(),
+        b.format().bytes_per_channel(),
+    );
+    let out_bpc = a_bpc.max(b_bpc);
+    let mask = depth_max_u32(out_bpc);
+    let out_fmt = format_for(a.format().channels(), out_bpc)?;
+    let n = a.width() as usize * a.height() as usize * a.format().channels();
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
+    let (a_data, b_data) = (a.data(), b.data());
+    for i in 0..n {
+        let v = f(read_u32(a_data, a_bpc, i), read_u32(b_data, b_bpc, i)) & mask;
+        write_u32(&mut out, out_bpc, i, v);
+    }
+    let out = Raster::from_op_output(a.width(), a.height(), out_fmt, out)?;
+    Ok(stamp_source_interpretation(out, a))
+}
+
+/// Samplewise relational op across two compatible images: 8-bit output with
+/// `255` where the relation holds.
+fn compare_map(
+    a: &Raster,
+    b: &Raster,
+    f: impl Fn(f64, f64) -> bool,
+) -> Result<Raster, ArithmeticError> {
+    ensure_compatible(a, b)?;
+    let (a_bpc, b_bpc) = (
+        a.format().bytes_per_channel(),
+        b.format().bytes_per_channel(),
+    );
+    let out_fmt = format_for(a.format().channels(), 1)?;
+    let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
+    let (a_data, b_data) = (a.data(), b.data());
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = if f(read_f64(a_data, a_bpc, i), read_f64(b_data, b_bpc, i)) {
+            255
+        } else {
+            0
+        };
+    }
+    Ok(Raster::from_op_output(a.width(), a.height(), out_fmt, out)?)
+}
+
+/// Samplewise relational op against a constant: 8-bit output with `255`
+/// where the relation holds.
+fn compare_const_map(r: &Raster, c: f64, f: impl Fn(f64, f64) -> bool) -> Raster {
+    let fmt = r.format();
+    let bpc = fmt.bytes_per_channel();
+    let out_fmt = PixelFormat::with_channels(fmt.channels(), 1)
+        .expect("band count unchanged, so the output format exists");
+    let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
+    let data = r.data();
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = if f(read_f64(data, bpc, i), c) { 255 } else { 0 };
+    }
+    Raster::from_op_output(r.width(), r.height(), out_fmt, out)
+        .expect("arithmetic output is well-formed")
+}
+
+mod comparand_sealed {
+    pub trait Sealed {}
+    impl Sealed for &super::Raster {}
+    impl Sealed for f64 {}
+}
+
+/// Right-hand operand for the samplewise comparison methods
+/// ([`Raster::more_than`], [`Raster::less_than`], and the rest of the
+/// family). It is implemented for `&Raster` (compare against another image,
+/// samplewise) and for `f64` (compare every sample against a constant), so a
+/// single call surface serves both `x.less_than(&other)` and
+/// `x.less_than(128.0)`. The dedicated `*_const` methods remain for callers
+/// that want an unambiguous constant form.
+///
+/// The trait is sealed: only this crate implements it.
+pub trait Comparand: comparand_sealed::Sealed {
+    #[doc(hidden)]
+    #[track_caller]
+    fn compare_against(
+        self,
+        lhs: &Raster,
+        label: &'static str,
+        pred: fn(f64, f64) -> bool,
+    ) -> Raster;
+}
+
+impl Comparand for &Raster {
+    #[track_caller]
+    fn compare_against(
+        self,
+        lhs: &Raster,
+        label: &'static str,
+        pred: fn(f64, f64) -> bool,
+    ) -> Raster {
+        expect_arith(label, compare_map(lhs, self, pred))
+    }
+}
+
+impl Comparand for f64 {
+    #[track_caller]
+    fn compare_against(
+        self,
+        lhs: &Raster,
+        _label: &'static str,
+        pred: fn(f64, f64) -> bool,
+    ) -> Raster {
+        compare_const_map(lhs, self, pred)
+    }
+}
+
+/// Statistical-differencing constants, the libvips `vips_stdif` defaults:
+/// blend factor `a`, target mean `m0`, deviation blend `b`, target
+/// deviation `s0`.
+const STDIF_A: f64 = 0.5;
+const STDIF_M0: f64 = 128.0;
+const STDIF_B: f64 = 0.5;
+const STDIF_S0: f64 = 50.0;
+
+/// The `find_trim` difference threshold, the libvips default.
+const FIND_TRIM_THRESHOLD: f64 = 10.0;
+
+/// The `scaleimage` log-mode exponent, the libvips `vips_scale` default.
+const SCALE_LOG_EXP: f64 = 0.25;
+
+/// Hough-line accumulator dimensions, the libvips `hough_line` defaults:
+/// angle bins across the width, distance bins down the height.
+const HOUGH_LINE_WIDTH: u32 = 256;
+const HOUGH_LINE_HEIGHT: u32 = 256;
+
+impl Raster {
+    // -----------------------------------------------------------------
+    // Reductions
+    // -----------------------------------------------------------------
+
+    /// Mean of every sample in every band (libvips `avg`).
+    pub fn avg(&self) -> f64 {
+        let bpc = self.format().bytes_per_channel();
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        let data = self.data();
+        let sum: f64 = (0..n).map(|i| read_f64(data, bpc, i)).sum();
+        sum / n as f64
+    }
+
+    /// Sample standard deviation of every sample in every band (libvips
+    /// `deviate`, using the `n - 1` denominator). A single-sample image has
+    /// deviation `0`.
+    pub fn deviate(&self) -> f64 {
+        let bpc = self.format().bytes_per_channel();
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        if n < 2 {
+            return 0.0;
+        }
+        let data = self.data();
+        let (mut sum, mut sum2) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            let v = read_f64(data, bpc, i);
+            sum += v;
+            sum2 += v * v;
+        }
+        (((sum2 - sum * sum / n as f64) / (n as f64 - 1.0)).max(0.0)).sqrt()
+    }
+
+    /// Smallest sample across every band (libvips `min`).
+    pub fn min(&self) -> f64 {
+        let bpc = self.format().bytes_per_channel();
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        let data = self.data();
+        (0..n)
+            .map(|i| read_f64(data, bpc, i))
+            .fold(f64::MAX, f64::min)
+    }
+
+    /// Largest sample across every band (libvips `max`).
+    pub fn max(&self) -> f64 {
+        let bpc = self.format().bytes_per_channel();
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        let data = self.data();
+        (0..n)
+            .map(|i| read_f64(data, bpc, i))
+            .fold(f64::MIN, f64::max)
+    }
+
+    /// Smallest sample and the position of its first occurrence in
+    /// row-major scan order, as `(value, x, y)` (libvips `min` with
+    /// position). For multi-band images the value is the smallest sample of
+    /// any band at that pixel.
+    pub fn minpos(&self) -> (f64, u32, u32) {
+        self.extremum_pos(|v, best| v < best)
+    }
+
+    /// Largest sample and the position of its first occurrence in row-major
+    /// scan order, as `(value, x, y)` (libvips `max` with position).
+    pub fn maxpos(&self) -> (f64, u32, u32) {
+        self.extremum_pos(|v, best| v > best)
+    }
+
+    /// Shared scan for [`Raster::minpos`] / [`Raster::maxpos`]: `better`
+    /// decides whether a strictly better sample replaces the current best,
+    /// so ties keep the first occurrence.
+    fn extremum_pos(&self, better: impl Fn(f64, f64) -> bool) -> (f64, u32, u32) {
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let data = self.data();
+        let mut best = read_f64(data, bpc, 0);
+        let (mut bx, mut by) = (0u32, 0u32);
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..bands {
+                    let v = read_f64(data, bpc, (y * w + x) * bands + c);
+                    if better(v, best) {
+                        best = v;
+                        bx = x as u32;
+                        by = y as u32;
+                    }
+                }
+            }
+        }
+        (best, bx, by)
+    }
+
+    /// Image statistics matrix (libvips `stats`).
+    ///
+    /// Returns `bands + 1` rows of `[min, max, sum, sum_of_squares, mean,
+    /// deviation]`: row `0` covers the whole image, row `b + 1` covers band
+    /// `b`. The deviation uses the same `n - 1` denominator as
+    /// [`Raster::deviate`].
+    pub fn stats(&self) -> Vec<Vec<f64>> {
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let pixels = self.width() as usize * self.height() as usize;
+        let data = self.data();
+
+        // Per-band accumulators: min, max, sum, sum2.
+        let mut acc = vec![(f64::MAX, f64::MIN, 0.0f64, 0.0f64); bands];
+        for p in 0..pixels {
+            for (c, a) in acc.iter_mut().enumerate() {
+                let v = read_f64(data, bpc, p * bands + c);
+                a.0 = a.0.min(v);
+                a.1 = a.1.max(v);
+                a.2 += v;
+                a.3 += v * v;
+            }
+        }
+        let row = |min: f64, max: f64, sum: f64, sum2: f64, n: f64| {
+            let mean = sum / n;
+            let sd = if n < 2.0 {
+                0.0
+            } else {
+                (((sum2 - sum * sum / n) / (n - 1.0)).max(0.0)).sqrt()
+            };
+            vec![min, max, sum, sum2, mean, sd]
+        };
+        let overall = acc.iter().fold(
+            (f64::MAX, f64::MIN, 0.0f64, 0.0f64),
+            |(mn, mx, s, s2), a| (mn.min(a.0), mx.max(a.1), s + a.2, s2 + a.3),
+        );
+        let mut result = Vec::with_capacity(bands + 1);
+        result.push(row(
+            overall.0,
+            overall.1,
+            overall.2,
+            overall.3,
+            (pixels * bands) as f64,
+        ));
+        for a in &acc {
+            result.push(row(a.0, a.1, a.2, a.3, pixels as f64));
+        }
+        result
+    }
+
+    /// Mean of each patch in a grid of `h` patches across and `v` patches
+    /// down (libvips `measure`).
+    ///
+    /// The image is divided into `h * v` equal patches; each patch is
+    /// sampled over its central 50% to avoid edge effects, matching
+    /// libvips. Returns one row per patch, left-to-right then top-to-bottom,
+    /// each row holding the per-band means.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ZeroPatches`] if `h` or `v` is zero, or
+    /// [`ArithmeticError::PatchGridTooFine`] if the grid has more patches
+    /// than pixels along either axis.
+    pub fn try_measure(&self, h: u32, v: u32) -> Result<Vec<Vec<f64>>, ArithmeticError> {
+        if h == 0 || v == 0 {
+            return Err(ArithmeticError::ZeroPatches);
+        }
+        if h > self.width() || v > self.height() {
+            return Err(ArithmeticError::PatchGridTooFine {
+                across: h,
+                down: v,
+                width: self.width(),
+                height: self.height(),
+            });
+        }
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let w = self.width() as usize;
+        let (pw, ph) = ((self.width() / h) as usize, (self.height() / v) as usize);
+        let (sw, sh) = ((pw / 2).max(1), (ph / 2).max(1));
+        let data = self.data();
+        let mut result = Vec::with_capacity((h * v) as usize);
+        for j in 0..v as usize {
+            for i in 0..h as usize {
+                let x0 = i * pw + pw / 4;
+                let y0 = j * ph + ph / 4;
+                let mut sums = vec![0.0f64; bands];
+                for y in y0..y0 + sh {
+                    for x in x0..x0 + sw {
+                        for (c, s) in sums.iter_mut().enumerate() {
+                            *s += read_f64(data, bpc, (y * w + x) * bands + c);
+                        }
+                    }
+                }
+                let n = (sw * sh) as f64;
+                result.push(sums.into_iter().map(|s| s / n).collect());
+            }
+        }
+        Ok(result)
+    }
+
+    /// Panicking form of [`Raster::try_measure`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_measure`].
+    #[track_caller]
+    pub fn measure(&self, h: u32, v: u32) -> Vec<Vec<f64>> {
+        expect_arith("measure", self.try_measure(h, v))
+    }
+
+    /// Bounding box of non-background content as `(left, top, width,
+    /// height)` (libvips `find_trim`).
+    ///
+    /// A pixel is content when any band differs from the background by more
+    /// than the libvips default threshold of `10`. `background` defaults to
+    /// `255` (white) in every band, the libvips default; a single-element
+    /// slice broadcasts across bands. An all-background image returns
+    /// `(0, 0, 0, 0)`. libvips median-filters the image before
+    /// thresholding; this implementation thresholds directly, which is
+    /// equivalent for noise-free rasters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ConstCountMismatch`] if `background` has
+    /// neither one element nor one per band.
+    pub fn try_find_trim(
+        &self,
+        background: Option<&[f64]>,
+    ) -> Result<(u32, u32, u32, u32), ArithmeticError> {
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let bg: Vec<f64> = match background {
+            None => vec![255.0; bands],
+            Some(v) if v.len() == 1 => vec![v[0]; bands],
+            Some(v) if v.len() == bands => v.to_vec(),
+            Some(v) => {
+                return Err(ArithmeticError::ConstCountMismatch {
+                    expected: bands,
+                    got: v.len(),
+                });
+            }
+        };
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let data = self.data();
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+        let mut found = false;
+        for y in 0..h {
+            for x in 0..w {
+                let content = (0..bands).any(|c| {
+                    (read_f64(data, bpc, (y * w + x) * bands + c) - bg[c]).abs()
+                        > FIND_TRIM_THRESHOLD
+                });
+                if content {
+                    found = true;
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        if !found {
+            return Ok((0, 0, 0, 0));
+        }
+        Ok((
+            x0 as u32,
+            y0 as u32,
+            (x1 - x0 + 1) as u32,
+            (y1 - y0 + 1) as u32,
+        ))
+    }
+
+    /// Panicking form of [`Raster::try_find_trim`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_find_trim`].
+    #[track_caller]
+    pub fn find_trim(&self, background: Option<&[f64]>) -> (u32, u32, u32, u32) {
+        expect_arith("find_trim", self.try_find_trim(background))
+    }
+
+    /// First non-zero sample positions (libvips `profile`).
+    ///
+    /// Returns `(columns, rows)`: `columns` is a `width x 1` image whose
+    /// value at `x` is the row index of the first non-zero sample in column
+    /// `x` (the image height when the column is all zero); `rows` is a
+    /// `1 x height` image whose value at `y` is the column index of the
+    /// first non-zero sample in row `y` (the image width when all zero).
+    /// Both outputs are 16-bit with the input band count, positions
+    /// saturating at `65535`, matching the libvips `ushort` output.
+    pub fn profile(&self) -> (Raster, Raster) {
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let out_fmt = PixelFormat::with_channels(bands, 2)
+            .expect("band count unchanged, so the output format exists");
+        let data = self.data();
+
+        let mut cols = op_output_or_panic(self.width(), 1, out_fmt);
+        for x in 0..w {
+            for c in 0..bands {
+                let first = (0..h)
+                    .find(|&y| read_u32(data, bpc, (y * w + x) * bands + c) != 0)
+                    .unwrap_or(h);
+                write_u32(&mut cols, 2, x * bands + c, first.min(0xFFFF) as u32);
+            }
+        }
+        let mut rows = op_output_or_panic(1, self.height(), out_fmt);
+        for y in 0..h {
+            for c in 0..bands {
+                let first = (0..w)
+                    .find(|&x| read_u32(data, bpc, (y * w + x) * bands + c) != 0)
+                    .unwrap_or(w);
+                write_u32(&mut rows, 2, y * bands + c, first.min(0xFFFF) as u32);
+            }
+        }
+        (
+            Raster::from_op_output(self.width(), 1, out_fmt, cols)
+                .expect("profile output is well-formed"),
+            Raster::from_op_output(1, self.height(), out_fmt, rows)
+                .expect("profile output is well-formed"),
+        )
+    }
+
+    /// Column and row sums (libvips `project`).
+    ///
+    /// Returns `(columns, rows)`: `columns` is a `width x 1` image holding
+    /// the per-band sum of each column; `rows` is a `1 x height` image
+    /// holding the per-band sum of each row. Outputs are 16-bit and sums
+    /// saturate at `65535` (libvips promotes to a 32-bit format this crate
+    /// does not have).
+    pub fn project(&self) -> (Raster, Raster) {
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let out_fmt = PixelFormat::with_channels(bands, 2)
+            .expect("band count unchanged, so the output format exists");
+        let data = self.data();
+
+        // `col_sums` / `row_sums` are input-scaled — a wide, short raster
+        // makes `col_sums` up to ~8x the input (`f64` per sample), so a legal
+        // large input could drive an infallible `vec![..]` into
+        // `handle_alloc_error` and abort. Route them through the fallible
+        // scratch path so an unsatisfiable size panics (project has no error
+        // channel) rather than aborting (#460).
+        let mut col_sums = scratch_or_panic(self.width(), self.height(), w * bands, 0.0f64);
+        let mut row_sums = scratch_or_panic(self.width(), self.height(), h * bands, 0.0f64);
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..bands {
+                    let v = read_f64(data, bpc, (y * w + x) * bands + c);
+                    col_sums[x * bands + c] += v;
+                    row_sums[y * bands + c] += v;
+                }
+            }
+        }
+        let mut cols = op_output_or_panic(self.width(), 1, out_fmt);
+        for (i, &s) in col_sums.iter().enumerate() {
+            write_f64(&mut cols, 2, i, s, 65535.0);
+        }
+        let mut rows = op_output_or_panic(1, self.height(), out_fmt);
+        for (i, &s) in row_sums.iter().enumerate() {
+            write_f64(&mut rows, 2, i, s, 65535.0);
+        }
+        (
+            Raster::from_op_output(self.width(), 1, out_fmt, cols)
+                .expect("project output is well-formed"),
+            Raster::from_op_output(1, self.height(), out_fmt, rows)
+                .expect("project output is well-formed"),
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // Constant arithmetic
+    // -----------------------------------------------------------------
+
+    /// Add a constant to every sample (libvips `linear` with `a = 1`).
+    /// 8-bit input promotes to 16-bit so sums above 255 survive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_add_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map("add_const", self, 2, move |v| v + c)
+    }
+
+    /// Panicking form of [`Raster::try_add_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_add_const`].
+    #[track_caller]
+    pub fn add_const(&self, c: f64) -> Raster {
+        expect_arith("add_const", self.try_add_const(c))
+    }
+
+    /// Subtract a constant from every sample, saturating at `0`.
+    ///
+    /// This constant form keeps the integer round-and-saturate contract,
+    /// matching `vips_linear`'s requested- (integer-) format output. It
+    /// differs from image-image [`Raster::sub`], which floats its output and
+    /// preserves negative differences (libviprs#282, matching `vips_subtract`'s
+    /// promotion to signed `short`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_sub_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map(
+            "sub_const",
+            self,
+            self.format().bytes_per_channel(),
+            move |v| v - c,
+        )
+    }
+
+    /// Panicking form of [`Raster::try_sub_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_sub_const`].
+    #[track_caller]
+    pub fn sub_const(&self, c: f64) -> Raster {
+        expect_arith("sub_const", self.try_sub_const(c))
+    }
+
+    /// Multiply every sample by a constant. 8-bit input promotes to 16-bit
+    /// so products above 255 survive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_mul_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map("mul_const", self, 2, move |v| v * c)
+    }
+
+    /// Panicking form of [`Raster::try_mul_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_mul_const`].
+    #[track_caller]
+    pub fn mul_const(&self, c: f64) -> Raster {
+        expect_arith("mul_const", self.try_mul_const(c))
+    }
+
+    /// Divide every sample by a constant. The output is a float raster,
+    /// matching the libvips float promotion for division (`vips_divide`
+    /// maps every integer format to float, and pyvips lowers `image / c`
+    /// to `vips_linear`, which also floats), so quotients keep their
+    /// fractional part: `128 / 255` stays `~0.502` instead of rounding
+    /// to `1`. Division by zero produces `0`, matching `vips_divide`.
+    /// Accepts every input depth including float.
+    pub fn div_const(&self, c: f64) -> Raster {
+        unary_map_float(self, move |v| if c == 0.0 { 0.0 } else { v / c })
+    }
+
+    /// Floor-divide every sample by a constant (Python `//`); division by
+    /// zero produces `0`. This op keeps the integer output contract: the
+    /// floored quotient of an unsigned integer sample is exactly
+    /// representable at the input depth, so the sample values match the
+    /// pyvips float result exactly and the integer format serves the
+    /// index-building callers ([`crate::histogram`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_floordiv_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map(
+            "floordiv_const",
+            self,
+            self.format().bytes_per_channel(),
+            move |v| if c == 0.0 { 0.0 } else { (v / c).floor() },
+        )
+    }
+
+    /// Panicking form of [`Raster::try_floordiv_const`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_floordiv_const`].
+    #[track_caller]
+    pub fn floordiv_const(&self, c: f64) -> Raster {
+        expect_arith("floordiv_const", self.try_floordiv_const(c))
+    }
+
+    /// Raise every sample to a power. 8-bit input promotes to 16-bit;
+    /// results saturate at the output depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_pow_const(&self, exp: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map("pow_const", self, 2, move |v| pow_vips(v, exp))
+    }
+
+    /// Panicking form of [`Raster::try_pow_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_pow_const`].
+    #[track_caller]
+    pub fn pow_const(&self, exp: f64) -> Raster {
+        expect_arith("pow_const", self.try_pow_const(exp))
+    }
+
+    /// Remainder of every sample divided by a constant (libvips
+    /// `remainder_const`); a zero divisor produces `0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
+    /// raster (this integer op rounds and saturates into an unsigned output).
+    pub fn try_rem_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
+        try_unary_map(
+            "rem_const",
+            self,
+            self.format().bytes_per_channel(),
+            move |v| if c == 0.0 { 0.0 } else { v % c },
+        )
+    }
+
+    /// Panicking form of [`Raster::try_rem_const`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_rem_const`].
+    #[track_caller]
+    pub fn rem_const(&self, c: f64) -> Raster {
+        expect_arith("rem_const", self.try_rem_const(c))
+    }
+
+    /// `a * sample + b` for every sample (libvips `linear`). The output
+    /// is a float raster, matching `vips_linear`, which computes in
+    /// float and never rounds into an integer container unless the
+    /// caller asks; [`Raster::linear_uchar`] is the asking form.
+    /// Fractional and negative results survive. Accepts every input
+    /// depth including float.
+    pub fn linear(&self, a: f64, b: f64) -> Raster {
+        unary_map_float(self, move |v| a * v + b)
+    }
+
+    /// `a * sample + b` clipped into `0..=255` and truncated into an
+    /// 8-bit raster (libvips `linear` with the `uchar` option): the
+    /// caller-requests-integer form of [`Raster::linear`]. The
+    /// truncation is the C float-to-uchar cast `vips_linear1` performs,
+    /// not a rounding, matching the `mask_*` uchar path in
+    /// [`crate::create`]. Accepts every input depth including float, so
+    /// it also casts a floated linear / divide result back to uchar.
+    pub fn linear_uchar(&self, a: f64, b: f64) -> Raster {
+        let fmt = self.format();
+        let (bands, in_bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let out_fmt = PixelFormat::with_channels(bands, 1)
+            .expect("band count unchanged, so the 8-bit output format exists");
+        let mut out = op_output_or_panic(self.width(), self.height(), out_fmt);
+        let data = self.data();
+        for (i, o) in out.iter_mut().enumerate() {
+            // C-style cast: clip, then truncate toward zero (NaN casts
+            // to 0 in Rust, which VIPS_FCLIP's comparisons also yield).
+            *o = (a * read_f64(data, in_bpc, i) + b).clamp(0.0, 255.0) as u8;
+        }
+        Raster::from_op_output(self.width(), self.height(), out_fmt, out)
+            .expect("arithmetic output is well-formed")
+    }
+
+    /// Per-band constant addition (libvips `add` with a vector constant);
+    /// 8-bit input promotes to 16-bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
+    /// one element per band, or [`ArithmeticError::FloatUnsupported`] if the
+    /// input is a float raster (this integer op rounds and saturates into an
+    /// unsigned output).
+    pub fn try_add_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
+        vec_map("add_vec", self, v, 2, |s, c| s + c)
+    }
+
+    /// Panicking form of [`Raster::try_add_vec`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_add_vec`].
+    #[track_caller]
+    pub fn add_vec(&self, v: &[f64]) -> Raster {
+        expect_arith("add_vec", self.try_add_vec(v))
+    }
+
+    /// Per-band constant subtraction, saturating at `0`.
+    ///
+    /// Like [`Raster::sub_const`], this per-band form keeps the integer
+    /// round-and-saturate contract (matching `vips_linear`'s requested-format
+    /// output) and so differs from image-image [`Raster::sub`], which floats
+    /// its output to preserve negative differences (libviprs#282).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
+    /// one element per band, or [`ArithmeticError::FloatUnsupported`] if the
+    /// input is a float raster (this integer op rounds and saturates into an
+    /// unsigned output).
+    pub fn try_sub_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
+        vec_map(
+            "sub_vec",
+            self,
+            v,
+            self.format().bytes_per_channel(),
+            |s, c| s - c,
+        )
+    }
+
+    /// Panicking form of [`Raster::try_sub_vec`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_sub_vec`].
+    #[track_caller]
+    pub fn sub_vec(&self, v: &[f64]) -> Raster {
+        expect_arith("sub_vec", self.try_sub_vec(v))
+    }
+
+    /// Per-band constant multiplication; 8-bit input promotes to 16-bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
+    /// one element per band, or [`ArithmeticError::FloatUnsupported`] if the
+    /// input is a float raster (this integer op rounds and saturates into an
+    /// unsigned output).
+    pub fn try_mul_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
+        vec_map("mul_vec", self, v, 2, |s, c| s * c)
+    }
+
+    /// Panicking form of [`Raster::try_mul_vec`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_mul_vec`].
+    #[track_caller]
+    pub fn mul_vec(&self, v: &[f64]) -> Raster {
+        expect_arith("mul_vec", self.try_mul_vec(v))
+    }
+
+    /// Per-band constant division. Float output, matching the libvips
+    /// float promotion for division (see [`Raster::div_const`]);
+    /// division by zero produces `0`. Accepts every input depth
+    /// including float.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ConstCountMismatch`] if `v` does not have
+    /// one element per band.
+    pub fn try_div_vec(&self, v: &[f64]) -> Result<Raster, ArithmeticError> {
+        vec_map_float(self, v, |s, c| if c == 0.0 { 0.0 } else { s / c })
+    }
+
+    /// Panicking form of [`Raster::try_div_vec`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_div_vec`].
+    #[track_caller]
+    pub fn div_vec(&self, v: &[f64]) -> Raster {
+        expect_arith("div_vec", self.try_div_vec(v))
+    }
+
+    // -----------------------------------------------------------------
+    // Unary shape / rounding ops
+    // -----------------------------------------------------------------
+
+    /// Unary plus: an identity copy (libvips and pyvips `+image`).
+    pub fn pos(&self) -> Raster {
+        self.clone()
+    }
+
+    /// Unary negation of every sample (libvips and pyvips `-image`). The
+    /// output is a float raster so negative results survive; `abs`
+    /// round-trips it back.
+    pub fn neg(&self) -> Raster {
+        unary_map_float(self, |v| -v)
+    }
+
+    /// Absolute value of every sample (libvips `abs`). Unsigned integer
+    /// samples cannot be negative, so those formats are an identity copy;
+    /// float rasters (for example a [`Raster::neg`] result) map `|v|`
+    /// samplewise and stay float.
+    pub fn abs(&self) -> Raster {
+        if self.format().is_float() {
+            unary_map_float(self, f64::abs)
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Sign of every sample (libvips `sign`): `1` for positive samples,
+    /// `0` for zero, `-1` for negative samples. Unsigned integer input
+    /// keeps its depth and cannot produce `-1`; float input produces a
+    /// float raster (NaN maps to `0`).
+    pub fn sign(&self) -> Raster {
+        if self.format().is_float() {
+            unary_map_float(self, |v| {
+                if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+        } else {
+            unary_map_u32(self, |v| u32::from(v > 0))
+        }
+    }
+
+    /// Clamp every sample into `[min, max]`; the bounds default to the
+    /// libvips `clamp` defaults `0` and `1`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `min > max`.
+    #[track_caller]
+    pub fn clamp(&self, min: Option<f64>, max: Option<f64>) -> Raster {
+        let lo = min.unwrap_or(0.0);
+        let hi = max.unwrap_or(1.0);
+        assert!(lo <= hi, "clamp: min bound {lo} exceeds max bound {hi}");
+        unary_map(self, self.format().bytes_per_channel(), move |v| {
+            v.clamp(lo, hi)
+        })
+    }
+
+    /// Round every sample down (libvips `floor`): float rasters map
+    /// `v.floor()` samplewise and stay float; the integer formats are an
+    /// exact identity, matching libvips for integer input.
+    pub fn floor(&self) -> Raster {
+        if self.format().is_float() {
+            unary_map_float(self, f64::floor)
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Round every sample up (libvips `ceil`): float rasters map
+    /// `v.ceil()` samplewise and stay float; the integer formats are an
+    /// exact identity.
+    pub fn ceil(&self) -> Raster {
+        if self.format().is_float() {
+            unary_map_float(self, f64::ceil)
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Round every sample to the nearest integer (libvips `rint`, which
+    /// rounds halves to the nearest **even** integer — banker's rounding,
+    /// matching C99 `rint` under the default rounding mode that vips 8.18.4
+    /// uses): float rasters map `v.round_ties_even()` samplewise and stay
+    /// float; the integer formats are an exact identity. Verified against
+    /// `vips round in out rint`: `0.5 -> 0`, `1.5 -> 2`, `2.5 -> 2`,
+    /// `3.5 -> 4`, `-2.5 -> -2`.
+    pub fn rint(&self) -> Raster {
+        if self.format().is_float() {
+            unary_map_float(self, f64::round_ties_even)
+        } else {
+            self.clone()
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Image-image arithmetic
+    // -----------------------------------------------------------------
+
+    /// Subtract `other` from `self` samplewise, producing a float raster
+    /// (libvips `subtract`).
+    ///
+    /// The output is a float raster, matching the `vips_subtract` promotion
+    /// table: subtracting two `uchar` images promotes to signed `short` in
+    /// libvips so negative differences survive, and a caller consumes that
+    /// signed result exactly as this crate's float output. Promoting to
+    /// float (rather than adding a signed integer carrier) is the
+    /// proportionate fix for issue #282 — the pre-#282 integer path routed
+    /// through the round-and-saturate writer and collapsed every negative
+    /// difference to `0` (silent data loss). Because the output floats, this
+    /// op also accepts float input, so a cast-then-subtract chain works.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_sub(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, |a, b| a - b)
+    }
+
+    /// Panicking form of [`Raster::try_sub`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_sub`].
+    #[track_caller]
+    pub fn sub(&self, other: &Raster) -> Raster {
+        expect_arith("sub", self.try_sub(other))
+    }
+
+    // -----------------------------------------------------------------
+    // Difference reductions
+    // -----------------------------------------------------------------
+
+    /// The maximum absolute per-sample difference between `self` and `other`
+    /// (libvips `max(abs(a - b))`), as `f64`.
+    ///
+    /// Reads every sample of both rasters at full `f64` precision (all
+    /// depths, including float), so a lossless round-trip reports exactly
+    /// `0.0`. The ported foreign cells assert on this directly, for example
+    /// `im.max_diff(&expected) == 0.0`. Both rasters must share pixel
+    /// dimensions and band count.
+    ///
+    /// NaN caveat: NaN samples are unsupported. A NaN difference propagates,
+    /// so any NaN-containing input yields a NaN result, matching
+    /// [`Raster::try_avg_diff`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the rasters disagree.
+    pub fn try_max_diff(&self, other: &Raster) -> Result<f64, ArithmeticError> {
+        ensure_compatible(self, other)?;
+        // Propagate NaN instead of dropping it: `f64::max` would silently
+        // return the finite operand, disagreeing with the NaN-propagating
+        // sum in `try_avg_diff` and letting a `max_diff == 0.0` assertion
+        // pass over unsupported NaN input. Fold to NaN once either side is
+        // NaN so the whole reduction surfaces it.
+        Ok(self.diff_fold(other, 0.0, |acc, d| {
+            if acc.is_nan() || d.is_nan() {
+                f64::NAN
+            } else {
+                acc.max(d)
+            }
+        }))
+    }
+
+    /// Panicking form of [`Raster::try_max_diff`], matching the ported-test
+    /// surface (`im.max_diff(&other)`).
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_max_diff`].
+    #[track_caller]
+    pub fn max_diff(&self, other: &Raster) -> f64 {
+        expect_arith("max_diff", self.try_max_diff(other))
+    }
+
+    /// The mean absolute per-sample difference between `self` and `other`
+    /// (libvips `avg(abs(a - b))`), as `f64`.
+    ///
+    /// Reads every sample of both rasters at full `f64` precision, then
+    /// divides the summed absolute differences by the sample count. The
+    /// ported foreign cells assert on this for lossy round-trips, for
+    /// example `im.colourspace("scrgb").avg_diff(...) < 0.02`. Both rasters
+    /// must share pixel dimensions and band count.
+    ///
+    /// NaN caveat: NaN samples are unsupported. A NaN difference propagates
+    /// through the sum, so any NaN-containing input yields a NaN result,
+    /// matching [`Raster::try_max_diff`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the rasters disagree.
+    pub fn try_avg_diff(&self, other: &Raster) -> Result<f64, ArithmeticError> {
+        ensure_compatible(self, other)?;
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        Ok(self.diff_fold(other, 0.0, |acc, d| acc + d) / n as f64)
+    }
+
+    /// Panicking form of [`Raster::try_avg_diff`], matching the ported-test
+    /// surface (`im.avg_diff(&other)`).
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_avg_diff`].
+    #[track_caller]
+    pub fn avg_diff(&self, other: &Raster) -> f64 {
+        expect_arith("avg_diff", self.try_avg_diff(other))
+    }
+
+    /// Fold `f` over the absolute per-sample differences of two
+    /// dimension-compatible rasters, starting from `init`. Each raster is
+    /// read at its own depth via [`read_f64`], so a mixed-depth pair
+    /// compares numerically. The caller is responsible for having checked
+    /// compatibility (`ensure_compatible`) first.
+    fn diff_fold(&self, other: &Raster, init: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
+        let a_bpc = self.format().bytes_per_channel();
+        let b_bpc = other.format().bytes_per_channel();
+        let n = self.width() as usize * self.height() as usize * self.format().channels();
+        let (a_data, b_data) = (self.data(), other.data());
+        (0..n)
+            .map(|i| (read_f64(a_data, a_bpc, i) - read_f64(b_data, b_bpc, i)).abs())
+            .fold(init, f)
+    }
+
+    /// Multiply two images samplewise (libvips `multiply`); 8-bit inputs
+    /// promote to 16-bit and results saturate at the output depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
+    pub fn try_mul(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map("mul", self, other, true, |a, b| a * b)
+    }
+
+    /// Panicking form of [`Raster::try_mul`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_mul`].
+    #[track_caller]
+    pub fn mul(&self, other: &Raster) -> Raster {
+        expect_arith("mul", self.try_mul(other))
+    }
+
+    /// Divide `self` by `other` samplewise (libvips `divide`). Float
+    /// output: the `vips_divide` promotion table maps every integer
+    /// input format to float, so fractional quotients survive. Division
+    /// by zero produces `0`, matching libvips. Accepts every input
+    /// depth including float.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_div(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, |a, b| if b == 0.0 { 0.0 } else { a / b })
+    }
+
+    /// Panicking form of [`Raster::try_div`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_div`].
+    #[track_caller]
+    pub fn div(&self, other: &Raster) -> Raster {
+        expect_arith("div", self.try_div(other))
+    }
+
+    /// Samplewise minimum of two images (libvips `minpair`); mixed depths
+    /// promote numerically to 16-bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
+    pub fn try_minpair(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map("minpair", self, other, false, f64::min)
+    }
+
+    /// Panicking form of [`Raster::try_minpair`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_minpair`].
+    #[track_caller]
+    pub fn minpair(&self, other: &Raster) -> Raster {
+        expect_arith("minpair", self.try_minpair(other))
+    }
+
+    /// Samplewise maximum of two images (libvips `maxpair`); mixed depths
+    /// promote numerically to 16-bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
+    pub fn try_maxpair(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map("maxpair", self, other, false, f64::max)
+    }
+
+    /// Panicking form of [`Raster::try_maxpair`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_maxpair`].
+    #[track_caller]
+    pub fn maxpair(&self, other: &Raster) -> Raster {
+        expect_arith("maxpair", self.try_maxpair(other))
+    }
+
+    /// Sum a list of images samplewise (libvips `sum`). The output is
+    /// 16-bit so 8-bit sums survive; totals saturate at `65535`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::EmptyImageList`] for an empty slice, or
+    /// [`ArithmeticError::DimensionMismatch`] /
+    /// [`ArithmeticError::BandCountMismatch`] if any image disagrees with
+    /// the first.
+    pub fn try_sum(images: &[&Raster]) -> Result<Raster, ArithmeticError> {
+        let first = *images.first().ok_or(ArithmeticError::EmptyImageList)?;
+        for r in &images[1..] {
+            ensure_compatible(first, r)?;
+        }
+        let bands = first.format().channels();
+        let out_fmt = format_for(bands, 2)?;
+        let n = first.width() as usize * first.height() as usize * bands;
+        let mut out = alloc_op_output(first.width(), first.height(), out_fmt)?;
+        for i in 0..n {
+            let total: f64 = images
+                .iter()
+                .map(|r| read_f64(r.data(), r.format().bytes_per_channel(), i))
+                .sum();
+            write_f64(&mut out, 2, i, total, 65535.0);
+        }
+        Ok(Raster::from_op_output(
+            first.width(),
+            first.height(),
+            out_fmt,
+            out,
+        )?)
+    }
+
+    /// Panicking form of [`Raster::try_sum`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_sum`].
+    #[track_caller]
+    pub fn sum(images: &[&Raster]) -> Raster {
+        expect_arith("sum", Self::try_sum(images))
+    }
+
+    // -----------------------------------------------------------------
+    // Comparisons (0 / 255 uchar masks)
+    // -----------------------------------------------------------------
+
+    /// Samplewise `self > other` as a `0` / `255` 8-bit mask (libvips
+    /// `relational` MORE).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_more_than(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        compare_map(self, other, |a, b| a > b)
+    }
+
+    /// Samplewise `self > other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` (compared samplewise) or an `f64` constant
+    /// (compared against every sample); see [`Comparand`].
+    ///
+    /// # Panics
+    ///
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_more_than`]. A constant operand never fails.
+    #[track_caller]
+    pub fn more_than(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "more_than", |a, b| a > b)
+    }
+
+    /// Samplewise `self > c` as a `0` / `255` 8-bit mask.
+    pub fn more_than_const(&self, c: f64) -> Raster {
+        compare_const_map(self, c, |a, b| a > b)
+    }
+
+    /// Samplewise `self >= other` as a `0` / `255` 8-bit mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_more_eq(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        compare_map(self, other, |a, b| a >= b)
+    }
+
+    /// Samplewise `self >= other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
+    ///
+    /// # Panics
+    ///
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_more_eq`]. A constant operand never fails.
+    #[track_caller]
+    pub fn more_eq(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "more_eq", |a, b| a >= b)
+    }
+
+    /// Samplewise `self >= c` as a `0` / `255` 8-bit mask.
+    pub fn more_eq_const(&self, c: f64) -> Raster {
+        compare_const_map(self, c, |a, b| a >= b)
+    }
+
+    /// Samplewise `self < other` as a `0` / `255` 8-bit mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_less_than(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        compare_map(self, other, |a, b| a < b)
+    }
+
+    /// Samplewise `self < other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
+    ///
+    /// # Panics
+    ///
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_less_than`]. A constant operand never fails.
+    #[track_caller]
+    pub fn less_than(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "less_than", |a, b| a < b)
+    }
+
+    /// Samplewise `self < c` as a `0` / `255` 8-bit mask.
+    pub fn less_than_const(&self, c: f64) -> Raster {
+        compare_const_map(self, c, |a, b| a < b)
+    }
+
+    /// Samplewise `self <= other` as a `0` / `255` 8-bit mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_less_eq(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        compare_map(self, other, |a, b| a <= b)
+    }
+
+    /// Samplewise `self <= other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
+    ///
+    /// # Panics
+    ///
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_less_eq`]. A constant operand never fails.
+    #[track_caller]
+    pub fn less_eq(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "less_eq", |a, b| a <= b)
+    }
+
+    /// Samplewise `self <= c` as a `0` / `255` 8-bit mask.
+    pub fn less_eq_const(&self, c: f64) -> Raster {
+        compare_const_map(self, c, |a, b| a <= b)
+    }
+
+    /// Samplewise `self == other` as a `0` / `255` 8-bit mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_equal(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        compare_map(self, other, |a, b| a == b)
+    }
+
+    /// Samplewise `self == other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`]. The
+    /// comparison is exact, so a fractional constant matches no integer sample.
+    ///
+    /// # Panics
+    ///
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_equal`]. A constant operand never fails.
+    #[track_caller]
+    pub fn equal(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "equal", |a, b| a == b)
+    }
+
+    /// Samplewise `self == c` as a `0` / `255` 8-bit mask. The comparison
+    /// is exact, so a fractional constant matches no integer sample.
+    pub fn equal_const(&self, c: f64) -> Raster {
+        compare_const_map(self, c, |a, b| a == b)
+    }
+
+    /// Samplewise `self != other` as a `0` / `255` 8-bit mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_noteq(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        compare_map(self, other, |a, b| a != b)
+    }
+
+    /// Samplewise `self != other` as a `0` / `255` 8-bit mask. The operand is
+    /// either another `&Raster` or an `f64` constant; see [`Comparand`].
+    ///
+    /// # Panics
+    ///
+    /// With a `&Raster` operand, panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_noteq`]. A constant operand never fails.
+    #[track_caller]
+    pub fn noteq(&self, other: impl Comparand) -> Raster {
+        other.compare_against(self, "noteq", |a, b| a != b)
+    }
+
+    /// Samplewise `self != c` as a `0` / `255` 8-bit mask.
+    pub fn noteq_const(&self, c: f64) -> Raster {
+        compare_const_map(self, c, |a, b| a != b)
+    }
+
+    // -----------------------------------------------------------------
+    // Bitwise operations
+    // -----------------------------------------------------------------
+
+    /// Samplewise bitwise AND of two images (libvips `boolean` AND); mixed
+    /// depths promote to 16-bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_bitand(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_u32(self, other, |a, b| a & b)
+    }
+
+    /// Panicking form of [`Raster::try_bitand`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_bitand`].
+    #[track_caller]
+    pub fn bitand(&self, other: &Raster) -> Raster {
+        expect_arith("bitand", self.try_bitand(other))
+    }
+
+    /// Samplewise boolean AND of two images, an alias for [`Raster::bitand`]
+    /// under the libvips `image & image` spelling. On `0` / `255` masks it
+    /// composes the relational ops into a range test, e.g.
+    /// `x.more_eq(64.0).band_and(&x.less_than(128.0))`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_bitand`].
+    #[track_caller]
+    pub fn band_and(&self, other: &Raster) -> Raster {
+        expect_arith("band_and", self.try_bitand(other))
+    }
+
+    /// Bitwise AND of every sample with a constant. The constant is masked
+    /// into the sample depth (two's complement, so `-1` is all ones).
+    pub fn bitand_const(&self, c: i64) -> Raster {
+        let mask = (c as u64 & depth_max_u32(self.format().bytes_per_channel()) as u64) as u32;
+        unary_map_u32(self, move |v| v & mask)
+    }
+
+    /// Samplewise bitwise OR of two images.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_bitor(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_u32(self, other, |a, b| a | b)
+    }
+
+    /// Panicking form of [`Raster::try_bitor`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_bitor`].
+    #[track_caller]
+    pub fn bitor(&self, other: &Raster) -> Raster {
+        expect_arith("bitor", self.try_bitor(other))
+    }
+
+    /// Bitwise OR of every sample with a constant, masked into the sample
+    /// depth.
+    pub fn bitor_const(&self, c: i64) -> Raster {
+        let mask = (c as u64 & depth_max_u32(self.format().bytes_per_channel()) as u64) as u32;
+        unary_map_u32(self, move |v| v | mask)
+    }
+
+    /// Samplewise bitwise XOR of two images.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_bitxor(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_u32(self, other, |a, b| a ^ b)
+    }
+
+    /// Panicking form of [`Raster::try_bitxor`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_bitxor`].
+    #[track_caller]
+    pub fn bitxor(&self, other: &Raster) -> Raster {
+        expect_arith("bitxor", self.try_bitxor(other))
+    }
+
+    /// Bitwise XOR of every sample with a constant, masked into the sample
+    /// depth.
+    pub fn bitxor_const(&self, c: i64) -> Raster {
+        let mask = (c as u64 & depth_max_u32(self.format().bytes_per_channel()) as u64) as u32;
+        unary_map_u32(self, move |v| v ^ mask)
+    }
+
+    /// Bitwise NOT of every sample within its depth (libvips `invert` for
+    /// integer formats): `!v & 0xFF` for 8-bit, `!v & 0xFFFF` for 16-bit.
+    pub fn bitnot(&self) -> Raster {
+        let mask = depth_max_u32(self.format().bytes_per_channel());
+        unary_map_u32(self, move |v| !v & mask)
+    }
+
+    /// Shift every sample left by `n` bits, truncating into the sample
+    /// depth (the same wrap-in-format behavior as the libvips integer
+    /// path). Shifts of the full sample width or more produce `0`.
+    pub fn lshift(&self, n: u32) -> Raster {
+        let mask = depth_max_u32(self.format().bytes_per_channel());
+        unary_map_u32(self, move |v| v.checked_shl(n).unwrap_or(0) & mask)
+    }
+
+    /// Shift every sample right by `n` bits. Shifts of the full sample
+    /// width or more produce `0`.
+    pub fn rshift(&self, n: u32) -> Raster {
+        unary_map_u32(self, move |v| v.checked_shr(n).unwrap_or(0))
+    }
+
+    // -----------------------------------------------------------------
+    // Enhancement / recombination
+    // -----------------------------------------------------------------
+
+    /// Scale samples to fill `0..=255` (libvips `scale`). The output is
+    /// 8-bit with the input band count.
+    ///
+    /// The default maps the global minimum to `0` and the global maximum
+    /// to `255` linearly; a constant image maps to all zeros.
+    /// `log = Some(true)` uses the libvips log-scaling curve
+    /// `255 / log10(1 + max^0.25) * log10(1 + v^0.25)` instead.
+    pub fn scaleimage(&self, log: Option<bool>) -> Raster {
+        if log == Some(true) {
+            let mx = self.max();
+            let denom = (1.0 + mx.powf(SCALE_LOG_EXP)).log10();
+            let f = if denom > 0.0 { 255.0 / denom } else { 0.0 };
+            unary_map(self, 1, move |v| f * (1.0 + v.powf(SCALE_LOG_EXP)).log10())
+        } else {
+            let (mn, mx) = (self.min(), self.max());
+            let range = mx - mn;
+            if range == 0.0 {
+                unary_map(self, 1, |_| 0.0)
+            } else {
+                unary_map(self, 1, move |v| (v - mn) * 255.0 / range)
+            }
+        }
+    }
+
+    /// Statistical differencing over a `width x height` window (libvips
+    /// `stdif` with its default parameters).
+    ///
+    /// Each sample is adjusted toward a target mean of `128` and a target
+    /// deviation of `50` relative to the statistics of the window centred
+    /// on it: `out = a*m0 + (1-a)*mean + (in - mean) * b*s0 / (b*dev + s0)`
+    /// with `a = 0.5, m0 = 128, b = 0.5, s0 = 50`. Bands are processed
+    /// independently; at the edges the window is edge-replicated
+    /// (`VIPS_EXTEND_COPY`, extending the border pixel) to match vips exactly,
+    /// with no remaining border divergence. The output keeps the input format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::ZeroWindow`] if either window dimension
+    /// is zero, or [`ArithmeticError::WindowTooLarge`] if a window dimension
+    /// exceeds the corresponding image dimension (vips: `stdif: window too
+    /// large`).
+    pub fn try_stdif(&self, width: u32, height: u32) -> Result<Raster, ArithmeticError> {
+        if width == 0 || height == 0 {
+            return Err(ArithmeticError::ZeroWindow);
+        }
+        // vips rejects a window larger than the image ("stdif: window too
+        // large"): with a 5-wide image, window 5 is accepted but 6+ errors
+        // (verified with the oracle). Mirror that instead of silently
+        // computing a result the differential harness could never obtain
+        // from vips.
+        if width > self.width() || height > self.height() {
+            return Err(ArithmeticError::WindowTooLarge {
+                win_w: width,
+                win_h: height,
+                width: self.width(),
+                height: self.height(),
+            });
+        }
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let max = depth_max(bpc);
+        let data = self.data();
+        let mut out = alloc_op_output(self.width(), self.height(), fmt)?;
+
+        // Integral images per band over an *edge-replicated* padding of the
+        // plane. vips embeds the input with a `window/2` border before taking
+        // window statistics, and that border extends the edge pixel (verified
+        // with the oracle: `vips stdif` on `[3,200,17,...]` with a 5-wide
+        // window matches replicate, not mirror/reflect — see #490). Clipping
+        // the window at the image edge (the old behaviour) shrank `npel` and
+        // diverged from vips in a `window/2` border; replicating instead keeps
+        // a full `width*height` window everywhere and matches vips exactly.
+        //
+        // The padded plane is `(w + width - 1) x (h + height - 1)`: `width/2`
+        // extra columns on the left plus `width - 1 - width/2` on the right
+        // (and likewise for rows), so every output window fits without
+        // clipping. `s[y][x]` holds the sum over the padded rectangle
+        // `[0, x) x [0, y)`, so any window sum is four lookups. These two f64
+        // buffers dwarf the output, so they allocate fallibly — an
+        // over-capacity size returns a typed error rather than aborting
+        // through `handle_alloc_error` (#435).
+        let (hw, hh) = (width as usize / 2, height as usize / 2);
+        let pw = w + width as usize - 1;
+        let ph = h + height as usize - 1;
+        let stride = pw + 1;
+        let scratch_len = stride
+            .checked_mul(ph + 1)
+            .ok_or(RasterError::SizeOverflow {
+                width: self.width(),
+                height: self.height(),
+                bpp: 8,
+            })?;
+        let mut s = try_scratch(self.width(), self.height(), scratch_len, 0.0f64)?;
+        let mut s2 = try_scratch(self.width(), self.height(), scratch_len, 0.0f64)?;
+        // Map a (possibly out-of-range) coordinate onto the nearest edge
+        // pixel — vips `EXTEND_COPY` / replicate border semantics.
+        let clamp_edge = |i: i64, n: usize| -> usize {
+            if i < 0 {
+                0
+            } else if i as usize >= n {
+                n - 1
+            } else {
+                i as usize
+            }
+        };
+        for band in 0..bands {
+            for py in 0..ph {
+                let sy = clamp_edge(py as i64 - hh as i64, h);
+                for px in 0..pw {
+                    let sx = clamp_edge(px as i64 - hw as i64, w);
+                    let v = read_f64(data, bpc, (sy * w + sx) * bands + band);
+                    let i = (py + 1) * stride + (px + 1);
+                    s[i] = v + s[i - 1] + s[i - stride] - s[i - stride - 1];
+                    s2[i] = v * v + s2[i - 1] + s2[i - stride] - s2[i - stride - 1];
+                }
+            }
+            let npel = (width as usize * height as usize) as f64;
+            for y in 0..h {
+                // The window for output row `y` spans padded rows [y, y+height).
+                let (y0, y1) = (y, y + height as usize);
+                for x in 0..w {
+                    // ...and padded columns [x, x+width): a full, unclipped window.
+                    let (x0, x1) = (x, x + width as usize);
+                    let win = |t: &[f64]| {
+                        t[y1 * stride + x1] - t[y0 * stride + x1] - t[y1 * stride + x0]
+                            + t[y0 * stride + x0]
+                    };
+                    let mean = win(&s) / npel;
+                    let var = (win(&s2) / npel - mean * mean).max(0.0);
+                    let dev = var.sqrt();
+                    let v = read_f64(data, bpc, (y * w + x) * bands + band);
+                    let res = STDIF_A * STDIF_M0
+                        + (1.0 - STDIF_A) * mean
+                        + (v - mean) * (STDIF_B * STDIF_S0) / (STDIF_B * dev + STDIF_S0);
+                    write_f64(&mut out, bpc, (y * w + x) * bands + band, res, max);
+                }
+            }
+        }
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            fmt,
+            out,
+        )?)
+    }
+
+    /// Panicking form of [`Raster::try_stdif`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_stdif`].
+    #[track_caller]
+    pub fn stdif(&self, width: u32, height: u32) -> Raster {
+        expect_arith("stdif", self.try_stdif(width, height))
+    }
+
+    /// Recombine bands with a matrix (libvips `recomb`).
+    ///
+    /// `matrix` has one row per output band and one coefficient per input
+    /// band: output band `r` is `sum(matrix[r][b] * in[b])`, rounded and
+    /// saturated into the input depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::EmptyMatrix`] for an empty matrix,
+    /// [`ArithmeticError::MatrixRowMismatch`] if any row does not have one
+    /// coefficient per input band, or [`ArithmeticError::TooManyBands`] if
+    /// the output band count exceeds `u16::MAX`.
+    pub fn try_recomb(&self, matrix: &[&[f64]]) -> Result<Raster, ArithmeticError> {
+        if matrix.is_empty() {
+            return Err(ArithmeticError::EmptyMatrix);
+        }
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        for (row, r) in matrix.iter().enumerate() {
+            if r.len() != bands {
+                return Err(ArithmeticError::MatrixRowMismatch {
+                    row,
+                    expected: bands,
+                    got: r.len(),
+                });
+            }
+        }
+        let out_bands = matrix.len();
+        let out_fmt = format_for(out_bands, bpc)?;
+        let pixels = self.width() as usize * self.height() as usize;
+        let max = depth_max(bpc);
+        let data = self.data();
+        let mut out = alloc_op_output(self.width(), self.height(), out_fmt)?;
+        for p in 0..pixels {
+            for (r, coeffs) in matrix.iter().enumerate() {
+                let acc: f64 = coeffs
+                    .iter()
+                    .enumerate()
+                    .map(|(b, &m)| m * read_f64(data, bpc, p * bands + b))
+                    .sum();
+                // vips recomb accumulates in double but STORES the result as
+                // float32 (VIPS_FORMAT_FLOAT); the differential comparison then
+                // casts that float32 into the input depth, and vips's
+                // float->integer cast truncates toward zero (verified with the
+                // oracle: `vips cast` of 2.6 -> 2, 3.5 -> 3, 0.5 -> 0). We must
+                // round the f64 accumulator to f32 *before* truncating, because
+                // an accumulator just below an integer (e.g. 6.99999988 for
+                // input [10,20,30] with coeff row [0,0,0.23333332933333335])
+                // rounds up to 7.0 in f32 storage, and `vips recomb` + `vips
+                // cast`->uchar yields 7 there, not the 6 a direct f64 truncation
+                // would give. Rounding to nearest here diverged by up to 1 LSB,
+                // so truncate the f32-clamped value instead. NaN -> 0.
+                let f = acc as f32;
+                let v = if f.is_nan() {
+                    0.0
+                } else {
+                    f.clamp(0.0, max as f32)
+                };
+                write_u32(&mut out, bpc, p * out_bands + r, v as u32);
+            }
+        }
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            out_fmt,
+            out,
+        )?)
+    }
+
+    /// Panicking form of [`Raster::try_recomb`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_recomb`].
+    #[track_caller]
+    pub fn recomb(&self, matrix: &[&[f64]]) -> Raster {
+        expect_arith("recomb", self.try_recomb(matrix))
+    }
+
+    /// Premultiply the colour bands by the alpha band (libvips
+    /// `premultiply`).
+    ///
+    /// The last band is the alpha band; every other band becomes
+    /// `v * alpha / max` (`max` is `255` or `65535` by depth), rounded to
+    /// nearest. The alpha band and the format are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NoAlphaBand`] if the image has fewer
+    /// than two bands.
+    pub fn try_premultiply(&self) -> Result<Raster, ArithmeticError> {
+        self.alpha_map(|v, a, max| v * a / max)
+    }
+
+    /// Panicking form of [`Raster::try_premultiply`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_premultiply`].
+    #[track_caller]
+    pub fn premultiply(&self) -> Raster {
+        expect_arith("premultiply", self.try_premultiply())
+    }
+
+    /// Undo alpha premultiplication (libvips `unpremultiply`).
+    ///
+    /// The last band is the alpha band; every other band becomes
+    /// `v * max / alpha` (saturated), or `0` where alpha is zero, matching
+    /// libvips. The alpha band and the format are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NoAlphaBand`] if the image has fewer
+    /// than two bands.
+    pub fn try_unpremultiply(&self) -> Result<Raster, ArithmeticError> {
+        self.alpha_map(|v, a, max| if a == 0.0 { 0.0 } else { v * max / a })
+    }
+
+    /// Panicking form of [`Raster::try_unpremultiply`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see
+    /// [`Raster::try_unpremultiply`].
+    #[track_caller]
+    pub fn unpremultiply(&self) -> Raster {
+        expect_arith("unpremultiply", self.try_unpremultiply())
+    }
+
+    /// Shared kernel for the alpha ops: apply `f(sample, alpha, max)` to
+    /// every non-alpha band and copy the alpha band through.
+    fn alpha_map(&self, f: impl Fn(f64, f64, f64) -> f64) -> Result<Raster, ArithmeticError> {
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        if bands < 2 {
+            return Err(ArithmeticError::NoAlphaBand { bands });
+        }
+        let pixels = self.width() as usize * self.height() as usize;
+        let max = depth_max(bpc);
+        let data = self.data();
+        let mut out = alloc_op_output(self.width(), self.height(), fmt)?;
+        for p in 0..pixels {
+            let alpha = read_f64(data, bpc, p * bands + bands - 1);
+            for c in 0..bands - 1 {
+                let v = read_f64(data, bpc, p * bands + c);
+                write_f64(&mut out, bpc, p * bands + c, f(v, alpha, max), max);
+            }
+            write_f64(&mut out, bpc, p * bands + bands - 1, alpha, max);
+        }
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            fmt,
+            out,
+        )?)
+    }
+
+    // -----------------------------------------------------------------
+    // Transcendental maths (libvips math / math2): float output
+    // -----------------------------------------------------------------
+
+    /// Sine of every sample, input in degrees (libvips `math` SIN). Float
+    /// output; accepts every input depth including float.
+    pub fn sin(&self) -> Raster {
+        unary_map_float(self, |v| v.to_radians().sin())
+    }
+
+    /// Cosine of every sample, input in degrees (libvips `math` COS).
+    /// Float output.
+    pub fn cos(&self) -> Raster {
+        unary_map_float(self, |v| v.to_radians().cos())
+    }
+
+    /// Tangent of every sample, input in degrees (libvips `math` TAN).
+    /// Float output.
+    pub fn tan(&self) -> Raster {
+        unary_map_float(self, |v| v.to_radians().tan())
+    }
+
+    /// Arc sine of every sample, output in degrees (libvips `math` ASIN).
+    /// Float output; inputs outside `[-1, 1]` produce NaN.
+    pub fn asin(&self) -> Raster {
+        unary_map_float(self, |v| v.asin().to_degrees())
+    }
+
+    /// Arc cosine of every sample, output in degrees (libvips `math`
+    /// ACOS). Float output; inputs outside `[-1, 1]` produce NaN.
+    pub fn acos(&self) -> Raster {
+        unary_map_float(self, |v| v.acos().to_degrees())
+    }
+
+    /// Arc tangent of every sample, output in degrees (libvips `math`
+    /// ATAN). Float output.
+    pub fn atan(&self) -> Raster {
+        unary_map_float(self, |v| v.atan().to_degrees())
+    }
+
+    /// Hyperbolic sine of every sample (libvips `math` SINH). Float
+    /// output.
+    pub fn sinh(&self) -> Raster {
+        unary_map_float(self, f64::sinh)
+    }
+
+    /// Hyperbolic cosine of every sample (libvips `math` COSH). Float
+    /// output.
+    pub fn cosh(&self) -> Raster {
+        unary_map_float(self, f64::cosh)
+    }
+
+    /// Hyperbolic tangent of every sample (libvips `math` TANH). Float
+    /// output.
+    pub fn tanh(&self) -> Raster {
+        unary_map_float(self, f64::tanh)
+    }
+
+    /// Inverse hyperbolic sine of every sample (libvips `math` ASINH).
+    /// Float output.
+    pub fn asinh(&self) -> Raster {
+        unary_map_float(self, f64::asinh)
+    }
+
+    /// Inverse hyperbolic cosine of every sample (libvips `math` ACOSH).
+    /// Float output; inputs below `1` produce NaN.
+    pub fn acosh(&self) -> Raster {
+        unary_map_float(self, f64::acosh)
+    }
+
+    /// Inverse hyperbolic tangent of every sample (libvips `math` ATANH).
+    /// Float output; `atanh(1)` is `+inf` and inputs outside `[-1, 1]`
+    /// produce NaN.
+    pub fn atanh(&self) -> Raster {
+        unary_map_float(self, f64::atanh)
+    }
+
+    /// Natural logarithm of every sample (libvips `math` LOG). Float
+    /// output; `log(0)` is `-inf` and negative inputs produce NaN.
+    pub fn log(&self) -> Raster {
+        unary_map_float(self, f64::ln)
+    }
+
+    /// Base-10 logarithm of every sample (libvips `math` LOG10). Float
+    /// output; see [`Raster::log`] for the domain edges.
+    pub fn log10(&self) -> Raster {
+        unary_map_float(self, f64::log10)
+    }
+
+    /// `e` raised to every sample (libvips `math` EXP). Float output;
+    /// large inputs overflow to `+inf` in `f32`.
+    pub fn exp(&self) -> Raster {
+        unary_map_float(self, f64::exp)
+    }
+
+    /// `10` raised to every sample (libvips `math` EXP10). Float output;
+    /// see [`Raster::exp`].
+    pub fn exp10(&self) -> Raster {
+        unary_map_float(self, |v| 10.0f64.powf(v))
+    }
+
+    /// Samplewise `atan2(self, other)` in degrees (libvips `math2` ATAN2:
+    /// `self` is the ordinate, `other` the abscissa). Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_atan2(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, |a, b| a.atan2(b).to_degrees())
+    }
+
+    /// Panicking form of [`Raster::try_atan2`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_atan2`].
+    #[track_caller]
+    pub fn atan2(&self, other: &Raster) -> Raster {
+        expect_arith("atan2", self.try_atan2(other))
+    }
+
+    /// Samplewise `self ** other` (libvips `math2` POW). Float output, so
+    /// fractional exponents and large results survive; contrast
+    /// [`Raster::pow_const`], which keeps the older integer contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_pow(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, pow_vips)
+    }
+
+    /// Panicking form of [`Raster::try_pow`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_pow`].
+    #[track_caller]
+    pub fn pow(&self, other: &Raster) -> Raster {
+        expect_arith("pow", self.try_pow(other))
+    }
+
+    /// Samplewise `other ** self`, power with the operands reversed
+    /// (libvips `math2` WOP). Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree.
+    pub fn try_wop(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map_float(self, other, |a, b| pow_vips(b, a))
+    }
+
+    /// Panicking form of [`Raster::try_wop`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_wop`].
+    #[track_caller]
+    pub fn wop(&self, other: &Raster) -> Raster {
+        expect_arith("wop", self.try_wop(other))
+    }
+
+    // -----------------------------------------------------------------
+    // Complex operations
+    // -----------------------------------------------------------------
+
+    /// Build a complex image from a real and an imaginary image (libvips
+    /// `complexform`).
+    ///
+    /// The output is a float raster with twice the input band count,
+    /// holding `(re, im)` pairs: band `2b` is band `b` of `real`, band
+    /// `2b + 1` is band `b` of `imag`. Both inputs may be any depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::TooManyBands`] if the doubled band count
+    /// exceeds `u16::MAX`.
+    pub fn try_complexform(real: &Raster, imag: &Raster) -> Result<Raster, ArithmeticError> {
+        ensure_compatible(real, imag)?;
+        let bands = real.format().channels();
+        let out_fmt = format_for(bands * 2, 4)?;
+        let (re_bpc, im_bpc) = (
+            real.format().bytes_per_channel(),
+            imag.format().bytes_per_channel(),
+        );
+        let pixels = real.width() as usize * real.height() as usize;
+        let mut out = alloc_op_output(real.width(), real.height(), out_fmt)?;
+        let (re_data, im_data) = (real.data(), imag.data());
+        for p in 0..pixels {
+            for b in 0..bands {
+                let i = p * bands + b;
+                write_f32(&mut out, 2 * i, read_f64(re_data, re_bpc, i));
+                write_f32(&mut out, 2 * i + 1, read_f64(im_data, im_bpc, i));
+            }
+        }
+        Ok(Raster::from_op_output(
+            real.width(),
+            real.height(),
+            out_fmt,
+            out,
+        )?)
+    }
+
+    /// Panicking form of [`Raster::try_complexform`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_complexform`].
+    #[track_caller]
+    pub fn complexform(real: &Raster, imag: &Raster) -> Raster {
+        expect_arith("complexform", Self::try_complexform(real, imag))
+    }
+
+    /// Convert every complex pair from rectangular to polar form (libvips
+    /// `complex` POLAR): `(re, im)` becomes `(magnitude, angle)` with the
+    /// angle in degrees. Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_polar(&self) -> Result<Raster, ArithmeticError> {
+        complex_map(self, |re, im| (re.hypot(im), im.atan2(re).to_degrees()))
+    }
+
+    /// Panicking form of [`Raster::try_polar`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_polar`].
+    #[track_caller]
+    pub fn polar(&self) -> Raster {
+        expect_arith("polar", self.try_polar())
+    }
+
+    /// Convert every complex pair from polar to rectangular form (libvips
+    /// `complex` RECT): `(magnitude, angle_degrees)` becomes `(re, im)`.
+    /// Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_rect(&self) -> Result<Raster, ArithmeticError> {
+        complex_map(self, |mag, angle| {
+            let (s, c) = angle.to_radians().sin_cos();
+            (mag * c, mag * s)
+        })
+    }
+
+    /// Panicking form of [`Raster::try_rect`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_rect`].
+    #[track_caller]
+    pub fn rect(&self) -> Raster {
+        expect_arith("rect", self.try_rect())
+    }
+
+    /// Complex conjugate of every pair (libvips `complex` CONJ):
+    /// `(re, im)` becomes `(re, -im)`. Float output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_conj(&self) -> Result<Raster, ArithmeticError> {
+        complex_map(self, |re, im| (re, -im))
+    }
+
+    /// Panicking form of [`Raster::try_conj`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_conj`].
+    #[track_caller]
+    pub fn conj(&self) -> Raster {
+        expect_arith("conj", self.try_conj())
+    }
+
+    /// Real part of every complex pair (libvips `complexget` REAL): a
+    /// float raster with half the band count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_real(&self) -> Result<Raster, ArithmeticError> {
+        complex_get(self, 0)
+    }
+
+    /// Panicking form of [`Raster::try_real`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_real`].
+    #[track_caller]
+    pub fn real(&self) -> Raster {
+        expect_arith("real", self.try_real())
+    }
+
+    /// Imaginary part of every complex pair (libvips `complexget` IMAG):
+    /// a float raster with half the band count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::NotComplex`] if the band count is odd.
+    pub fn try_imag(&self) -> Result<Raster, ArithmeticError> {
+        complex_get(self, 1)
+    }
+
+    /// Panicking form of [`Raster::try_imag`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_imag`].
+    #[track_caller]
+    pub fn imag(&self) -> Raster {
+        expect_arith("imag", self.try_imag())
+    }
+
+    // -----------------------------------------------------------------
+    // Hough transforms
+    // -----------------------------------------------------------------
+
+    /// Hough line transform (libvips `hough_line` with its default
+    /// 256 x 256 accumulator).
+    ///
+    /// Every non-zero sample votes for the lines through its pixel, and the
+    /// **binning** of those votes is vips-exact: the accumulator cell each
+    /// vote lands in matches vips 8.18.4 `hough_line` cell-for-cell (see the
+    /// oracle-pinned tests). The output is a single-band 16-bit accumulator:
+    /// column `i` is the angle bin `theta = 180deg * i / 256`. The vote
+    /// *counts* carried in those cells are ushort rather than vips's uint and
+    /// saturate at `65535` — an intentional format deviation, documented
+    /// below, that leaves the "vips-exact" claim scoped to the binning only.
+    ///
+    /// vips normalizes the pixel coordinates by the image **diagonal**
+    /// `d = sqrt(w^2 + h^2)` — not by width/height separately — so
+    /// `xd = x / d`, `yd = y / d`, and the signed line distance
+    /// `r = xd*cos(theta) + yd*sin(theta)` always lies in the open interval
+    /// `(-1, 1)`. That distance is mapped linearly onto the accumulator rows
+    /// with `ri = (r + 1) * (height / 2)` (so `r = -1` -> row 0, `r = +1`
+    /// -> row `height`), centring `r = 0` on the middle row. Because `r` is
+    /// strictly inside `(-1, 1)` no vote ever falls outside the accumulator,
+    /// so — unlike a raw `height * r` binning — no votes are discarded.
+    ///
+    /// A peak at `(i, ri)` therefore decodes as angle `180 * i / width` and
+    /// signed pixel distance `(2 * ri / height - 1) * sqrt(w^2 + h^2)`.
+    ///
+    /// # Intentional accumulator-format deviation from vips (#495)
+    ///
+    /// vips 8.18.4 emits the `hough_line` accumulator as a **32-bit `uint`**
+    /// image whose cells hold the full collinear-vote count with **no
+    /// saturation** (confirmed: `vipsheader` reports `uint`, and a 70000-wide
+    /// lit line peaks at exactly `70000`). This crate has no unsigned 32-bit
+    /// pixel format, so the accumulator is carried as `Gray16` (ushort) and
+    /// every cell is clamped with `v.min(0xFFFF)`. The two therefore diverge
+    /// only when a single accumulator cell would exceed `65535` — i.e. when
+    /// more than 65535 collinear lit pixels concentrate into one bin, which
+    /// requires an image dimension above 65535 (vips accepts such images).
+    /// On that case vips reports the true count while this op reports `65535`.
+    /// The *binning* (which cell each vote lands in) is unaffected and stays
+    /// vips-exact; only the cell's carrier width and the >65535 saturation
+    /// differ. This mirrors the format deviation disclosed for
+    /// [`Raster::hough_circle`] and is tracked by issue #495.
+    ///
+    /// The angle terms are read from a `sin` lookup table indexed by
+    /// `i` and `i + width/2` (vips uses `sin[i + width/2]` for the cosine
+    /// term); for the default even 256-wide accumulator `width/2` is an
+    /// exact quarter turn, but the table indexing is preserved so odd or
+    /// non-default widths bin identically to vips.
+    pub fn hough_line(&self) -> Raster {
+        let (aw, ah) = (HOUGH_LINE_WIDTH as usize, HOUGH_LINE_HEIGHT as usize);
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let data = self.data();
+
+        // vips normalizes coordinates by the image diagonal, so a pixel's
+        // signed distance to a line through the origin stays in (-1, 1).
+        let diag = ((w * w + h * h) as f64).sqrt();
+
+        // sin table: s[k] = sin(PI * k / width). vips reads the cosine term
+        // as s[i + width/2] rather than cos(theta), so replicate the table
+        // (indices run up to (aw - 1) + aw/2).
+        let sin_t: Vec<f64> = (0..aw + aw / 2)
+            .map(|k| (std::f64::consts::PI * k as f64 / aw as f64).sin())
+            .collect();
+
+        let mut acc = vec![0u32; aw * ah];
+        for y in 0..h {
+            let yd = y as f64 / diag;
+            for x in 0..w {
+                let voters = (0..bands)
+                    .filter(|&c| read_f64(data, bpc, (y * w + x) * bands + c) != 0.0)
+                    .count() as u32;
+                if voters == 0 {
+                    continue;
+                }
+                let xd = x as f64 / diag;
+                for i in 0..aw {
+                    // r in (-1, 1); vips: r = xd*sin[i + width/2] + yd*sin[i].
+                    let r = xd * sin_t[i + aw / 2] + yd * sin_t[i];
+                    // vips: int ri = (r + 1) * (height / 2.0). r < 1 keeps
+                    // ri < height; the guard is defensive against a boundary
+                    // rounding to exactly height and never discards a vote.
+                    let ri = ((r + 1.0) * (ah as f64 / 2.0)) as usize;
+                    if ri < ah {
+                        acc[ri * aw + i] += voters;
+                    }
+                }
+            }
+        }
+
+        // vips carries the accumulator as uint; this crate has no unsigned
+        // 32-bit format, so it is emitted as Gray16 and cells are clamped at
+        // 65535 (an intentional, documented deviation — see the rustdoc and
+        // issue #495). The u32 accumulator above keeps the binning exact; only
+        // cells with >65535 votes (a >65535-pixel collinear line) saturate.
+        let out_fmt = PixelFormat::with_channels(1, 2).expect("Gray16 exists");
+        let mut out = op_output_or_panic(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt);
+        for (i, &v) in acc.iter().enumerate() {
+            write_u32(&mut out, 2, i, v.min(0xFFFF));
+        }
+        Raster::from_op_output(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt, out)
+            .expect("hough accumulator is well-formed")
+    }
+
+    /// Hough circle transform (libvips `hough_circle` at scale 1).
+    ///
+    /// Every non-zero sample votes, for each candidate radius, along the
+    /// midpoint circle of that radius centred on its pixel: exactly the
+    /// point set [`Raster::draw_circle`] plots, so a drawn circle's pixels
+    /// all vote for the drawn centre at the drawn radius. The output has
+    /// the input dimensions and one 16-bit band per candidate radius
+    /// (`min_radius..=max_radius`); the peak's pixel is the detected
+    /// centre and its strongest band index plus `min_radius` is the
+    /// detected radius. Counts saturate at `65535`.
+    ///
+    /// # Intentional accumulator-model deviation from vips (#495)
+    ///
+    /// This op does **not** reproduce vips 8.18.4's exact per-cell vote
+    /// counts, and is deliberately kept as a golden-only op (no vips
+    /// cross-oracle in the differential suite). vips votes by running its
+    /// Bresenham circle walker (`vips__draw_circle_direct`) and, for every
+    /// scanline it emits, incrementing **both** span endpoints
+    /// *unconditionally* — with no deduplication at the cardinal (`x == 0`)
+    /// and diagonal (`x == y`) points where octant reflections coincide,
+    /// and re-emitting the final `x == y` scanlines. The result is a
+    /// radius-dependent vote multiplicity: a single lit pixel yields
+    /// accumulator cells as high as `4` for small radii (e.g. vips totals
+    /// `64/36/40/48/48` votes for radii `4..=8` of one point), where the
+    /// multiplier collapses back to `1` only once the radius is large
+    /// enough that no two octant points share a cell.
+    ///
+    /// This crate instead casts **one** vote per *distinct* circle point
+    /// (the deduplicated octant walk shared with [`Raster::draw_circle`]),
+    /// so a single pixel produces a clean max of `1` per cell. Peak
+    /// **location** and the detected radius agree with vips; only the raw
+    /// vote magnitudes differ. Matching vips's counts exactly would require
+    /// porting its non-deduplicating scanline-endpoint accumulation, whose
+    /// small-radius multiplicity could not be reproduced faithfully even
+    /// from the 8.18.4 source; the deduplicated model is retained as an
+    /// intentional, internally-consistent deviation rather than risk a
+    /// subtly-wrong rewrite of a correctly-peaking transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::EmptyRadiusRange`] if
+    /// `min_radius > max_radius`, or [`ArithmeticError::TooManyBands`] if
+    /// the radius count exceeds `u16::MAX`.
+    pub fn try_hough_circle(
+        &self,
+        min_radius: u32,
+        max_radius: u32,
+    ) -> Result<Raster, ArithmeticError> {
+        if min_radius > max_radius {
+            return Err(ArithmeticError::EmptyRadiusRange {
+                min: min_radius,
+                max: max_radius,
+            });
+        }
+        let radii = (max_radius - min_radius + 1) as usize;
+        let out_fmt = format_for(radii, 2)?;
+        let fmt = self.format();
+        let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let data = self.data();
+
+        // The vote accumulator is `radii` bands deep — twice the output and
+        // sized by the caller-controlled radius range — so it dominates the
+        // op's memory. Allocate it fallibly: an over-capacity range returns a
+        // typed error rather than aborting through `handle_alloc_error`, which
+        // making only the output fallible left open (#433 / #434).
+        let acc_len = w
+            .checked_mul(h)
+            .and_then(|wh| wh.checked_mul(radii))
+            .ok_or(RasterError::SizeOverflow {
+                width: self.width(),
+                height: self.height(),
+                bpp: radii.saturating_mul(4),
+            })?;
+        let mut acc = try_scratch(self.width(), self.height(), acc_len, 0u32)?;
+        {
+            let mut vote = |cx: i32, cy: i32, band: usize, votes: u32| {
+                if cx >= 0 && cy >= 0 && (cx as usize) < w && (cy as usize) < h {
+                    acc[(cy as usize * w + cx as usize) * radii + band] += votes;
+                }
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let voters = (0..bands)
+                        .filter(|&c| read_f64(data, bpc, (y * w + x) * bands + c) != 0.0)
+                        .count() as u32;
+                    if voters == 0 {
+                        continue;
+                    }
+                    let (px, py) = (x as i32, y as i32);
+                    for r in min_radius..=max_radius {
+                        let band = (r - min_radius) as usize;
+                        if r == 0 {
+                            vote(px, py, band, voters);
+                            continue;
+                        }
+                        crate::draw::for_each_octant_step(r as i32, |ox, oy| {
+                            // The eight octant reflections, deduplicated at
+                            // oy == 0 and ox == oy so votes are one per
+                            // distinct circle point.
+                            vote(px + ox, py + oy, band, voters);
+                            vote(px - ox, py + oy, band, voters);
+                            if oy != 0 {
+                                vote(px + ox, py - oy, band, voters);
+                                vote(px - ox, py - oy, band, voters);
+                            }
+                            if ox != oy {
+                                vote(px + oy, py + ox, band, voters);
+                                vote(px + oy, py - ox, band, voters);
+                                if oy != 0 {
+                                    vote(px - oy, py + ox, band, voters);
+                                    vote(px - oy, py - ox, band, voters);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut out = alloc_op_output(self.width(), self.height(), out_fmt)?;
+        for (i, &v) in acc.iter().enumerate() {
+            write_u32(&mut out, 2, i, v.min(0xFFFF));
+        }
+        Ok(Raster::from_op_output(
+            self.width(),
+            self.height(),
+            out_fmt,
+            out,
+        )?)
+    }
+
+    /// Panicking form of [`Raster::try_hough_circle`], matching the
+    /// ported-test surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_hough_circle`].
+    #[track_caller]
+    pub fn hough_circle(&self, min_radius: u32, max_radius: u32) -> Raster {
+        expect_arith(
+            "hough_circle",
+            self.try_hough_circle(min_radius, max_radius),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A width x height Gray8 raster from a byte vector.
+    fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
+        Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A 1-band 16-bit raster from sample values.
+    fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// A per-thread `try_scratch` ceiling below every scratch buffer the ops
+    /// under test allocate for [`SCRATCH_PROBE_DIM`]², so the fallible path
+    /// trips deterministically at a tiny, instantly-constructible input instead
+    /// of the multi-TiB one the real overflow would need (#460).
+    const SCRATCH_TEST_CAP_BYTES: u64 = 64;
+
+    /// A modest Gray8 raster (`64² = 4 KiB`, trivially within the construction
+    /// budget). Its `project` accumulators (`64 · 8 = 512` bytes) and its
+    /// `stdif` integral images (`65² · 8 ≈ 34 KiB`) both dwarf
+    /// [`SCRATCH_TEST_CAP_BYTES`], so the lowered cap forces the fallible
+    /// scratch path in each.
+    const SCRATCH_PROBE_DIM: u32 = 64;
+
+    /// `project`'s input-scaled `col_sums` / `row_sums` accumulators must be
+    /// allocated through the fallible scratch path: an over-capacity size
+    /// surfaces as a panic (project's only error channel — it returns
+    /// `(Raster, Raster)`), never a process abort through `handle_alloc_error`
+    /// (#460). A panic unwinds and is catchable; an abort would take the test
+    /// process down with it. Co-located with the abort-safety hook it drives so
+    /// the hook stays `cfg(test)`-only (no shipped test-support surface); the
+    /// vips-differential golden for `project`'s numeric result stays in the
+    /// external `tests/op_oversized_input_fallible_alloc.rs`.
+    #[test]
+    fn project_oversize_scratch_panics_not_aborts() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught = std::panic::catch_unwind(|| {
+            let raster = Raster::zeroed(SCRATCH_PROBE_DIM, SCRATCH_PROBE_DIM, PixelFormat::Gray8)
+                .expect("probe Gray8 raster is within the construction budget");
+            with_scratch_alloc_cap(SCRATCH_TEST_CAP_BYTES, || raster.project())
+        });
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "over-capacity project scratch must panic (unwindable), not abort"
+        );
+    }
+
+    /// `try_stdif`'s two `f64` integral-image scratch buffers must be allocated
+    /// fallibly: an over-capacity size returns a typed `Err` (routed through
+    /// [`RasterError::AllocationFailed`]), never a process abort. Exercises the
+    /// `try_stdif` abort path #459 fixed but left untested — reachable here only
+    /// via the lowered-cap hook #460 asked for, since the genuine overflow needs
+    /// a ~8 TiB input.
+    #[test]
+    fn stdif_oversize_scratch_returns_typed_error_not_abort() {
+        let raster = Raster::zeroed(SCRATCH_PROBE_DIM, SCRATCH_PROBE_DIM, PixelFormat::Gray8)
+            .expect("probe Gray8 raster is within the construction budget");
+        let result = with_scratch_alloc_cap(SCRATCH_TEST_CAP_BYTES, || raster.try_stdif(11, 11));
+        assert!(
+            result.is_err(),
+            "over-capacity stdif scratch must return Err, not a raster"
+        );
+    }
+
+    /// Issue #271: the fallible per-band `try_*` ops return the typed
+    /// [`ArithmeticError::FloatUnsupported`] error on float input instead of
+    /// panicking through the old `assert!` in `vec_map`. The error carries the
+    /// specific op name so callers can act on it, and no panic escapes.
+    #[test]
+    fn try_vec_ops_on_float_return_float_unsupported() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::zeroed(2, 2, f1).unwrap();
+
+        assert!(matches!(
+            im.try_add_vec(&[1.0]),
+            Err(ArithmeticError::FloatUnsupported { op: "add_vec" })
+        ));
+        assert!(matches!(
+            im.try_sub_vec(&[1.0]),
+            Err(ArithmeticError::FloatUnsupported { op: "sub_vec" })
+        ));
+        assert!(matches!(
+            im.try_mul_vec(&[1.0]),
+            Err(ArithmeticError::FloatUnsupported { op: "mul_vec" })
+        ));
+    }
+
+    /// Issue #271: the integer-output image-image `try_*` ops return
+    /// [`ArithmeticError::FloatUnsupported`] on float input rather than
+    /// panicking through the old `assert!` in `binary_map`. Image-image
+    /// `sub` no longer belongs here — it floats its output (issue #282) and
+    /// so accepts float input; `mul` keeps the integer contract and its
+    /// float-input guard (see [`sub_accepts_float_input_and_stays_float`]).
+    #[test]
+    fn try_binary_ops_on_float_return_float_unsupported() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let a = Raster::zeroed(2, 2, f1).unwrap();
+        let b = Raster::zeroed(2, 2, f1).unwrap();
+
+        assert!(matches!(
+            a.try_mul(&b),
+            Err(ArithmeticError::FloatUnsupported { op: "mul" })
+        ));
+    }
+
+    /// Issue #282: because image-image `sub` promotes to a float raster, it
+    /// accepts float input too (the float-output family reads every depth),
+    /// so a cast-then-subtract chain over float intermediates works and
+    /// stays float instead of returning [`ArithmeticError::FloatUnsupported`].
+    #[test]
+    fn sub_accepts_float_input_and_stays_float() {
+        let a = grayf(2, 1, &[0.5, 10.0]);
+        let b = grayf(2, 1, &[2.0, 3.0]);
+        let out = a.sub(&b);
+        assert!(out.format().is_float());
+        assert_eq!(float_samples(&out), vec![-1.5, 7.0]);
+        assert!(a.try_sub(&b).is_ok());
+    }
+
+    /// Follow-up to #339 (tracked by #350): `FloatUnsupported` embeds the op
+    /// name in its `Display`, so the panicking op forms must not re-prefix it
+    /// via `expect_arith` — otherwise the diagnostic reads "mul: mul does not
+    /// support float rasters yet ...". Both the fallible `try_*` error Display
+    /// and the panicking form's panic message must name the op exactly once.
+    /// Uses `mul`, which keeps the integer contract and its float-input guard
+    /// (image-image `sub` now floats and accepts float input, issue #282).
+    #[test]
+    fn float_unsupported_names_op_exactly_once() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let a = Raster::zeroed(2, 2, f1).unwrap();
+        let b = Raster::zeroed(2, 2, f1).unwrap();
+
+        // Fallible form: the typed error's Display already names "mul" once.
+        let display = a.try_mul(&b).unwrap_err().to_string();
+        assert_eq!(
+            display.matches("mul").count(),
+            1,
+            "try_mul error Display must name the op once, got: {display:?}"
+        );
+        assert!(display.starts_with("mul does not support float rasters yet"));
+
+        // Panicking form: the caught panic payload must name "mul" once too
+        // (was doubled as "mul: mul does not support float rasters yet ...").
+        // Silence the default hook so the intentional panic stays off stderr.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.mul(&b)))
+            .expect_err("mul() on a float raster must panic");
+        std::panic::set_hook(prev);
+        let panic_msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload is a string");
+        assert_eq!(
+            panic_msg.matches("mul").count(),
+            1,
+            "mul() panic message must name the op once, got: {panic_msg:?}"
+        );
+    }
+
+    /// Issues #279 / #280: an arithmetic op's output is built through the
+    /// fallible, budget-free op-output path ([`alloc_op_output`] +
+    /// [`Raster::from_op_output`]) that every op now funnels its result
+    /// through, so an oversized declared output returns a typed `Err` instead
+    /// of the old `Raster::new(...).expect(...)` panic, and an out-of-memory
+    /// request returns `AllocationFailed` instead of aborting the process.
+    ///
+    /// The oversize contract is asserted at that shared boundary: a genuine
+    /// multi-gigabyte op *input* cannot be allocated in a unit test (an op
+    /// output is at most 4x its already-allocated input), so exercising the
+    /// constructor the ops delegate to is the deterministic, cheap proof.
+    #[test]
+    fn op_output_path_rejects_oversize_without_panicking() {
+        // 4 bytes-per-pixel at u32::MAX x u32::MAX overflows usize, so the
+        // op-output constructor returns SizeOverflow rather than `.expect`.
+        let rgba8 = PixelFormat::Rgba8;
+        let built = Raster::from_op_output(u32::MAX, u32::MAX, rgba8, Vec::new());
+        assert!(
+            matches!(built, Err(RasterError::SizeOverflow { .. })),
+            "expected SizeOverflow, got {built:?}"
+        );
+
+        // 1 byte-per-pixel fits usize on a 64-bit target but exceeds the Vec
+        // capacity ceiling, so the fallible allocation returns AllocationFailed
+        // (never SIGABRT). On a 32-bit-usize target the same u32::MAX x u32::MAX
+        // product overflows usize, so `buffer_len` narrows it to SizeOverflow
+        // first; either typed error proves the abort-safety contract holds.
+        let alloc = alloc_op_output(u32::MAX, u32::MAX, PixelFormat::Gray8);
+        assert!(
+            matches!(
+                alloc,
+                Err(RasterError::AllocationFailed { .. } | RasterError::SizeOverflow { .. })
+            ),
+            "expected AllocationFailed or SizeOverflow, got {alloc:?}"
+        );
+    }
+
+    /// Issue #279: a depth-promoting op still produces correct values through
+    /// the budget-free op-output path (the panic fix must not perturb output).
+    #[test]
+    fn op_output_path_preserves_values() {
+        let a = gray(1, 1, vec![200]);
+        // add_const promotes 8-bit to 16-bit; the sum survives past 255.
+        let out = a.add_const(100.0);
+        assert_eq!(out.format().bytes_per_channel(), 2);
+        assert_eq!(read_u32(out.data(), 2, 0), 300);
+    }
+
+    /// A 1-band float raster from `f32` sample values.
+    fn grayf(w: u32, h: u32, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::with_channels(1, 4).unwrap();
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_on_known_uchar_samples() {
+        // |10-12| = 2, |20-25| = 5  ->  max 5, mean (2+5)/2 = 3.5.
+        let a = gray(2, 1, vec![10, 20]);
+        let b = gray(2, 1, vec![12, 25]);
+        assert_eq!(a.max_diff(&b), 5.0);
+        assert!((a.avg_diff(&b) - 3.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_of_identical_rasters_are_zero() {
+        // Pins the lossless-roundtrip assertion the foreign cells make.
+        let a = gray(2, 2, vec![1, 2, 3, 4]);
+        assert_eq!(a.max_diff(&a.clone()), 0.0);
+        assert_eq!(a.avg_diff(&a.clone()), 0.0);
+    }
+
+    #[test]
+    fn avg_diff_reads_float_rasters() {
+        // |0.5-0.25| = 0.25, |1.0-1.5| = 0.5  ->  mean 0.375.
+        let a = grayf(2, 1, &[0.5, 1.0]);
+        let b = grayf(2, 1, &[0.25, 1.5]);
+        assert!((a.avg_diff(&b) - 0.375).abs() < 1e-6);
+        assert!((a.max_diff(&b) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn max_diff_and_avg_diff_propagate_a_nan_sample() {
+        // NaN samples are unsupported input; both reductions agree by
+        // propagating NaN, so neither silently reports a finite difference
+        // (in particular max_diff must not drop the NaN and pass `== 0.0`).
+        let a = grayf(2, 1, &[f32::NAN, 1.0]);
+        let b = grayf(2, 1, &[0.0, 1.0]);
+        assert!(a.max_diff(&b).is_nan());
+        assert!(a.avg_diff(&b).is_nan());
+    }
+
+    #[test]
+    fn diff_mismatched_dimensions_is_a_typed_error() {
+        let a = gray(2, 1, vec![0, 0]);
+        let b = gray(3, 1, vec![0, 0, 0]);
+        assert!(matches!(
+            a.try_max_diff(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+        assert!(matches!(
+            a.try_avg_diff(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn diff_mismatched_bands_is_a_typed_error() {
+        let a = gray(2, 1, vec![0, 0]);
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert!(matches!(
+            a.try_max_diff(&rgb),
+            Err(ArithmeticError::BandCountMismatch { .. })
+        ));
+    }
+
+    /// The flat samples of a float raster as `f64`, for assertions.
+    fn float_samples(r: &Raster) -> Vec<f64> {
+        assert!(r.format().is_float(), "expected a float raster");
+        let n = r.width() as usize * r.height() as usize * r.format().channels();
+        (0..n).map(|i| read_f64(r.data(), 4, i)).collect()
+    }
+
+    /// A 100x100 Gray8 image whose left half is 0 and right half is `v`.
+    fn half_half(v: u8) -> Raster {
+        let mut data = vec![0u8; 100 * 100];
+        for y in 0..100 {
+            for x in 50..100 {
+                data[y * 100 + x] = v;
+            }
+        }
+        gray(100, 100, data)
+    }
+
+    // ---- avg / deviate ----
+
+    /// avg is the mean of every sample: half-0 half-100 averages 50, and a
+    /// 3-band pixel averages across bands.
+    #[test]
+    fn avg_all_samples() {
+        assert!((half_half(100).avg() - 50.0).abs() < 1e-9);
+        let rgb = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        assert!((rgb.avg() - 20.0).abs() < 1e-9);
+    }
+
+    /// deviate uses the sample (n-1) formula: the half-0 half-100 image
+    /// deviates by ~50.0025, and a constant image by 0.
+    #[test]
+    fn deviate_sample_stddev() {
+        let d = half_half(100).deviate();
+        assert!((d - 50.0).abs() < 0.01, "deviate should be ~50, got {d}");
+        assert_eq!(gray(2, 2, vec![9; 4]).deviate(), 0.0);
+    }
+
+    /// deviate of a single-sample image is 0, not a division by zero.
+    #[test]
+    fn deviate_single_sample_is_zero() {
+        assert_eq!(gray(1, 1, vec![42]).deviate(), 0.0);
+    }
+
+    // ---- min / max / minpos / maxpos ----
+
+    /// min and max scan every band of every pixel.
+    #[test]
+    fn min_max_values() {
+        let im = Raster::new(1, 2, PixelFormat::Rgb8, vec![5, 200, 30, 7, 2, 9]).unwrap();
+        assert_eq!(im.min(), 2.0);
+        assert_eq!(im.max(), 200.0);
+    }
+
+    /// maxpos returns the value and pixel position; ties keep the first
+    /// occurrence in row-major order.
+    #[test]
+    fn maxpos_position_and_ties() {
+        let mut data = vec![0u8; 100 * 100];
+        data[50 * 100 + 40] = 100;
+        let im = gray(100, 100, data);
+        assert_eq!(im.maxpos(), (100.0, 40, 50));
+
+        let tie = gray(3, 1, vec![7, 7, 3]);
+        assert_eq!(tie.maxpos(), (7.0, 0, 0));
+    }
+
+    /// minpos finds the lone zero in a bright image.
+    #[test]
+    fn minpos_position() {
+        let mut data = vec![100u8; 100 * 100];
+        data[50 * 100 + 40] = 0;
+        let im = gray(100, 100, data);
+        assert_eq!(im.minpos(), (0.0, 40, 50));
+    }
+
+    /// 16-bit reductions read full-depth samples.
+    #[test]
+    fn reductions_16bit() {
+        let im = gray16(2, 1, &[4096, 300]);
+        assert_eq!(im.max(), 4096.0);
+        assert_eq!(im.min(), 300.0);
+        assert!((im.avg() - 2198.0).abs() < 1e-9);
+    }
+
+    // ---- stats ----
+
+    /// stats row 0 holds overall [min, max, sum, sum2, mean, sd] and
+    /// matches avg / deviate; band rows follow.
+    #[test]
+    fn stats_overall_row() {
+        let mut data = vec![0u8; 100 * 50];
+        for y in 0..50 {
+            for x in 50..100 {
+                data[y * 100 + x] = 10;
+            }
+        }
+        let im = gray(100, 50, data);
+        let stats = im.stats();
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0][0], 0.0);
+        assert_eq!(stats[0][1], 10.0);
+        assert_eq!(stats[0][2], 25_000.0);
+        assert_eq!(stats[0][3], 250_000.0);
+        assert!((stats[0][4] - im.avg()).abs() < 1e-9);
+        assert!((stats[0][5] - im.deviate()).abs() < 1e-9);
+    }
+
+    /// stats has one row per band after the overall row, each with
+    /// per-band values.
+    #[test]
+    fn stats_per_band_rows() {
+        let im = Raster::new(2, 1, PixelFormat::Rgb8, vec![1, 10, 100, 3, 30, 200]).unwrap();
+        let stats = im.stats();
+        assert_eq!(stats.len(), 4);
+        assert_eq!(stats[1][0], 1.0); // band 0 min
+        assert_eq!(stats[1][1], 3.0); // band 0 max
+        assert_eq!(stats[2][2], 40.0); // band 1 sum
+        assert_eq!(stats[3][4], 150.0); // band 2 mean
+    }
+
+    // ---- measure ----
+
+    /// measure(2, 1) on a left-0 right-10 image returns [[0], [10]]: the
+    /// patch order is left-to-right.
+    #[test]
+    fn measure_two_across() {
+        let mut data = vec![0u8; 100 * 50];
+        for y in 0..50 {
+            for x in 50..100 {
+                data[y * 100 + x] = 10;
+            }
+        }
+        let im = gray(100, 50, data);
+        let matrix = im.measure(2, 1);
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0], vec![0.0]);
+        assert_eq!(matrix[1], vec![10.0]);
+    }
+
+    /// measure reports per-band means and orders patches row-major
+    /// (across, then down).
+    #[test]
+    fn measure_grid_and_bands() {
+        // 2x2 grid over a 4x4 RGB image; each quadrant is constant.
+        let mut data = vec![0u8; 4 * 4 * 3];
+        for y in 0..4 {
+            for x in 0..4 {
+                let q = (u8::from(y >= 2) * 2 + u8::from(x >= 2)) * 10;
+                let off = (y * 4 + x) * 3;
+                data[off] = q;
+                data[off + 1] = q + 1;
+                data[off + 2] = q + 2;
+            }
+        }
+        let im = Raster::new(4, 4, PixelFormat::Rgb8, data).unwrap();
+        let m = im.measure(2, 2);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m[0], vec![0.0, 1.0, 2.0]);
+        assert_eq!(m[1], vec![10.0, 11.0, 12.0]);
+        assert_eq!(m[2], vec![20.0, 21.0, 22.0]);
+        assert_eq!(m[3], vec![30.0, 31.0, 32.0]);
+    }
+
+    /// measure rejects zero and too-fine patch grids with typed errors.
+    #[test]
+    fn measure_typed_errors() {
+        let im = gray(4, 4, vec![0; 16]);
+        assert!(matches!(
+            im.try_measure(0, 1),
+            Err(ArithmeticError::ZeroPatches)
+        ));
+        assert!(matches!(
+            im.try_measure(5, 1),
+            Err(ArithmeticError::PatchGridTooFine { .. })
+        ));
+    }
+
+    // ---- find_trim ----
+
+    /// find_trim locates content against the default white background.
+    #[test]
+    fn find_trim_default_background() {
+        let mut data = vec![255u8; 200 * 300];
+        for y in 20..80 {
+            for x in 10..60 {
+                data[y * 200 + x] = 100;
+            }
+        }
+        let im = gray(200, 300, data);
+        assert_eq!(im.find_trim(None), (10, 20, 50, 60));
+    }
+
+    /// find_trim accepts an explicit background and returns a zero box
+    /// when everything is background.
+    #[test]
+    fn find_trim_explicit_background_and_empty() {
+        let mut data = vec![0u8; 50 * 50];
+        data[25 * 50 + 30] = 200;
+        let im = gray(50, 50, data);
+        assert_eq!(im.find_trim(Some(&[0.0])), (30, 25, 1, 1));
+
+        let blank = gray(10, 10, vec![255; 100]);
+        assert_eq!(blank.find_trim(None), (0, 0, 0, 0));
+    }
+
+    /// Differences at or below the threshold of 10 are background.
+    #[test]
+    fn find_trim_threshold() {
+        let mut data = vec![255u8; 10 * 10];
+        data[5 * 10 + 5] = 246; // |246 - 255| = 9, below threshold
+        let im = gray(10, 10, data);
+        assert_eq!(im.find_trim(None), (0, 0, 0, 0));
+    }
+
+    /// A background vector of the wrong length is a typed error.
+    #[test]
+    fn find_trim_background_mismatch_is_typed_error() {
+        let im = gray(2, 2, vec![0; 4]);
+        assert!(matches!(
+            im.try_find_trim(Some(&[1.0, 2.0])),
+            Err(ArithmeticError::ConstCountMismatch {
+                expected: 1,
+                got: 2
+            })
+        ));
+    }
+
+    // ---- profile / project ----
+
+    /// profile returns first-non-zero positions: columns as a 1-row image,
+    /// rows as a 1-column image, with the dimension as the all-zero value.
+    #[test]
+    fn profile_positions() {
+        let mut data = vec![0u8; 100 * 100];
+        data[50 * 100 + 40] = 100;
+        let im = gray(100, 100, data);
+        let (columns, rows) = im.profile();
+        assert_eq!((columns.width(), columns.height()), (100, 1));
+        assert_eq!((rows.width(), rows.height()), (1, 100));
+        assert_eq!(columns.getpoint(40, 0), vec![50.0]);
+        assert_eq!(columns.getpoint(0, 0), vec![100.0]); // all-zero column
+        assert_eq!(rows.getpoint(0, 50), vec![40.0]);
+        assert_eq!(rows.getpoint(0, 0), vec![100.0]); // all-zero row
+        assert_eq!(columns.minpos(), (50.0, 40, 0));
+        assert_eq!(rows.minpos(), (40.0, 0, 50));
+    }
+
+    /// project returns column and row sums per band.
+    #[test]
+    fn project_sums() {
+        let mut data = vec![0u8; 100 * 50];
+        for y in 0..50 {
+            for x in 50..100 {
+                data[y * 100 + x] = 10;
+            }
+        }
+        let im = gray(100, 50, data);
+        let (columns, rows) = im.project();
+        assert_eq!(columns.getpoint(10, 0), vec![0.0]);
+        assert_eq!(columns.getpoint(70, 0), vec![500.0]);
+        assert_eq!(rows.getpoint(0, 10), vec![500.0]);
+    }
+
+    /// project saturates sums past 65535 rather than wrapping.
+    #[test]
+    fn project_saturates() {
+        let im = gray(1, 300, vec![255; 300]); // column sum 76500 > 65535
+        let (columns, _) = im.project();
+        assert_eq!(columns.getpoint(0, 0), vec![65535.0]);
+    }
+
+    // ---- constant arithmetic ----
+
+    /// add_const promotes 8-bit input to 16-bit so sums survive, and
+    /// saturates negative results at zero.
+    #[test]
+    fn add_const_promotes() {
+        let im = gray(2, 1, vec![200, 10]);
+        let r = im.add_const(100.0);
+        assert_eq!(r.format(), PixelFormat::Gray16);
+        assert_eq!(r.getpoint(0, 0), vec![300.0]);
+        assert_eq!(im.add_const(-20.0).getpoint(1, 0), vec![0.0]);
+    }
+
+    /// sub_const keeps the depth and saturates at zero.
+    #[test]
+    fn sub_const_saturates_at_zero() {
+        let im = gray(2, 1, vec![5, 100]);
+        let r = im.sub_const(10.0);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.getpoint(0, 0), vec![0.0]);
+        assert_eq!(r.getpoint(1, 0), vec![90.0]);
+    }
+
+    /// mul_const promotes and rounds to nearest.
+    #[test]
+    fn mul_const_promotes_and_rounds() {
+        let im = gray(2, 1, vec![200, 3]);
+        let r = im.mul_const(2.0);
+        assert_eq!(r.format(), PixelFormat::Gray16);
+        assert_eq!(r.getpoint(0, 0), vec![400.0]);
+        assert_eq!(im.mul_const(1.5).getpoint(1, 0), vec![5.0]); // 4.5 -> 5 (round half up)
+    }
+
+    /// div_const halves values into a float raster; a zero divisor
+    /// produces zero, matching libvips.
+    #[test]
+    fn div_const_and_zero_divisor() {
+        let im = gray(1, 1, vec![100]);
+        let r = im.div_const(2.0);
+        assert!(r.format().is_float());
+        assert_eq!(r.getpoint(0, 0), vec![50.0]);
+        assert_eq!(im.div_const(0.0).getpoint(0, 0), vec![0.0]);
+    }
+
+    /// The ported test_atanh scenario (libviprs-tests issue #77):
+    /// div_const(255.0) on a 128 image keeps the float quotient
+    /// (libvips promotes division to float), so atanh of the mid-range
+    /// value is finite and correct instead of atanh(1) = inf.
+    #[test]
+    fn div_const_float_enables_atanh() {
+        let im = gray(1, 1, vec![128]);
+        let q = im.div_const(255.0);
+        assert!(q.format().is_float());
+        let v = float_samples(&q)[0];
+        assert!((v - 128.0 / 255.0).abs() < 1e-6, "128/255 ~ 0.502, got {v}");
+        let a = float_samples(&q.atanh())[0];
+        let expected = (128.0f64 / 255.0).atanh(); // ~0.551924
+        assert!(a.is_finite(), "atanh(0.502) is finite, got {a}");
+        assert!((a - expected).abs() < 1e-6, "expected {expected}, got {a}");
+    }
+
+    /// floordiv_const floors the quotient into the integer container;
+    /// div_const keeps the exact float quotient.
+    #[test]
+    fn floordiv_const_floors() {
+        let im = gray(1, 1, vec![100]);
+        assert_eq!(im.floordiv_const(3.0).getpoint(0, 0), vec![33.0]);
+        let q = im.div_const(3.0).getpoint(0, 0)[0];
+        assert!((q - 100.0 / 3.0).abs() < 1e-4, "100/3 stays 33.33, got {q}");
+        let im9 = gray(1, 1, vec![9]);
+        assert_eq!(im9.floordiv_const(5.0).getpoint(0, 0), vec![1.0]); // 1.8 floors to 1
+        let q = im9.div_const(5.0).getpoint(0, 0)[0];
+        assert!((q - 1.8).abs() < 1e-6, "9/5 stays 1.8, got {q}");
+    }
+
+    /// pow_const promotes so squares survive, and saturates at 65535.
+    #[test]
+    fn pow_const_promotes_and_saturates() {
+        let im = gray(2, 1, vec![200, 3]);
+        let r = im.pow_const(2.0);
+        assert_eq!(r.format(), PixelFormat::Gray16);
+        assert_eq!(r.getpoint(0, 0), vec![40_000.0]);
+        assert_eq!(r.getpoint(1, 0), vec![9.0]);
+        assert_eq!(im.pow_const(3.0).getpoint(0, 0), vec![65_535.0]);
+    }
+
+    /// rem_const computes the remainder; a zero divisor produces zero.
+    #[test]
+    fn rem_const_values() {
+        let im = gray(3, 1, vec![7, 8, 9]);
+        let r = im.rem_const(2.0);
+        assert_eq!(r.getpoint(0, 0), vec![1.0]);
+        assert_eq!(r.getpoint(1, 0), vec![0.0]);
+        assert_eq!(im.rem_const(0.0).getpoint(2, 0), vec![0.0]);
+    }
+
+    /// linear computes a*x + b into a float raster; negative and
+    /// fractional results survive instead of saturating or rounding.
+    #[test]
+    fn linear_values() {
+        let im = gray(2, 1, vec![0, 100]);
+        let r = im.linear(1.0, 10.0);
+        assert!(r.format().is_float());
+        assert_eq!(r.getpoint(0, 0), vec![10.0]);
+        assert_eq!(r.getpoint(1, 0), vec![110.0]);
+        assert!((r.avg() - 60.0).abs() < 1e-9);
+        assert_eq!(im.linear(3.0, 5.0).getpoint(1, 0), vec![305.0]);
+        // The float contract: no zero saturation, no rounding.
+        assert_eq!(float_samples(&im.linear(1.0, -20.0)), vec![-20.0, 80.0]);
+        assert_eq!(float_samples(&im.linear(1.0, 0.5)), vec![0.5, 100.5]);
+    }
+
+    /// linear_uchar is the caller-requests-integer form (the vips_linear
+    /// uchar option): clipped into 0..=255, then truncated by the C
+    /// float-to-uchar cast, accepting float input, so it casts a floated
+    /// raster back to uchar.
+    #[test]
+    fn linear_uchar_truncates_and_saturates() {
+        let im = gray(3, 1, vec![10, 200, 0]);
+        let r = im.linear_uchar(2.0, -20.0);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.data(), &[0, 255, 0]); // 0 exact, 380 clips, -20 clips
+
+        // Truncation, not rounding: 9 * 0.2 = 1.8 casts to 1.
+        assert_eq!(gray(1, 1, vec![9]).linear_uchar(0.2, 0.0).data(), &[1]);
+
+        // Round-trip a floated quotient back to uchar.
+        let back = gray(1, 1, vec![128])
+            .div_const(255.0)
+            .linear_uchar(255.0, 0.0);
+        assert_eq!(back.data(), &[128]);
+    }
+
+    /// add_vec applies one constant per band; a wrong-length vector is a
+    /// typed error.
+    #[test]
+    fn add_vec_per_band_and_error() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        let r = im.add_vec(&[1.0, 2.0, 3.0]);
+        assert_eq!(r.getpoint(0, 0), vec![11.0, 22.0, 33.0]);
+        assert!(matches!(
+            im.try_add_vec(&[1.0]),
+            Err(ArithmeticError::ConstCountMismatch {
+                expected: 3,
+                got: 1
+            })
+        ));
+    }
+
+    /// sub_vec and mul_vec apply per-band constants with the documented
+    /// integer saturation / promotion; div_vec floats per band, with the
+    /// zero-divisor rule.
+    #[test]
+    fn other_vec_ops() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        assert_eq!(
+            im.sub_vec(&[5.0, 25.0, 10.0]).getpoint(0, 0),
+            vec![5.0, 0.0, 20.0]
+        );
+        let r = im.mul_vec(&[1.0, 2.0, 30.0]);
+        assert_eq!(r.format(), PixelFormat::Rgb16);
+        assert_eq!(r.getpoint(0, 0), vec![10.0, 40.0, 900.0]);
+        let d = im.div_vec(&[2.0, 0.0, 3.0]);
+        assert!(d.format().is_float());
+        let d = d.getpoint(0, 0);
+        assert_eq!(&d[..2], &[5.0, 0.0]);
+        assert!((d[2] - 10.0).abs() < 1e-6);
+        // Wrong-length vectors stay typed errors on the float path.
+        assert!(matches!(
+            im.try_div_vec(&[1.0]),
+            Err(ArithmeticError::ConstCountMismatch {
+                expected: 3,
+                got: 1
+            })
+        ));
+    }
+
+    /// The libvips promotion table for the linear / divide family:
+    /// divide always outputs float (the `vips_divide` table maps every
+    /// integer format to float); linear outputs float (`vips_linear`)
+    /// unless the caller requests uchar; image-image `sub` outputs float
+    /// (`vips_subtract` promotes `uchar` to signed `short`, carried here
+    /// as float, issue #282); add / multiply and the constant `sub_const`
+    /// / `sub_vec` keep the integer contract.
+    #[test]
+    fn linear_divide_promotion_table() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im8 = gray(1, 1, vec![128]);
+        let im16 = gray16(1, 1, &[1000]);
+
+        // Divide family: always float.
+        assert_eq!(im8.div_const(2.0).format(), f1);
+        assert_eq!(im16.div_const(2.0).format(), f1);
+        assert_eq!(im8.div(&im8).format(), f1);
+        assert_eq!(im8.div_vec(&[2.0]).format(), f1);
+        let rgb = Raster::new(1, 1, PixelFormat::Rgb8, vec![1, 2, 3]).unwrap();
+        assert_eq!(
+            rgb.div_const(2.0).format(),
+            PixelFormat::with_channels(3, 4).unwrap()
+        );
+
+        // linear: float unless uchar is requested.
+        assert_eq!(im8.linear(1.0, 0.0).format(), f1);
+        assert_eq!(im16.linear(1.0, 0.0).format(), f1);
+        assert_eq!(im8.linear_uchar(1.0, 0.0).format(), PixelFormat::Gray8);
+
+        // Image-image sub: float (signed short in libvips, issue #282).
+        assert_eq!(im8.sub(&im8).format(), f1);
+        assert_eq!(im16.sub(&im16).format(), f1);
+
+        // Integer contract unchanged everywhere libvips keeps integer.
+        assert_eq!(im8.add_const(1.0).format(), PixelFormat::Gray16);
+        assert_eq!(im8.sub_const(1.0).format(), PixelFormat::Gray8);
+        assert_eq!(im8.mul_const(2.0).format(), PixelFormat::Gray16);
+        assert_eq!(im8.add_vec(&[1.0]).format(), PixelFormat::Gray16);
+        assert_eq!(im8.sub_vec(&[1.0]).format(), PixelFormat::Gray8);
+        assert_eq!(im8.mul_vec(&[2.0]).format(), PixelFormat::Gray16);
+        assert_eq!(im8.mul(&im8).format(), PixelFormat::Gray16);
+        assert_eq!(im8.floordiv_const(2.0).format(), PixelFormat::Gray8);
+        assert_eq!(im8.rem_const(2.0).format(), PixelFormat::Gray8);
+        assert_eq!(im8.pow_const(2.0).format(), PixelFormat::Gray16);
+    }
+
+    /// The linear / divide family accepts float input now that it writes
+    /// float output, so chains like div_const(...).linear(...) work.
+    #[test]
+    fn linear_divide_accept_float_input() {
+        let im = grayf(1, 1, &[0.5]);
+        assert_eq!(float_samples(&im.div_const(2.0)), vec![0.25]);
+        assert_eq!(float_samples(&im.linear(2.0, 1.0)), vec![2.0]);
+        assert_eq!(float_samples(&im.div(&im)), vec![1.0]);
+        assert_eq!(float_samples(&im.div_vec(&[4.0])), vec![0.125]);
+    }
+
+    // ---- unary shape ops ----
+
+    /// pos, abs, floor, ceil, and rint are identities on the unsigned
+    /// integer formats.
+    #[test]
+    fn identity_ops() {
+        let im = gray(2, 1, vec![7, 200]);
+        for r in [im.pos(), im.abs(), im.floor(), im.ceil(), im.rint()] {
+            assert_eq!(r.format(), im.format());
+            assert_eq!(r.data(), im.data());
+        }
+    }
+
+    /// sign maps zero to 0 and positive samples to 1, keeping the depth.
+    #[test]
+    fn sign_values() {
+        let im = gray(3, 1, vec![0, 1, 200]);
+        let r = im.sign();
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.data(), &[0, 1, 1]);
+        let im16 = gray16(2, 1, &[0, 4096]);
+        assert_eq!(im16.sign().getpoint(1, 0), vec![1.0]);
+    }
+
+    /// clamp defaults to [0, 1] and accepts explicit bounds.
+    #[test]
+    fn clamp_bounds() {
+        let im = gray(3, 1, vec![0, 1, 200]);
+        let r = im.clamp(None, None);
+        assert!(r.max() <= 1.0);
+        assert!(r.min() >= 0.0);
+        let r = im.clamp(Some(14.0), Some(45.0));
+        assert_eq!(r.data(), &[14, 14, 45]);
+    }
+
+    /// clamp panics when the bounds are inverted.
+    #[test]
+    #[should_panic(expected = "clamp: min bound")]
+    fn clamp_inverted_bounds_panics() {
+        let _ = gray(1, 1, vec![0]).clamp(Some(2.0), Some(1.0));
+    }
+
+    // ---- image-image arithmetic ----
+
+    /// sub of an image from itself is all zeros; negative differences
+    /// survive as signed float values instead of saturating to `0`
+    /// (issue #282, matching the `vips_subtract` promotion to signed short).
+    #[test]
+    fn sub_zeros_and_signed_difference() {
+        let a = gray(2, 1, vec![100, 10]);
+        let z = a.sub(&a);
+        assert!(z.format().is_float());
+        assert_eq!(z.avg(), 0.0);
+        let b = gray(2, 1, vec![50, 200]);
+        assert_eq!(a.sub(&b).getpoint(0, 0), vec![50.0]);
+        // 10 - 200 = -190 survives instead of the pre-#282 saturated `0`.
+        assert_eq!(a.sub(&b).getpoint(1, 0), vec![-190.0]);
+    }
+
+    /// mul promotes 8-bit products to 16-bit.
+    #[test]
+    fn mul_promotes() {
+        let a = gray(1, 1, vec![200]);
+        let r = a.mul(&a);
+        assert_eq!(r.format(), PixelFormat::Gray16);
+        assert_eq!(r.getpoint(0, 0), vec![40_000.0]);
+    }
+
+    /// div of an image by itself is 1 for non-zero samples and 0 where the
+    /// divisor is zero.
+    #[test]
+    fn div_self_and_zero() {
+        let a = gray(2, 1, vec![100, 0]);
+        let r = a.div(&a);
+        assert_eq!(r.getpoint(0, 0), vec![1.0]);
+        assert_eq!(r.getpoint(1, 0), vec![0.0]);
+    }
+
+    /// Binary ops reject mismatched dimensions and band counts with typed
+    /// errors, and the panicking surface reports the op name.
+    #[test]
+    fn binary_typed_errors() {
+        let a = gray(2, 1, vec![0, 0]);
+        let b = gray(1, 1, vec![0]);
+        assert!(matches!(
+            a.try_sub(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert!(matches!(
+            a.try_mul(&rgb),
+            Err(ArithmeticError::BandCountMismatch {
+                expected: 1,
+                got: 3
+            })
+        ));
+    }
+
+    /// The panicking surface reports the op name and the typed message.
+    #[test]
+    #[should_panic(expected = "sub: dimension mismatch")]
+    fn sub_panicking_surface_message() {
+        let a = gray(2, 1, vec![0, 0]);
+        let b = gray(1, 1, vec![0]);
+        let _ = a.sub(&b);
+    }
+
+    /// minpair / maxpair take the samplewise extremum; mixed depths
+    /// promote numerically to 16-bit.
+    #[test]
+    fn minpair_maxpair() {
+        let a = gray(2, 1, vec![100, 5]);
+        let b = gray(2, 1, vec![50, 60]);
+        assert_eq!(a.minpair(&b).getpoint(0, 0), vec![50.0]);
+        assert_eq!(a.minpair(&b).getpoint(1, 0), vec![5.0]);
+        assert_eq!(a.maxpair(&b).getpoint(0, 0), vec![100.0]);
+        assert_eq!(a.maxpair(&b).getpoint(1, 0), vec![60.0]);
+
+        let wide = gray16(2, 1, &[4096, 2]);
+        let r = a.maxpair(&wide);
+        assert_eq!(r.format(), PixelFormat::Gray16);
+        assert_eq!(r.getpoint(0, 0), vec![4096.0]);
+        assert_eq!(r.getpoint(1, 0), vec![5.0]);
+    }
+
+    /// sum adds a list of images with 16-bit promotion; empty lists and
+    /// mismatched images are typed errors.
+    #[test]
+    fn sum_list() {
+        let images: Vec<Raster> = (0..10u8).map(|x| gray(2, 2, vec![x * 10; 4])).collect();
+        let refs: Vec<&Raster> = images.iter().collect();
+        let result = Raster::sum(&refs);
+        assert_eq!(result.format(), PixelFormat::Gray16);
+        assert_eq!(result.max(), 450.0);
+
+        assert!(matches!(
+            Raster::try_sum(&[]),
+            Err(ArithmeticError::EmptyImageList)
+        ));
+        let odd = gray(1, 1, vec![0]);
+        assert!(matches!(
+            Raster::try_sum(&[&images[0], &odd]),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+    }
+
+    /// sum saturates at 65535.
+    #[test]
+    fn sum_saturates() {
+        let a = gray16(1, 1, &[60_000]);
+        let b = gray16(1, 1, &[10_000]);
+        assert_eq!(Raster::sum(&[&a, &b]).getpoint(0, 0), vec![65_535.0]);
+    }
+
+    // ---- comparisons ----
+
+    /// The relational family produces 8-bit 0/255 masks with the expected
+    /// truth tables.
+    #[test]
+    fn comparison_masks() {
+        let a = gray(2, 1, vec![10, 200]);
+        let b = gray(2, 1, vec![10, 100]);
+        assert_eq!(a.more_than(&b).data(), &[0, 255]);
+        assert_eq!(a.more_eq(&b).data(), &[255, 255]);
+        assert_eq!(a.less_than(&b).data(), &[0, 0]);
+        assert_eq!(a.less_eq(&b).data(), &[255, 0]);
+        assert_eq!(a.equal(&b).data(), &[255, 0]);
+        assert_eq!(a.noteq(&b).data(), &[0, 255]);
+    }
+
+    /// Constant comparisons produce the same masks against a scalar, and
+    /// self-comparisons degenerate correctly.
+    #[test]
+    fn comparison_const_masks() {
+        let im = gray(3, 1, vec![50, 100, 150]);
+        assert_eq!(im.more_than_const(100.0).data(), &[0, 0, 255]);
+        assert_eq!(im.more_eq_const(100.0).data(), &[0, 255, 255]);
+        assert_eq!(im.less_than_const(100.0).data(), &[255, 0, 0]);
+        assert_eq!(im.less_eq_const(100.0).data(), &[255, 255, 0]);
+        assert_eq!(im.equal_const(100.0).data(), &[0, 255, 0]);
+        assert_eq!(im.noteq_const(100.0).data(), &[255, 0, 255]);
+
+        assert_eq!(im.more_than(&im).avg(), 0.0);
+        assert_eq!(im.more_eq(&im).avg(), 255.0);
+        assert_eq!(im.less_than(&im).avg(), 0.0);
+        assert_eq!(im.less_eq(&im).avg(), 255.0);
+        assert_eq!(im.equal(&im).avg(), 255.0);
+        assert_eq!(im.noteq(&im).avg(), 0.0);
+    }
+
+    /// equal_const is exact: out-of-range and fractional constants match
+    /// nothing.
+    #[test]
+    fn equal_const_exactness() {
+        let ramp: Vec<u8> = (0..=255).collect();
+        let im = gray(256, 1, ramp);
+        assert!(im.equal_const(1000.0).max() < 1.0);
+        assert_eq!(im.equal_const(12.0).max(), 255.0);
+        assert!(im.equal_const(12.5).max() < 1.0);
+    }
+
+    /// Comparisons on 16-bit input still produce 8-bit masks.
+    #[test]
+    fn comparison_16bit_input_masks_are_8bit() {
+        let im = gray16(2, 1, &[4096, 100]);
+        let r = im.more_than_const(1000.0);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.data(), &[255, 0]);
+    }
+
+    // ---- bitwise ----
+
+    /// Image and constant bitwise ops match the sample-wise integer ops.
+    #[test]
+    fn bitwise_values() {
+        let a = gray(1, 1, vec![0xCC]);
+        let b = gray(1, 1, vec![0xAA]);
+        assert_eq!(a.bitand(&b).data(), &[0x88]);
+        assert_eq!(a.bitor(&b).data(), &[0xEE]);
+        assert_eq!(a.bitxor(&b).data(), &[0x66]);
+        assert_eq!(a.bitand_const(0x0F).data(), &[0x0C]);
+        assert_eq!(a.bitor_const(0x0F).data(), &[0xCF]);
+        assert_eq!(a.bitxor_const(0xFF).data(), &[0x33]);
+        assert_eq!(a.bitnot().data(), &[0x33]);
+    }
+
+    /// AND with itself is identity, AND with 0 is zero, OR with 0xFF is
+    /// 255 (the ported truth checks).
+    #[test]
+    fn bitwise_ported_identities() {
+        let im = gray(2, 1, vec![0xF0, 0x0F]);
+        assert_eq!(im.bitand(&im).data(), im.data());
+        assert_eq!(im.bitand_const(0).avg(), 0.0);
+        assert_eq!(im.bitor_const(0xFF).avg(), 255.0);
+        assert_eq!(im.bitxor(&im).avg(), 0.0);
+    }
+
+    /// A negative constant masks to all ones in the sample depth.
+    #[test]
+    fn bitwise_negative_constant_is_all_ones() {
+        let im = gray(1, 1, vec![0xA5]);
+        assert_eq!(im.bitand_const(-1).data(), &[0xA5]);
+        let im16 = gray16(1, 1, &[0x0F0F]);
+        assert_eq!(im16.bitand_const(-1).getpoint(0, 0), vec![0x0F0F as f64]);
+    }
+
+    /// Shifts truncate into the depth; oversized shift counts produce 0.
+    #[test]
+    fn shift_values() {
+        let im = gray(2, 1, vec![3, 0xF0]);
+        assert_eq!(im.lshift(2).data(), &[12, 0xC0]); // 0xF0 << 2 truncates to 0xC0
+        assert_eq!(im.rshift(2).data(), &[0, 0x3C]);
+        assert_eq!(im.lshift(40).data(), &[0, 0]);
+        assert_eq!(im.rshift(40).data(), &[0, 0]);
+        let im16 = gray16(1, 1, &[0x0100]);
+        assert_eq!(im16.lshift(4).getpoint(0, 0), vec![0x1000 as f64]);
+    }
+
+    /// bitnot on 16-bit input inverts within 16 bits.
+    #[test]
+    fn bitnot_16bit() {
+        let im = gray16(1, 1, &[0x0F0F]);
+        assert_eq!(im.bitnot().getpoint(0, 0), vec![0xF0F0 as f64]);
+    }
+
+    // ---- scaleimage ----
+
+    /// scaleimage maps the global min to 0 and max to 255 and always
+    /// outputs 8-bit.
+    #[test]
+    fn scaleimage_linear() {
+        let im = gray16(3, 1, &[100, 300, 500]);
+        let r = im.scaleimage(None);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.getpoint(0, 0), vec![0.0]);
+        assert_eq!(r.getpoint(1, 0), vec![128.0]); // 127.5 rounds up
+        assert_eq!(r.getpoint(2, 0), vec![255.0]);
+    }
+
+    /// scaleimage log mode still peaks at 255 and is monotone.
+    #[test]
+    fn scaleimage_log() {
+        let im = gray(3, 1, vec![0, 10, 200]);
+        let r = im.scaleimage(Some(true));
+        assert_eq!(r.getpoint(2, 0), vec![255.0]);
+        let v0 = r.getpoint(0, 0)[0];
+        let v1 = r.getpoint(1, 0)[0];
+        assert!(v0 < v1 && v1 < 255.0);
+    }
+
+    /// A constant image scales to all zeros instead of dividing by zero.
+    #[test]
+    fn scaleimage_constant_input() {
+        let im = gray(2, 2, vec![7; 4]);
+        assert_eq!(im.scaleimage(None).max(), 0.0);
+        let black = gray(2, 2, vec![0; 4]);
+        assert_eq!(black.scaleimage(Some(true)).max(), 0.0);
+    }
+
+    /// scaleimage keeps the band count.
+    #[test]
+    fn scaleimage_multiband() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![0, 100, 200]).unwrap();
+        let r = im.scaleimage(None);
+        assert_eq!(r.format(), PixelFormat::Rgb8);
+        assert_eq!(r.getpoint(0, 0), vec![0.0, 128.0, 255.0]);
+    }
+
+    // ---- stdif ----
+
+    /// stdif keeps dimensions and format and pulls the mean toward the
+    /// target mean of 128.
+    #[test]
+    fn stdif_shifts_mean_toward_target() {
+        // A gradient image with mean far below 128.
+        let mut data = vec![0u8; 60 * 40];
+        for (i, d) in data.iter_mut().enumerate() {
+            *d = (i % 60) as u8;
+        }
+        let im = gray(60, 40, data);
+        let r = im.stdif(10, 10);
+        assert_eq!((r.width(), r.height()), (im.width(), im.height()));
+        assert_eq!(r.format(), im.format());
+        let orig_dist = (im.avg() - 128.0).abs();
+        let new_dist = (r.avg() - 128.0).abs();
+        assert!(
+            new_dist < orig_dist,
+            "stdif should shift mean toward 128: orig {orig_dist}, new {new_dist}"
+        );
+    }
+
+    /// On a constant image the deviation term vanishes and every pixel
+    /// becomes a*m0 + (1-a)*mean.
+    #[test]
+    fn stdif_constant_image() {
+        let im = gray(20, 20, vec![40; 400]);
+        let r = im.stdif(5, 5);
+        // 0.5 * 128 + 0.5 * 40 = 84.
+        assert_eq!(r.getpoint(10, 10), vec![84.0]);
+    }
+
+    /// stdif processes bands independently. A window equal to the image is
+    /// the largest vips accepts; on a constant image the deviation term
+    /// vanishes so every band is `0.5*128 + 0.5*band`.
+    #[test]
+    fn stdif_multiband() {
+        let im = Raster::new(2, 2, PixelFormat::Rgb8, [10u8, 40, 70].repeat(4)).unwrap();
+        let r = im.stdif(2, 2);
+        assert_eq!(r.format(), PixelFormat::Rgb8);
+        // Constant bands: 0.5*128 + 0.5*band.
+        assert_eq!(r.getpoint(0, 0), vec![69.0, 84.0, 99.0]);
+    }
+
+    /// A window larger than the image is a typed error, matching vips, which
+    /// rejects it as `stdif: window too large` (verified with the oracle: on a
+    /// 5-wide image, window 5 is accepted but 6+ errors). The core previously
+    /// computed a silent result for any window; #490 aligns it with vips.
+    #[test]
+    fn stdif_window_larger_than_image_is_typed_error() {
+        let im = Raster::new(2, 2, PixelFormat::Rgb8, [10u8, 40, 70].repeat(4)).unwrap();
+        assert!(matches!(
+            im.try_stdif(3, 2),
+            Err(ArithmeticError::WindowTooLarge { .. })
+        ));
+        assert!(matches!(
+            im.try_stdif(2, 3),
+            Err(ArithmeticError::WindowTooLarge { .. })
+        ));
+        // A window exactly the image size is still accepted.
+        assert!(im.try_stdif(2, 2).is_ok());
+    }
+
+    /// Edge pixels use a replicated (edge-extended) window, matching vips.
+    /// vips embeds the input with a `window/2` replicated border before taking
+    /// window statistics; the old code clipped the window at the edge, which
+    /// diverged in a `window/2`-wide border. Pinned against the oracle:
+    /// `vips stdif` of `[0,40,80,120,200]` (uchar) with a `3x1` window yields
+    /// `[65,84,104,126,160]`, and with a `5x1` window on
+    /// `[3,200,17,250,99,5,128,64,33,210]` yields
+    /// `[75,137,96,156,114,90,118,101,101,155]`.
+    #[test]
+    fn stdif_border_replicates_like_vips() {
+        let im = gray(5, 1, vec![0, 40, 80, 120, 200]);
+        let r = im.stdif(3, 1);
+        let got: Vec<f64> = (0..5).map(|x| r.getpoint(x, 0)[0]).collect();
+        assert_eq!(got, vec![65.0, 84.0, 104.0, 126.0, 160.0]);
+
+        let im = gray(10, 1, vec![3, 200, 17, 250, 99, 5, 128, 64, 33, 210]);
+        let r = im.stdif(5, 1);
+        let got: Vec<f64> = (0..10).map(|x| r.getpoint(x, 0)[0]).collect();
+        assert_eq!(
+            got,
+            vec![
+                75.0, 137.0, 96.0, 156.0, 114.0, 90.0, 118.0, 101.0, 101.0, 155.0
+            ]
+        );
+    }
+
+    /// The 2D window replicates on all four edges. Pinned against the oracle:
+    /// `vips stdif` of the 3x3 `[0,40,80; 120,160,200; 30,60,90]` (uchar) with
+    /// a `3x3` window yields `[74,92,109; 114,130,148; 86,100,113]`.
+    #[test]
+    fn stdif_border_replicates_2d() {
+        let im = gray(3, 3, vec![0, 40, 80, 120, 160, 200, 30, 60, 90]);
+        let r = im.stdif(3, 3);
+        let got: Vec<f64> = (0..3)
+            .flat_map(|y| (0..3).map(move |x| (x, y)))
+            .map(|(x, y)| r.getpoint(x, y)[0])
+            .collect();
+        assert_eq!(
+            got,
+            vec![74.0, 92.0, 109.0, 114.0, 130.0, 148.0, 86.0, 100.0, 113.0]
+        );
+    }
+
+    /// A zero window dimension is a typed error.
+    #[test]
+    fn stdif_zero_window_is_typed_error() {
+        let im = gray(2, 2, vec![0; 4]);
+        assert!(matches!(
+            im.try_stdif(0, 5),
+            Err(ArithmeticError::ZeroWindow)
+        ));
+        assert!(matches!(
+            im.try_stdif(5, 0),
+            Err(ArithmeticError::ZeroWindow)
+        ));
+    }
+
+    // ---- recomb ----
+
+    /// recomb with one row produces the weighted band sum as a single-band
+    /// image.
+    #[test]
+    fn recomb_single_row() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![100, 50, 10]).unwrap();
+        let matrix: &[&[f64]] = &[&[0.2, 0.5, 0.3]];
+        let r = im.recomb(matrix);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.getpoint(0, 0), vec![48.0]); // 20 + 25 + 3
+    }
+
+    /// recomb with the identity matrix reproduces the image; a swap matrix
+    /// reorders bands, and row count sets the output band count.
+    #[test]
+    fn recomb_identity_and_swap() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        let identity: &[&[f64]] = &[&[1.0, 0.0, 0.0], &[0.0, 1.0, 0.0], &[0.0, 0.0, 1.0]];
+        assert_eq!(im.recomb(identity).data(), im.data());
+
+        let swap: &[&[f64]] = &[&[0.0, 0.0, 1.0], &[1.0, 0.0, 0.0]];
+        let r = im.recomb(swap);
+        assert_eq!(r.format().channels(), 2);
+        assert_eq!(r.getpoint(0, 0), vec![30.0, 10.0]);
+    }
+
+    /// recomb saturates results into the input depth.
+    #[test]
+    fn recomb_saturates() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![200, 200, 200]).unwrap();
+        let matrix: &[&[f64]] = &[&[1.0, 1.0, 1.0]];
+        assert_eq!(im.recomb(matrix).getpoint(0, 0), vec![255.0]);
+    }
+
+    /// recomb truncates the float accumulator toward zero, matching vips's
+    /// float-then-cast rather than round-to-nearest. vips `recomb` produces a
+    /// float image and the differential cast to the input depth truncates
+    /// (verified with the oracle: `vips cast` of `6.5 -> 6`, `6.6 -> 6`). A
+    /// fractional result of `6.5` therefore becomes `6`, where the old
+    /// round-to-nearest gave `7` — a 1-LSB divergence.
+    #[test]
+    fn recomb_truncates_like_vips() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        // 0.1*10 + 0.1*20 + 0.1166667*30 = 6.5 -> truncates to 6.
+        let m65: &[&[f64]] = &[&[0.1, 0.1, 0.1166667]];
+        assert_eq!(im.recomb(m65).getpoint(0, 0), vec![6.0]);
+        // 0.1*10 + 0.1*20 + 0.12*30 = 6.6 -> truncates to 6.
+        let m66: &[&[f64]] = &[&[0.1, 0.1, 0.12]];
+        assert_eq!(im.recomb(m66).getpoint(0, 0), vec![6.0]);
+        // A negative accumulator clamps to 0 (not wrapping).
+        let mneg: &[&[f64]] = &[&[-1.0, 0.0, 0.0]];
+        assert_eq!(im.recomb(mneg).getpoint(0, 0), vec![0.0]);
+    }
+
+    /// vips stores the recomb accumulator as float32 before the cast truncates,
+    /// so an f64 accumulator that lands just below an integer inside the f32
+    /// round-up band rounds *up* first. Pinned against the oracle: input
+    /// `[10,20,30]` with coeff row `[0,0,0.23333332933333335]` gives an f64
+    /// accumulator of `6.99999988`, which `vips recomb` stores as f32 `7.0` and
+    /// `vips cast`->uchar yields `7` (not the `6` a direct f64 truncation would
+    /// give). Regression for #491.
+    #[test]
+    fn recomb_rounds_to_f32_before_truncating_like_vips() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+        // f64 acc = 6.99999988; f32 storage -> 7.0; cast -> 7.
+        let m: &[&[f64]] = &[&[0.0, 0.0, 0.233_333_329_333_333_35]];
+        assert_eq!(im.recomb(m).getpoint(0, 0), vec![7.0]);
+    }
+
+    /// Malformed recomb matrices are typed errors.
+    #[test]
+    fn recomb_typed_errors() {
+        let im = Raster::new(1, 1, PixelFormat::Rgb8, vec![0, 0, 0]).unwrap();
+        assert!(matches!(
+            im.try_recomb(&[]),
+            Err(ArithmeticError::EmptyMatrix)
+        ));
+        let bad: &[&[f64]] = &[&[1.0, 2.0]];
+        assert!(matches!(
+            im.try_recomb(bad),
+            Err(ArithmeticError::MatrixRowMismatch {
+                row: 0,
+                expected: 3,
+                got: 2
+            })
+        ));
+    }
+
+    // ---- premultiply / unpremultiply ----
+
+    /// premultiply scales colour bands by alpha/max and keeps alpha.
+    #[test]
+    fn premultiply_values() {
+        let im = Raster::new(1, 1, PixelFormat::Rgba8, vec![100, 200, 50, 127]).unwrap();
+        let r = im.premultiply();
+        assert_eq!(r.format(), PixelFormat::Rgba8);
+        // v * 127 / 255, rounded.
+        assert_eq!(r.getpoint(0, 0), vec![50.0, 100.0, 25.0, 127.0]);
+    }
+
+    /// unpremultiply inverts premultiply within rounding error and maps
+    /// zero alpha to zero.
+    #[test]
+    fn unpremultiply_round_trip_and_zero_alpha() {
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::Rgba8,
+            vec![100, 200, 50, 127, 90, 90, 90, 0],
+        )
+        .unwrap();
+        let round = im.premultiply().unpremultiply();
+        let orig = im.getpoint(0, 0);
+        let got = round.getpoint(0, 0);
+        for (o, g) in orig.iter().zip(got.iter()) {
+            assert!((o - g).abs() < 2.0, "expected {o}, got {g}");
+        }
+        // Zero alpha: premultiplied colour is 0 and stays 0.
+        assert_eq!(round.getpoint(1, 0), vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// The alpha ops treat the last band as alpha for any band count >= 2
+    /// and work at 16-bit depth.
+    #[test]
+    fn premultiply_two_band_and_16bit() {
+        let im = Raster::new(
+            1,
+            1,
+            PixelFormat::with_channels(2, 1).unwrap(),
+            vec![100, 128],
+        )
+        .unwrap();
+        let r = im.premultiply();
+        assert_eq!(r.getpoint(0, 0), vec![50.0, 128.0]); // 100*128/255 = 50.2
+
+        let vals = [40_000u16, 32_768u16];
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let im16 = Raster::new(1, 1, PixelFormat::with_channels(2, 2).unwrap(), data).unwrap();
+        let r16 = im16.premultiply();
+        assert_eq!(r16.getpoint(0, 0), vec![20_000.0, 32_768.0]); // 40000*32768/65535 ~ 20000.3
+    }
+
+    /// A single-band image has no alpha band: typed error.
+    #[test]
+    fn premultiply_single_band_is_typed_error() {
+        let im = gray(1, 1, vec![0]);
+        assert!(matches!(
+            im.try_premultiply(),
+            Err(ArithmeticError::NoAlphaBand { bands: 1 })
+        ));
+        assert!(matches!(
+            im.try_unpremultiply(),
+            Err(ArithmeticError::NoAlphaBand { bands: 1 })
+        ));
+    }
+
+    /// unpremultiply saturates invalid premultiplied data instead of
+    /// wrapping.
+    #[test]
+    fn unpremultiply_saturates() {
+        // Colour 200 with alpha 100: 200 * 255 / 100 = 510 saturates.
+        let im = Raster::new(
+            1,
+            1,
+            PixelFormat::with_channels(2, 1).unwrap(),
+            vec![200, 100],
+        )
+        .unwrap();
+        assert_eq!(im.unpremultiply().getpoint(0, 0), vec![255.0, 100.0]);
+    }
+
+    /// The integer-writing arithmetic ops still reject float rasters
+    /// loudly instead of writing garbage (the linear / divide family
+    /// floats; cast to an unsigned format first for the rest). The
+    /// read-only reductions accept floats since the create batch. The
+    /// panicking constant forms now delegate to their `try_*_const` twin,
+    /// so the diagnostic is the typed [`ArithmeticError::FloatUnsupported`]
+    /// message, which names the op (libviprs#281).
+    #[test]
+    #[should_panic(expected = "does not support float rasters")]
+    fn arithmetic_float_write_panics() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::zeroed(2, 2, f1).unwrap();
+        let _ = im.add_const(1.0);
+    }
+
+    /// The read-only reductions read `f32` samples: the float generators
+    /// from the create batch (`gaussnoise`, the masks) call `avg`,
+    /// `deviate`, `min`/`max`, and the position scans directly.
+    #[test]
+    fn reductions_read_float_rasters() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let mut im = Raster::zeroed(2, 2, f1).unwrap();
+        let samples: [f32; 4] = [0.5, -1.5, 2.0, 1.0];
+        for (i, v) in samples.iter().enumerate() {
+            im.data_mut()[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
+        }
+        assert_eq!(im.avg(), 0.5);
+        assert_eq!(im.min(), -1.5);
+        assert_eq!(im.max(), 2.0);
+        assert_eq!(im.minpos(), (-1.5, 1, 0));
+        assert_eq!(im.maxpos(), (2.0, 0, 1));
+        // sum 2.0, sum of squares 7.5: variance (7.5 - 2^2/4) / 3.
+        let dev = im.deviate();
+        assert!((dev - (6.5f64 / 3.0).sqrt()).abs() < 1e-12);
+    }
+
+    // ---- transcendental maths (float output) ----
+
+    /// The trig ops take degrees and produce a float raster:
+    /// sin(90) = 1, cos(0) = 1, tan(45) = 1.
+    #[test]
+    fn trig_degrees_float_output() {
+        let im = gray(3, 1, vec![90, 0, 45]);
+        let s = im.sin();
+        assert_eq!(s.format(), PixelFormat::with_channels(1, 4).unwrap());
+        let sv = float_samples(&s);
+        assert!((sv[0] - 1.0).abs() < 1e-6, "sin(90deg) = 1, got {}", sv[0]);
+        assert!(sv[1].abs() < 1e-6, "sin(0deg) = 0");
+
+        let cv = float_samples(&im.cos());
+        assert!((cv[1] - 1.0).abs() < 1e-6, "cos(0deg) = 1, got {}", cv[1]);
+
+        let tv = float_samples(&im.tan());
+        assert!((tv[2] - 1.0).abs() < 1e-6, "tan(45deg) = 1, got {}", tv[2]);
+    }
+
+    /// The inverse trig ops accept float input and produce degrees:
+    /// asin(1) = 90, asin(0.5) = 30, acos(1) = 0, atan(1) = 45.
+    #[test]
+    fn inverse_trig_degrees_from_float_input() {
+        let im = grayf(2, 1, &[1.0, 0.5]);
+        let a = float_samples(&im.asin());
+        assert!((a[0] - 90.0).abs() < 1e-4);
+        assert!((a[1] - 30.0).abs() < 1e-4);
+        let a = float_samples(&im.acos());
+        assert!(a[0].abs() < 1e-4);
+        assert!((a[1] - 60.0).abs() < 1e-4);
+        let a = float_samples(&im.atan());
+        assert!((a[0] - 45.0).abs() < 1e-4);
+    }
+
+    /// atan2 covers all four quadrants in degrees, atan2(y, x) with self
+    /// as the ordinate.
+    #[test]
+    fn atan2_quadrants() {
+        let y = grayf(4, 1, &[1.0, 1.0, -1.0, -1.0]);
+        let x = grayf(4, 1, &[1.0, -1.0, -1.0, 1.0]);
+        let a = float_samples(&y.atan2(&x));
+        assert!((a[0] - 45.0).abs() < 1e-4, "quadrant I, got {}", a[0]);
+        assert!((a[1] - 135.0).abs() < 1e-4, "quadrant II, got {}", a[1]);
+        assert!((a[2] + 135.0).abs() < 1e-4, "quadrant III, got {}", a[2]);
+        assert!((a[3] + 45.0).abs() < 1e-4, "quadrant IV, got {}", a[3]);
+    }
+
+    /// sinh / cosh overflow the f32 op output above asinh / acosh of
+    /// f32::MAX (~89.4): real libvips `vips_math` on uchar input also
+    /// outputs float (f32) and yields inf there, so inf IS the correct
+    /// op result for large fixture values (libviprs-tests issue #77:
+    /// sinh(226) ~ 7.07e97 >> f32::MAX ~ 3.4e38). Small probes stay
+    /// finite and exact.
+    #[test]
+    fn sinh_cosh_f32_overflow_matches_libvips() {
+        let big = gray(1, 1, vec![226]);
+        assert_eq!(float_samples(&big.sinh()), vec![f64::INFINITY]);
+        assert_eq!(float_samples(&big.cosh()), vec![f64::INFINITY]);
+
+        let small = gray(2, 1, vec![3, 5]);
+        let s = float_samples(&small.sinh());
+        assert!((s[0] - 3.0f64.sinh()).abs() < 1e-3, "sinh(3), got {}", s[0]);
+        let c = float_samples(&small.cosh());
+        assert!((c[1] - 5.0f64.cosh()).abs() < 1e-2, "cosh(5), got {}", c[1]);
+    }
+
+    /// The hyperbolic family round-trips through its inverses on float
+    /// rasters.
+    #[test]
+    fn hyperbolic_round_trips() {
+        let im = grayf(1, 1, &[0.5]);
+        let v = float_samples(&im.sinh().asinh())[0];
+        assert!((v - 0.5).abs() < 1e-6, "asinh(sinh(0.5)), got {v}");
+        let v = float_samples(&im.tanh().atanh())[0];
+        assert!((v - 0.5).abs() < 1e-6, "atanh(tanh(0.5)), got {v}");
+        let two = grayf(1, 1, &[2.0]);
+        let v = float_samples(&two.cosh().acosh())[0];
+        assert!((v - 2.0).abs() < 1e-6, "acosh(cosh(2)), got {v}");
+        let v = float_samples(&im.tanh())[0];
+        assert!((v - 0.5f64.tanh()).abs() < 1e-7);
+    }
+
+    /// log is the natural log, log10 base 10; exp and exp10 invert them:
+    /// log(e) = 1, log10(100) = 2, exp(0) = 1, exp10(2) = 100.
+    #[test]
+    fn log_exp_families() {
+        let im = grayf(2, 1, &[std::f64::consts::E as f32, 100.0]);
+        let l = float_samples(&im.log());
+        assert!((l[0] - 1.0).abs() < 1e-6, "log(e) = 1, got {}", l[0]);
+        let l = float_samples(&im.log10());
+        assert!((l[1] - 2.0).abs() < 1e-6, "log10(100) = 2, got {}", l[1]);
+
+        let im = gray(2, 1, vec![0, 2]);
+        let e = float_samples(&im.exp());
+        assert!((e[0] - 1.0).abs() < 1e-6, "exp(0) = 1, got {}", e[0]);
+        assert!((e[1] - 2.0f64.exp()).abs() < 1e-4);
+        let e = float_samples(&im.exp10());
+        assert!((e[0] - 1.0).abs() < 1e-6, "exp10(0) = 1");
+        assert!((e[1] - 100.0).abs() < 1e-3, "exp10(2) = 100, got {}", e[1]);
+    }
+
+    /// pow is self ** other and wop is other ** self, both float:
+    /// pow(2, 10) = 1024, wop(2, 10) = 100.
+    #[test]
+    fn pow_and_wop() {
+        let base = gray(1, 1, vec![2]);
+        let exp = gray(1, 1, vec![10]);
+        let v = float_samples(&base.pow(&exp))[0];
+        assert!((v - 1024.0).abs() < 1e-3, "2^10 = 1024, got {v}");
+        let v = float_samples(&base.wop(&exp))[0];
+        assert!((v - 100.0).abs() < 1e-3, "10^2 = 100, got {v}");
+    }
+
+    /// vips `math2` POW guards the whole `base == 0 && exp <= 0` quadrant to
+    /// `0`, not the IEEE / `f64::powf` values (`0 ** 0 = 1`, `0 ** -1 = +inf`,
+    /// `0 ** -0.5 = +inf`). Verified with the oracle: `vips math2_const zero
+    /// out pow c` yields `0` for `c` in `{0, -1, -2, -0.5}`, while a positive
+    /// base is untouched (`2 ** -1 = 0.5`). This holds for `pow`, the reversed
+    /// `wop`, and the depth-preserving `pow_const`; every other operand pair is
+    /// unchanged (`0 ** 5 = 0`, `5 ** 0 = 1`).
+    #[test]
+    fn pow_zero_zero_matches_vips() {
+        let zero = gray(1, 1, vec![0]);
+        let five = gray(1, 1, vec![5]);
+        assert_eq!(float_samples(&zero.pow(&zero))[0], 0.0, "pow(0,0) = 0");
+        assert_eq!(float_samples(&zero.wop(&zero))[0], 0.0, "wop(0,0) = 0");
+        assert_eq!(
+            zero.pow_const(0.0).getpoint(0, 0),
+            vec![0.0],
+            "pow_const(0,0)"
+        );
+        // Neighbouring cases are untouched.
+        assert_eq!(float_samples(&zero.pow(&five))[0], 0.0, "0^5 = 0");
+        assert_eq!(float_samples(&five.pow(&zero))[0], 1.0, "5^0 = 1");
+        assert_eq!(
+            five.pow_const(0.0).getpoint(0, 0),
+            vec![1.0],
+            "pow_const(5,0)=1"
+        );
+    }
+
+    /// vips POW keeps `0 ** exp = 0` for every `exp <= 0`, not just `exp == 0`:
+    /// `f64::powf(0, negative)` is `+inf`, but vips returns `0` (verified with
+    /// the oracle: `vips math2_const zero out pow c` yields `0` for `c` in
+    /// `{-1, -2, -0.5}`). A positive base still uses the normal power
+    /// (`2 ** -1 = 0.5`). Pinned across `pow`, `wop`, and `pow_const`.
+    #[test]
+    fn pow_zero_negative_exponent_matches_vips() {
+        let zero = gray(1, 1, vec![0]);
+        // pow_const: 0 ** -1 and 0 ** -0.5 are 0, not +inf.
+        assert_eq!(zero.pow_const(-1.0).getpoint(0, 0), vec![0.0], "0 ** -1");
+        assert_eq!(zero.pow_const(-2.0).getpoint(0, 0), vec![0.0], "0 ** -2");
+        assert_eq!(zero.pow_const(-0.5).getpoint(0, 0), vec![0.0], "0 ** -0.5");
+
+        // Image-image pow / wop with a zero base and a negative exponent.
+        let neg1 = grayf(1, 1, &[-1.0]);
+        assert_eq!(float_samples(&zero.pow(&neg1))[0], 0.0, "pow: 0 ** -1");
+        // wop(a, b) = b ** a, so wop(neg1, zero) = zero ** neg1 = 0.
+        assert_eq!(float_samples(&neg1.wop(&zero))[0], 0.0, "wop: 0 ** -1");
+
+        let neghalf = grayf(1, 1, &[-0.5]);
+        assert_eq!(float_samples(&zero.pow(&neghalf))[0], 0.0, "pow: 0 ** -0.5");
+
+        // A positive base keeps the ordinary power.
+        let two = grayf(1, 1, &[2.0]);
+        assert_eq!(float_samples(&two.pow(&neg1))[0], 0.5, "2 ** -1 = 0.5");
+    }
+
+    /// The math2 ops validate image compatibility like the other binary
+    /// ops.
+    #[test]
+    fn math2_rejects_mismatch() {
+        let a = gray(2, 1, vec![1, 2]);
+        let b = gray(1, 1, vec![3]);
+        assert!(matches!(
+            a.try_atan2(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+        assert!(matches!(
+            a.try_pow(&b),
+            Err(ArithmeticError::DimensionMismatch { .. })
+        ));
+    }
+
+    /// neg produces a float raster with negated samples; abs and sign have
+    /// float branches, so abs(neg(x)) round-trips and sign sees negatives.
+    #[test]
+    fn neg_abs_sign_float() {
+        let im = gray(2, 1, vec![5, 0]);
+        let n = im.neg();
+        assert!(n.format().is_float());
+        assert_eq!(float_samples(&n), vec![-5.0, 0.0]);
+        assert_eq!(float_samples(&n.abs()), vec![5.0, 0.0]);
+
+        let s = float_samples(&grayf(3, 1, &[-3.5, 0.0, 2.0]).sign());
+        assert_eq!(s, vec![-1.0, 0.0, 1.0]);
+    }
+
+    /// floor, ceil, and rint round float rasters samplewise (rint rounds
+    /// halves to the nearest even integer — banker's rounding, the libvips
+    /// VIPS_RINT / C99 `rint` behavior) and stay identities on integer input.
+    #[test]
+    fn rounding_on_float_rasters() {
+        let im = grayf(2, 1, &[1.5, -1.5]);
+        assert_eq!(float_samples(&im.floor()), vec![1.0, -2.0]);
+        assert_eq!(float_samples(&im.ceil()), vec![2.0, -1.0]);
+        assert_eq!(float_samples(&im.rint()), vec![2.0, -2.0]);
+
+        let ints = gray(2, 1, vec![3, 200]);
+        assert_eq!(ints.floor().data(), ints.data());
+        assert_eq!(ints.ceil().format(), PixelFormat::Gray8);
+    }
+
+    /// rint rounds exact halves to the nearest even integer (banker's
+    /// rounding), matching vips 8.18.4 `vips round in out rint`, which was
+    /// verified against the oracle to map the half-integers as pinned below.
+    /// `f64::round` (half away from zero) would give `1, 2, 3, 4, -1, -2, -3`
+    /// for these inputs — the old, divergent behavior this replaces.
+    #[test]
+    fn rint_rounds_half_to_even() {
+        let im = grayf(8, 1, &[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, -3.5]);
+        assert_eq!(
+            float_samples(&im.rint()),
+            vec![0.0, 2.0, 2.0, 4.0, 0.0, -2.0, -2.0, -4.0]
+        );
+        // Non-half values still round to nearest as usual.
+        let f = grayf(4, 1, &[0.4, 0.6, -0.4, 2.9]);
+        assert_eq!(float_samples(&f.rint()), vec![0.0, 1.0, 0.0, 3.0]);
+    }
+
+    /// The unary maths accept float input (a chained result) without
+    /// panicking, unlike the integer-writing ops.
+    #[test]
+    fn math_accepts_float_input() {
+        let im = gray(1, 1, vec![90]);
+        let chained = im.sin().asin();
+        assert!((float_samples(&chained)[0] - 90.0).abs() < 1e-4);
+    }
+
+    // ---- complex operations ----
+
+    /// complexform interleaves (re, im) pairs; real / imag extract them
+    /// and conj negates the imaginary half.
+    #[test]
+    fn complexform_real_imag_conj() {
+        let re = gray(1, 1, vec![3]);
+        let im = gray(1, 1, vec![4]);
+        let z = Raster::complexform(&re, &im);
+        assert_eq!(z.format(), PixelFormat::with_channels(2, 4).unwrap());
+        assert_eq!(float_samples(&z), vec![3.0, 4.0]);
+        assert_eq!(float_samples(&z.real()), vec![3.0]);
+        assert_eq!(float_samples(&z.imag()), vec![4.0]);
+        assert_eq!(float_samples(&z.conj()), vec![3.0, -4.0]);
+    }
+
+    /// Multi-band complexform interleaves per band: bands [1, 2] and
+    /// [3, 4] become [1, 3, 2, 4], and real / imag recover the halves.
+    #[test]
+    fn complexform_multiband_interleaving() {
+        let two = PixelFormat::with_channels(2, 1).unwrap();
+        let re = Raster::new(1, 1, two, vec![1, 2]).unwrap();
+        let im = Raster::new(1, 1, two, vec![3, 4]).unwrap();
+        let z = Raster::complexform(&re, &im);
+        assert_eq!(float_samples(&z), vec![1.0, 3.0, 2.0, 4.0]);
+        assert_eq!(float_samples(&z.real()), vec![1.0, 2.0]);
+        assert_eq!(float_samples(&z.imag()), vec![3.0, 4.0]);
+    }
+
+    /// polar converts (3, 4) to magnitude 5 and angle atan2(4, 3) in
+    /// degrees; rect converts back.
+    #[test]
+    fn polar_rect_round_trip() {
+        let z = Raster::complexform(&gray(1, 1, vec![3]), &gray(1, 1, vec![4]));
+        let p = float_samples(&z.polar());
+        assert!((p[0] - 5.0).abs() < 1e-5, "|3+4i| = 5, got {}", p[0]);
+        let want = 4.0f64.atan2(3.0).to_degrees();
+        assert!((p[1] - want).abs() < 1e-4, "arg(3+4i), got {}", p[1]);
+
+        let back = float_samples(&z.polar().rect());
+        assert!((back[0] - 3.0).abs() < 1e-4);
+        assert!((back[1] - 4.0).abs() < 1e-4);
+    }
+
+    /// The ported polar expectation: (100 + 100i) has magnitude
+    /// 100 * sqrt(2) and angle 45 degrees.
+    #[test]
+    fn polar_ported_values() {
+        let re = gray(1, 1, vec![100]);
+        let z = Raster::complexform(&re, &re);
+        let p = float_samples(&z.polar());
+        assert!((p[0] - 100.0 * 2.0f64.sqrt()).abs() < 1e-3);
+        assert!((p[1] - 45.0).abs() < 1e-4);
+    }
+
+    /// The complex ops reject odd band counts with a typed error.
+    #[test]
+    fn complex_rejects_odd_bands() {
+        let odd = gray(1, 1, vec![7]);
+        assert!(matches!(
+            odd.try_polar(),
+            Err(ArithmeticError::NotComplex { bands: 1 })
+        ));
+        assert!(matches!(
+            odd.try_real(),
+            Err(ArithmeticError::NotComplex { bands: 1 })
+        ));
+    }
+
+    // ---- hough transforms ----
+
+    /// Decode a hough_line accumulator row back to a signed pixel distance,
+    /// inverting vips's `ri = (r + 1) * (height / 2)` mapping over the
+    /// image-diagonal normalization.
+    fn hough_distance(row: u32, acc_height: u32, w: u32, h: u32) -> f64 {
+        let diag = ((w * w + h * h) as f64).sqrt();
+        (2.0 * row as f64 / acc_height as f64 - 1.0) * diag
+    }
+
+    /// A horizontal line at y = 30 peaks at the 90-degree angle bin and
+    /// the distance bin decoding to ~30. Verified against vips 8.18.4
+    /// `hough_line`: the peak lands at accumulator cell (x=128, y=155) with
+    /// exactly 100 votes (`vips csvsave` of the accumulator), matching this
+    /// crate's output cell-for-cell.
+    #[test]
+    fn hough_line_horizontal_peak() {
+        let mut data = vec![0u8; 100 * 100];
+        for x in 0..100 {
+            data[30 * 100 + x] = 255;
+        }
+        let im = gray(100, 100, data);
+        let acc = im.hough_line();
+        assert_eq!((acc.width(), acc.height()), (256, 256));
+        let (votes, x, y) = acc.maxpos();
+        assert_eq!(votes, 100.0, "all 100 line pixels vote in one bin");
+        // vips places the peak at exactly (128, 155).
+        assert_eq!((x, y), (128, 155), "vips peak cell (angle, distance)");
+        let angle = 180.0 * x as f64 / acc.width() as f64;
+        let distance = hough_distance(y, acc.height(), 100, 100);
+        assert!(
+            (angle - 90.0).abs() < 2.0,
+            "angle should be ~90, got {angle}"
+        );
+        assert!(
+            (distance - 30.0).abs() < 2.0,
+            "distance should be ~30, got {distance}"
+        );
+    }
+
+    /// The ported diagonal: a line along x + y = 100 peaks at 45 degrees
+    /// and signed distance ~ 100 / sqrt(2), decoded through vips's
+    /// diagonal-normalized `(r + 1) * height / 2` binning.
+    #[test]
+    fn hough_line_diagonal_peak() {
+        let mut data = vec![0u8; 100 * 100];
+        for x in 10..=90 {
+            data[(100 - x) * 100 + x] = 255;
+        }
+        let im = gray(100, 100, data);
+        let acc = im.hough_line();
+        let (_votes, x, y) = acc.maxpos();
+        let angle = 180.0 * x as f64 / acc.width() as f64;
+        let distance = hough_distance(y, acc.height(), 100, 100);
+        assert!(
+            (angle - 45.0).abs() < 5.0,
+            "angle should be ~45, got {angle}"
+        );
+        assert!(
+            (distance - 100.0 / 2.0f64.sqrt()).abs() < 5.0,
+            "distance should be ~70.7, got {distance}"
+        );
+    }
+
+    /// Pins the exact vips 8.18.4 binning for a single lit pixel against the
+    /// oracle. A 16x16 image with one pixel at (3, 4) produces, at the
+    /// theta = 0 column (i = 0, so `r = xd = x / sqrt(w^2+h^2)`), a vote in
+    /// row `(r + 1) * 128`. vips `hough_line` (default 256x256) casts every
+    /// column's vote — 256 votes total for one pixel, none discarded — and
+    /// the theta=0 vote lands in row 144 (`vips hough_line` + `csvsave`
+    /// confirm exactly `[144]` in column 0), matching this computation.
+    #[test]
+    fn hough_line_single_pixel_matches_vips_binning() {
+        let mut data = vec![0u8; 16 * 16];
+        data[4 * 16 + 3] = 255;
+        let acc = gray(16, 16, data).hough_line();
+        // One lit pixel votes in every one of the 256 angle columns, and
+        // none fall outside the accumulator (diagonal normalization).
+        let total: f64 = {
+            let (w, h) = (acc.width(), acc.height());
+            (0..w)
+                .flat_map(|x| (0..h).map(move |y| (x, y)))
+                .map(|(x, y)| acc.getpoint(x, y)[0])
+                .sum()
+        };
+        assert_eq!(total, 256.0, "one pixel votes once per angle column");
+        // theta = 0 column: r = 3 / sqrt(16^2+16^2), ri = (r + 1) * 128.
+        let diag = ((16 * 16 + 16 * 16) as f64).sqrt();
+        let r = 3.0 / diag;
+        let ri = ((r + 1.0) * 128.0) as u32;
+        assert_eq!(ri, 144, "vips theta=0 row for pixel x=3");
+        assert_eq!(acc.getpoint(0, ri)[0], 1.0, "vote sits in the vips row");
+    }
+
+    /// Pins the intentional accumulator-format deviation from vips (#495): a
+    /// line with more than 65535 collinear lit pixels overflows a single
+    /// accumulator cell. vips carries the accumulator as 32-bit `uint` and
+    /// reports the true count; this crate carries `Gray16` (ushort) and clamps
+    /// at 65535. A 70000x1 all-lit row concentrates every vote into one cell at
+    /// the theta bin where the x-term vanishes (column 128, row 128), so vips
+    /// reports 70000 there (verified: `vips hough_line` + `vips max` on a
+    /// 70000x1 uchar line = 70000) while this op saturates to 65535. Peak
+    /// location still agrees; only the >65535 count is clamped.
+    #[test]
+    fn hough_line_saturates_above_65535_votes_deviation() {
+        let w = 70000usize;
+        let acc = gray(w as u32, 1, vec![255u8; w]).hough_line();
+        let (peak, x, y) = acc.maxpos();
+        // vips reports the uncapped 70000 here; core clamps to u16::MAX.
+        assert_eq!(peak, 65535.0, "ushort accumulator saturates (vips: 70000)");
+        assert_eq!(
+            (x, y),
+            (128, 128),
+            "all votes concentrate in the vanishing-x-term bin, as in vips"
+        );
+    }
+
+    /// A drawn circle of radius 40 at (50, 50) peaks at its centre with
+    /// the strongest band at radius 40: every circle pixel votes for the
+    /// exact centre because voting reuses the drawing octant walk.
+    #[test]
+    fn hough_circle_centre_and_radius() {
+        let mut im = Raster::zeroed(100, 100, PixelFormat::Gray8).unwrap();
+        im.draw_circle(&[100], 50, 50, 40);
+
+        let acc = im.hough_circle(35, 45);
+        assert_eq!((acc.width(), acc.height()), (100, 100));
+        assert_eq!(acc.format().channels(), 11);
+
+        let (_votes, x, y) = acc.maxpos();
+        assert!((x as f64 - 50.0).abs() < 2.0, "centre x ~50, got {x}");
+        assert!((y as f64 - 50.0).abs() < 2.0, "centre y ~50, got {y}");
+        let bands = acc.getpoint(x, y);
+        let r = bands
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i as u32 + 35)
+            .unwrap();
+        assert!((r as f64 - 40.0).abs() < 2.0, "radius ~40, got {r}");
+    }
+
+    /// hough_circle validates the radius range.
+    #[test]
+    fn hough_circle_rejects_empty_range() {
+        let im = gray(4, 4, vec![0; 16]);
+        assert!(matches!(
+            im.try_hough_circle(45, 35),
+            Err(ArithmeticError::EmptyRadiusRange { min: 45, max: 35 })
+        ));
+    }
+}

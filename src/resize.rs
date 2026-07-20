@@ -15,6 +15,14 @@ use crate::raster::{Raster, RasterError};
 pub fn downscale_half(src: &Raster) -> Result<Raster, RasterError> {
     let fmt = src.format();
 
+    // The integer box-filter kernels assume unsigned 8/16-bit samples;
+    // float pyramid levels are not part of the pipeline yet.
+    if fmt.is_float() {
+        return Err(RasterError::FloatUnsupported {
+            op: "downscale_half",
+        });
+    }
+
     if fmt.has_alpha() {
         downscale_half_alpha(src)
     } else {
@@ -88,11 +96,15 @@ fn downscale_half_noalpha(src: &Raster) -> Result<Raster, RasterError> {
 /// Matches libvips `SHRINK_ALPHA_TYPE` from `region.c`:
 /// - Alpha channel (last band) is averaged normally: `(a1+a2+a3+a4) / 4`
 /// - Color channels are weighted by their pixel's alpha:
-///   `(a1*c1 + a2*c2 + a3*c3 + a4*c4) / (4 * avg_alpha)`
-/// - If the averaged alpha is zero, all channels are set to zero
+///   `(a1*c1 + a2*c2 + a3*c3 + a4*c4) / (a1 + a2 + a3 + a4)`
+/// - If the summed alpha is zero, all channels are set to zero
 ///
 /// This prevents transparent pixels from darkening opaque neighbors
-/// when averaged together.
+/// when averaged together. Every sum is accumulated in `u64` and the final
+/// divides round half-up (colour `(w + alpha_sum/2)/alpha_sum`, alpha
+/// `(alpha_sum + count/2)/count`), matching [`downscale_to`] and the no-alpha
+/// box filter so a fully-opaque RGBA image downscales bit-identically to its
+/// RGB twin instead of carrying a systematic -0.5 LSB truncation bias.
 fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
     let dst_w = src.width().div_ceil(2);
     let dst_h = src.height().div_ceil(2);
@@ -117,82 +129,81 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
 
             let dst_offset = (dy as usize * dst_w as usize + dx as usize) * bpp;
 
-            // Gather alpha values from the contributing pixels
-            let mut alphas = [0.0f64; 4];
-            let mut pixel_offsets = [0usize; 4];
-            let mut n = 0;
+            // Read a single 8- or 16-bit sample as `u64`.
+            let read = |off: usize| -> u64 {
+                if bpc == 1 {
+                    u64::from(src_data[off])
+                } else {
+                    u64::from(u16::from_ne_bytes([src_data[off], src_data[off + 1]]))
+                }
+            };
+
+            // Accumulate the alpha-weighted colour sums and the total alpha over
+            // the (up-to) 2x2 source block in `u64`, mirroring `downscale_to`:
+            // colour is premultiplied by each pixel's alpha before averaging and
+            // un-premultiplied after, so the meaningless RGB of fully-transparent
+            // pixels cannot bleed into opaque neighbours. All sums stay integer so
+            // this path and `downscale_to` produce bit-identical output for the
+            // same block.
+            let mut alpha_sum: u64 = 0;
+            let mut weighted = [0u64; 4];
             for oy in 0..y_count {
                 for ox in 0..x_count {
                     let off = (sy + oy) as usize * src_stride + (sx + ox) as usize * bpp;
-                    pixel_offsets[n] = off;
-                    alphas[n] = if bpc == 1 {
-                        src_data[off + alpha_idx] as f64
-                    } else {
-                        u16::from_ne_bytes([
-                            src_data[off + alpha_idx * 2],
-                            src_data[off + alpha_idx * 2 + 1],
-                        ]) as f64
-                    };
-                    n += 1;
+                    let a = read(off + alpha_idx * bpc);
+                    alpha_sum += a;
+                    for (c, w) in weighted[..alpha_idx].iter_mut().enumerate() {
+                        *w += a * read(off + c * bpc);
+                    }
                 }
             }
 
-            // Average alpha
-            let alpha_sum: f64 = alphas[..n].iter().sum();
-            let avg_alpha = alpha_sum / count as f64;
+            if alpha_sum == 0 {
+                // Fully transparent block — leave every band zero (`dst` is
+                // pre-zeroed), matching `downscale_to`.
+                continue;
+            }
 
-            if avg_alpha == 0.0 {
-                // All transparent — zero all channels
-                for c in 0..channels {
-                    if bpc == 1 {
-                        dst[dst_offset + c] = 0;
-                    } else {
-                        dst[dst_offset + c * 2] = 0;
-                        dst[dst_offset + c * 2 + 1] = 0;
-                    }
-                }
-            } else {
-                // Alpha-weighted average for color channels
-                for c in 0..alpha_idx {
-                    let mut weighted_sum = 0.0f64;
-                    for i in 0..n {
-                        let val = if bpc == 1 {
-                            src_data[pixel_offsets[i] + c] as f64
-                        } else {
-                            u16::from_ne_bytes([
-                                src_data[pixel_offsets[i] + c * 2],
-                                src_data[pixel_offsets[i] + c * 2 + 1],
-                            ]) as f64
-                        };
-                        weighted_sum += alphas[i] * val;
-                    }
-
-                    let result = weighted_sum / (count as f64 * avg_alpha);
-
-                    if bpc == 1 {
-                        // vips truncates (C cast from double to int)
-                        dst[dst_offset + c] = result as u8;
-                    } else {
-                        let bytes = (result as u16).to_ne_bytes();
-                        dst[dst_offset + c * 2] = bytes[0];
-                        dst[dst_offset + c * 2 + 1] = bytes[1];
-                    }
-                }
-
-                // Alpha channel — simple average
+            // Alpha-weighted colour bands, `weighted / alpha_sum` round-half-up
+            // (matches the `downscale_to` fix, not a truncating C double→int cast),
+            // so a fully-opaque RGBA image downscales bit-identically to its RGB
+            // twin instead of carrying a systematic -0.5 LSB bias.
+            for (c, &w) in weighted[..alpha_idx].iter().enumerate() {
+                let result = (w + alpha_sum / 2) / alpha_sum;
                 if bpc == 1 {
-                    // vips truncates alpha too (C double→int cast)
-                    dst[dst_offset + alpha_idx] = avg_alpha as u8;
+                    dst[dst_offset + c] = result as u8;
                 } else {
-                    let bytes = (avg_alpha as u16).to_ne_bytes();
-                    dst[dst_offset + alpha_idx * 2] = bytes[0];
-                    dst[dst_offset + alpha_idx * 2 + 1] = bytes[1];
+                    let bytes = (result as u16).to_ne_bytes();
+                    dst[dst_offset + c * 2] = bytes[0];
+                    dst[dst_offset + c * 2 + 1] = bytes[1];
                 }
+            }
+
+            // Alpha band: simple average, round-half-up like the no-alpha branch
+            // (`(alpha_sum + count / 2) / count`).
+            let avg_alpha = (alpha_sum + count as u64 / 2) / count as u64;
+            if bpc == 1 {
+                dst[dst_offset + alpha_idx] = avg_alpha as u8;
+            } else {
+                let bytes = (avg_alpha as u16).to_ne_bytes();
+                dst[dst_offset + alpha_idx * 2] = bytes[0];
+                dst[dst_offset + alpha_idx * 2 + 1] = bytes[1];
             }
         }
     }
 
     Raster::new(dst_w, dst_h, fmt, dst)
+}
+
+/// Number of source samples covered by one destination pixel's source region.
+///
+/// This is the divisor used to average a destination pixel, so it must be exact
+/// for every downscale ratio. The half-open span `[sx0, sx1) x [sy0, sy1)` can
+/// be as large as the entire source raster (for a 1x1 destination), and a source
+/// may hold more than `u32::MAX` samples, so the product is computed in `u64`.
+#[inline]
+fn source_region_area(sx0: u32, sx1: u32, sy0: u32, sy1: u32) -> u64 {
+    (sx1 - sx0) as u64 * (sy1 - sy0) as u64
 }
 
 /// Downscale a raster to arbitrary dimensions using simple bilinear-ish area averaging.
@@ -210,6 +221,8 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
 /// - [test_resize_rounding](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
 ///   exercises arbitrary-ratio downscaling and checks that output dimensions
 ///   are correctly rounded.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-match-page-size)
 pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, RasterError> {
     if dst_w == 0 || dst_h == 0 {
         return Err(RasterError::ZeroDimension {
@@ -218,16 +231,62 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
         });
     }
 
+    // The integer area-averaging kernel assumes unsigned 8/16-bit samples;
+    // float pyramid levels are not part of the pipeline yet.
+    if src.format().is_float() {
+        return Err(RasterError::FloatUnsupported { op: "downscale_to" });
+    }
+
     let fmt = src.format();
     let bpp = fmt.bytes_per_pixel();
     let bpc = fmt.bytes_per_channel();
     let channels = fmt.channels();
+    let has_alpha = fmt.has_alpha();
     let src_stride = src.stride();
     let src_data = src.data();
     let src_w = src.width();
     let src_h = src.height();
 
-    let mut dst = vec![0u8; dst_w as usize * dst_h as usize * bpp];
+    // `downscale_to` is downscale-only: reject any target larger than the
+    // source in either axis. This bounds the output buffer to the source's
+    // already-allocated size, so an adversarial `u32` target (e.g. a crafted
+    // PDF page at a large `--dpi` saturating to `u32::MAX`) cannot drive a
+    // multi-gigapixel allocation or overflow the size arithmetic below.
+    if dst_w > src_w || dst_h > src_h {
+        return Err(RasterError::UpscaleNotSupported {
+            src_w,
+            src_h,
+            dst_w,
+            dst_h,
+        });
+    }
+
+    // Fallible allocation: compute the length with checked arithmetic (defence
+    // in depth — the bound above already keeps it within the source size) and
+    // reserve via `try_reserve` so an allocation failure surfaces as a typed
+    // error instead of aborting the process.
+    let len = (dst_w as usize)
+        .checked_mul(dst_h as usize)
+        .and_then(|px| px.checked_mul(bpp))
+        .ok_or(RasterError::SizeOverflow {
+            width: dst_w,
+            height: dst_h,
+            bpp,
+        })?;
+    let mut dst: Vec<u8> = Vec::new();
+    dst.try_reserve(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width: dst_w,
+            height: dst_h,
+            bytes: len,
+        })?;
+    dst.resize(len, 0);
+
+    // Reusable per-output-pixel alpha-weighted colour accumulator (one entry per
+    // colour band), allocated once so the alpha branch does not allocate inside
+    // the loop. Empty for the no-alpha path.
+    let alpha_idx = if has_alpha { channels - 1 } else { 0 };
+    let mut weighted = vec![0u64; alpha_idx];
 
     for dy in 0..dst_h {
         for dx in 0..dst_w {
@@ -240,35 +299,103 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
             let sy1 = sy1.min(src_h);
 
             let dst_offset = (dy as usize * dst_w as usize + dx as usize) * bpp;
-            let count = (sx1 - sx0) * (sy1 - sy0);
+            let count = source_region_area(sx0, sx1, sy0, sy1);
 
             if count == 0 {
                 continue;
             }
 
-            for c in 0..channels {
-                let mut sum: u64 = 0;
+            if has_alpha {
+                // Alpha-weighted area averaging, mirroring `downscale_half_alpha`
+                // for the arbitrary-ratio region `[sx0,sx1) x [sy0,sy1)`. Colour
+                // bands are weighted by each source pixel's alpha (premultiply
+                // before averaging, un-premultiply after) so the meaningless RGB
+                // of fully-transparent pixels cannot bleed into opaque neighbours
+                // and darken edges; the alpha band is a simple average.
+                //
+                // The region is scanned exactly once, reading each source pixel's
+                // alpha a single time while accumulating every colour band's
+                // alpha-weighted sum alongside the total alpha (#414). All sums
+                // stay in `u64` — exact where the colour accumulator would drop
+                // low bits above 2^53 for an extreme 16-bit region (#418), just
+                // like the no-alpha branch — and the final divides round half-up
+                // rather than truncating (#416/#417), so a fully-opaque RGBA image
+                // downscales bit-identically to its RGB twin instead of carrying a
+                // systematic -0.5 LSB bias.
+                let read = |off: usize| -> u64 {
+                    if bpc == 1 {
+                        u64::from(src_data[off])
+                    } else {
+                        u64::from(u16::from_ne_bytes([src_data[off], src_data[off + 1]]))
+                    }
+                };
+
+                weighted.iter_mut().for_each(|w| *w = 0);
+                let mut alpha_sum: u64 = 0;
                 for sy in sy0..sy1 {
                     for sx in sx0..sx1 {
-                        let src_offset = sy as usize * src_stride + sx as usize * bpp + c * bpc;
-                        if bpc == 1 {
-                            sum += src_data[src_offset] as u64;
-                        } else {
-                            let val = u16::from_ne_bytes([
-                                src_data[src_offset],
-                                src_data[src_offset + 1],
-                            ]);
-                            sum += val as u64;
+                        let px = sy as usize * src_stride + sx as usize * bpp;
+                        let a = read(px + alpha_idx * bpc);
+                        alpha_sum += a;
+                        for (c, w) in weighted.iter_mut().enumerate() {
+                            *w += a * read(px + c * bpc);
                         }
                     }
                 }
-                let avg = (sum + count as u64 / 2) / count as u64;
+
+                if alpha_sum == 0 {
+                    // Fully transparent region: every band stays zero (the
+                    // destination buffer is pre-zeroed), matching the sibling.
+                    continue;
+                }
+
+                // Alpha-weighted colour bands, `weighted / alpha_sum` round-half-up.
+                for (c, &w) in weighted.iter().enumerate() {
+                    let result = (w + alpha_sum / 2) / alpha_sum;
+                    if bpc == 1 {
+                        dst[dst_offset + c] = result as u8;
+                    } else {
+                        let bytes = (result as u16).to_ne_bytes();
+                        dst[dst_offset + c * 2] = bytes[0];
+                        dst[dst_offset + c * 2 + 1] = bytes[1];
+                    }
+                }
+
+                // Alpha band: simple average, round-half-up like the no-alpha
+                // branch (`(sum + count / 2) / count`).
+                let avg_alpha = (alpha_sum + count / 2) / count;
                 if bpc == 1 {
-                    dst[dst_offset + c] = avg as u8;
+                    dst[dst_offset + alpha_idx] = avg_alpha as u8;
                 } else {
-                    let bytes = (avg as u16).to_ne_bytes();
-                    dst[dst_offset + c * 2] = bytes[0];
-                    dst[dst_offset + c * 2 + 1] = bytes[1];
+                    let bytes = (avg_alpha as u16).to_ne_bytes();
+                    dst[dst_offset + alpha_idx * 2] = bytes[0];
+                    dst[dst_offset + alpha_idx * 2 + 1] = bytes[1];
+                }
+            } else {
+                for c in 0..channels {
+                    let mut sum: u64 = 0;
+                    for sy in sy0..sy1 {
+                        for sx in sx0..sx1 {
+                            let src_offset = sy as usize * src_stride + sx as usize * bpp + c * bpc;
+                            if bpc == 1 {
+                                sum += src_data[src_offset] as u64;
+                            } else {
+                                let val = u16::from_ne_bytes([
+                                    src_data[src_offset],
+                                    src_data[src_offset + 1],
+                                ]);
+                                sum += val as u64;
+                            }
+                        }
+                    }
+                    let avg = (sum + count / 2) / count;
+                    if bpc == 1 {
+                        dst[dst_offset + c] = avg as u8;
+                    } else {
+                        let bytes = (avg as u16).to_ne_bytes();
+                        dst[dst_offset + c * 2] = bytes[0];
+                        dst[dst_offset + c * 2 + 1] = bytes[1];
+                    }
                 }
             }
         }
@@ -451,6 +578,56 @@ mod tests {
     }
 
     /**
+     * Tests that a saturated-dimension target is rejected with a typed error
+     * rather than overflowing the output-buffer size arithmetic.
+     *
+     * `downscale_to` derives its output allocation from the free `u32` target
+     * dimensions. A crafted request such as `u32::MAX x u32::MAX` drives
+     * `dst_w * dst_h * bpp` past `usize::MAX`: in debug the multiplication
+     * panics, and in release it wraps to a small value, under-allocates, and
+     * then slice-panics on the first write. Either way the process is taken
+     * down by untrusted input. The checked path must return an `Err` before
+     * allocating.
+     *
+     * Input: downscale_to(4x4 Rgba8, u32::MAX, u32::MAX) -> Err (no panic/abort).
+     */
+    #[test]
+    fn downscale_to_saturated_dimensions_rejected() {
+        let src = solid_raster(4, 4, &[10, 20, 30, 40], PixelFormat::Rgba8);
+        let result = downscale_to(&src, u32::MAX, u32::MAX);
+        assert!(result.is_err(), "expected Err for saturated target, got Ok");
+        assert!(
+            matches!(result, Err(RasterError::UpscaleNotSupported { .. })),
+            "expected UpscaleNotSupported, got {result:?}"
+        );
+    }
+
+    /**
+     * Tests that downscale_to enforces its downscale-only contract: a target
+     * larger than the source in either axis is rejected with a typed error
+     * rather than allocating an unbounded buffer, while an equal-size target
+     * (a no-op downscale) is still accepted.
+     *
+     * Input: downscale_to(8x8, 9, 8) -> Err(UpscaleNotSupported);
+     *        downscale_to(8x8, 8, 9) -> Err(UpscaleNotSupported);
+     *        downscale_to(8x8, 8, 8) -> Ok.
+     */
+    #[test]
+    fn downscale_to_upscale_rejected() {
+        let src = solid_raster(8, 8, &[42], PixelFormat::Gray8);
+        assert!(matches!(
+            downscale_to(&src, 9, 8),
+            Err(RasterError::UpscaleNotSupported { .. })
+        ));
+        assert!(matches!(
+            downscale_to(&src, 8, 9),
+            Err(RasterError::UpscaleNotSupported { .. })
+        ));
+        // Equal size is a valid (no-op) downscale.
+        assert!(downscale_to(&src, 8, 8).is_ok());
+    }
+
+    /**
      * Tests that downscaling a solid-color image preserves the color exactly.
      * Works by area-averaging a uniform RGB image to an arbitrary smaller size
      * and verifying every output pixel matches the original color.
@@ -465,6 +642,115 @@ mod tests {
         for chunk in dst.data().chunks(3) {
             assert_eq!(chunk, &[200, 100, 50]);
         }
+    }
+
+    /**
+     * Regression for #287: `downscale_to` must alpha-weight colour channels so
+     * the RGB of fully-transparent pixels cannot bleed into opaque neighbours.
+     *
+     * A 4x1 RGBA raster alternates opaque red and *transparent green* so every
+     * 2-pixel destination region mixes an opaque and a transparent pixel across
+     * the boundary. Uniform averaging (the pre-fix behaviour) would pull the
+     * transparent green into the result (G ~= 128) and darken the red; the
+     * alpha-weighted average discards the zero-alpha contribution, so the
+     * surviving colour stays pure opaque red and the transparent green never
+     * appears.
+     *
+     * Input: 4x1 Rgba8 [red/A255, green/A0, green/A0, red/A255] -> downscale_to
+     * 2x1 -> both pixels (255, 0, 0, 128): red preserved, no green bleed.
+     */
+    #[test]
+    fn downscale_to_rgba_no_colour_bleed() {
+        #[rustfmt::skip]
+        let data = vec![
+            255, 0, 0, 255, // opaque red
+            0, 255, 0, 0,   // transparent green (must not bleed)
+            0, 255, 0, 0,   // transparent green (must not bleed)
+            255, 0, 0, 255, // opaque red
+        ];
+        let src = Raster::new(4, 1, PixelFormat::Rgba8, data).unwrap();
+        let dst = downscale_to(&src, 2, 1).unwrap();
+        assert_eq!(dst.width(), 2);
+        assert_eq!(dst.height(), 1);
+        // Each output pixel averages one opaque-red and one transparent-green
+        // source pixel. Alpha-weighted: R = (255*255 + 0*0)/255 = 255,
+        // G = (255*0 + 0*255)/255 = 0, A = (255 + 0)/2 = 127.5 -> 128
+        // (round-half-up, like the no-alpha branch).
+        for chunk in dst.data().chunks(4) {
+            assert_eq!(chunk[0], 255, "R: opaque red must be preserved");
+            assert_eq!(chunk[1], 0, "G: transparent green must NOT bleed in");
+            assert_eq!(chunk[2], 0, "B stays 0");
+            assert_eq!(chunk[3], 128, "A: simple average, round-half-up");
+        }
+    }
+
+    /**
+     * Regression for #416/#417: a fully-opaque RGBA image and its RGB twin must
+     * downscale to identical colour values. The alpha branch previously
+     * truncated the alpha-weighted colour while the no-alpha branch rounded
+     * half-up, so opaque RGBA output carried a systematic -0.5 LSB bias versus
+     * the same image without an alpha band. With both branches rounding half-up
+     * the colour channels now agree exactly.
+     *
+     * Input: 3x1 Rgb8 and its opaque Rgba8 twin with values that average to a
+     * .5 boundary -> downscale_to 1x1 -> identical RGB, alpha 255.
+     */
+    #[test]
+    fn downscale_to_opaque_rgba_matches_rgb_twin() {
+        // Two pixels whose per-channel means land exactly on .5, where
+        // round-half-up and truncation diverge (10.5 -> 11 rounded, 10 truncated).
+        #[rustfmt::skip]
+        let rgb = vec![
+            10, 20, 30,
+            11, 21, 31,
+        ]; // means: 10.5, 20.5, 30.5 -> round-half-up 11, 21, 31
+        let rgba = vec![
+            10, 20, 30, 255, //
+            11, 21, 31, 255, //
+        ];
+        let rgb_src = Raster::new(2, 1, PixelFormat::Rgb8, rgb).unwrap();
+        let rgba_src = Raster::new(2, 1, PixelFormat::Rgba8, rgba).unwrap();
+        let rgb_out = downscale_to(&rgb_src, 1, 1).unwrap();
+        let rgba_out = downscale_to(&rgba_src, 1, 1).unwrap();
+        let a = rgb_out.data();
+        let b = rgba_out.data();
+        assert_eq!(a, &[11, 21, 31], "RGB twin rounds half-up");
+        assert_eq!(
+            &b[..3],
+            &[11, 21, 31],
+            "opaque RGBA colour must match the RGB twin exactly (no truncation bias)"
+        );
+        assert_eq!(b[3], 255, "opaque alpha preserved");
+    }
+
+    /**
+     * Regression for #418: the alpha-weighted colour accumulator must stay
+     * integer-exact for 16-bit input, where an f64 accumulator would drop the
+     * low bits of a large weighted sum. A uniform opaque 16-bit image downscaled
+     * to 1x1 must reproduce its exact channel values (the alpha-weighted mean of
+     * a constant is that constant), with no rounding drift.
+     *
+     * Input: 8x8 Rgba16 uniform (40000, 20000, 8000, 65535) -> 1x1 -> same.
+     */
+    #[test]
+    fn downscale_to_rgba16_opaque_exact() {
+        let (w, h) = (8u32, 8u32);
+        let color = [40000u16, 20000, 8000, 65535];
+        let mut data = Vec::with_capacity((w * h) as usize * 8);
+        for _ in 0..w * h {
+            for &c in &color {
+                data.extend_from_slice(&c.to_ne_bytes());
+            }
+        }
+        let src = Raster::new(w, h, PixelFormat::Rgba16, data).unwrap();
+        let dst = downscale_to(&src, 1, 1).unwrap();
+        let px = dst.data();
+        let s = |i: usize| u16::from_ne_bytes([px[2 * i], px[2 * i + 1]]);
+        assert_eq!(
+            [s(0), s(1), s(2), s(3)],
+            color,
+            "16-bit opaque mean is exact"
+        );
     }
 
     // -- Alpha-weighted averaging tests --
@@ -506,9 +792,9 @@ mod tests {
         let src = Raster::new(2, 2, PixelFormat::Rgba8, data).unwrap();
         let dst = downscale_half(&src).unwrap();
 
-        // Alpha average = (255+255+0+0)/4 = 127 (truncated from 127.5)
-        // R = (255*255 + 255*255 + 0*0 + 0*0) / (4 * 127.5) = 130050/510 = 255
-        // G = (255*0 + 255*0 + 0*255 + 0*255) / (4 * 127.5) = 0
+        // Alpha average = (255+255+0+0)/4 = 127.5 → 128 (round half up)
+        // R = (255*255 + 255*255 + 0*0 + 0*0) / (255+255) = 130050/510 = 255
+        // G = (255*0 + 255*0 + 0*255 + 0*255) / 510 = 0
         // B = 0
         assert_eq!(dst.data()[0], 255, "R should be 255 (alpha-weighted)");
         assert_eq!(
@@ -517,7 +803,11 @@ mod tests {
             "G should be 0 (transparent pixels ignored)"
         );
         assert_eq!(dst.data()[2], 0, "B should be 0");
-        assert_eq!(dst.data()[3], 127, "A should be 127 (truncated from 127.5)");
+        assert_eq!(
+            dst.data()[3],
+            128,
+            "A should be 128 (127.5 rounded half up)"
+        );
     }
 
     /// Alpha-weighted: partial alpha correctly weights the contribution.
@@ -534,12 +824,12 @@ mod tests {
         let src = Raster::new(2, 2, PixelFormat::Rgba8, data).unwrap();
         let dst = downscale_half(&src).unwrap();
 
-        // Alpha = (200+50+0+0)/4 = 62.5 → 62 (truncated)
-        // R = (200*100 + 50*200 + 0 + 0) / (4 * 62.5) = 30000/250 = 120
-        let avg_alpha = (200.0 + 50.0) / 4.0;
-        let expected_r = (200.0 * 100.0 + 50.0 * 200.0) / (4.0 * avg_alpha);
-        assert_eq!(dst.data()[0], expected_r as u8, "R alpha-weighted");
-        assert_eq!(dst.data()[3], avg_alpha as u8, "A averaged");
+        // Alpha_sum = 200+50+0+0 = 250; count = 4.
+        // Alpha = (250 + 4/2) / 4 = 252/4 = 63 (62.5 rounded half up).
+        // R = (200*100 + 50*200 + alpha_sum/2) / alpha_sum
+        //   = (30000 + 125) / 250 = 120 (round half up).
+        assert_eq!(dst.data()[0], 120, "R alpha-weighted (round half up)");
+        assert_eq!(dst.data()[3], 63, "A averaged (62.5 rounded half up)");
     }
 
     /// Alpha-weighted averaging with odd dimensions handles edge pixels.
@@ -555,10 +845,67 @@ mod tests {
         let dst = downscale_half(&src).unwrap();
         assert_eq!(dst.width(), 2);
         assert_eq!(dst.height(), 1);
-        // First pixel: average of red+green (both alpha=255) → (127,127,0,255)
+        // First pixel: average of red+green (both alpha=255) → (128,128,0,255)
         // (with alpha-weighted: same as uniform since alpha is equal)
-        assert_eq!(dst.data()[0], 127); // R: (255*255+255*0)/(2*255) = 127
-        assert_eq!(dst.data()[1], 127); // G: (255*0+255*255)/(2*255) = 127 (truncated)
+        assert_eq!(dst.data()[0], 128); // R: (255*255 + 510/2)/510 = 65280/510 = 128
+        assert_eq!(dst.data()[1], 128); // G: (255*255 + 510/2)/510 = 128 (round half up)
         assert_eq!(dst.data()[3], 255); // A: (255+255)/2 = 255
+    }
+
+    /**
+     * Tests that the per-destination-pixel source area is computed in u64 so an
+     * extreme downscale ratio cannot overflow the divisor.
+     * Works by asking for the area of a whole 65536x65536 (~4.3 gigapixel)
+     * source mapped onto a single destination pixel: 65536*65536 == 2^32, which
+     * overflows a u32 product (debug panic / release wrap to 0 → a black or
+     * misdivided output pixel). Computed in u64 it is exact and still usable as
+     * a rounding divisor.
+     * Input: source region [0,65536) x [0,65536) → area 2^32, avg of all-200 == 200.
+     */
+    #[test]
+    fn area_count_widens_past_u32() {
+        let area = source_region_area(0, 65536, 0, 65536);
+        assert_eq!(area, 1u64 << 32, "gigapixel area must not overflow u32");
+
+        // Exercise the same rounding-divide the averaging loop performs, with a
+        // sum that only fits in u64, to confirm the divisor stays exact.
+        let sum: u64 = area * 200; // every source sample == 200
+        let avg = (sum + area / 2) / area;
+        assert_eq!(avg, 200, "u64 divisor must average correctly");
+    }
+
+    /**
+     * Tests that the downscale entry points reject float rasters with the
+     * typed FloatUnsupported error instead of misreading their bytes with
+     * the integer box-filter kernels. Covers both the named RgbaF32 (which
+     * has alpha and would otherwise take the alpha kernel) and FloatF32.
+     * Input: 4x4 float rasters → Err(FloatUnsupported) from both entries.
+     */
+    #[test]
+    fn downscale_rejects_float_with_typed_error() {
+        use crate::pixel::PixelFormat;
+
+        let rgba = Raster::zeroed(4, 4, PixelFormat::RgbaF32).unwrap();
+        assert!(matches!(
+            downscale_half(&rgba),
+            Err(RasterError::FloatUnsupported {
+                op: "downscale_half"
+            })
+        ));
+        assert!(matches!(
+            downscale_to(&rgba, 2, 2),
+            Err(RasterError::FloatUnsupported { op: "downscale_to" })
+        ));
+
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let gray = Raster::zeroed(4, 4, f1).unwrap();
+        assert!(matches!(
+            downscale_half(&gray),
+            Err(RasterError::FloatUnsupported { .. })
+        ));
+        assert!(matches!(
+            downscale_to(&gray, 2, 2),
+            Err(RasterError::FloatUnsupported { .. })
+        ));
     }
 }

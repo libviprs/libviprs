@@ -34,6 +34,8 @@ use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_png};
 /// * [`PackfileFormat::Tar`] — uncompressed POSIX tar.
 /// * [`PackfileFormat::TarGz`] — POSIX tar wrapped in a gzip stream (`.tar.gz`).
 /// * [`PackfileFormat::Zip`] — standard ZIP archive with per-entry compression.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackfileFormat {
     /// Plain uncompressed tar archive.
@@ -58,6 +60,10 @@ pub enum PackfileFormat {
 ///   checksum and sign.
 ///
 /// See [`PackfileFormat`] for the supported container formats.
+///
+/// On the CLI this sink is selected by passing a `packfile://…` URI to `--sink`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 pub struct PackfileSink {
     /// Final archive path (used to derive the archive stem for DZI / tile
     /// prefixes).
@@ -222,6 +228,12 @@ impl PackfileSink {
 
     /// Append raw `bytes` to the archive under `archive_path`.
     fn append_bytes(&self, archive_path: &str, bytes: &[u8]) -> Result<(), SinkError> {
+        // Fragile-write-path branch of the crate poison policy (crate::poison):
+        // the archive writer appends sequentially, so a holder that panicked
+        // mid-entry leaves a half-written tar/zip that every later append would
+        // corrupt. We therefore do NOT recover the guard; we surface the poison
+        // as a typed error so the run aborts cleanly instead of building on an
+        // unusable writer.
         let mut guard = self
             .writer
             .lock()
@@ -436,6 +448,89 @@ impl TileSink for PackfileSink {
 }
 
 // ---------------------------------------------------------------------------
+// ZipSink
+// ---------------------------------------------------------------------------
+
+/// Tile sink that packs an entire pyramid into a single ZIP archive.
+///
+/// `ZipSink` is a thin newtype over [`PackfileSink`] with the container
+/// format fixed to [`PackfileFormat::Zip`]. It gives callers who only ever
+/// want ZIP output a dedicated type to name, instead of threading a
+/// [`PackfileFormat`] argument through their code. Every [`TileSink`] method
+/// delegates straight to the inner [`PackfileSink`] (through the
+/// [`TileSink::inner_sink`] decorator hook for the engine-bookkeeping
+/// methods, and directly for [`TileSink::write_tile`] /
+/// [`TileSink::finish`]); ZipSink adds no archive-writing logic of its own.
+#[derive(Debug)]
+pub struct ZipSink {
+    inner: PackfileSink,
+}
+
+impl ZipSink {
+    /// Create a ZIP tile sink writing to `path`, using `plan` for tile paths
+    /// and `format` for the per-tile encoding. The container format is always
+    /// [`PackfileFormat::Zip`].
+    ///
+    /// This is the fallible constructor and the recommended entry point when a
+    /// caller wants to handle archive-creation failure explicitly. It delegates
+    /// to [`PackfileSink::new`]`(path, PackfileFormat::Zip, plan, format)`,
+    /// which opens `path` for writing up front.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SinkError::Io`] if the output file at `path` cannot be created
+    /// (for example a parent directory that cannot be created, or a permissions
+    /// error).
+    pub fn try_new(
+        path: impl Into<PathBuf>,
+        plan: PyramidPlan,
+        format: TileFormat,
+    ) -> Result<Self, SinkError> {
+        let inner = PackfileSink::new(path, PackfileFormat::Zip, plan, format)?;
+        Ok(Self { inner })
+    }
+
+    /// Create a ZIP tile sink writing to `path`, using `plan` for tile paths
+    /// and `format` for the per-tile encoding. The container format is always
+    /// [`PackfileFormat::Zip`]. This is a convenience wrapper over
+    /// [`ZipSink::try_new`] for call sites that treat archive creation as
+    /// infallible.
+    ///
+    /// # Panics
+    ///
+    /// Unlike the filesystem sinks (whose `new` constructors do no eager I/O
+    /// and defer every write to their `finish` path), `ZipSink::new` performs
+    /// eager I/O: it creates the archive file at `path` when the sink is
+    /// constructed. It therefore panics if that file cannot be created (for
+    /// example a parent directory that cannot be created, or a permissions
+    /// error). Callers who need to handle that failure should use
+    /// [`ZipSink::try_new`], which returns a [`Result`] instead.
+    pub fn new(path: impl Into<PathBuf>, plan: PyramidPlan, format: TileFormat) -> Self {
+        Self::try_new(path, plan, format)
+            .expect("ZipSink::new: failed to create the ZIP archive output file")
+    }
+
+    /// Returns the archive's output path.
+    pub fn out_path(&self) -> &Path {
+        self.inner.out_path()
+    }
+}
+
+impl TileSink for ZipSink {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        self.inner.write_tile(tile)
+    }
+
+    fn finish(&self) -> Result<(), SinkError> {
+        self.inner.finish()
+    }
+
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        Some(&self.inner)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Archive append helpers
 // ---------------------------------------------------------------------------
 
@@ -487,6 +582,23 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
         PixelFormat::Rgba8 => image::ColorType::Rgba8,
         PixelFormat::Rgb16 => image::ColorType::Rgb16,
         PixelFormat::Rgba16 => image::ColorType::Rgba16,
+        // Multiband intermediates (from the band ops in `crate::bands`) have
+        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
+        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
+            return Err(SinkError::EncodeMsg(format!(
+                "multiband raster ({} bands) cannot be encoded as an image tile",
+                raster.format().channels()
+            )));
+        }
+        // Float compute intermediates have no PNG/JPEG representation;
+        // cast to an unsigned 8/16-bit format before encoding tiles.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
+            return Err(SinkError::EncodeMsg(format!(
+                "float raster ({:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first",
+                raster.format()
+            )));
+        }
     };
 
     let mut buf = Vec::new();
@@ -631,5 +743,85 @@ mod tests {
 
         let meta = std::fs::metadata(&out).unwrap();
         assert!(meta.len() > 0, "tar archive must be non-empty");
+    }
+
+    /// TDD for the ZipSink lane (libviprs-tests#87): driving a `ZipSink`
+    /// across a small pyramid produces a `.zip` that exists, is non-empty,
+    /// and, when reopened with the `zip` crate, contains the expected tile
+    /// entries plus the root manifest.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn zip_sink_writes_pyramid_archive() {
+        let plan = make_plan(64, 64, 32);
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("pyramid.zip");
+
+        let sink = ZipSink::new(out.clone(), plan.clone(), TileFormat::Png);
+
+        // Drive every tile of the small pyramid through the sink, counting the
+        // total we feed in so we can pin the stored `_files/` entry count.
+        let mut driven_tiles = 0usize;
+        for level in &plan.levels {
+            for y in 0..level.rows {
+                for x in 0..level.cols {
+                    let tile = Tile {
+                        coord: TileCoord::new(level.level, x, y),
+                        raster: Raster::zeroed(32, 32, PixelFormat::Rgb8).unwrap(),
+                        blank: false,
+                    };
+                    sink.write_tile(&tile).unwrap();
+                    driven_tiles += 1;
+                }
+            }
+        }
+        assert!(driven_tiles > 0, "test must drive at least one tile");
+        sink.finish().unwrap();
+
+        // 1. The archive file exists and is non-empty.
+        let meta = std::fs::metadata(&out).unwrap();
+        assert!(meta.len() > 0, "zip archive must be non-empty");
+
+        // 2. Reopen with the zip crate and enumerate entry names.
+        let file = File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert!(!archive.is_empty(), "zip archive must contain entries");
+
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+
+        // 3. It carries DeepZoom tile entries under `<stem>_files/…` and the
+        //    root manifest.
+        assert!(
+            names
+                .iter()
+                .any(|n| n.contains("_files/") && n.ends_with(".png")),
+            "zip must contain DeepZoom tile entries, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "manifest.json"),
+            "zip must contain the root manifest.json, got: {names:?}"
+        );
+
+        // 4. Exactly one DeepZoom `_files/<level>/<x>_<y>.png` entry per driven
+        //    tile: no tile is dropped and none is duplicated on that path. (The
+        //    mirror `<stem>/…` entries live outside `_files/` and are excluded.)
+        let deep_zoom_tiles = names
+            .iter()
+            .filter(|n| n.contains("_files/") && n.ends_with(".png"))
+            .count();
+        assert_eq!(
+            deep_zoom_tiles, driven_tiles,
+            "DeepZoom `_files/*.png` entry count must equal the driven tile total, got: {names:?}"
+        );
+
+        // 5. `finish()` writes the DeepZoom `<stem>.dzi` manifest at the root.
+        //    The archive stem for `pyramid.zip` is `pyramid`, so pin the
+        //    contract by requiring the `pyramid.dzi` entry.
+        assert!(
+            names.iter().any(|n| n == "pyramid.dzi"),
+            "zip must contain the DeepZoom manifest `pyramid.dzi`, got: {names:?}"
+        );
     }
 }

@@ -23,24 +23,27 @@
 //!
 //! ## Entry points
 //!
-//! - [`generate_pyramid_mapreduce`] — explicit MapReduce with a [`StripSource`].
-//! - [`generate_pyramid_mapreduce_auto`] — auto-selects monolithic or MapReduce
-//!   based on the budget vs. estimated monolithic peak memory.
+//! MapReduce is reached through the fluent
+//! [`EngineBuilder`](crate::EngineBuilder). Select it explicitly with
+//! [`EngineKind::MapReduce`](crate::EngineKind::MapReduce) over a
+//! [`StripSource`], or let [`EngineKind::Auto`](crate::EngineKind::Auto)
+//! choose monolithic vs. MapReduce based on the budget vs. the estimated
+//! monolithic peak memory.
 
-use std::sync::Arc;
-
-use crate::engine::{BlankTileStrategy, EngineConfig, EngineError, EngineResult, is_blank_tile};
+use crate::engine::{
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, is_blank_for_strategy,
+};
 use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::raster::Raster;
-use crate::resize;
 use crate::sink::{Tile, TileSink};
 #[cfg(test)]
 use crate::streaming::RasterStripSource;
 use crate::streaming::{
-    StripSource, compute_strip_height, emit_full_level_tiles, emit_strip_tiles,
-    fill_background_rows, find_monolithic_threshold, obtain_canvas_strip, propagate_down,
+    StripSource, compute_strip_height, downscale_strip_tracked, emit_strip_tiles,
+    find_monolithic_threshold, flush_monolithic_levels, flush_unpaired_accumulators,
+    obtain_canvas_strip, propagate_down,
 };
 
 /// Configuration for the MapReduce streaming engine.
@@ -48,6 +51,10 @@ use crate::streaming::{
 /// Controls memory budget, per-strip tile concurrency, channel backpressure,
 /// and tile handling options. The budget determines how many strips can be
 /// in flight simultaneously during the Map phase.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
+/// (memory budget is documented at
+/// [`#flag-memory-budget`](https://libviprs.org/cli/#flag-memory-budget))
 #[derive(Debug, Clone)]
 pub struct MapReduceConfig {
     /// Soft memory budget in bytes (covers all in-flight strips + accumulators).
@@ -61,6 +68,15 @@ pub struct MapReduceConfig {
     pub background_rgb: [u8; 3],
     /// Blank tile handling strategy.
     pub blank_tile_strategy: BlankTileStrategy,
+    /// Optional cooperative-cancellation token. When set, the engine polls it
+    /// before each batch of strips and stops with
+    /// [`EngineError::Cancelled`] once cancelled (#133).
+    pub cancel: Option<crate::cancel::CancelToken>,
+    /// How terminal write failures are handled. Threaded from the builder so
+    /// the MapReduce engine honors the same `FailurePolicy` as the monolithic
+    /// and streaming engines (issue #134). Under `RetryThenSkip` a tile whose
+    /// retries are exhausted is skipped and accounted, not propagated.
+    pub failure_policy: crate::retry::FailurePolicy,
 }
 
 impl Default for MapReduceConfig {
@@ -71,6 +87,8 @@ impl Default for MapReduceConfig {
             buffer_size: 64,
             background_rgb: [255, 255, 255],
             blank_tile_strategy: BlankTileStrategy::Emit,
+            cancel: None,
+            failure_policy: crate::retry::FailurePolicy::default(),
         }
     }
 }
@@ -82,11 +100,122 @@ impl MapReduceConfig {
             buffer_size: self.buffer_size,
             background_rgb: self.background_rgb,
             blank_tile_strategy: self.blank_tile_strategy,
-            failure_policy: crate::retry::FailurePolicy::default(),
+            // Build-only: the MapReduce engine does not (yet) honour
+            // skip_blanks; keeping it off preserves current behaviour.
+            // Engine-side skip_blanks parity for streaming/mapreduce is
+            // deferred (libviprs-tests#87 lane 2 covers the monolithic engine).
+            skip_blanks: false,
+            failure_policy: self.failure_policy.clone(),
             checkpoint_every: 0,
             dedupe_strategy: None,
             checkpoint_root: None,
+            source_content_hash: None,
+            cancel: self.cancel.clone(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkExecutor seam (issue #67)
+// ---------------------------------------------------------------------------
+
+/// One unit of MAP-phase strip work, as dispatched by the MapReduce engine.
+///
+/// Identifies the horizontal band of the top-level canvas a
+/// [`WorkExecutor`] must render: `canvas_y` is the band's starting row in
+/// canvas coordinates, `height` its row count, and `level` the pyramid level
+/// the band belongs to (always the top level today; carried explicitly so an
+/// out-of-process executor can reconstruct the request without the plan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StripWorkUnit {
+    /// Starting row of the strip, in canvas coordinates.
+    pub canvas_y: u32,
+    /// Number of rows in the strip.
+    pub height: u32,
+    /// Pyramid level the strip is rendered at (the plan's top level).
+    pub level: u32,
+}
+
+/// Borrowed context handed to a [`WorkExecutor`] alongside each
+/// [`StripWorkUnit`].
+///
+/// Everything a local executor needs to render the strip in-process. An
+/// out-of-tree distribution layer is free to ignore these borrows and
+/// reconstruct equivalent state on the far side of its transport.
+#[derive(Clone, Copy)]
+pub struct WorkContext<'a> {
+    /// The strip source the engine was launched with.
+    pub source: &'a dyn StripSource,
+    /// The pyramid plan for this run.
+    pub plan: &'a PyramidPlan,
+    /// The engine configuration derived from the run's [`MapReduceConfig`].
+    pub config: &'a EngineConfig,
+}
+
+impl std::fmt::Debug for WorkContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkContext")
+            .field("plan", &self.plan)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Plug-in seam for MAP-phase strip dispatch (issue #67).
+///
+/// The MapReduce engine routes every strip render through this trait, so an
+/// alternative executor (a process pool, an out-of-tree distributed worker
+/// layer) can substitute for the built-in in-process rendering. Install one
+/// via [`EngineBuilder::with_executor`](crate::EngineBuilder::with_executor);
+/// the default is [`LocalWorkExecutor`], which preserves the engine's
+/// historical behaviour exactly.
+///
+/// # Contract
+///
+/// * **Dispatch order** — the engine dispatches work units in canonical
+///   order: strictly increasing `canvas_y`, gap-free over the canvas. On the
+///   parallel MAP path (a source that opts in via
+///   [`StripSource::permits_concurrent_strips`] plus `tile_concurrency > 0`)
+///   several `execute` calls may be in flight at once, so *completion* order
+///   is unspecified; the engine reassembles results positionally, and the
+///   REDUCE phase always consumes strips in canonical order regardless of the
+///   executor.
+/// * **Output** — the returned [`Raster`] must be the canvas-space strip for
+///   the request: `plan.canvas_width` wide, exactly `spec.height` rows, in
+///   `ctx.source.format()`. Byte-identical output to [`LocalWorkExecutor`] is
+///   required for the engine's byte-identical-pyramid guarantee to hold.
+/// * **Errors** — returning `Err` aborts the run with that error. A panic
+///   inside `execute` on the parallel path surfaces as
+///   [`EngineError::WorkerPanic`]; on the sequential path it unwinds, exactly
+///   as the built-in renderer always has.
+pub trait WorkExecutor: Send + Sync {
+    /// Render one canvas-space strip.
+    fn execute(&self, spec: StripWorkUnit, ctx: WorkContext<'_>) -> Result<Raster, EngineError>;
+
+    /// Self-reported identity carried on the attribution events the engine
+    /// emits for this executor's work (issue #67).
+    ///
+    /// The engine stamps this value onto [`EngineEvent::StripDispatched`]
+    /// and [`EngineEvent::StripExecutorDone`]
+    /// so an observer can attribute strip work back to the executor that
+    /// performed it. The default is `None` (unattributed), which is what
+    /// [`LocalWorkExecutor`] reports; an out-of-tree distribution layer
+    /// overrides this with its own identity scheme.
+    fn worker_id(&self) -> Option<crate::observe::WorkerId> {
+        None
+    }
+}
+
+/// Default [`WorkExecutor`]: renders the strip in-process.
+///
+/// Wraps the engine's built-in canvas-strip renderer, so installing it
+/// explicitly is byte-identical to not installing an executor at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LocalWorkExecutor;
+
+impl WorkExecutor for LocalWorkExecutor {
+    fn execute(&self, spec: StripWorkUnit, ctx: WorkContext<'_>) -> Result<Raster, EngineError> {
+        obtain_canvas_strip(ctx.source, ctx.plan, spec.canvas_y, spec.height, ctx.config)
     }
 }
 
@@ -133,11 +262,24 @@ fn estimate_mono_buffer_cost(plan: &PyramidPlan, format: PixelFormat) -> u64 {
 
 /// Compute the number of in-flight strips that fit within a memory budget.
 ///
-/// Returns at least 1.
+/// The budget must accommodate *every* live buffer the Map phase holds at
+/// once: all `K` decoded strips, the per-level accumulators and monolithic
+/// buffer (`fixed_cost`), and the bounded tile channel backlog
+/// (`channel_bytes`). Charging the channel and all `K` strips — rather than a
+/// single strip — is what keeps the real RSS within the configured ceiling
+/// (issue #103); previously only the accumulators were charged, so `K` strips
+/// plus the channel could push the peak toward 2× budget.
+///
+/// Returns at least 1. When even a single strip does not fit, callers rely on
+/// the pre-flight [`EngineError::BudgetExceeded`] check in the MapReduce engine
+/// to reject the budget up front.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
 pub fn compute_inflight_strips(
     plan: &PyramidPlan,
     format: PixelFormat,
     strip_height: u32,
+    channel_bytes: u64,
     memory_budget_bytes: u64,
 ) -> u32 {
     let bpp = format.bytes_per_pixel() as u64;
@@ -146,23 +288,43 @@ pub fn compute_inflight_strips(
         return 1;
     }
     let fixed_cost = estimate_accumulator_cost(plan, format, strip_height)
-        + estimate_mono_buffer_cost(plan, format);
+        + estimate_mono_buffer_cost(plan, format)
+        + channel_bytes;
     let available = memory_budget_bytes.saturating_sub(fixed_cost);
     let k = available / strip_cost;
-    k.max(1) as u32
+    // The image only spans this many strips (`strip_cost != 0` above implies
+    // `strip_height >= 1`, so the `div_ceil` is safe). There is no reason to
+    // admit more in-flight strips than actually exist, and using it as the
+    // upper clamp bound also keeps the return within `u32` range.
+    let total_strips = (plan.canvas_height.div_ceil(strip_height) as u64).max(1);
+    // Clamp *before* the `u32` cast: `k` is a `u64`, so a huge budget can yield
+    // a value at or above `2^32`. `k as u32` would then truncate — any nonzero
+    // multiple of `2^32` wraps to 0 — and `strip_specs.chunks(0)` panics with
+    // "chunk size must be non-zero". Clamping first guarantees `1..=total_strips`
+    // (issue #106).
+    k.clamp(1, total_strips) as u32
 }
 
 /// Estimate peak memory for the MapReduce streaming engine.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-parallel)
+///
+/// `channel_bytes` charges the bounded tile channel backlog (up to
+/// `buffer_size + concurrency` decoded tiles held in flight during parallel
+/// tile emission). It is included so the estimate reflects every live buffer,
+/// not just the strips and accumulators (issue #103).
 pub fn estimate_mapreduce_peak_memory(
     plan: &PyramidPlan,
     format: PixelFormat,
     strip_height: u32,
     inflight_strips: u32,
+    channel_bytes: u64,
 ) -> u64 {
     let bpp = format.bytes_per_pixel() as u64;
     let strip_cost = plan.canvas_width as u64 * strip_height as u64 * bpp;
     let fixed_cost = estimate_accumulator_cost(plan, format, strip_height)
-        + estimate_mono_buffer_cost(plan, format);
+        + estimate_mono_buffer_cost(plan, format)
+        + channel_bytes;
     let peak = inflight_strips as u64 * strip_cost + fixed_cost;
     peak + peak / 10
 }
@@ -172,6 +334,18 @@ pub fn estimate_mapreduce_peak_memory(
 // ---------------------------------------------------------------------------
 
 /// Emit tiles from a strip using parallel worker threads.
+///
+/// # Write order
+///
+/// Tiles are extracted concurrently and written to the [`TileSink`] in
+/// channel-*arrival* order, which is neither row-major nor stable across runs.
+/// `TileCompleted` events interleave arbitrarily for the same reason. The set of
+/// tiles written (and their bytes) is fully determined by the strip and plan, so
+/// the resulting pyramid is order-independent — but only for sinks that honour
+/// the [`TileSink`] contract and place each tile by its
+/// [`coord`](crate::sink::Tile::coord) rather than by arrival position. This is
+/// the parallel counterpart of the sequential [`emit_strip_tiles`], which emits
+/// the same tiles in row-major order.
 fn emit_strip_tiles_parallel(
     strip: &Raster,
     plan: &PyramidPlan,
@@ -183,7 +357,13 @@ fn emit_strip_tiles_parallel(
 ) -> Result<(u64, u64), EngineError> {
     let level_plan = &plan.levels[level as usize];
     let ts = plan.tile_size;
-    let use_placeholders = config.blank_tile_strategy == BlankTileStrategy::Placeholder;
+    // Honor the full `BlankTileStrategy` — including
+    // `PlaceholderWithTolerance` — via the same predicate the sequential and
+    // monolithic paths use. An exact-equality test against `Placeholder`
+    // silently dropped the tolerance variant whenever `tile_concurrency > 0`,
+    // flipping blank flags and `tiles_skipped` between concurrency settings and
+    // breaking the byte-identical-output guarantee (issue #107).
+    let blank_strategy = config.blank_tile_strategy;
 
     let first_row = strip_canvas_y / ts;
     let last_row = (strip_canvas_y + strip.height())
@@ -202,40 +382,47 @@ fn emit_strip_tiles_parallel(
         return Ok((0, 0));
     }
 
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Tile, EngineError>>(config.buffer_size);
+    // Routed through `crate::sync_queue` (loom-modellable under `--cfg loom`)
+    // rather than `std::sync::mpsc::sync_channel` directly, so the shipped
+    // backpressure/teardown protocol is what the loom suite exercises.
+    let (tx, rx) = crate::sync_queue::bounded::<Result<Tile, EngineError>>(config.buffer_size);
 
-    let strip_arc = Arc::new(strip.clone());
-    let plan_arc = Arc::new(plan.clone());
-
+    // Workers run under `std::thread::scope` and therefore cannot outlive
+    // this frame, so they borrow `strip` and `plan` directly. The previous
+    // `Arc::new(strip.clone())` held a full extra copy of the strip alive for
+    // the whole emission — memory the budget estimate never accounted for.
     let concurrency = config.tile_concurrency.min(coords.len());
     let chunk_size = coords.len().div_ceil(concurrency);
 
     std::thread::scope(|s| {
         for chunk in coords.chunks(chunk_size) {
             let tx = tx.clone();
-            let strip_arc = Arc::clone(&strip_arc);
-            let plan_arc = Arc::clone(&plan_arc);
             let chunk = chunk.to_vec();
             let bg = config.background_rgb;
 
             s.spawn(move || {
                 for coord in chunk {
-                    let result = crate::streaming::extract_tile_from_strip(
-                        &strip_arc,
-                        &plan_arc,
-                        coord,
-                        strip_canvas_y,
-                        bg,
-                    )
-                    .map(|tile_raster| {
-                        let blank = use_placeholders && is_blank_tile(&tile_raster);
-                        Tile {
+                    // Contain a worker panic as a typed `WorkerPanic` on the
+                    // channel rather than letting it unwind out of
+                    // `thread::scope`, matching the map phase (issue #118).
+                    let result = crate::engine::catch_worker_panic(|| {
+                        crate::streaming::extract_tile_from_strip(
+                            strip,
+                            plan,
                             coord,
-                            raster: tile_raster,
-                            blank,
-                        }
-                    })
-                    .map_err(EngineError::from);
+                            strip_canvas_y,
+                            bg,
+                        )
+                        .map(|tile_raster| {
+                            let blank = is_blank_for_strategy(&tile_raster, blank_strategy);
+                            Tile {
+                                coord,
+                                raster: tile_raster,
+                                blank,
+                            }
+                        })
+                        .map_err(EngineError::from)
+                    });
                     if tx.send(result).is_err() {
                         break;
                     }
@@ -252,8 +439,26 @@ fn emit_strip_tiles_parallel(
             if tile.blank {
                 skipped += 1;
             }
-            sink.write_tile(&tile)?;
-            observer.on_event(EngineEvent::TileCompleted { coord });
+            if let Err(e) = sink.write_tile(&tile) {
+                // Honor the configured FailurePolicy so the MapReduce engine
+                // matches the monolithic and streaming engines (issue #134). A
+                // write whose retry backoff was interrupted by a cancellation
+                // must surface as Cancelled, not be swallowed by RetryThenSkip.
+                if let Some(token) = &config.cancel {
+                    if token.is_cancelled() {
+                        return Err(EngineError::Cancelled);
+                    }
+                }
+                match &config.failure_policy {
+                    crate::retry::FailurePolicy::RetryThenSkip(_) => {
+                        sink.note_sink_skipped();
+                        observer.on_event(EngineEvent::tile_completed(coord));
+                        continue;
+                    }
+                    _ => return Err(crate::engine::promote_sink_error(e)),
+                }
+            }
+            observer.on_event(EngineEvent::tile_completed(coord));
             count += 1;
         }
         Ok((count, skipped))
@@ -267,9 +472,12 @@ fn emit_strip_tiles_parallel(
 /// Generate a tile pyramid using the MapReduce streaming engine.
 ///
 /// Processes strips in parallel batches. Within each batch, strip rendering
-/// can happen concurrently (when `tile_concurrency > 0` and batch size > 1),
-/// while tile emission and propagation remain sequential to preserve the
-/// deterministic strip ordering required by `propagate_down`.
+/// can happen concurrently (when `tile_concurrency > 0`, batch size > 1, and
+/// the source opts in via [`StripSource::permits_concurrent_strips`]); sources
+/// that require the default sequential, increasing-`y` access pattern are
+/// rendered one strip at a time. Tile emission and propagation remain
+/// sequential regardless, to preserve the deterministic strip ordering required
+/// by `propagate_down`.
 ///
 /// # Pixel parity
 ///
@@ -282,14 +490,46 @@ pub(crate) fn generate_pyramid_mapreduce(
     sink: &dyn TileSink,
     config: &MapReduceConfig,
     observer: &dyn EngineObserver,
+    executor: &dyn WorkExecutor,
 ) -> Result<EngineResult, EngineError> {
     let format = source.format();
     let bpp = format.bytes_per_pixel();
     let engine_cfg = config.engine_config();
 
-    let strip_height = compute_strip_height(plan, format, config.memory_budget_bytes)
-        .unwrap_or(2 * plan.tile_size);
-    let inflight = compute_inflight_strips(plan, format, strip_height, config.memory_budget_bytes);
+    // Pre-flight (parity with the sequential engine, `streaming.rs`): the
+    // worst-case strip is one minimum aligned unit (2 × tile_size rows) at
+    // canvas width. If the budget cannot fit it, the engine cannot honour the
+    // budget no matter how it slices the work, so reject it up front instead
+    // of silently proceeding with an over-budget minimum strip (issue #103).
+    let min_strip_height = 2 * plan.tile_size;
+    let worst_case_strip_bytes = plan.canvas_width as u64 * min_strip_height as u64 * bpp as u64;
+    if worst_case_strip_bytes > config.memory_budget_bytes {
+        return Err(EngineError::BudgetExceeded {
+            strip_bytes: worst_case_strip_bytes,
+            budget_bytes: config.memory_budget_bytes,
+        });
+    }
+
+    let strip_height =
+        compute_strip_height(plan, format, config.memory_budget_bytes).unwrap_or(min_strip_height);
+
+    // The parallel tile-emission path (`emit_strip_tiles_parallel`) holds up to
+    // `buffer_size` decoded tiles in its bounded channel, plus one per worker
+    // in flight. Charge that backlog against the budget so the in-flight strip
+    // count leaves room for it and the peak estimate stays honest (issue #103).
+    let channel_bytes = if config.tile_concurrency > 0 {
+        let tile_bytes = plan.tile_size as u64 * plan.tile_size as u64 * bpp as u64;
+        (config.buffer_size as u64 + config.tile_concurrency as u64) * tile_bytes
+    } else {
+        0
+    };
+    let inflight = compute_inflight_strips(
+        plan,
+        format,
+        strip_height,
+        channel_bytes,
+        config.memory_budget_bytes,
+    );
 
     let ch = plan.canvas_height;
     let top_level = plan.levels.len() - 1;
@@ -330,6 +570,9 @@ pub(crate) fn generate_pyramid_mapreduce(
     // ===================================================================
     let mut strip_index_offset: u32 = 0;
     for (batch_idx, batch_specs) in strip_specs.chunks(inflight as usize).enumerate() {
+        // Cooperative cancellation: stop cleanly at the batch boundary before
+        // rendering (and downscaling) another batch of strips.
+        engine_cfg.check_cancelled()?;
         observer.on_event(EngineEvent::BatchStarted {
             batch_index: batch_idx as u32,
             strips_in_batch: batch_specs.len() as u32,
@@ -338,16 +581,68 @@ pub(crate) fn generate_pyramid_mapreduce(
 
         let mut batch_tiles: u64 = 0;
 
-        // MAP: render all strips in this batch (parallel when beneficial)
-        let rendered_strips = if config.tile_concurrency > 0 && batch_specs.len() > 1 {
-            let mut strips: Vec<Option<Raster>> = vec![None; batch_specs.len()];
+        // MAP: render all strips in this batch (parallel when beneficial).
+        //
+        // Every strip render goes through the `WorkExecutor` seam (issue #67);
+        // the default `LocalWorkExecutor` reproduces the historical in-process
+        // rendering exactly. Work units are dispatched in canonical order and
+        // results are reassembled positionally, so the REDUCE phase below sees
+        // strips in canonical order regardless of the executor.
+        //
+        // Concurrent rendering issues `render_strip` from several threads at
+        // once and therefore out of `y` order. That only honours the
+        // `StripSource` contract for sources that opt in via
+        // `permits_concurrent_strips`; a default (cursor-based) source is
+        // promised sequential, strictly-increasing-`y` access, so it must take
+        // the sequential branch even when concurrency is enabled (issue #105).
+        let work_context = WorkContext {
+            source,
+            plan,
+            config: &engine_cfg,
+        };
+
+        // Attribution (issue #67): announce every work unit on the
+        // coordinating thread, in canonical dispatch order, before any of the
+        // batch executes. The matching `StripExecutorDone` events are emitted
+        // below, also on the coordinating thread and also in canonical order
+        // (results are reassembled positionally first), so the event stream
+        // is deterministic regardless of executor concurrency; only the
+        // measured `duration` values vary run to run.
+        let exec_worker_id = executor.worker_id();
+        for &(y, sh) in batch_specs {
+            observer.on_event(EngineEvent::StripDispatched {
+                worker_id: exec_worker_id.clone(),
+                spec: StripWorkUnit {
+                    canvas_y: y,
+                    height: sh,
+                    level: top_level as u32,
+                },
+            });
+        }
+
+        let timed_strips: Vec<(Raster, std::time::Duration)> = if config.tile_concurrency > 0
+            && batch_specs.len() > 1
+            && source.permits_concurrent_strips()
+        {
+            let mut strips: Vec<Option<(Raster, std::time::Duration)>> =
+                vec![None; batch_specs.len()];
             std::thread::scope(|s| -> Result<(), EngineError> {
                 let mut handles = Vec::with_capacity(batch_specs.len());
                 for &(y, sh) in batch_specs {
-                    let engine_cfg = &engine_cfg;
-                    handles.push(s.spawn(move || -> Result<Raster, EngineError> {
-                        obtain_canvas_strip(source, plan, y, sh, engine_cfg)
-                    }));
+                    handles.push(s.spawn(
+                        move || -> Result<(Raster, std::time::Duration), EngineError> {
+                            let started = std::time::Instant::now();
+                            let strip = executor.execute(
+                                StripWorkUnit {
+                                    canvas_y: y,
+                                    height: sh,
+                                    level: top_level as u32,
+                                },
+                                work_context,
+                            )?;
+                            Ok((strip, started.elapsed()))
+                        },
+                    ));
                 }
                 for (i, handle) in handles.into_iter().enumerate() {
                     let strip = handle.join().map_err(|_| EngineError::WorkerPanic)??;
@@ -359,9 +654,50 @@ pub(crate) fn generate_pyramid_mapreduce(
         } else {
             batch_specs
                 .iter()
-                .map(|&(y, sh)| obtain_canvas_strip(source, plan, y, sh, &engine_cfg))
-                .collect::<Result<Vec<_>, _>>()?
+                .map(|&(y, sh)| {
+                    let started = std::time::Instant::now();
+                    let strip = executor.execute(
+                        StripWorkUnit {
+                            canvas_y: y,
+                            height: sh,
+                            level: top_level as u32,
+                        },
+                        work_context,
+                    )?;
+                    Ok((strip, started.elapsed()))
+                })
+                .collect::<Result<Vec<_>, EngineError>>()?
         };
+
+        // Emit completion attribution in canonical order, then strip the
+        // timing wrapper so the REDUCE phase below is unchanged.
+        let rendered_strips: Vec<Raster> = timed_strips
+            .into_iter()
+            .enumerate()
+            .map(|(i, (strip, duration))| {
+                let (y, sh) = batch_specs[i];
+                observer.on_event(EngineEvent::StripExecutorDone {
+                    worker_id: exec_worker_id.clone(),
+                    spec: StripWorkUnit {
+                        canvas_y: y,
+                        height: sh,
+                        level: top_level as u32,
+                    },
+                    duration,
+                });
+                strip
+            })
+            .collect();
+
+        // All strips in this batch are now materialised simultaneously (the
+        // Map phase renders them concurrently, or sequentially into one Vec).
+        // Charge every one against the tracker here so the reported peak
+        // reflects the whole in-flight batch, not just the single strip being
+        // reduced. Each strip is released again after it is downscaled below,
+        // so the tracked total falls back as the batch drains (issue #103).
+        for strip in &rendered_strips {
+            tracker.alloc(strip.data().len() as u64);
+        }
 
         // REDUCE: for each rendered strip, emit tiles and propagate (sequential)
         for (i, strip) in rendered_strips.into_iter().enumerate() {
@@ -372,9 +708,6 @@ pub(crate) fn generate_pyramid_mapreduce(
                 strip_index: strip_idx,
                 total_strips,
             });
-
-            let strip_bytes = strip.data().len() as u64;
-            tracker.alloc(strip_bytes);
 
             // Emit tiles at the top level
             let (tp, ts_skip) = if config.tile_concurrency > 0 {
@@ -402,68 +735,22 @@ pub(crate) fn generate_pyramid_mapreduce(
             tiles_skipped += ts_skip;
             batch_tiles += tp;
 
-            // Downscale for reduce propagation
-            let half = resize::downscale_half(&strip)?;
-            tracker.dealloc(strip_bytes);
-            let half_bytes = half.data().len() as u64;
-            tracker.alloc(half_bytes);
+            // Downscale for reduce propagation, transferring the strip's
+            // memory charge to the half-strip.
+            let half = downscale_strip_tracked(&strip, &tracker)?;
 
-            // Propagate half-strip into lower levels
-            propagate_down(
-                half,
-                top_level - 1,
-                y / 2,
-                &mut accumulators,
-                &mut mono_accumulators,
-                monolithic_threshold,
-                plan,
-                sink,
-                &engine_cfg,
-                observer,
-                &tracker,
-                &mut tiles_produced,
-                &mut tiles_skipped,
-            )?;
-        }
-
-        strip_index_offset += batch_specs.len() as u32;
-
-        observer.on_event(EngineEvent::BatchCompleted {
-            batch_index: batch_idx as u32,
-            tiles_produced: batch_tiles,
-        });
-    }
-
-    // ===================================================================
-    // Phase 2: Flush unpaired strip accumulators
-    // ===================================================================
-    for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
-        if let Some(leftover) = accumulators[level_idx].take() {
-            let (_, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(plan.levels[level_idx].level)
-            } else {
-                (plan.levels[level_idx].width, plan.levels[level_idx].height)
-            };
-            let leftover_y = lh.saturating_sub(leftover.height());
-
-            let (tp, ts_skip) = emit_strip_tiles(
-                &leftover,
-                plan,
-                level_idx as u32,
-                leftover_y,
-                sink,
-                &engine_cfg,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            if level_idx > 0 {
-                let further_half = resize::downscale_half(&leftover)?;
+            // Propagate half-strip into lower levels.
+            //
+            // A single-level plan (top_level == 0) has no level below the
+            // top: the top-level tiles were already emitted above, so there
+            // is nothing left to reduce. Guard the recursion to avoid the
+            // `top_level - 1` underflow (debug panic / release usize::MAX ->
+            // out-of-bounds index into `accumulators`).
+            if top_level > 0 {
                 propagate_down(
-                    further_half,
-                    level_idx - 1,
-                    leftover_y / 2,
+                    half,
+                    top_level - 1,
+                    y / 2,
                     &mut accumulators,
                     &mut mono_accumulators,
                     monolithic_threshold,
@@ -477,67 +764,45 @@ pub(crate) fn generate_pyramid_mapreduce(
                 )?;
             }
         }
+
+        strip_index_offset += batch_specs.len() as u32;
+
+        observer.on_event(EngineEvent::BatchCompleted {
+            batch_index: batch_idx as u32,
+            tiles_produced: batch_tiles,
+        });
     }
+
+    // ===================================================================
+    // Phase 2: Flush unpaired strip accumulators
+    // ===================================================================
+    flush_unpaired_accumulators(
+        &mut accumulators,
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        sink,
+        &engine_cfg,
+        observer,
+        &tracker,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // ===================================================================
     // Phase 3: Monolithic flush — assemble and emit small levels
     // ===================================================================
-    {
-        let top_mono = monolithic_threshold.min(plan.levels.len() - 1);
-        let mut prev_raster: Option<Raster> = None;
-
-        for level_idx in (0..=top_mono).rev() {
-            let level = &plan.levels[level_idx];
-            let (lw, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(level.level)
-            } else {
-                (level.width, level.height)
-            };
-            if lw == 0 || lh == 0 {
-                continue;
-            }
-
-            let raster = if let Some(prev) = prev_raster.take() {
-                resize::downscale_half(&prev)?
-            } else {
-                let mut acc_data = std::mem::take(&mut mono_accumulators[level_idx]);
-                if acc_data.is_empty() {
-                    continue;
-                }
-                let expected = lw as usize * lh as usize * bpp;
-
-                if acc_data.len() > expected {
-                    acc_data.truncate(expected);
-                }
-                if acc_data.len() < expected {
-                    let filled_rows = acc_data.len() / (lw as usize * bpp);
-                    acc_data.resize(expected, 0);
-                    fill_background_rows(
-                        &mut acc_data,
-                        filled_rows,
-                        lw,
-                        lh,
-                        bpp,
-                        engine_cfg.background_rgb,
-                    );
-                }
-                Raster::new(lw, lh, format, acc_data)?
-            };
-
-            let (tp, ts_skip) = emit_full_level_tiles(
-                &raster,
-                plan,
-                level_idx as u32,
-                sink,
-                &engine_cfg,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            prev_raster = Some(raster);
-        }
-    }
+    flush_monolithic_levels(
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        format,
+        sink,
+        &engine_cfg,
+        observer,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // Emit LevelCompleted for all levels
     for level in &plan.levels {
@@ -565,7 +830,7 @@ pub(crate) fn generate_pyramid_mapreduce(
         queue_pressure_peak: 0,
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
-        skipped_due_to_failure: 0,
+        skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
     })
 }
 
@@ -598,16 +863,52 @@ mod tests {
     fn compute_inflight_strips_at_least_one() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let k = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 1);
+        let k = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 1);
         assert!(k >= 1);
+    }
+
+    #[test]
+    fn compute_inflight_strips_huge_budget_no_chunks_zero_panic() {
+        // A caller-supplied budget that is a nonzero multiple of 2^32 (or the
+        // saturating maximum) used to make `k` land on a multiple of 2^32 and
+        // truncate to 0 in the `u32` cast, so `strip_specs.chunks(inflight)`
+        // panicked with "chunk size must be non-zero" (issue #106). The count
+        // must instead stay in `1..=total_strips` for *any* budget.
+        let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let strip_height = 512u32;
+        // Exact number of strips the batch loop will chunk over.
+        let total_strips = plan.canvas_height.div_ceil(strip_height);
+
+        for budget in [1u64 << 32, 2u64 << 32, u64::MAX] {
+            let inflight =
+                compute_inflight_strips(&plan, PixelFormat::Rgb8, strip_height, 0, budget);
+            assert!(
+                inflight >= 1,
+                "budget {budget}: inflight must be >= 1 to avoid chunks(0), got {inflight}",
+            );
+            assert!(
+                inflight <= total_strips,
+                "budget {budget}: inflight {inflight} must not exceed total strips {total_strips}",
+            );
+
+            // Prove the returned count is a legal `chunks` argument: the call
+            // below panics if `inflight` ever truncated to 0.
+            let strip_specs: Vec<u32> = (0..total_strips).collect();
+            let batches = strip_specs.chunks(inflight as usize).count();
+            assert!(
+                batches >= 1,
+                "budget {budget}: chunking produced no batches"
+            );
+        }
     }
 
     #[test]
     fn compute_inflight_strips_grows_with_budget() {
         let planner = PyramidPlanner::new(4096, 4096, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let small = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 1_000_000);
-        let large = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 100_000_000);
+        let small = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 1_000_000);
+        let large = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, 100_000_000);
         assert!(large >= small);
     }
 
@@ -615,8 +916,8 @@ mod tests {
     fn estimate_mapreduce_peak_monotonic() {
         let planner = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
-        let est_1 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 1);
-        let est_4 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 4);
+        let est_1 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 1, 0);
+        let est_4 = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 4, 0);
         assert!(est_4 > est_1);
     }
 
@@ -639,12 +940,22 @@ mod tests {
         ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
         let mr_sink = MemorySink::new();
+        // Budget fits the minimum aligned strip (256×256×3 = 196_608 bytes) so
+        // the run is admitted; it still exercises the streaming/reduce path.
         let config = MapReduceConfig {
-            memory_budget_bytes: 100_000,
+            memory_budget_bytes: 1_000_000,
             ..MapReduceConfig::default()
         };
         let strip_src = RasterStripSource::new(&src);
-        generate_pyramid_mapreduce(&strip_src, &plan, &mr_sink, &config, &NoopObserver).unwrap();
+        generate_pyramid_mapreduce(
+            &strip_src,
+            &plan,
+            &mr_sink,
+            &config,
+            &NoopObserver,
+            &LocalWorkExecutor,
+        )
+        .unwrap();
         let mut mr_tiles = mr_sink.tiles();
         mr_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
 
@@ -652,6 +963,327 @@ mod tests {
         for (r, m) in ref_tiles.iter().zip(mr_tiles.iter()) {
             assert_eq!(r.coord, m.coord);
             assert_eq!(r.data, m.data, "tile data diverged at {:?}", m.coord);
+        }
+    }
+
+    #[test]
+    fn mapreduce_rejects_budget_too_small_for_strip() {
+        // A 512×512 RGB8 image with tile_size 256 has a minimum aligned strip
+        // of 2×256 = 512 rows → 512×512×3 = 786_432 bytes. A budget below that
+        // cannot honour the memory ceiling, so the engine must reject it up
+        // front with `BudgetExceeded` — parity with the sequential streaming
+        // engine — instead of silently proceeding with an over-budget minimum
+        // strip.
+        let src = gradient_raster(512, 512);
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = MapReduceConfig {
+            memory_budget_bytes: 100_000,
+            ..MapReduceConfig::default()
+        };
+        let sink = MemorySink::new();
+        let err = generate_pyramid_mapreduce(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &LocalWorkExecutor,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EngineError::BudgetExceeded { .. }),
+            "expected BudgetExceeded, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn estimate_accounts_for_channel_backlog() {
+        // The peak estimate must grow by (at least) the charged channel
+        // backlog — previously the channel-held tiles were invisible to the
+        // estimate, so the reported peak understated real RSS (issue #103).
+        let plan = PyramidPlanner::new(2048, 2048, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let without = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 2, 0);
+        let with = estimate_mapreduce_peak_memory(&plan, PixelFormat::Rgb8, 512, 2, 4_000_000);
+        assert!(with > without);
+        assert!(with - without >= 4_000_000);
+    }
+
+    #[test]
+    fn inflight_strips_shrink_when_channel_charged() {
+        // Charging the channel backlog leaves less room for in-flight strips,
+        // so K must be non-increasing as the channel charge grows — this is
+        // what keeps K strips + channel within the ceiling (issue #103).
+        let plan = PyramidPlanner::new(8192, 8192, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let budget = 200_000_000u64;
+        let k_no_channel = compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 0, budget);
+        let k_big_channel =
+            compute_inflight_strips(&plan, PixelFormat::Rgb8, 512, 100_000_000, budget);
+        assert!(
+            k_no_channel > 1,
+            "test needs a case where several strips fit"
+        );
+        assert!(k_big_channel <= k_no_channel);
+        assert!(k_big_channel >= 1);
+    }
+
+    #[test]
+    fn mapreduce_real_peak_within_budget() {
+        // End-to-end: with the in-flight strips now charged (both by the
+        // budgeter and the memory tracker), a constrained run keeps its real
+        // tracked peak within the configured budget instead of spiking toward
+        // 2× budget mid-batch (issue #103).
+        let src = gradient_raster(1024, 1024);
+        let plan = PyramidPlanner::new(1024, 1024, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let budget = 12_000_000u64;
+        let sink = MemorySink::new();
+        let config = MapReduceConfig {
+            memory_budget_bytes: budget,
+            ..MapReduceConfig::default()
+        };
+        let result = generate_pyramid_mapreduce(
+            &RasterStripSource::new(&src),
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &LocalWorkExecutor,
+        )
+        .unwrap();
+        assert!(
+            result.peak_memory_bytes > 0,
+            "tracker should record the in-flight strips"
+        );
+        assert!(
+            result.peak_memory_bytes <= budget,
+            "real peak {} exceeded budget {budget}",
+            result.peak_memory_bytes,
+        );
+    }
+
+    /// A raster that is uniform within a small channel delta but *not* exactly
+    /// uniform: every pixel is the base colour with a per-pixel wobble of at
+    /// most `delta`. `PlaceholderWithTolerance { max_channel_delta >= delta }`
+    /// treats each full tile as blank; exact `Placeholder` does not.
+    fn near_uniform_raster(w: u32, h: u32, base: u8, delta: u8) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                // Deterministic wobble in `0..=delta`, so the tile is blank
+                // within tolerance but every pixel is not identical.
+                let wobble = ((x + y) % (delta as u32 + 1)) as u8;
+                data[off] = base + wobble;
+                data[off + 1] = base + wobble;
+                data[off + 2] = base + wobble;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    #[test]
+    fn placeholder_with_tolerance_identical_across_tile_concurrency() {
+        // Regression for issue #107: the parallel tile-emission path tested
+        // `blank_tile_strategy == Placeholder` with exact equality, so
+        // `PlaceholderWithTolerance` silently degraded to "never blank" the
+        // moment `tile_concurrency > 0` — flipping blank flags and
+        // `tiles_skipped` between concurrency settings and breaking the
+        // byte-identical-output guarantee. The base level is emitted through
+        // that path, so its near-uniform tiles are where the two runs diverge.
+        let src = near_uniform_raster(256, 256, 100, 2);
+        let plan = PyramidPlanner::new(256, 256, 128, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        let run = |tile_concurrency: usize| {
+            let sink = MemorySink::new();
+            let config = MapReduceConfig {
+                memory_budget_bytes: 1_000_000,
+                tile_concurrency,
+                blank_tile_strategy: BlankTileStrategy::PlaceholderWithTolerance {
+                    max_channel_delta: 2,
+                },
+                ..MapReduceConfig::default()
+            };
+            let result = generate_pyramid_mapreduce(
+                &RasterStripSource::new(&src),
+                &plan,
+                &sink,
+                &config,
+                &NoopObserver,
+                &LocalWorkExecutor,
+            )
+            .unwrap();
+            let mut tiles = sink.tiles();
+            tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+            (result.tiles_skipped, tiles)
+        };
+
+        let (seq_skipped, seq_tiles) = run(0);
+        let (par_skipped, par_tiles) = run(4);
+
+        // The tolerance must produce *some* blank tiles, otherwise the test
+        // would pass vacuously (exact-equality bug and correct code agree on
+        // "never blank").
+        assert!(
+            seq_skipped > 0,
+            "sequential path must skip near-uniform tiles under the tolerance"
+        );
+        assert_eq!(
+            seq_skipped, par_skipped,
+            "tiles_skipped must be identical at tile_concurrency 0 and >= 2 \
+             (parallel path ignored PlaceholderWithTolerance, issue #107)"
+        );
+
+        assert_eq!(seq_tiles.len(), par_tiles.len());
+        for (s, p) in seq_tiles.iter().zip(par_tiles.iter()) {
+            assert_eq!(s.coord, p.coord);
+            assert_eq!(
+                s.data, p.data,
+                "tile bytes diverged between concurrency settings at {:?}",
+                p.coord
+            );
+        }
+    }
+
+    #[test]
+    fn mapreduce_order_independent_parity_at_concurrency() {
+        // Issue #108: at `tile_concurrency > 0` the consumer writes tiles in
+        // channel-*arrival* order (see `emit_strip_tiles_parallel`), which is
+        // neither row-major nor stable across runs. This proves the *output* is
+        // nonetheless order-independent: the coordinate-keyed pyramid produced
+        // by the parallel emission path (and the concurrent MAP strip-render
+        // path) is byte-identical to the row-major sequential reference, on
+        // every one of several runs that sample different worker interleavings.
+        //
+        // The only in-crate parity test previously ran at the default
+        // `tile_concurrency: 0`, so the parallel tile-emission path and the
+        // multi-strip reduce had no coverage.
+        let src = gradient_raster(1024, 1024);
+        let plan = PyramidPlanner::new(1024, 1024, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+
+        // Row-major reference from the monolithic engine (the module guarantees
+        // byte-identical parity with it).
+        let ref_sink = MemorySink::new();
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &ref_sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        let mut ref_tiles = ref_sink.tiles();
+        ref_tiles.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+
+        // Budget chosen so the image spans several strips (strip_height 512 over
+        // a 1024-tall canvas), so `emit_strip_tiles_parallel` — the arrival-order
+        // write path (issue #108) — runs once per strip and the multi-strip
+        // reduce is exercised too. The concurrent strip-render MAP scope
+        // (`inflight >= 2`) only engages for inputs far larger than is practical
+        // in a fast unit test, so it is left to the integration suite; this test
+        // proves order-independence of the tile writes, which is the property
+        // the issue calls out.
+        let budget = 6_000_000u64;
+        let tile_concurrency = 4usize;
+
+        // Guard the coverage the issue calls out: if a planner/budget change
+        // ever collapsed this to a single strip or a single tile per strip, the
+        // parallel emission path would go untested and the assertion would pass
+        // vacuously. Fail loudly instead.
+        let strip_height = compute_strip_height(&plan, PixelFormat::Rgb8, budget).unwrap();
+        let total_strips = plan.canvas_height.div_ceil(strip_height);
+        assert!(
+            total_strips >= 2,
+            "test needs multiple strips to exercise the multi-strip reduce, got {total_strips}"
+        );
+        let top = &plan.levels[plan.levels.len() - 1];
+        assert!(
+            top.cols * top.rows > tile_concurrency as u32,
+            "test needs more top-level tiles than workers so the strip is split \
+             and writes can reorder (got {} tiles, {tile_concurrency} workers)",
+            top.cols * top.rows
+        );
+
+        let run = || {
+            let sink = MemorySink::new();
+            let config = MapReduceConfig {
+                memory_budget_bytes: budget,
+                tile_concurrency,
+                ..MapReduceConfig::default()
+            };
+            let result = generate_pyramid_mapreduce(
+                &RasterStripSource::new(&src),
+                &plan,
+                &sink,
+                &config,
+                &NoopObserver,
+                &LocalWorkExecutor,
+            )
+            .unwrap();
+            // `tiles()` preserves write (arrival) order — capture it before
+            // sorting so we can observe that the parallel path really does
+            // reorder writes relative to row-major.
+            let arrival: Vec<TileCoord> = sink.tiles().into_iter().map(|t| t.coord).collect();
+            let mut sorted = sink.tiles();
+            sorted.sort_by_key(|t| (t.coord.level, t.coord.row, t.coord.col));
+            (result, arrival, sorted)
+        };
+
+        let row_major: Vec<TileCoord> = ref_tiles.iter().map(|t| t.coord).collect();
+        let mut observed_reorder = false;
+
+        for iteration in 0..8 {
+            let (result, arrival, sorted) = run();
+
+            // Parity: the coordinate-keyed pyramid matches the row-major
+            // reference regardless of the (arbitrary) arrival order.
+            assert_eq!(
+                result.tiles_produced,
+                plan.total_tile_count(),
+                "iteration {iteration}: tile count diverged from the plan"
+            );
+            assert_eq!(
+                ref_tiles.len(),
+                sorted.len(),
+                "iteration {iteration}: tile count diverged from the sequential reference"
+            );
+            for (r, m) in ref_tiles.iter().zip(sorted.iter()) {
+                assert_eq!(r.coord, m.coord, "iteration {iteration}: coord diverged");
+                assert_eq!(
+                    r.data, m.data,
+                    "iteration {iteration}: tile bytes diverged from reference at {:?}",
+                    m.coord
+                );
+            }
+
+            if arrival != row_major {
+                observed_reorder = true;
+            }
+        }
+
+        // Non-vacuity signal: across several runs the parallel path is expected
+        // to deliver at least one non-row-major arrival order (this is the very
+        // behaviour that makes order-independence load-bearing). We do not gate
+        // correctness on it — the scheduler could in principle serialise every
+        // run — but its absence would mean the reordering the test guards
+        // against was never actually observed, so surface it as an eprintln
+        // rather than a hard, scheduler-dependent failure.
+        if !observed_reorder {
+            eprintln!(
+                "note: all runs delivered tiles in row-major order; \
+                 order-independence still held but no reordering was sampled"
+            );
         }
     }
 
@@ -671,8 +1303,86 @@ mod tests {
             &sink,
             &config,
             &NoopObserver,
+            &LocalWorkExecutor,
         )
         .unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single-level plan underflow guard (issue #102)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod single_level_tests {
+    use super::*;
+    use crate::observe::NoopObserver;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlan, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+
+    fn gradient(w: u32, h: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                data[off] = (x % 256) as u8;
+                data[off + 1] = (y % 256) as u8;
+                data[off + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn run(plan: &PyramidPlan, src: &Raster) -> MemorySink {
+        let sink = MemorySink::new();
+        // Modest budget that still fits a minimum aligned strip for these
+        // single-tile plans, so the strip loop and propagate_down run without
+        // tripping the pre-flight budget check.
+        let config = MapReduceConfig {
+            memory_budget_bytes: 1_000_000,
+            ..MapReduceConfig::default()
+        };
+        generate_pyramid_mapreduce(
+            &RasterStripSource::new(src),
+            plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &LocalWorkExecutor,
+        )
+        .expect("single-level plan must run to completion without underflow panic");
+        sink
+    }
+
+    #[test]
+    fn google_single_tile_image_runs_to_completion() {
+        let src = gradient(256, 256);
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
+    }
+
+    #[test]
+    fn deepzoom_one_by_one_source_runs_to_completion() {
+        let src = gradient(1, 1);
+        let plan = PyramidPlanner::new(1, 1, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
     }
 }

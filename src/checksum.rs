@@ -30,21 +30,22 @@ use thiserror::Error;
 
 pub use crate::manifest::ChecksumAlgo;
 
-/// Parse the lowercase-string form (`"blake3"` / `"sha256"`) used in the
-/// manifest JSON. Returns `None` for unknown names.
-fn checksum_algo_from_manifest_str(s: &str) -> Option<ChecksumAlgo> {
-    match s {
-        "blake3" => Some(ChecksumAlgo::Blake3),
-        "sha256" => Some(ChecksumAlgo::Sha256),
-        _ => None,
-    }
-}
+// The lowercase manifest-string parser lives on `ChecksumAlgo`
+// (`ChecksumAlgo::from_manifest_str`) so every verify path shares one
+// definition and treats an unknown algorithm identically. See issue #95.
 
 // ---------------------------------------------------------------------------
 // ChecksumMode
 // ---------------------------------------------------------------------------
 
 /// How a sink should treat checksums.
+///
+/// The CLI surfaces this via
+/// [`--manifest-emit-checksums`](https://libviprs.org/cli/#flag-manifest-emit-checksums)
+/// (and, when verification is requested,
+/// [`--verify`](https://libviprs.org/cli/#flag-verify)).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChecksumMode {
     /// Do not compute or emit any per-tile checksums.
@@ -70,12 +71,82 @@ pub fn hash_tile(bytes: &[u8], algo: ChecksumAlgo) -> String {
             let mut hasher = sha2::Sha256::new();
             hasher.update(bytes);
             let out = hasher.finalize();
-            let mut s = String::with_capacity(out.len() * 2);
-            for b in out.iter() {
-                use std::fmt::Write;
-                let _ = write!(s, "{:02x}", b);
+            crate::hex::hex_lower(&out)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Untrusted-path sanitization + streaming hash
+// ---------------------------------------------------------------------------
+
+/// Join an attacker-controlled *relative* manifest path onto a trusted `root`,
+/// rejecting anything that could escape `root`.
+///
+/// Manifest `per_tile` keys are attacker-controlled: a hostile bundle can list
+/// `/etc/passwd`, a Windows drive prefix, or `../../secret`. `Path::join` with
+/// an absolute or prefixed component silently *replaces* the base, and `..`
+/// walks upward — both give arbitrary-file read (and a hash/existence oracle,
+/// since the digest is echoed back on mismatch).
+///
+/// This returns `Some(root.join(rel))` only when every component of `rel` is a
+/// plain name (or a redundant `.`); it returns `None` for an empty path or any
+/// path containing a root, a prefix (e.g. `C:`), or a `..` component. Because
+/// only `Normal`/`CurDir` components survive, the join can never escape `root`.
+pub(crate) fn safe_manifest_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let rel_path = Path::new(rel);
+    if rel_path.as_os_str().is_empty() {
+        return None;
+    }
+    for comp in rel_path.components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => return None,
+        }
+    }
+    Some(root.join(rel_path))
+}
+
+/// Hash the contents of the file at `path` by streaming it through the hasher
+/// in fixed-size chunks, capping peak memory regardless of file size.
+///
+/// This replaces `std::fs::read` + [`hash_tile`], which buffered the whole file
+/// and was an OOM primitive when pointed at a huge (or infinite, e.g.
+/// `/dev/zero`) file. Returns the same lowercase hex digest as [`hash_tile`]
+/// would for identical bytes.
+pub(crate) fn hash_file(path: &Path, algo: ChecksumAlgo) -> std::io::Result<String> {
+    use std::io::Read;
+
+    // 64 KiB is large enough to amortize syscall/read overhead while keeping
+    // the transient buffer trivially small.
+    let mut buf = [0u8; 64 * 1024];
+    let mut file = std::fs::File::open(path)?;
+
+    match algo {
+        ChecksumAlgo::Blake3 => {
+            let mut hasher = blake3::Hasher::new();
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
             }
-            s
+            Ok(hasher.finalize().to_hex().to_string())
+        }
+        ChecksumAlgo::Sha256 => {
+            let mut hasher = sha2::Sha256::new();
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            let out = hasher.finalize();
+            Ok(crate::hex::hex_lower(&out))
         }
     }
 }
@@ -85,6 +156,11 @@ pub fn hash_tile(bytes: &[u8], algo: ChecksumAlgo) -> String {
 // ---------------------------------------------------------------------------
 
 /// Summary of what [`verify_output`] found.
+///
+/// Produced by the CLI's [`--verify`](https://libviprs.org/cli/#flag-verify)
+/// post-hoc check.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-verify)
 #[derive(Debug, Clone, Default)]
 pub struct VerifyReport {
     /// Total number of tile entries considered (== size of the manifest's
@@ -99,7 +175,12 @@ pub struct VerifyReport {
 }
 
 /// Errors produced by [`verify_output`].
+///
+/// Surfaced by the CLI's [`--verify`](https://libviprs.org/cli/#flag-verify) flag.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-verify)
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VerifyError {
     #[error("manifest.json not found (checked {sibling} and {inside})")]
     ManifestNotFound { sibling: PathBuf, inside: PathBuf },
@@ -126,8 +207,16 @@ pub enum VerifyError {
     #[error("unknown checksum algorithm in manifest: {0}")]
     UnknownAlgo(String),
 
-    #[error("checksum mismatch")]
-    Mismatch,
+    /// A `per_tile` key was an absolute, prefixed, or `..`-containing path that
+    /// would escape the pyramid directory. Rejected before any filesystem
+    /// access so it cannot be used for path traversal or as a hash/existence
+    /// oracle.
+    #[error("manifest tile path escapes pyramid directory: {0}")]
+    UnsafePath(String),
+    // NOTE: per-tile checksum mismatches are *not* errors — `verify_output`
+    // records them in [`VerifyReport::tiles_mismatched`] and still returns
+    // `Ok`. `VerifyError` is reserved for structural failures (manifest
+    // missing, unparseable, malformed, or an unsafe tile path).
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +282,7 @@ pub fn verify_output(dir: &Path) -> Result<VerifyReport, VerifyError> {
         .get("algo")
         .and_then(|v| v.as_str())
         .ok_or(VerifyError::MissingField("checksums.algo"))?;
-    let algo = checksum_algo_from_manifest_str(algo_str)
+    let algo = ChecksumAlgo::from_manifest_str(algo_str)
         .ok_or_else(|| VerifyError::UnknownAlgo(algo_str.to_string()))?;
 
     let per_tile = checksums
@@ -221,10 +310,16 @@ pub fn verify_output(dir: &Path) -> Result<VerifyReport, VerifyError> {
         };
 
         let rel_path = PathBuf::from(rel);
-        let abs = dir.join(&rel_path);
+        // Reject traversal / absolute / prefixed paths before touching the
+        // filesystem — a hostile manifest must not be able to read outside the
+        // pyramid directory or probe file existence via the report.
+        let abs = match safe_manifest_join(dir, rel) {
+            Some(p) => p,
+            None => return Err(VerifyError::UnsafePath(rel.clone())),
+        };
 
-        let bytes = match std::fs::read(&abs) {
-            Ok(b) => b,
+        let got = match hash_file(&abs, algo) {
+            Ok(g) => g,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 report.tiles_missing.push(rel_path);
                 continue;
@@ -237,7 +332,6 @@ pub fn verify_output(dir: &Path) -> Result<VerifyReport, VerifyError> {
             }
         };
 
-        let got = hash_tile(&bytes, algo);
         if got.eq_ignore_ascii_case(digest_hex) {
             report.tiles_ok += 1;
         } else {
@@ -284,6 +378,56 @@ mod tests {
         );
     }
 
+    /// Byte-for-byte reproduction of the open-coded lowercase-hex encoder that
+    /// `hash_tile` / `hash_file` used before they were routed through
+    /// `crate::hex::hex_lower` (the #302 follow-up). Kept local to the test so
+    /// the swap can be proven output-preserving.
+    fn old_inline_02x(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes.iter() {
+            let _ = write!(s, "{:02x}", b);
+        }
+        s
+    }
+
+    #[test]
+    fn hex_encoding_swap_is_byte_identical_on_checksum_path() {
+        // `hash_tile` / `hash_file` previously hex-encoded the SHA-256 digest
+        // with an inline `write!("{:02x}")` loop; both were replaced with
+        // `crate::hex::hex_lower`. The hashing is untouched, so proving the two
+        // encoders agree byte-for-byte proves the emitted digest strings — and
+        // therefore the checksum reference goldens — are unchanged. Cover empty
+        // input, each nibble in isolation, a full 0..=255 sweep, and the 32-byte
+        // SHA-256 digest width.
+        let digest_width: Vec<u8> = (0u8..32).collect();
+        let all_bytes: Vec<u8> = (0u8..=255).collect();
+        let cases: &[&[u8]] = &[
+            &[],           // empty input → ""
+            &[0x00],       // zero-padded low nibble
+            &[0x0f],       // low nibble only
+            &[0xf0],       // high nibble only
+            &[0xff],       // both nibbles set
+            &digest_width, // full SHA-256 digest width (32 bytes → 64 chars)
+            &all_bytes,    // every possible byte value
+        ];
+        for bytes in cases {
+            let via_helper = crate::hex::hex_lower(bytes);
+            let via_old = old_inline_02x(bytes);
+            assert_eq!(via_helper, via_old, "encoders diverged for {bytes:02x?}");
+            assert_eq!(via_helper.len(), bytes.len() * 2, "width not two-per-byte");
+        }
+        // Explicit empty-input contract shared with the checksum path.
+        assert_eq!(crate::hex::hex_lower(&[]), "");
+
+        // End-to-end pin: the real SHA-256 path still yields the known golden,
+        // now that it encodes via `hex_lower`.
+        assert_eq!(
+            hash_tile(b"abc", ChecksumAlgo::Sha256),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+    }
+
     #[test]
     fn blank_marker_hash_is_stable() {
         // One byte 0x00 is the canonical BLANK_TILE_MARKER; its hash is the
@@ -299,6 +443,100 @@ mod tests {
     }
 
     #[test]
+    fn safe_manifest_join_rejects_escaping_paths() {
+        let root = Path::new("/tmp/pyramid");
+        // Absolute / rooted paths.
+        assert!(safe_manifest_join(root, "/etc/passwd").is_none());
+        // Parent-dir traversal, at any depth.
+        assert!(safe_manifest_join(root, "../secret").is_none());
+        assert!(safe_manifest_join(root, "0/../../secret").is_none());
+        assert!(safe_manifest_join(root, "a/b/../../../x").is_none());
+        // Empty path.
+        assert!(safe_manifest_join(root, "").is_none());
+    }
+
+    #[test]
+    fn safe_manifest_join_accepts_plain_relative_paths() {
+        let root = Path::new("/tmp/pyramid");
+        assert_eq!(
+            safe_manifest_join(root, "0/0_0.raw"),
+            Some(PathBuf::from("/tmp/pyramid/0/0_0.raw"))
+        );
+        // A redundant `.` is harmless and does not escape.
+        assert_eq!(
+            safe_manifest_join(root, "./0/0_0.raw"),
+            Some(PathBuf::from("/tmp/pyramid/./0/0_0.raw"))
+        );
+    }
+
+    #[test]
+    fn hash_file_matches_in_memory_hash_for_both_algos() {
+        let dir = tempfile::tempdir().unwrap();
+        // Larger than the 64 KiB streaming chunk to exercise multiple reads.
+        let bytes = vec![0x5Au8; 200 * 1024 + 3];
+        let p = dir.path().join("tile.raw");
+        std::fs::write(&p, &bytes).unwrap();
+
+        for algo in [ChecksumAlgo::Blake3, ChecksumAlgo::Sha256] {
+            assert_eq!(hash_file(&p, algo).unwrap(), hash_tile(&bytes, algo));
+        }
+    }
+
+    #[test]
+    fn hash_file_reports_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.raw");
+        let err = hash_file(&missing, ChecksumAlgo::Blake3).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn verify_output_reports_tile_mismatch_in_report_not_as_error() {
+        // The "real condition" the removed `VerifyError::Mismatch` variant was
+        // meant to represent: a tile whose on-disk bytes do not hash to the
+        // recorded digest. By design that is NOT an error — `verify_output`
+        // returns `Ok` and records the offending tile in
+        // `VerifyReport::tiles_mismatched`. This pins that contract so no one
+        // re-introduces a context-free error variant for a per-tile mismatch.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // A tile whose bytes match its recorded digest, and one whose do not.
+        let ok_bytes = b"good tile bytes";
+        let bad_bytes = b"actual bytes on disk";
+        std::fs::create_dir_all(root.join("0")).unwrap();
+        std::fs::write(root.join("0/0_0.raw"), ok_bytes).unwrap();
+        std::fs::write(root.join("0/1_0.raw"), bad_bytes).unwrap();
+
+        let ok_digest = hash_tile(ok_bytes, ChecksumAlgo::Blake3);
+        // A digest that deliberately disagrees with `bad_bytes`.
+        let wrong_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+        assert_ne!(hash_tile(bad_bytes, ChecksumAlgo::Blake3), wrong_digest);
+
+        let manifest = serde_json::json!({
+            "checksums": {
+                "algo": "blake3",
+                "per_tile": {
+                    "0/0_0.raw": ok_digest,
+                    "0/1_0.raw": wrong_digest,
+                }
+            }
+        });
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let report =
+            verify_output(root).expect("a per-tile mismatch must not be a structural error");
+        assert_eq!(report.tiles_checked, 2);
+        assert_eq!(report.tiles_ok, 1);
+        assert!(report.tiles_missing.is_empty());
+        assert_eq!(report.tiles_mismatched, vec![PathBuf::from("0/1_0.raw")]);
+    }
+
+    #[test]
     fn algo_serde_roundtrip() {
         let j = serde_json::to_string(&ChecksumAlgo::Blake3).unwrap();
         assert_eq!(j, "\"blake3\"");
@@ -306,13 +544,13 @@ mod tests {
         assert_eq!(j, "\"sha256\"");
 
         assert_eq!(
-            checksum_algo_from_manifest_str("blake3"),
+            ChecksumAlgo::from_manifest_str("blake3"),
             Some(ChecksumAlgo::Blake3)
         );
         assert_eq!(
-            checksum_algo_from_manifest_str("sha256"),
+            ChecksumAlgo::from_manifest_str("sha256"),
             Some(ChecksumAlgo::Sha256)
         );
-        assert_eq!(checksum_algo_from_manifest_str("md5"), None);
+        assert_eq!(ChecksumAlgo::from_manifest_str("md5"), None);
     }
 }
