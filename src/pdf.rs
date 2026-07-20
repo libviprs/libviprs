@@ -1092,16 +1092,16 @@ fn get_page_dimensions(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> (f64,
     };
 
     // Try MediaBox, falling back through parent pages
-    if let Some(media_box) = resolve_array_entry(doc, dict, b"MediaBox") {
-        if media_box.len() >= 4 {
-            let x0 = obj_to_f64(&media_box[0]).unwrap_or(0.0);
-            let y0 = obj_to_f64(&media_box[1]).unwrap_or(0.0);
-            let x1 = obj_to_f64(&media_box[2]).unwrap_or(0.0);
-            let y1 = obj_to_f64(&media_box[3]).unwrap_or(0.0);
-            let w = (x1 - x0).abs();
-            let h = (y1 - y0).abs();
-            return apply_rotate_to_dims(w, h, resolve_rotate(doc, page_id));
-        }
+    if let Some(media_box) = resolve_array_entry(doc, dict, b"MediaBox")
+        && media_box.len() >= 4
+    {
+        let x0 = obj_to_f64(&media_box[0]).unwrap_or(0.0);
+        let y0 = obj_to_f64(&media_box[1]).unwrap_or(0.0);
+        let x1 = obj_to_f64(&media_box[2]).unwrap_or(0.0);
+        let y1 = obj_to_f64(&media_box[3]).unwrap_or(0.0);
+        let w = (x1 - x0).abs();
+        let h = (y1 - y0).abs();
+        return apply_rotate_to_dims(w, h, resolve_rotate(doc, page_id));
     }
 
     (0.0, 0.0)
@@ -1140,12 +1140,11 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
         let Ok(dict) = obj.as_dict() else {
             return 0;
         };
-        if let Ok(rotate_obj) = dict.get(b"Rotate") {
-            if let Ok(resolved) = resolve_object(doc, rotate_obj) {
-                if let Some(v) = obj_to_f64(resolved) {
-                    return v as i64;
-                }
-            }
+        if let Ok(rotate_obj) = dict.get(b"Rotate")
+            && let Ok(resolved) = resolve_object(doc, rotate_obj)
+            && let Some(v) = obj_to_f64(resolved)
+        {
+            return v as i64;
         }
         // `/Parent` is an indirect reference to the parent Pages node.
         // Pull the object id straight from the Reference — don't call

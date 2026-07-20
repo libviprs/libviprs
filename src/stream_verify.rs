@@ -150,13 +150,13 @@ pub fn verify_from_strip_source(
     // plan. Mirrors the Monolithic raster_verify path so verify errors on
     // plan divergence surface structurally instead of as per-tile byte
     // mismatches.
-    if let Some(meta) = crate::resume::JobCheckpoint::load(root)? {
-        if let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
-            return Err(EngineError::PlanHashMismatch {
-                expected: current,
-                actual: meta.plan_hash,
-            });
-        }
+    if let Some(meta) = crate::resume::JobCheckpoint::load(root)?
+        && let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink)
+    {
+        return Err(EngineError::PlanHashMismatch {
+            expected: current,
+            actual: meta.plan_hash,
+        });
     }
 
     // ------------------------------------------------------------------
@@ -182,63 +182,62 @@ pub fn verify_from_strip_source(
     // present and records per-tile checksums, re-hash the on-disk bytes
     // and fail on the first mismatch.
     // ------------------------------------------------------------------
-    if let Some(manifest) = read_manifest(root) {
-        if let Some(checksums) = manifest.get("checksums") {
-            let algo_str = checksums.get("algo").and_then(|v| v.as_str());
-            let per_tile = checksums.get("per_tile").and_then(|v| v.as_object());
-            if let (Some(algo_str), Some(per_tile)) = (algo_str, per_tile) {
-                // Route through the single shared parser. An unknown / future
-                // / typo'd algorithm is a hard verification failure here, not
-                // something to silently skip — otherwise a manifest stamped
-                // with a bogus algo would pass with zero digests checked
-                // (issue #95).
-                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(
-                    || {
-                        EngineError::Sink(SinkError::Other(format!(
-                            "Verify: unknown checksum algorithm {algo_str:?} in manifest"
-                        )))
-                    },
-                )?;
-                {
-                    // A recorded tile that is gone from disk is a verification
-                    // failure, not something to skip — unless it is a
-                    // manifest-referenced blank whose content lives in
-                    // `_shared/` (issue #93).
-                    let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
-                    for (rel, expected) in per_tile {
-                        let Some(expected_s) = expected.as_str() else {
-                            continue;
-                        };
-                        // Reject traversal / absolute / prefixed manifest keys
-                        // before any filesystem access, and stream the tile
-                        // through the hasher to cap memory (see #79).
-                        let abs = match crate::checksum::safe_manifest_join(root, rel) {
-                            Some(p) => p,
-                            None => {
-                                return Err(EngineError::Sink(SinkError::Other(format!(
-                                    "Verify: manifest tile path escapes checkpoint root: {rel}"
-                                ))));
-                            }
-                        };
-                        let got = match crate::checksum::hash_file(&abs, algo) {
-                            Ok(g) => g,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                if blank_refs.is_some_and(|m| m.contains_key(rel)) {
-                                    continue;
-                                }
-                                return Err(EngineError::Sink(SinkError::MissingTile {
-                                    tile_rel_path: rel.clone(),
-                                }));
-                            }
-                            Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
-                        };
-                        if !got.eq_ignore_ascii_case(expected_s) {
-                            return Err(EngineError::ChecksumMismatch {
-                                tile: coord_for_manifest_rel(plan, rel),
-                                expected: expected_s.to_string(),
-                                got,
-                            });
+    if let Some(manifest) = read_manifest(root)
+        && let Some(checksums) = manifest.get("checksums")
+    {
+        let algo_str = checksums.get("algo").and_then(|v| v.as_str());
+        let per_tile = checksums.get("per_tile").and_then(|v| v.as_object());
+        if let (Some(algo_str), Some(per_tile)) = (algo_str, per_tile) {
+            // Route through the single shared parser. An unknown / future
+            // / typo'd algorithm is a hard verification failure here, not
+            // something to silently skip — otherwise a manifest stamped
+            // with a bogus algo would pass with zero digests checked
+            // (issue #95).
+            let algo =
+                crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(|| {
+                    EngineError::Sink(SinkError::Other(format!(
+                        "Verify: unknown checksum algorithm {algo_str:?} in manifest"
+                    )))
+                })?;
+            {
+                // A recorded tile that is gone from disk is a verification
+                // failure, not something to skip — unless it is a
+                // manifest-referenced blank whose content lives in
+                // `_shared/` (issue #93).
+                let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
+                for (rel, expected) in per_tile {
+                    let Some(expected_s) = expected.as_str() else {
+                        continue;
+                    };
+                    // Reject traversal / absolute / prefixed manifest keys
+                    // before any filesystem access, and stream the tile
+                    // through the hasher to cap memory (see #79).
+                    let abs = match crate::checksum::safe_manifest_join(root, rel) {
+                        Some(p) => p,
+                        None => {
+                            return Err(EngineError::Sink(SinkError::Other(format!(
+                                "Verify: manifest tile path escapes checkpoint root: {rel}"
+                            ))));
                         }
+                    };
+                    let got = match crate::checksum::hash_file(&abs, algo) {
+                        Ok(g) => g,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            if blank_refs.is_some_and(|m| m.contains_key(rel)) {
+                                continue;
+                            }
+                            return Err(EngineError::Sink(SinkError::MissingTile {
+                                tile_rel_path: rel.clone(),
+                            }));
+                        }
+                        Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
+                    };
+                    if !got.eq_ignore_ascii_case(expected_s) {
+                        return Err(EngineError::ChecksumMismatch {
+                            tile: coord_for_manifest_rel(plan, rel),
+                            expected: expected_s.to_string(),
+                            got,
+                        });
                     }
                 }
             }
@@ -584,10 +583,10 @@ fn read_manifest(root: &std::path::Path) -> Option<serde_json::Value> {
         let mut name = stem.to_os_string();
         name.push(".manifest.json");
         let sibling = parent.join(name);
-        if let Ok(bytes) = std::fs::read(&sibling) {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                return Some(v);
-            }
+        if let Ok(bytes) = std::fs::read(&sibling)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            return Some(v);
         }
     }
     let inside = root.join("manifest.json");
@@ -834,13 +833,13 @@ mod tests {
         'outer: for coord in plan.tile_coords() {
             if let Some(rel) = plan.tile_path(coord, "raw") {
                 let abs = out.join(&rel);
-                if let Ok(mut bytes) = std::fs::read(&abs) {
-                    if !bytes.is_empty() {
-                        bytes[0] ^= 0xFF;
-                        std::fs::write(&abs, &bytes).unwrap();
-                        corrupted = Some(coord);
-                        break 'outer;
-                    }
+                if let Ok(mut bytes) = std::fs::read(&abs)
+                    && !bytes.is_empty()
+                {
+                    bytes[0] ^= 0xFF;
+                    std::fs::write(&abs, &bytes).unwrap();
+                    corrupted = Some(coord);
+                    break 'outer;
                 }
             }
         }

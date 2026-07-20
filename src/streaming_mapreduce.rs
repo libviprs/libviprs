@@ -444,10 +444,10 @@ fn emit_strip_tiles_parallel(
                 // matches the monolithic and streaming engines (issue #134). A
                 // write whose retry backoff was interrupted by a cancellation
                 // must surface as Cancelled, not be swallowed by RetryThenSkip.
-                if let Some(token) = &config.cancel {
-                    if token.is_cancelled() {
-                        return Err(EngineError::Cancelled);
-                    }
+                if let Some(token) = &config.cancel
+                    && token.is_cancelled()
+                {
+                    return Err(EngineError::Cancelled);
                 }
                 match &config.failure_policy {
                     crate::retry::FailurePolicy::RetryThenSkip(_) => {

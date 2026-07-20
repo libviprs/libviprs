@@ -408,10 +408,10 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             if config.checkpoint_every != 0 {
                 policy = policy.with_checkpoint_every(config.checkpoint_every);
             }
-            if policy.checkpoint_root().is_none() {
-                if let Some(root) = config.checkpoint_root {
-                    policy = policy.with_checkpoint_root(root);
-                }
+            if policy.checkpoint_root().is_none()
+                && let Some(root) = config.checkpoint_root
+            {
+                policy = policy.with_checkpoint_root(root);
             }
             self.resume = Some(policy);
         }
@@ -829,24 +829,17 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // it found it: no tile output, and no bookkeeping either. This
             // preflight reads the same atomically-renamed checkpoint file the
             // locked check reads, so it never sees a torn header.
-            if matches!(policy.mode(), ResumeMode::Resume) {
-                if let Some(root) = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink) {
-                    if let Some(meta) = crate::resume::JobCheckpoint::load(&root)
-                        .map_err(EngineError::ResumeFailed)?
-                    {
-                        if let Err(current) = crate::resume::verify_checkpoint_contract(
-                            &meta,
-                            &plan,
-                            &engine_cfg,
-                            &sink,
-                        ) {
-                            return Err(EngineError::PlanHashMismatch {
-                                expected: current,
-                                actual: meta.plan_hash,
-                            });
-                        }
-                    }
-                }
+            if matches!(policy.mode(), ResumeMode::Resume)
+                && let Some(root) = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink)
+                && let Some(meta) =
+                    crate::resume::JobCheckpoint::load(&root).map_err(EngineError::ResumeFailed)?
+                && let Err(current) =
+                    crate::resume::verify_checkpoint_contract(&meta, &plan, &engine_cfg, &sink)
+            {
+                return Err(EngineError::PlanHashMismatch {
+                    expected: current,
+                    actual: meta.plan_hash,
+                });
             }
 
             // Overwrite / Resume: take the advisory run lock(s) BEFORE any work

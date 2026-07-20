@@ -1078,7 +1078,7 @@ fn find_best_contrast(
     }
     // Stable sort: contrast ties keep scan order (the C qsort's tie order
     // is unspecified).
-    candidates.sort_by(|l, r| r.2.cmp(&l.2));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
     Ok(candidates[..nbest].iter().map(|c| (c.0, c.1)).collect())
 }
 
