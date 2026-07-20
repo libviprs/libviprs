@@ -912,7 +912,7 @@ impl<'a> CheckpointState<'a> {
             return false;
         }
         let n = self.completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        n % self.checkpoint_every == 0
+        n.is_multiple_of(self.checkpoint_every)
     }
 
     /// Promote the level to `levels_completed` only when every tile in that

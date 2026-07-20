@@ -128,7 +128,7 @@ fn expect_freq<T>(op: &str, r: Result<T, FreqfiltError>) -> T {
 /// the libviprs analogue of libvips' `vips_band_format_iscomplex` branch
 /// (see the module docs).
 fn is_fourier_complex(r: &Raster) -> bool {
-    r.format().channels() % 2 == 0 && r.interpretation() == Interpretation::Fourier
+    r.format().channels().is_multiple_of(2) && r.interpretation() == Interpretation::Fourier
 }
 
 /// Read every sample as `f64` in raster order (row-major, bands

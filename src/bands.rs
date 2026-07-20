@@ -334,7 +334,7 @@ impl Raster {
             Some(f) => f,
             None => width,
         };
-        if width % factor != 0 {
+        if !width.is_multiple_of(factor) {
             return Err(BandError::FoldNotDivisible { width, factor });
         }
         let fmt = self.format();
@@ -380,7 +380,7 @@ impl Raster {
             Some(f) => f,
             None => u32::try_from(bands).map_err(|_| BandError::TooManyBands { bands })?,
         };
-        if bands % factor as usize != 0 {
+        if !bands.is_multiple_of(factor as usize) {
             return Err(BandError::UnfoldNotDivisible { bands, factor });
         }
         let out_width = self.width() as u64 * factor as u64;
