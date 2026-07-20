@@ -188,7 +188,7 @@ pub struct Tile {
 /// `None` for a terminal sink). An external author writing a "byte bucket"
 /// therefore implements `write_tile` alone (plus `finish` if it needs one) and
 /// never has to understand the engine's resume / checkpoint / retry internals.
-/// The wrappers ([`Box<T>`], [`&T`], [`Arc<T>`]) forward every method through a
+/// The wrappers ([`Box<T>`], `&T`, [`Arc<T>`]) forward every method through a
 /// single macro so a wrapper cannot drop one relative to its siblings.
 ///
 /// The engine hooks remain part of this one public trait for now because
@@ -1140,7 +1140,7 @@ impl FsSink {
     /// it (issue #122 / #273). The sink no longer publishes its own checkpoint
     /// file — the engine's [`CheckpointState`](crate::engine) is the single
     /// checkpoint authority (issue #277) — so under the documented
-    /// [`EngineBuilder::with_resume`](crate::engine::EngineBuilder::with_resume)
+    /// [`EngineBuilder::with_resume`](crate::engine_builder::EngineBuilder::with_resume)
     /// path this is armed automatically and calling it here is redundant (but
     /// harmless). Retained so existing callers keep compiling.
     ///
