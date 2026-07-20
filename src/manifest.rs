@@ -16,7 +16,8 @@
 //! - `TileFormat`: `{"kind": "png"}`, `{"kind": "jpeg", "quality": N}`,
 //!   `{"kind": "raw"}`.
 //! - `PixelFormat`: `"gray8"`, `"gray16"`, `"rgb8"`, `"rgba8"`, `"rgb16"`,
-//!   `"rgba16"`.
+//!   `"rgba16"`, `"rgbaf32"`; the multiband and float compute
+//!   intermediates as `"multi8:N"`, `"multi16:N"`, `"floatf32:N"`.
 //! - `BlankTileStrategy`: `{"kind": "emit"}`, `{"kind": "placeholder"}`,
 //!   `{"kind": "placeholder_with_tolerance", "tolerance": N}`.
 //!
@@ -44,6 +45,7 @@ use crate::sink::TileFormat;
 
 /// Errors that can occur while reading or writing a [`Manifest`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ManifestError {
     /// Underlying I/O failure (file not found, permission denied, etc.).
     #[error("manifest I/O error: {0}")]
@@ -69,6 +71,11 @@ pub type BlankReferences = BTreeMap<String, String>;
 ///
 /// Serializes as a lowercase string (`"blake3"` / `"sha256"`) so the
 /// manifest.json is human-readable and stable across releases.
+///
+/// Selected from the CLI via [`--checksum-algo`](https://libviprs.org/cli/#flag-checksum-algo),
+/// which accepts `blake3` (default) or `sha256`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-checksum-algo)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChecksumAlgo {
@@ -95,32 +102,41 @@ impl ChecksumAlgo {
         }
     }
 
+    /// Parse the lowercase manifest string form (`"blake3"` / `"sha256"`)
+    /// back into a [`ChecksumAlgo`]. Returns `None` for any unrecognised
+    /// name.
+    ///
+    /// This is the single canonical parser shared by every verify path — the
+    /// post-hoc [`verify_output`](crate::checksum::verify_output), the
+    /// monolithic `raster_verify`, and the streaming
+    /// `verify_from_strip_source`. Routing all three through one function
+    /// guarantees an unknown / future / typo'd algorithm fails verification
+    /// uniformly instead of being silently mapped to "no checksums" in some
+    /// paths and to an error in others.
+    pub fn from_manifest_str(s: &str) -> Option<Self> {
+        match s {
+            "blake3" => Some(Self::Blake3),
+            "sha256" => Some(Self::Sha256),
+            _ => None,
+        }
+    }
+
     /// Hashes `bytes` and returns the lowercase hex digest.
     pub fn hash(&self, bytes: &[u8]) -> String {
         match self {
             Self::Blake3 => {
                 let h = blake3::hash(bytes);
-                hex_lower(h.as_bytes())
+                crate::hex::hex_lower(h.as_bytes())
             }
             Self::Sha256 => {
                 use sha2::Digest;
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(bytes);
                 let out = hasher.finalize();
-                hex_lower(&out)
+                crate::hex::hex_lower(&out)
             }
         }
     }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +159,8 @@ mod layout_serde {
             Layout::DeepZoom => "deep_zoom",
             Layout::Xyz => "xyz",
             Layout::Google => "google",
+            Layout::Zoomify => "zoomify",
+            Layout::Iiif => "iiif",
         };
         s.serialize_str(name)
     }
@@ -153,6 +171,8 @@ mod layout_serde {
             "deep_zoom" => Ok(Layout::DeepZoom),
             "xyz" => Ok(Layout::Xyz),
             "google" => Ok(Layout::Google),
+            "zoomify" => Ok(Layout::Zoomify),
+            "iiif" => Ok(Layout::Iiif),
             other => Err(serde::de::Error::custom(format!("unknown layout: {other}"))),
         }
     }
@@ -245,19 +265,28 @@ mod pixel_format_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &PixelFormat, s: S) -> Result<S::Ok, S::Error> {
+        // The named formats keep their historical manifest tags. Multiband
+        // and float compute intermediates (never produced by the pyramid
+        // pipeline, but the serializer must be total) round-trip as
+        // "multi8:N"/"multi16:N"/"floatf32:N".
         let name = match v {
-            PixelFormat::Gray8 => "gray8",
-            PixelFormat::Gray16 => "gray16",
-            PixelFormat::Rgb8 => "rgb8",
-            PixelFormat::Rgba8 => "rgba8",
-            PixelFormat::Rgb16 => "rgb16",
-            PixelFormat::Rgba16 => "rgba16",
+            PixelFormat::Gray8 => "gray8".to_string(),
+            PixelFormat::Gray16 => "gray16".to_string(),
+            PixelFormat::Rgb8 => "rgb8".to_string(),
+            PixelFormat::Rgba8 => "rgba8".to_string(),
+            PixelFormat::Rgb16 => "rgb16".to_string(),
+            PixelFormat::Rgba16 => "rgba16".to_string(),
+            PixelFormat::RgbaF32 => "rgbaf32".to_string(),
+            PixelFormat::Multi8(n) => format!("multi8:{n}"),
+            PixelFormat::Multi16(n) => format!("multi16:{n}"),
+            PixelFormat::FloatF32(n) => format!("floatf32:{n}"),
         };
-        s.serialize_str(name)
+        s.serialize_str(&name)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PixelFormat, D::Error> {
         let s = String::deserialize(d)?;
+        let unknown = || serde::de::Error::custom(format!("unknown pixel_format: {s}"));
         match s.as_str() {
             "gray8" => Ok(PixelFormat::Gray8),
             "gray16" => Ok(PixelFormat::Gray16),
@@ -265,9 +294,17 @@ mod pixel_format_serde {
             "rgba8" => Ok(PixelFormat::Rgba8),
             "rgb16" => Ok(PixelFormat::Rgb16),
             "rgba16" => Ok(PixelFormat::Rgba16),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown pixel_format: {other}"
-            ))),
+            "rgbaf32" => Ok(PixelFormat::RgbaF32),
+            other => {
+                let (depth, bands) = other
+                    .strip_prefix("multi8:")
+                    .map(|n| (1usize, n))
+                    .or_else(|| other.strip_prefix("multi16:").map(|n| (2usize, n)))
+                    .or_else(|| other.strip_prefix("floatf32:").map(|n| (4usize, n)))
+                    .ok_or_else(unknown)?;
+                let bands: usize = bands.parse().map_err(|_| unknown())?;
+                PixelFormat::with_channels(bands, depth).ok_or_else(unknown)
+            }
         }
     }
 }
@@ -485,6 +522,11 @@ impl ManifestV1 {
 /// [`Manifest::V1`]. Unknown versions produce a deserialization error, which
 /// is the intentional contrast with the forward-compatible "unknown inner
 /// fields are ignored" policy on [`ManifestV1`].
+///
+/// Manifest emission is enabled from the CLI via
+/// [`--manifest-emit-checksums`](https://libviprs.org/cli/#flag-manifest-emit-checksums).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "schema_version")]
 pub enum Manifest {
@@ -515,14 +557,13 @@ impl Manifest {
 
     /// Serialize and write this manifest to `path`, creating parent
     /// directories as needed.
+    ///
+    /// The write is atomic (staged `.tmp` sibling + rename via
+    /// [`crate::resume::atomic_write`]) so a crash mid-write cannot leave a
+    /// torn manifest, and the two on-disk copies cannot diverge (issue #124).
     pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
         let json = self.to_json_string()?;
-        fs::write(path, json)?;
+        crate::resume::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -552,6 +593,9 @@ impl Manifest {
 /// The builder is cheap to construct and clone, carries no references, and is
 /// consumed by `FsSink::with_manifest(...)` to configure the manifest emitter.
 ///
+/// The CLI exposes the equivalent toggle as
+/// [`--manifest-emit-checksums`](https://libviprs.org/cli/#flag-manifest-emit-checksums).
+///
 /// # Example
 ///
 /// ```ignore
@@ -560,6 +604,8 @@ impl Manifest {
 ///     .with_checksums(ChecksumAlgo::Blake3)
 ///     .with_dedupe(true);
 /// ```
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-manifest-emit-checksums)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestBuilder {
     checksums: Option<ChecksumAlgo>,
@@ -716,6 +762,81 @@ mod tests {
         assert_eq!(s2, "\"sha256\"");
     }
 
+    /// Multiband compute intermediates (PixelFormat::Multi8/Multi16, from
+    /// the band ops) round-trip through the manifest serde as "multi8:N" /
+    /// "multi16:N" tags, while the six named formats keep their historical
+    /// tags. The pyramid pipeline never emits multiband manifests, but the
+    /// serializer must be total over the enum.
+    #[test]
+    fn pixel_format_serde_round_trips_multiband() {
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::with_channels(7, 1).unwrap();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"multi8:7\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::with_channels(2, 2).unwrap();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"multi16:2\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    /// The float formats round-trip through the manifest serde: the named
+    /// RgbaF32 as "rgbaf32" and the FloatF32 intermediates as
+    /// "floatf32:N". A "floatf32:4" tag deserializes to the canonical
+    /// RgbaF32, mirroring how "multi8:3" canonicalizes to Rgb8.
+    #[test]
+    fn pixel_format_serde_round_trips_float() {
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::RgbaF32;
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"rgbaf32\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = PixelFormat::with_channels(3, 4).unwrap();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        assert!(s.contains("\"floatf32:3\""), "unexpected tag in {s}");
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+
+        // "floatf32:4" canonicalizes to the named RgbaF32 on the way in.
+        let s4 = s.replace("\"floatf32:3\"", "\"floatf32:4\"");
+        let parsed: Manifest = serde_json::from_str(&s4).unwrap();
+        assert_eq!(parsed.as_v1().source.pixel_format, PixelFormat::RgbaF32);
+    }
+
+    // Issue #95: the shared manifest-string parser must round-trip both
+    // known algorithms and reject any unknown name, so every verify path can
+    // route through this one definition and fail uniformly on a bogus algo.
+    #[test]
+    fn from_manifest_str_roundtrips_and_rejects_unknown() {
+        assert_eq!(
+            ChecksumAlgo::from_manifest_str("blake3"),
+            Some(ChecksumAlgo::Blake3)
+        );
+        assert_eq!(
+            ChecksumAlgo::from_manifest_str("sha256"),
+            Some(ChecksumAlgo::Sha256)
+        );
+        // Future / typo'd / unsupported names must not parse.
+        assert_eq!(ChecksumAlgo::from_manifest_str("md5"), None);
+        assert_eq!(ChecksumAlgo::from_manifest_str("BLAKE3"), None);
+        assert_eq!(ChecksumAlgo::from_manifest_str(""), None);
+        // Parsing is the exact inverse of `as_str` for every variant.
+        for algo in [ChecksumAlgo::Blake3, ChecksumAlgo::Sha256] {
+            assert_eq!(ChecksumAlgo::from_manifest_str(algo.as_str()), Some(algo));
+        }
+    }
+
     #[test]
     fn blake3_hex_digest_is_64_chars() {
         let h = ChecksumAlgo::Blake3.hash(b"hello world");
@@ -788,6 +909,51 @@ mod tests {
             BlankTileStrategy::PlaceholderWithTolerance {
                 max_channel_delta: 7,
             }
+        );
+    }
+
+    /// Issue #124: manifest writes must be atomic (staged `.tmp` + rename), not
+    /// a bare `fs::write` that truncates the destination in place.
+    ///
+    /// A rename replaces the directory entry rather than opening and truncating
+    /// the existing file, so it succeeds even when the previous manifest is a
+    /// read-only regular file (as long as the parent directory is writable),
+    /// and a reader never observes a torn write. A bare `fs::write` instead
+    /// fails with `PermissionDenied` trying to truncate the read-only target.
+    ///
+    /// Before the fix `write_to` used `fs::write` and this returned an error
+    /// (RED); after it the atomic rename replaces the file cleanly (GREEN).
+    #[test]
+    #[cfg(unix)]
+    fn write_to_atomically_replaces_a_read_only_manifest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.manifest.json");
+
+        // Pre-existing manifest that a crashed prior run left behind, made
+        // read-only so an in-place truncate would fail.
+        std::fs::write(&path, b"{\"stale\": true}").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let manifest = sample_manifest();
+        manifest
+            .write_to(&path)
+            .expect("atomic write must replace a read-only manifest");
+
+        // The new content fully replaced the old, and no staging temp lingers.
+        let reloaded = ManifestV1::read_from(&path).unwrap();
+        assert_eq!(reloaded, manifest);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging temp file may linger after a successful write: {leftovers:?}"
         );
     }
 }

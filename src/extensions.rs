@@ -3,19 +3,23 @@
 //! [`EngineObserver`](crate::observe::EngineObserver),
 //! [`StripSource`](crate::streaming::StripSource)).
 //!
-//! The shape mirrors [`http::Extensions`]: a `TypeId`-keyed map of
+//! The shape mirrors `http::Extensions`: a `TypeId`-keyed map of
 //! `Box<dyn Any + Send + Sync>`. One slot per `TypeId`; re-inserting a type
 //! overwrites the previous value. Values must be `Send + Sync + 'static` so
 //! the map itself is trivially `Send + Sync`.
 //!
-//! libviprs itself reads **zero** extensions as of this release — the hatch
-//! is deliberately inert. It exists so third-party crates can stash shared
-//! context (metrics recorders, tracing spans, custom config blobs) through
+//! The hatch lets third-party crates stash shared context (metrics
+//! recorders, tracing spans, custom config blobs) through
 //! [`EngineBuilder::with_extension`](crate::EngineBuilder::with_extension)
-//! and retrieve it from a custom `EngineObserver` or the rest of the
-//! pipeline without a semver bump to libviprs. When libviprs grows a
-//! feature that needs cross-cutting context (e.g. an optional `metrics`
-//! integration), that feature's code becomes the first internal reader.
+//! and read it back without a semver bump to libviprs. On every
+//! [`run`](crate::EngineBuilder::run) the builder delivers the whole map to
+//! the attached observer via
+//! [`EngineObserver::on_extensions`](crate::observe::EngineObserver::on_extensions),
+//! once, before any tile is emitted — so a custom `EngineObserver` is the
+//! canonical reader. libviprs itself overrides `on_extensions` in none of its
+//! built-in observers today; when a feature grows that needs cross-cutting
+//! context (e.g. an optional `metrics` integration), that feature's observer
+//! becomes the first internal reader.
 //!
 //! # Example
 //!
@@ -42,6 +46,8 @@ type BoxedAny = Box<dyn Any + Send + Sync>;
 /// one was present. The internal [`HashMap`] is lazily allocated so an
 /// [`EngineBuilder`](crate::EngineBuilder) that never sets an extension
 /// pays no heap cost.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#pyramid)
 #[derive(Default)]
 pub struct Extensions {
     map: Option<HashMap<TypeId, BoxedAny>>,

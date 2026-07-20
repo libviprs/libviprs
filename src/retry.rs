@@ -57,17 +57,31 @@ fn process_seed() -> u64 {
     })
 }
 
+/// Draws a distinct nonce for each [`RetryingSink`] constructed in this
+/// process, so two sinks sharing the same [`process_seed`] and both ticking
+/// from zero do not emit identical jitter streams. Monotonic and wrapping;
+/// only distinctness matters, not the value.
+fn next_sink_nonce() -> u64 {
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    NONCE.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Cheap xorshift64-based pseudo-random nanosecond value in `[0, max_nanos)`.
 ///
-/// Combines the per-process seed with a monotonic per-sink counter to
-/// de-correlate jitter across both calls and sinks without touching the OS
-/// on every invocation. Good enough for jitter; not cryptographic.
-fn sample_jitter(max_nanos: u64, jitter_tick: &AtomicU64) -> u64 {
+/// Combines the per-process seed with a per-sink nonce and a monotonic
+/// per-sink counter to de-correlate jitter across both calls and sinks
+/// without touching the OS on every invocation. Mixing `sink_nonce` is what
+/// keeps two sinks in one process from producing the same sequence even
+/// though `process_seed()` is shared and each `jitter_tick` starts at zero.
+/// Good enough for jitter; not cryptographic.
+fn sample_jitter(max_nanos: u64, jitter_tick: &AtomicU64, sink_nonce: u64) -> u64 {
     if max_nanos == 0 {
         return 0;
     }
     let tick = jitter_tick.fetch_add(1, Ordering::Relaxed);
-    let mut x = process_seed().wrapping_add(tick.wrapping_mul(0x9E3779B97F4A7C15));
+    let mut x = process_seed()
+        .wrapping_add(sink_nonce.wrapping_mul(0xD1B5_4A32_D192_ED03))
+        .wrapping_add(tick.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     // xorshift64
     x ^= x << 13;
     x ^= x >> 7;
@@ -91,7 +105,11 @@ fn sample_jitter(max_nanos: u64, jitter_tick: &AtomicU64) -> u64 {
 /// * `jitter` — when `true`, a uniformly-distributed random slice in
 ///   `[0, backoff / 2]` is added to each sleep. Jitter helps de-synchronise
 ///   many parallel workers hammering the same flaky endpoint.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max)
+/// (and [`--retry-backoff`](https://libviprs.org/cli/#flag-retry-backoff) for the backoff arg)
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct RetryPolicy {
     pub max_retries: u32,
@@ -180,12 +198,26 @@ impl RetryPolicy {
 /// * [`FailurePolicy::RetryThenSkip`] — retry per the embedded policy; on
 ///   exhaustion, account the tile in
 ///   `EngineResult::skipped_due_to_failure` and continue.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum FailurePolicy {
+    /// Propagate the first error; no retries.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
     #[default]
     FailFast,
+    /// Retry per the embedded policy; propagate the last error if every
+    /// retry is exhausted.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
     RetryThenFail(RetryPolicy),
+    /// Retry per the embedded policy; on exhaustion, skip the tile and
+    /// continue.
+    ///
+    /// **See also:** [interactive example](https://libviprs.org/cli/#flag-failure-policy)
     RetryThenSkip(RetryPolicy),
 }
 
@@ -256,6 +288,8 @@ fn duration_from_nanos_u128(nanos: u128) -> Duration {
 ///   (not by `RetryingSink` itself) when `RetryThenSkip` drops a tile.
 ///   Exposed here so the engine can stash the running total without a
 ///   second data structure.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-retry-max)
 pub struct RetryingSink<S: TileSink> {
     inner: S,
     policy: RetryPolicy,
@@ -263,6 +297,14 @@ pub struct RetryingSink<S: TileSink> {
     skipped_due_to_failure: AtomicU64,
     /// Per-sink monotonic tick used to de-correlate jitter across calls.
     jitter_tick: AtomicU64,
+    /// Per-sink nonce mixed into the jitter seed so distinct sinks in one
+    /// process draw independent jitter streams despite the shared
+    /// [`process_seed`] and both ticks starting at zero.
+    jitter_nonce: u64,
+    /// Optional cooperative-cancellation token. When set, the exponential
+    /// backoff sleeps in short slices and aborts between them, so an in-flight
+    /// retry does not have to run its full schedule before the run can stop.
+    cancel: Option<crate::cancel::CancelToken>,
 }
 
 impl<S: TileSink> RetryingSink<S> {
@@ -274,7 +316,19 @@ impl<S: TileSink> RetryingSink<S> {
             retry_count: AtomicU64::new(0),
             skipped_due_to_failure: AtomicU64::new(0),
             jitter_tick: AtomicU64::new(0),
+            jitter_nonce: next_sink_nonce(),
+            cancel: None,
         }
+    }
+
+    /// Attach a [`CancelToken`](crate::cancel::CancelToken) so an in-flight
+    /// backoff can be interrupted. The engine wires this from
+    /// [`EngineConfig::cancel`](crate::engine::EngineConfig::cancel); a
+    /// cancelled token stops the retry loop, and the engine then reports the
+    /// run as [`EngineError::Cancelled`](crate::engine::EngineError::Cancelled).
+    pub fn with_cancel(mut self, token: Option<crate::cancel::CancelToken>) -> Self {
+        self.cancel = token;
+        self
     }
 
     /// Total number of retry attempts observed by this sink so far.
@@ -307,18 +361,42 @@ impl<S: TileSink> RetryingSink<S> {
     }
 
     /// Sleep for the computed backoff, adding jitter if enabled.
-    fn backoff_sleep(&self, attempt: u32) {
+    ///
+    /// When a [`CancelToken`](crate::cancel::CancelToken) is attached, the
+    /// sleep is broken into short slices and abandoned as soon as the token is
+    /// cancelled. Returns `true` if the full backoff elapsed, `false` if it was
+    /// cut short by cancellation.
+    fn backoff_sleep(&self, attempt: u32) -> bool {
         let base = compute_backoff(&self.policy, attempt);
         let total = if self.policy.jitter {
             let max_jitter_nanos = (base / 2).as_nanos() as u64;
-            let jitter_nanos = sample_jitter(max_jitter_nanos, &self.jitter_tick);
+            let jitter_nanos =
+                sample_jitter(max_jitter_nanos, &self.jitter_tick, self.jitter_nonce);
             base + Duration::from_nanos(jitter_nanos)
         } else {
             base
         };
-        if !total.is_zero() {
-            thread::sleep(total);
+        if total.is_zero() {
+            return true;
         }
+        // No cancel token: sleep the whole duration in one go (fast path).
+        let Some(cancel) = &self.cancel else {
+            thread::sleep(total);
+            return true;
+        };
+        // Interruptible sleep: poll the token between short slices so an
+        // in-flight backoff can be aborted well before its full schedule.
+        const SLICE: Duration = Duration::from_millis(25);
+        let mut remaining = total;
+        while !remaining.is_zero() {
+            if cancel.is_cancelled() {
+                return false;
+            }
+            let step = remaining.min(SLICE);
+            thread::sleep(step);
+            remaining -= step;
+        }
+        !cancel.is_cancelled()
     }
 }
 
@@ -334,7 +412,16 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
                 }
                 let mut last_err = first_err;
                 for attempt in 0..self.policy.max_retries {
-                    self.backoff_sleep(attempt);
+                    // If cancellation fires during (or before) the backoff,
+                    // stop retrying and return the last error immediately. The
+                    // engine polls the same token on the write-error path and
+                    // promotes this to EngineError::Cancelled.
+                    if !self.backoff_sleep(attempt) {
+                        return Err(last_err);
+                    }
+                    if self.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        return Err(last_err);
+                    }
                     self.retry_count.fetch_add(1, Ordering::Relaxed);
                     match self.inner.write_tile(tile) {
                         Ok(()) => return Ok(()),
@@ -350,8 +437,16 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
         self.inner.finish()
     }
 
-    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
-        self.inner.record_engine_config(config);
+    /// Expose the wrapped sink so the trait's bookkeeping defaults forward
+    /// through it. `RetryingSink` genuinely owns two counters
+    /// (`sink_retry_count`, `sink_skipped_due_to_failure`) and its own
+    /// retry-loop marker (`applies_retry_policy`), so those stay overridden
+    /// below; every purely-transparent hook (`record_engine_config`,
+    /// `checkpoint_root`, `init_level_count`, `content_format`) is served by
+    /// the default that reads this inner sink, so the wrapper cannot silently
+    /// drop one (issue #137).
+    fn inner_sink(&self) -> Option<&dyn TileSink> {
+        Some(&self.inner)
     }
 
     fn sink_retry_count(&self) -> u64 {
@@ -364,15 +459,20 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
     }
 
     fn note_sink_skipped(&self) {
+        // Record the skip on this wrapper's own counter only — do NOT forward
+        // to the inner sink. The engine calls `note_sink_skipped` exactly once
+        // per dropped tile, on the outermost sink, and `sink_skipped_due_to_failure`
+        // already recurses (self + inner) to aggregate the whole chain. Forwarding
+        // here as well would let one skip through an N-deep stack of RetryingSinks
+        // report N (mirrors how `sink_retry_count` sums per-level counters that are
+        // each bumped only by their own retry loop).
         self.skipped_due_to_failure.fetch_add(1, Ordering::Relaxed);
-        // Forward so inner wrappers (e.g. another RetryingSink) can also
-        // observe the skip. An actual terminal sink ignores the hook via the
-        // default no-op implementation.
-        self.inner.note_sink_skipped();
     }
 
-    fn checkpoint_root(&self) -> Option<&std::path::Path> {
-        self.inner.checkpoint_root()
+    fn applies_retry_policy(&self) -> bool {
+        // This decorator runs the retry loop itself, so a caller that
+        // pre-wrapped their sink must not be wrapped again by the builder.
+        true
     }
 }
 
@@ -525,6 +625,50 @@ mod tests {
         // max_retries=2 → 1 initial + 2 retries = 3 total attempts.
         assert_eq!(sink.inner().calls.load(Ordering::SeqCst), 3);
         assert_eq!(sink.retry_count(), 2);
+    }
+
+    #[test]
+    fn nested_wrappers_count_a_single_skip_once() {
+        // Engine calls `note_sink_skipped` exactly once per dropped tile, on the
+        // outermost sink. Through a two-deep RetryingSink chain that single skip
+        // must aggregate to 1 — not 2. (Before the fix, `note_sink_skipped`
+        // forwarded into the inner wrapper while `sink_skipped_due_to_failure`
+        // also summed self+inner, double-counting.)
+        let inner = RetryingSink::new(MemorySink::new(), RetryPolicy::default());
+        let outer = RetryingSink::new(inner, RetryPolicy::default());
+
+        outer.note_sink_skipped();
+
+        assert_eq!(
+            outer.sink_skipped_due_to_failure(),
+            1,
+            "one skip through nested RetryingSinks must count exactly once"
+        );
+    }
+
+    #[test]
+    fn jitter_is_decorrelated_across_sinks() {
+        // Two sinks constructed in the same process share `process_seed()` and
+        // both tick from zero. Without a per-sink nonce mixed into the seed they
+        // would emit byte-for-byte identical jitter streams, defeating the
+        // cross-sink de-correlation the jitter is meant to provide.
+        let a = RetryingSink::new(MemorySink::new(), RetryPolicy::default());
+        let b = RetryingSink::new(MemorySink::new(), RetryPolicy::default());
+
+        // A wide range keeps the (already vanishing) chance of an incidental
+        // per-tick collision negligible across the sampled sequence.
+        let max = u32::MAX as u64;
+        let seq_a: Vec<u64> = (0..16)
+            .map(|_| sample_jitter(max, &a.jitter_tick, a.jitter_nonce))
+            .collect();
+        let seq_b: Vec<u64> = (0..16)
+            .map(|_| sample_jitter(max, &b.jitter_tick, b.jitter_nonce))
+            .collect();
+
+        assert_ne!(
+            seq_a, seq_b,
+            "distinct sinks must draw independent jitter streams"
+        );
     }
 
     #[test]

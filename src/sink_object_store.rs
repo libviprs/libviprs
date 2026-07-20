@@ -1,6 +1,7 @@
 //! S3-compatible object-storage sink for libviprs Phase 3.
 //!
-//! This module is gated behind the `s3` feature flag. It introduces an
+//! This module is gated behind the `object-store-sink` feature flag (the
+//! deprecated `s3` alias also enables it). It introduces an
 //! injectable [`ObjectStore`] trait so tests can swap in in-memory backends,
 //! plus a concrete [`ObjectStoreSink`] that conforms to the crate's
 //! [`TileSink`](crate::sink::TileSink) contract.
@@ -37,6 +38,32 @@ use crate::sink::{BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, enco
 /// without the network.
 pub trait ObjectStore: Send + Sync {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError>;
+
+    /// Enumerate the object keys stored under `prefix`.
+    ///
+    /// **Defaulted to a loud refusal.** A listing-capable backend — a real
+    /// object-store client, or a test double that tracks its own key space —
+    /// overrides this to return the keys it holds. Write-only backends (any
+    /// store that only implements `put`) inherit this default, which fails loud
+    /// with [`SinkError::Unsupported`] rather than returning a misleading empty
+    /// `Ok(vec![])`. A silent empty list is a footgun: a caller diffing
+    /// server-side keys against a filesystem reference cannot distinguish
+    /// "nothing was uploaded" from "this backend cannot list", so the diff
+    /// passes falsely or fails spuriously.
+    ///
+    /// [`ObjectStoreSink::list_objects`] delegates here, so the sink no longer
+    /// hardcodes the refusal — listing capability now lives with the backend,
+    /// and no sink edit is needed when a listing-capable transport lands.
+    fn list(&self, prefix: &str) -> Result<Vec<String>, SinkError> {
+        let _ = prefix;
+        Err(SinkError::Unsupported(
+            "list_objects: this ObjectStore backend does not implement a LIST \
+             operation (ObjectStore::list is defaulted to refuse). A \
+             listing-capable backend overrides it; write-only backends inherit \
+             this loud failure. Do not treat this as an empty object set."
+                .into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +78,8 @@ pub trait ObjectStore: Send + Sync {
 ///
 /// Retry behaviour is **not** configured here — wrap the resulting sink in
 /// [`crate::retry::RetryingSink`] if you need automatic retries.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ObjectStoreConfig {
@@ -125,6 +154,16 @@ impl ObjectStoreConfig {
         self
     }
 
+    /// Set the multipart-upload threshold (in bytes).
+    ///
+    /// **Currently inert in this build.** The threshold is stored on the config
+    /// and observed only by a real multipart-capable object-store transport,
+    /// which is not compiled in (see [`ObjectStoreSink::list_objects`] and the
+    /// Phase 3 TODO in [`ObjectStoreSink::new`]). The injectable [`ObjectStore`]
+    /// trait exposes only a single `put`, so no chunking boundary is applied to
+    /// uploads regardless of this value. It is retained so callers can configure
+    /// the intended threshold ahead of that transport landing, at which point
+    /// this setting will take effect.
     pub fn with_multipart_threshold(mut self, threshold: usize) -> Self {
         self.multipart_threshold = threshold;
         self
@@ -198,6 +237,18 @@ fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError
         PixelFormat::Rgba8 => Ok(image::ColorType::Rgba8),
         PixelFormat::Rgb16 => Ok(image::ColorType::Rgb16),
         PixelFormat::Rgba16 => Ok(image::ColorType::Rgba16),
+        // Multiband intermediates (from the band ops in `crate::bands`) have
+        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
+        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Err(SinkError::EncodeMsg(format!(
+            "multiband raster ({} bands) cannot be encoded as an image tile",
+            fmt.channels()
+        ))),
+        // Float compute intermediates have no PNG/JPEG representation;
+        // cast to an unsigned 8/16-bit format before encoding tiles.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
+            "float raster ({fmt:?}) cannot be encoded as an image tile; \
+             cast to an unsigned 8/16-bit format first"
+        ))),
     }
 }
 
@@ -236,14 +287,19 @@ fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError
 ///
 /// Tile keys follow the plan's layout (Deep Zoom, XYZ, or Google) rooted at
 /// `<key_prefix>/<image_name>…`. The backend is injected via
-/// [`ObjectStoreConfig::with_object_store`]; a built-in ureq-based S3 client
-/// is not wired into this build (see the TODO stub in [`ObjectStoreSink::new`]).
+/// [`ObjectStoreConfig::with_object_store`]; a built-in object-store transport
+/// (the planned `object_store` + `tokio` client) is not wired into this build
+/// (see the TODO stub in [`ObjectStoreSink::new`]).
 ///
 /// This sink performs **no** retries of its own — if the underlying store's
 /// `put` fails, the error is returned verbatim. Callers wanting automatic
 /// retry should wrap this sink in [`crate::retry::RetryingSink`] with the
 /// appropriate [`crate::retry::RetryPolicy`] and
 /// [`crate::retry::FailurePolicy`].
+///
+/// On the CLI this sink is selected by passing an `s3://…` URI to `--sink`.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-sink)
 #[non_exhaustive]
 pub struct ObjectStoreSink {
     cfg: ObjectStoreConfig,
@@ -264,41 +320,55 @@ impl ObjectStoreSink {
     /// Construct a new sink.
     ///
     /// Requires a backend to have been attached to `cfg` via
-    /// [`ObjectStoreConfig::with_object_store`]. The internal ureq-based S3
-    /// signer is not wired up in this build (tracking: Phase 3 TODO — add a
-    /// native HTTP path so production callers don't need to inject a
-    /// backend), so calling `new` without an injected backend returns
-    /// [`SinkError::Other`] with a message pointing at the injection API.
+    /// [`ObjectStoreConfig::with_object_store`]. The built-in object-store
+    /// transport (the planned `object_store` + `tokio` client) is not wired up
+    /// in this build (tracking: Phase 3 TODO — add a native transport so
+    /// production callers don't need to inject a backend), so calling `new`
+    /// without an injected backend returns [`SinkError::Other`] with a message
+    /// pointing at the injection API.
     pub fn new(
         cfg: ObjectStoreConfig,
         plan: PyramidPlan,
         format: TileFormat,
     ) -> Result<Self, SinkError> {
         if cfg.store.is_none() {
-            // Phase 3 TODO: wire up a built-in ureq-based S3 client so this
-            // branch becomes unreachable. For now, all callers (tests and
-            // production) must inject a backend via `.with_object_store(...)`.
+            // Phase 3 TODO: wire up the built-in object-store transport (the
+            // planned `object_store` + `tokio` client) so this branch becomes
+            // unreachable. For now, all callers (tests and production) must
+            // inject a backend via `.with_object_store(...)`.
             return Err(SinkError::Other(
                 "ObjectStoreSink: no backend attached. Call \
                  ObjectStoreConfig::with_object_store(Arc<dyn ObjectStore>) \
-                 to inject an ObjectStore implementation (the built-in S3 \
-                 HTTP client is not compiled into this build)."
+                 to inject an ObjectStore implementation."
                     .into(),
             ));
         }
         Ok(Self { cfg, plan, format })
     }
 
-    /// List all object keys currently stored in the backing store under this
-    /// sink's configured key prefix.
+    /// Enumerate the object keys stored under this sink's key prefix.
     ///
-    /// Phase 2b stub: returns an empty list when the sink was constructed via
-    /// the default S3 plumbing (a full implementation would issue a LIST
-    /// request against the configured endpoint). Primarily intended so
-    /// integration tests that want to diff the server-side state against a
-    /// filesystem reference can compile and run.
+    /// Delegates to the injected backend's [`ObjectStore::list`], passing the
+    /// sink's configured `key_prefix`. The sink no longer hardcodes a refusal:
+    /// a listing-capable backend overrides `ObjectStore::list` and returns real
+    /// keys, while a write-only backend inherits the trait's defaulted loud
+    /// failure ([`SinkError::Unsupported`]). Rather than a silently-empty
+    /// `Ok(vec![])` — which a caller diffing server-side keys against a
+    /// filesystem reference cannot distinguish from "nothing was uploaded",
+    /// making the diff pass falsely or fail spuriously — the default path fails
+    /// loud. Callers should treat [`SinkError::Unsupported`] as "this backend
+    /// cannot list" rather than "the store is empty".
     pub fn list_objects(&self) -> Result<Vec<String>, SinkError> {
-        Ok(Vec::new())
+        let store =
+            self.cfg.store.as_ref().ok_or_else(|| {
+                SinkError::Other("ObjectStoreSink: backend is not configured".into())
+            })?;
+        // Forward the *trimmed* prefix so a listing observes the same key space
+        // the write path produces: every `*_key` helper (and the Zoomify/IIIF
+        // branch) normalises `key_prefix` with `trim_matches('/')` before it
+        // builds an object key, so a raw `"/run-1/"` would list under a prefix
+        // no written key ever carries. Match that normalisation here.
+        store.list(self.cfg.key_prefix.trim_matches('/'))
     }
 
     /// Build the object key for a given tile coordinate, respecting the
@@ -335,6 +405,19 @@ impl ObjectStoreSink {
                 coord.row,
                 ext,
             ),
+            // Zoomify / IIIF tile paths are plan-dependent (cumulative tile
+            // numbering, region maths), so the planner is the single source of
+            // truth. Prefix its canonical relative tile path with the key
+            // prefix and image name, matching the XYZ / Google key shape.
+            crate::planner::Layout::Zoomify | crate::planner::Layout::Iiif => {
+                let rel = self.plan.tile_path(coord, ext)?;
+                let trimmed = self.cfg.key_prefix.trim_matches('/');
+                if trimmed.is_empty() {
+                    format!("{}/{rel}", self.cfg.image_name)
+                } else {
+                    format!("{trimmed}/{}/{rel}", self.cfg.image_name)
+                }
+            }
         };
         Some(key)
     }
@@ -434,6 +517,186 @@ mod tests {
         assert!(
             msg.contains("with_object_store"),
             "error should point callers to the injection API: {msg}"
+        );
+    }
+
+    /// In-crate recording backend: captures every `(key, bytes)` handed to
+    /// `put` so a test can prove the sink actually uploaded, then confront that
+    /// with what `list_objects` reports.
+    #[derive(Default)]
+    struct RecordingStore {
+        puts: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    impl RecordingStore {
+        fn keys(&self) -> Vec<String> {
+            self.puts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect()
+        }
+    }
+
+    impl ObjectStore for RecordingStore {
+        fn put(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
+            self.puts
+                .lock()
+                .unwrap()
+                .push((key.to_string(), bytes.to_vec()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn list_objects_is_unsupported_even_after_writes() {
+        // Regression guard for the silent-empty-list footgun (issues #379,
+        // #380, #383, #384): the earlier test asserted `list_objects() == []`
+        // over a sink that had never uploaded anything, a property a *correct*
+        // LIST implementation would also satisfy — so it locked in nothing.
+        //
+        // Here we upload a real tile through the sink (the recording backend
+        // captures it), then assert the sink cannot enumerate it. Because the
+        // `ObjectStore` trait exposes only `put`, `list_objects` fails loud
+        // with `SinkError::Unsupported` rather than masquerading the backend's
+        // populated state as an empty `Ok(vec![])`.
+        use crate::planner::{Layout, PyramidPlanner};
+        use crate::sink::TileSink;
+
+        let store = Arc::new(RecordingStore::default());
+        let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket")
+            .with_object_store(store.clone());
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom)
+            .expect("planner params are valid")
+            .plan();
+        let sink = ObjectStoreSink::new(cfg, plan, TileFormat::Png)
+            .expect("sink constructs once a backend is injected");
+
+        let tile = Tile {
+            coord: TileCoord::new(0, 0, 0),
+            raster: Raster::zeroed(256, 256, PixelFormat::Rgb8).unwrap(),
+            blank: false,
+        };
+        sink.write_tile(&tile).expect("tile upload succeeds");
+
+        // The backend really recorded the upload...
+        assert_eq!(
+            store.keys().len(),
+            1,
+            "backend must have recorded exactly one put"
+        );
+
+        // ...yet the sink still cannot enumerate it: the stub fails loud
+        // instead of returning a misleading empty list.
+        let err = sink
+            .list_objects()
+            .expect_err("list_objects must not report success while unimplemented");
+        assert!(
+            matches!(err, SinkError::Unsupported(_)),
+            "expected SinkError::Unsupported, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("list_objects") && msg.contains("LIST"),
+            "error must name the operation and the missing transport: {msg}"
+        );
+    }
+
+    /// A listing-capable backend: records every `put` and *overrides*
+    /// [`ObjectStore::list`] to return the keys it holds (filtered by prefix).
+    /// Proves the sink delegates enumeration to the backend rather than
+    /// hardcoding a refusal.
+    #[derive(Default)]
+    struct ListingStore {
+        puts: std::sync::Mutex<Vec<String>>,
+        last_prefix: std::sync::Mutex<Option<String>>,
+    }
+
+    impl ObjectStore for ListingStore {
+        fn put(&self, key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+            self.puts.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+
+        fn list(&self, prefix: &str) -> Result<Vec<String>, SinkError> {
+            *self.last_prefix.lock().unwrap() = Some(prefix.to_string());
+            Ok(self
+                .puts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn list_objects_delegates_to_overriding_backend() {
+        // A backend that overrides `ObjectStore::list` makes `list_objects`
+        // return real keys — proving the sink delegates to the backend's
+        // `list` instead of hardcoding `SinkError::Unsupported`, and that the
+        // sink's `key_prefix` is forwarded as the `list` argument.
+        use crate::planner::{Layout, PyramidPlanner};
+        use crate::sink::TileSink;
+
+        let store = Arc::new(ListingStore::default());
+        // Wrap the prefix in slashes: the write path trims them via
+        // `trim_matches('/')` before building keys, so `list_objects` must
+        // forward the same trimmed prefix ("run-1"), not the raw "/run-1/".
+        let cfg = ObjectStoreConfig::s3("http://localhost:9000", "bucket")
+            .with_key_prefix("/run-1/")
+            .with_image_name("deleg")
+            .with_object_store(store.clone());
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::DeepZoom)
+            .expect("planner params are valid")
+            .plan();
+        let sink = ObjectStoreSink::new(cfg, plan, TileFormat::Png)
+            .expect("sink constructs once a backend is injected");
+
+        let tile = Tile {
+            coord: TileCoord::new(0, 0, 0),
+            raster: Raster::zeroed(256, 256, PixelFormat::Rgb8).unwrap(),
+            blank: false,
+        };
+        sink.write_tile(&tile).expect("tile upload succeeds");
+
+        let listed = sink
+            .list_objects()
+            .expect("list_objects delegates to the overriding backend");
+        assert_eq!(
+            listed,
+            vec!["run-1/deleg_files/0/0_0.png".to_string()],
+            "list_objects must return the keys the backend holds"
+        );
+
+        // The sink forwarded its configured key_prefix to the backend's `list`,
+        // *trimmed* to match the write path — the backend sees "run-1", not
+        // the raw "/run-1/".
+        assert_eq!(
+            store.last_prefix.lock().unwrap().as_deref(),
+            Some("run-1"),
+            "list_objects must delegate with the write-path-trimmed key_prefix"
+        );
+    }
+
+    /// The trait's *defaulted* `list` refuses loud on a write-only backend that
+    /// does not override it — the behaviour the sink used to hardcode now lives
+    /// on the trait.
+    #[test]
+    fn default_trait_list_refuses_loud() {
+        let store = RecordingStore::default();
+        let err = ObjectStore::list(&store, "any-prefix")
+            .expect_err("defaulted ObjectStore::list must refuse");
+        assert!(
+            matches!(err, SinkError::Unsupported(_)),
+            "expected SinkError::Unsupported, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("list_objects") && msg.contains("LIST"),
+            "default list error must name the operation and the missing transport: {msg}"
         );
     }
 }

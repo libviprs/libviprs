@@ -9,18 +9,47 @@
 //! # Storage contract
 //!
 //! For each distinct content hash, at most one physical file is written at
-//! `_shared/<shared_key>.<ext>`. Every other tile with the same content is
-//! then referenced from its planned path via one of three strategies,
-//! attempted in order:
+//! `_shared/<shared_key>.<ext>`. [`DedupeIndex::record`] tells the sink
+//! whether it is looking at the *first* occurrence of some content
+//! ([`DedupeDecision::WriteNew`]) or a later duplicate
+//! ([`DedupeDecision::Reference`]); the sink materialises the layout with a
+//! *promote-on-second-hit* scheme (see [`crate::sink::FsSink`]):
 //!
-//! 1. **Symlink** (`try_symlink`) — preferred on unix because it's cheap and
-//!    readers that follow symlinks see the target bytes transparently.
-//! 2. **Hardlink** (`try_hardlink`) — used when the filesystem or platform
-//!    rejects symlinks (e.g. Windows without the Developer Mode privilege).
-//! 3. **Manifest-only** — as a last resort, a 1-byte placeholder is written
-//!    at the tile path and the sink records the relationship in
-//!    `manifest.json`'s `blank_references` map. Readers must consult the
-//!    manifest to resolve the pointer.
+//! 1. The first tile with a given content hash is written in full at its own
+//!    planned path. Nothing is placed under `_shared/` yet — content seen only
+//!    once never bloats `_shared/`.
+//! 2. When a *second* tile with identical bytes arrives, the first tile's file
+//!    is promoted into `_shared/<shared_key>.<ext>` and the first tile path is
+//!    re-pointed at it with a **hardlink** (guaranteeing at least one tile
+//!    resolves to the shared inode).
+//! 3. That second tile — and every later duplicate — is written as a 1-byte
+//!    placeholder at its own path, and the `tile_path -> shared_path`
+//!    relationship is recorded in `manifest.json`'s `blank_references` map.
+//!    Readers consult the manifest to resolve the pointer.
+//!
+//! # Deterministic placement (issue #275)
+//!
+//! [`DedupeIndex::record`] returns `WriteNew` for whichever occurrence of a
+//! content hash it sees *first*, and under `tile_concurrency > 0` that is
+//! producer-completion order over an MPSC queue — non-deterministic. If the
+//! sink kept the arrival-first occurrence as the full-payload holder, the byte
+//! layout and the `blank_references` map would depend on thread scheduling,
+//! breaking the [`crate::sink::TileSink`] commutative-placement contract.
+//!
+//! To make placement a pure function of content + coordinates, `FsSink` runs
+//! the promote-on-second-hit scheme above *during* the run for its
+//! at-least-one-hardlink guarantee, then, at `finish()` (after all writers have
+//! joined), reassigns the single full-payload holder of each duplicated content
+//! to its **coordinate-minimal** occurrence — sorted by `(level, row, col)`,
+//! the canonical order used by [`crate::mapreduce_hot_cache`]. The layout shape
+//! is otherwise identical; only *which* occurrence keeps the full bytes changes,
+//! and it changes to a value fixed by the input alone. See
+//! [`crate::sink::FsSink::canonicalize_dedupe_layout`].
+//!
+//! The standalone [`materialize_reference`] helper (symlink → hardlink →
+//! placeholder fallback, reported via [`LinkResult`]) is provided for
+//! *alternative* sinks that prefer link-based references over the manifest
+//! scheme above; `FsSink` does not use it.
 //!
 //! # Shared-key contract
 //!
@@ -40,7 +69,14 @@ use crate::manifest::ChecksumAlgo;
 // ---------------------------------------------------------------------------
 
 /// Selects how tiles are content-addressed prior to being written to disk.
+///
+/// CLI users pick a strategy via
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks) (blanks-only)
+/// or [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all) (every tile).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum DedupeStrategy {
     /// No deduplication — every tile is written to its own file. Default.
@@ -48,9 +84,13 @@ pub enum DedupeStrategy {
     None,
     /// Only blank (uniform-colour) tiles are deduplicated. Non-blank tiles
     /// are written individually.
+    ///
+    /// CLI: [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks).
     Blanks,
     /// Every tile is content-addressed; identical tiles share a single
     /// physical file regardless of whether they're blank.
+    ///
+    /// CLI: [`--dedupe-all`](https://libviprs.org/cli/#flag-dedupe-all).
     All {
         /// Hash algorithm used to derive the shared-key filename.
         algo: ChecksumAlgo,
@@ -62,6 +102,11 @@ pub enum DedupeStrategy {
 // ---------------------------------------------------------------------------
 
 /// Outcome of a [`DedupeIndex::record`] call.
+///
+/// Drives the on-disk layout produced by the CLI's
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks) flag.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DedupeDecision {
@@ -129,16 +174,41 @@ fn algo_tag(a: ChecksumAlgo) -> AlgoTag {
 /// order regardless of hash-state randomization.
 #[derive(Debug, Default)]
 struct DedupeState {
-    /// `(algo_tag, digest) -> shared_key` for first-write / reference
+    /// `(algo_tag, digest) -> SeenEntry` for first-write / reference
     /// decisions.
-    seen: BTreeMap<(AlgoTag, [u8; 32]), String>,
+    seen: BTreeMap<(AlgoTag, [u8; 32]), SeenEntry>,
     /// `tile_path -> shared_key` for manifest emission.
     refs: BTreeMap<String, String>,
+}
+
+/// Value stored per distinct content hash in [`DedupeState::seen`].
+///
+/// The shared-key stem is a pure function of the content hash, but the
+/// physical file's *extension* is inherited from whichever tile was recorded
+/// first (that tile's bytes are the ones promoted into `_shared/`). A later
+/// same-bytes tile with a different extension must therefore reference the
+/// path that was actually written, not one re-derived from its own extension
+/// (issue #96). We remember that full path here so `Reference` decisions can
+/// return it verbatim.
+#[derive(Debug, Clone)]
+struct SeenEntry {
+    /// Deterministic `blank_<hash>` stem of the shared file.
+    shared_key: String,
+    /// Full relative path of the shared file as first written, e.g.
+    /// `_shared/blank_<hash>.png`. Recorded from the first tile that carried
+    /// this content so later duplicates reference the file that actually
+    /// exists on disk.
+    shared_path: PathBuf,
 }
 
 /// In-memory mapping from content-hash to shared-key. One instance per
 /// generation run; not persisted across restarts (resume-mode sinks rebuild
 /// the index by walking `_shared/`).
+///
+/// Constructed under the hood when the CLI runs with
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[non_exhaustive]
 pub struct DedupeIndex {
     strategy: DedupeStrategy,
@@ -212,27 +282,55 @@ impl DedupeIndex {
             .unwrap_or("bin");
 
         let (algo, digest) = self.hash_content_raw(bytes);
-        let hash_hex = hex_lower(&digest);
+        let hash_hex = crate::hex::hex_lower(&digest);
         let shared_key = format!("blank_{hash_hex}");
         let shared_path = Self::shared_path(&shared_key, ext);
 
+        // `DedupeStrategy::None` is a true passthrough: every tile is written
+        // to its own file and no content is ever collapsed. We must therefore
+        // neither consult nor populate `seen`/`refs`, so two calls with
+        // identical bytes can never yield a `Reference` (issue #99). Returning
+        // `WriteNew` for every call tells the caller to write the tile verbatim
+        // at its planned path. `FsSink` guards this externally and never calls
+        // `record` under `None`, but `record` is public API and other consumers
+        // must not be silently deduplicated.
+        if self.strategy == DedupeStrategy::None {
+            return DedupeDecision::WriteNew {
+                shared_key,
+                shared_path,
+            };
+        }
+
         // Single lock: update `refs` and `seen` atomically so readers never
-        // observe one populated without the other (Mara B5).
-        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        // observe one populated without the other (Mara B5). Poison is
+        // recovered (crate::poison policy): the maps are structurally valid
+        // between operations, so a panicked prior holder must not cascade.
+        let mut state = crate::poison::recover(&self.state);
         state.refs.insert(path.to_string(), shared_key.clone());
 
         match state.seen.entry((algo_tag(algo), digest)) {
             std::collections::btree_map::Entry::Vacant(e) => {
-                e.insert(shared_key.clone());
+                e.insert(SeenEntry {
+                    shared_key: shared_key.clone(),
+                    shared_path: shared_path.clone(),
+                });
                 DedupeDecision::WriteNew {
                     shared_key,
                     shared_path,
                 }
             }
-            std::collections::btree_map::Entry::Occupied(_) => DedupeDecision::Reference {
-                shared_key,
-                shared_path,
-            },
+            // A first occurrence already recorded the physical path that its
+            // bytes will occupy under `_shared/`. Return the *stored* shared
+            // key and path so the reference resolves to the file that actually
+            // gets written, rather than one re-derived from this tile's
+            // (possibly different) extension (issue #96).
+            std::collections::btree_map::Entry::Occupied(e) => {
+                let stored = e.get();
+                DedupeDecision::Reference {
+                    shared_key: stored.shared_key.clone(),
+                    shared_path: stored.shared_path.clone(),
+                }
+            }
         }
     }
 
@@ -240,28 +338,8 @@ impl DedupeIndex {
     /// a symlink / hardlink and no manifest pointer is required). No-op if
     /// the path was never recorded.
     pub fn forget_reference(&self, path: &str) {
-        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
+        let mut state = crate::poison::recover(&self.state);
         state.refs.remove(path);
-    }
-
-    /// Record an already-known shared key for a given content hash, used by
-    /// resume-mode sinks when walking an existing `_shared/` directory so
-    /// that subsequent `record` calls don't emit `WriteNew` for content
-    /// that's already physically present on disk.
-    ///
-    /// `hash_hex` must be the lowercase hex of the 32-byte digest produced
-    /// by the index's effective algorithm. Invalid or wrong-length hex is
-    /// silently ignored — the index will simply emit `WriteNew` on first
-    /// encounter, which is benign (the sink's rename-into-_shared path
-    /// already tolerates an existing target).
-    pub fn seed_shared_key(&self, hash_hex: String, shared_key: String) {
-        let digest = match decode_hex_32(&hash_hex) {
-            Some(d) => d,
-            None => return,
-        };
-        let algo = self.effective_algo();
-        let mut state = self.state.lock().expect("dedupe state mutex poisoned");
-        state.seen.insert((algo_tag(algo), digest), shared_key);
     }
 
     /// Compute the on-disk relative path for a shared blob.
@@ -277,21 +355,13 @@ impl DedupeIndex {
     /// Returns a `BTreeMap` so callers that serialize the result get
     /// deterministic key order (dtolnay #5).
     pub fn references(&self) -> BTreeMap<String, String> {
-        self.state
-            .lock()
-            .expect("dedupe state mutex poisoned")
-            .refs
-            .clone()
+        crate::poison::recover(&self.state).refs.clone()
     }
 
     /// Total number of distinct content hashes seen so far. Useful for
     /// diagnostics and tests.
     pub fn distinct_count(&self) -> usize {
-        self.state
-            .lock()
-            .expect("dedupe state mutex poisoned")
-            .seen
-            .len()
+        crate::poison::recover(&self.state).seen.len()
     }
 }
 
@@ -301,6 +371,11 @@ impl DedupeIndex {
 
 /// Outcome of [`materialize_reference`]: which strategy was ultimately used
 /// to point `tile_path` at `shared_path`.
+///
+/// Reflects the link/placeholder fallback chain triggered by
+/// [`--dedupe-blanks`](https://libviprs.org/cli/#flag-dedupe-blanks).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LinkResult {
@@ -428,88 +503,70 @@ fn pathdiff(to: &Path, from: &Path) -> Option<PathBuf> {
 /// The parent directory of `tile_path` must already exist; the caller is
 /// responsible for `std::fs::create_dir_all`. Any pre-existing file at
 /// `tile_path` is removed first (so this is safe to call in resume mode).
-pub fn materialize_reference(tile_path: &Path, shared_path: &Path) -> LinkResult {
-    // Remove any leftover file at the tile path so link creation doesn't
-    // fail with EEXIST. `remove_file` silently succeeds on not-found via
-    // explicit check to avoid swallowing unrelated errors.
-    if tile_path.exists() || tile_path.is_symlink() {
-        let _ = std::fs::remove_file(tile_path);
+///
+/// Returns the [`LinkResult`] describing which strategy succeeded, or an
+/// [`io::Error`] if *every* strategy — including the placeholder write —
+/// failed. A failure is never reported as success: if the returned value is
+/// `Ok`, a resolvable file exists at `tile_path`.
+pub fn materialize_reference(tile_path: &Path, shared_path: &Path) -> io::Result<LinkResult> {
+    // Absolutize the shared target before linking. A relative `shared_path`
+    // (e.g. `_shared/blank_<hash>.png`) passed verbatim as a symlink target
+    // is resolved relative to `tile_path`'s parent, which points at a file
+    // that does not exist there — a dangling link. Anchoring to an absolute
+    // path makes the reference resolve regardless of where `tile_path` lives.
+    let shared_target = absolutize(shared_path);
+
+    // Remove any leftover file (or dangling symlink) at the tile path so link
+    // creation doesn't fail with EEXIST. Removing unconditionally — and
+    // tolerating only `NotFound` — closes the check-then-remove TOCTOU window
+    // while still surfacing genuine errors (e.g. EACCES on the parent dir).
+    match std::fs::remove_file(tile_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
 
     #[cfg(windows)]
     {
         // Windows: hardlink first (works without admin), then symlink.
-        if try_hardlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Hardlink;
+        if try_hardlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Hardlink);
         }
-        if try_symlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Symlink;
+        if try_symlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Symlink);
         }
     }
 
     #[cfg(not(windows))]
     {
         // Unix (and other unix-like targets): symlink first, then hardlink.
-        if try_symlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Symlink;
+        if try_symlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Symlink);
         }
-        if try_hardlink(shared_path, tile_path).is_ok() {
-            return LinkResult::Hardlink;
-        }
-    }
-
-    // Final fallback: placeholder file.
-    match std::fs::write(tile_path, PLACEHOLDER_MARKER) {
-        Ok(()) => LinkResult::ManifestOnly,
-        Err(_) => {
-            // Even the placeholder write failed; there's not much we can do
-            // without bubbling an error. The caller's manifest map still
-            // documents the intended relationship, so readers that consult
-            // it will recover.
-            LinkResult::ManifestOnly
+        if try_hardlink(&shared_target, tile_path).is_ok() {
+            return Ok(LinkResult::Hardlink);
         }
     }
+
+    // Final fallback: placeholder file. If even this write fails there is no
+    // resolvable file at `tile_path`, so the error must be surfaced rather
+    // than masqueraded as a successful `ManifestOnly`.
+    std::fs::write(tile_path, PLACEHOLDER_MARKER)?;
+    Ok(LinkResult::ManifestOnly)
 }
 
-/// Lowercase-hex encode a byte slice. Duplicated (as of this writing) in
-/// `manifest.rs` and `checksum.rs`; dtolnay flagged the three copies as a
-/// consolidation opportunity. Deferred to a follow-up because promoting the
-/// helper to `pub(crate)` requires touching a file outside this branch's
-/// scope.
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
-}
-
-/// Decode a lowercase or uppercase hex string into a fixed 32-byte digest.
-/// Returns `None` if the input isn't exactly 64 hex characters. Used by
-/// [`DedupeIndex::seed_shared_key`] to convert a caller-supplied hex hash
-/// back into the raw-byte form now stored in `DedupeState::seen`.
-fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, chunk) in bytes.chunks_exact(2).enumerate() {
-        let hi = hex_nibble(chunk[0])?;
-        let lo = hex_nibble(chunk[1])?;
-        out[i] = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(10 + (b - b'a')),
-        b'A'..=b'F' => Some(10 + (b - b'A')),
-        _ => None,
+/// Resolve `p` to an absolute path. Already-absolute paths are returned
+/// unchanged; relative ones are joined onto the current working directory.
+/// Falls back to the input verbatim only if the cwd cannot be read (in which
+/// case the caller is presumed to control cwd).
+fn absolutize(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p.to_path_buf(),
+        }
     }
 }
 
@@ -530,6 +587,68 @@ mod tests {
     fn shared_path_is_under_shared_dir() {
         let p = DedupeIndex::shared_path("blank_deadbeef", "png");
         assert_eq!(p, PathBuf::from("_shared").join("blank_deadbeef.png"));
+    }
+
+    #[test]
+    fn none_strategy_never_deduplicates() {
+        // Regression (issue #99): `DedupeStrategy::None` must be a true
+        // passthrough. Two tiles with byte-identical contents must each be
+        // reported as `WriteNew` — the second must NOT collapse onto the first
+        // as a `Reference` — and no internal dedupe state may be populated.
+        let idx = DedupeIndex::new(DedupeStrategy::None);
+        let bytes = b"identical tile bytes";
+
+        let d1 = idx.record("0/0_0.png", bytes);
+        let d2 = idx.record("0/0_1.png", bytes);
+
+        assert!(
+            matches!(d1, DedupeDecision::WriteNew { .. }),
+            "None must report the first tile as WriteNew; got {d1:?}"
+        );
+        assert!(
+            matches!(d2, DedupeDecision::WriteNew { .. }),
+            "None must never emit a dedupe Reference; got {d2:?}"
+        );
+        assert!(
+            idx.references().is_empty(),
+            "None must not record any manifest references"
+        );
+        assert_eq!(
+            idx.distinct_count(),
+            0,
+            "None must not populate the seen index"
+        );
+    }
+
+    /// Reproducer for #117: a poisoned dedupe-state lock must not cascade a
+    /// second panic into every later `record` / `references` / `distinct_count`
+    /// call. We poison the state mutex under `catch_unwind`, then keep using the
+    /// index. Before the fix (`.lock().expect(...)`) each of these re-panicked
+    /// on the poison (RED); after it they recover the guard and preserve the
+    /// already-seen entries (GREEN).
+    #[test]
+    fn poisoned_dedupe_state_recovers_without_cascade() {
+        let idx = DedupeIndex::new(DedupeStrategy::Blanks);
+        let bytes = b"content that gets deduplicated";
+        let d1 = idx.record("0/0_0.png", bytes);
+        assert!(matches!(d1, DedupeDecision::WriteNew { .. }));
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = idx.state.lock().unwrap();
+            panic!("worker panic while holding the dedupe state lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(idx.state.is_poisoned());
+
+        // Recovered reads see the pre-poison entry, and a duplicate still
+        // resolves to a Reference — none of these may panic.
+        assert_eq!(idx.distinct_count(), 1);
+        assert_eq!(idx.references().len(), 1);
+        let d2 = idx.record("0/0_1.png", bytes);
+        assert!(
+            matches!(d2, DedupeDecision::Reference { .. }),
+            "duplicate must still dedupe after poison recovery; got {d2:?}"
+        );
     }
 
     #[test]
@@ -622,7 +741,7 @@ mod tests {
         let tile = tmp.path().join("0").join("0_0.png");
         std::fs::create_dir_all(tile.parent().unwrap()).unwrap();
 
-        let result = materialize_reference(&tile, &shared);
+        let result = materialize_reference(&tile, &shared).expect("materialization must succeed");
         // Depending on the host filesystem, any of the three is legal.
         assert!(matches!(
             result,
@@ -644,32 +763,118 @@ mod tests {
     }
 
     #[test]
-    fn seed_shared_key_suppresses_later_write_new() {
+    fn cross_extension_reference_points_at_written_shared_file() {
+        // Regression: two same-bytes tiles with *different* extensions must
+        // not collide onto a shared file that was never written. The first
+        // tile (`.png`) is the one whose bytes actually get promoted into
+        // `_shared/`, so a later `.jpg` tile with identical bytes must
+        // reference `_shared/<key>.png` — the file that exists on disk — not
+        // `_shared/<key>.jpg`, which nothing ever created.
         let idx = DedupeIndex::new(DedupeStrategy::Blanks);
-        let hash = {
-            let h = blake3::hash(b"payload");
-            hex_lower(h.as_bytes())
+        let bytes = b"identical tile payload";
+
+        let first = idx.record("0/0_0.png", bytes);
+        let written_shared_path = match first {
+            DedupeDecision::WriteNew { shared_path, .. } => shared_path,
+            _ => panic!("first record must be WriteNew"),
         };
-        idx.seed_shared_key(hash.clone(), format!("blank_{hash}"));
-        let decision = idx.record("a.png", b"payload");
-        assert!(matches!(decision, DedupeDecision::Reference { .. }));
+
+        let second = idx.record("0/0_1.jpg", bytes);
+        match second {
+            DedupeDecision::Reference { shared_path, .. } => {
+                assert_eq!(
+                    shared_path, written_shared_path,
+                    "reference must point at the actually-written shared file, \
+                     not a path derived from the second tile's extension"
+                );
+            }
+            _ => panic!("second record must be Reference"),
+        }
     }
 
     #[test]
-    fn decode_hex_32_roundtrip() {
-        let bytes = [
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-            0xee, 0xff, 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x01, 0x02, 0x03, 0x04,
-            0x05, 0x06, 0x07, 0x08,
-        ];
-        let hex = hex_lower(&bytes);
-        let back = decode_hex_32(&hex).expect("valid hex round-trips");
-        assert_eq!(back, bytes);
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn materialize_reference_with_relative_target_does_not_dangle() {
+        // Regression (issue #98): a *relative* `shared_path` was passed to the
+        // symlink call verbatim. On unix a symlink target is resolved relative
+        // to the link's own directory, so `_shared/blank_x.png` resolved to
+        // `<tile-dir>/_shared/blank_x.png` — a path that does not exist — and
+        // the reference dangled. Absolutizing the target fixes it.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize the root so the cwd reported by `current_dir` (which the
+        // OS may resolve through symlinks, e.g. /var -> /private/var on macOS)
+        // matches the paths we build here; otherwise the relative-symlink math
+        // compares mismatched prefixes.
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let shared_dir = root.join("_shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::write(shared_dir.join("blank_rel.png"), b"SHAREDPAYLOAD").unwrap();
+
+        let tile = root.join("7").join("1_2.png");
+        std::fs::create_dir_all(tile.parent().unwrap()).unwrap();
+
+        // Deliberately relative shared path, mirroring what `record` returns.
+        let relative_shared = Path::new("_shared").join("blank_rel.png");
+
+        // Run with cwd at the temp root so the relative target *could* be
+        // resolved from there but never from the tile's own directory.
+        let cwd_guard = CwdGuard::change_to(&root);
+        let result =
+            materialize_reference(&tile, &relative_shared).expect("materialization must succeed");
+        drop(cwd_guard);
+
+        // Whichever strategy was chosen, the tile must resolve to the shared
+        // bytes — i.e. it must not dangle.
+        assert!(matches!(result, LinkResult::Symlink | LinkResult::Hardlink));
+        let read_back = std::fs::read(&tile).expect("tile reference must resolve, not dangle");
+        assert_eq!(read_back, b"SHAREDPAYLOAD");
     }
 
     #[test]
-    fn decode_hex_32_rejects_bad_length() {
-        assert!(decode_hex_32("").is_none());
-        assert!(decode_hex_32("abcd").is_none());
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn materialize_reference_surfaces_total_failure() {
+        // Regression (issue #98): when symlink, hardlink, and the placeholder
+        // write all fail, the function used to return `Ok(ManifestOnly)` —
+        // reporting success on total failure. A tile path whose parent
+        // directory does not exist makes every strategy fail, so the call must
+        // now surface an error and leave no file behind.
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("_shared").join("blank_x.png");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"payload").unwrap();
+
+        let missing_parent = tmp.path().join("does").join("not").join("exist");
+        let tile = missing_parent.join("tile.png");
+
+        let result = materialize_reference(&tile, &shared);
+        assert!(
+            result.is_err(),
+            "total failure must surface an error, not report success"
+        );
+        assert!(!tile.exists(), "no file should be left at the tile path");
+    }
+
+    /// Scoped `set_current_dir` helper. Serialises via a process-wide mutex so
+    /// concurrent tests don't clobber each other's cwd, and restores the
+    /// previous directory on drop.
+    struct CwdGuard {
+        prev: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CwdGuard {
+        fn change_to(dir: &Path) -> Self {
+            static CWD_LOCK: Mutex<()> = Mutex::new(());
+            let lock = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prev = std::env::current_dir().unwrap();
+            std::env::set_current_dir(dir).unwrap();
+            CwdGuard { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
+        }
     }
 }

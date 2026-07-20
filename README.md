@@ -15,55 +15,100 @@ A pure-Rust, thread-safe image pyramiding engine. Inspired by [libvips](https://
 
 Takes blueprint PDFs and images, extracts raster data, optionally geo-references it, and generates tile pyramids (DeepZoom, XYZ, Google Maps) suitable for web-based viewers.
 
+**Try it interactively:** the [CLI docs page](https://libviprs.org/cli/) lets you tick flags and copy a complete Rust program — start from the [pyramid base setup](https://libviprs.org/cli/#pyramid-base-setup) and toggle features in the [generator panel](https://libviprs.org/cli/#cli-generator).
+
 ## Features
 
 - **PDF extraction** — extract embedded raster images from scanned blueprint PDFs via lopdf (pure Rust, no C dependencies)
-- **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional memory-budgeted rendering (optional `pdfium` feature)
+- **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional [memory-budgeted rendering](https://libviprs.org/cli/#flag-memory-budget) (optional `pdfium` feature)
 - **Image decoding** — JPEG, PNG, TIFF via the `image` crate
-- **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap
+- **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap (see [`--parallel`](https://libviprs.org/cli/#flag-parallel))
 - **Layout formats** — DeepZoom (`.dzi` + directory tree), XYZ (`z/x/y`), and Google Maps (`z/y/x`, power-of-2 grids)
 - **Centre support** — centre image within the tile grid with even background padding on all sides
 - **Tile encoding** — PNG, JPEG (configurable quality), or raw pixel output
 - **Blank tile optimization** — configurable `BlankTileStrategy` to either emit full tiles or write 1-byte placeholders (`BLANK_TILE_MARKER`) for uniform-color regions, reducing disk usage for sparse images
 - **Edge tile background** — configurable background color (`background_rgb`) for padding partial tiles at image edges (defaults to white)
-- **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support
-- **Observability** — progress events, per-level callbacks, peak memory tracking
+- **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support ([`--geo-reference`](https://libviprs.org/cli/#flag-geo-reference))
+- **Restart-safe runs** — checkpoint and [resume](https://libviprs.org/cli/#flag-resume) interrupted jobs, with content-addressed [tile dedupe](https://libviprs.org/cli/#flag-dedupe) and per-tile [checksums](https://libviprs.org/cli/#flag-checksums)
+- **Sinks** — filesystem, [packfile](https://libviprs.org/cli/#flag-packfile) (tar/zip), and [S3-compatible](https://libviprs.org/cli/#flag-s3) object stores
+- **Observability** — progress events, per-level callbacks, peak memory tracking, optional structured [tracing](https://libviprs.org/cli/#flag-tracing)
 
 ## Usage
 
 ```rust
 use libviprs::{
-    extract_page_image, BlankTileStrategy, EngineBuilder, EngineKind,
-    FsSink, Layout, PyramidPlanner, TileFormat,
+    extract_page_image,
+    BlankTileStrategy,
+    EngineBuilder,
+    EngineKind,
+    FsSink,
+    Layout,
+    PyramidPlanner,
+    TileFormat,
 };
 use std::path::Path;
 
-// Extract raster from a scanned blueprint PDF
-let raster = extract_page_image(Path::new("blueprint.pdf"), 1).unwrap();
-
-// Plan the pyramid
-let planner = PyramidPlanner::new(
-    raster.width(), raster.height(),
-    256,  // tile size
-    0,    // overlap
-    Layout::DeepZoom,
+// ──────────────────────────────────────────────────────────────────────
+// 1. Decode the source.
+//    extract_page_image pulls the embedded raster out of a scanned PDF;
+//    use libviprs::decode_file for plain image inputs (PNG/JPEG/TIFF).
+// ──────────────────────────────────────────────────────────────────────
+let raster = extract_page_image(
+    Path::new("blueprint.pdf"),  // input path (PDF here; any image works too)
+    1,                           // 1-based PDF page number
 ).unwrap();
+
+// ──────────────────────────────────────────────────────────────────────
+// 2. Plan the pyramid.
+//    PyramidPlanner computes per-level dimensions, tile counts, and
+//    canvas size — no pixels are touched yet.
+// ──────────────────────────────────────────────────────────────────────
+let planner = PyramidPlanner::new(
+    raster.width(),    // source width in pixels
+    raster.height(),   // source height in pixels
+    256,               // tile size (DeepZoom default; 512 for HiDPI)
+    0,                 // pixel overlap between adjacent tiles
+    Layout::DeepZoom,  // tile naming convention (also: Xyz, Google)
+).unwrap();
+
 let plan = planner.plan();
 
-// Generate tiles to disk
-let sink = FsSink::new("output_tiles", plan.clone()).with_format(TileFormat::Png);
-let result = EngineBuilder::new(&raster, plan, sink)
-    .with_engine(EngineKind::Auto)
-    .with_concurrency(4)
-    .with_blank_strategy(BlankTileStrategy::Placeholder)
-    .run()
-    .unwrap();
+// ──────────────────────────────────────────────────────────────────────
+// 3. Configure where the tiles get written.
+//    FsSink writes to a local directory; libviprs also ships
+//    ObjectStoreSink (S3) and PackfileSink (.tar/.tar.gz/.zip).
+// ──────────────────────────────────────────────────────────────────────
+let sink = FsSink::new(
+    "output_tiles",  // output directory (created if missing)
+    plan.clone(),    // pyramid plan tile paths are derived from
+)
+.with_format(TileFormat::Png);  // also: TileFormat::Jpeg { quality: u8 } | Raw
+
+// ──────────────────────────────────────────────────────────────────────
+// 4. Run the engine.
+//    EngineKind::Auto picks monolithic / streaming / mapreduce based on
+//    the source kind and any with_memory_budget value supplied.
+// ──────────────────────────────────────────────────────────────────────
+let result = EngineBuilder::new(
+    &raster,  // source raster from step 1
+    plan,     // pyramid plan from step 2
+    sink,     // tile sink from step 3
+)
+.with_engine(EngineKind::Auto)                        // auto-select engine
+.with_concurrency(4)                                   // worker threads for tile extraction
+.with_blank_strategy(BlankTileStrategy::Placeholder)   // collapse uniform tiles into 1-byte placeholders
+.run()
+.unwrap();
 
 println!(
     "{} tiles across {} levels ({} blank tiles skipped)",
-    result.tiles_produced, result.levels_processed, result.tiles_skipped,
+    result.tiles_produced,    // total tile files written
+    result.levels_processed,  // number of pyramid levels
+    result.tiles_skipped,     // tiles emitted as blank placeholders
 );
 ```
+
+> See [interactive example](https://libviprs.org/cli/#cli-generator) — tick flags on the CLI docs page to generate a tailored version of this snippet.
 
 ## Modules
 
@@ -81,7 +126,7 @@ println!(
 | `streaming_mapreduce` | Parallel strip engine and `MapReduceConfig` |
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
-| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `s3`) |
+| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
 | `resume` | Job checkpoints and resume policy for restart-safe runs |
 | `retry` | Failure / retry policy and `RetryingSink` wrapper |
 | `dedupe` | Content-addressed tile deduplication |
@@ -97,7 +142,8 @@ println!(
 |---|---|---|
 | `pdfium` | off | Enables `render_page_pdfium()`, `render_page_pdfium_budgeted()`, and `PdfiumStripSource` for vector PDF rendering. Requires libpdfium at runtime. |
 | `pdfium-static` | off | Implies `pdfium` and links libpdfium statically via `pdfium-render/static`. |
-| `s3` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). |
+| `object-store-sink` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). Ships no built-in S3 transport — a backend must be injected. |
+| `s3` | off | **Deprecated alias** for `object-store-sink`, retained so consumers pinned to the old feature name keep building. Prefer `object-store-sink`; the `s3` alias will be removed in a future release. |
 | `tracing` | off | Emits structured `tracing` spans and events from the engine pipeline. |
 | `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |
 
@@ -113,11 +159,11 @@ The `pdfium` feature requires `libpdfium.so` at runtime. Pre-compiled binaries b
 ```bash
 # x86_64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7725/pdfium-linux-x64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7881/pdfium-linux-x64.tgz
 
 # arm64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7725/pdfium-linux-arm64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7881/pdfium-linux-arm64.tgz
 
 # Extract and install
 tar xzf pdfium.tgz

@@ -36,11 +36,16 @@
 //!
 //! ## Entry points
 //!
-//! - [`generate_pyramid_streaming`] — explicit streaming with a [`StripSource`].
-//! - [`generate_pyramid_auto`] — auto-selects monolithic or streaming based on
-//!   the budget vs. estimated monolithic peak memory.
+//! Streaming is reached through the fluent
+//! [`EngineBuilder`](crate::EngineBuilder). Select it explicitly with
+//! [`EngineKind::Streaming`](crate::EngineKind::Streaming) over a
+//! [`StripSource`], or let [`EngineKind::Auto`](crate::EngineKind::Auto)
+//! choose monolithic vs. streaming based on the budget vs. the estimated
+//! monolithic peak memory.
 
-use crate::engine::{BlankTileStrategy, EngineConfig, EngineError, EngineResult};
+use crate::engine::{
+    BlankTileStrategy, EngineConfig, EngineError, EngineResult, promote_sink_error,
+};
 use crate::observe::{EngineEvent, EngineObserver, MemoryTracker};
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
@@ -53,6 +58,8 @@ use crate::sink::{Tile, TileSink};
 ///
 /// The streaming engine performs a pre-flight check against the worst-case
 /// strip and surfaces this policy when the budget is insufficient.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BudgetPolicy {
     /// Return [`EngineError::BudgetExceeded`] without doing any work.
@@ -76,6 +83,8 @@ pub enum BudgetPolicy {
 /// controls strip height selection. The budget is a soft upper bound — the
 /// engine uses it to maximise strip height (and therefore throughput) while
 /// keeping estimated peak memory below the target.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 #[derive(Debug, Clone)]
 pub struct StreamingConfig {
     /// Soft memory budget in bytes.
@@ -120,11 +129,26 @@ impl Default for StreamingConfig {
 ///
 /// - `render_strip(y, h)` must return a raster of width [`width()`](Self::width)
 ///   and height ≤ `h`, starting at row `y` in the full-resolution image.
-/// - The engine calls strips in strictly increasing `y` order, but may request
-///   different heights for the last strip if the image height is not a multiple
-///   of the strip height.
-/// - Implementations must be `Send + Sync` so they can be shared across threads
-///   in future parallel-strip extensions.
+/// - The engine may request different heights for the last strip if the image
+///   height is not a multiple of the strip height.
+/// - Implementations must be `Send + Sync` so they can be shared across threads.
+///
+/// ## Access ordering and concurrency
+///
+/// By default the engine calls [`render_strip`](Self::render_strip)
+/// **sequentially, in strictly increasing `y` order** — one call completes
+/// before the next begins, and each `y_offset` is greater than the previous
+/// one. This is the pattern a cursor-based source (a streamed TIFF decoder, a
+/// network byte stream) can rely on, and it holds across *every* engine,
+/// including the parallel MapReduce engine.
+///
+/// A source that is safe to call from multiple threads and in any `y` order —
+/// a random-access source such as [`RasterStripSource`] or
+/// [`PdfiumStripSource`] — may override
+/// [`permits_concurrent_strips`](Self::permits_concurrent_strips) to return
+/// `true`. Only then may the MapReduce MAP phase render several strips
+/// concurrently (and therefore out of `y` order) within a batch. Sources that
+/// leave the default in place are never called concurrently or out of order.
 pub trait StripSource: Send + Sync {
     /// Render or extract the horizontal band starting at `y_offset` with up to
     /// `height` rows, in full-resolution image coordinates.
@@ -135,6 +159,18 @@ pub trait StripSource: Send + Sync {
     fn height(&self) -> u32;
     /// Pixel format of every strip returned by [`render_strip`](Self::render_strip).
     fn format(&self) -> PixelFormat;
+
+    /// Whether the engine may call [`render_strip`](Self::render_strip)
+    /// concurrently from multiple threads and out of `y` order.
+    ///
+    /// Defaults to `false`, guaranteeing the sequential, strictly-increasing-`y`
+    /// access pattern described in the [trait contract](StripSource#access-ordering-and-concurrency).
+    /// Random-access sources whose `render_strip` is cheap and thread-safe from
+    /// any offset may override this to `true` to let the MapReduce engine render
+    /// strips in parallel batches; cursor-based sources must leave it `false`.
+    fn permits_concurrent_strips(&self) -> bool {
+        false
+    }
 }
 
 /// [`StripSource`] backed by an in-memory [`Raster`].
@@ -142,8 +178,9 @@ pub trait StripSource: Send + Sync {
 /// Extracts row bands via [`Raster::extract`], which copies the requested
 /// rows into a new buffer without touching the rest of the source.
 ///
-/// This is the default source used by [`generate_pyramid_auto`] when the
-/// monolithic path would exceed the memory budget. The source raster still
+/// This is the default source used by
+/// [`EngineKind::Auto`](crate::EngineKind::Auto) when the monolithic path would
+/// exceed the memory budget. The source raster still
 /// lives in memory, but the pyramid generation pipeline avoids the large
 /// canvas-sized working allocation that the monolithic engine requires.
 pub struct RasterStripSource<'a> {
@@ -159,7 +196,7 @@ impl<'a> RasterStripSource<'a> {
 
 impl<'a> StripSource for RasterStripSource<'a> {
     fn render_strip(&self, y_offset: u32, height: u32) -> Result<Raster, EngineError> {
-        let h = height.min(self.raster.height() - y_offset);
+        let h = height.min(self.raster.height().saturating_sub(y_offset));
         self.raster
             .extract(0, y_offset, self.raster.width(), h)
             .map_err(EngineError::from)
@@ -176,53 +213,153 @@ impl<'a> StripSource for RasterStripSource<'a> {
     fn format(&self) -> PixelFormat {
         self.raster.format()
     }
+
+    fn permits_concurrent_strips(&self) -> bool {
+        // Random access: `extract` copies from an immutable `&Raster`, so any
+        // offset is safe from any thread, in any order.
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
 // PdfiumStripSource — true source-side PDF strip streaming
 // ---------------------------------------------------------------------------
 
-/// [`StripSource`] backed by pdfium.
+/// Render-mode tag for [`PdfiumStripSource`].
 ///
-/// At construction time, the full display-oriented page is rendered once via
-/// [`render_page_pdfium`](crate::pdf::render_page_pdfium). Each
-/// [`render_strip`](StripSource::render_strip) call then slices the cached
-/// raster — O(1) per strip, no additional pdfium calls. Dimensions are
-/// taken directly from the rendered raster so
-/// [`StripSource::width`]/[`StripSource::height`] match the output byte-for-byte.
+/// Selects how the source produces strips:
 ///
-/// This currently trades source-side memory (`O(canvas_w × canvas_h)`) for
-/// correctness: pdfium's matrix render path does not auto-apply the page's
-/// intrinsic `/Rotate`, and hand-composed rotation matrices produced
-/// 180°-off output for `/Rotate 90/270` pages in practice. The form-data
-/// render path that `render_page_pdfium` uses does rotate automatically, so
-/// we fall back to full-page render + slice. See
-/// [`render_strip_inner`](Self::render_strip_inner) for details.
+/// - [`CachedFullPage`](Self::CachedFullPage) — render the full display-
+///   oriented page once at construction and slice subsequent strips from
+///   that cached buffer. O(1) per [`render_strip`](StripSource::render_strip)
+///   after the first, but resident memory is `width × height × 4` bytes
+///   for the source's lifetime.
+/// - [`Streaming`](Self::Streaming) — render each strip on demand via
+///   pdfium's matrix render path. The source holds only path / page /
+///   rotation metadata between calls; peak memory is bounded by the
+///   strip in flight.
+///
+/// Pick streaming for sources whose full page would exceed your memory
+/// budget (large-format blueprints, scanned posters), and cached when the
+/// full page comfortably fits and per-strip pdfium overhead matters.
+#[cfg(feature = "pdfium")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfiumRenderMode {
+    CachedFullPage,
+    Streaming,
+}
+
+#[cfg(feature = "pdfium")]
+enum PdfiumSourceState {
+    CachedFullPage { full_raster: Raster },
+    // Boxed so the enum size is bounded by the smaller variant. The
+    // `StreamingState` payload is ~368 bytes (it carries a `PdfDocument`
+    // handle plus its drop-ordered `Option`); the heap indirection here
+    // avoids inflating every `PdfiumSourceState` value to that size,
+    // including `CachedFullPage` ones that don't need the streaming
+    // machinery at all.
+    Streaming(Box<StreamingState>),
+}
+
+/// Per-source streaming state. Holds a parsed [`PdfDocument`] so
+/// subsequent `render_strip` calls don't reparse the PDF on every
+/// invocation.
+///
+/// The document is stored in an [`Option`] for explicit drop ordering —
+/// [`Drop`] takes it before any caller would expect it gone, which
+/// keeps the cached-handle lifecycle obvious to readers. The actual
+/// FPDF synchronisation that protects `FPDF_CloseDocument` against
+/// concurrent renders lives in `pdfium-render`'s
+/// `ThreadSafePdfiumBindings` wrapper (active via the `sync` feature
+/// plus the per-call locking fork declared as a direct git dependency
+/// in `libviprs/Cargo.toml`).
+///
+/// Lifetime is `'static` because the document borrows from
+/// [`crate::pdf::init_pdfium`]'s `OnceLock`-backed `&'static Pdfium`.
+/// With the pdfium-render `sync` feature on, `PdfDocument<'static>` is
+/// `Send + Sync`.
+#[cfg(feature = "pdfium")]
+struct StreamingState {
+    /// Always `Some(_)` outside `Drop`. Wrapped in `Option` for
+    /// readable drop ordering inside the `Drop` impl.
+    document: Option<pdfium_render::prelude::PdfDocument<'static>>,
+    /// 0-based page index (`c_int`) for pdfium-render's `PdfPages::get`.
+    /// Stored pre-converted so the hot path doesn't re-validate `page > 0`.
+    page_index: pdfium_render::prelude::PdfPageIndex,
+    /// Page's intrinsic `/Rotate`, normalised at construction.
+    rotation: crate::pdf::PageRotation,
+}
+
+#[cfg(feature = "pdfium")]
+impl Drop for StreamingState {
+    fn drop(&mut self) {
+        // Closing the document issues `FPDF_CloseDocument`. Like every
+        // other FPDF entry point in this crate (see the invariant at
+        // `crate::pdf::pdfium_lock`), teardown must acquire the
+        // process-wide lock first: with the unpatched `pdfium-render`
+        // (crates.io builds of libviprs resolve the upstream wrapper,
+        // since cargo strips the git source on publish), a close racing
+        // a concurrent render inside the non-thread-safe C library
+        // corrupts the heap.
+        //
+        // Checklist: any pdfium-render object whose `Drop` issues FPDF
+        // calls must die inside a `pdfium_lock()` scope.
+        let _lock = crate::pdf::pdfium_lock();
+        drop(self.document.take());
+    }
+}
+
+/// [`StripSource`] backed by pdfium, in either cached or streaming mode.
+///
+/// The constructor chosen determines the mode:
+///
+/// - [`new`](Self::new) / [`new_with_budget`](Self::new_with_budget) —
+///   [`PdfiumRenderMode::CachedFullPage`]. Renders the full display-
+///   oriented page once via [`render_page_pdfium`](crate::pdf::render_page_pdfium)
+///   and slices subsequent strips from the cached buffer.
+/// - [`new_streaming`](Self::new_streaming) /
+///   [`new_streaming_with_budget`](Self::new_streaming_with_budget) —
+///   [`PdfiumRenderMode::Streaming`]. Caches the parsed PDF document
+///   at construction and renders each strip on demand via pdfium's
+///   matrix render path, keeping source-side peak memory bounded by
+///   the strip in flight.
+///
+/// Both modes honour the same [`StripSource`] contract: `render_strip(y, h)`
+/// returns a raster of width [`width()`](StripSource::width) and height
+/// `≤ h`, sourced from rows `[y, y + h)` of the display-oriented page.
+/// Output bytes between modes are not pixel-identical because pdfium's
+/// form-data and matrix render paths use independent rasterisers; both
+/// satisfy the engine's region-correctness requirement (see the test
+/// suite at `libviprs-tests/tests/streaming_pdfium_matrix.rs` and
+/// `pdfium_streaming_render.rs`).
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub struct PdfiumStripSource {
     width: u32,
     height: u32,
     dpi: u32,
-    /// Full display-oriented raster, rendered at construction time and
-    /// sliced per-strip. See [`render_strip_inner`] for why we cache the
-    /// full page instead of rendering strip-by-strip.
-    full_raster: Raster,
+    state: PdfiumSourceState,
 }
 
 #[cfg(feature = "pdfium")]
 impl std::fmt::Debug for PdfiumStripSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Mode-specific state (cached raster bytes / cached pdfium handle)
+        // is intentionally elided — the four diagnostic fields above are
+        // the contract; everything else is implementation detail.
         f.debug_struct("PdfiumStripSource")
             .field("width", &self.width)
             .field("height", &self.height)
             .field("dpi", &self.dpi)
-            .finish()
+            .field("mode", &self.mode())
+            .finish_non_exhaustive()
     }
 }
 
 #[cfg(feature = "pdfium")]
 impl PdfiumStripSource {
-    /// Open a PDF page as a strip source at the given DPI.
+    /// Open a PDF page as a [`PdfiumRenderMode::CachedFullPage`] strip source.
     ///
     /// Renders the full display-oriented page via pdfium and caches it.
     /// Subsequent [`render_strip`](StripSource::render_strip) calls slice
@@ -244,8 +381,7 @@ impl PdfiumStripSource {
         // differently than our `probe_page_dims` truncation at higher DPIs;
         // using the cached raster's real width/height keeps
         // `StripSource::width`/`height` in lockstep with what `render_strip`
-        // will hand back. See `render_strip_inner` for why we render the
-        // full page in the first place.
+        // will hand back.
         let full = crate::pdf::render_page_pdfium(&path, page, dpi)?;
         let width = full.width();
         let height = full.height();
@@ -253,11 +389,12 @@ impl PdfiumStripSource {
             width,
             height,
             dpi,
-            full_raster: full,
+            state: PdfiumSourceState::CachedFullPage { full_raster: full },
         })
     }
 
-    /// Open a PDF page with a worst-case strip budget check.
+    /// Open a [`PdfiumRenderMode::CachedFullPage`] source with a worst-case
+    /// strip budget check.
     ///
     /// Computes the worst-case minimum aligned strip
     /// (`width × min_strip_height × 4` bytes for RGBA8) and applies the
@@ -276,30 +413,14 @@ impl PdfiumStripSource {
         policy: BudgetPolicy,
     ) -> Result<Self, crate::pdf::PdfError> {
         let path = path.into();
-        let pdfium = crate::pdf::init_pdfium()?;
-        let resolved_dpi = match policy {
-            BudgetPolicy::Error => {
-                let (width, _, _, _) = probe_page_dims(pdfium, &path, page, dpi_hint)?;
-                let strip_bytes = width as u64 * min_strip_height as u64 * 4;
-                if strip_bytes > budget_bytes {
-                    return Err(crate::pdf::PdfError::BudgetExceeded {
-                        strip_bytes,
-                        budget_bytes,
-                        dpi: dpi_hint,
-                    });
-                }
-                dpi_hint
-            }
-            BudgetPolicy::AutoAdjustDpi { min_dpi } => resolve_dpi_under_budget(
-                pdfium,
-                &path,
-                page,
-                dpi_hint,
-                min_dpi,
-                min_strip_height,
-                budget_bytes,
-            )?,
-        };
+        let resolved_dpi = resolve_budget_dpi(
+            &path,
+            page,
+            dpi_hint,
+            min_strip_height,
+            budget_bytes,
+            policy,
+        )?;
         let full = crate::pdf::render_page_pdfium(&path, page, resolved_dpi)?;
         let width = full.width();
         let height = full.height();
@@ -307,14 +428,99 @@ impl PdfiumStripSource {
             width,
             height,
             dpi: resolved_dpi,
-            full_raster: full,
+            state: PdfiumSourceState::CachedFullPage { full_raster: full },
         })
+    }
+
+    /// Open a PDF page as a [`PdfiumRenderMode::Streaming`] strip source.
+    ///
+    /// Each [`render_strip`](StripSource::render_strip) call dispatches
+    /// directly to pdfium's matrix render path; the source caches the
+    /// parsed `PdfDocument` once at construction and reuses it for
+    /// every render, so no per-strip PDF parsing is paid.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Path to the PDF file.
+    /// * `page` — 1-based page number.
+    /// * `dpi` — Render resolution in dots per inch.
+    ///
+    /// # Performance
+    ///
+    /// Streaming mode trades source-side memory for per-strip render
+    /// work. For an N-strip render of a vector-heavy PDF, expect
+    /// streaming wall time to scale ~linearly with N — pdfium's
+    /// `FPDF_RenderPageBitmapWithMatrix` walks the page content stream
+    /// once per call, regardless of clip rectangle. For raster-heavy
+    /// PDFs (embedded JPEG/JPEG2000) the per-strip cost is essentially
+    /// just the region extract; the streaming/cached ratio approaches
+    /// 1×. See `libviprs-bench/src/pdfium_strip_source_bench.rs` for
+    /// data on representative fixtures.
+    ///
+    /// Pick streaming when the full-page raster would exceed your
+    /// memory budget (large-format blueprints, scanned posters); pick
+    /// [`new`](Self::new) when the page comfortably fits.
+    ///
+    /// # Concurrency
+    ///
+    /// pdfium itself is not thread-safe. The `pdfium-render` `sync`
+    /// feature, plus the direct git dependency in `libviprs/Cargo.toml`
+    /// that pins the patched fork at `libviprs/pdfium-render` branch
+    /// `libviprs/integration` (per-call FFI locking),
+    /// serialise every FPDF call through a process-wide mutex. So
+    /// concurrent `render_strip` calls from multiple threads (e.g.
+    /// under `EngineKind::MapReduce`) are correct but produce no
+    /// parallelism. This is a property of the underlying C library;
+    /// no parallelism is "lost" relative to a hypothetical safer
+    /// pdfium-render version.
+    pub fn new_streaming(
+        path: impl Into<std::path::PathBuf>,
+        page: usize,
+        dpi: u32,
+    ) -> Result<Self, crate::pdf::PdfError> {
+        let path = path.into();
+        let rotation = crate::pdf::page_rotate(&path, page)?;
+        load_streaming_source(path, page, dpi, rotation)
+    }
+
+    /// Open a [`PdfiumRenderMode::Streaming`] source with a worst-case
+    /// strip budget check. See [`new_with_budget`](Self::new_with_budget)
+    /// for the policy semantics.
+    pub fn new_streaming_with_budget(
+        path: impl Into<std::path::PathBuf>,
+        page: usize,
+        dpi_hint: u32,
+        min_strip_height: u32,
+        budget_bytes: u64,
+        policy: BudgetPolicy,
+    ) -> Result<Self, crate::pdf::PdfError> {
+        let path = path.into();
+        let resolved_dpi = resolve_budget_dpi(
+            &path,
+            page,
+            dpi_hint,
+            min_strip_height,
+            budget_bytes,
+            policy,
+        )?;
+        let rotation = crate::pdf::page_rotate(&path, page)?;
+        load_streaming_source(path, page, resolved_dpi, rotation)
     }
 
     /// The DPI this source actually renders at. May differ from a constructor
     /// `dpi_hint` after [`BudgetPolicy::AutoAdjustDpi`] reduction.
+    #[must_use]
     pub fn dpi(&self) -> u32 {
         self.dpi
+    }
+
+    /// The render mode this source was constructed in.
+    #[must_use]
+    pub fn mode(&self) -> PdfiumRenderMode {
+        match self.state {
+            PdfiumSourceState::CachedFullPage { .. } => PdfiumRenderMode::CachedFullPage,
+            PdfiumSourceState::Streaming(_) => PdfiumRenderMode::Streaming,
+        }
     }
 
     fn render_strip_inner(
@@ -322,29 +528,146 @@ impl PdfiumStripSource {
         y_offset: u32,
         height: u32,
     ) -> Result<Raster, crate::pdf::PdfError> {
-        // Pdfium's matrix-based render path (FPDF_RenderPageBitmapWithMatrix)
-        // does not auto-apply the page's intrinsic /Rotate — hand-composed
-        // rotation matrices produced 180°-off output for /Rotate 90/270
-        // pages across every variant we tried. Rather than chase pdfium's
-        // matrix conventions, we render the full display-oriented raster
-        // once via `render_page_pdfium` (the form-data path that pdfium
-        // does rotate automatically) and slice strips out of the cached
-        // buffer. This trades peak memory for correctness; a future
-        // iteration can switch back to a true single-strip render once
-        // pdfium's matrix convention is pinned down.
-        let strip_h = height.min(self.height.saturating_sub(y_offset));
-        if strip_h == 0 {
-            let data = vec![0u8; self.width as usize * height as usize * 4];
-            return Raster::new(self.width, height, PixelFormat::Rgba8, data)
-                .map_err(crate::pdf::PdfError::from);
+        match &self.state {
+            PdfiumSourceState::CachedFullPage { full_raster } => {
+                let strip_h = height.min(self.height.saturating_sub(y_offset));
+                if strip_h == 0 {
+                    let data = crate::pdf::alloc_zeroed_rgba(self.width, height)?;
+                    return Raster::new(self.width, height, PixelFormat::Rgba8, data)
+                        .map_err(crate::pdf::PdfError::from);
+                }
+                full_raster
+                    .extract(0, y_offset, self.width, strip_h)
+                    .map_err(crate::pdf::PdfError::from)
+            }
+            PdfiumSourceState::Streaming(streaming) => {
+                // Hold the global pdfium lock for the entire matrix render:
+                // page handle access, bitmap allocation, FPDF_RenderPage call,
+                // and bitmap → image → Raster conversion all touch FPDF state
+                // and must serialize against any other thread also rendering.
+                let _lock = crate::pdf::pdfium_lock();
+                let document = streaming
+                    .document
+                    .as_ref()
+                    .expect("StreamingState::document is None only during Drop");
+                let pdf_page = document
+                    .pages()
+                    .get(streaming.page_index)
+                    .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+                crate::pdf::render_page_strip_with_page(
+                    &pdf_page,
+                    self.dpi,
+                    streaming.rotation,
+                    y_offset,
+                    height,
+                )
+            }
         }
-
-        self.full_raster
-            .extract(0, y_offset, self.width, strip_h)
-            .map_err(crate::pdf::PdfError::from)
     }
 }
 
+/// One-shot load of the pdfium document for streaming mode: parses the
+/// PDF once via pdfium, validates the requested page, extracts the
+/// display-oriented dimensions inline, and packages everything into a
+/// [`PdfiumStripSource`] ready for repeated `render_strip` calls. The
+/// document handle is cached in `StreamingState` so subsequent renders
+/// pay no parse cost.
+///
+/// Acquires `pdfium-render`'s thread-safety lock internally for the duration
+/// of the FPDF calls. Caller must not be holding the lock.
+#[cfg(feature = "pdfium")]
+fn load_streaming_source(
+    path: std::path::PathBuf,
+    page: usize,
+    dpi: u32,
+    rotation: crate::pdf::PageRotation,
+) -> Result<PdfiumStripSource, crate::pdf::PdfError> {
+    let pdfium = crate::pdf::init_pdfium()?;
+    let _lock = crate::pdf::pdfium_lock();
+    let document = pdfium
+        .load_pdf_from_file(&path, None)
+        .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+    let page_index = crate::pdf::pdfium_page_index(page, document.pages().len())?;
+    let pdf_page = document
+        .pages()
+        .get(page_index)
+        .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
+
+    // Match `render_page_pdfium`'s width/height truncation byte-for-byte
+    // (the comment at pdf.rs:376-379) so cached and streaming sources report
+    // identical dimensions.
+    //
+    // Streaming mode deliberately does *not* take the full-page pixel ceiling
+    // that the cached path applies: it never materialises the whole page as a
+    // single bitmap — each `render_strip` renders only a strip-sized bitmap —
+    // so a large page is handled by streaming, not rejected. The per-strip
+    // allocation is bounded by `alloc_zeroed_rgba`'s checked/`try_reserve`
+    // path in `render_page_strip_with_page` and `render_strip_inner`.
+    let scale = dpi as f32 / 72.0;
+    let width = (pdf_page.width().value * scale) as u32;
+    let height = (pdf_page.height().value * scale) as u32;
+    drop(pdf_page);
+
+    Ok(PdfiumStripSource {
+        width,
+        height,
+        dpi,
+        state: PdfiumSourceState::Streaming(Box::new(StreamingState {
+            document: Some(document),
+            page_index,
+            rotation,
+        })),
+    })
+}
+
+/// Shared budget-policy resolution used by both the cached and streaming
+/// `*_with_budget` constructors.
+///
+/// Acquires `pdfium-render`'s thread-safety lock internally so the inner calls
+/// to [`probe_page_dims`] / [`resolve_dpi_under_budget`] (which assume
+/// the lock is held) can run safely. Callers do not need to acquire
+/// the lock first.
+#[cfg(feature = "pdfium")]
+fn resolve_budget_dpi(
+    path: &std::path::Path,
+    page: usize,
+    dpi_hint: u32,
+    min_strip_height: u32,
+    budget_bytes: u64,
+    policy: BudgetPolicy,
+) -> Result<u32, crate::pdf::PdfError> {
+    let pdfium = crate::pdf::init_pdfium()?;
+    let _lock = crate::pdf::pdfium_lock();
+    match policy {
+        BudgetPolicy::Error => {
+            let (width, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint)?;
+            let strip_bytes = width as u64 * min_strip_height as u64 * 4;
+            if strip_bytes > budget_bytes {
+                return Err(crate::pdf::PdfError::BudgetExceeded {
+                    strip_bytes,
+                    budget_bytes,
+                    dpi: dpi_hint,
+                });
+            }
+            Ok(dpi_hint)
+        }
+        BudgetPolicy::AutoAdjustDpi { min_dpi } => resolve_dpi_under_budget(
+            pdfium,
+            path,
+            page,
+            dpi_hint,
+            min_dpi,
+            min_strip_height,
+            budget_bytes,
+        ),
+    }
+}
+
+/// Probe a PDF page's dimensions without rendering.
+///
+/// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
+/// issues FPDF calls (load + page get + dim getter) that require
+/// process-wide pdfium serialization.
 #[cfg(feature = "pdfium")]
 fn probe_page_dims(
     pdfium: &pdfium_render::prelude::Pdfium,
@@ -356,15 +679,9 @@ fn probe_page_dims(
         .load_pdf_from_file(path, None)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
     let pages = document.pages();
-    let total = pages.len();
-    if page == 0 || page > total as usize {
-        return Err(crate::pdf::PdfError::PageOutOfRange {
-            page,
-            total: total as usize,
-        });
-    }
+    let page_index = crate::pdf::pdfium_page_index(page, pages.len())?;
     let pdf_page = pages
-        .get(page as u16 - 1)
+        .get(page_index)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
     let scale = dpi as f32 / 72.0;
     // Pdfium's FPDF_GetPageWidthF/HeightF return the display dimensions —
@@ -378,6 +695,12 @@ fn probe_page_dims(
     Ok((width, height, w_pts, h_pts))
 }
 
+/// Find the largest DPI ≤ `dpi_hint` whose worst-case minimum-aligned
+/// strip fits within `budget_bytes`, or error if even `min_dpi` would
+/// not fit.
+///
+/// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
+/// calls [`probe_page_dims`] internally, which is not standalone-locked.
 #[cfg(feature = "pdfium")]
 fn resolve_dpi_under_budget(
     pdfium: &pdfium_render::prelude::Pdfium,
@@ -450,7 +773,7 @@ fn resolve_dpi_under_budget(
 impl StripSource for PdfiumStripSource {
     fn render_strip(&self, y_offset: u32, height: u32) -> Result<Raster, EngineError> {
         self.render_strip_inner(y_offset, height)
-            .map_err(|e| EngineError::Sink(crate::sink::SinkError::Other(e.to_string())))
+            .map_err(|e| EngineError::Source(Box::new(e)))
     }
 
     fn width(&self) -> u32 {
@@ -463,6 +786,14 @@ impl StripSource for PdfiumStripSource {
 
     fn format(&self) -> PixelFormat {
         PixelFormat::Rgba8
+    }
+
+    fn permits_concurrent_strips(&self) -> bool {
+        // Both modes are safe for concurrent, out-of-order access:
+        // `CachedFullPage` slices an immutable cached raster, and `Streaming`
+        // holds the process-wide `pdfium_lock()` for the whole matrix render,
+        // serialising every FPDF call regardless of thread or offset.
+        true
     }
 }
 
@@ -490,6 +821,8 @@ impl StripSource for PdfiumStripSource {
 ///
 /// `Some(strip_height)` — the largest aligned strip height within budget,
 /// capped at the canvas height. `None` if the budget is insufficient.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 pub fn compute_strip_height(plan: &PyramidPlan, format: PixelFormat, budget: u64) -> Option<u32> {
     let ch = plan.canvas_height as u64;
     let ts = plan.tile_size;
@@ -532,6 +865,8 @@ pub fn compute_strip_height(plan: &PyramidPlan, format: PixelFormat, budget: u64
 ///
 /// Use this to validate that a chosen strip height stays within budget,
 /// or to display estimated memory usage to callers before committing.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-memory-budget)
 pub fn estimate_streaming_memory(
     plan: &PyramidPlan,
     format: PixelFormat,
@@ -653,6 +988,9 @@ pub(crate) fn generate_pyramid_streaming(
     let mut strip_index: u32 = 0;
     let mut y: u32 = 0;
     while y < ch {
+        // Cooperative cancellation: stop at the strip boundary before
+        // obtaining (rendering) and downscaling the next strip (#133).
+        config.engine.check_cancelled()?;
         // Clamp the last strip if the canvas height isn't a multiple of
         // strip_height. The shorter strip is handled correctly by all
         // downstream functions.
@@ -688,29 +1026,34 @@ pub(crate) fn generate_pyramid_streaming(
         // Step 3: Downscale the strip with the 2×2 box filter, producing
         // a half-strip at the next level. Free the original strip's memory
         // charge before accounting the new one.
-        let half = resize::downscale_half(&strip)?;
-        tracker.dealloc(strip_bytes);
-        let half_bytes = half.data().len() as u64;
-        tracker.alloc(half_bytes);
+        let half = downscale_strip_tracked(&strip, &tracker)?;
 
         // Step 4: Push the half-strip into the recursive propagation tree.
         // It will be paired with another half-strip at the next level, or
         // appended to a monolithic accumulator if the level is small enough.
-        propagate_down(
-            half,
-            top_level - 1,
-            y / 2,
-            &mut accumulators,
-            &mut mono_accumulators,
-            monolithic_threshold,
-            plan,
-            sink,
-            &config.engine,
-            observer,
-            &tracker,
-            &mut tiles_produced,
-            &mut tiles_skipped,
-        )?;
+        //
+        // A single-level plan (top_level == 0) has no level below the top:
+        // the top-level tiles were already emitted in Step 2, so there is
+        // nothing left to propagate. Guard the recursion to avoid the
+        // `top_level - 1` underflow (debug panic / release usize::MAX ->
+        // out-of-bounds index into `accumulators`).
+        if top_level > 0 {
+            propagate_down(
+                half,
+                top_level - 1,
+                y / 2,
+                &mut accumulators,
+                &mut mono_accumulators,
+                monolithic_threshold,
+                plan,
+                sink,
+                &config.engine,
+                observer,
+                &tracker,
+                &mut tiles_produced,
+                &mut tiles_skipped,
+            )?;
+        }
 
         y += sh;
     }
@@ -718,136 +1061,33 @@ pub(crate) fn generate_pyramid_streaming(
     // ===================================================================
     // Phase 2: Flush unpaired strip accumulators
     // ===================================================================
-    //
-    // When the canvas height isn't evenly divisible by the strip height,
-    // the last half-strip at some levels arrives without a partner. These
-    // leftovers sit in `accumulators[level_idx]` and must be emitted and
-    // propagated before the monolithic flush.
-    //
-    // Process from highest to lowest so that propagation feeds data into
-    // levels below, which may themselves be monolithic.
-    for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
-        if let Some(leftover) = accumulators[level_idx].take() {
-            // The leftover covers the bottom slice of this level. Its Y
-            // position is the level height minus the strip's own height.
-            let (_, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(plan.levels[level_idx].level)
-            } else {
-                (plan.levels[level_idx].width, plan.levels[level_idx].height)
-            };
-            let leftover_y = lh.saturating_sub(leftover.height());
-
-            let (tp, ts_skip) = emit_strip_tiles(
-                &leftover,
-                plan,
-                level_idx as u32,
-                leftover_y,
-                sink,
-                &config.engine,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            // Continue the downscale chain into lower levels
-            if level_idx > 0 {
-                let further_half = resize::downscale_half(&leftover)?;
-                propagate_down(
-                    further_half,
-                    level_idx - 1,
-                    leftover_y / 2,
-                    &mut accumulators,
-                    &mut mono_accumulators,
-                    monolithic_threshold,
-                    plan,
-                    sink,
-                    &config.engine,
-                    observer,
-                    &tracker,
-                    &mut tiles_produced,
-                    &mut tiles_skipped,
-                )?;
-            }
-        }
-    }
+    flush_unpaired_accumulators(
+        &mut accumulators,
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        sink,
+        &config.engine,
+        observer,
+        &tracker,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // ===================================================================
     // Phase 3: Monolithic flush — assemble and emit small levels
     // ===================================================================
-    //
-    // Only the topmost monolithic level has accumulated raw row data via
-    // propagate_down. All levels below it are empty — they are produced
-    // here by downscaling the level above, exactly as the monolithic
-    // engine does. This guarantees pixel-exact parity: each pixel goes
-    // through the same sequence of 2×2 box-filter averages regardless
-    // of whether the pyramid was built monolithically or via streaming.
-    {
-        let top_mono = monolithic_threshold.min(plan.levels.len() - 1);
-        let mut prev_raster: Option<Raster> = None;
-
-        // Walk from the largest monolithic level (top_mono) down to level 0
-        for level_idx in (0..=top_mono).rev() {
-            let level = &plan.levels[level_idx];
-            let (lw, lh) = if plan.layout == Layout::Google {
-                plan.canvas_size_at_level(level.level)
-            } else {
-                (level.width, level.height)
-            };
-            if lw == 0 || lh == 0 {
-                continue;
-            }
-
-            let raster = if let Some(prev) = prev_raster.take() {
-                // Produce this level by downscaling the level above,
-                // mirroring the monolithic engine's downscale chain
-                resize::downscale_half(&prev)?
-            } else {
-                // Topmost monolithic level — assemble from accumulated rows.
-                let mut acc_data = std::mem::take(&mut mono_accumulators[level_idx]);
-                if acc_data.is_empty() {
-                    continue;
-                }
-                let expected = lw as usize * lh as usize * bpp;
-
-                // The accumulated data may exceed the expected size when
-                // the source has odd dimensions and downscale_half produces
-                // div_ceil rows from each strip fragment. Truncate to the
-                // exact expected byte count.
-                if acc_data.len() > expected {
-                    acc_data.truncate(expected);
-                }
-                // Conversely, if the last strip was shorter than expected,
-                // pad remaining rows with the background colour.
-                if acc_data.len() < expected {
-                    let filled_rows = acc_data.len() / (lw as usize * bpp);
-                    acc_data.resize(expected, 0);
-                    fill_background_rows(
-                        &mut acc_data,
-                        filled_rows,
-                        lw,
-                        lh,
-                        bpp,
-                        config.engine.background_rgb,
-                    );
-                }
-                Raster::new(lw, lh, format, acc_data)?
-            };
-
-            let (tp, ts_skip) = emit_full_level_tiles(
-                &raster,
-                plan,
-                level_idx as u32,
-                sink,
-                &config.engine,
-                observer,
-            )?;
-            tiles_produced += tp;
-            tiles_skipped += ts_skip;
-
-            // Retain this raster so the next iteration can downscale it
-            prev_raster = Some(raster);
-        }
-    }
+    flush_monolithic_levels(
+        &mut mono_accumulators,
+        monolithic_threshold,
+        plan,
+        format,
+        sink,
+        &config.engine,
+        observer,
+        &mut tiles_produced,
+        &mut tiles_skipped,
+    )?;
 
     // Emit LevelCompleted for all levels
     for level in &plan.levels {
@@ -875,7 +1115,7 @@ pub(crate) fn generate_pyramid_streaming(
         queue_pressure_peak: 0,
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
-        skipped_due_to_failure: 0,
+        skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
     })
 }
 
@@ -919,6 +1159,211 @@ pub(crate) fn find_monolithic_threshold(
     }
     // Every level is larger than a strip — treat level 0 as monolithic anyway
     0
+}
+
+/// Full-level pixel dimensions for `level_idx`: the padded canvas size for
+/// Google layout, the recorded level size otherwise.
+fn level_dims(plan: &PyramidPlan, level_idx: usize) -> (u32, u32) {
+    if plan.layout == Layout::Google {
+        plan.canvas_size_at_level(plan.levels[level_idx].level)
+    } else {
+        (plan.levels[level_idx].width, plan.levels[level_idx].height)
+    }
+}
+
+/// Downscale a strip with the shared tile operation
+/// ([`resize::downscale_half`]) and transfer its memory-tracker charge to
+/// the resulting half-strip.
+///
+/// Shared by the sequential streaming strip loop and the MapReduce reduce
+/// loop; both charge the strip before calling and hand the returned half to
+/// [`propagate_down`] (whose caller-charges-the-buffer contract the `alloc`
+/// here satisfies).
+pub(crate) fn downscale_strip_tracked(
+    strip: &Raster,
+    tracker: &MemoryTracker,
+) -> Result<Raster, RasterError> {
+    let strip_bytes = strip.data().len() as u64;
+    let half = resize::downscale_half(strip)?;
+    tracker.dealloc(strip_bytes);
+    tracker.alloc(half.data().len() as u64);
+    Ok(half)
+}
+
+/// Phase 2 of the streaming engines: flush unpaired strip accumulators.
+///
+/// When the canvas height isn't evenly divisible by the strip height, the
+/// last half-strip at some levels arrives without a partner. These leftovers
+/// sit in `accumulators[level_idx]` and must be emitted and propagated
+/// before the monolithic flush.
+///
+/// Processes from highest to lowest so that propagation feeds data into
+/// levels below, which may themselves be monolithic. Shared verbatim by the
+/// sequential streaming engine and the MapReduce engine (issue #138).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flush_unpaired_accumulators(
+    accumulators: &mut Vec<Option<Raster>>,
+    mono_accumulators: &mut Vec<Vec<u8>>,
+    monolithic_threshold: usize,
+    plan: &PyramidPlan,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    tracker: &MemoryTracker,
+    tiles_produced: &mut u64,
+    tiles_skipped: &mut u64,
+) -> Result<(), EngineError> {
+    for level_idx in (monolithic_threshold + 1..plan.levels.len()).rev() {
+        if let Some(leftover) = accumulators[level_idx].take() {
+            // The leftover was charged when it was stored as an unpaired first
+            // half; it is still charged now.
+            let leftover_bytes = leftover.data().len() as u64;
+            // The leftover covers the bottom slice of this level. Its Y
+            // position is the level height minus the strip's own height.
+            let (_, lh) = level_dims(plan, level_idx);
+            let leftover_y = lh.saturating_sub(leftover.height());
+
+            let (tp, ts_skip) = emit_strip_tiles(
+                &leftover,
+                plan,
+                level_idx as u32,
+                leftover_y,
+                sink,
+                config,
+                observer,
+            )?;
+            *tiles_produced += tp;
+            *tiles_skipped += ts_skip;
+
+            // Continue the downscale chain into lower levels
+            if level_idx > 0 {
+                let further_half = resize::downscale_half(&leftover)?;
+                let further_bytes = further_half.data().len() as u64;
+                // Charge the downscaled half before handing it down (the
+                // caller-charges-the-buffer contract of `propagate_down`,
+                // issue #109). `leftover` is still live during the downscale,
+                // so the peak captures both.
+                tracker.alloc(further_bytes);
+                propagate_down(
+                    further_half,
+                    level_idx - 1,
+                    leftover_y / 2,
+                    accumulators,
+                    mono_accumulators,
+                    monolithic_threshold,
+                    plan,
+                    sink,
+                    config,
+                    observer,
+                    tracker,
+                    tiles_produced,
+                    tiles_skipped,
+                )?;
+            }
+
+            // The leftover buffer is dropped at the end of this block; release
+            // its charge.
+            drop(leftover);
+            tracker.dealloc(leftover_bytes);
+        }
+    }
+    Ok(())
+}
+
+/// Phase 3 of the streaming engines: assemble and emit the monolithic
+/// (small) levels.
+///
+/// Only the topmost monolithic level has accumulated raw row data via
+/// [`propagate_down`]. All levels below it are produced here by downscaling
+/// the level above with the shared level walk
+/// ([`crate::level_walk::walk_levels_down`]), exactly as the monolithic
+/// engine does. This guarantees pixel-exact parity: each pixel goes through
+/// the same sequence of 2×2 box-filter averages regardless of whether the
+/// pyramid was built monolithically or via streaming. Shared verbatim by the
+/// sequential streaming engine and the MapReduce engine (issue #138).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flush_monolithic_levels(
+    mono_accumulators: &mut [Vec<u8>],
+    monolithic_threshold: usize,
+    plan: &PyramidPlan,
+    format: PixelFormat,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    tiles_produced: &mut u64,
+    tiles_skipped: &mut u64,
+) -> Result<(), EngineError> {
+    let bpp = format.bytes_per_pixel();
+    let top_mono = monolithic_threshold.min(plan.levels.len() - 1);
+
+    // Locate the topmost monolithic level with accumulated data and
+    // assemble its full raster. Levels above it (empty accumulator, or the
+    // degenerate zero-dimension case) produce nothing, exactly as before
+    // the extraction: the pre-#138 loop `continue`d past them until the
+    // first level whose accumulator held rows.
+    let mut base: Option<(usize, Raster)> = None;
+    for level_idx in (0..=top_mono).rev() {
+        let (lw, lh) = level_dims(plan, level_idx);
+        if lw == 0 || lh == 0 {
+            continue;
+        }
+        let mut acc_data = std::mem::take(&mut mono_accumulators[level_idx]);
+        if acc_data.is_empty() {
+            continue;
+        }
+        let expected = lw as usize * lh as usize * bpp;
+
+        // The accumulated data may exceed the expected size when the source
+        // has odd dimensions and downscale_half produces div_ceil rows from
+        // each strip fragment. Truncate to the exact expected byte count.
+        if acc_data.len() > expected {
+            acc_data.truncate(expected);
+        }
+        // Conversely, if the last strip was shorter than expected, pad
+        // remaining rows with the background colour.
+        if acc_data.len() < expected {
+            let filled_rows = acc_data.len() / (lw as usize * bpp);
+            acc_data.resize(expected, 0);
+            fill_background_rows(
+                &mut acc_data,
+                filled_rows,
+                lw,
+                lh,
+                bpp,
+                config.background_rgb,
+            );
+        }
+        base = Some((level_idx, Raster::new(lw, lh, format, acc_data)?));
+        break;
+    }
+    let Some((base_idx, base_raster)) = base else {
+        return Ok(());
+    };
+
+    // Walk from the assembled base level down to level 0, producing each
+    // lower level by downscaling the level above (the shared tile op).
+    crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+        base_raster,
+        base_idx + 1,
+        |_| Ok(()),
+        |_, prev| Ok(resize::downscale_half(&prev)?),
+        |level_idx, raster| {
+            // Defensive guard carried over from the pre-#138 loop: a level
+            // with zero pixel dimensions emits nothing. Below a non-empty
+            // base this is unreachable (level sizes halve with div_ceil, so
+            // they never drop below 1×1).
+            let (lw, lh) = level_dims(plan, level_idx);
+            if lw == 0 || lh == 0 {
+                return Ok(());
+            }
+            let (tp, ts_skip) =
+                emit_full_level_tiles(raster, plan, level_idx as u32, sink, config, observer)?;
+            *tiles_produced += tp;
+            *tiles_skipped += ts_skip;
+            Ok(())
+        },
+    )?;
+    Ok(())
 }
 
 /// Obtain a horizontal strip in canvas coordinate space.
@@ -978,9 +1423,14 @@ pub(crate) fn obtain_canvas_strip(
             Raster::new(cw, height, format, data).map_err(EngineError::from)
         }
     } else {
-        // DeepZoom/Xyz: strip is in image space, width = source width
+        // DeepZoom/Xyz: strip is in image space, width = source width.
+        // Guard the subtraction: a caller-supplied plan taller than the source
+        // (the public builder accepts plan and source independently) would make
+        // `y` exceed `src_h`, underflowing `src_h - y` — a debug panic and a
+        // release wrap-to-huge that only surfaces downstream. Saturating to 0
+        // yields a typed error from `render_strip`, matching the Google branch.
         let src_h = source.height();
-        let avail_h = (src_h - y).min(height);
+        let avail_h = src_h.saturating_sub(y).min(height);
         source.render_strip(y, avail_h)
     }
 }
@@ -1142,12 +1592,27 @@ pub(crate) fn emit_strip_tiles(
             if blank {
                 skipped += 1;
             }
-            sink.write_tile(&Tile {
+            if let Err(e) = sink.write_tile(&Tile {
                 coord,
                 raster: tile_raster,
                 blank,
-            })?;
-            observer.on_event(EngineEvent::TileCompleted { coord });
+            }) {
+                // A write that failed because its retry backoff was interrupted
+                // by a cancellation must surface as Cancelled, not be swallowed
+                // by RetryThenSkip or reported as a plain sink error. Mirror the
+                // monolithic engine so the configured FailurePolicy takes effect
+                // on every engine kind (issue #134).
+                config.check_cancelled()?;
+                match &config.failure_policy {
+                    crate::retry::FailurePolicy::RetryThenSkip(_) => {
+                        sink.note_sink_skipped();
+                        observer.on_event(EngineEvent::tile_completed(coord));
+                        continue;
+                    }
+                    _ => return Err(promote_sink_error(e)),
+                }
+            }
+            observer.on_event(EngineEvent::tile_completed(coord));
             count += 1;
         }
     }
@@ -1365,24 +1830,53 @@ pub(crate) fn propagate_down(
     tiles_produced: &mut u64,
     tiles_skipped: &mut u64,
 ) -> Result<(), EngineError> {
+    // Memory-accounting contract: the caller has already charged the
+    // `MemoryTracker` for the bytes of `half_strip` (the buffer it hands in).
+    // This function is responsible for releasing that charge once the buffer
+    // is consumed, or for leaving it charged while the buffer lives on in an
+    // accumulator. Every *new* raster buffer it allocates (the concatenated
+    // combined strip and the downscaled half handed to the recursive call) is
+    // charged here so that `peak_memory_bytes` reflects the true simultaneous
+    // working set — including the propagate/concat transients that were
+    // previously invisible (#109).
+    let incoming_bytes = half_strip.data().len() as u64;
+
     if level_idx <= monolithic_threshold {
         // Monolithic path: append rows and stop. The flush phase will
         // assemble the full raster and cascade downscales from there.
+        //
+        // The half's rows move into the persistent monolithic accumulator.
+        // Charge that growth before the copy and release the transient
+        // `half_strip` buffer after it, so the peak captures the brief window
+        // where both the source half and the growing accumulator are live,
+        // and the accumulator's bytes stay charged once the half is dropped.
+        tracker.alloc(incoming_bytes);
         let acc = &mut mono_accumulators[level_idx];
         acc.extend_from_slice(half_strip.data());
+        drop(half_strip);
+        tracker.dealloc(incoming_bytes);
         return Ok(());
     }
 
     // Strip-pairing path: check if we already have a stored first half.
     match accumulators[level_idx].take() {
         None => {
-            // First of pair — store and wait for the partner
+            // First of pair — store and wait for the partner. The buffer
+            // lives on in the accumulator, so its charge is intentionally
+            // left in place; the matching `Some` arm releases it later.
             accumulators[level_idx] = Some(half_strip);
         }
         Some(prev) => {
             // Second of pair — stack top-over-bottom to reconstruct the
-            // full strip height at this level
+            // full strip height at this level. `prev` is still charged from
+            // when it was stored in the `None` arm above.
+            let prev_bytes = prev.data().len() as u64;
             let combined = concat_vertical(&prev, &half_strip)?;
+            let combined_bytes = combined.data().len() as u64;
+            // Charge the combined buffer now: at this instant `prev`, the
+            // incoming half, and `combined` are all live — this is the
+            // concat transient the tracker previously ignored.
+            tracker.alloc(combined_bytes);
             // The combined strip's Y offset is where the first half started
             let combined_y = strip_y_at_level.saturating_sub(prev.height());
 
@@ -1399,9 +1893,23 @@ pub(crate) fn propagate_down(
             *tiles_produced += tp;
             *tiles_skipped += ts_skip;
 
+            // The two source halves are no longer needed once the combined
+            // strip exists; release their charges (the buffers are dropped
+            // here for `prev` and at function exit for `half_strip`).
+            drop(prev);
+            drop(half_strip);
+            tracker.dealloc(prev_bytes);
+            tracker.dealloc(incoming_bytes);
+
             // Continue the downscale chain into the next lower level
             if level_idx > 0 {
                 let further_half = resize::downscale_half(&combined)?;
+                let further_bytes = further_half.data().len() as u64;
+                // Charge the downscaled half before handing it to the
+                // recursive call, honouring the contract that the caller
+                // charges the buffer it passes down. `combined` is still
+                // live during the downscale, so the peak captures both.
+                tracker.alloc(further_bytes);
                 propagate_down(
                     further_half,
                     level_idx - 1,
@@ -1418,6 +1926,9 @@ pub(crate) fn propagate_down(
                     tiles_skipped,
                 )?;
             }
+
+            // The combined transient is done; release it.
+            tracker.dealloc(combined_bytes);
         }
     }
 
@@ -1687,6 +2198,102 @@ mod tests {
         assert_eq!(result.tiles_produced, plan.total_tile_count());
     }
 
+    // -- Issue #109: peak_memory_bytes must include propagate/concat transients --
+
+    /// `propagate_down` reaches its strip-pairing (`Some`) arm when two levels
+    /// above the monolithic threshold are strip-paired. At the instant the two
+    /// half-strips are concatenated, three buffers are simultaneously live —
+    /// the two source halves plus the combined strip — yet before #109 the
+    /// tracker was never touched inside `propagate_down`, so this transient
+    /// (and every deeper propagation buffer) was invisible to
+    /// `peak_memory_bytes`.
+    ///
+    /// This drives `propagate_down` directly with a paired half-strip and
+    /// asserts the reported peak accounts for the concat transient. It fails
+    /// on the unfixed code (the tracker stays at the two caller-charged halves,
+    /// never rising to include the combined buffer) and passes once the
+    /// transient is charged.
+    #[test]
+    fn propagate_down_charges_concat_transient() {
+        let planner = PyramidPlanner::new(2048, 2048, 128, 0, Layout::DeepZoom).unwrap();
+        let plan = planner.plan();
+        let format = PixelFormat::Rgb8;
+        let bpp = format.bytes_per_pixel() as u64;
+        let strip_height = 256;
+
+        // With this geometry the two largest levels are strip-paired, so
+        // propagating a half at `top - 1` hits the concat branch.
+        let mono_thresh = find_monolithic_threshold(&plan, format, strip_height);
+        let top = plan.levels.len() - 1;
+        let level_idx = top - 1;
+        assert!(
+            level_idx > mono_thresh,
+            "test geometry must keep level {level_idx} strip-paired (mono_thresh={mono_thresh})"
+        );
+
+        let lw = plan.levels[level_idx].width;
+        let hh = plan.tile_size; // half-strip height: one tile row
+        let half_bytes = lw as u64 * hh as u64 * bpp;
+
+        let mut accumulators: Vec<Option<Raster>> = vec![None; plan.levels.len()];
+        let mut mono_accumulators: Vec<Vec<u8>> = plan.levels.iter().map(|_| Vec::new()).collect();
+        let sink = MemorySink::new();
+        let config = EngineConfig::default();
+        let tracker = MemoryTracker::new();
+        let mut tiles_produced = 0u64;
+        let mut tiles_skipped = 0u64;
+
+        // First half of the pair. Mirror the engine's convention of charging
+        // the buffer before handing it to `propagate_down`.
+        tracker.alloc(half_bytes);
+        propagate_down(
+            solid_raster(lw, hh, 10),
+            level_idx,
+            hh,
+            &mut accumulators,
+            &mut mono_accumulators,
+            mono_thresh,
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &tracker,
+            &mut tiles_produced,
+            &mut tiles_skipped,
+        )
+        .unwrap();
+
+        // Second half — triggers the vertical concat of both halves.
+        tracker.alloc(half_bytes);
+        propagate_down(
+            solid_raster(lw, hh, 20),
+            level_idx,
+            2 * hh,
+            &mut accumulators,
+            &mut mono_accumulators,
+            mono_thresh,
+            &plan,
+            &sink,
+            &config,
+            &NoopObserver,
+            &tracker,
+            &mut tiles_produced,
+            &mut tiles_skipped,
+        )
+        .unwrap();
+
+        // At the concat instant the two half buffers (half_bytes each) and the
+        // combined buffer (their sum, 2 * half_bytes) are all live.
+        let combined_bytes = 2 * half_bytes;
+        let expected_min = 2 * half_bytes + combined_bytes;
+        assert!(
+            tracker.peak_bytes() >= expected_min,
+            "reported peak {} must include the concat transient (>= {})",
+            tracker.peak_bytes(),
+            expected_min
+        );
+    }
+
     #[test]
     fn concat_vertical_works() {
         let top = solid_raster(4, 2, 100);
@@ -1785,5 +2392,185 @@ mod tests {
         let result =
             generate_pyramid_streaming(&strip_src, &plan, &sink, &config, &NoopObserver).unwrap();
         assert_eq!(result.tiles_produced, plan.total_tile_count());
+    }
+
+    // Regression: `StreamingState::drop` must close its document under
+    // `pdfium_lock()`. The unpatched `pdfium-render` bypasses per-call
+    // locking, so a teardown (`FPDF_CloseDocument`) racing a concurrent
+    // render inside the non-thread-safe C library corrupts the heap.
+    //
+    // This exercises the synchronisation directly without a live pdfium
+    // handle: a `StreamingState` whose `document` is `None` still must
+    // acquire `PDFIUM_LOCK` in `Drop`. We hold the lock on this thread and
+    // assert that a `Drop` running on another thread blocks until we
+    // release it. On the pre-fix code the `Drop` never touches the lock,
+    // so the teardown completes while the lock is held and the first
+    // timeout assertion fails.
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn streaming_state_drop_acquires_pdfium_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let guard = crate::pdf::pdfium_lock();
+
+        let state = StreamingState {
+            document: None,
+            page_index: 0,
+            rotation: crate::pdf::PageRotation::Zero,
+        };
+
+        let (tx, rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            drop(state); // must block here until the main thread releases the lock
+            tx.send(()).unwrap();
+        });
+
+        // While we hold the lock, a lock-respecting Drop cannot finish.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "StreamingState::drop completed while PDFIUM_LOCK was held — \
+             Drop did not acquire pdfium_lock(), leaving FPDF_CloseDocument \
+             unsynchronised against concurrent renders"
+        );
+
+        // Release the lock; the teardown must now proceed.
+        drop(guard);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("StreamingState::drop did not complete after lock release");
+        handle.join().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single-level plan underflow guard (issue #102)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod single_level_tests {
+    use super::*;
+    use crate::observe::NoopObserver;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::sink::MemorySink;
+
+    fn gradient(w: u32, h: u32) -> Raster {
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let off = (y as usize * w as usize + x as usize) * bpp;
+                data[off] = (x % 256) as u8;
+                data[off + 1] = (y % 256) as u8;
+                data[off + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    fn run(plan: &crate::planner::PyramidPlan, src: &Raster) -> MemorySink {
+        let sink = MemorySink::new();
+        let config = StreamingConfig {
+            memory_budget_bytes: u64::MAX,
+            engine: EngineConfig::default(),
+            budget_policy: BudgetPolicy::Error,
+        };
+        generate_pyramid_streaming(
+            &RasterStripSource::new(src),
+            plan,
+            &sink,
+            &config,
+            &NoopObserver,
+        )
+        .expect("single-level plan must run to completion without underflow panic");
+        sink
+    }
+
+    // A Google-layout image no larger than one tile collapses to a single
+    // pyramid level (top_level == 0). The streaming engine must emit the
+    // top-level tiles and stop, not recurse into propagate_down with an
+    // underflowed `top_level - 1`.
+    #[test]
+    fn google_single_tile_image_runs_to_completion() {
+        let src = gradient(256, 256);
+        let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
+    }
+
+    // A 1x1 source collapses to a single level under any layout.
+    #[test]
+    fn deepzoom_one_by_one_source_runs_to_completion() {
+        let src = gradient(1, 1);
+        let plan = PyramidPlanner::new(1, 1, 256, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        assert_eq!(plan.levels.len(), 1, "expected a single-level plan");
+        let sink = run(&plan, &src);
+        assert!(
+            !sink.tiles().is_empty(),
+            "single-level plan should still emit its top-level tile(s)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strip-path u32 subtraction underflow guards (issue #110)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod strip_underflow_guard_tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+
+    fn solid(w: u32, h: u32) -> Raster {
+        let data = vec![0u8; w as usize * h as usize * 3];
+        Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    }
+
+    // `RasterStripSource::render_strip` with a `y_offset` past the source height
+    // must not underflow `raster.height() - y_offset`. Before the guard this
+    // panicked in debug and wrapped to a huge value in release; now it saturates
+    // to a zero-height request and surfaces a typed error.
+    #[test]
+    fn raster_strip_source_offset_beyond_height_errors_without_panic() {
+        let src = solid(10, 10);
+        let source = RasterStripSource::new(&src);
+        // y_offset > height: unguarded `10 - 20` underflows.
+        let result = source.render_strip(20, 5);
+        assert!(
+            result.is_err(),
+            "out-of-range y_offset must yield a typed error, not a panic/wrap"
+        );
+    }
+
+    // The DeepZoom/Xyz branch of `obtain_canvas_strip` subtracts `src_h - y`
+    // without a guard. A plan taller than the source drives `y` past `src_h`;
+    // the subtraction must saturate rather than underflow-panic (debug) or
+    // wrap to a huge strip height (release).
+    #[test]
+    fn deepzoom_obtain_canvas_strip_y_beyond_source_errors_without_panic() {
+        let src = solid(8, 8);
+        let source = RasterStripSource::new(&src);
+        let plan = PyramidPlanner::new(8, 8, 8, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = EngineConfig::default();
+        // y past the source height: unguarded `8 - 13` underflows.
+        let result = obtain_canvas_strip(&source, &plan, 13, 4, &config);
+        assert!(
+            result.is_err(),
+            "y beyond source height must yield a typed error, not a panic/wrap"
+        );
     }
 }

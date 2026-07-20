@@ -1,7 +1,39 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use crate::planner::TileCoord;
+
+/// Opaque identity of the executor (or external worker) that produced an
+/// event (issue #67).
+///
+/// The engine treats the string as opaque: it is never parsed, only carried
+/// on [`EngineEvent`] variants so an observer can attribute work back to the
+/// executor that performed it. An out-of-tree distribution layer picks its
+/// own naming scheme (hostnames, pool slots, UUIDs). The built-in
+/// [`LocalWorkExecutor`](crate::LocalWorkExecutor) reports no identity, so
+/// locally-executed work stays unattributed (`None`) exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WorkerId(pub String);
+
+impl WorkerId {
+    /// Create a `WorkerId` from anything string-shaped.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The identity as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WorkerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Events emitted during pyramid generation.
 ///
@@ -19,7 +51,10 @@ use crate::planner::TileCoord;
 /// - [level_started_before_tile_completed](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
 ///   verifies the ordering invariant between `LevelStarted` and
 ///   `TileCompleted` events.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EngineEvent {
     // -- Pipeline-level events (emitted by callers for full-pipeline observability) --
     /// The source file is about to be loaded (decoded, extracted, or rendered).
@@ -61,7 +96,63 @@ pub enum EngineEvent {
         tile_count: u64,
     },
     /// A tile was produced and sent to the sink.
-    TileCompleted { coord: TileCoord },
+    ///
+    /// `worker_id` attributes the tile to the [`WorkExecutor`](crate::WorkExecutor)
+    /// that produced it, and `timestamp` records when the coordinating thread
+    /// emitted the event (issue #67). Both are additive and optional: the
+    /// in-tree engines set `worker_id: None` (work is unattributed) and stamp
+    /// `timestamp: Some(_)` at emit time on the coordinating thread. An
+    /// out-of-tree executor layer fills `worker_id` to route the event back to
+    /// the worker that produced it. Construct with
+    /// [`EngineEvent::tile_completed`](Self::tile_completed) to stamp both the
+    /// default way.
+    TileCompleted {
+        coord: TileCoord,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
+    /// A tile failed terminally and was skipped under
+    /// [`FailurePolicy::RetryThenSkip`](crate::retry::FailurePolicy::RetryThenSkip).
+    ///
+    /// Emitted *instead of* [`TileCompleted`](Self::TileCompleted): a tile
+    /// that failed every retry produced no output, so reporting it as
+    /// completed would corrupt any observer that pairs completions with sink
+    /// writes (progress bars, completion counters, per-tile audit logs). The
+    /// `error` string carries a human-readable description of the terminal
+    /// failure. `worker_id` / `timestamp` carry the same optional attribution
+    /// as [`TileCompleted`](Self::TileCompleted) (issue #67).
+    TileFailed {
+        coord: TileCoord,
+        error: String,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
+    /// A tile was skipped on resume because a prior run already produced it.
+    ///
+    /// Emitted for tiles listed in an inbound resume checkpoint. Such tiles
+    /// are never re-extracted or re-written this run, so they must not
+    /// surface as [`TileCompleted`](Self::TileCompleted) — an observer would
+    /// otherwise double-count them across the original and resumed runs.
+    /// `worker_id` / `timestamp` carry the same optional attribution as
+    /// [`TileCompleted`](Self::TileCompleted) (issue #67).
+    TileSkippedOnResume {
+        coord: TileCoord,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
+    /// A tile write failed and a retry is about to be attempted.
+    ///
+    /// `attempt` is 1-based: the first retry after the initial failure is
+    /// `attempt == 1`. Terminal failure (all retries exhausted) surfaces as
+    /// [`TileFailed`](Self::TileFailed), never as `TileCompleted`.
+    /// `worker_id` / `timestamp` carry the same optional attribution as
+    /// [`TileCompleted`](Self::TileCompleted) (issue #67).
+    RetryAttempted {
+        coord: TileCoord,
+        attempt: u32,
+        worker_id: Option<WorkerId>,
+        timestamp: Option<SystemTime>,
+    },
     /// A level finished processing.
     LevelCompleted { level: u32, tiles_produced: u64 },
 
@@ -91,6 +182,75 @@ pub enum EngineEvent {
         tiles_produced: u64,
     },
 
+    // -- Worker attribution events (issue #67) --
+    /// A MAP-phase strip work unit was handed to the installed
+    /// [`WorkExecutor`](crate::WorkExecutor).
+    ///
+    /// Emitted by the MapReduce engines (including
+    /// [`EngineKind::MapReduceHotCache`](crate::EngineKind::MapReduceHotCache))
+    /// on the coordinating thread, in canonical dispatch order (strictly
+    /// increasing `spec.canvas_y`). `worker_id` is the executor's
+    /// self-reported identity from
+    /// [`WorkExecutor::worker_id`](crate::WorkExecutor::worker_id); the
+    /// built-in [`LocalWorkExecutor`](crate::LocalWorkExecutor) reports
+    /// `None`, preserving the unattributed default.
+    StripDispatched {
+        worker_id: Option<WorkerId>,
+        spec: crate::streaming_mapreduce::StripWorkUnit,
+    },
+
+    /// A MAP-phase strip work unit finished executing.
+    ///
+    /// Emitted by the MapReduce engines on the coordinating thread after the
+    /// batch's results are reassembled, in the same canonical order as
+    /// [`StripDispatched`](Self::StripDispatched), so the event stream stays
+    /// deterministic even when strips render concurrently. `duration` is the
+    /// wall-clock time [`WorkExecutor::execute`](crate::WorkExecutor::execute)
+    /// took for this unit.
+    StripExecutorDone {
+        worker_id: Option<WorkerId>,
+        spec: crate::streaming_mapreduce::StripWorkUnit,
+        duration: std::time::Duration,
+    },
+
+    /// An external worker became available to an out-of-tree executor layer.
+    ///
+    /// The in-tree engines never emit this: it is vocabulary for a
+    /// distribution layer built on the [`WorkExecutor`](crate::WorkExecutor)
+    /// seam, so its observers can share one event stream (and one
+    /// [`EngineObserver`] implementation) with the engine's own events.
+    WorkerJoined { worker_id: WorkerId },
+
+    /// An external worker left an out-of-tree executor layer.
+    ///
+    /// Like [`WorkerJoined`](Self::WorkerJoined), this is emitted only by
+    /// out-of-tree distribution layers, never by the in-tree engines.
+    /// `reason` is a free-form, human-readable explanation (for example
+    /// "drained" or "heartbeat timeout").
+    WorkerLeft { worker_id: WorkerId, reason: String },
+
+    /// A point-in-time memory reading attributed to a worker.
+    ///
+    /// Emitted only by out-of-tree executor layers that want to surface
+    /// per-worker memory pressure through the shared event stream;
+    /// `worker_id` is `None` when the reading describes the process as a
+    /// whole. The in-tree engines report memory through
+    /// [`EngineResult`](crate::EngineResult) instead and never emit this.
+    MemorySnapshot {
+        worker_id: Option<WorkerId>,
+        current_bytes: u64,
+        peak_bytes: u64,
+    },
+
+    // -- Durability events --
+    /// A resume checkpoint was flushed to durable storage.
+    ///
+    /// `tiles` is the cumulative number of completed tiles recorded in the
+    /// checkpoint at flush time, giving observers a durable-progress signal
+    /// distinct from the in-memory [`TileCompleted`](Self::TileCompleted)
+    /// stream.
+    CheckpointFlushed { tiles: u64 },
+
     // -- Completion events --
     /// The tiling phase is done.
     ///
@@ -103,6 +263,55 @@ pub enum EngineEvent {
     /// (manifest writing, cleanup, etc.) is finished. The engine never
     /// emits this — it is purely a caller-side bookend to `SourceLoadStarted`.
     PipelineComplete,
+}
+
+impl EngineEvent {
+    /// Build a [`TileCompleted`](Self::TileCompleted) the in-tree way: no worker
+    /// attribution (`worker_id: None`) and a coordinating-thread timestamp
+    /// (`timestamp: Some(SystemTime::now())`).
+    ///
+    /// This is the constructor the built-in engines call, so every in-tree
+    /// tile-completion event is stamped identically. An out-of-tree executor
+    /// layer that needs `worker_id` builds the variant directly.
+    pub fn tile_completed(coord: TileCoord) -> Self {
+        Self::TileCompleted {
+            coord,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
+
+    /// Build a [`TileFailed`](Self::TileFailed) with no worker attribution and a
+    /// coordinating-thread timestamp. See [`tile_completed`](Self::tile_completed).
+    pub fn tile_failed(coord: TileCoord, error: String) -> Self {
+        Self::TileFailed {
+            coord,
+            error,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
+
+    /// Build a [`TileSkippedOnResume`](Self::TileSkippedOnResume) with no worker
+    /// attribution and a coordinating-thread timestamp.
+    pub fn tile_skipped_on_resume(coord: TileCoord) -> Self {
+        Self::TileSkippedOnResume {
+            coord,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
+
+    /// Build a [`RetryAttempted`](Self::RetryAttempted) with no worker
+    /// attribution and a coordinating-thread timestamp.
+    pub fn retry_attempted(coord: TileCoord, attempt: u32) -> Self {
+        Self::RetryAttempted {
+            coord,
+            attempt,
+            worker_id: None,
+            timestamp: Some(SystemTime::now()),
+        }
+    }
 }
 
 /// Trait for receiving engine progress events.
@@ -119,8 +328,25 @@ pub enum EngineEvent {
 ///   and inspect all events emitted during a test pyramid build.
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   implements this trait to print live progress to stderr.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 pub trait EngineObserver: Send + Sync {
     fn on_event(&self, event: EngineEvent);
+
+    /// Receive the builder's [`Extensions`](crate::extensions::Extensions) map
+    /// once, before any tile is emitted.
+    ///
+    /// This is the reader end of the extension hatch threaded through
+    /// [`EngineBuilder::with_extension`](crate::EngineBuilder::with_extension):
+    /// third-party context (metrics recorders, tracing spans, custom config
+    /// blobs) inserted on the builder is delivered here so a custom observer
+    /// can clone out the handles it needs for the rest of the run. The default
+    /// implementation ignores the map, so existing observers are unaffected.
+    ///
+    /// The borrow is valid only for the duration of the call; an observer that
+    /// needs a value past this point must clone it out (extension values are
+    /// `Send + Sync`, so `Arc`-shaped handles clone cheaply).
+    fn on_extensions(&self, _extensions: &crate::extensions::Extensions) {}
 }
 
 /// A no-op observer that discards all events.
@@ -142,6 +368,17 @@ impl EngineObserver for NoopObserver {
 /// primary observer used in integration tests and is also useful for
 /// debugging production pipelines (attach it alongside a logging observer).
 ///
+/// # Unbounded by choice
+///
+/// The buffer grows without limit: one [`EngineEvent`] is retained per event,
+/// under a single mutex. This is deliberate — the collector exists to capture
+/// a *complete* history for tests and debugging, where the event count is
+/// small and known. It is **not** suitable for very large runs: a pyramid of
+/// `10^8` tiles emits at least that many events and will exhaust memory.
+/// For production progress reporting, implement [`EngineObserver`] directly
+/// with an aggregating counter (O(1) memory), or drain the collector
+/// periodically. See issue #128 for the rationale.
+///
 /// # Example usage
 ///
 /// - [progress_events_match_tile_count](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
@@ -149,6 +386,8 @@ impl EngineObserver for NoopObserver {
 ///   then inspect the captured events.
 /// - [CLI source](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs)
 ///   wraps a `CollectingObserver` for its `--verbose` mode.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug)]
 pub struct CollectingObserver {
     events: std::sync::Mutex<Vec<EngineEvent>>,
@@ -165,12 +404,12 @@ impl CollectingObserver {
     /// Return a snapshot of all collected events so far, cloned from the
     /// internal mutex-protected buffer.
     pub fn events(&self) -> Vec<EngineEvent> {
-        self.events.lock().unwrap().clone()
+        crate::poison::recover(&self.events).clone()
     }
 
     /// Return the number of events collected so far.
     pub fn event_count(&self) -> usize {
-        self.events.lock().unwrap().len()
+        crate::poison::recover(&self.events).len()
     }
 }
 
@@ -182,7 +421,74 @@ impl Default for CollectingObserver {
 
 impl EngineObserver for CollectingObserver {
     fn on_event(&self, event: EngineEvent) {
-        self.events.lock().unwrap().push(event);
+        crate::poison::recover(&self.events).push(event);
+    }
+}
+
+/// An observer that fans every event out to a list of observers, in order.
+///
+/// This is the multi-observer composition behind
+/// [`EngineBuilder::with_observers`](crate::EngineBuilder::with_observers)
+/// (issue #67): each [`EngineEvent`] is delivered to every registered
+/// observer in registration order, synchronously, on the thread that
+/// produced the event. [`on_extensions`](EngineObserver::on_extensions) is
+/// forwarded the same way, so every registered observer can read the
+/// extension hatch.
+///
+/// The type is public so callers composing observers by hand (outside the
+/// builder) can reuse it instead of writing their own fan-out.
+pub struct FanOutObserver {
+    observers: Vec<Arc<dyn EngineObserver>>,
+}
+
+impl FanOutObserver {
+    /// Create a fan-out over the given observers. Events are delivered in
+    /// the order the observers appear in the vector.
+    pub fn new(observers: Vec<Arc<dyn EngineObserver>>) -> Self {
+        Self { observers }
+    }
+
+    /// Append another observer; it receives events after all previously
+    /// registered ones.
+    pub fn push(&mut self, observer: Arc<dyn EngineObserver>) {
+        self.observers.push(observer);
+    }
+
+    /// Number of registered observers.
+    pub fn len(&self) -> usize {
+        self.observers.len()
+    }
+
+    /// Whether no observers are registered (events are then discarded).
+    pub fn is_empty(&self) -> bool {
+        self.observers.is_empty()
+    }
+}
+
+impl std::fmt::Debug for FanOutObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FanOutObserver")
+            .field("observers", &self.observers.len())
+            .finish()
+    }
+}
+
+impl EngineObserver for FanOutObserver {
+    fn on_event(&self, event: EngineEvent) {
+        // Clone for all but the last delivery; the final observer takes the
+        // original by value.
+        if let Some((last, rest)) = self.observers.split_last() {
+            for obs in rest {
+                obs.on_event(event.clone());
+            }
+            last.on_event(event);
+        }
+    }
+
+    fn on_extensions(&self, extensions: &crate::extensions::Extensions) {
+        for obs in &self.observers {
+            obs.on_extensions(extensions);
+        }
     }
 }
 
@@ -197,6 +503,8 @@ impl EngineObserver for CollectingObserver {
 /// - [peak_memory_bounded_for_medium_image](https://github.com/libviprs/libviprs-tests/blob/main/tests/observability.rs)
 ///   attaches a `MemoryTracker` to an engine run and asserts the peak stays
 ///   below an expected ceiling.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-trace-level)
 #[derive(Debug, Clone)]
 pub struct MemoryTracker {
     current: Arc<AtomicU64>,
@@ -218,8 +526,23 @@ impl MemoryTracker {
     }
 
     /// Record a deallocation of `bytes`.
+    ///
+    /// Uses saturating semantics: if `bytes` exceeds the currently tracked
+    /// total, `current` clamps to `0` rather than wrapping around the `u64`
+    /// range. A plain `fetch_sub` would underflow to `~2^64`, and the next
+    /// [`alloc`](Self::alloc)'s `fetch_max` would then ratchet `peak` to that
+    /// garbage value permanently. In-tree call sites balance their
+    /// alloc/dealloc pairs, but the type is `pub` with a `Clone`-able `Arc`
+    /// interior, so a caller can drive `current` negative; saturating keeps the
+    /// counter meaningful in that case.
     pub fn dealloc(&self, bytes: u64) {
-        self.current.fetch_sub(bytes, Ordering::Relaxed);
+        // `fetch_update` retries on contention (CAS loop) so the clamp is
+        // applied atomically with respect to concurrent alloc/dealloc calls.
+        let _ = self
+            .current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(bytes))
+            });
     }
 
     /// Current tracked memory in bytes.
@@ -232,7 +555,16 @@ impl MemoryTracker {
         self.peak.load(Ordering::Relaxed)
     }
 
-    /// Reset the tracker.
+    /// Reset the tracker back to zero.
+    ///
+    /// **Quiescent-only.** The two counters are cleared with independent,
+    /// non-atomic stores, so this must be called only when no other thread is
+    /// concurrently calling [`alloc`](Self::alloc) or [`dealloc`](Self::dealloc)
+    /// on this tracker (or any of its `Clone`d handles). Calling it while
+    /// allocations are in flight can interleave a store between another
+    /// thread's `current` update and its `peak` ratchet, leaving `peak` lower
+    /// than a `current` that outlives the reset. Reset between runs, not
+    /// during one.
     pub fn reset(&self) {
         self.current.store(0, Ordering::Relaxed);
         self.peak.store(0, Ordering::Relaxed);
@@ -263,9 +595,7 @@ mod tests {
             height: 1,
             tile_count: 1,
         });
-        obs.on_event(EngineEvent::TileCompleted {
-            coord: TileCoord::new(0, 0, 0),
-        });
+        obs.on_event(EngineEvent::tile_completed(TileCoord::new(0, 0, 0)));
         obs.on_event(EngineEvent::LevelCompleted {
             level: 0,
             tiles_produced: 1,
@@ -303,6 +633,109 @@ mod tests {
                 total_tiles: 10,
                 ..
             }
+        ));
+    }
+
+    /**
+     * Reproducer for #117: one panicking holder must not cascade its poison
+     * into a second panic on every later observer call. We poison the events
+     * mutex by panicking under `catch_unwind` while holding the guard, then
+     * exercise the public read/write surface.
+     *
+     * Before the fix (`.lock().unwrap()`), `event_count`, `events` and
+     * `on_event` all re-`unwrap()` the poisoned lock and panic (RED). After
+     * the fix they recover the guard via `crate::poison::recover` and keep the
+     * already-collected events, so the count grows past the poison (GREEN).
+     */
+    #[test]
+    fn poisoned_events_lock_recovers_without_cascade() {
+        let obs = CollectingObserver::new();
+        obs.on_event(EngineEvent::tile_completed(TileCoord::new(0, 0, 0)));
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = obs.events.lock().unwrap();
+            panic!("worker panic while holding the events lock");
+        }));
+        assert!(poisoned.is_err(), "the injected panic must unwind");
+        assert!(obs.events.is_poisoned(), "the lock must now be poisoned");
+
+        // None of these may panic under the recovered poison policy.
+        assert_eq!(obs.event_count(), 1);
+        assert_eq!(obs.events().len(), 1);
+        obs.on_event(EngineEvent::Finished {
+            total_tiles: 1,
+            levels: 1,
+        });
+        assert_eq!(obs.event_count(), 2);
+    }
+
+    /**
+     * Reproducer for #128: a terminally-failed tile must have a dedicated
+     * event distinct from `TileCompleted`, and a resume-skipped tile must
+     * have its own event too. Reporting either as `TileCompleted` corrupts
+     * observers that pair completions with sink writes (the exact defect the
+     * issue describes).
+     *
+     * Before the fix the event vocabulary had no failure or resume-skip
+     * variant, so this test failed to compile (RED). After adding the
+     * variants it captures them and asserts each is distinct from a
+     * completion (GREEN).
+     *
+     * Input: TileFailed(2,3,4), TileSkippedOnResume(0,1,1) →
+     * Output: neither event matches TileCompleted; fields round-trip.
+     */
+    #[test]
+    fn failed_and_skipped_tiles_are_not_reported_as_completed() {
+        let obs = CollectingObserver::new();
+        let failed = TileCoord::new(2, 3, 4);
+        let skipped = TileCoord::new(0, 1, 1);
+        obs.on_event(EngineEvent::tile_failed(
+            failed,
+            "sink write failed after retries".to_string(),
+        ));
+        obs.on_event(EngineEvent::tile_skipped_on_resume(skipped));
+
+        let events = obs.events();
+        assert_eq!(events.len(), 2);
+
+        // A failure is never observable as a completion.
+        assert!(!matches!(events[0], EngineEvent::TileCompleted { .. }));
+        match &events[0] {
+            EngineEvent::TileFailed { coord, error, .. } => {
+                assert_eq!(*coord, failed);
+                assert_eq!(error, "sink write failed after retries");
+            }
+            other => panic!("expected TileFailed, got {other:?}"),
+        }
+
+        // A resume-skip is never observable as a completion.
+        assert!(!matches!(events[1], EngineEvent::TileCompleted { .. }));
+        assert!(matches!(
+            events[1],
+            EngineEvent::TileSkippedOnResume { coord, .. } if coord == skipped
+        ));
+    }
+
+    /**
+     * Tests that the retry and checkpoint-flush events carry their
+     * coordinates / counters and are distinct from completion. Guards the
+     * remaining #128 vocabulary additions against accidental removal.
+     * Input: RetryAttempted(coord, attempt=2), CheckpointFlushed(tiles=7).
+     */
+    #[test]
+    fn retry_and_checkpoint_events_round_trip() {
+        let obs = CollectingObserver::new();
+        let coord = TileCoord::new(1, 2, 3);
+        obs.on_event(EngineEvent::retry_attempted(coord, 2));
+        obs.on_event(EngineEvent::CheckpointFlushed { tiles: 7 });
+        let events = obs.events();
+        assert!(matches!(
+            events[0],
+            EngineEvent::RetryAttempted { attempt: 2, .. }
+        ));
+        assert!(matches!(
+            events[1],
+            EngineEvent::CheckpointFlushed { tiles: 7 }
         ));
     }
 
@@ -383,6 +816,48 @@ mod tests {
         t.reset();
         assert_eq!(t.current_bytes(), 0);
         assert_eq!(t.peak_bytes(), 0);
+    }
+
+    /**
+     * Reproducer for #114: an over-large `dealloc` must not wrap `current`
+     * below zero. With the old `fetch_sub`, `dealloc(bytes)` where
+     * `bytes > current` underflowed to ~2^64, and the next `alloc`'s
+     * `fetch_max` ratcheted `peak` to that garbage value permanently.
+     *
+     * Before the fix `current_bytes()` returned `u64::MAX - 49` after the
+     * unbalanced dealloc and `peak_bytes()` was corrupted by the following
+     * alloc (RED). After switching to a saturating `fetch_update`, `current`
+     * clamps to 0 and `peak` stays meaningful (GREEN).
+     *
+     * Input: alloc(100), dealloc(150), alloc(10) →
+     * Output: current=10, peak stays a small sane value (never ~2^64).
+     */
+    #[test]
+    fn dealloc_saturates_and_does_not_corrupt_peak() {
+        let t = MemoryTracker::new();
+        t.alloc(100);
+        assert_eq!(t.current_bytes(), 100);
+
+        // Deallocate more than is currently tracked: must clamp to 0, not wrap.
+        t.dealloc(150);
+        assert_eq!(
+            t.current_bytes(),
+            0,
+            "dealloc must saturate at zero rather than underflow"
+        );
+
+        // The next alloc must not pick up a wrapped `current` into `peak`.
+        t.alloc(10);
+        assert_eq!(t.current_bytes(), 10);
+        assert_eq!(
+            t.peak_bytes(),
+            100,
+            "peak must remain the true high-water mark, uncorrupted by underflow"
+        );
+        assert!(
+            t.peak_bytes() < u64::MAX / 2,
+            "peak must never be ratcheted to a wrapped garbage value"
+        );
     }
 
     /**

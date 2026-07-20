@@ -1,0 +1,768 @@
+//! Matrix-image and LUT-inversion operations ported from libvips.
+//!
+//! A matrix image is a small one-band image holding dense numeric data,
+//! produced by [`Raster::from_matrix`] and stamped
+//! [`Interpretation::Matrix`]. This module carries the two operations
+//! the ported suite calls on them:
+//!
+//! | libviprs | libvips | notes |
+//! |---|---|---|
+//! | [`Raster::matrixinvert`] | `vips_matrixinvert` | dense inverse of a square matrix image |
+//! | [`Raster::invertlut`] | `vips_invertlut` | inverse LUT from measured `(x, f(x))` rows |
+//!
+//! [`Raster::buildlut`] (the forward companion of `invertlut`) already
+//! lives in [`crate::create`] with the other generators;
+//! `vips_matrixmultiply` is not called by the ported suite and stays
+//! unimplemented.
+//!
+//! # Semantics
+//!
+//! * **`matrixinvert`** is a faithful port of libvips
+//!   `mosaicing/matrixinvert.c`: matrices below 4x4 invert through the
+//!   direct cofactor formulas, larger ones through the Numerical
+//!   Recipes PLU decomposition with implicit (scaled) partial pivoting,
+//!   solving one unit vector per column. A zero row, or a pivot smaller
+//!   than `2 * DBL_MIN`, is a typed [`MatrixError::Singular`] error,
+//!   matching the C thresholds exactly.
+//! * **`invertlut`** is a faithful port of libvips `create/invertlut.c`:
+//!   rows of the input matrix are measured points, column 0 the input
+//!   level and each further column one band's measured response, all in
+//!   `0..=1`. Rows are sorted by column 0; each output band linearly
+//!   interpolates between the bracketing measured rows, extrapolating
+//!   the head to `(0, 0)` and the tail to `(1, 1)`. The output is a
+//!   `size` x 1 image (default 256) with one band per measured column,
+//!   stamped [`Interpretation::Histogram`].
+//! * **Precision.** Both operations compute in `f64` and store results
+//!   in [`PixelFormat::FloatF32`] rasters (libvips stores `double`;
+//!   libviprs carries float data as `f32`, the same trade documented by
+//!   [`crate::create`] for `from_matrix` itself).
+
+use std::num::NonZeroU16;
+
+use thiserror::Error;
+
+use crate::conversion::Interpretation;
+use crate::pixel::PixelFormat;
+use crate::raster::{Raster, RasterError};
+
+/// The `vips_check_matrix` size limit: matrix images wider or taller
+/// than this are rejected.
+const MAX_MATRIX_SIZE: u32 = 100_000;
+
+/// libvips `matrixinvert.c` TOO_SMALL: twice the smallest normalised
+/// double. Pivots below this magnitude count as singular.
+const TOO_SMALL: f64 = 2.0 * f64::MIN_POSITIVE;
+
+/// Typed errors for the matrix operations in [`crate::matrix`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum MatrixError {
+    /// The input is not a matrix image: matrices are one-band.
+    #[error("{op} requires a one-band matrix image, got {bands} bands")]
+    NotOneBand {
+        /// The operation that failed.
+        op: &'static str,
+        /// The offending band count.
+        bands: usize,
+    },
+    /// The input exceeds the libvips `vips_check_matrix` size limit.
+    #[error("{op}: matrix is too large: {width}x{height} (limit {MAX_MATRIX_SIZE})")]
+    TooLarge {
+        /// The operation that failed.
+        op: &'static str,
+        /// Matrix width.
+        width: u32,
+        /// Matrix height.
+        height: u32,
+    },
+    /// `matrixinvert` was given a non-square matrix.
+    #[error("matrixinvert: non-square matrix ({width}x{height})")]
+    NotSquare {
+        /// Matrix width.
+        width: u32,
+        /// Matrix height.
+        height: u32,
+    },
+    /// The matrix is singular or near-singular: a row of zeros, or a
+    /// pivot below the libvips `TOO_SMALL` threshold.
+    #[error("matrixinvert: singular or near-singular matrix")]
+    Singular,
+    /// `invertlut` needs an input column plus at least one measured
+    /// column.
+    #[error("invertlut: bad input matrix: need at least two columns, got {columns}")]
+    TooFewColumns {
+        /// The offending column count.
+        columns: u32,
+    },
+    /// An `invertlut` matrix element is outside `0..=1` (NaN included;
+    /// libvips checks the same range).
+    #[error("invertlut: element ({column}, {row}) is {value}, outside range [0,1]")]
+    OutOfRange {
+        /// Zero-based column of the offending element.
+        column: u32,
+        /// Zero-based row of the offending element.
+        row: u32,
+        /// The offending value.
+        value: f64,
+    },
+    /// The requested `invertlut` LUT size is outside the libvips range
+    /// `1..=65536`.
+    #[error("invertlut: bad size {size} (expected 1..=65536)")]
+    BadSize {
+        /// The offending size.
+        size: u32,
+    },
+    /// An underlying raster allocation failed.
+    #[error(transparent)]
+    Raster(#[from] RasterError),
+}
+
+/// Panic with the standard message shape for the panicking wrappers.
+#[track_caller]
+fn expect_matrix<T>(op: &str, r: Result<T, MatrixError>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("{op}: {e}"),
+    }
+}
+
+/// The `vips_check_matrix` gate: one band, within the size limit.
+/// Returns the matrix as rows of `f64`.
+fn check_matrix(op: &'static str, r: &Raster) -> Result<Vec<Vec<f64>>, MatrixError> {
+    let bands = r.format().channels();
+    if bands != 1 {
+        return Err(MatrixError::NotOneBand { op, bands });
+    }
+    if r.width() > MAX_MATRIX_SIZE || r.height() > MAX_MATRIX_SIZE {
+        return Err(MatrixError::TooLarge {
+            op,
+            width: r.width(),
+            height: r.height(),
+        });
+    }
+    Ok((0..r.height())
+        .map(|y| (0..r.width()).map(|x| r.getpoint(x, y)[0]).collect())
+        .collect())
+}
+
+/// Build the one-band float matrix image for `rows`, stamped with
+/// `interpretation`.
+fn matrix_raster(
+    rows: &[Vec<f64>],
+    width: u32,
+    height: u32,
+    bands: u16,
+    interpretation: Interpretation,
+) -> Result<Raster, MatrixError> {
+    let mut data = Vec::with_capacity(width as usize * height as usize * bands as usize * 4);
+    for row in rows {
+        for &v in row {
+            data.extend_from_slice(&(v as f32).to_ne_bytes());
+        }
+    }
+    let format = PixelFormat::FloatF32(NonZeroU16::new(bands).expect("bands is non-zero"));
+    let mut out = Raster::new(width, height, format, data)?;
+    out.meta.interpretation = Some(interpretation);
+    Ok(out)
+}
+
+/// The direct cofactor inverses for 1x1, 2x2, and 3x3 matrices, ported
+/// from `vips_matrixinvert_direct`.
+fn invert_direct(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, MatrixError> {
+    match m.len() {
+        1 => {
+            let det = m[0][0];
+            if det.abs() < TOO_SMALL {
+                return Err(MatrixError::Singular);
+            }
+            Ok(vec![vec![1.0 / det]])
+        }
+        2 => {
+            let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+            if det.abs() < TOO_SMALL {
+                return Err(MatrixError::Singular);
+            }
+            let t = 1.0 / det;
+            Ok(vec![
+                vec![t * m[1][1], -t * m[0][1]],
+                vec![-t * m[1][0], t * m[0][0]],
+            ])
+        }
+        _ => {
+            let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+            if det.abs() < TOO_SMALL {
+                return Err(MatrixError::Singular);
+            }
+            let t = 1.0 / det;
+            Ok(vec![
+                vec![
+                    t * (m[1][1] * m[2][2] - m[1][2] * m[2][1]),
+                    t * (m[0][2] * m[2][1] - m[0][1] * m[2][2]),
+                    t * (m[0][1] * m[1][2] - m[0][2] * m[1][1]),
+                ],
+                vec![
+                    t * (m[1][2] * m[2][0] - m[1][0] * m[2][2]),
+                    t * (m[0][0] * m[2][2] - m[0][2] * m[2][0]),
+                    t * (m[0][2] * m[1][0] - m[0][0] * m[1][2]),
+                ],
+                vec![
+                    t * (m[1][0] * m[2][1] - m[1][1] * m[2][0]),
+                    t * (m[0][1] * m[2][0] - m[0][0] * m[2][1]),
+                    t * (m[0][0] * m[1][1] - m[0][1] * m[1][0]),
+                ],
+            ])
+        }
+    }
+}
+
+/// The PLU decomposition from `lu_decomp` (Numerical Recipes `ludcmp`
+/// with implicit pivot scaling): returns the packed LU matrix and the
+/// row permutation, or `Singular`.
+fn lu_decomp(m: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<usize>), MatrixError> {
+    let n = m.len();
+    let mut lu: Vec<Vec<f64>> = m.to_vec();
+    let mut perm = vec![0usize; n];
+
+    // Scaling factors: the largest magnitude in each row.
+    let mut row_scale = vec![0.0f64; n];
+    for (i, row) in lu.iter().enumerate() {
+        for &v in row {
+            row_scale[i] = row_scale[i].max(v.abs());
+        }
+        if row_scale[i] == 0.0 {
+            return Err(MatrixError::Singular);
+        }
+        row_scale[i] = 1.0 / row_scale[i];
+    }
+
+    for j in 0..n {
+        // Upper half, except the diagonal.
+        for i in 0..j {
+            for k in 0..i {
+                lu[i][j] -= lu[i][k] * lu[k][j];
+            }
+        }
+
+        // Diagonal and lower half, tracking the best scaled pivot.
+        let mut max = -1.0f64;
+        let mut i_of_max = 0usize;
+        for i in j..n {
+            for k in 0..j {
+                lu[i][j] -= lu[i][k] * lu[k][j];
+            }
+            let abs_val = row_scale[i] * lu[i][j].abs();
+            if abs_val > max {
+                max = abs_val;
+                i_of_max = i;
+            }
+        }
+
+        if lu[i_of_max][j].abs() < TOO_SMALL {
+            return Err(MatrixError::Singular);
+        }
+
+        if i_of_max != j {
+            lu.swap(j, i_of_max);
+            row_scale[i_of_max] = row_scale[j];
+        }
+        perm[j] = i_of_max;
+
+        for i in j + 1..n {
+            lu[i][j] /= lu[j][j];
+        }
+    }
+
+    Ok((lu, perm))
+}
+
+/// Solve `A x = vec` in place given the PLU decomposition, ported from
+/// `lu_solve`.
+fn lu_solve(lu: &[Vec<f64>], perm: &[usize], vec: &mut [f64]) {
+    let n = lu.len();
+    for i in 0..n {
+        let i_perm = perm[i];
+        if i_perm != i {
+            vec.swap(i, i_perm);
+        }
+        for j in 0..i {
+            vec[i] -= lu[i][j] * vec[j];
+        }
+    }
+    for i in (0..n).rev() {
+        for j in i + 1..n {
+            vec[i] -= lu[i][j] * vec[j];
+        }
+        vec[i] /= lu[i][i];
+    }
+}
+
+impl Raster {
+    // -----------------------------------------------------------------
+    // matrixinvert
+    // -----------------------------------------------------------------
+
+    /// Fallible form of [`Raster::matrixinvert`].
+    ///
+    /// # Errors
+    ///
+    /// [`MatrixError::NotOneBand`] / [`MatrixError::TooLarge`] for an
+    /// input `vips_check_matrix` would reject, [`MatrixError::NotSquare`]
+    /// for a non-square matrix, [`MatrixError::Singular`] for a singular
+    /// or near-singular one, or [`MatrixError::Raster`] on allocation
+    /// failure.
+    pub fn try_matrixinvert(&self) -> Result<Raster, MatrixError> {
+        let m = check_matrix("matrixinvert", self)?;
+        if self.width() != self.height() {
+            return Err(MatrixError::NotSquare {
+                width: self.width(),
+                height: self.height(),
+            });
+        }
+        let n = m.len();
+
+        // libvips: direct path below 4x4, PLU above.
+        let inv = if n < 4 {
+            invert_direct(&m)?
+        } else {
+            let (lu, perm) = lu_decomp(&m)?;
+            let mut inv = vec![vec![0.0f64; n]; n];
+            let mut vec_buf = vec![0.0f64; n];
+            for j in 0..n {
+                vec_buf.fill(0.0);
+                vec_buf[j] = 1.0;
+                lu_solve(&lu, &perm, &mut vec_buf);
+                for i in 0..n {
+                    inv[i][j] = vec_buf[i];
+                }
+            }
+            inv
+        };
+
+        matrix_raster(&inv, self.width(), self.height(), 1, Interpretation::Matrix)
+    }
+
+    /// Invert a square matrix image (libvips `vips_matrixinvert`):
+    /// direct cofactor formulas below 4x4, PLU decomposition with
+    /// scaled partial pivoting above. The output is a matrix image the
+    /// same size as the input, stamped [`Interpretation::Matrix`].
+    /// Panicking form of [`Raster::try_matrixinvert`], matching the
+    /// ported-test call surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`MatrixError`]; see [`Raster::try_matrixinvert`].
+    #[track_caller]
+    pub fn matrixinvert(&self) -> Raster {
+        expect_matrix("matrixinvert", self.try_matrixinvert())
+    }
+
+    // -----------------------------------------------------------------
+    // invertlut
+    // -----------------------------------------------------------------
+
+    /// Fallible form of [`Raster::invertlut`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Raster::try_invertlut_size`]; the size is the libvips
+    /// default of 256.
+    pub fn try_invertlut(&self) -> Result<Raster, MatrixError> {
+        self.try_invertlut_size(256)
+    }
+
+    /// Build an inverse look-up table (libvips `vips_invertlut` with the
+    /// default `size: 256`): see [`Raster::try_invertlut_size`].
+    /// Panicking form, matching the ported-test call surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`MatrixError`]; see [`Raster::try_invertlut_size`].
+    #[track_caller]
+    pub fn invertlut(&self) -> Raster {
+        expect_matrix("invertlut", self.try_invertlut())
+    }
+
+    /// Fallible form of [`Raster::invertlut_size`].
+    ///
+    /// # Errors
+    ///
+    /// [`MatrixError::NotOneBand`] / [`MatrixError::TooLarge`] for an
+    /// input `vips_check_matrix` would reject,
+    /// [`MatrixError::TooFewColumns`] without a measured column,
+    /// [`MatrixError::OutOfRange`] for an element outside `0..=1`,
+    /// [`MatrixError::BadSize`] for a size outside `1..=65536`, or
+    /// [`MatrixError::Raster`] on allocation failure.
+    pub fn try_invertlut_size(&self, size: u32) -> Result<Raster, MatrixError> {
+        let mut data = check_matrix("invertlut", self)?;
+        let width = self.width();
+        let height = data.len();
+        if width < 2 {
+            return Err(MatrixError::TooFewColumns { columns: width });
+        }
+        if !(1..=65536).contains(&size) {
+            return Err(MatrixError::BadSize { size });
+        }
+        let size = size as usize;
+
+        // Range-check every element like `vips_invertlut_build_init`.
+        // The `!(0.0..=1.0).contains(...)` shape also rejects NaN, which
+        // the C comparison chain lets through into undefined territory.
+        for (y, row) in data.iter().enumerate() {
+            for (x, &v) in row.iter().enumerate() {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(MatrixError::OutOfRange {
+                        column: x as u32,
+                        row: y as u32,
+                        value: v,
+                    });
+                }
+            }
+        }
+
+        // Sort rows by the input column, like the C qsort on column 0.
+        data.sort_by(|a, b| a[0].partial_cmp(&b[0]).expect("range check rejects NaN"));
+
+        let bands = width as usize - 1;
+        let mut buf = vec![0.0f64; size * bands];
+
+        // `vips_invertlut_build_create`, band by band.
+        for b in 0..bands {
+            // The first and last LUT positions with known real values.
+            // C truncates the double to int.
+            let first = (data[0][b + 1] * (size - 1) as f64) as usize;
+            let last = (data[height - 1][b + 1] * (size - 1) as f64) as usize;
+
+            // Extrapolate the head towards (0, 0) ...
+            for k in 0..first {
+                // Divide inside the loop, like the C source, so
+                // first == 0 never divides by zero.
+                let fac = data[0][0] / first as f64;
+                buf[b + k * bands] = k as f64 * fac;
+            }
+
+            // ... and the tail towards (1, 1).
+            for k in last..size {
+                let fac = (1.0 - data[height - 1][0]) / ((size - 1) - last) as f64;
+                buf[b + k * bands] = data[height - 1][0] + (k - last) as f64 * fac;
+            }
+
+            // Interpolate the measured section (inclusive of `last`,
+            // overwriting the tail's first slot, like the C loop).
+            for k in first..=last {
+                let ki = k as f64 / (size - 1) as f64;
+
+                // Search down for the lowest row strictly below ki;
+                // default to row 0 when there is none.
+                let j = (0..height)
+                    .rev()
+                    .find(|&j| data[j][b + 1] < ki)
+                    .unwrap_or(0);
+
+                if height > 1 {
+                    let irange = data[j + 1][b + 1] - data[j][b + 1];
+                    let orange = data[j + 1][0] - data[j][0];
+                    buf[b + k * bands] = data[j][0] + orange * ((ki - data[j][b + 1]) / irange);
+                } else {
+                    buf[b + k * bands] = data[j][0];
+                }
+            }
+        }
+
+        let rows: Vec<Vec<f64>> = vec![buf];
+        let bands_u16 = u16::try_from(bands).map_err(|_| MatrixError::TooLarge {
+            op: "invertlut",
+            width,
+            height: self.height(),
+        })?;
+        matrix_raster(&rows, size as u32, 1, bands_u16, Interpretation::Histogram)
+    }
+
+    /// Build an inverse look-up table with an explicit output size
+    /// (libvips `vips_invertlut` with `size` set). Given a matrix image
+    /// of measured points, column 0 the input level and each further
+    /// column one band's measured response (all in `0..=1`), produce a
+    /// `size` x 1 float image with one band per measured column mapping
+    /// each target level back to the input that produces it: linear
+    /// interpolation between the bracketing rows, extrapolated to
+    /// `(0, 0)` and `(1, 1)` at the ends. Handy for linearising
+    /// printers. The output is stamped [`Interpretation::Histogram`].
+    /// Panicking form of [`Raster::try_invertlut_size`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`MatrixError`]; see [`Raster::try_invertlut_size`].
+    #[track_caller]
+    pub fn invertlut_size(&self, size: u32) -> Raster {
+        expect_matrix("invertlut", self.try_invertlut_size(size))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read a matrix image back as rows of `f64`.
+    fn rows(r: &Raster) -> Vec<Vec<f64>> {
+        (0..r.height())
+            .map(|y| (0..r.width()).map(|x| r.getpoint(x, y)[0]).collect())
+            .collect()
+    }
+
+    /// A 2x2 inverse matches the analytic cofactor inverse (the libvips
+    /// direct path).
+    #[test]
+    fn matrixinvert_2x2_analytic() {
+        let m = Raster::from_matrix(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let inv = m.matrixinvert();
+        assert_eq!(inv.width(), 2);
+        assert_eq!(inv.height(), 2);
+        assert_eq!(inv.interpretation(), Interpretation::Matrix);
+        let got = rows(&inv);
+        let expected = [[-2.0, 1.0], [1.5, -0.5]];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((got[i][j] - expected[i][j]).abs() < 1e-6, "({i},{j})");
+            }
+        }
+    }
+
+    /// A 3x3 inverse matches the analytic inverse (the libvips direct
+    /// path).
+    #[test]
+    fn matrixinvert_3x3_analytic() {
+        let m = Raster::from_matrix(&[
+            vec![1.0, 0.0, 1.0],
+            vec![0.0, 2.0, 0.0],
+            vec![0.0, 0.0, 4.0],
+        ]);
+        let inv = m.matrixinvert();
+        let got = rows(&inv);
+        let expected = [[1.0, 0.0, -0.25], [0.0, 0.5, 0.0], [0.0, 0.0, 0.25]];
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((got[i][j] - expected[i][j]).abs() < 1e-6, "({i},{j})");
+            }
+        }
+    }
+
+    /// The ported 4x4 matrix (the libvips PLU path) matches its full
+    /// analytic inverse, not just the two entries the ported cell
+    /// checks.
+    #[test]
+    fn matrixinvert_4x4_ported_matrix() {
+        let m = Raster::from_matrix(&[
+            vec![4.0, 0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 2.0, 0.0],
+            vec![0.0, 1.0, 2.0, 0.0],
+            vec![1.0, 0.0, 0.0, 1.0],
+        ]);
+        let inv = m.matrixinvert();
+        assert_eq!(inv.width(), 4);
+        assert_eq!(inv.height(), 4);
+        let got = rows(&inv);
+        let expected = [
+            [0.25, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 1.0, 0.0],
+            [0.0, 0.5, 0.0, 0.0],
+            [-0.25, 0.0, 0.0, 1.0],
+        ];
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (got[i][j] - expected[i][j]).abs() < 1e-6,
+                    "({i},{j}): {} vs {}",
+                    got[i][j],
+                    expected[i][j]
+                );
+            }
+        }
+    }
+
+    /// Inverting twice returns the original matrix (PLU path).
+    #[test]
+    fn matrixinvert_round_trip() {
+        let original = [
+            vec![2.0, 1.0, 0.5, 0.0],
+            vec![1.0, 3.0, 0.0, 1.0],
+            vec![0.0, 1.0, 4.0, 2.0],
+            vec![1.0, 0.0, 2.0, 5.0],
+        ];
+        let m = Raster::from_matrix(&original);
+        let back = m.matrixinvert().matrixinvert();
+        let got = rows(&back);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!((got[i][j] - original[i][j]).abs() < 1e-4, "({i},{j})");
+            }
+        }
+    }
+
+    /// Singular matrices are a typed error on both paths, matching the
+    /// libvips TOO_SMALL threshold.
+    #[test]
+    fn matrixinvert_singular() {
+        // Direct path (2x2, linearly dependent rows).
+        let m = Raster::from_matrix(&[vec![1.0, 2.0], vec![2.0, 4.0]]);
+        assert!(matches!(m.try_matrixinvert(), Err(MatrixError::Singular)));
+
+        // PLU path (4x4 with a zero row).
+        let m = Raster::from_matrix(&[
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        ]);
+        assert!(matches!(m.try_matrixinvert(), Err(MatrixError::Singular)));
+
+        // PLU path, singular without a zero row (rank 3).
+        let m = Raster::from_matrix(&[
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2.0, 4.0, 6.0, 8.0],
+            vec![0.0, 1.0, 0.0, 1.0],
+            vec![1.0, 0.0, 1.0, 0.0],
+        ]);
+        assert!(matches!(m.try_matrixinvert(), Err(MatrixError::Singular)));
+    }
+
+    /// Shape errors are typed: non-square and multi-band inputs.
+    #[test]
+    fn matrixinvert_shape_errors() {
+        let m = Raster::from_matrix(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        assert!(matches!(
+            m.try_matrixinvert(),
+            Err(MatrixError::NotSquare {
+                width: 3,
+                height: 2
+            })
+        ));
+
+        let rgb = Raster::black_bands(2, 2, 3);
+        assert!(matches!(
+            rgb.try_matrixinvert(),
+            Err(MatrixError::NotOneBand {
+                op: "matrixinvert",
+                bands: 3
+            })
+        ));
+    }
+
+    /// The ported `test_invertlut` table, checked against hand-computed
+    /// values from the libvips algorithm: zero at 0, one at 255, and
+    /// the measured levels mapped back to their inputs.
+    #[test]
+    fn invertlut_ported_table() {
+        let lut = Raster::from_matrix(&[
+            vec![0.1, 0.2, 0.3, 0.1],
+            vec![0.2, 0.4, 0.4, 0.2],
+            vec![0.7, 0.5, 0.6, 0.3],
+        ]);
+        let im = lut.invertlut();
+
+        assert_eq!(im.width(), 256);
+        assert_eq!(im.height(), 1);
+        assert_eq!(im.format().channels(), 3);
+        assert_eq!(im.interpretation(), Interpretation::Histogram);
+
+        // Head extrapolation: everything starts at 0.
+        for &v in &im.getpoint(0, 0) {
+            assert!(v.abs() < 0.001);
+        }
+        // Tail extrapolation: everything ends at 1.
+        for &v in &im.getpoint(255, 0) {
+            assert!((v - 1.0).abs() < 0.001);
+        }
+        // Measured points map back to their inputs: band 0 measured 0.2
+        // at input 0.1, so LUT[trunc(0.2 * 255)][0] = 0.1. Bands 1 and 2
+        // likewise.
+        let p = im.getpoint(51, 0);
+        assert!((p[0] - 0.1).abs() < 0.001, "band 0 at 51: {}", p[0]);
+        let p = im.getpoint(76, 0);
+        assert!((p[1] - 0.1).abs() < 0.01, "band 1 at 76: {}", p[1]);
+        let p = im.getpoint(25, 0);
+        assert!((p[2] - 0.1).abs() < 0.01, "band 2 at 25: {}", p[2]);
+
+        // An interior interpolated value, hand-computed: band 0 at
+        // k = 90, ki = 90/255, bracketed by rows (0.1, 0.2) and
+        // (0.2, 0.4): 0.1 + 0.1 * (90/255 - 0.2) / 0.2.
+        let ki = 90.0 / 255.0;
+        let expected = 0.1 + 0.1 * ((ki - 0.2) / 0.2);
+        let p = im.getpoint(90, 0);
+        assert!((p[0] - expected).abs() < 1e-4, "{} vs {expected}", p[0]);
+    }
+
+    /// A one-row table: the measured section collapses to the row's
+    /// input value and both extrapolations still anchor at (0,0) and
+    /// (1,1).
+    #[test]
+    fn invertlut_single_row() {
+        let lut = Raster::from_matrix(&[vec![0.5, 0.5]]);
+        let im = lut.invertlut();
+        assert_eq!(im.width(), 256);
+        let p = im.getpoint(0, 0);
+        assert!(p[0].abs() < 1e-6);
+        // trunc(0.5 * 255) = 127: the single measured point.
+        let p = im.getpoint(127, 0);
+        assert!((p[0] - 0.5).abs() < 1e-6);
+        let p = im.getpoint(255, 0);
+        assert!((p[0] - 1.0).abs() < 1e-6);
+    }
+
+    /// An explicit size produces that many entries.
+    #[test]
+    fn invertlut_explicit_size() {
+        let lut = Raster::from_matrix(&[vec![0.2, 0.5], vec![0.7, 0.9]]);
+        let im = lut.invertlut_size(1024);
+        assert_eq!(im.width(), 1024);
+        assert_eq!(im.height(), 1);
+        let p = im.getpoint(1023, 0);
+        assert!((p[0] - 1.0).abs() < 1e-6);
+    }
+
+    /// invertlut input validation is typed: range, shape, band count,
+    /// and size errors.
+    #[test]
+    fn invertlut_typed_errors() {
+        let out_of_range = Raster::from_matrix(&[vec![0.1, 1.5], vec![0.2, 0.4]]);
+        assert!(matches!(
+            out_of_range.try_invertlut(),
+            Err(MatrixError::OutOfRange {
+                column: 1,
+                row: 0,
+                ..
+            })
+        ));
+
+        let nan = Raster::from_matrix(&[vec![0.1, f64::NAN], vec![0.2, 0.4]]);
+        assert!(matches!(
+            nan.try_invertlut(),
+            Err(MatrixError::OutOfRange { .. })
+        ));
+
+        let narrow = Raster::from_matrix(&[vec![0.1], vec![0.2]]);
+        assert!(matches!(
+            narrow.try_invertlut(),
+            Err(MatrixError::TooFewColumns { columns: 1 })
+        ));
+
+        let rgb = Raster::black_bands(4, 2, 3);
+        assert!(matches!(
+            rgb.try_invertlut(),
+            Err(MatrixError::NotOneBand {
+                op: "invertlut",
+                bands: 3
+            })
+        ));
+
+        let lut = Raster::from_matrix(&[vec![0.2, 0.5], vec![0.7, 0.9]]);
+        assert!(matches!(
+            lut.try_invertlut_size(0),
+            Err(MatrixError::BadSize { size: 0 })
+        ));
+        assert!(matches!(
+            lut.try_invertlut_size(65537),
+            Err(MatrixError::BadSize { size: 65537 })
+        ));
+    }
+}
