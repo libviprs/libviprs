@@ -2977,9 +2977,14 @@ impl Raster {
     /// Hough line transform (libvips `hough_line` with its default
     /// 256 x 256 accumulator).
     ///
-    /// Every non-zero sample votes for the lines through its pixel, exactly
-    /// as vips 8.18.4 `hough_line` does. The output is a single-band 16-bit
-    /// accumulator: column `i` is the angle bin `theta = 180deg * i / 256`.
+    /// Every non-zero sample votes for the lines through its pixel, and the
+    /// **binning** of those votes is vips-exact: the accumulator cell each
+    /// vote lands in matches vips 8.18.4 `hough_line` cell-for-cell (see the
+    /// oracle-pinned tests). The output is a single-band 16-bit accumulator:
+    /// column `i` is the angle bin `theta = 180deg * i / 256`. The vote
+    /// *counts* carried in those cells are ushort rather than vips's uint and
+    /// saturate at `65535` — an intentional format deviation, documented
+    /// below, that leaves the "vips-exact" claim scoped to the binning only.
     ///
     /// vips normalizes the pixel coordinates by the image **diagonal**
     /// `d = sqrt(w^2 + h^2)` — not by width/height separately — so
@@ -2993,7 +2998,23 @@ impl Raster {
     ///
     /// A peak at `(i, ri)` therefore decodes as angle `180 * i / width` and
     /// signed pixel distance `(2 * ri / height - 1) * sqrt(w^2 + h^2)`.
-    /// Counts saturate at `65535`.
+    ///
+    /// # Intentional accumulator-format deviation from vips (#495)
+    ///
+    /// vips 8.18.4 emits the `hough_line` accumulator as a **32-bit `uint`**
+    /// image whose cells hold the full collinear-vote count with **no
+    /// saturation** (confirmed: `vipsheader` reports `uint`, and a 70000-wide
+    /// lit line peaks at exactly `70000`). This crate has no unsigned 32-bit
+    /// pixel format, so the accumulator is carried as `Gray16` (ushort) and
+    /// every cell is clamped with `v.min(0xFFFF)`. The two therefore diverge
+    /// only when a single accumulator cell would exceed `65535` — i.e. when
+    /// more than 65535 collinear lit pixels concentrate into one bin, which
+    /// requires an image dimension above 65535 (vips accepts such images).
+    /// On that case vips reports the true count while this op reports `65535`.
+    /// The *binning* (which cell each vote lands in) is unaffected and stays
+    /// vips-exact; only the cell's carrier width and the >65535 saturation
+    /// differ. This mirrors the format deviation disclosed for
+    /// [`Raster::hough_circle`] and is tracked by issue #495.
     ///
     /// The angle terms are read from a `sin` lookup table indexed by
     /// `i` and `i + width/2` (vips uses `sin[i + width/2]` for the cosine
@@ -3043,6 +3064,11 @@ impl Raster {
             }
         }
 
+        // vips carries the accumulator as uint; this crate has no unsigned
+        // 32-bit format, so it is emitted as Gray16 and cells are clamped at
+        // 65535 (an intentional, documented deviation — see the rustdoc and
+        // issue #495). The u32 accumulator above keeps the binning exact; only
+        // cells with >65535 votes (a >65535-pixel collinear line) saturate.
         let out_fmt = PixelFormat::with_channels(1, 2).expect("Gray16 exists");
         let mut out = op_output_or_panic(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt);
         for (i, &v) in acc.iter().enumerate() {
@@ -5026,6 +5052,29 @@ mod tests {
         let ri = ((r + 1.0) * 128.0) as u32;
         assert_eq!(ri, 144, "vips theta=0 row for pixel x=3");
         assert_eq!(acc.getpoint(0, ri)[0], 1.0, "vote sits in the vips row");
+    }
+
+    /// Pins the intentional accumulator-format deviation from vips (#495): a
+    /// line with more than 65535 collinear lit pixels overflows a single
+    /// accumulator cell. vips carries the accumulator as 32-bit `uint` and
+    /// reports the true count; this crate carries `Gray16` (ushort) and clamps
+    /// at 65535. A 70000x1 all-lit row concentrates every vote into one cell at
+    /// the theta bin where the x-term vanishes (column 128, row 128), so vips
+    /// reports 70000 there (verified: `vips hough_line` + `vips max` on a
+    /// 70000x1 uchar line = 70000) while this op saturates to 65535. Peak
+    /// location still agrees; only the >65535 count is clamped.
+    #[test]
+    fn hough_line_saturates_above_65535_votes_deviation() {
+        let w = 70000usize;
+        let acc = gray(w as u32, 1, vec![255u8; w]).hough_line();
+        let (peak, x, y) = acc.maxpos();
+        // vips reports the uncapped 70000 here; core clamps to u16::MAX.
+        assert_eq!(peak, 65535.0, "ushort accumulator saturates (vips: 70000)");
+        assert_eq!(
+            (x, y),
+            (128, 128),
+            "all votes concentrate in the vanishing-x-term bin, as in vips"
+        );
     }
 
     /// A drawn circle of radius 40 at (50, 50) peaks at its centre with

@@ -973,11 +973,20 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
 /// This extracts that integer (1-8) so a `.v` file vips itself wrote decodes
 /// with the correct orientation for [`Raster::autorot`]; the distinct
 /// lowercase `name="orientation"` is not shared by the `exif-ifd0-Orientation`
-/// string field. Returns `None` when the trailer is not valid UTF-8, carries
+/// string field. The anchor requires the field element to close immediately
+/// (`name="orientation">`), matching vips's deterministic
+/// `<field type="gint" name="orientation">` serialization, so a longer
+/// field name (e.g. a hypothetical `name="orientation-foo"`) cannot
+/// false-match. Returns `None` when the trailer is not valid UTF-8, carries
 /// no such field, or the value is out of the 1-8 range.
+///
+/// Only the orientation is recovered from a real-libvips XML trailer; the
+/// remaining fields (exif-data, icc-profile-data, resolution, n-pages, …) are
+/// not parsed — see issue #487. Core's own JSON trailer preserves them, so
+/// this partial affects only round-tripping a `.v` that vips itself wrote.
 fn parse_vips_xml_orientation(trailer: &[u8]) -> Option<u8> {
     let text = std::str::from_utf8(trailer).ok()?;
-    let anchor = text.find(r#"name="orientation""#)?;
+    let anchor = text.find(r#"name="orientation">"#)?;
     let after = &text[anchor..];
     let open = after.find('>')?;
     let rest = &after[open + 1..];
@@ -1865,6 +1874,12 @@ mod tests {
             None
         );
         assert_eq!(parse_vips_xml_orientation(b"no field here"), None);
+        // A longer field name that merely starts with "orientation" must not
+        // false-match: the anchor requires the closing quote + '>'.
+        assert_eq!(
+            parse_vips_xml_orientation(b"<field name=\"orientation-foo\">6</field>"),
+            None
+        );
     }
 
     // -- free functions -----------------------------------------------------
