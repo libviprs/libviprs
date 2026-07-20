@@ -1,0 +1,79 @@
+name: publish
+
+# Publish the `libviprs` crate to crates.io after a successful merge to the
+# `release` branch (the release flow is: bump -> PR into `release` -> PR
+# `release` -> `main` -> tag; this fires on the push that lands the release on
+# `release`). Also runnable on demand via the Actions tab (workflow_dispatch),
+# with a dry-run toggle.
+#
+# Requires the `CARGO_REGISTRY_TOKEN` repository secret: a crates.io API token
+# scoped to publish `libviprs`. Without it the `cargo publish` step fails.
+#
+# NOTE (issue #344): the crate currently depends on the libviprs pdfium-render
+# *fork* (git-pinned) for its `sync` feature, which upstream `pdfium-render`
+# 0.9.x on crates.io does not expose — so `cargo publish` is blocked until the
+# fork dependency is reconciled for crates.io (rename+publish the fork, or drop
+# the fork-only feature from the published manifest and rely on the in-tree
+# `pdfium_lock` fallback). This workflow is ready for when that lands.
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package + verify only (cargo publish --dry-run), do not upload"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never run two publishes concurrently; never cancel an in-flight upload.
+concurrency:
+  group: publish-crates-io
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve the crate version
+        id: v
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "libviprs") | .version')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "libviprs version: $version"
+
+      - name: Skip if this version is already on crates.io
+        id: check
+        run: |
+          version="${{ steps.v.outputs.version }}"
+          if curl -sf -H 'User-Agent: libviprs-publish-ci' \
+               "https://crates.io/api/v1/crates/libviprs/${version}" \
+               | jq -e '.version.num' >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::libviprs ${version} is already published on crates.io — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.check.outputs.already == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "Dry run — packaging + verifying only."
+            cargo publish --dry-run --locked
+          else
+            cargo publish --locked
+          fi
