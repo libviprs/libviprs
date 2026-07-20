@@ -7,8 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-20
+
+### Breaking
+
+- Tile-lifecycle `EngineEvent` variants carry optional worker attribution
+  (issue #67). `TileCompleted`, `TileFailed`, `TileSkippedOnResume`, and
+  `RetryAttempted` each gain `worker_id: Option<WorkerId>` and
+  `timestamp: Option<SystemTime>`. The in-tree engines set `worker_id: None`
+  and stamp `timestamp: Some(_)` on the coordinating thread at emit time; an
+  out-of-tree executor layer fills `worker_id` to route events back to the
+  worker that produced them. Construction moves to the stamping helpers
+  `EngineEvent::tile_completed`, `::tile_failed`, `::tile_skipped_on_resume`,
+  and `::retry_attempted`. Code that pattern-matched these variants must add
+  `..` (e.g. `TileCompleted { coord, .. }`); code that constructed them by
+  struct literal must supply the new fields or use the helpers. `EngineEvent`
+  is `#[non_exhaustive]`, so `matches!(e, EngineEvent::TileCompleted { .. })`
+  filters are unaffected.
+
 ### Added
 
+- Extensible raster drawing framework in the new `draw` module (issue #55).
+  A `DrawOp` trait (`fn apply(&self, &mut Raster)`) is the seam: new shapes and
+  paint effects plug in as `impl DrawOp` without touching the core `Raster`.
+  Ships `Circle` and `Rectangle` ops (outline + filled), the inherent
+  convenience methods `Raster::draw`, `draw_circle`, `draw_circle_filled`,
+  `draw_rect`, `draw_rect_filled`, and `put_pixel` (clipping, format-agnostic
+  pixel write). All drawing clips to the raster bounds. (Ink-width validation
+  was added later; see the **Breaking (drawing)** entry under _Changed_ — the
+  draw ops now reject a wrong-width ink rather than broadcasting it.)
+- Pixel utilities on `Raster` (issue #55): `getpoint(x, y) -> Vec<f64>` reads a
+  pixel as one `f64` per band (native byte order for 16-bit), and
+  `add(&other) -> Raster` combines two rasters pixel-by-pixel, promoting 8-bit
+  results to 16-bit so sums do not wrap (16-bit sums saturate at `65535`).
+- `WorkExecutor` trait, `StripWorkUnit`, `WorkContext`, and `LocalWorkExecutor`
+  in `streaming_mapreduce` (re-exported at the crate root): a plug-in seam at
+  the MapReduce MAP-phase strip dispatch, so an out-of-tree executor (process
+  pool, distributed worker layer) can substitute for the built-in in-process
+  rendering (issue #67). Installed via `EngineBuilder::with_executor(...)`;
+  the default `LocalWorkExecutor` is byte-identical to the previous engine.
+- `EngineKind::MapReduceHotCache`: a local-only MapReduce variant that holds
+  every produced tile in RAM and drains the caller's sink in one batched pass
+  at the end of the run, in canonical `(level, row, col)` order, followed by
+  a single `finish()` (issue #67). Byte-identical output to the streaming and
+  MapReduce engines; explicit opt-in only, never selected by
+  `EngineKind::Auto`.
+- Worker attribution on `EngineEvent` (issue #67): new `WorkerId` newtype and
+  new event variants `StripDispatched`, `StripExecutorDone` (emitted by the
+  MapReduce engines on the coordinating thread, in canonical dispatch order,
+  stamped with the installed executor's self-reported
+  `WorkExecutor::worker_id`, `None` for `LocalWorkExecutor`), plus
+  `WorkerJoined`, `WorkerLeft`, and `MemorySnapshot` as vocabulary for
+  out-of-tree executor layers (never emitted by the in-tree engines).
+  `WorkExecutor::worker_id` has a `None` default, so existing executor
+  implementations are unaffected.
+- `EngineBuilder::with_observers(Vec<Arc<dyn EngineObserver>>)` and the
+  `FanOutObserver` composition behind it (issue #67): every event (and the
+  `on_extensions` hatch) fans out to each registered observer in order.
+  `with_observer` stays as the single-observer shorthand.
 - Image generators ported from libvips (create batch of the ported-tests
   operation surface, libviprs-tests issue #55), in the new `create`
   module, all as associated constructors on `Raster` with `try_*`
@@ -268,65 +324,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RunLock::acquire` revalidates after locking that the path still names the
   inode it locked (retrying against the fresh file otherwise), which keeps
   the removal safe against concurrent acquirers.
-
-## [0.4.0] — 2026-07-11
-
-### Breaking
-
-- Tile-lifecycle `EngineEvent` variants carry optional worker attribution
-  (issue #67). `TileCompleted`, `TileFailed`, `TileSkippedOnResume`, and
-  `RetryAttempted` each gain `worker_id: Option<WorkerId>` and
-  `timestamp: Option<SystemTime>`. The in-tree engines set `worker_id: None`
-  and stamp `timestamp: Some(_)` on the coordinating thread at emit time; an
-  out-of-tree executor layer fills `worker_id` to route events back to the
-  worker that produced them. Construction moves to the stamping helpers
-  `EngineEvent::tile_completed`, `::tile_failed`, `::tile_skipped_on_resume`,
-  and `::retry_attempted`. Code that pattern-matched these variants must add
-  `..` (e.g. `TileCompleted { coord, .. }`); code that constructed them by
-  struct literal must supply the new fields or use the helpers. `EngineEvent`
-  is `#[non_exhaustive]`, so `matches!(e, EngineEvent::TileCompleted { .. })`
-  filters are unaffected.
-
-### Added
-
-- Extensible raster drawing framework in the new `draw` module (issue #55).
-  A `DrawOp` trait (`fn apply(&self, &mut Raster)`) is the seam: new shapes and
-  paint effects plug in as `impl DrawOp` without touching the core `Raster`.
-  Ships `Circle` and `Rectangle` ops (outline + filled), the inherent
-  convenience methods `Raster::draw`, `draw_circle`, `draw_circle_filled`,
-  `draw_rect`, `draw_rect_filled`, and `put_pixel` (clipping, format-agnostic
-  pixel write). All drawing clips to the raster bounds. (Ink-width validation
-  was added later; see the **Breaking (drawing)** entry under _Changed_ — the
-  draw ops now reject a wrong-width ink rather than broadcasting it.)
-- Pixel utilities on `Raster` (issue #55): `getpoint(x, y) -> Vec<f64>` reads a
-  pixel as one `f64` per band (native byte order for 16-bit), and
-  `add(&other) -> Raster` combines two rasters pixel-by-pixel, promoting 8-bit
-  results to 16-bit so sums do not wrap (16-bit sums saturate at `65535`).
-- `WorkExecutor` trait, `StripWorkUnit`, `WorkContext`, and `LocalWorkExecutor`
-  in `streaming_mapreduce` (re-exported at the crate root): a plug-in seam at
-  the MapReduce MAP-phase strip dispatch, so an out-of-tree executor (process
-  pool, distributed worker layer) can substitute for the built-in in-process
-  rendering (issue #67). Installed via `EngineBuilder::with_executor(...)`;
-  the default `LocalWorkExecutor` is byte-identical to the previous engine.
-- `EngineKind::MapReduceHotCache`: a local-only MapReduce variant that holds
-  every produced tile in RAM and drains the caller's sink in one batched pass
-  at the end of the run, in canonical `(level, row, col)` order, followed by
-  a single `finish()` (issue #67). Byte-identical output to the streaming and
-  MapReduce engines; explicit opt-in only, never selected by
-  `EngineKind::Auto`.
-- Worker attribution on `EngineEvent` (issue #67): new `WorkerId` newtype and
-  new event variants `StripDispatched`, `StripExecutorDone` (emitted by the
-  MapReduce engines on the coordinating thread, in canonical dispatch order,
-  stamped with the installed executor's self-reported
-  `WorkExecutor::worker_id`, `None` for `LocalWorkExecutor`), plus
-  `WorkerJoined`, `WorkerLeft`, and `MemorySnapshot` as vocabulary for
-  out-of-tree executor layers (never emitted by the in-tree engines).
-  `WorkExecutor::worker_id` has a `None` default, so existing executor
-  implementations are unaffected.
-- `EngineBuilder::with_observers(Vec<Arc<dyn EngineObserver>>)` and the
-  `FanOutObserver` composition behind it (issue #67): every event (and the
-  `on_extensions` hatch) fans out to each registered observer in order.
-  `with_observer` stays as the single-observer shorthand.
 
 ## [0.3.1] — 2026-04-25
 
