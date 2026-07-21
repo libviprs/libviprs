@@ -88,7 +88,7 @@ moxcms = { version = "0.8.1", features = ["any_to_any"] }
 # lockstep.
 pdfium-render = { version = "0.9", features = [
 	"sync",
-], git = "https://github.com/libviprs/pdfium-render.git", rev = "48f0aa5d82871c1854a976fcbb8a0b1c366a739f" }
+], git = "https://github.com/libviprs/pdfium-render.git", rev = "3b03093295b85486c2e42f514cef9647eb629c63" }
 proptest = "1"
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
