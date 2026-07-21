@@ -286,8 +286,6 @@ struct StreamingState {
     /// 0-based page index (`c_int`) for pdfium-render's `PdfPages::get`.
     /// Stored pre-converted so the hot path doesn't re-validate `page > 0`.
     page_index: pdfium_render::prelude::PdfPageIndex,
-    /// Page's intrinsic `/Rotate`, normalised at construction.
-    rotation: crate::pdf::PageRotation,
 }
 
 #[cfg(feature = "pdfium")]
@@ -479,8 +477,7 @@ impl PdfiumStripSource {
         dpi: u32,
     ) -> Result<Self, crate::pdf::PdfError> {
         let path = path.into();
-        let rotation = crate::pdf::page_rotate(&path, page)?;
-        load_streaming_source(path, page, dpi, rotation)
+        load_streaming_source(path, page, dpi)
     }
 
     /// Open a [`PdfiumRenderMode::Streaming`] source with a worst-case
@@ -503,8 +500,7 @@ impl PdfiumStripSource {
             budget_bytes,
             policy,
         )?;
-        let rotation = crate::pdf::page_rotate(&path, page)?;
-        load_streaming_source(path, page, resolved_dpi, rotation)
+        load_streaming_source(path, page, resolved_dpi)
     }
 
     /// The DPI this source actually renders at. May differ from a constructor
@@ -554,13 +550,7 @@ impl PdfiumStripSource {
                     .pages()
                     .get(streaming.page_index)
                     .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-                crate::pdf::render_page_strip_with_page(
-                    &pdf_page,
-                    self.dpi,
-                    streaming.rotation,
-                    y_offset,
-                    height,
-                )
+                crate::pdf::render_page_strip_with_page(&pdf_page, self.dpi, y_offset, height)
             }
         }
     }
@@ -580,7 +570,6 @@ fn load_streaming_source(
     path: std::path::PathBuf,
     page: usize,
     dpi: u32,
-    rotation: crate::pdf::PageRotation,
 ) -> Result<PdfiumStripSource, crate::pdf::PdfError> {
     let pdfium = crate::pdf::init_pdfium()?;
     let _lock = crate::pdf::pdfium_lock();
@@ -615,7 +604,6 @@ fn load_streaming_source(
         state: PdfiumSourceState::Streaming(Box::new(StreamingState {
             document: Some(document),
             page_index,
-            rotation,
         })),
     })
 }
@@ -2417,7 +2405,6 @@ mod tests {
         let state = StreamingState {
             document: None,
             page_index: 0,
-            rotation: crate::pdf::PageRotation::Zero,
         };
 
         let (tx, rx) = mpsc::channel::<()>();
