@@ -1,13 +1,20 @@
 name: publish
 
-# Publish the `libviprs` crate to crates.io after a successful merge to the
+# Migrated from GitHub Actions (.github/workflows/publish.yml) to run on our
+# self-hosted Gitea Actions runner.
+#
+# Publishes the `libviprs` crate to crates.io after a merge lands on the
 # `release` branch (the release flow is: bump -> PR into `release` -> PR
 # `release` -> `main` -> tag; this fires on the push that lands the release on
-# `release`). Also runnable on demand via the Actions tab (workflow_dispatch),
-# with a dry-run toggle.
+# `release`, delivered to Gitea via the mirror sync). Also runnable on demand
+# via workflow_dispatch, with a dry-run toggle.
 #
-# Requires the `CARGO_REGISTRY_TOKEN` repository secret: a crates.io API token
-# scoped to publish `libviprs`. Without it the `cargo publish` step fails.
+# !!! ACTION REQUIRED — SECRET NOT SET !!!
+# This workflow needs a `CARGO_REGISTRY_TOKEN` secret: a crates.io API token
+# scoped to publish `libviprs`. It is NOT currently set on Gitea (nor was it on
+# GitHub). Add it as a Gitea org/repo secret before relying on publishing —
+# without it the `cargo publish` step fails. Until then publishing is a no-op
+# on the dry-run path and fails on the real path.
 #
 # NOTE (issue #344): the crate currently depends on the libviprs pdfium-render
 # *fork* (git-pinned) for its `sync` feature, which upstream `pdfium-render`
@@ -25,9 +32,6 @@ on:
         description: "Package + verify only (cargo publish --dry-run), do not upload"
         type: boolean
         default: false
-
-permissions:
-  contents: read
 
 # Never run two publishes concurrently; never cancel an in-flight upload.
 concurrency:
