@@ -1,0 +1,73 @@
+name: Merge Gate
+
+# Migrated from GitHub Actions (.github/workflows/merge-gate.yml) to run on our
+# self-hosted Gitea Actions runner. Results are reported back to GitHub as the
+# `gitea/merge-gate` commit status. The original only ran on PRs into `release`;
+# on Gitea it runs on every branch push (via the mirror sync) and can be
+# dispatched manually.
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report pending to GitHub
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_STATUS_TOKEN }}
+        run: |
+          curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d '{"state":"pending","context":"gitea/merge-gate","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}","description":"Gitea Actions run started"}' || true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +nightly miri test
+
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
+
+  pdfium-source:
+    name: pdfium-render source audit (#149)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Fail the release gate if the pdfium-render thread-safety fork is not
+      # resolved from the libviprs git source (i.e. the [patch.crates-io] was
+      # dropped and the unpatched, segfault-prone wrapper would be linked).
+      - run: bash scripts/audit-pdfium-source.sh . -- --features pdfium
+
+  report:
+    runs-on: ubuntu-latest
+    needs: [miri, loom, pdfium-source]
+    if: always()
+    steps:
+      - name: Report final status to GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GH_STATUS_TOKEN }}
+        run: |
+          state=success
+          [ "${{ needs.miri.result }}" = "success" ] || state=failure
+          [ "${{ needs.loom.result }}" = "success" ] || state=failure
+          [ "${{ needs.pdfium-source.result }}" = "success" ] || state=failure
+          curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d "{\"state\":\"$state\",\"context\":\"gitea/merge-gate\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\",\"description\":\"Gitea Actions: $state\"}"
