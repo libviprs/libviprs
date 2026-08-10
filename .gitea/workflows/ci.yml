@@ -19,6 +19,7 @@ jobs:
     name: Check & Lint
     runs-on: ubuntu-latest
     steps:
+      # target_url is human-clicked from GitHub, so it uses the PUBLIC forge URL (vars.GIT_PUBLIC_URL); github.server_url is the runner's internal gitea:3000, for API and git calls only.
       - name: Report pending to GitHub
         if: always()
         env:
@@ -26,7 +27,7 @@ jobs:
         run: |
           curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
-            -d '{"state":"pending","context":"gitea/ci","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}","description":"Gitea Actions run started"}' || true
+            -d '{"state":"pending","context":"gitea/ci","target_url":"${{ vars.GIT_PUBLIC_URL }}/${{ github.repository }}/actions/runs/${{ github.run_number }}","description":"Gitea Actions run started"}' || true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -113,6 +114,7 @@ jobs:
     needs: [check, msrv, docs, test, integration-test]
     if: always()
     steps:
+      # target_url is human-clicked from GitHub, so it uses the PUBLIC forge URL (vars.GIT_PUBLIC_URL); github.server_url is the runner's internal gitea:3000, for API and git calls only.
       - name: Report final status to GitHub
         env:
           GH_TOKEN: ${{ secrets.GH_STATUS_TOKEN }}
@@ -125,4 +127,4 @@ jobs:
           [ "${{ needs.integration-test.result }}" = "success" ] || state=failure
           curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
-            -d "{\"state\":\"$state\",\"context\":\"gitea/ci\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\",\"description\":\"Gitea Actions: $state\"}"
+            -d "{\"state\":\"$state\",\"context\":\"gitea/ci\",\"target_url\":\"${{ vars.GIT_PUBLIC_URL }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\",\"description\":\"Gitea Actions: $state\"}"
