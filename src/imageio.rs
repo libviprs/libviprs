@@ -1934,6 +1934,303 @@ mod tests {
         );
     }
 
+    // -- .v trailer forward compatibility (issue #565) -----------------------
+
+    /// A `MetadataValue` as a *newer* libviprs writes it: the four variants
+    /// this build has, plus one it does not. #573 needs exactly this — a
+    /// per-frame delay array for animated GIF — and the whole point of this
+    /// lane is that adding it must not cost an older reader the rest of its
+    /// metadata, so the future writer is modelled here instead of shipped.
+    ///
+    /// The derive carries no serde attributes, exactly like [`MetadataValue`],
+    /// so the bytes it produces are the bytes a future build would produce.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum FutureMetadataValue {
+        Int(i64),
+        Double(f64),
+        Str(String),
+        Blob(Vec<u8>),
+        /// The variant this build has never heard of.
+        IntArray(Vec<i64>),
+    }
+
+    /// The attached-field list as a newer libviprs writes it.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct FutureFields {
+        entries: Vec<(String, FutureMetadataValue)>,
+    }
+
+    /// The `.v` trailer as a newer libviprs writes it.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct FutureTrailer {
+        orientation: u8,
+        fields: FutureFields,
+    }
+
+    /// The trailer reader as libviprs shipped it *before* this change:
+    /// `serde_json::from_slice` straight onto a struct holding the plain
+    /// externally tagged [`MetadataValue`]. Keeping it verbatim makes "an
+    /// already-released build can still read what we write" an executed
+    /// assertion rather than a claim about bytes.
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct ReleasedTrailer {
+        orientation: u8,
+        fields: ReleasedFields,
+    }
+
+    /// The released reader's field list; see [`ReleasedTrailer`].
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct ReleasedFields {
+        entries: Vec<(String, MetadataValue)>,
+    }
+
+    /// The trailer libviprs 0.4 wrote, captured byte for byte from the
+    /// released encoder for a 2x2 RGB raster carrying one field of each
+    /// variant and orientation 6. Frozen here so the reader is pinned
+    /// against the shipped format and not against whatever the current
+    /// writer happens to emit.
+    const RELEASED_TRAILER: &[u8] = br#"{"orientation":6,"fields":{"entries":[["note",{"Str":"hello"}],["n-pages",{"Int":3}],["xres-hint",{"Double":1.5}],["icc-profile-data",{"Blob":[5,5,5]}]]}}"#;
+
+    /// Header and pixels for a 2x2 RGB raster with no trailer, so a test can
+    /// staple an arbitrary trailer onto a real `.v` body.
+    fn v_body() -> Vec<u8> {
+        Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
+            .unwrap()
+            .encode_vips_impl(false)
+    }
+
+    /// A `.v` file as a newer libviprs would write it: a real header and real
+    /// pixels, followed by a trailer carrying one field of every variant this
+    /// build knows plus a `delay` array it does not.
+    fn file_from_a_newer_build() -> Vec<u8> {
+        let mut bytes = v_body();
+        let trailer = FutureTrailer {
+            orientation: 6,
+            fields: FutureFields {
+                entries: vec![
+                    ("note".to_string(), FutureMetadataValue::Str("hello".into())),
+                    ("n-pages".to_string(), FutureMetadataValue::Int(3)),
+                    (
+                        "delay".to_string(),
+                        FutureMetadataValue::IntArray(vec![40, 40, 90]),
+                    ),
+                    ("xres-hint".to_string(), FutureMetadataValue::Double(1.5)),
+                    (
+                        "icc-profile-data".to_string(),
+                        FutureMetadataValue::Blob(vec![5, 5, 5]),
+                    ),
+                ],
+            },
+        };
+        bytes.extend_from_slice(&serde_json::to_vec(&trailer).unwrap());
+        bytes
+    }
+
+    /// A `.v` written by a build that has a `MetadataValue` variant this one
+    /// does not must still hand back every field this build *does* understand
+    /// (issue #565). The old behaviour was that one unknown variant failed the
+    /// whole `serde_json::from_slice`, so the ICC profile, the EXIF blob and
+    /// the orientation tag all vanished with no error at all.
+    ///
+    /// The unknown field itself reads as absent: it is carried, not
+    /// interpretable, so it stays out of the field API.
+    #[test]
+    fn v_trailer_from_a_newer_build_keeps_the_fields_this_build_understands() {
+        let back = decode_bytes(&file_from_a_newer_build()).unwrap();
+
+        assert_eq!(back.orientation(), 6, "orientation must survive");
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(back.get_n_pages(), 3);
+        assert_eq!(
+            back.get_field("xres-hint"),
+            Some(MetadataValue::Double(1.5))
+        );
+        assert_eq!(back.icc_profile(), Some(&[5u8, 5, 5][..]));
+        // Pixels and geometry are untouched by any of this.
+        assert_eq!(back.data(), &[7u8; 12]);
+
+        // The variant this build cannot represent reads as absent rather than
+        // as a wrong value.
+        assert_eq!(back.get_field("delay"), None);
+        assert_eq!(back.get_typeof("delay"), 0);
+        assert!(
+            !back.get_fields().iter().any(|n| n == "delay"),
+            "an uninterpretable field must not be advertised as readable"
+        );
+    }
+
+    /// Preserving an unknown field only matters if it survives being written
+    /// back out: an old build that opens a new file and re-saves it must not
+    /// quietly strip the field it could not read, which would be the same
+    /// data loss one step later.
+    #[test]
+    fn v_trailer_unknown_field_survives_a_rewrite_by_this_build() {
+        let back = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let rewritten = back.encode_vips().unwrap();
+
+        // Read the rewritten file with the *newer* build's reader.
+        let trailer: FutureTrailer =
+            serde_json::from_slice(&rewritten[v_body().len()..]).expect("newer build can re-read");
+        assert_eq!(trailer.orientation, 6);
+        let delay = trailer
+            .fields
+            .entries
+            .iter()
+            .find(|(n, _)| n == "delay")
+            .map(|(_, v)| v);
+        assert_eq!(
+            delay,
+            Some(&FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            "the unknown field must round-trip untouched"
+        );
+        // And the fields this build does understand are still there too.
+        assert_eq!(trailer.fields.entries.len(), 5);
+        assert!(trailer.fields.entries.iter().any(
+            |(n, v)| n == "icc-profile-data" && *v == FutureMetadataValue::Blob(vec![5, 5, 5])
+        ));
+    }
+
+    /// A field the caller sets by hand supersedes an unknown field of the same
+    /// name, and removing it removes it for good. Otherwise a stripped raster
+    /// would leak the old opaque value back into the file.
+    #[test]
+    fn setting_or_removing_a_field_supersedes_the_unknown_one() {
+        let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
+        back.set_field("delay", MetadataValue::Int(4));
+        let rewritten = back.encode_vips().unwrap();
+        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..]).unwrap();
+        let delays: Vec<_> = trailer
+            .fields
+            .entries
+            .iter()
+            .filter(|(n, _)| n == "delay")
+            .collect();
+        assert_eq!(delays.len(), 1, "the field must not be written twice");
+        assert_eq!(delays[0].1, FutureMetadataValue::Int(4));
+        assert_eq!(
+            trailer.fields.entries.len(),
+            5,
+            "overwriting one field must not disturb the other four"
+        );
+
+        let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
+        back.set_typeof("delay", 0);
+        let rewritten = back.encode_vips().unwrap();
+        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            !trailer.fields.entries.iter().any(|(n, _)| n == "delay"),
+            "a removed field must not come back from the opaque carrier"
+        );
+        assert_eq!(
+            trailer.fields.entries.len(),
+            4,
+            "removing one field must not remove the other four"
+        );
+    }
+
+    /// The other direction: what this build writes must still parse on a build
+    /// that shipped before this change, or the fix would break every reader
+    /// already in the wild. The released reader is reproduced verbatim as
+    /// [`ReleasedTrailer`], so this runs it rather than asserting about it.
+    #[test]
+    fn v_trailer_written_now_still_parses_on_the_released_build() {
+        let mut im = Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
+            .unwrap()
+            .copy()
+            .orientation(6)
+            .build();
+        im.set_field("note", "hello".into());
+        im.set_field("n-pages", MetadataValue::Int(3));
+        im.set_field("xres-hint", MetadataValue::Double(1.5));
+        im.set_icc_profile(&[5, 5, 5]);
+
+        let bytes = im.encode_vips().unwrap();
+        let trailer = &bytes[v_body().len()..];
+        let parsed: ReleasedTrailer =
+            serde_json::from_slice(trailer).expect("the released reader must still parse this");
+        assert_eq!(parsed.orientation, 6);
+        assert_eq!(
+            parsed.fields.entries,
+            vec![
+                ("note".to_string(), MetadataValue::Str("hello".into())),
+                ("n-pages".to_string(), MetadataValue::Int(3)),
+                ("xres-hint".to_string(), MetadataValue::Double(1.5)),
+                (
+                    "icc-profile-data".to_string(),
+                    MetadataValue::Blob(vec![5, 5, 5])
+                ),
+            ]
+        );
+        // The wire bytes are unchanged from the released encoder, which is what
+        // makes the guarantee above hold for every field, not just these four.
+        assert_eq!(trailer, RELEASED_TRAILER);
+    }
+
+    /// And a file the released build wrote still reads here, checked against
+    /// the frozen bytes rather than against a fresh encode.
+    #[test]
+    fn v_trailer_written_by_the_released_build_still_reads() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(RELEASED_TRAILER);
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.orientation(), 6);
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(
+            back.get_field("xres-hint"),
+            Some(MetadataValue::Double(1.5))
+        );
+        assert_eq!(back.icc_profile(), Some(&[5u8, 5, 5][..]));
+    }
+
+    /// The reader must survive more than a new variant: a newer trailer may
+    /// carry keys this build has never seen, drop keys it expects, or hold an
+    /// entry shaped in some way it cannot use. None of that may cost the
+    /// entries that *are* readable.
+    #[test]
+    fn v_trailer_tolerates_shapes_a_newer_build_might_write() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(
+            br#"{"fields":{"entries":[["note",{"Str":"hi"}],["broken"],[7,{"Int":1}],
+                 ["n-pages",{"Int":2}]],"grouping":"page"},"trailer-version":9}"#,
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(2)));
+        // No orientation key: the upright default, not a dropped trailer.
+        assert_eq!(back.orientation(), 1);
+    }
+
+    /// A trailer that opens with `{` claims to be a libviprs JSON trailer, so
+    /// one that is not valid JSON is corruption rather than a foreign format,
+    /// and the metadata is genuinely unrecoverable. That is reported instead
+    /// of swallowed. Nothing else changes: a trailer that never claimed to be
+    /// ours is still ignored, pixels and header intact.
+    #[test]
+    fn v_trailer_that_claims_to_be_ours_but_is_corrupt_is_reported() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(br#"{"orientation":6,"fields":{"entr"#);
+        let err = decode_bytes(&bytes).unwrap_err();
+        assert!(
+            matches!(&err, SourceError::VipsFormat(m) if m.contains("trailer")),
+            "expected a reported trailer failure, got {err}"
+        );
+
+        // A foreign or junk trailer is not ours to complain about.
+        for foreign in [
+            &b"<?xml version=\"1.0\"?><root/>"[..],
+            &[0u8; 8][..],
+            b"junk",
+        ] {
+            let mut bytes = v_body();
+            bytes.extend_from_slice(foreign);
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(back.data(), &[7u8; 12]);
+            assert_eq!(back.get_field("note"), None);
+        }
+    }
+
     /// Pins every [`Interpretation`] to its `VipsInterpretation` code and
     /// nickname, so the mapping cannot drift from
     /// `libvips/include/vips/image.h:96-117` (8.18.4) when a variant lands.
