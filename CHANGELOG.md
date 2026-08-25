@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `.v` file tagged `OkLab` or `OkLch` now carries the real libvips
+  interpretation codes `30` and `31` in its header `Type` word, so it
+  interoperates with vips instead of only with libviprs (issue #535). libvips
+  8.18 assigned those codes (`VIPS_INTERPRETATION_OKLAB` and
+  `VIPS_INTERPRETATION_OKLCH`, `libvips/include/vips/image.h:115-116`), but
+  libviprs still wrote the private extension codes `1000` and `1001` it had
+  picked while libvips had none. The consequence ran both ways: a `.v` written
+  by real vips came back tagged `Multiband`, because `30` matched no arm of the
+  reader and the raster fell through to format inference, and a `.v` written by
+  libviprs was unreadable as OkLab anywhere else. This changes what goes on
+  disk: newly written files hold `30` / `31` where they used to hold `1000` /
+  `1001`. The change is one-way. The reader keeps `1000` and `1001` as legacy
+  aliases, so files libviprs has already written still load with their
+  OkLab/OkLch tag intact, but nothing emits those codes any more, and a file
+  written by this version does not read as OkLab on an older libviprs.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking

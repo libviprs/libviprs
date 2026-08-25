@@ -401,9 +401,10 @@ fn interpretation_from_nickname(s: &str) -> Option<Interpretation> {
 }
 
 /// The libvips `VipsInterpretation` enum value for the `.v` header
-/// `Type` word. `OkLab` / `OkLch` have no libvips code; they use
-/// libviprs extension codes above the libvips range and round-trip
-/// through libviprs-written files only.
+/// `Type` word, as declared in `libvips/include/vips/image.h:96-117`
+/// (8.18.4). `OkLab` and `OkLch` are `VIPS_INTERPRETATION_OKLAB` = 30
+/// and `VIPS_INTERPRETATION_OKLCH` = 31 (`image.h:115-116`), so a `.v`
+/// libviprs writes carries the same tag real vips writes.
 fn interpretation_code(i: Interpretation) -> i32 {
     match i {
         Interpretation::Multiband => 0,
@@ -425,8 +426,8 @@ fn interpretation_code(i: Interpretation) -> i32 {
         Interpretation::Matrix => 27,
         Interpretation::ScRgb => 28,
         Interpretation::Hsv => 29,
-        Interpretation::OkLab => 1000,
-        Interpretation::OkLch => 1001,
+        Interpretation::OkLab => 30,
+        Interpretation::OkLch => 31,
     }
 }
 
@@ -453,6 +454,11 @@ fn interpretation_from_code(code: i32) -> Option<Interpretation> {
         27 => Interpretation::Matrix,
         28 => Interpretation::ScRgb,
         29 => Interpretation::Hsv,
+        30 => Interpretation::OkLab,
+        31 => Interpretation::OkLch,
+        // Read-only legacy aliases: before libvips 8.18 assigned 30 / 31,
+        // libviprs wrote these private codes above the libvips range. Files
+        // it already wrote keep loading; nothing emits them any more.
         1000 => Interpretation::OkLab,
         1001 => Interpretation::OkLch,
         _ => return None,
