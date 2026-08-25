@@ -15,7 +15,7 @@
 //! operation from a later batch, the setup is reproduced with direct
 //! `Raster` construction and the conversion expressions are kept literal.
 
-use libviprs::{Angle, Interpretation, PixelFormat, Raster};
+use libviprs::{Align, Angle, Interpretation, JoinDirection, PixelFormat, Raster};
 
 /// The ported `make_test_mono`: a 100x100 Gray8 band-reject ring image.
 fn make_test_mono() -> Raster {
@@ -366,4 +366,50 @@ fn ported_switch_call_sites() {
     let never_b = x.equal_const(2000.0);
     let index = Raster::switch(&[&never_a, &never_b]);
     assert!((index.avg() - 2.0).abs() < 0.001);
+}
+
+/// The `join` call surface: both directions, every [`Align`] variant, the
+/// `expand` flag, the `Option` shim / background / align arguments, the
+/// nickname `FromStr`, and the fallible twin. The measured vips 8.18.4
+/// sizes for the 3x2 / 2x3 oracle pair are pinned here too.
+#[test]
+fn ported_join_call_sites() {
+    let a = Raster::new(3, 2, PixelFormat::Gray8, vec![1, 2, 3, 4, 5, 6]).unwrap();
+    let c = Raster::new(2, 3, PixelFormat::Gray8, vec![10, 20, 30, 40, 50, 60]).unwrap();
+
+    let im = a.join(&c, JoinDirection::Horizontal, false, None, None, None);
+    assert_eq!((im.width(), im.height()), (5, 2));
+
+    let im = a.join(&c, JoinDirection::Horizontal, true, None, None, None);
+    assert_eq!((im.width(), im.height()), (5, 3));
+
+    let im = a.join(
+        &c,
+        JoinDirection::Horizontal,
+        true,
+        Some(2),
+        None,
+        Some(Align::Centre),
+    );
+    assert_eq!((im.width(), im.height()), (7, 3));
+
+    let background = [255.0];
+    let im = a.join(
+        &c,
+        JoinDirection::Vertical,
+        true,
+        Some(1),
+        Some(&background),
+        Some(Align::High),
+    );
+    assert_eq!((im.width(), im.height()), (3, 6));
+
+    let align: Align = "centre".parse().unwrap();
+    assert_eq!(align, Align::Centre);
+    assert!("sideways".parse::<Align>().is_err());
+
+    let im = a
+        .try_join(&c, JoinDirection::Vertical, false, None, None, Some(Align::Low))
+        .unwrap();
+    assert_eq!((im.width(), im.height()), (2, 5));
 }

@@ -2988,6 +2988,417 @@ mod tests {
         let b = gray8(1, 1, vec![2]);
         assert_eq!(Raster::arrayjoin(&[&a, &b], None, None).xres(), 11.0);
     }
+    // ------------------------------------------------------------------
+    // join
+    // ------------------------------------------------------------------
+
+    /// The oracle fixture pair: `a` is 3x2, `c` is 2x3, both Gray8.
+    fn join_a() -> Raster {
+        gray8(3, 2, vec![1, 2, 3, 4, 5, 6])
+    }
+
+    fn join_c() -> Raster {
+        gray8(2, 3, vec![10, 20, 30, 40, 50, 60])
+    }
+
+    /**
+     * Tests the default horizontal join: the second image sits to the
+     * right of the first and the result is cropped back to the shorter
+     * height, exactly as `vips join a c out horizontal`.
+     * Works by joining the 3x2 / 2x3 oracle pair with align low and
+     * expand off, then comparing the whole buffer.
+     * Input: a(3x2) + c(2x3) -> 5x2, height = min(2, 3).
+     */
+    #[test]
+    fn join_horizontal_low_crops_to_shorter() {
+        let out = join_a().join(&join_c(), JoinDirection::Horizontal, false, None, None, None);
+        assert_eq!((out.width(), out.height()), (5, 2));
+        assert_eq!(out.data(), &[1, 2, 3, 10, 20, 4, 5, 6, 30, 40]);
+    }
+
+    /**
+     * Tests that `expand` keeps every input pixel and fills the gap with
+     * the background.
+     * Input: a(3x2) + c(2x3), horizontal, expand -> 5x3 with a black
+     * bottom-left corner.
+     */
+    #[test]
+    fn join_horizontal_low_expand_keeps_all_pixels() {
+        let out = join_a().join(&join_c(), JoinDirection::Horizontal, true, None, None, None);
+        assert_eq!((out.width(), out.height()), (5, 3));
+        assert_eq!(
+            out.data(),
+            &[1, 2, 3, 10, 20, 4, 5, 6, 30, 40, 0, 0, 0, 50, 60]
+        );
+    }
+
+    /**
+     * Tests the HIGH alignment on a taller second image, which puts the
+     * insert origin at a negative y. The expanded form grows upward and
+     * the cropped form starts at `max(0, y) - y`, i.e. row 1.
+     * Input: a(3x2) + c(2x3), horizontal, align high.
+     */
+    #[test]
+    fn join_horizontal_high_negative_y() {
+        let expanded = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            true,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 3));
+        assert_eq!(
+            expanded.data(),
+            &[0, 0, 0, 10, 20, 1, 2, 3, 30, 40, 4, 5, 6, 50, 60]
+        );
+
+        let cropped = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (5, 2));
+        assert_eq!(cropped.data(), &[1, 2, 3, 30, 40, 4, 5, 6, 50, 60]);
+    }
+
+    /**
+     * Tests the vertical direction, both expand settings: the second
+     * image goes below the first and the crop takes the narrower width.
+     * Input: a(3x2) + c(2x3) vertical -> 2x5 cropped, 3x5 expanded.
+     */
+    #[test]
+    fn join_vertical_low() {
+        let cropped = join_a().join(&join_c(), JoinDirection::Vertical, false, None, None, None);
+        assert_eq!((cropped.width(), cropped.height()), (2, 5));
+        assert_eq!(cropped.data(), &[1, 2, 4, 5, 10, 20, 30, 40, 50, 60]);
+
+        let expanded = join_a().join(&join_c(), JoinDirection::Vertical, true, None, None, None);
+        assert_eq!((expanded.width(), expanded.height()), (3, 5));
+        assert_eq!(
+            expanded.data(),
+            &[1, 2, 3, 4, 5, 6, 10, 20, 0, 30, 40, 0, 50, 60, 0]
+        );
+    }
+
+    /**
+     * Tests the vertical HIGH alignment with a wider second image, the
+     * negative-x twin of the horizontal case: the expanded canvas grows
+     * leftward and the crop starts at column `max(0, x) - x` = 1.
+     * Input: 4x2 + 5x2 vertical, align high.
+     */
+    #[test]
+    fn join_vertical_high_negative_x() {
+        let f = gray8(4, 2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let g = gray8(5, 2, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+        let expanded = f.join(
+            &g,
+            JoinDirection::Vertical,
+            true,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 4));
+        assert_eq!(
+            expanded.data(),
+            &[0, 1, 2, 3, 4, 0, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        );
+
+        let cropped = f.join(
+            &g,
+            JoinDirection::Vertical,
+            false,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (4, 4));
+        assert_eq!(
+            cropped.data(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 17, 18, 19, 20]
+        );
+    }
+
+    /**
+     * Tests the CENTRE ladder on the vertical axis, where the two
+     * truncating divisions happen to agree with the combined form:
+     * 4/2 - 5/2 = 2 - 2 = 0.
+     * Input: 4x2 + 5x2 vertical, align centre.
+     */
+    #[test]
+    fn join_vertical_centre() {
+        let f = gray8(4, 2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let g = gray8(5, 2, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+        let expanded = f.join(
+            &g,
+            JoinDirection::Vertical,
+            true,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 4));
+        assert_eq!(
+            expanded.data(),
+            &[1, 2, 3, 4, 0, 5, 6, 7, 8, 0, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        );
+
+        let cropped = f.join(
+            &g,
+            JoinDirection::Vertical,
+            false,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (4, 4));
+        assert_eq!(
+            cropped.data(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 16, 17, 18, 19]
+        );
+    }
+
+    /**
+     * Tests that CENTRE is TWO separate truncating integer divisions
+     * (`in1.h / 2 - in2.h / 2`), not the combined `(in1.h - in2.h) / 2`.
+     * For 4 and 3 the C form gives `2 - 1 = 1` where the combined form
+     * gives `0`, so the second image starts one row down and the top
+     * right corner stays background.
+     * Input: 2x4 + 2x3 horizontal, align centre -> 4x4 expanded.
+     */
+    #[test]
+    fn join_centre_uses_two_truncating_divisions() {
+        let d = gray8(2, 4, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let out = d.join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            true,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((out.width(), out.height()), (4, 4));
+        // Row 0 is `1 2 | background background`: with the combined
+        // `(4 - 3) / 2 = 0` form it would read `1 2 10 20`.
+        assert_eq!(
+            out.data(),
+            &[1, 2, 0, 0, 3, 4, 10, 20, 5, 6, 30, 40, 7, 8, 50, 60]
+        );
+
+        let cropped = d.join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (4, 3));
+        assert_eq!(cropped.data(), &[1, 2, 0, 0, 3, 4, 10, 20, 5, 6, 30, 40]);
+    }
+
+    /**
+     * Tests CENTRE with a taller second image, which drives y negative
+     * (2/2 - 5/2 = 1 - 2 = -1) and exercises the `max(0, y) - y` crop
+     * origin on the centre arm.
+     * Input: 3x2 + 2x5 horizontal, align centre.
+     */
+    #[test]
+    fn join_centre_negative_y() {
+        let e = gray8(2, 5, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+        let expanded = join_a().join(
+            &e,
+            JoinDirection::Horizontal,
+            true,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 5));
+        assert_eq!(
+            expanded.data(),
+            &[
+                0, 0, 0, 11, 12, 1, 2, 3, 13, 14, 4, 5, 6, 15, 16, 0, 0, 0, 17, 18, 0, 0, 0, 19, 20
+            ]
+        );
+
+        let cropped = join_a().join(
+            &e,
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (5, 2));
+        assert_eq!(cropped.data(), &[1, 2, 3, 13, 14, 4, 5, 6, 15, 16]);
+    }
+
+    /**
+     * Tests that `shim` opens a gap of that many pixels between the two
+     * images and that the gap takes the background colour, not black,
+     * when one is given.
+     * Input: a(3x2) + c(2x3) horizontal, shim 2 -> 7 wide; expanded with
+     * background 128 and cropped with the default black.
+     */
+    #[test]
+    fn join_shim_gap_takes_background() {
+        let bg = [128.0];
+        let expanded = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            true,
+            Some(2),
+            Some(&bg),
+            None,
+        );
+        assert_eq!((expanded.width(), expanded.height()), (7, 3));
+        assert_eq!(
+            expanded.data(),
+            &[
+                1, 2, 3, 128, 128, 10, 20, 4, 5, 6, 128, 128, 30, 40, 128, 128, 128, 128, 128, 50,
+                60
+            ]
+        );
+
+        let cropped = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            Some(2),
+            None,
+            None,
+        );
+        assert_eq!((cropped.width(), cropped.height()), (7, 2));
+        assert_eq!(
+            cropped.data(),
+            &[1, 2, 3, 0, 0, 10, 20, 4, 5, 6, 0, 0, 30, 40]
+        );
+    }
+
+    /**
+     * Tests a non-black background on the vertical arm: the shim row and
+     * the column the narrower second image does not cover both take it.
+     * Input: a(3x2) + c(2x3) vertical, shim 1, background 200 -> 3x6.
+     */
+    #[test]
+    fn join_vertical_background_fills_uncovered() {
+        let bg = [200.0];
+        let out = join_a().join(
+            &join_c(),
+            JoinDirection::Vertical,
+            true,
+            Some(1),
+            Some(&bg),
+            None,
+        );
+        assert_eq!((out.width(), out.height()), (3, 6));
+        assert_eq!(
+            out.data(),
+            &[
+                1, 2, 3, 4, 5, 6, 200, 200, 200, 10, 20, 200, 30, 40, 200, 50, 60, 200
+            ]
+        );
+    }
+
+    /**
+     * Tests that band alignment comes through from `insert`: a one-band
+     * image joined with a three-band one gives three bands, the mono
+     * samples replicated, and a three-value background is used per band.
+     * Input: Gray8 3x2 + Rgb8 2x3 horizontal, expand, background [1,2,3].
+     */
+    #[test]
+    fn join_band_promotion_mono_and_colour() {
+        let colour = rgb8(
+            2,
+            3,
+            vec![10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62],
+        );
+        let bg = [1.0, 2.0, 3.0];
+        let out = join_a().join(
+            &colour,
+            JoinDirection::Horizontal,
+            true,
+            None,
+            Some(&bg),
+            None,
+        );
+        assert_eq!(out.format(), PixelFormat::Rgb8);
+        assert_eq!((out.width(), out.height()), (5, 3));
+        assert_eq!(out.getpoint(0, 0), vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.getpoint(3, 0), vec![10.0, 11.0, 12.0]);
+        assert_eq!(out.getpoint(0, 2), vec![1.0, 2.0, 3.0]);
+        assert_eq!(out.getpoint(4, 2), vec![60.0, 61.0, 62.0]);
+    }
+
+    /**
+     * Tests depth promotion: an 8-bit image joined with a 16-bit one
+     * gives 16-bit samples with the numbers unchanged.
+     * Input: Gray8 3x2 + Gray16 2x3 horizontal, expand -> Gray16 5x3.
+     */
+    #[test]
+    fn join_depth_promotion_8_and_16_bit() {
+        let wide = gray16(2, 3, &[10, 20, 30, 40, 50, 60]);
+        let out = join_a().join(&wide, JoinDirection::Horizontal, true, None, None, None);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!((out.width(), out.height()), (5, 3));
+        assert_eq!(out.getpoint(0, 0), vec![1.0]);
+        assert_eq!(out.getpoint(4, 2), vec![60.0]);
+        assert_eq!(out.getpoint(0, 2), vec![0.0]);
+    }
+
+    /**
+     * Tests that the delegated `insert` band-count error surfaces as the
+     * typed `ConversionError::Extract` wrapper: 2 bands against 3, with
+     * neither being 1, is what libvips `bandalike` rejects too.
+     */
+    #[test]
+    fn try_join_band_count_mismatch() {
+        let two = Raster::zeroed(1, 1, PixelFormat::with_channels(2, 1).unwrap()).unwrap();
+        let three = Raster::zeroed(1, 1, PixelFormat::Rgb8).unwrap();
+        assert!(matches!(
+            two.try_join(&three, JoinDirection::Horizontal, false, None, None, None),
+            Err(ConversionError::Extract(ExtractError::BandCountMismatch {
+                main: 2,
+                sub: 3
+            }))
+        ));
+    }
+
+    /**
+     * Tests that the join carries the first image's metadata, matching
+     * the arrayjoin convention and libvips, which copies in1's fields.
+     */
+    #[test]
+    fn join_meta_from_first() {
+        let a = join_a().copy().xres(11.0).build();
+        let out = a.join(&join_c(), JoinDirection::Horizontal, false, None, None, None);
+        assert_eq!(out.xres(), 11.0);
+    }
+
+    /**
+     * Tests the libvips align nicknames and the typed error for an
+     * unknown one.
+     */
+    #[test]
+    fn align_from_str_nicknames() {
+        assert_eq!("low".parse::<Align>().unwrap(), Align::Low);
+        assert_eq!("centre".parse::<Align>().unwrap(), Align::Centre);
+        assert_eq!("center".parse::<Align>().unwrap(), Align::Centre);
+        assert_eq!("high".parse::<Align>().unwrap(), Align::High);
+        assert!(matches!(
+            "middle".parse::<Align>(),
+            Err(ConversionError::UnknownAlign { .. })
+        ));
+    }
 
     // ------------------------------------------------------------------
     // grey

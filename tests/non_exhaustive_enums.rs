@@ -12,8 +12,9 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    BandError, Combine, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat,
-    PlannerError, Precision, RasterError, ResumeError, SourceError, VerifyError,
+    Align, BandError, Combine, DrawError, EngineEvent, JoinDirection, Layout, ManifestError,
+    PdfError, PixelFormat, PlannerError, Precision, RasterError, ResumeError, SourceError,
+    VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -202,4 +203,25 @@ fn pdf_error_pdfium_variant_is_feature_independent() {
 fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
+    match v {
+        JoinDirection::Horizontal => {}
+        JoinDirection::Vertical => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_align_non_exhaustive(v: &Align) {
+    match v {
+        Align::Low => {}
+        Align::Centre => {}
+        Align::High => {}
+        _ => {}
+    }
 }
