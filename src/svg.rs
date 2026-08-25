@@ -47,7 +47,7 @@
 //!
 //! # Security: `<image xlink:href>` never touches the filesystem
 //!
-//! `usvg`'s default [`ImageHrefResolver`](usvg::ImageHrefResolver) treats an
+//! `usvg`'s default `ImageHrefResolver` treats an
 //! href as a **file path**: it calls `Path::exists` and then `fs::read` on
 //! it, and because `Options::resources_dir` defaults to `None` the path is
 //! used verbatim, so it resolves absolutely or relative to the process
