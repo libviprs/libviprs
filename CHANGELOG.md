@@ -724,6 +724,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `.v` file written by a newer libviprs no longer loses every metadata field
+  when it is read by an older one (issue #565). The trailer was read as one
+  `serde_json::from_slice` onto a struct holding a plain externally tagged
+  `MetadataValue`, and serde errors on a variant it has never heard of, so the
+  first field a future version added would fail the whole parse. The `if let
+  Ok(..)` around it then swallowed the failure, and the image came back with
+  no ICC profile, no EXIF blob and an orientation of 1, with nothing said. It
+  is a data-loss break that `cargo semver-checks` cannot see, because it lives
+  in the file format rather than in the API, and it was blocking the animated
+  formats: a per-frame delay array is a new `MetadataValue` variant, so adding
+  one would have started corrupting metadata for everyone on the current
+  release.
+
+  The trailer is now read entry by entry. An entry this build cannot represent
+  is carried opaquely rather than dropped, so it survives being written back
+  out and an old build that opens a new file and re-saves it does not strip
+  what it could not read. Those fields stay out of `get_field` and
+  `get_fields`, because this build can say the field was there but not what it
+  means; setting or removing a field of the same name supersedes the carried
+  one, so stripping still strips. Unknown trailer keys are ignored and missing
+  ones default, so the shape can grow too, and the bytes written are unchanged,
+  which is what keeps every already-released reader working.
+
+  A trailer that opens with `{` and is not valid JSON is now reported as a
+  corrupt `.v` rather than ignored. That is the one case left where metadata is
+  genuinely unrecoverable, and it is narrow enough that no libviprs or libvips
+  writer can produce it: libvips writes XML in the same slot, and a trailer
+  that never claimed to be libviprs JSON is still read as absent, exactly as
+  before.
+
 - A zero mask coefficient no longer poisons a non-finite sample (issue #574).
   libvips squeezes zero taps out of a mask before it convolves, in both cores
   (`convolution/convf.c:314-321` and `convolution/convi.c:1189-1197`), and
