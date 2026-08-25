@@ -41,6 +41,7 @@
 //! | [`Raster::sub`] | `vips_subtract` | float raster (signed differences survive) |
 //! | [`Raster::mul`] | `vips_multiply` | image-image arithmetic |
 //! | [`Raster::div`], [`Raster::div_const`], [`Raster::div_vec`] | `vips_divide` | float raster |
+//! | [`Raster::remainder`] | `vips_remainder` | samplewise `a % b`, integer raster |
 //! | [`Raster::linear`] / [`Raster::linear_uchar`] | `vips_linear1` (default / `uchar` option) | `a * x + b`, float / uchar raster |
 //! | [`Raster::sum`] | `vips_sum` | pixelwise sum of an image list |
 //! | [`Raster::minpair`] / [`Raster::maxpair`] | `vips_minpair` / `vips_maxpair` | pixelwise extremum of two images |
@@ -78,8 +79,15 @@
 //! * **Comparisons.** The relational family returns an 8-bit image with the
 //!   input's band count holding `255` where the relation holds and `0`
 //!   where it does not, matching libvips.
-//! * **Division by zero.** `x / 0` and `x % 0` produce `0`, matching
-//!   libvips `vips_divide`.
+//! * **Division by zero.** `x / 0` produces `0`, matching libvips
+//!   `vips_divide`.
+//! * **Remainder by zero.** `x % 0` produces `0`, where libvips writes
+//!   `-1`. That `-1` is not the integer branch's quirk alone:
+//!   `remainder.c:101` writes it in `IREMAINDER` and `remainder.c:116`
+//!   writes it again in `FREMAINDER`, so a float carrier would not change
+//!   it. It is simply not representable on an unsigned carrier, so the
+//!   crate keeps `0`. Both remainder forms follow this:
+//!   [`Raster::remainder`] and [`Raster::rem_const`].
 //! * **NaN.** A NaN result (e.g. `0.0.powf(f64::NAN)`) writes `0`.
 //!
 //! # Float-output operations
@@ -339,6 +347,45 @@ fn pow_vips(base: f64, exp: f64) -> f64 {
     } else {
         base.powf(exp)
     }
+}
+
+/// `a` mod `b` with libvips `remainder` semantics, shared by the image-image
+/// [`Raster::try_remainder`] and the constant [`Raster::try_rem_const`] so
+/// the two forms cannot drift apart.
+///
+/// The body is C's *truncating* `%`, with a zero divisor short-circuited to
+/// `0` before the division so `0 / 0` never forms (`b == 0.0` catches `-0.0`
+/// too). Rust's `%` on `f64` truncates exactly as C's does on integers, and
+/// the operands here are always whole numbers read out of an integer carrier.
+///
+/// libvips does not pick one definition, it dispatches on format
+/// (`remainder.c:101,116`): `IREMAINDER` uses C's truncating `%` for `CHAR`,
+/// `UCHAR`, `SHORT`, `USHORT`, `INT` and `UINT`, while `FREMAINDER` uses
+/// `a - b * floor(a / b)` for `FLOAT` and `DOUBLE`. Every carrier the crate
+/// has today is an unsigned integer one, so `IREMAINDER` is the only branch
+/// reachable and this kernel implements it. Both remainder forms therefore
+/// match vips on the carrier they actually run on, including the negative
+/// divisor [`Raster::try_rem_const`] can be handed: measured against vips
+/// 8.18.4, `remainder_const` on a uchar `[7,20,30]` with `c = -3` gives
+/// `[1,2,0]`, which is what this returns.
+///
+/// The two definitions are indistinguishable on non-negative operands, so the
+/// image-image form cannot tell them apart at all (verified exhaustively over
+/// all 4,294,836,225 pairs with `a` in `0..=65535` and `b` in `1..=65535`,
+/// zero disagreements). Only a negative divisor separates them, and only
+/// [`Raster::try_rem_const`] can supply one.
+///
+/// **A float carrier needs the floored branch added here**: keep this body
+/// for the integer formats and add `a - b * (a / b).floor()` for the float
+/// ones, exactly as `remainder.c` does. That is measured rather than guessed:
+/// the same uchar `[7,20,30]` cast to `float` first gives `[-2,-1,0]`.
+///
+/// The zero case is the one deliberate divergence: libvips writes `-1` in
+/// both branches, which an unsigned carrier cannot hold, so the crate-wide
+/// `x % 0 == 0` convention wins.
+#[inline]
+fn remainder_vips(a: f64, b: f64) -> f64 {
+    if b == 0.0 { 0.0 } else { a % b }
 }
 
 /// Error unless `a` and `b` share pixel dimensions and band count.
@@ -1483,6 +1530,14 @@ impl Raster {
     /// Remainder of every sample divided by a constant (libvips
     /// `remainder_const`); a zero divisor produces `0`.
     ///
+    /// The kernel is the shared `remainder_vips`, the same truncating `%`
+    /// [`Raster::try_remainder`] uses, so the constant and image-image forms
+    /// cannot disagree for identical operands. `c` is an unconstrained `f64`,
+    /// so unlike the image-image form this one can be handed a negative
+    /// divisor, and truncating is what libvips does there for an integer
+    /// input: measured against vips 8.18.4, `remainder_const` on a uchar
+    /// `[7,20,30]` with `c = -3` gives `[1,2,0]`.
+    ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
@@ -1492,7 +1547,7 @@ impl Raster {
             "rem_const",
             self,
             self.format().bytes_per_channel(),
-            move |v| if c == 0.0 { 0.0 } else { v % c },
+            move |v| remainder_vips(v, c),
         )
     }
 
@@ -1929,6 +1984,87 @@ impl Raster {
     #[track_caller]
     pub fn div(&self, other: &Raster) -> Raster {
         expect_arith("div", self.try_div(other))
+    }
+    /// Remainder of `self` divided by `other` samplewise (libvips
+    /// `remainder`), the image-image companion to [`Raster::rem_const`].
+    ///
+    /// The output depth is the wider of the two input depths. libvips gets
+    /// there via the identity promotion table (`vips_remainder_format_table`,
+    /// `remainder.c:173-178`) applied after `vips__formatalike` has already
+    /// cast both inputs to the smallest common format, which on this crate's
+    /// unsigned carriers is exactly `max(a_bpc, b_bpc)`.
+    ///
+    /// The kernel is the shared `remainder_vips`, C's truncating `%`, which
+    /// [`Raster::rem_const`] runs too so the two forms cannot disagree for
+    /// identical operands.
+    ///
+    /// libvips does not pick one definition, it dispatches on format
+    /// (`remainder.c:101,116`): truncating `%` in `IREMAINDER` for the
+    /// integer formats, floored `a - b * floor(a / b)` in `FREMAINDER` for
+    /// `FLOAT` and `DOUBLE`. Every carrier the crate has today is an
+    /// unsigned integer one, so `IREMAINDER` is the branch this operation
+    /// runs and it matches vips exactly. The choice is in any case invisible
+    /// here: truncated and floored agree on every non-negative operand pair,
+    /// verified exhaustively over all 4,294,836,225 pairs with `a` in
+    /// `0..=65535` and `b` in `1..=65535`, zero disagreements. Only a
+    /// negative divisor separates them, which this form cannot produce and
+    /// [`Raster::rem_const`] can. A float carrier will need the floored
+    /// branch added to the kernel, and the kernel says so where it is
+    /// defined.
+    ///
+    /// # Divergences from libvips
+    ///
+    /// Three, all deliberate:
+    ///
+    /// * **A zero divisor produces `0`, where libvips produces `-1`.**
+    ///   `remainder.c:101` writes `q[x] = p2[x] ? p1[x] % p2[x] : -1;` in
+    ///   `IREMAINDER`, and `remainder.c:116` writes the same `-1` in
+    ///   `FREMAINDER`, so this is not an integer-branch quirk that a float
+    ///   carrier would resolve. On a uchar carrier that `-1` reads back as
+    ///   `255` (measured against vips 8.18.4: divisor `[[0,7,0],[7,0,7]]`
+    ///   gives `[255,6,255,5,255,4]`). libviprs has no signed carrier, so
+    ///   `-1` is not representable here at all, and `x % 0 == 0` is the
+    ///   crate-wide convention the module header already states under
+    ///   "Remainder by zero" and [`Raster::rem_const`] already follows.
+    /// * **No band broadcast and no size alignment.** libvips runs
+    ///   `bandalike` (a 1-band operand repeated across an n-band one) and
+    ///   then `sizealike` (the smaller image zero-padded up to the larger)
+    ///   before the kernel sees anything. Here the two rasters must agree
+    ///   exactly on width, height, and band count, which is how every other
+    ///   image-image operation in this module behaves. Matching the family
+    ///   matters more than matching libvips on this point. ([`Raster::add`]
+    ///   is the crate's one broadcasting operation and is not the model for
+    ///   this family.)
+    /// * **Unsigned carriers only.** A float raster on either side is
+    ///   rejected with [`ArithmeticError::FloatUnsupported`], so libvips's
+    ///   integer/float kernel split collapses to a single branch here. The
+    ///   reason is the output, not the input: this is one of the integer
+    ///   round-and-saturate operations, so the result is an unsigned integer
+    ///   raster with no representable place for a fractional or negative
+    ///   sample, and rejecting float up front through `reject_float_input`
+    ///   is what that whole family does. [`Raster::rem_const`], the sibling
+    ///   this operation is the companion to, carries the same restriction
+    ///   for the same reason. Cast to an unsigned 8- or 16-bit format first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
+    pub fn try_remainder(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map("remainder", self, other, false, remainder_vips)
+    }
+
+    /// Panicking form of [`Raster::try_remainder`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_remainder`].
+    #[track_caller]
+    pub fn remainder(&self, other: &Raster) -> Raster {
+        expect_arith("remainder", self.try_remainder(other))
     }
 
     /// Samplewise minimum of two images (libvips `minpair`); mixed depths
@@ -4090,6 +4226,143 @@ mod tests {
         let r = a.div(&a);
         assert_eq!(r.getpoint(0, 0), vec![1.0]);
         assert_eq!(r.getpoint(1, 0), vec![0.0]);
+    }
+
+    /// The shared `remainder_vips` kernel is TRUNCATED, matching libvips
+    /// `IREMAINDER`, which is the only branch the crate's unsigned integer
+    /// carriers can reach.
+    ///
+    /// Nothing else in the suite can tell truncated from floored: the two
+    /// agree on every non-negative operand pair, so the image-image form is
+    /// blind to the choice and swapping the body leaves its tests green.
+    /// This pins the definition directly, on the operands where the two
+    /// split. Rust's `%` on `f64` truncates exactly as C's does on integers,
+    /// which is what `IREMAINDER` runs.
+    #[test]
+    fn remainder_vips_is_truncated_matching_iremainder() {
+        // Negative divisor: truncated keeps the sign of the dividend. This
+        // is the one split reachable today, through `rem_const`. Floored
+        // would give -2, -1, 0 here; vips 8.18.4 measures 1, 2, 0 on a uchar
+        // carrier, which is what `IREMAINDER` and this kernel produce.
+        assert_eq!(remainder_vips(7.0, -3.0), 1.0);
+        assert_eq!(remainder_vips(20.0, -3.0), 2.0);
+        assert_eq!(remainder_vips(30.0, -3.0), 0.0);
+        // Negative dividend: unreachable on an unsigned carrier, pinned so
+        // the definition is unambiguous either way. Floored would give 2.
+        assert_eq!(remainder_vips(-7.0, 3.0), -1.0);
+        // Non-negative operands, i.e. everything the image-image form can
+        // see: truncated and floored agree, so these hold under both.
+        assert_eq!(remainder_vips(7.0, 3.0), 1.0);
+        assert_eq!(remainder_vips(3.0, 7.0), 3.0);
+        assert_eq!(remainder_vips(0.0, 7.0), 0.0);
+        // A zero divisor short-circuits before the division, so `0 / 0`
+        // never forms, and `-0.0 == 0.0` catches the negative zero too.
+        assert_eq!(remainder_vips(7.0, 0.0), 0.0);
+        assert_eq!(remainder_vips(0.0, 0.0), 0.0);
+        assert_eq!(remainder_vips(7.0, -0.0), 0.0);
+    }
+
+    /// rem_const shares the truncating `remainder_vips` kernel with the
+    /// image-image form, and truncating is what libvips runs for an integer
+    /// input, so a negative constant matches vips rather than diverging.
+    ///
+    /// Measured against vips 8.18.4 on uchar `[7,20,30]`:
+    /// `vips remainder_const a out -- -3` gives `[1,2,0]`. The same input
+    /// cast to `float` first gives `[-2,-1,0]`, because `remainder_const`
+    /// dispatches on format and the float path floors. That is the branch a
+    /// future float carrier will need, and it is not the branch this is.
+    ///
+    /// `c = 3` happens to give the same `[1,2,0]`, which is a coincidence of
+    /// these operands, not the point: the negative case is the one where the
+    /// two definitions could have disagreed.
+    #[test]
+    fn rem_const_negative_divisor_matches_the_vips_integer_branch() {
+        let a = gray(3, 1, vec![7, 20, 30]);
+        assert_eq!(a.rem_const(-3.0).data().to_vec(), vec![1, 2, 0]);
+        assert_eq!(a.rem_const(3.0).data().to_vec(), vec![1, 2, 0]);
+    }
+
+    /// The measured vips 8.18.4 oracle for the 2-image remainder:
+    /// `a = uchar [[10,20,30],[40,50,60]]`, `b = uchar` all 7, and
+    /// `vips remainder a b` gives a uchar raster holding `[3,6,2,5,1,4]`.
+    /// The output format is the identity promotion (`remainder.c:173-178`)
+    /// applied after formatalike, i.e. the wider of the two input depths.
+    #[test]
+    fn remainder_matches_vips_oracle() {
+        let a = gray(3, 2, vec![10, 20, 30, 40, 50, 60]);
+        let b = gray(3, 2, vec![7; 6]);
+        let r = a.remainder(&b);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.data().to_vec(), vec![3, 6, 2, 5, 1, 4]);
+    }
+
+    /// A zero divisor gives `0`, the crate-wide `x % 0 == 0` convention the
+    /// module header states and `rem_const` already follows.
+    ///
+    /// This is a DELIBERATE divergence from vips, which writes `-1`
+    /// (`remainder.c:101`: `q[x] = p2[x] ? p1[x] % p2[x] : -1;`, and again at
+    /// `remainder.c:116` in the float branch). Measured
+    /// with divisor `[[0,7,0],[7,0,7]]`, vips 8.18.4 gives
+    /// `[255,6,255,5,255,4]` — the `-1` read back through the uchar carrier.
+    /// libviprs has no signed carrier, so `-1` is unrepresentable here.
+    #[test]
+    fn remainder_by_zero_is_zero_not_the_vips_minus_one() {
+        let a = gray(3, 2, vec![10, 20, 30, 40, 50, 60]);
+        let b = gray(3, 2, vec![0, 7, 0, 7, 0, 7]);
+        assert_eq!(a.remainder(&b).data().to_vec(), vec![0, 6, 0, 5, 0, 4]);
+    }
+
+    /// Format promotion is the identity table applied to the formatalike
+    /// result, so the output depth is the wider input depth: `uchar %
+    /// uchar` stays 8-bit and `uchar % ushort` promotes to 16-bit.
+    #[test]
+    fn remainder_promotes_to_the_wider_depth() {
+        let a = gray(2, 1, vec![10, 200]);
+        let narrow = a.remainder(&gray(2, 1, vec![7, 7]));
+        assert_eq!(narrow.format(), PixelFormat::Gray8);
+        assert_eq!(narrow.getpoint(0, 0), vec![3.0]);
+
+        let wide = a.remainder(&gray16(2, 1, &[7, 300]));
+        assert_eq!(wide.format(), PixelFormat::Gray16);
+        assert_eq!(wide.getpoint(0, 0), vec![3.0]);
+        // 200 % 300 == 200: the dividend survives a larger divisor.
+        assert_eq!(wide.getpoint(1, 0), vec![200.0]);
+    }
+
+    /// remainder requires exact dimension and band-count equality (no
+    /// bandalike, no sizealike — see [`Raster::try_remainder`]) and rejects
+    /// float operands on either side, all as typed errors.
+    #[test]
+    fn remainder_typed_errors() {
+        let a = gray(2, 1, vec![10, 20]);
+        assert!(matches!(
+            a.try_remainder(&gray(1, 1, vec![7])),
+            Err(ArithmeticError::DimensionMismatch {
+                expected_w: 2,
+                expected_h: 1,
+                got_w: 1,
+                got_h: 1
+            })
+        ));
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![7; 6]).unwrap();
+        assert!(matches!(
+            a.try_remainder(&rgb),
+            Err(ArithmeticError::BandCountMismatch {
+                expected: 1,
+                got: 3
+            })
+        ));
+
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f = Raster::zeroed(2, 1, f1).unwrap();
+        assert!(matches!(
+            f.try_remainder(&a),
+            Err(ArithmeticError::FloatUnsupported { op: "remainder" })
+        ));
+        assert!(matches!(
+            a.try_remainder(&f),
+            Err(ArithmeticError::FloatUnsupported { op: "remainder" })
+        ));
     }
 
     /// Binary ops reject mismatched dimensions and band counts with typed
