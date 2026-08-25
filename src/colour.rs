@@ -31,10 +31,29 @@
 //!
 //! # Colour-space model
 //!
-//! Conversion mirrors the libvips route table: every supported space
-//! converts to and from CIE XYZ (D65-relative, `Y` white = 100), and a
-//! conversion from space `A` to space `B` runs `A -> XYZ -> B`. All
-//! intermediate maths is `f64`; quantisation happens only where libvips
+//! Conversion is modelled on a hub: every supported space converts to and
+//! from CIE XYZ (D65-relative, `Y` white = 100), and a conversion from
+//! space `A` to space `B` runs `A -> XYZ -> B`.
+//!
+//! That is a summary of the libvips route table
+//! (`colour/colourspace.c:223-497`), not a transcription of it. libvips
+//! stores an explicit pipeline per ordered pair, and plenty of those
+//! pipelines never reach XYZ. This port takes four of them directly, the
+//! same-family cartesian/polar pairs `Lab <-> Lch` (`:244`, `:276`) and
+//! `OkLab <-> OkLCh` (`:478`, `:494`), because on those the hub inserts a
+//! round trip that changes the answer rather than only costing time (the
+//! `polar_shortcut` source notes carry the measured damage). Everything
+//! else goes through the hub here, including these hub-free edges of
+//! libvips', which is where the next direct route will be wanted:
+//!
+//! * the Lab family reaches `Lch`, `Cmc` and `Labs` from each other with
+//!   no XYZ step: `{ LAB, CMC }` (`:245`), `{ LAB, LABS }` (`:246`),
+//!   `{ LCH, CMC }` (`:279`), `{ LCH, LABS }` (`:280`), `{ CMC, LCH }`
+//!   (`:295`), and the rest of `:293-313`;
+//! * the 8/16-bit RGB block (`srgb`, `scrgb`, `hsv`, `b-w`, `rgb16`,
+//!   `grey16`) converts among itself with no XYZ step (`:352-441`).
+//!
+//! All intermediate maths is `f64`; quantisation happens only where libvips
 //! quantises, i.e. when a space is stored at 8 or 16 bits (`srgb`, `hsv`,
 //! `cmyk`, `b-w` at 8 bits; `rgb16`, `grey16` at 16 bits) and inside the
 //! XYZ -> HSV step, which passes through 8-bit sRGB exactly as the libvips
@@ -117,9 +136,23 @@
 //!   colour-difference rasters are float, so until the float arithmetic
 //!   batch lands they read through [`Raster::getpoint`] /
 //!   [`Raster::f32_samples`].
-//! * The packed `labq` coding and the `histogram` / `fourier` /
-//!   `multiband` pseudo-interpretations have no colourspace route, exactly
-//!   as in libvips: they yield [`ColourError::UnsupportedColourspace`].
+//! * The `histogram` / `fourier` / `multiband` pseudo-interpretations have
+//!   no colourspace route, exactly as in libvips: the route table carries
+//!   no `from` row for any of them (`colour/colourspace.c:223-497`), and
+//!   `vips_colourspace_issupported` (`:511-535`) calls a space unsupported
+//!   precisely when scanning those `from` fields finds nothing. They yield
+//!   [`ColourError::UnsupportedColourspace`].
+//! * The packed `labq` coding yields the same error, but that one is a
+//!   **libviprs limitation rather than libvips parity**: libvips routes
+//!   LabQ both ways against every space (`{ LAB, LABQ,
+//!   { vips_Lab2LabQ } }` at `colour/colourspace.c:243` and the whole
+//!   `LABQ` block at `:258-273`). LabQ is both an interpretation and a
+//!   coding in libvips (`VIPS_INTERPRETATION_LABQ = 16` and
+//!   `VIPS_CODING_LABQ = 2`, `include/vips/image.h:102,138`), and it is
+//!   the coding half libviprs has no home for: four `u8` carrying three
+//!   logical channels at 10:11:11 with a shared low-bits byte. There is no
+//!   coding concept here for that carrier to live in, so there is nothing
+//!   for a route to produce (issue #552 records the gap).
 //! * libvips built with lcms converts `cmyk` through an embedded generic
 //!   CMYK profile; the ported CMYK tests target the no-lcms approximation,
 //!   which is what [`Raster::colourspace`] implements. Profiled CMYK is
@@ -361,13 +394,55 @@ fn xyz_to_scrgb(xyz: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// Hue angle of `(a, b)` in degrees, wrapped to `[0, 360)` (libvips
-/// `vips_col_ab2h`).
+/// Hue angle of `(a, b)` in degrees, wrapped to `[0, 360]` (libvips
+/// `vips_col_ab2h`, `colour/Lab2LCh.c:61-89`).
+///
+/// The explicit `a == 0.0` arm is the C ladder's own, not a shortcut:
+/// `a == 0` is true for `-0.0` in C, so vips answers 0 / 90 / 270 on the
+/// whole `a` axis, while `atan2(±0.0, -0.0)` is `±PI` and would answer
+/// 180. Measured on the binary, `oklab [0.5, -0.0, 0.0] -> oklch` is
+/// `0.5 0 0`, and `[0.5, -0.0, ±0.1]` gives 90 / 270. Off that axis the
+/// `atan2` form and the C's `atan(b / a)` plus a quadrant offset agree,
+/// which `hue_matches_vips_col_ab2h_ladder` pins rather than assumes.
+///
+/// The upper bound really is closed. For a positive `a` and a `b` small
+/// enough that `deg(atan2(b, a))` is a tiny negative, `h + 360.0` rounds
+/// to exactly `360.0`: `oklab [0.5, 0.1, -1e-30] -> oklch` gives a hue of
+/// `360` here and `360` in vips 8.18.4, which lands on the same edge
+/// through `VIPS_DEG(t + VIPS_PI * 2.0)`. Clamping to `[0, 360)` would
+/// buy a tidier range by diverging from the C, so the range is documented
+/// instead.
+///
+/// One divergence from the C is deliberate: a non-finite `(a, b)` follows
+/// IEEE `atan2` here, so `(inf, inf)` is 45 degrees, where the C's
+/// `b / a` is NaN and propagates through `atan` to the output. See
+/// [`lab_to_lch`] for the matching chroma divergence.
 fn ab_to_h(a: f64, b: f64) -> f64 {
-    let h = b.atan2(a).to_degrees();
-    if h < 0.0 { h + 360.0 } else { h }
+    if a == 0.0 {
+        // Matches `if (a == 0)` in the C, which `-0.0` also enters.
+        if b < 0.0 {
+            270.0
+        } else if b == 0.0 {
+            0.0
+        } else {
+            90.0
+        }
+    } else {
+        let h = b.atan2(a).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    }
 }
 
+/// Lab-like cartesian to polar (libvips `vips_Lab2LCh_line`,
+/// `colour/Lab2LCh.c:114`, and `vips_Oklab2Oklch_line`,
+/// `colour/Oklab2Oklch.c:64`, which are the same two lines of arithmetic
+/// over `float`).
+///
+/// The chroma uses [`f64::hypot`] where the C squares and adds,
+/// `sqrtf(a * a + b * b)`. That is a deliberate divergence in this
+/// crate's favour: `a * a` overflows an `f32` to infinity once `a` passes
+/// about 1.8e19, the square root of `f32::MAX`, and `hypot` has no such
+/// intermediate to overflow.
 fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
     [lab[0], lab[1].hypot(lab[2]), ab_to_h(lab[1], lab[2])]
 }
@@ -743,6 +818,57 @@ fn alias_source(space: Interpretation) -> Interpretation {
         Interpretation::Rgb => Interpretation::Srgb,
         Interpretation::Matrix => Interpretation::Bw,
         other => other,
+    }
+}
+
+/// The direct edge, if any, for a same-family cartesian/polar pair.
+///
+/// Every other pair in the route table meets at the XYZ hub, but libvips
+/// joins the two Lab-like spaces to their polar forms with a single
+/// transform and nothing else in the pipeline: `{ LAB, LCH,
+/// { vips_Lab2LCh } }` (`colour/colourspace.c:244`), `{ LCH, LAB,
+/// { vips_LCh2Lab } }` (:276), `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }`
+/// (:478) and `{ OKLCH, OKLAB, { vips_Oklch2Oklab } }` (:494).
+///
+/// Sending those four through the hub inserts a cube-root round trip
+/// libvips never runs, and on both pairs the two halves of that round
+/// trip fail to invert each other, so this is accuracy and not only time.
+///
+/// For Oklab the culprit is the matrix: the published inverse is an
+/// 8-decimal approximation (the `1.00000001` / `1.00000005` quirk
+/// digits), so `Oklab -> XYZ -> Oklab` pushes a neutral colour's `a` and
+/// `b` off zero by about 2e-9, and the hue read off them comes out of
+/// nowhere: 94.489 degrees for OkLab `[0.5, 0, 0]`, where vips 8.18.4
+/// returns 0.
+///
+/// For Lab the culprit is the shadow branch: `lab_f` switches at
+/// `t < 0.008856` while `lab_to_xyz` switches at `L < 8.0`, and those
+/// rounded decimal constants are not mutual inverses. Under `L = 8` the
+/// same neutral-hue garbage appears about 3e5 times larger in raw units:
+/// `Lab [5, 0, 0]` comes back from the hub as
+/// `(4.99996, 5.172e-4, -2.069e-4)`, i.e. LCh
+/// `(4.99996, C = 5.571e-4, h = 338.199)`, where vips returns `5 0 0`.
+/// The residue only reaches exactly zero somewhere above `L = 10` (which
+/// still yields a 1.4e-14 chroma carrying the same 338.199 hue), so the
+/// `L = 50` neutrals a test naturally reaches for hide it completely.
+///
+/// Taking the edge keeps both conversions a pure polar swap.
+///
+/// Cross-family polar pairs are deliberately absent: libvips routes
+/// `{ OKLCH, LCH }` (:483) through XYZ like everything else, and so does
+/// this table by returning `None` for it.
+///
+/// Same-family is the rule for what is here, not for what libvips joins
+/// directly. `{ LCH, CMC }` (:279) and `{ CMC, LCH }` (:295) are
+/// single-transform edges as well, and `Cmc` is a supported space here,
+/// so it still pays the hub round trip; the module docs list the rest of
+/// the hub-free edges this port has not taken.
+fn polar_shortcut(src: Interpretation, target: Interpretation) -> Option<fn([f64; 3]) -> [f64; 3]> {
+    use Interpretation::{Lab, Lch, OkLab, OkLch};
+    match (src, target) {
+        (Lab, Lch) | (OkLab, OkLch) => Some(lab_to_lch),
+        (Lch, Lab) | (OkLch, OkLab) => Some(lch_to_lab),
+        _ => None,
     }
 }
 
@@ -1577,6 +1703,10 @@ impl Raster {
     /// [`Interpretation::Rgb`] sources are treated as sRGB and
     /// [`Interpretation::Matrix`] as mono, mirroring libvips.
     ///
+    /// `Lab <-> Lch` and `OkLab <-> OkLCh` take the direct in-place edge
+    /// libvips gives them instead of the XYZ hub; see the
+    /// [module docs](crate::colour#colour-space-model).
+    ///
     /// # Precision ceiling: routes through HSV are 8-bit
     ///
     /// Any conversion that passes through [`Interpretation::Hsv`] routes
@@ -1635,6 +1765,10 @@ impl Raster {
         let mut src_px = vec![0.0f64; src_bands];
         let mut tgt_px = [0.0f64; 4];
         let identity = src == target;
+        // The four same-family cartesian/polar pairs libvips joins with a
+        // direct edge rather than routing through the XYZ hub; see
+        // `polar_shortcut`.
+        let shortcut = polar_shortcut(src, target);
 
         for p in 0..total {
             let in_base = p * channels;
@@ -1647,7 +1781,12 @@ impl Raster {
                     write_sample(&mut buf, tgt_depth, out_base + c, v);
                 }
             } else {
-                from_xyz_into(target, to_xyz(src, &src_px), &mut tgt_px);
+                match shortcut {
+                    Some(polar) => {
+                        tgt_px[..3].copy_from_slice(&polar([src_px[0], src_px[1], src_px[2]]));
+                    }
+                    None => from_xyz_into(target, to_xyz(src, &src_px), &mut tgt_px),
+                }
                 for (c, &v) in tgt_px.iter().take(tgt_bands).enumerate() {
                     write_sample(&mut buf, tgt_depth, out_base + c, v);
                 }
@@ -2262,6 +2401,375 @@ mod tests {
                         "Lab->{a:?}->{b:?}->Lab drifted: got={got}, expected={exp}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The `vips_col_ab2h` quadrant ladder, transcribed line for line
+    /// from libvips `colour/Lab2LCh.c:61-89`. Used as the reference the
+    /// crate's [`ab_to_h`] is pinned against.
+    fn vips_col_ab2h(a: f64, b: f64) -> f64 {
+        if a == 0.0 {
+            if b < 0.0 {
+                270.0
+            } else if b == 0.0 {
+                0.0
+            } else {
+                90.0
+            }
+        } else {
+            let t = (b / a).atan();
+            if a > 0.0 {
+                if b < 0.0 {
+                    (t + std::f64::consts::PI * 2.0).to_degrees()
+                } else {
+                    t.to_degrees()
+                }
+            } else {
+                (t + std::f64::consts::PI).to_degrees()
+            }
+        }
+    }
+
+    /**
+     * Tests sRGB white and mid-grey Lab against ABSOLUTE Oklab values
+     * captured from vips 8.18.4, not just against a round trip: a
+     * systematically wrong M1/M2 pair that still inverts cleanly would
+     * pass every `Lab -> A -> B -> Lab` test but not these.
+     * Works by converting the two fixtures and comparing every band to
+     * the capture. vips runs the conversion through XYZ D65 with Y white
+     * = 100 (colour/XYZ2Oklab.c:53-79), not through linear sRGB, so the
+     * near-zero a/b residues below are the signature of that route --
+     * they are not zero, and a linear-sRGB route would not reproduce
+     * them.
+     * Input (`vips colourspace in.v out.v oklab` + `vips getpoint`):
+     *   sRGB [255,255,255] -> [1.0000017881393433, 2.1827961518283701e-06,
+     *                          -1.1364420788595453e-04]
+     *   Lab  [50,0,0]      -> [0.56896543502807617, -5.7465244935883675e-06,
+     *                          -4.8703699576435611e-05]
+     * Tolerance is 1e-6: vips carries the whole chain in f32, libviprs in
+     * f64, and the two agree to ~1e-7 on these values.
+     */
+    #[test]
+    fn oklab_absolute_vips_pins() {
+        // Captured with:
+        //   vips black b3.v 1 1 --bands 3
+        //   vips linear b3.v w.v 0 255 --uchar
+        //   vips copy w.v wsrgb.v --interpretation srgb
+        //   vips colourspace wsrgb.v wok.v oklab && vips getpoint wok.v 0 0
+        let white = Raster::new(1, 1, PixelFormat::Rgb8, vec![255, 255, 255]).unwrap();
+        let got = white.colourspace(Interpretation::OkLab).getpoint(0, 0);
+        let expected = [
+            1.000_001_788_139_343_3,
+            2.182_796_151_828_37e-6,
+            -1.136_442_078_859_545_3e-4,
+        ];
+        for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "sRGB white -> Oklab band {i}: got={got}, vips={exp}"
+            );
+        }
+
+        // Captured with:
+        //   vips linear b3.v lab.v "0 0 0" "50 0 0"
+        //   vips copy lab.v labi.v --interpretation lab
+        //   vips colourspace labi.v labok.v oklab && vips getpoint labok.v 0 0
+        let grey = Raster::constant(1, 1, &[50.0, 0.0, 0.0], Interpretation::Lab);
+        let got = grey.colourspace(Interpretation::OkLab).getpoint(0, 0);
+        let expected = [
+            0.568_965_435_028_076_2,
+            -5.746_524_493_588_367_5e-6,
+            -4.870_369_957_643_561e-5,
+        ];
+        for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "Lab [50,0,0] -> Oklab band {i}: got={got}, vips={exp}"
+            );
+        }
+    }
+
+    /**
+     * Tests the three saturated sRGB primaries against ABSOLUTE OkLCh
+     * values captured from vips 8.18.4, pinning the hue in DEGREES and
+     * inside the [0, 360) range. Blue is the load-bearing case: its hue
+     * is 264.07 degrees, which a raw `atan2` would report as -95.93, so
+     * this pins the wrap as well as the unit. (The wrap is onto
+     * [0, 360] with a closed top, not [0, 360); these three land well
+     * inside it, so they are asserted against the open form.)
+     * Works by tagging 1x1 sRGB primaries and converting to OkLCh.
+     * Input (`vips colourspace in.v out.v oklch` + `vips getpoint`):
+     *   [255,0,0] -> [0.62792587280273438, 0.2576846182346344,  29.223178863525391]
+     *   [0,255,0] -> [0.86645191907882690, 0.29480746388435364, 142.51116943359375]
+     *   [0,0,255] -> [0.45203295350074768, 0.31329533457756042, 264.07290649414062]
+     */
+    #[test]
+    fn oklch_saturated_primaries_absolute_vips_pins() {
+        let cases: [([u8; 3], [f64; 3]); 3] = [
+            (
+                [255, 0, 0],
+                [
+                    0.627_925_872_802_734_4,
+                    0.257_684_618_234_634_4,
+                    29.223_178_863_525_39,
+                ],
+            ),
+            (
+                [0, 255, 0],
+                [
+                    0.866_451_919_078_826_9,
+                    0.294_807_463_884_353_64,
+                    142.511_169_433_593_75,
+                ],
+            ),
+            (
+                [0, 0, 255],
+                [
+                    0.452_032_953_500_747_7,
+                    0.313_295_334_577_560_4,
+                    264.072_906_494_140_6,
+                ],
+            ),
+        ];
+
+        for (rgb, expected) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let lch = im.colourspace(Interpretation::OkLch);
+            assert_eq!(lch.interpretation(), Interpretation::OkLch);
+            let got = lch.getpoint(0, 0);
+
+            assert!(
+                (got[0] - expected[0]).abs() < 1e-6,
+                "sRGB {rgb:?} -> OkLCh L: got={}, vips={}",
+                got[0],
+                expected[0]
+            );
+            assert!(
+                (got[1] - expected[1]).abs() < 1e-6,
+                "sRGB {rgb:?} -> OkLCh C: got={}, vips={}",
+                got[1],
+                expected[1]
+            );
+            // Hue is in degrees, not radians, and wrapped rather than
+            // signed. These three are nowhere near the 360 boundary.
+            assert!(
+                (got[2] - expected[2]).abs() < 1e-4,
+                "sRGB {rgb:?} -> OkLCh h (degrees): got={}, vips={}",
+                got[2],
+                expected[2]
+            );
+            assert!(
+                (0.0..360.0).contains(&got[2]),
+                "sRGB {rgb:?} -> OkLCh h out of [0,360): {}",
+                got[2]
+            );
+        }
+    }
+
+    /**
+     * Tests that the crate's hue equals the `vips_col_ab2h` quadrant
+     * ladder (colour/Lab2LCh.c:61-89) rather than merely being assumed
+     * equivalent to it. The ladder has an explicit `a == 0` branch giving
+     * 270 / 0 / 90, so those cases are asserted as exact equalities, and
+     * the rest of the plane is swept against a line-for-line
+     * transcription of the C.
+     * `-0.0` is the case where the two forms genuinely disagree and so
+     * the one the sweep must carry: `a == 0` is true for `-0.0` in C, so
+     * vips takes the explicit branch, while `atan2(±0.0, -0.0)` is `±PI`
+     * and a plain atan2 answers 180. vips 8.18.4 on the binary:
+     *   oklab [0.5, -0.0,  0.0] -> oklch  0.5  0  0
+     *   oklab [0.5, -0.0,  0.1] -> oklch  0.5  0.1  90
+     *   oklab [0.5, -0.0, -0.1] -> oklch  0.5  0.1  270
+     * The upper bound of the range is closed, not open: a positive `a`
+     * with a small enough negative `b` wraps onto exactly 360.0 in both
+     * implementations.
+     * Works by comparing ab_to_h to vips_col_ab2h over a grid that
+     * covers all four quadrants, both axes, and both signed zeros.
+     */
+    #[test]
+    fn hue_matches_vips_col_ab2h_ladder() {
+        // The explicit `a == 0` branch of the C ladder, exactly.
+        assert_eq!(ab_to_h(0.0, 0.0), 0.0, "a == 0, b == 0 must be 0 degrees");
+        assert_eq!(ab_to_h(0.0, 1.0), 90.0, "a == 0, b > 0 must be 90 degrees");
+        assert_eq!(
+            ab_to_h(0.0, -1.0),
+            270.0,
+            "a == 0, b < 0 must be 270 degrees"
+        );
+        assert_eq!(ab_to_h(0.0, 128.0), 90.0);
+        assert_eq!(ab_to_h(0.0, -0.001), 270.0);
+        // `a == 0` is true for `-0.0` in C too, so the same branch runs
+        // and the answer is 0 / 90 / 270, NOT the 180 that
+        // `atan2(±0.0, -0.0) == ±PI` would give.
+        assert_eq!(
+            ab_to_h(-0.0, 0.0),
+            0.0,
+            "a == -0.0, b == 0 must be 0 degrees, not 180"
+        );
+        assert_eq!(
+            ab_to_h(-0.0, -0.0),
+            0.0,
+            "a == -0.0, b == -0.0 must be 0 degrees, not 180"
+        );
+        assert_eq!(ab_to_h(-0.0, 0.1), 90.0, "a == -0.0, b > 0 must be 90");
+        assert_eq!(ab_to_h(-0.0, -0.1), 270.0, "a == -0.0, b < 0 must be 270");
+        // And the b == 0 axis, which the ladder reaches through atan(0).
+        assert_eq!(ab_to_h(1.0, 0.0), 0.0);
+        assert_eq!(ab_to_h(-1.0, 0.0), 180.0);
+        // The wrap lands on exactly 360.0 here and in the C, so the
+        // documented range is [0, 360] and not [0, 360).
+        assert_eq!(
+            ab_to_h(0.1, -1e-30),
+            360.0,
+            "a > 0 with a tiny negative b wraps onto exactly 360"
+        );
+        assert_eq!(vips_col_ab2h(0.1, -1e-30), 360.0);
+
+        let samples = [
+            -128.0, -60.0, -25.0, -1.0, -0.1, -1e-9, -1e-30, -0.0, 0.0, 1e-30, 1e-9, 0.1, 1.0,
+            25.0, 60.0, 128.0,
+        ];
+        for &a in &samples {
+            for &b in &samples {
+                let got = ab_to_h(a, b);
+                let want = vips_col_ab2h(a, b);
+                assert!(
+                    (got - want).abs() < 1e-9,
+                    "ab_to_h({a}, {b}) = {got}, vips_col_ab2h = {want}"
+                );
+                assert!(
+                    (0.0..=360.0).contains(&got),
+                    "ab_to_h({a}, {b}) = {got} is outside [0, 360]"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct same-family polar route. libvips joins OkLab and
+     * OkLCh with a single edge, `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }`
+     * (colour/colourspace.c:478) and `{ OKLCH, OKLAB }` (:494), so the
+     * conversion is a pure polar/cartesian swap with nothing else in the
+     * pipeline. Routing it through the XYZ hub instead adds an
+     * Oklab2XYZ/XYZ2Oklab cube-root round trip that libvips never runs,
+     * which perturbs a neutral colour's a and b away from zero and so
+     * scrambles the hue that is read off them.
+     * Works by converting OkLab constants captured from vips 8.18.4 and
+     * comparing to the capture, then round-tripping back to OkLab.
+     * The -0.0 rows are the ones a bare atan2 gets wrong: `a == 0` is
+     * true for `-0.0` in C, so vips takes the explicit ladder branch,
+     * while `atan2(±0.0, -0.0)` is `±PI` and answers 180.
+     * Input (`vips colourspace in.v out.v oklch` + `vips getpoint`, the
+     * signed-zero rows written as raw f32 and read with `vips rawload
+     * ... --format float --interpretation oklab`):
+     *   [0.5, 0,  0   ] -> [0.5, 0,          0        ]
+     *   [0.5, 0,  0.1 ] -> [0.5, 0.1,        90       ]
+     *   [0.5, 0, -0.1 ] -> [0.5, 0.1,        270      ]
+     *   [0.7, 0.1,-0.05] -> [0.7, 0.11180340, 333.43494]
+     *   [0.5, -0.0,  0.0] -> [0.5, 0,   0  ]
+     *   [0.5, -0.0, -0.0] -> [0.5, 0,   0  ]
+     *   [0.5, -0.0,  0.1] -> [0.5, 0.1, 90 ]
+     *   [0.5, -0.0, -0.1] -> [0.5, 0.1, 270]
+     */
+    #[test]
+    fn oklab_oklch_direct_route_matches_vips() {
+        let cases: [([f64; 3], [f64; 3]); 8] = [
+            ([0.5, 0.0, 0.0], [0.5, 0.0, 0.0]),
+            ([0.5, 0.0, 0.1], [0.5, 0.100_000_001_490_116_12, 90.0]),
+            ([0.5, 0.0, -0.1], [0.5, 0.100_000_001_490_116_12, 270.0]),
+            ([0.5, -0.0, 0.0], [0.5, 0.0, 0.0]),
+            ([0.5, -0.0, -0.0], [0.5, 0.0, 0.0]),
+            ([0.5, -0.0, 0.1], [0.5, 0.100_000_001_490_116_12, 90.0]),
+            ([0.5, -0.0, -0.1], [0.5, 0.100_000_001_490_116_12, 270.0]),
+            (
+                [0.7, 0.1, -0.05],
+                [
+                    0.699_999_988_079_071,
+                    0.111_803_397_536_277_77,
+                    333.434_936_523_437_5,
+                ],
+            ),
+        ];
+
+        for (oklab, expected) in cases {
+            let src = Raster::constant(1, 1, &oklab, Interpretation::OkLab);
+            let lch = src.colourspace(Interpretation::OkLch);
+            assert_eq!(lch.interpretation(), Interpretation::OkLch);
+            let got = lch.getpoint(0, 0);
+            for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+                let tol = if i == 2 { 1e-4 } else { 1e-7 };
+                assert!(
+                    (got - exp).abs() < tol,
+                    "OkLab {oklab:?} -> OkLCh band {i}: got={got}, vips={exp}"
+                );
+            }
+
+            // The direct edge makes the loop a polar/cartesian swap, so
+            // it comes back to the f32 storage value, not to whatever a
+            // cube-root round trip through XYZ leaves behind.
+            let back = lch.colourspace(Interpretation::OkLab).getpoint(0, 0);
+            for (i, (got, exp)) in back.iter().zip(oklab.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-7,
+                    "OkLab {oklab:?} -> OkLCh -> OkLab band {i}: got={got}, expected={exp}"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the same direct polar route also covers Lab <-> LCh,
+     * which libvips joins with `{ LAB, LCH, { vips_Lab2LCh } }`
+     * (colour/colourspace.c:244) and `{ LCH, LAB }` (:276).
+     * The dark neutrals are the load-bearing cases: Lab2XYZ and XYZ2Lab
+     * do NOT invert each other below L = 8, because lab_f switches at
+     * t < 0.008856 and lab_to_xyz at L < 8.0 and those rounded decimals
+     * are not mutual inverses. Routed through the hub, Lab [5, 0, 0]
+     * comes out as LCh (4.99996, C = 5.571e-4, h = 338.199) -- the same
+     * neutral-garbage-hue defect as the Oklab pair, about 3e5 times
+     * larger in raw units -- where vips returns 5 0 0. At L = 50 the hub
+     * residual is ~1e-14 and rounds away, which is exactly why an
+     * all-L=50 fixture set says nothing about this.
+     * The -0.0 case pins the `a == 0` branch of the quadrant ladder,
+     * which `-0.0` enters in C and which a bare atan2 would miss.
+     * Works by converting Lab constants captured from vips 8.18.4,
+     * including the two `a == 0` axis cases the quadrant ladder pins at
+     * exactly 90 and 270 degrees.
+     * Input (`vips colourspace in.v out.v lch` + `vips getpoint`, the
+     * input written as raw f32 and read with `vips rawload ...
+     * --format float --interpretation lab` so the signed zero survives):
+     *   [50, 0, 0]     -> [50, 0,  0        ]
+     *   [50, 0, 25]    -> [50, 25, 90       ]
+     *   [50, 0, -25]   -> [50, 25, 270      ]
+     *   [50, -30, -40] -> [50, 50, 233.13010]
+     *   [50, -0.0, 0]  -> [50, 0,  0        ]
+     *   [5,  0, 0]     -> [5,  0,  0        ]
+     *   [3,  0, 0]     -> [3,  0,  0        ]
+     */
+    #[test]
+    fn lab_lch_direct_route_matches_vips() {
+        let cases: [([f64; 3], [f64; 3]); 7] = [
+            ([50.0, 0.0, 0.0], [50.0, 0.0, 0.0]),
+            ([50.0, 0.0, 25.0], [50.0, 25.0, 90.0]),
+            ([50.0, 0.0, -25.0], [50.0, 25.0, 270.0]),
+            ([50.0, -30.0, -40.0], [50.0, 50.0, 233.130_096_435_546_88]),
+            ([50.0, -0.0, 0.0], [50.0, 0.0, 0.0]),
+            // Under L = 8 the hub route would answer
+            // (4.99996, 5.571e-4, 338.199) and (2.99997, 5.571e-4, 338.199).
+            ([5.0, 0.0, 0.0], [5.0, 0.0, 0.0]),
+            ([3.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
+        ];
+
+        for (lab, expected) in cases {
+            let src = Raster::constant(1, 1, &lab, Interpretation::Lab);
+            let got = src.colourspace(Interpretation::Lch).getpoint(0, 0);
+            for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+                let tol = if i == 2 { 1e-4 } else { 1e-5 };
+                assert!(
+                    (got - exp).abs() < tol,
+                    "Lab {lab:?} -> LCh band {i}: got={got}, vips={exp}"
+                );
             }
         }
     }
