@@ -765,4 +765,143 @@ mod tests {
             Err(MatrixError::BadSize { size: 65537 })
         ));
     }
+
+    /// The measured vips 8.18.4 case: a 3x2 left times a 2x3 right is
+    /// the 2x2 product, exactly, stamped as a matrix image.
+    #[test]
+    fn matrixmultiply_measured_case() {
+        let left = Raster::from_matrix(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        let right = Raster::from_matrix(&[vec![7.0, 8.0], vec![9.0, 10.0], vec![11.0, 12.0]]);
+        let out = left.matrixmultiply(&right);
+
+        assert_eq!(out.width(), 2);
+        assert_eq!(out.height(), 2);
+        assert_eq!(out.format().channels(), 1);
+        assert_eq!(out.interpretation(), Interpretation::Matrix);
+
+        let got = rows(&out);
+        let expected = [[58.0, 64.0], [139.0, 154.0]];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (got[i][j] - expected[i][j]).abs() < 1e-6,
+                    "({i},{j}): {} vs {}",
+                    got[i][j],
+                    expected[i][j]
+                );
+            }
+        }
+    }
+
+    /// Multiplying by the identity gives the original matrix back, with
+    /// the non-square shape preserved.
+    #[test]
+    fn matrixmultiply_identity() {
+        let original = [vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let left = Raster::from_matrix(&original);
+        let identity = Raster::from_matrix(&[
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ]);
+        let out = left.matrixmultiply(&identity);
+
+        assert_eq!(out.width(), 3);
+        assert_eq!(out.height(), 2);
+        let got = rows(&out);
+        for i in 0..2 {
+            for j in 0..3 {
+                assert!((got[i][j] - original[i][j]).abs() < 1e-6, "({i},{j})");
+            }
+        }
+    }
+
+    /// Matrix multiplication does not commute: both orders of the same
+    /// pair of 2x2 matrices are legal and give different products, both
+    /// measured against vips 8.18.4.
+    #[test]
+    fn matrixmultiply_not_commutative() {
+        let a = Raster::from_matrix(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let b = Raster::from_matrix(&[vec![0.0, 1.0], vec![1.0, 0.0]]);
+
+        let ab = rows(&a.matrixmultiply(&b));
+        let ba = rows(&b.matrixmultiply(&a));
+        let ab_expected = [[2.0, 1.0], [4.0, 3.0]];
+        let ba_expected = [[3.0, 4.0], [1.0, 2.0]];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((ab[i][j] - ab_expected[i][j]).abs() < 1e-6, "ab ({i},{j})");
+                assert!((ba[i][j] - ba_expected[i][j]).abs() < 1e-6, "ba ({i},{j})");
+            }
+        }
+    }
+
+    /// A matrix times its own inverse is the identity, cross-checking
+    /// `matrixmultiply` against `matrixinvert` on the PLU path.
+    #[test]
+    fn matrixmultiply_by_inverse_is_identity() {
+        let m = Raster::from_matrix(&[
+            vec![2.0, 1.0, 0.5, 0.0],
+            vec![1.0, 3.0, 0.0, 1.0],
+            vec![0.0, 1.0, 4.0, 2.0],
+            vec![1.0, 0.0, 2.0, 5.0],
+        ]);
+        let out = m.matrixmultiply(&m.matrixinvert());
+
+        assert_eq!(out.width(), 4);
+        assert_eq!(out.height(), 4);
+        let got = rows(&out);
+        for i in 0..4 {
+            for j in 0..4 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                // f32 storage of an f64 accumulation, so a loose bound.
+                assert!(
+                    (got[i][j] - expected).abs() < 1e-5,
+                    "({i},{j}): {} vs {expected}",
+                    got[i][j]
+                );
+            }
+        }
+    }
+
+    /// Incompatible sizes are the typed `BadSizes` error, carrying both
+    /// shapes, exactly where vips 8.18.4 says "matrixmultiply: bad
+    /// sizes".
+    #[test]
+    fn matrixmultiply_bad_sizes() {
+        let a = Raster::from_matrix(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        assert!(matches!(
+            a.try_matrixmultiply(&a),
+            Err(MatrixError::BadSizes {
+                op: "matrixmultiply",
+                left_w: 3,
+                left_h: 2,
+                right_w: 3,
+                right_h: 2
+            })
+        ));
+    }
+
+    /// Both operands go through the `vips_check_matrix` gate, so a
+    /// multi-band input on either side is a typed error.
+    #[test]
+    fn matrixmultiply_not_one_band() {
+        let ok = Raster::from_matrix(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let rgb = Raster::black_bands(2, 2, 3);
+
+        assert!(matches!(
+            rgb.try_matrixmultiply(&ok),
+            Err(MatrixError::NotOneBand {
+                op: "matrixmultiply",
+                bands: 3
+            })
+        ));
+        assert!(matches!(
+            ok.try_matrixmultiply(&rgb),
+            Err(MatrixError::NotOneBand {
+                op: "matrixmultiply",
+                bands: 3
+            })
+        ));
+    }
 }
