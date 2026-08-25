@@ -225,8 +225,10 @@ fn write_f32_flat(data: &mut [u8], i: usize, v: f32) {
 /// not validate that the band count matches the tag, exactly as in libvips
 /// where `copy` accepts any interpretation.
 ///
-/// The perceptual `OkLab` / `OkLch` tags used by the ported colour suite
-/// are included alongside the classic libvips set.
+/// The perceptual `OkLab` and `OkLch` tags are libvips' own
+/// `VIPS_INTERPRETATION_OKLAB` and `VIPS_INTERPRETATION_OKLCH`, assigned by
+/// libvips 8.18 (`libvips/include/vips/image.h:115-116`), so a raster
+/// tagged with either writes the same `.v` header code real vips writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Interpretation {
