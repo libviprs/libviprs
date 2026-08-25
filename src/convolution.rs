@@ -3957,4 +3957,811 @@ mod tests {
         assert_eq!(im.try_scharr().unwrap().data(), got[1].as_slice());
         assert_eq!(im.try_prewitt().unwrap().data(), got[2].as_slice());
     }
+
+    // -----------------------------------------------------------------
+    // canny (issues #511, #559, #560)
+    //
+    // Every expected value below comes from
+    // `oracle-captures/convolution/canny/oracle.json`, captured from vips
+    // 8.18.4 on **both** libvips paths. Where the two disagree the pin is
+    // the `VIPS_NOVECTOR=1` arm, which is the portable C libviprs targets
+    // (issue #558).
+    // -----------------------------------------------------------------
+
+    /// The LCG `oracle-captures/convolution/canny/capture.py` builds its
+    /// noise fixtures with, reproduced so the digests below are of the
+    /// same bytes vips measured. Deliberately not the module's own
+    /// [`lcg`] helper: that is a different generator with a different
+    /// stream, and the captured digests are of this one.
+    fn oracle_lcg(n: usize, seed: u32) -> Vec<u8> {
+        let mut state = u64::from(seed & 0x7fff_ffff);
+        (0..n)
+            .map(|_| {
+                state = (1_103_515_245 * state + 12_345) & 0x7fff_ffff;
+                ((state >> 16) & 0xff) as u8
+            })
+            .collect()
+    }
+
+    /// `fixtures/step9.pgm`: 9x9 uchar, columns 0-3 black and 4-8 white.
+    /// A pure `Gx` edge and the simplest non-trivial case.
+    fn canny_step9() -> Raster {
+        gray_from(9, 9, |x, _| if x < 4 { 0 } else { 255 })
+    }
+
+    /// `fixtures/square9.pgm`: 9x9 uchar with a 4x4 white block in the
+    /// top-left. Its bottom-right corner drives both gradient
+    /// convolutions into their negative clip, which is the only way to
+    /// reach the uchar ceiling of `G == 64`.
+    fn canny_square9() -> Raster {
+        gray_from(9, 9, |x, y| if x < 4 && y < 4 { 255 } else { 0 })
+    }
+
+    /// The half-step ramp behind the four `fixtures/plateau_*` images.
+    /// The 128 in the middle is what gives two adjacent pixels the same
+    /// `G` and the same `theta`.
+    const CANNY_RAMP: [u8; 9] = [0, 0, 0, 0, 128, 255, 255, 255, 255];
+
+    /// One of `fixtures/plateau_h`, `plateau_h_rev`, `plateau_v`,
+    /// `plateau_v_rev`: the ramp laid along x (9x5) or along y (5x9),
+    /// forwards or mirrored.
+    fn canny_plateau(vertical: bool, reversed: bool) -> Raster {
+        let pick = move |i: u32| CANNY_RAMP[if reversed { 8 - i } else { i } as usize];
+        if vertical {
+            gray_from(5, 9, move |_, y| pick(y))
+        } else {
+            gray_from(9, 5, move |x, _| pick(x))
+        }
+    }
+
+    /// `fixtures/disc33.pgm`: the "white disc on a black background" the
+    /// `canny.c:228` comment describes, radius 12 on 33x33.
+    fn canny_disc33() -> Raster {
+        gray_from(33, 33, |x, y| {
+            let (dx, dy) = (x as i32 - 16, y as i32 - 16);
+            if dx * dx + dy * dy <= 144 { 255 } else { 0 }
+        })
+    }
+
+    /// `fixtures/border7.pgm`: a white column on the left frame edge and
+    /// a white row on the bottom one, so real edges sit in the outer ring
+    /// where the `Extend::Copy` embed duplicates neighbours.
+    fn canny_border7() -> Raster {
+        gray_from(7, 7, |x, y| if x == 0 || y == 6 { 255 } else { 0 })
+    }
+
+    /// The twenty `(gx, gy)` pairs `fixtures/octants26.pgm` is engineered
+    /// to produce: all eight octants, the four axes, the four diagonals,
+    /// `gx == gy == 0`, and three gradients below the LUT's 4-bit
+    /// resolution.
+    const CANNY_OCTANT_TARGETS: [(i32, i32); 20] = [
+        (0, 0),
+        (64, 0),
+        (0, 64),
+        (-64, 0),
+        (0, -64),
+        (64, 64),
+        (-64, 64),
+        (64, -64),
+        (-64, -64),
+        (96, 32),
+        (32, 96),
+        (-96, 32),
+        (32, -96),
+        (96, -32),
+        (-32, 96),
+        (-96, -32),
+        (8, 0),
+        (0, 8),
+        (-8, -8),
+        (120, 120),
+    ];
+
+    /// `fixtures/octants26.pgm`. For a 2x2 window `a b / c d` the two
+    /// convolution sums are `sx = b + d - a - c` and `sy = c + d - a - b`,
+    /// so `a = 128`, `b = 128 + (sx - sy) / 4`, `c = 128 - (sx - sy) / 4`
+    /// and `d = 128 + (sx + sy) / 2` puts any wanted `(gx, gy)` at the
+    /// window's bottom-right pixel, on a flat 128 background.
+    fn canny_octants26() -> Raster {
+        let mut data = vec![128u8; 26 * 26];
+        for (n, &(sx, sy)) in CANNY_OCTANT_TARGETS.iter().enumerate() {
+            let (bx, by) = (2 + (n % 5) * 5, 2 + (n / 5) * 5);
+            let k = (sx - sy) / 4;
+            data[by * 26 + bx + 1] = (128 + k) as u8;
+            data[(by + 1) * 26 + bx] = (128 - k) as u8;
+            data[(by + 1) * 26 + bx + 1] = (128 + (sx + sy) / 2) as u8;
+        }
+        Raster::new(26, 26, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// Where the `n`th octant probe reads: the bottom-right of its 2x2.
+    fn canny_octant_probe(n: usize) -> (u32, u32) {
+        ((2 + (n % 5) * 5 + 1) as u32, (2 + (n / 5) * 5 + 1) as u32)
+    }
+
+    /// `fixtures/noise64.pgm`: 64x64 uchar LCG noise. At sigma 0.01 the
+    /// blur is an exact copy, so this drives the polar stage directly and
+    /// reaches all 256 atan2 LUT indices.
+    fn canny_noise64() -> Raster {
+        Raster::new(64, 64, PixelFormat::Gray8, oracle_lcg(64 * 64, 20_260_825)).unwrap()
+    }
+
+    /// `fixtures/noise16rgb.ppm`: 16x16x3 uchar LCG noise, for the
+    /// `(w, h, b)` round trip and per-band independence.
+    fn canny_noise16rgb() -> Raster {
+        Raster::new(16, 16, PixelFormat::Rgb8, oracle_lcg(16 * 16 * 3, 4242)).unwrap()
+    }
+
+    /// The digest `oracle.json` records as `raw_sha256`: sha256 of
+    /// `vips rawsave` output, which is the samples alone with no header.
+    /// Float samples are re-serialised little-endian rather than natively
+    /// so the pin means the same thing wherever the tests run.
+    fn oracle_raw_sha256(r: &Raster) -> String {
+        let bytes: Vec<u8> = if r.format().is_float() {
+            r.f32_samples()
+                .expect("a float raster has f32 samples")
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect()
+        } else {
+            r.data().to_vec()
+        };
+        crate::checksum::hash_tile(&bytes, crate::checksum::ChecksumAlgo::Sha256)
+    }
+
+    /// Every row of a uchar raster, bands interleaved.
+    fn u8_rows(r: &Raster) -> Vec<Vec<u8>> {
+        let stride = r.width() as usize * r.format().channels();
+        r.data().chunks(stride).map(<[u8]>::to_vec).collect()
+    }
+
+    /// Every row of a float raster, bands interleaved.
+    fn f32_rows(r: &Raster) -> Vec<Vec<f32>> {
+        let stride = r.width() as usize * r.format().channels();
+        r.f32_samples()
+            .expect("a float raster has f32 samples")
+            .chunks(stride)
+            .map(<[f32]>::to_vec)
+            .collect()
+    }
+
+    /// Assert a float raster matches a measured grid, to a tolerance and
+    /// with the offending cell named. The byte-exact half of these pins
+    /// is the `raw_sha256` next to each call.
+    fn assert_f32_grid(got: &Raster, want: &[[f32; 9]; 9], what: &str) {
+        for (y, (row, wrow)) in f32_rows(got).into_iter().zip(want).enumerate() {
+            for (x, (v, w)) in row.into_iter().zip(wrow).enumerate() {
+                assert!(
+                    (v - w).abs() < 1e-3,
+                    "{what} at ({x}, {y}): read {v}, want {w}"
+                );
+            }
+        }
+    }
+
+    /// `vips canny --sigma 1.4 --precision float`, the default call, on
+    /// the 9x9 step.
+    ///
+    /// The answer is a **float** image, not a byte one, and that is the
+    /// first thing a port gets wrong. `canny.c:81` tests the format of
+    /// the *blurred* image, not of the input, and on the float arm
+    /// gaussblur has already promoted the uchar step to float by then, so
+    /// the uchar gradient branch never fires. Nothing here fits in a
+    /// byte: the surviving column carries 47.99, and a hard 0/255 step
+    /// with no blur in front of it reaches 508.5.
+    #[test]
+    fn canny_reproduces_vips_on_the_default_float_arm() {
+        let out = canny_step9().canny(1.4, Precision::Float);
+        assert_eq!(out.format(), float_format(1), "float arm output format");
+        assert_eq!((out.width(), out.height()), (9, 9), "size round-trips");
+        assert_eq!(
+            oracle_raw_sha256(&out),
+            "2f6ab0a309442a20357f1314576f8f81411e6fc3dca23533ada523a9262eaee1",
+            "record default_step9_float"
+        );
+        let mut want = [[0.0f32; 9]; 9];
+        for row in &mut want {
+            row[4] = 47.992_317;
+        }
+        assert_f32_grid(&out, &want, "step9 float");
+
+        // The same op on the corner fixture, where the two gradients are
+        // both live and the diagonal edge is what survives.
+        let square = canny_square9().canny(1.4, Precision::Float);
+        assert_eq!(
+            oracle_raw_sha256(&square),
+            "d614673426996af46331ab84e22cc465b63089c40b12ec6c95d98decd8728c81",
+            "record default_square9_float"
+        );
+    }
+
+    /// `vips canny --sigma 1.4 --precision integer` on the same step, and
+    /// on the corner fixture. Integer precision keeps the blur uchar, so
+    /// the gradient stage takes its `offset = 128` integer arm and the
+    /// whole operation stays in a byte, where `G` is bounded at 64.
+    #[test]
+    fn canny_reproduces_vips_on_the_uchar_integer_arm() {
+        let out = canny_step9().canny(1.4, Precision::Integer);
+        assert_eq!(out.format(), PixelFormat::Gray8, "integer arm stays uchar");
+        assert_eq!(u8_rows(&out), vec![vec![0, 0, 0, 0, 32, 0, 0, 0, 0]; 9]);
+
+        let square = canny_square9().canny(1.4, Precision::Integer);
+        assert_eq!(
+            u8_rows(&square),
+            vec![
+                vec![0, 0, 0, 0, 32, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 32, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 34, 0, 0, 0, 0],
+                vec![0, 0, 0, 33, 36, 0, 0, 0, 0],
+                vec![32, 32, 34, 37, 0, 0, 0, 0, 0],
+                vec![0; 9],
+                vec![0; 9],
+                vec![0; 9],
+                vec![0; 9],
+            ],
+            "record default_square9_integer"
+        );
+    }
+
+    /// The two arms do not merely round differently, they have different
+    /// ranges. `square9` at sigma 0.01 (the blur is an exact copy) drives
+    /// both convolutions into their negative clip at (4, 4), which is the
+    /// only way to reach the uchar ceiling of 64; the same fixture on the
+    /// float arm answers 508.5078125 on the straight edges, eight times
+    /// what a byte holds.
+    ///
+    /// The interpolation inside suppression is what makes 64 dangerous:
+    /// `G * (32 - residual)` is `64 * 32 = 2048` there, so a port that
+    /// blends in `u8` overflows and panics in debug. C promotes to `int`.
+    #[test]
+    fn canny_uchar_g_tops_out_at_64_where_the_float_arm_reaches_508() {
+        let uchar = canny_square9().canny(0.01, Precision::Integer);
+        assert_eq!(
+            u8_rows(&uchar),
+            vec![
+                vec![0, 0, 0, 0, 32, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 32, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 32, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 32, 0, 0, 0, 0],
+                vec![32, 32, 32, 32, 64, 0, 0, 0, 0],
+                vec![0; 9],
+                vec![0; 9],
+                vec![0; 9],
+                vec![0; 9],
+            ],
+            "record gmax_square9_uchar"
+        );
+
+        let float = canny_square9()
+            .cast(float_format(1))
+            .canny(0.01, Precision::Float);
+        let mut want = [[0.0f32; 9]; 9];
+        for row in want.iter_mut().take(4) {
+            row[4] = 508.507_812_5;
+        }
+        want[4] = [
+            508.507_812_5,
+            508.507_812_5,
+            508.507_812_5,
+            508.507_812_5,
+            254.503_906_25,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        assert_f32_grid(&float, &want, "record gmax_square9_float");
+    }
+
+    /// The 256-entry atan2 LUT of `canny.c:200-222`, recomputed in `f64`
+    /// from the C exactly as written: each nibble sign-extended to
+    /// `-8..=7`, `VIPS_DEG(atan2(x, y)) + 360`, then a **truncating**
+    /// `256 * theta / 360` and `& 0xFF`.
+    ///
+    /// `VIPS_DEG` is `(a / (2 * pi)) * 360`, not `a * (180 / pi)`: two
+    /// roundings in that order. The sixty entries that land on an exact
+    /// angle are exactly representable through that chain, and the
+    /// closest of the other 196 sits 0.019 away from a truncation
+    /// boundary, so this recomputation does not depend on the host's
+    /// `atan2` being bit-identical to the one the table was built with.
+    #[test]
+    fn canny_atan2_lut_is_the_canny_c_table() {
+        let sign_extend = |v: i32| if v & 0x8 != 0 { v - 0x10 } else { v };
+        for (i, &entry) in CANNY_ATAN2_LUT.iter().enumerate() {
+            let x = sign_extend(i as i32 & 0xF);
+            let y = sign_extend((i as i32 >> 4) & 0xF);
+            let theta = vips_deg(f64::from(x).atan2(f64::from(y))) + 360.0;
+            let want = ((256.0 * theta / 360.0) as i32 & 0xFF) as u8;
+            assert_eq!(entry, want, "LUT[{i}] for (x, y) = ({x}, {y})");
+        }
+        // The cardinal directions, spelled out: theta is measured from
+        // +y with the arguments swapped, so a gradient pointing along +y
+        // reads 0 and one along +x reads 64.
+        assert_eq!(CANNY_ATAN2_LUT[0x01], 64, "(gx, gy) = (1, 0)");
+        assert_eq!(CANNY_ATAN2_LUT[0x10], 0, "(gx, gy) = (0, 1)");
+        assert_eq!(CANNY_ATAN2_LUT[0x0f], 192, "(gx, gy) = (-1, 0)");
+        assert_eq!(CANNY_ATAN2_LUT[0xf0], 128, "(gx, gy) = (0, -1)");
+        assert_eq!(CANNY_ATAN2_LUT[0x00], 0, "atan2(0, 0) is 0");
+    }
+
+    /// The two polar arms on the twenty engineered `(gx, gy)` pairs, the
+    /// values `oracle.json -> derived_polar.octants` records.
+    ///
+    /// The last three rows are the interesting ones. `(8, 0)` and
+    /// `(0, 8)` both read theta 0 on the uchar path, because the LUT
+    /// throws away the bottom four bits of each axis and a gradient
+    /// smaller than 16 collapses into bucket zero; the float path reads
+    /// the correct 64 and 0. That is not a porting bug to fix, it is what
+    /// the binary does.
+    #[test]
+    fn canny_polar_matches_the_measured_octants_on_both_arms() {
+        let want: [(u8, u8, f32, f32); 20] = [
+            (0, 0, 0.5, 0.0),
+            (8, 64, 8.5, 64.0),
+            (8, 0, 8.5, 0.0),
+            (8, 192, 8.5, 192.0),
+            (8, 128, 8.5, 128.0),
+            (16, 32, 16.5, 32.0),
+            (16, 224, 16.5, 224.0),
+            (16, 96, 16.5, 96.0),
+            (16, 160, 16.5, 160.0),
+            (20, 50, 20.5, 50.890_701),
+            (20, 13, 20.5, 13.109_297),
+            (20, 205, 20.5, 205.109_3),
+            (20, 114, 20.5, 114.890_7),
+            (20, 77, 20.5, 77.109_3),
+            (20, 242, 20.5, 242.890_7),
+            (20, 178, 20.5, 178.890_7),
+            (0, 0, 0.625, 64.0),
+            (0, 0, 0.625, 0.0),
+            (0, 160, 0.75, 160.0),
+            (56, 32, 56.75, 32.0),
+        ];
+        for (&(gx, gy), &(ug, ut, fg, ft)) in CANNY_OCTANT_TARGETS.iter().zip(&want) {
+            assert_eq!(
+                canny_polar_uchar(gx, gy),
+                (ug, ut),
+                "uchar polar of ({gx}, {gy})"
+            );
+            let (g, t) = canny_polar_float(f64::from(gx), f64::from(gy));
+            assert!((g - fg).abs() < 1e-4, "float G of ({gx}, {gy}): {g}");
+            assert!((t - ft).abs() < 1e-3, "float theta of ({gx}, {gy}): {t}");
+        }
+    }
+
+    /// The gradient stage really does put those `(gx, gy)` pairs where
+    /// the fixture says, which is what makes the octant pins above a test
+    /// of the whole polar path rather than of arithmetic in isolation.
+    ///
+    /// It also pins the 2x2 anchor. A 2x2 mask has no tap below or right
+    /// of its centre, so the window for output `(x, y)` is
+    /// `(x - 1, y - 1)..=(x, y)`, and getting that off by one moves every
+    /// probe to the wrong pixel.
+    #[test]
+    fn canny_gradient_recovers_the_engineered_pairs() {
+        let [gx, gy] = canny_octants26()
+            .canny_gradient(0.01, Precision::Integer)
+            .unwrap();
+        assert_eq!(gx.format(), PixelFormat::Gray8, "integer arm keeps uchar");
+        for (n, &(sx, sy)) in CANNY_OCTANT_TARGETS.iter().enumerate() {
+            let (x, y) = canny_octant_probe(n);
+            assert_eq!(
+                (
+                    i32::from(u8_at(&gx, x, y)) - 128,
+                    i32::from(u8_at(&gy, x, y)) - 128
+                ),
+                (sx, sy),
+                "probe {n} at ({x}, {y})"
+            );
+        }
+
+        // And the whole operation over the same fixture, on both arms.
+        assert_eq!(
+            oracle_raw_sha256(&canny_octants26().canny(0.01, Precision::Integer)),
+            "6f3bb853b2e2a617b99ac26c8c9463db2eaba9632c9b1b9a28b105086879f9a4",
+            "record octants_uchar"
+        );
+        assert_eq!(
+            oracle_raw_sha256(
+                &canny_octants26()
+                    .cast(float_format(1))
+                    .canny(0.01, Precision::Float)
+            ),
+            "84023df0c31b34bc1e2d006d31d639dc168187284ba7f354e64ac297170a4299",
+            "record octants_float"
+        );
+    }
+
+    /// The orientation the `canny.c:228` comment gets wrong. It says
+    /// "0 at the top, 64 on the left, 128 on the right and 192 on the
+    /// right edge", naming the right twice and dropping the bottom.
+    ///
+    /// Measured on the disc, uchar arm: **0 at the top, 64 on the left,
+    /// 128 at the bottom, 192 on the right**. Both arms call
+    /// `atan2(gx, gy)` with the arguments swapped relative to the usual
+    /// convention, which is what puts 0 at the top rather than on the
+    /// right. The float arm reads 2.65 / 61.35 / 125.35 / 194.65 at the
+    /// same four points: the 2x2 mask measures the gradient half a pixel
+    /// off centre, and the LUT's 4-bit quantisation is what hides that on
+    /// the uchar arm.
+    #[test]
+    fn canny_theta_reads_zero_at_the_top_of_a_white_disc() {
+        let [gx, gy] = canny_disc33()
+            .canny_gradient(1.4, Precision::Integer)
+            .unwrap();
+        let uchar_at = |x: u32, y: u32| {
+            canny_polar_uchar(
+                i32::from(u8_at(&gx, x, y)) - 128,
+                i32::from(u8_at(&gy, x, y)) - 128,
+            )
+        };
+        for (name, x, y, theta) in [
+            ("top", 16, 4, 0u8),
+            ("left", 4, 16, 64),
+            ("bottom", 16, 28, 128),
+            ("right", 28, 16, 192),
+        ] {
+            assert_eq!(uchar_at(x, y), (32, theta), "uchar disc {name}");
+        }
+
+        let [fx, fy] = canny_disc33()
+            .canny_gradient(1.4, Precision::Float)
+            .unwrap();
+        let (sx, sy) = (fx.f32_samples().unwrap(), fy.f32_samples().unwrap());
+        for (name, x, y, theta) in [
+            ("top", 16usize, 5usize, 2.647_448_f32),
+            ("left", 5, 16, 61.352_55),
+            ("bottom", 16, 28, 125.352_554),
+            ("right", 28, 16, 194.647_45),
+        ] {
+            let i = y * 33 + x;
+            let (g, t) = canny_polar_float(f64::from(sx[i]), f64::from(sy[i]));
+            assert!((g - 42.543_835).abs() < 1e-3, "float disc {name} G: {g}");
+            assert!((t - theta).abs() < 1e-3, "float disc {name} theta: {t}");
+        }
+
+        assert_eq!(
+            oracle_raw_sha256(&canny_disc33().canny(1.4, Precision::Integer)),
+            "816037cbd20a5101d471c898f5d264fc03cf8f1f82e82e3fe618b85eb0cf22de",
+            "record default_disc33_integer"
+        );
+        assert_eq!(
+            oracle_raw_sha256(&canny_disc33().canny(1.4, Precision::Float)),
+            "4cff279b981f71b378fcc6a5041b12baea2347be4b5c6433c5a9440532962963",
+            "record default_disc33_float"
+        );
+    }
+
+    /// `G` on the uchar arm can never leave `0..=64`, and it does reach
+    /// 64. `(gx * gx + gy * gy + 256) >> 9` with both terms clipped to
+    /// `-128..=127` tops out at `(16384 + 16384 + 256) >> 9`, so a wrong
+    /// shift is not caught by "it fits in a byte".
+    #[test]
+    fn canny_polar_uchar_g_stays_inside_0_to_64() {
+        let mut highest = 0u8;
+        for gx in -128..=127i32 {
+            for gy in -128..=127i32 {
+                let (g, _) = canny_polar_uchar(gx, gy);
+                assert!(g <= 64, "G {g} at ({gx}, {gy})");
+                highest = highest.max(g);
+            }
+        }
+        assert_eq!(highest, 64, "the ceiling is reached, not merely respected");
+        // The float arm has no such ceiling and no zero at the bottom:
+        // the `+ 256.0` makes a flat region 0.5 rather than 0.
+        assert!(
+            (canny_polar_float(0.0, 0.0).0 - 0.5).abs() < f32::EPSILON,
+            "flat float G is 0.5, not 0"
+        );
+        assert!(
+            (canny_polar_float(-510.0, 0.0).0 - 508.507_812_5).abs() < 1e-3,
+            "float G is not bounded to a byte"
+        );
+    }
+
+    /// The suppression test is `G <= low || G < high`, with `<=` on one
+    /// side and `<` on the other, and it is not a typo. The plateau
+    /// fixture gives x=4 and x=5 the same `G` (32) and the same `theta`
+    /// (64), so exactly one of the two can survive, and which one is
+    /// decided entirely by that asymmetry.
+    ///
+    /// The mirrored fixture puts the same plateau at theta 192 and the
+    /// survivor moves to the other side. Between them the pair rules out
+    /// every "tidied" variant: both comparisons written `<=` erases the
+    /// edge, both written `<` keeps a 2-pixel-wide edge, and swapping
+    /// them keeps the wrong pixel. The survivor is always the one on the
+    /// strict `<` side.
+    #[test]
+    fn canny_suppression_keeps_the_strict_less_than_side_of_a_plateau() {
+        for (reversed, survivor) in [(false, 4usize), (true, 5)] {
+            let im = canny_plateau(false, reversed);
+            let out = im.canny(0.01, Precision::Integer);
+            let mut want = vec![0u8; 9];
+            want[survivor] = 32;
+            assert_eq!(
+                u8_rows(&out),
+                vec![want; 5],
+                "plateau_h{} survivor",
+                if reversed { "_rev" } else { "" }
+            );
+
+            // The plateau really is a plateau: both candidates carry the
+            // same G and the same theta going in, so nothing but the
+            // comparison can be choosing between them.
+            let [gx, gy] = im.canny_gradient(0.01, Precision::Integer).unwrap();
+            let polar_at = |x: u32| {
+                canny_polar_uchar(
+                    i32::from(u8_at(&gx, x, 2)) - 128,
+                    i32::from(u8_at(&gy, x, 2)) - 128,
+                )
+            };
+            assert_eq!(polar_at(4), polar_at(5), "the two candidates must tie");
+            assert_eq!(polar_at(4).0, 32, "plateau G");
+            assert_eq!(polar_at(4).1, if reversed { 192 } else { 64 }, "plateau theta");
+        }
+    }
+
+    /// The same asymmetry on the other axis, where theta is 0 and 128
+    /// rather than 64 and 192. This is the pair that catches a direction
+    /// table rotated by one step: the offsets run **counter-clockwise
+    /// from top-middle**, which is not the order most implementations
+    /// number their neighbours in.
+    #[test]
+    fn canny_suppression_asymmetry_holds_on_the_vertical_axis() {
+        for (reversed, survivor) in [(false, 4usize), (true, 5)] {
+            let out = canny_plateau(true, reversed).canny(0.01, Precision::Integer);
+            let mut want = vec![vec![0u8; 5]; 9];
+            want[survivor] = vec![32; 5];
+            assert_eq!(
+                u8_rows(&out),
+                want,
+                "plateau_v{} survivor",
+                if reversed { "_rev" } else { "" }
+            );
+        }
+    }
+
+    /// The outer ring is **not** zeroed. `vips_embed` with
+    /// `VIPS_EXTEND_COPY` duplicates the edge pixels, so an edge lying on
+    /// the frame compares against copies of itself and survives.
+    ///
+    /// `border7` puts real edges on the frame on purpose. Its last row
+    /// comes out `0 64 32 32 32 32 32`: live data right on the boundary,
+    /// which a port that supplied zeros outside the image would lose.
+    #[test]
+    fn canny_keeps_edges_that_lie_on_the_frame() {
+        let out = canny_border7().canny(0.01, Precision::Integer);
+        assert_eq!(
+            u8_rows(&out),
+            vec![
+                vec![0, 32, 0, 0, 0, 0, 0],
+                vec![0, 32, 0, 0, 0, 0, 0],
+                vec![0, 32, 0, 0, 0, 0, 0],
+                vec![0, 32, 0, 0, 0, 0, 0],
+                vec![0, 32, 0, 0, 0, 0, 0],
+                vec![0, 32, 0, 0, 0, 0, 0],
+                vec![0, 64, 32, 32, 32, 32, 32],
+            ],
+            "record border7_uchar"
+        );
+
+        // And on the float arm at the default sigma, where the blur
+        // spreads the frame edges into the interior.
+        let float = canny_border7().canny(1.4, Precision::Float);
+        assert_eq!(
+            oracle_raw_sha256(&float),
+            "667a55e2a7285d7f3d18b2648d5d8b66f3eef8bca2cf87f8405e2d7616977e3c",
+            "record border7_float"
+        );
+    }
+
+    /// The output format follows the format of the **blurred** image,
+    /// which is not the same thing as the format of the input. On the
+    /// float arm a uchar input has already been promoted by gaussblur, so
+    /// the uchar gradient branch cannot fire, and the only way back into
+    /// it is a sigma below 0.2, where gaussblur short-circuits to a copy.
+    ///
+    /// libviprs has no `double` depth and no `VipsPrecision::APPROXIMATE`,
+    /// so the reachable half of `oracle.json -> format_table` is this.
+    #[test]
+    fn canny_output_format_follows_the_blurred_image() {
+        let cases: [(PixelFormat, f64, Precision, PixelFormat); 10] = [
+            (PixelFormat::Gray8, 1.4, Precision::Integer, PixelFormat::Gray8),
+            (PixelFormat::Gray8, 1.4, Precision::Float, float_format(1)),
+            (PixelFormat::Gray8, 0.19, Precision::Float, PixelFormat::Gray8),
+            (PixelFormat::Gray8, 0.2, Precision::Float, float_format(1)),
+            (PixelFormat::Gray8, 0.1, Precision::Integer, PixelFormat::Gray8),
+            (PixelFormat::Gray16, 1.4, Precision::Integer, float_format(1)),
+            (PixelFormat::Gray16, 0.1, Precision::Float, float_format(1)),
+            (PixelFormat::Rgb8, 1.4, Precision::Integer, PixelFormat::Rgb8),
+            (PixelFormat::Rgb8, 1.4, Precision::Float, float_format(3)),
+            (PixelFormat::RgbaF32, 1.4, Precision::Integer, PixelFormat::RgbaF32),
+        ];
+        for (src, sigma, precision, want) in cases {
+            let im = Raster::zeroed(9, 9, src).unwrap();
+            let out = im.canny(sigma, precision);
+            assert_eq!(
+                out.format(),
+                want,
+                "canny of {src:?} at sigma {sigma} {precision:?}"
+            );
+            assert_eq!((out.width(), out.height()), (9, 9), "size of {src:?}");
+        }
+    }
+
+    /// Size, band count, interpretation and the attached metadata all
+    /// round-trip, and the bands are independent: `vips canny` on a
+    /// 3-band image is the same op run three times.
+    #[test]
+    fn canny_round_trips_size_bands_and_metadata() {
+        let mut im = canny_noise16rgb()
+            .copy()
+            .interpretation(Interpretation::Srgb)
+            .xres(42.0)
+            .build();
+        im.set_field("exif-data", MetadataValue::Blob(vec![7, 8, 9]));
+        let out = im.canny(1.4, Precision::Integer);
+        assert_eq!(out.format(), PixelFormat::Rgb8, "bands round-trip");
+        assert_eq!((out.width(), out.height()), (16, 16), "size round-trips");
+        assert_eq!(out.interpretation(), Interpretation::Srgb, "interpretation");
+        assert!((out.xres() - 42.0).abs() < 1e-12, "xres");
+        assert_eq!(
+            out.get_field("exif-data"),
+            Some(MetadataValue::Blob(vec![7, 8, 9])),
+            "attached metadata"
+        );
+        assert_eq!(
+            oracle_raw_sha256(&out),
+            "d1c08b4dbdcf9ec9eb005ebd3b4112c418ed0bb94753432b9d2dcecba21a9b4c",
+            "record default_noise16rgb_integer"
+        );
+
+        // Band independence: band 1 of the colour answer is the mono
+        // answer for band 1 of the source.
+        let band1 = gray_from(16, 16, |x, y| {
+            im.data()[((y * 16 + x) * 3 + 1) as usize]
+        });
+        let mono = band1.canny(1.4, Precision::Integer);
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_eq!(
+                    out.data()[((y * 16 + x) * 3 + 1) as usize],
+                    u8_at(&mono, x, y),
+                    "band 1 at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// Where the two libvips implementations disagree, libviprs is the
+    /// portable C one (issue #558), and this is the pin that says so.
+    ///
+    /// `--precision integer` diverges between vectorised and scalar
+    /// libvips at nine of the twelve sigmas the capture swept, by as much
+    /// as 28 on a byte through canny's non-linear stages. **Sigma 1.4,
+    /// the default, is one of the three that agree**, because its
+    /// separable gaussmat has scale 64 and a power of two requantises
+    /// exactly. A suite pinned only at the default would pass against
+    /// either implementation and prove nothing, so the sigmas here are
+    /// 0.8 and 1.6, where the two answers differ in 681 and 280 of the
+    /// 4096 samples.
+    ///
+    /// Both digests are asserted: the one libviprs must produce, and the
+    /// one it must not.
+    #[test]
+    fn canny_targets_the_portable_c_libvips_where_the_two_disagree() {
+        let noise = canny_noise64();
+        for (sigma, novector, vector) in [
+            (
+                0.8,
+                "49403130c8ceda8d5b6d8706bb599b1ae8d2685249f8cd88455a1e279d3ee9a3",
+                "c9d53c9ed50d2174adb875662028f972a3a498ec14a1b9d1914a858d77c973f4",
+            ),
+            (
+                1.6,
+                "d51bc95aff59a56338f32f1caea39cef89443ad26973bf0083a3513322854597",
+                "23a57a8192d5773ed29587430feba68f57c636a7125b6ef96ed9eea8f488d87b",
+            ),
+        ] {
+            let got = oracle_raw_sha256(&noise.canny(sigma, Precision::Integer));
+            assert_eq!(got, novector, "sigma {sigma} must match VIPS_NOVECTOR=1");
+            assert_ne!(got, vector, "sigma {sigma} must not match the vector path");
+        }
+
+        // Sigma 1.4 is where the two agree, so it is a parity pin rather
+        // than a discriminating one.
+        assert_eq!(
+            oracle_raw_sha256(&noise.canny(1.4, Precision::Integer)),
+            "1969e4d9be44bf44ad2b4a548939b65688a9fdde090e0dd43f60086125f967c5",
+            "sigma 1.4, where both libvips paths agree"
+        );
+        // The whole operation with no blur at all, which is what reaches
+        // every one of the 256 atan2 LUT indices.
+        assert_eq!(
+            oracle_raw_sha256(&noise.canny(0.01, Precision::Integer)),
+            "c01f04c1a300765b460488d8d9c305efca088256fac0bbd7ab850084a7f08662",
+            "record gmax_noise64_uchar"
+        );
+    }
+
+    /// A sigma below 0.2 makes the blur an exact copy
+    /// (`convolution/gaussblur.c:71`), so canny reduces to gradient,
+    /// polar and thin. There is no sigma *threshold* on the format
+    /// question, only that copy: 0.01, 0.1 and 0.19 all give the same
+    /// bytes, and 0.2 changes the format on the float arm without
+    /// changing a single value, because from 0.2 to 0.55 the integer
+    /// gaussmat is still a 1x1 identity.
+    #[test]
+    fn canny_sigma_below_the_blur_threshold_is_an_exact_no_op() {
+        let step = canny_step9();
+        let base = step.canny(0.01, Precision::Float);
+        for sigma in [0.1, 0.19] {
+            assert_eq!(
+                step.canny(sigma, Precision::Float).data(),
+                base.data(),
+                "sigma {sigma} must be the same no-blur answer"
+            );
+            assert_eq!(
+                step.canny(sigma, Precision::Float).format(),
+                PixelFormat::Gray8,
+                "sigma {sigma} keeps the blur uchar"
+            );
+        }
+        assert_eq!(
+            u8_rows(&base),
+            vec![vec![0, 0, 0, 0, 32, 0, 0, 0, 0]; 9],
+            "record sigma_step9_0.01_float"
+        );
+
+        // 0.2 is where gaussblur stops short-circuiting. The value does
+        // not change, the format does.
+        let promoted = step.canny(0.2, Precision::Float);
+        assert_eq!(promoted.format(), float_format(1), "sigma 0.2 promotes");
+        let mut want = [[0.0f32; 9]; 9];
+        for row in &mut want {
+            row[4] = 508.507_812_5;
+        }
+        assert_f32_grid(&promoted, &want, "record sigma_step9_0.2_float");
+    }
+
+    /// The `try_*` and panicking forms are the same call, and a sigma
+    /// outside the mask generator's range is a typed error rather than a
+    /// panic.
+    ///
+    /// libviprs does **not** reproduce what the vips CLI does with an
+    /// out-of-range sigma. GObject refuses anything outside `0.01..1000`
+    /// with a `GLib-GObject-CRITICAL`, silently leaves sigma at its 1.4
+    /// default and still exits 0, so `vips canny --sigma 0` is byte
+    /// identical to `--sigma 1.4`. That is the property system talking,
+    /// not the operation, and silently ignoring an argument is not a
+    /// behaviour worth porting: `try_canny` honours whatever it is given,
+    /// exactly as [`Raster::try_gaussblur`] already does.
+    #[test]
+    fn canny_try_and_panicking_forms_agree() {
+        let im = canny_step9();
+        assert_eq!(
+            im.canny(1.4, Precision::Integer).data(),
+            im.try_canny(1.4, Precision::Integer).unwrap().data()
+        );
+        // Below 0.2 the blur is a copy, so sigma 0 is a legal no-blur
+        // request here rather than the 1.4 the CLI quietly substitutes.
+        assert_eq!(
+            im.try_canny(0.0, Precision::Float).unwrap().data(),
+            im.try_canny(0.01, Precision::Float).unwrap().data(),
+            "sigma 0 is the no-blur answer, not the 1.4 one"
+        );
+        assert_ne!(
+            im.try_canny(0.0, Precision::Float).unwrap().format(),
+            im.try_canny(1.4, Precision::Float).unwrap().format(),
+            "and it is not what --sigma 0 gives the CLI"
+        );
+        assert!(matches!(
+            im.try_canny(f64::NAN, Precision::Float),
+            Err(ConvolutionError::InvalidMaskParameter {
+                op: "gaussmat",
+                param: "sigma",
+                ..
+            })
+        ));
+    }
 }
