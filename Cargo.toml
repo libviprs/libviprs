@@ -37,6 +37,17 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
     "webp",
 ] }
+# The WebP codec `image` already pulls in behind its `webp` feature, named
+# directly (issue #568). Promoting it costs no new crate and no lockfile
+# churn: `image` 0.25 depends on `image-webp = "0.2.0"`, so `"0.2.4"`
+# resolves to the one copy that is already in the graph. The reason to name
+# it is the encoder surface. `image::codecs::webp::WebPEncoder` exposes
+# `new_lossless` plus `ImageEncoder`'s ICC and EXIF setters and stops there,
+# where `image_webp::WebPEncoder` also has `set_xmp_metadata`, and XMP is one
+# of the three chunks vips `webpsave --keep` round-trips. The decoder is the
+# same story: only the direct type reports `num_frames()`, which is what
+# libviprs attaches as `n-pages`.
+image-webp = "0.2.4"
 libfuzzer-sys = "0.4"
 libviprs = { path = "." }
 loom = "0.7"
@@ -243,6 +254,7 @@ ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 flate2 = { workspace = true }
 image = { workspace = true }
+image-webp = { workspace = true }
 lopdf = { workspace = true }
 moxcms = { workspace = true }
 pdfium-render = { workspace = true, optional = true }

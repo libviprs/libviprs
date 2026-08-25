@@ -18,10 +18,11 @@
 //! |---|---|---|
 //! | `.png` | [`crate::sink::encode_png`] | none yet (iCCP embedding is an open gap) |
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
+//! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
-//! Formats libviprs cannot encode yet (WebP, TIFF-with-metadata, ...)
-//! return [`SaveError::UnsupportedExtension`]; they arrive with the
+//! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
+//! [`SaveError::UnsupportedExtension`]; they arrive with the
 //! foreign-format batch. Structured EXIF tag writing (`exif-ifd0-*`
 //! fields into the TIFF directory of a JPEG APP1 segment) is also
 //! deferred to the foreign batch: those fields round-trip through `.v`
@@ -789,6 +790,7 @@ impl Raster {
                     encoded
                 }
             }
+            "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
             _ => return Err(SaveError::UnsupportedExtension { extension }),
         };
@@ -1693,6 +1695,36 @@ mod tests {
     }
 
     /**
+     * Tests that `.webp` is a live row in the extension route and that
+     * the lossless encoder behind it round-trips: the file written by
+     * `save` decodes back to the same pixels, and `save_stripped` drops
+     * the metadata chunks the plain `save` embeds. Works by attaching an
+     * ICC blob, saving both ways, and reading each file back.
+     * Input: 2x2 Rgb8 with `icc-profile-data` -> Output: identical
+     * pixels from both files, the profile present after `save` and
+     * absent after `save_stripped`.
+     */
+    #[test]
+    fn save_webp_round_trips_losslessly_and_honours_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut im = rgb_2x2();
+        im.fields
+            .set("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3, 4]));
+
+        let kept = dir.path().join("kept.webp");
+        im.save(&kept).unwrap();
+        let back = decode_file(&kept).unwrap();
+        assert_eq!(back.data(), im.data(), "the WebP encoder is lossless");
+        assert_eq!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
+
+        let stripped = dir.path().join("stripped.webp");
+        im.save_stripped(&stripped).unwrap();
+        let bare = decode_file(&stripped).unwrap();
+        assert_eq!(bare.data(), im.data());
+        assert_eq!(bare.icc_profile(), None);
+    }
+
+    /**
      * Tests save dispatch to PNG: the file decodes back to the same
      * pixels (PNG is lossless), and unknown extensions error.
      */
@@ -1706,11 +1738,6 @@ mod tests {
         assert_eq!(back.width(), 2);
         assert_eq!(back.data(), im.data());
 
-        let err = im.save(&dir.path().join("out.webp")).unwrap_err();
-        assert!(
-            matches!(err, SaveError::UnsupportedExtension { .. }),
-            "{err}"
-        );
         let err = im.save(&dir.path().join("noextension")).unwrap_err();
         assert!(
             matches!(err, SaveError::UnsupportedExtension { .. }),
