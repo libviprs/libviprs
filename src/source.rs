@@ -281,6 +281,13 @@ pub enum SourceError {
     /// opaque string.
     #[error(transparent)]
     Radiance(#[from] crate::radiance::RadianceError),
+    /// A malformed GIF. libviprs decodes GIF through the `gif` crate rather
+    /// than the `image` facade (see [`crate::gif`]), because the facade
+    /// hard-codes RGBA output and hides the transparent index, so its
+    /// failures arrive as the codec's own typed
+    /// [`GifError`](crate::gif::GifError) rather than as an opaque string.
+    #[error(transparent)]
+    Gif(#[from] crate::gif::GifError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -704,8 +711,8 @@ impl SniffedFormat {
     /// Whether [`decode_file_with_limits`] has to read the whole file into
     /// memory rather than streaming it.
     ///
-    /// True for exactly two containers, and for reasons that belong to the
-    /// decoder rather than to the format:
+    /// True for the containers libviprs parses itself, and for reasons that
+    /// belong to the decoder rather than to the format:
     ///
     /// * `.v`, because [`crate::imageio::decode_vips_bytes`] parses the
     ///   libvips header and the JSON metadata trailer itself and needs the
@@ -715,6 +722,12 @@ impl SniffedFormat {
     /// * Radiance, because [`crate::radiance::decode_radiance`] walks the
     ///   header lines and the run-length-encoded body over one addressable
     ///   buffer.
+    /// * GIF, because [`crate::gif::decode_gif`] has to scan every frame's
+    ///   metadata before it can size the output — the band count depends on
+    ///   whether *any* frame declares transparency — and then rewind to
+    ///   decode frame 0. vips does exactly the same thing, and with the same
+    ///   consequence: `vips_foreign_load_nsgif_header` opens with
+    ///   `vips_source_map(gif->source, &size)`, mapping the whole file.
     /// * WebP, because [`crate::webp::decode_webp`] reads the `ICCP`,
     ///   `EXIF` and `XMP ` chunks out of the RIFF directory as well as the
     ///   frame, and the frame is rarely the last chunk in the file.
@@ -722,11 +735,14 @@ impl SniffedFormat {
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
     const fn decodes_from_memory(self) -> bool {
-        matches!(self, Self::Vips | Self::Jpeg | Self::Radiance | Self::WebP)
+        matches!(
+            self,
+            Self::Vips | Self::Jpeg | Self::Gif | Self::WebP | Self::Radiance
+        )
     }
 
-    /// The `image` decoder for this container, or `None` for `.v`,
-    /// Radiance and WebP, which libviprs decodes itself.
+    /// The `image` decoder for this container, or `None` for `.v`, GIF,
+    /// WebP and Radiance, which libviprs decodes itself.
     ///
     /// This is the entire route table, and it is an identity mapping on
     /// purpose: one sniffed container in, one decoder out, no per-format
@@ -739,7 +755,13 @@ impl SniffedFormat {
             Self::Jpeg => Some(image::ImageFormat::Jpeg),
             Self::Png => Some(image::ImageFormat::Png),
             Self::Tiff => Some(image::ImageFormat::Tiff),
-            Self::Gif => Some(image::ImageFormat::Gif),
+            // `image`'s GIF route is reachable but not usable for parity:
+            // `GifDecoder::color_type()` is hard-coded to `Rgba8`, where
+            // `vips gifload` emits three bands unless some frame declares a
+            // transparent index, and the facade surfaces none of the fields
+            // `gifload` attaches. [`crate::gif`] drives the `gif` crate
+            // directly instead (issue #570).
+            Self::Gif => None,
             // The `image` facade's WebP decoder reports neither the frame
             // count nor the XMP chunk, and [`crate::webp`] needs both, so
             // that module drives `image-webp` directly (issue #567).
@@ -914,6 +936,9 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     }
     if sniffed == Some(SniffedFormat::Radiance) {
         return crate::radiance::decode_radiance(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::Gif) {
+        return crate::gif::decode_gif(bytes, limits);
     }
     if sniffed == Some(SniffedFormat::WebP) {
         return crate::webp::decode_webp(bytes, limits);
@@ -1671,8 +1696,9 @@ mod tests {
      * container in, one decoder out, no options and no many-to-one
      * collapsing.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
-     * true for exactly `Vips`, `Jpeg`, `Radiance` and `WebP`, and distinct
-     * `image` formats for every container libviprs does not decode itself.
+     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP` and `Radiance`, and
+     * distinct `image` formats for every container libviprs does not decode
+     * itself.
      */
     #[test]
     fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
@@ -1690,6 +1716,7 @@ mod tests {
         let self_decoded = [
             SniffedFormat::Vips,
             SniffedFormat::Radiance,
+            SniffedFormat::Gif,
             SniffedFormat::WebP,
         ];
 
@@ -1703,10 +1730,11 @@ mod tests {
             vec![
                 SniffedFormat::Vips,
                 SniffedFormat::Jpeg,
+                SniffedFormat::Gif,
                 SniffedFormat::WebP,
                 SniffedFormat::Radiance
             ],
-            "only .v, JPEG, WebP and Radiance may read the whole file into memory"
+            "only .v, JPEG, GIF, WebP and Radiance may read the whole file into memory"
         );
 
         for format in self_decoded {

@@ -12,10 +12,22 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    Align, BandError, ColourError, Combine, DrawError, EngineEvent, Intent, Interpretation,
-    JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError, Precision,
-    RadianceError, RasterError, ResumeError, SourceError, VerifyError,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, GifError, Intent,
+    Interpretation, JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError,
+    Precision, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
 };
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_gif_error_non_exhaustive(v: &GifError) {
+    match v {
+        GifError::Decode { .. } => {}
+        GifError::NoFrames => {}
+        GifError::AllocLimitExceeded { .. } => {}
+        GifError::Raster(_) => {}
+        _ => {}
+    }
+}
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]

@@ -98,6 +98,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default `vips webpload` does too. Reading every frame is issue #569 and waits
   on the page model.
 
+- Still-image GIF load and save (issues #570, #571). `gifload` was routed
+  through the `image` crate's facade and `encode_gif` was a typed stub; both
+  now go straight to the `gif` crate, because the facade cannot reach what
+  either half needs. `image::codecs::gif::GifDecoder` hard-codes `Rgba8`
+  where vips emits three bands for a GIF with no transparent index anywhere,
+  and its `GifEncoder` has no interlace, no dither, and no palette control at
+  all.
+
+  Load produces frame 0 at the logical screen size, which is exactly what
+  `vips gifload` does by default (`page = 0`, `n = 1`), tagged sRGB and
+  carrying `n-pages`, `loop`, `bits-per-sample`, `palette`, and `interlaced`.
+  Seven of the eight GIFs in the libvips reference suite decode
+  byte-identically to vips, over 3.25 MB of pixels; the eighth is
+  `truncated.gif`, where libviprs recovers sixteen more rows out of the
+  broken tail before it gives up and the first 784 rows still match exactly.
+
+  Three details are worth knowing because they are easy to get wrong and all
+  three were settled against the binary rather than the spec. The canvas
+  around frame 0 is transparent black, not the background colour the header
+  reports. `loop` is not the NETSCAPE repeat count: no application extension
+  means 1, a stored count of 0 means 0 (forever), and a stored count of `n`
+  means `n + 1`. And a frame whose pixel data runs off the end of the file
+  counts as declaring transparency, because the rows that never arrived stay
+  uncomposited, so a truncated GIF loads with four bands where the intact one
+  has three.
+
+  Save writes a single-frame GIF89a and takes `interlace`, `dither` and
+  `bitdepth`. `Raster::save`, `encode_to_buffer` and `encode_to_target` all
+  route `.gif` to it, so the extension dispatch works alongside the direct
+  `encode_gif` / `save_gif` pair.
+
+  **Output is not byte-identical to `vips gifsave`, and it never will be.**
+  LZW is exactly lossless and deterministic both ways, so the bitstream is
+  not where the two disagree; palette quantisation is. vips quantises with
+  libimagequant and libviprs with the median-cut quantiser that already backs
+  `encode_png_palette`, and two algorithms pick two different palettes for
+  the same image. What is matched instead is structural, and all of it is
+  checked: the colour table is `2^bitdepth` entries with the same LZW minimum
+  code size vips writes, a transparent index is reserved at 0 under exactly
+  the same condition (measured over twelve bitdepth and colour-count pairs,
+  so an opaque source with palette headroom reloads as four bands here too),
+  alpha is thresholded at 128 with the sub-threshold pixel zeroed outright,
+  and interlaced rows go out in GIF's four-pass order. Where the palette
+  already fits, the round trip is exact.
+
+  The quantiser gap is bounded rather than waved at. On a 48x32 gradient of
+  1536 distinct colours vips scores `avg_abs_diff 3.895` and
+  `max_abs_diff 22` against its own input, and libviprs scores `3.457` and
+  `12`; on the reference `synth_rgb8` fixture vips scores `3.366` and `23`
+  and libviprs `3.944` and `18`. Neither dominates.
+
+  Encoding is byte-reproducible. It was not, before: the shared quantiser
+  gathered distinct colours through a `HashMap` whose iteration order the
+  default `RandomState` reseeds per process, so identical input produced
+  differently ordered palettes and different bytes on every run. That
+  affected `encode_png_palette` too, and is fixed for both.
+
+  Animated GIF is not included. `decode_gif` loads frame 0 and attaches
+  `n-pages` so a caller can see the rest is there; multi-page load and save
+  arrive with the page model. For the same reason the array-valued fields
+  `delay`, `background` and `gif-palette` are read but not attached, since
+  `MetadataValue` has no array variant yet. `gifsave`'s `effort`, `reuse`,
+  `interpalette-maxerror`, `interframe-maxerror` and `keep-duplicate-frames`
+  are cgif-specific palette-reuse and frame-coalescing machinery with no
+  pure-Rust equivalent and are not modelled.
+
 - SVG rasterisation, behind a new non-default `svg` feature (issue #502).
   `decode_svg` was a typed stub reporting that librsvg was missing; it now
   renders through `resvg` and returns a 4-band 8-bit sRGB raster with
