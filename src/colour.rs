@@ -38,18 +38,20 @@
 //! That is a summary of the libvips route table
 //! (`colour/colourspace.c:223-497`), not a transcription of it. libvips
 //! stores an explicit pipeline per ordered pair, and plenty of those
-//! pipelines never reach XYZ. This port takes four of them directly, the
+//! pipelines never reach XYZ. This port takes six of them directly, the
 //! same-family cartesian/polar pairs `Lab <-> Lch` (`:244`, `:276`) and
-//! `OkLab <-> OkLCh` (`:478`, `:494`), because on those the hub inserts a
+//! `OkLab <-> OkLCh` (`:478`, `:494`), and the coding pair
+//! `Lab <-> Labs` (`:246`, `:310`), because on those the hub inserts a
 //! round trip that changes the answer rather than only costing time (the
-//! `polar_shortcut` source notes carry the measured damage). Everything
+//! `direct_edge` source notes carry the measured damage). Everything
 //! else goes through the hub here, including these hub-free edges of
 //! libvips', which is where the next direct route will be wanted:
 //!
-//! * the Lab family reaches `Lch`, `Cmc` and `Labs` from each other with
-//!   no XYZ step: `{ LAB, CMC }` (`:245`), `{ LAB, LABS }` (`:246`),
-//!   `{ LCH, CMC }` (`:279`), `{ LCH, LABS }` (`:280`), `{ CMC, LCH }`
-//!   (`:295`), and the rest of `:293-313`;
+//! * the rest of the Lab family reaches `Lch`, `Cmc` and `Labs` from each
+//!   other with no XYZ step: `{ LAB, CMC }` (`:245`), `{ LCH, CMC }`
+//!   (`:279`), `{ LCH, LABS }` (`:280`), `{ CMC, LCH }` (`:295`),
+//!   `{ CMC, LABS }` (`:297`), `{ LABS, LCH }` (`:312`),
+//!   `{ LABS, CMC }` (`:313`), and the rest of `:293-313`;
 //! * the 8/16-bit RGB block (`srgb`, `scrgb`, `hsv`, `b-w`, `rgb16`,
 //!   `grey16`) converts among itself with no XYZ step (`:352-441`).
 //!
@@ -71,7 +73,9 @@
 //!   interpolation tables; the bisection used here is at least as
 //!   accurate);
 //! * `labs` as Lab scaled to the signed-16-bit code range
-//!   (`L * 32767/100`, `a`,`b * 256`). There is no signed 16-bit
+//!   (`L * 32767/100`, `a`,`b * 256`), clipped and then **truncated
+//!   toward zero**, because `colour/Lab2LabS.c:66-68` stores the clipped
+//!   double into a `signed short`. There is no signed 16-bit
 //!   [`PixelFormat`], so the samples are carried in a float raster whose
 //!   values match the libvips LabS codes;
 //! * Oklab / OkLCh per Ottosson's published matrices (the same constants
@@ -714,14 +718,32 @@ fn yxy_to_xyz(yxy: [f64; 3]) -> [f64; 3] {
 const LABS_L_SCALE: f64 = 32767.0 / 100.0;
 const LABS_AB_SCALE: f64 = 32768.0 / 128.0;
 
+/// Lab -> the LabS code triple, the whole of `vips_Lab2LabS_line`
+/// (`colour/Lab2LabS.c:64-68`) including the store.
+///
+/// The C clips in `double` with `VIPS_CLIP(0, .., SHRT_MAX)` on `L` and
+/// `VIPS_CLIP(SHRT_MIN, .., SHRT_MAX)` on `a`/`b`, then assigns the
+/// result into a `signed short`, which drops the fraction **toward
+/// zero**. That last step is the whole quantiser, so it lives here
+/// rather than at the call sites: `Lab [50, 0, 0]` scales to exactly
+/// `16383.5`, and vips 8.18.4 answers `16383`, not `16384`.
+///
+/// Truncating is not flooring. LabS is the only signed carrier this
+/// module quantises into, so the two differ on negative `a`/`b`, and the
+/// binary picks truncation: `a = +/-0.501953125` scales to `+/-128.5`
+/// and comes back `+/-128`, where flooring would give `128 / -129` and
+/// rounding `129 / -129`.
 fn lab_to_labs(lab: [f64; 3]) -> [f64; 3] {
     [
-        (lab[0] * LABS_L_SCALE).clamp(0.0, 32767.0),
-        (lab[1] * LABS_AB_SCALE).clamp(-32768.0, 32767.0),
-        (lab[2] * LABS_AB_SCALE).clamp(-32768.0, 32767.0),
+        (lab[0] * LABS_L_SCALE).clamp(0.0, 32767.0).trunc(),
+        (lab[1] * LABS_AB_SCALE).clamp(-32768.0, 32767.0).trunc(),
+        (lab[2] * LABS_AB_SCALE).clamp(-32768.0, 32767.0).trunc(),
     ]
 }
 
+/// LabS -> Lab, the plain division `vips_LabS2Lab_line` does
+/// (`colour/LabS2Lab.c:57-59`). No quantiser on this side: the target is
+/// float.
 fn labs_to_lab(labs: [f64; 3]) -> [f64; 3] {
     [
         labs[0] / LABS_L_SCALE,
@@ -821,17 +843,20 @@ fn alias_source(space: Interpretation) -> Interpretation {
     }
 }
 
-/// The direct edge, if any, for a same-family cartesian/polar pair.
+/// The direct edge, if any, for a same-family pair libvips joins with a
+/// single transform.
 ///
 /// Every other pair in the route table meets at the XYZ hub, but libvips
-/// joins the two Lab-like spaces to their polar forms with a single
-/// transform and nothing else in the pipeline: `{ LAB, LCH,
-/// { vips_Lab2LCh } }` (`colour/colourspace.c:244`), `{ LCH, LAB,
-/// { vips_LCh2Lab } }` (:276), `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }`
-/// (:478) and `{ OKLCH, OKLAB, { vips_Oklch2Oklab } }` (:494).
+/// joins each Lab-like space to its polar form with one transform and
+/// nothing else in the pipeline: `{ LAB, LCH, { vips_Lab2LCh } }`
+/// (`colour/colourspace.c:244`), `{ LCH, LAB, { vips_LCh2Lab } }`
+/// (:276), `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }` (:478) and
+/// `{ OKLCH, OKLAB, { vips_Oklch2Oklab } }` (:494). It joins Lab to its
+/// signed-16-bit coding the same way: `{ LAB, LABS, { vips_Lab2LabS } }`
+/// (:246) and `{ LABS, LAB, { vips_LabS2Lab } }` (:310).
 ///
-/// Sending those four through the hub inserts a cube-root round trip
-/// libvips never runs, and on both pairs the two halves of that round
+/// Sending any of those through the hub inserts a round trip libvips
+/// never runs, and on every one of them the two halves of that round
 /// trip fail to invert each other, so this is accuracy and not only time.
 ///
 /// For Oklab the culprit is the matrix: the published inverse is an
@@ -852,22 +877,44 @@ fn alias_source(space: Interpretation) -> Interpretation {
 /// still yields a 1.4e-14 chroma carrying the same 338.199 hue), so the
 /// `L = 50` neutrals a test naturally reaches for hide it completely.
 ///
-/// Taking the edge keeps both conversions a pure polar swap.
+/// For LabS the same residue is what a truncating quantiser cannot
+/// survive. `lab_to_labs` drops the fraction toward zero the way
+/// `Lab2LabS.c:66` does, so a hub residue of `-1e-6` on a code that
+/// should land on a whole number costs a whole count. On a grid of Lab
+/// values with `a`/`b` at multiples of `1/256` the hub misses the direct
+/// answer on 3420 channels, always by exactly one and always at an
+/// integer code: `Lab [0, -128, 1]` is `[0, -32768, 256]` in vips and
+/// `[0, -32767, 255]` through the hub. Rounding used to absorb that,
+/// which is why the routing looked cosmetic until the quantiser was
+/// right. Coming back, `LabS [983, 256, -256]` is `[2.999969482421875,
+/// 1, -1]` in vips and `[2.99994, 1.00052, -1.00021]` through the hub.
+///
+/// Taking the edge keeps the polar pairs a pure polar swap and the LabS
+/// pair a pure scale.
+///
+/// Every entry owns its **complete** target-side production, quantiser
+/// included, because this table never reaches `from_xyz_into`. That is
+/// why the `signed short` truncation lives inside `lab_to_labs` rather
+/// than at the `Labs` arm there: a route added here cannot lose it.
 ///
 /// Cross-family polar pairs are deliberately absent: libvips routes
 /// `{ OKLCH, LCH }` (:483) through XYZ like everything else, and so does
 /// this table by returning `None` for it.
 ///
 /// Same-family is the rule for what is here, not for what libvips joins
-/// directly. `{ LCH, CMC }` (:279) and `{ CMC, LCH }` (:295) are
-/// single-transform edges as well, and `Cmc` is a supported space here,
-/// so it still pays the hub round trip; the module docs list the rest of
-/// the hub-free edges this port has not taken.
-fn polar_shortcut(src: Interpretation, target: Interpretation) -> Option<fn([f64; 3]) -> [f64; 3]> {
-    use Interpretation::{Lab, Lch, OkLab, OkLch};
+/// directly. `{ LCH, CMC }` (:279), `{ CMC, LCH }` (:295),
+/// `{ LCH, LABS }` (:280), `{ LABS, LCH }` (:312), `{ CMC, LABS }`
+/// (:297) and `{ LABS, CMC }` (:313) are hub-free in libvips as well,
+/// and `Lch` and `Cmc` are supported spaces here, so those still pay the
+/// hub round trip; the module docs list the rest of the hub-free edges
+/// this port has not taken.
+fn direct_edge(src: Interpretation, target: Interpretation) -> Option<fn([f64; 3]) -> [f64; 3]> {
+    use Interpretation::{Lab, Labs, Lch, OkLab, OkLch};
     match (src, target) {
         (Lab, Lch) | (OkLab, OkLch) => Some(lab_to_lch),
         (Lch, Lab) | (OkLch, OkLab) => Some(lch_to_lab),
+        (Lab, Labs) => Some(lab_to_labs),
+        (Labs, Lab) => Some(labs_to_lab),
         _ => None,
     }
 }
@@ -932,9 +979,9 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
             out[1] = c_to_ccmc(lch[1]);
             out[2] = ch_to_hcmc(lch[1], lch[2]);
         }
-        Interpretation::Labs => {
-            out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65)).map(f64::round));
-        }
+        // `lab_to_labs` carries the `signed short` truncation, so this
+        // arm and the direct edge quantise through one function.
+        Interpretation::Labs => out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65))),
         Interpretation::ScRgb => out[..3].copy_from_slice(&xyz_to_scrgb(xyz)),
         Interpretation::Hsv => {
             // The libvips HSV encode goes through 8-bit sRGB.
@@ -1703,9 +1750,9 @@ impl Raster {
     /// [`Interpretation::Rgb`] sources are treated as sRGB and
     /// [`Interpretation::Matrix`] as mono, mirroring libvips.
     ///
-    /// `Lab <-> Lch` and `OkLab <-> OkLCh` take the direct in-place edge
-    /// libvips gives them instead of the XYZ hub; see the
-    /// [module docs](crate::colour#colour-space-model).
+    /// `Lab <-> Lch`, `OkLab <-> OkLCh` and `Lab <-> Labs` take the
+    /// direct in-place edge libvips gives them instead of the XYZ hub;
+    /// see the [module docs](crate::colour#colour-space-model).
     ///
     /// # Precision ceiling: routes through HSV are 8-bit
     ///
@@ -1765,10 +1812,9 @@ impl Raster {
         let mut src_px = vec![0.0f64; src_bands];
         let mut tgt_px = [0.0f64; 4];
         let identity = src == target;
-        // The four same-family cartesian/polar pairs libvips joins with a
-        // direct edge rather than routing through the XYZ hub; see
-        // `polar_shortcut`.
-        let shortcut = polar_shortcut(src, target);
+        // The same-family pairs libvips joins with a single transform
+        // rather than routing through the XYZ hub; see `direct_edge`.
+        let shortcut = direct_edge(src, target);
 
         for p in 0..total {
             let in_base = p * channels;
@@ -1782,8 +1828,8 @@ impl Raster {
                 }
             } else {
                 match shortcut {
-                    Some(polar) => {
-                        tgt_px[..3].copy_from_slice(&polar([src_px[0], src_px[1], src_px[2]]));
+                    Some(edge) => {
+                        tgt_px[..3].copy_from_slice(&edge([src_px[0], src_px[1], src_px[2]]));
                     }
                     None => from_xyz_into(target, to_xyz(src, &src_px), &mut tgt_px),
                 }
@@ -3229,9 +3275,11 @@ mod tests {
                 [1638.0, 25.0, -25.0],
                 [4.998931884765625, 0.09765625, -0.09765625],
             ),
+            // vips prints this one as 0.99795526266098022, which is the
+            // same f32 with a digit more than f64 needs.
             (
                 [327.0, 1.0, -1.0],
-                [0.99795526266098022, 0.00390625, -0.00390625],
+                [0.9979552626609802, 0.00390625, -0.00390625],
             ),
             ([983.0, 256.0, -256.0], [2.999969482421875, 1.0, -1.0]),
             ([2621.0, 0.0, 0.0], [7.9989013671875, 0.0, 0.0]),
