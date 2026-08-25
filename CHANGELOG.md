@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `decode_svg` takes a `SvgOptions` instead of a bare `Option<f64>` DPI
+  (issue #502). It used to be `decode_svg(data, Some(144.0))`, and it is now
+  `decode_svg(data, SvgOptions { dpi: 144.0, ..Default::default() })`. The old
+  shape had nowhere to put `scale` or `unlimited`, which are two of the three
+  load options vips `svgload` actually takes, and growing it to a third
+  positional argument would have broken every call site anyway. The function
+  also moved from `crate::foreign_stubs` to the new `crate::svg`, but the
+  crate-root spelling `libviprs::decode_svg` is unchanged.
+
 - `colourspace` to `labs` now truncates the LabS code toward zero instead of
   rounding it, so the output bytes of every conversion into `labs` change
   (issue #556). `Lab [50, 0, 0]` came out as `16384` and is now `16383`, which
@@ -44,6 +53,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   swept grid.
 
 ### Added
+
+- SVG rasterisation, behind a new non-default `svg` feature (issue #502).
+  `decode_svg` was a typed stub reporting that librsvg was missing; it now
+  renders through `resvg` and returns a 4-band 8-bit sRGB raster with
+  unpremultiplied alpha, matching what vips gets out of librsvg and cairo.
+  `dpi`, `scale` and `unlimited` are implemented and pinned against vips
+  8.18.4: `total_scale = scale * dpi / 72`, output geometry rounds half up,
+  and `Xres`/`Yres` become `dpi / 25.4` pixels per millimetre. `scale`
+  deliberately does not move the resolution, and a physically-sized document
+  takes `dpi` twice (once converting millimetres to user units, once through
+  `total_scale`) because that is what vips measurably does.
+
+  The feature is off by default because it costs 29 crates. All of them are
+  pure Rust: no `-sys` crates and nothing that compiles C, so enabling it does
+  not put a C toolchain in your build.
+
+  `<image xlink:href>` never resolves. usvg's stock resolver reads local files
+  and, with no `resources_dir` set, takes the href verbatim, so an untrusted
+  document could read arbitrary files and probe for their existence. Both
+  halves of the resolver are overridden to refuse every href, which means
+  `<image>` elements do not render at all, from any source including `data:`
+  URIs. That is a deliberate divergence from vips.
+
+  Not implemented: `stylesheet`, `high_bitdepth` (resvg has no float surface
+  to render scRGB into), and text fidelity. Text renders against the bundled
+  Bitstream Vera face so it is deterministic, but vips shapes through pango
+  against system fonts and the two do not match: measured, 12.8% of pixels
+  differ on a short line of text and the advance width moves. SVG is also not
+  added to the content-sniffing route table, because it has no fixed leading
+  magic; `decode_svg` is the entry point.
 
 - Radiance HDR (`.hdr`) load and save (issue #506): `decode_radiance` reads a
   Radiance file into a `FloatF32(3)` raster tagged `ScRgb`, and
