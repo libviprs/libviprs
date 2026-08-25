@@ -1523,7 +1523,9 @@ mod tests {
     /// The intize scale adjustment: a fractional mask whose rounded scale
     /// would skew brightness gets the libvips nudge. Mask [[0.4, 0.4]],
     /// scale 0.8: double result 1.0; rint mask [0, 0], rint scale 1,
-    /// int result 0; adjusted scale rint(1 + (0 - 1)) = 0 -> 1.
+    /// int result 0; adjusted scale rint(1 + (0 - 1)) = 0 -> 1. The offset
+    /// rides along rounded but never rescaled, as `vips__image_intize`
+    /// leaves it.
     #[test]
     fn intize_matches_vips_image_intize() {
         let dense = DenseKernel::new(&Kernel {
@@ -1531,24 +1533,200 @@ mod tests {
             scale: 0.8,
         })
         .unwrap();
-        let (imask, iscale) = intize(&dense, 0.8);
+        let (imask, iscale, ioffset) = intize(&dense, 0.8, 0.0);
         assert_eq!(imask, vec![0, 0]);
         assert_eq!(iscale, 1);
+        assert_eq!(ioffset, 0);
+
+        // The scale is nudged from 0.8 to 1 here, and the offset does not
+        // follow it: 127.6 rounds to 128 and stays there.
+        let (_, iscale, ioffset) = intize(&dense, 0.8, 127.6);
+        assert_eq!(iscale, 1);
+        assert_eq!(ioffset, 128);
 
         // The ported blur mask stays untouched: ints in, sum matches.
         let dense = DenseKernel::new(&ported_masks()[1]).unwrap();
-        let (imask, iscale) = intize(&dense, 9.0);
+        let (imask, iscale, ioffset) = intize(&dense, 9.0, 128.0);
         assert_eq!(imask, vec![1; 9]);
         assert_eq!(iscale, 9);
+        assert_eq!(ioffset, 128);
 
-        // rint() is round-half-to-even, like C under the default mode.
+        // rint() is round-half-to-even, like C under the default mode, for
+        // the coefficients and for the offset alike.
         let dense = DenseKernel::new(&Kernel {
             data: vec![vec![0.5, 1.5, 2.5]],
             scale: 4.5,
         })
         .unwrap();
-        let (imask, _) = intize(&dense, 4.5);
+        let (imask, _, ioffset) = intize(&dense, 4.5, 0.5);
         assert_eq!(imask, vec![0, 2, 2]);
+        assert_eq!(ioffset, 0);
+        let (_, _, ioffset) = intize(&dense, 4.5, 1.5);
+        assert_eq!(ioffset, 2);
+    }
+
+    /// FNV-1a over a whole buffer, so a full `data()` comparison fits in
+    /// one pinned constant.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// A `w x h` single-band float raster of deterministic noise spanning
+    /// negatives, for the two arms that never clip.
+    fn noise_float(w: u32, h: u32, seed: u32) -> Raster {
+        let mut next = lcg(seed);
+        let samples: Vec<f32> = (0..w as usize * h as usize)
+            .map(|_| f32::from(next()) - 128.0)
+            .collect();
+        Raster::from_f32_samples(w, h, float_format(1), &samples).unwrap()
+    }
+
+    /// The regression guard for the mask offset: at `offset` 0
+    /// `conv_raster_offset` reproduces the pre-offset output byte for byte.
+    /// The digests are FNV-1a over the whole `data()` buffer, captured from
+    /// the implementation before the summand existed, for all four
+    /// `ported_masks()` at both precisions on the uchar, colour, and float
+    /// input arms. The public `conv` must still route through the shim, so
+    /// its bytes have to agree as well.
+    #[test]
+    fn conv_raster_offset_zero_reproduces_the_pre_offset_bytes() {
+        // Per input, per mask: [integer-precision digest, float-precision
+        // digest].
+        let cases: [(Raster, [[u64; 2]; 4]); 3] = [
+            (
+                noise_gray(20, 20, 3),
+                [
+                    [0x174d_88ee_bcd8_e438, 0x3bd6_7d6f_0acf_a5e1],
+                    [0x9fc6_4404_fea1_81aa, 0x846e_0e05_d2fc_f4a8],
+                    [0xe3d0_476d_d341_4c0c, 0x2040_8791_364f_a5fa],
+                    [0xc498_5b9d_52c5_d19d, 0x2161_3ea2_a21a_d2a2],
+                ],
+            ),
+            (
+                noise_rgb(20, 20, 4),
+                [
+                    [0xafe4_ffc1_6589_4821, 0x39af_ddc5_5d7b_224a],
+                    [0x394a_993d_89dc_9a48, 0x384b_b952_bc40_fbd2],
+                    [0xac22_fd7d_f031_f7ee, 0xc48f_d1e2_df84_e123],
+                    [0x3fbb_9591_64dc_34f1, 0x9fa3_91a6_b1da_13dc],
+                ],
+            ),
+            (
+                noise_float(20, 20, 7),
+                [
+                    [0x3ac8_42a9_30db_a65a, 0x3ac8_42a9_30db_a65a],
+                    [0x8c9f_1585_edd2_37cc, 0x9349_0ad8_c550_c5bd],
+                    [0xa98a_afa4_f29e_4792, 0xa98a_afa4_f29e_4792],
+                    [0xbed3_519d_d204_b58a, 0xbed3_519d_d204_b58a],
+                ],
+            ),
+        ];
+
+        for (im, per_mask) in &cases {
+            for (mask, digests) in ported_masks().iter().zip(per_mask) {
+                let dense = DenseKernel::new(mask).unwrap();
+                for (precision, expected) in [
+                    (Precision::Integer, digests[0]),
+                    (Precision::Float, digests[1]),
+                ] {
+                    let out = conv_raster_offset(im, &dense, mask.scale, 0.0, precision).unwrap();
+                    let shim = im.conv(mask, precision);
+                    assert_eq!(
+                        fnv1a(out.data()),
+                        expected,
+                        "offset 0 changed the {precision:?} output for {:?} input, mask {mask:?}",
+                        im.format()
+                    );
+                    assert_eq!(out.format(), shim.format());
+                    assert_eq!(
+                        out.data(),
+                        shim.data(),
+                        "conv no longer routes through the zero-offset shim"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The uchar recipe of `convolution/edge.c` (`offset` 128, `scale` 2 on
+    /// a sobel mask): the offset lands before the clip, so a flat region
+    /// reads as the 128 zero point, a falling edge saturates at 0 and a
+    /// rising edge at 255. Without the offset the same input never reaches
+    /// the top of the range.
+    #[test]
+    fn conv_raster_offset_clips_symmetrically_on_the_uchar_arm() {
+        // Three columns wide so the horizontal edge replication is a
+        // no-op; rows 2..=4 are the bright band.
+        let rows: [u8; 7] = [0, 0, 255, 255, 255, 0, 0];
+        let data: Vec<u8> = rows.iter().flat_map(|&v| [v, v, v]).collect();
+        let im = Raster::new(3, 7, PixelFormat::Gray8, data).unwrap();
+        let mask = Kernel {
+            data: vec![
+                vec![1.0, 2.0, 1.0],
+                vec![0.0, 0.0, 0.0],
+                vec![-1.0, -2.0, -1.0],
+            ],
+            scale: 2.0,
+        };
+        let dense = DenseKernel::new(&mask).unwrap();
+
+        let out = conv_raster_offset(&im, &dense, mask.scale, 128.0, Precision::Integer).unwrap();
+        assert_eq!(out.format(), PixelFormat::Gray8);
+        // sum 0 -> (0 + 1) / 2 + 128; sum -1020 -> -509 + 128 -> clipped to
+        // 0; sum +1020 -> 510 + 128 -> clipped to 255.
+        let got: Vec<f64> = (0..7).map(|y| out.getpoint(1, y)[0]).collect();
+        assert_eq!(got, vec![128.0, 0.0, 0.0, 128.0, 255.0, 255.0, 128.0]);
+
+        // The same mask with no offset: the low end still clips at 0, but
+        // nothing reaches 255 and the flat region is black.
+        let plain = conv_raster_offset(&im, &dense, mask.scale, 0.0, Precision::Integer).unwrap();
+        let got: Vec<f64> = (0..7).map(|y| plain.getpoint(1, y)[0]).collect();
+        assert_eq!(got, vec![0.0, 0.0, 0.0, 0.0, 255.0, 255.0, 0.0]);
+    }
+
+    /// A float input never clips, on either arm. Under integer precision
+    /// the offset is the rounded one `vips_convi_gen` reads
+    /// (`rint()`, half to even); under float precision `vips_convf_gen`
+    /// keeps the raw double.
+    #[test]
+    fn conv_raster_offset_is_unclipped_on_the_float_input_arms() {
+        let im = Raster::from_f32_samples(2, 2, float_format(1), &[10.0; 4]).unwrap();
+        let mask = ported_masks().remove(1); // the 3x3 all-ones blur, scale 9
+        let dense = DenseKernel::new(&mask).unwrap();
+
+        // Integer precision, float input: intize gives an all-ones mask and
+        // scale 9, so the sum is exactly 10 before the offset.
+        for (offset, want) in [
+            (1000.0, 1010.0),
+            (-1000.0, -990.0),
+            (0.5, 10.0),
+            (1.5, 12.0),
+        ] {
+            let out =
+                conv_raster_offset(&im, &dense, mask.scale, offset, Precision::Integer).unwrap();
+            assert_eq!(out.format(), float_format(1));
+            let got = out.getpoint(0, 0)[0];
+            assert!(
+                (got - want).abs() < 1e-4,
+                "integer precision, float input, offset {offset}: got {got}, want {want}"
+            );
+        }
+
+        // Float precision keeps the offset unrounded and unclipped.
+        for (offset, want) in [(1000.0, 1010.0), (-1000.0, -990.0), (0.5, 10.5)] {
+            let out =
+                conv_raster_offset(&im, &dense, mask.scale, offset, Precision::Float).unwrap();
+            let got = out.getpoint(1, 1)[0];
+            assert!(
+                (got - want).abs() < 1e-4,
+                "float precision, offset {offset}: got {got}, want {want}"
+            );
+        }
     }
 
     /// convsep equals the full 2D convolution with the outer-product mask
