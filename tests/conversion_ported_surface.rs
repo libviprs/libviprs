@@ -305,6 +305,20 @@ fn ported_arrayjoin_call_sites() {
     let im = Raster::arrayjoin(&[&mono, &colour], Some(1), None);
     assert_eq!(im.width(), colour.width());
     assert_eq!(im.height(), mono.height() + colour.height());
+
+    // The same two guards `join` carries, matchable from outside the crate.
+    assert!(matches!(
+        Raster::try_arrayjoin(&[&mono, &colour], None, Some(1_000_001)),
+        Err(ConversionError::ShimTooLarge {
+            shim: 1_000_001,
+            max: 1_000_000
+        })
+    ));
+    let ramp = Raster::grey(4, 4, false);
+    assert!(matches!(
+        Raster::try_arrayjoin(&[&ramp, &mono], None, None),
+        Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" })
+    ));
 }
 
 /// The ported `test_grey` body (`ported_create.rs`), both halves: the

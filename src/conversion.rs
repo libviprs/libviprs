@@ -190,13 +190,14 @@ pub enum ConversionError {
     /// every "this is too big" outcome from `join` has to match both.
     #[error("result size {width}x{height} exceeds u32::MAX")]
     SizeOverflow { width: u64, height: u64 },
-    /// A `shim` above the maximum libvips accepts. `join.c` declares the
-    /// property as `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so
-    /// GObject refuses `vips join --shim 1000001` before the operation
-    /// runs at all. Widening the argument to `u32` here carried the lower
-    /// bound into the type but not the upper one, so the upper bound is
-    /// checked instead: without it a single argument asks for a canvas of
-    /// several gigabytes out of two tiny inputs.
+    /// A `shim` above the maximum libvips accepts, from either
+    /// [`Raster::join`] or [`Raster::arrayjoin`]. Both declare the property
+    /// as `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so GObject
+    /// refuses `--shim 1000001` before either operation runs at all.
+    /// Widening the argument to `u32` here carried the lower bound into the
+    /// type but not the upper one, so the upper bound is checked instead:
+    /// without it a single argument asks for a canvas of several gigabytes
+    /// out of two tiny inputs.
     #[error("shim must be at most {max}, got {shim}")]
     ShimTooLarge {
         /// The `shim` that was asked for.
@@ -228,12 +229,15 @@ pub enum ConversionError {
         y: i64,
     },
     /// The operation was handed a float raster it cannot read yet.
-    /// [`Raster::try_join`] returns this instead of delegating into the
-    /// unsigned-only placement path, which reads samples as `u8` or `u16`
-    /// and panics on 4-byte ones. Float input is ordinary rather than
-    /// exotic here: every `colourspace` result for Lab, Lch, OkLab, OkLCh,
-    /// XYZ, scRGB and Yxy is a float raster, so `im.colourspace(Lab)` is
-    /// already one. Mirrors
+    /// [`Raster::try_join`] and [`Raster::try_arrayjoin`] return this
+    /// instead of running into the unsigned-only sample copy, which reads
+    /// samples as `u8` or `u16` and panics on 4-byte ones. Float input is
+    /// ordinary rather than exotic here: every `colourspace` result for
+    /// Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is a float raster, so
+    /// `im.colourspace(Lab)` is already one. Real vips handles float on
+    /// both operations, so this is a libviprs limitation rather than
+    /// parity; it is a typed error so a fallible method reports it instead
+    /// of panicking. Mirrors
     /// [`crate::arithmetic::ArithmeticError::FloatUnsupported`].
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
     FloatFormatUnsupported {
@@ -682,17 +686,20 @@ fn remap(
     Ok(out)
 }
 
-/// The largest `shim` [`Raster::join`] accepts, matching the libvips
-/// property bound: `join.c` declares `VIPS_ARG_INT(class, "shim", 5, ...,
-/// 0, 1000000, 0)`, and GObject refuses anything above it before the
-/// operation is even built.
-const JOIN_SHIM_MAX: u32 = 1_000_000;
+/// The largest `shim` [`Raster::join`] and [`Raster::arrayjoin`] accept,
+/// matching the libvips property bound both operations declare:
+/// `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)` in `join.c` and the
+/// same range in `arrayjoin.c`. GObject refuses anything above it before
+/// either operation is even built, and the binary agrees:
+/// `vips join --shim 1000001` and `vips arrayjoin --shim 1000001` both fail
+/// with the same CRITICAL.
+const SHIM_MAX: u32 = 1_000_000;
 
 /// Where the second image sits relative to the first, in pixels from the
 /// first image's origin (`join.c:109-156`).
 ///
 /// Every input is widened to `i64` first, so nothing here can wrap: the
-/// dimensions come from `u32` and `shim` is bounded by [`JOIN_SHIM_MAX`],
+/// dimensions come from `u32` and `shim` is bounded by [`SHIM_MAX`],
 /// which puts every intermediate under 2^33. The result is then range
 /// checked against the `i32` placement [`Raster::try_insert`] takes and
 /// libvips itself computes in.
@@ -1579,6 +1586,10 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConversionError::EmptyInput`] for an empty list,
+    /// [`ConversionError::FloatFormatUnsupported`] if any input is a float
+    /// raster (the sample copy is unsigned-only),
+    /// [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`, the
+    /// bound libvips declares on the property,
     /// [`ConversionError::BandCountMismatch`] if band counts differ and
     /// the smaller is not 1, [`ConversionError::SizeOverflow`] if the
     /// grid exceeds `u32` dimensions, or [`ConversionError::Raster`] on
@@ -1591,10 +1602,27 @@ impl Raster {
         if images.is_empty() {
             return Err(ConversionError::EmptyInput { op: "arrayjoin" });
         }
+        // The sample copy below is `read_flat` / `write_flat`, which are
+        // unsigned-only and panic on 4-byte samples, so a float input has to
+        // be refused here rather than panicking out of a fallible method.
+        // Same reason as `try_join`: `space_depth` maps Lab, Lch, OkLab,
+        // OkLCh, XYZ, scRGB and Yxy all to F32, so a `colourspace` result is
+        // already float.
+        if images.iter().any(|i| i.format().is_float()) {
+            return Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" });
+        }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
         let across = across.unwrap_or(n).clamp(1, n);
         let down = n.div_ceil(across);
         let shim = shim.unwrap_or(0);
+        // `arrayjoin` declares the same 0..=1000000 property range `join`
+        // does, so the same bound applies; see `SHIM_MAX`.
+        if shim > SHIM_MAX {
+            return Err(ConversionError::ShimTooLarge {
+                shim,
+                max: SHIM_MAX,
+            });
+        }
 
         let bands = images
             .iter()
@@ -1675,8 +1703,17 @@ impl Raster {
     /// Tile a list of images into a grid (libvips `vips_arrayjoin`).
     ///
     /// `across` is the number of images per row (default: all of them in
-    /// one row, clamped to `1..=n` as in libvips); `shim` is the gap in
-    /// pixels between cells (default 0). Every cell is the size of the
+    /// one row); `shim` is the gap in pixels between cells (default 0,
+    /// maximum `1000000` as in libvips). Float rasters are not supported
+    /// yet on any input.
+    ///
+    /// Known divergence: `across` is currently clamped to the number of
+    /// images, so a value larger than the list gives one full row. Real
+    /// vips does not clamp, and lays out the empty trailing cells: `vips
+    /// arrayjoin "a.v c.v" out.v --across 5` on a 3x2 and a 2x3 gives 15x3,
+    /// where libviprs gives 6x3. vips also refuses `--across 0` and
+    /// `--across 1000001` at the property boundary, which libviprs clamps
+    /// instead. Every cell is the size of the
     /// largest input; smaller images sit at the top-left of their cell and
     /// the remainder (and any trailing empty cells and shim gaps) is
     /// filled with black, libvips' default background. Band counts are
@@ -1766,10 +1803,10 @@ impl Raster {
         // to `u32` kept the lower bound and dropped the upper one, and
         // without it one argument buys a multi-gigabyte canvas out of two
         // 3x2 inputs, each raster staying under the per-raster budget.
-        if shim > JOIN_SHIM_MAX {
+        if shim > SHIM_MAX {
             return Err(ConversionError::ShimTooLarge {
                 shim,
-                max: JOIN_SHIM_MAX,
+                max: SHIM_MAX,
             });
         }
         let shim = i64::from(shim);
@@ -3341,7 +3378,16 @@ mod tests {
     }
 
     /**
-     * Tests that across is clamped to 1..=n like libvips VIPS_CLIP.
+     * Tests the current `across` clamp, which is a KNOWN DIVERGENCE and not
+     * libvips parity, contrary to what this test used to claim. Measured
+     * against vips 8.18.4 on the 3x2 / 2x3 pair, `across` is not clamped to
+     * the image count at all: `--across 3` gives 9x3 and `--across 5` gives
+     * 15x3, laying out the empty trailing cells, where libviprs gives 6x3
+     * for both. vips also refuses `--across 0` and `--across 1000001` at
+     * the property boundary (`VIPS_ARG_INT(..., 1, 1000000, 1)`) rather
+     * than clamping them. This test pins what libviprs does today so the
+     * divergence is visible and a fix has something to change; it is not a
+     * statement about what vips does.
      * Input: Some(0) behaves as 1 (stack), Some(99) as n (row).
      */
     #[test]
@@ -3385,6 +3431,58 @@ mod tests {
         let out = Raster::arrayjoin(&[&mono, &colour], None, None);
         assert_eq!(out.format(), PixelFormat::Rgb8);
         assert_eq!(out.interpretation(), Interpretation::Srgb);
+    }
+
+    /**
+     * Tests that a float input is a typed error rather than a panic out of
+     * a fallible method. `arrayjoin`'s sample copy is `read_flat` /
+     * `write_flat`, which are unsigned-only, and a float raster is ordinary
+     * input: every `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ,
+     * scRGB and Yxy is float. Real vips handles it (`vips arrayjoin
+     * "af.v a.v" out.v` gives `6x2 float`), so this is a libviprs
+     * limitation reported honestly rather than parity.
+     * Works by putting the float `grey` ramp in each list position.
+     * Input: FloatF32 2x2 ramp beside a Gray8 1x1.
+     */
+    #[test]
+    fn try_arrayjoin_float_input_is_a_typed_error_not_a_panic() {
+        let ramp = Raster::grey(2, 2, false);
+        assert!(ramp.format().is_float());
+        let plain = gray8(1, 1, vec![1]);
+        for list in [[&ramp, &plain], [&plain, &ramp]] {
+            assert!(matches!(
+                Raster::try_arrayjoin(&list, None, None),
+                Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" })
+            ));
+        }
+    }
+
+    /**
+     * Tests the libvips bound on `arrayjoin`'s `shim`, the same
+     * `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)` range `join`
+     * declares: `vips arrayjoin "a.v c.v" out.v --shim 1000001` fails with
+     * the same GObject CRITICAL. Both sides of the bound are pinned, the
+     * accepting one against the measured `vips arrayjoin "t1.v t1.v" out.v
+     * --shim 1000000` result of `1000002x1`.
+     * Input: two 1x1 images, shim 1000001 then 1000000.
+     */
+    #[test]
+    fn try_arrayjoin_shim_above_the_vips_maximum_is_rejected() {
+        let a = gray8(1, 1, vec![1]);
+        let b = gray8(1, 1, vec![2]);
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], None, Some(1_000_001)),
+            Err(ConversionError::ShimTooLarge {
+                shim: 1_000_001,
+                max: 1_000_000
+            })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], None, Some(u32::MAX)),
+            Err(ConversionError::ShimTooLarge { .. })
+        ));
+        let out = Raster::arrayjoin(&[&a, &b], None, Some(1_000_000));
+        assert_eq!((out.width(), out.height()), (1_000_002, 1));
     }
 
     /**

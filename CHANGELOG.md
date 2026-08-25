@@ -164,6 +164,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Raster::try_arrayjoin` no longer panics on a float input (issue #551). Its
+  sample copy is unsigned-only and panicked on 4-byte samples, so a fallible
+  method aborted the process on ordinary input: `space_depth` maps Lab, Lch,
+  OkLab, OkLCh, XYZ, scRGB and Yxy all to F32, which makes every `colourspace`
+  result for those spaces a float raster. It is now
+  `ConversionError::FloatFormatUnsupported { op: "arrayjoin" }`, the same
+  guard `join` got, and the panicking `arrayjoin` twin still panics through
+  the usual `expect` path. Real vips handles float on both operations, so this
+  is a libviprs limitation reported honestly rather than parity, and it goes
+  away when the unsigned-only sample helpers grow a float arm.
+
+- `Raster::arrayjoin` now rejects a `shim` above `1000000` with
+  `ConversionError::ShimTooLarge` (issue #551), the same bound `join` got.
+  Both operations declare the property as `VIPS_ARG_INT(class, "shim", 5, ...,
+  0, 1000000, 0)`, and the binary refuses `vips arrayjoin --shim 1000001` with
+  the identical GObject CRITICAL, so the two now agree with each other and
+  with vips. `--shim 1000000` still builds the grid vips builds.
+
 - `Raster::arrayjoin` no longer tags a band-promoted grid with the first
   image's interpretation (issue #551). `bandalike` promotes a one-band input
   up to the widest band count in the list, so a grid built from a 1-band
