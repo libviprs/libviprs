@@ -74,6 +74,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Canny edge detection: `Raster::canny` and `Raster::try_canny`, matching
+  `vips_canny` (issues #511, #559 and #560). It takes `sigma` and `precision`
+  and nothing else, because libvips's canny **stops after non-maximum
+  suppression**: it blurs, takes a 2x2 `[-1 1; -1 1]` gradient, converts to
+  `(G, theta)`, thins along the gradient direction, and that is the whole
+  operation. There is no double-thresholding and no edge tracking by
+  connectivity, which is why there are no hysteresis thresholds to pass. Expect
+  the result to look thinner and greyer than a textbook Canny, because it is a
+  suppressed gradient magnitude rather than a binary edge map.
+
+  The output format is the surprising part, so it is worth stating before you
+  wire it into a pipeline: `precision` reaches only the blur, and the gradient
+  stage then picks its own arm from the format of the *blurred* image. On the
+  float arm the blur has already promoted a uchar input by then, so canny
+  answers a float raster whose values run past 500 and do not fit a byte. A
+  uchar input comes back uchar only at integer precision or below sigma 0.2,
+  where the blur short-circuits to a copy. Everything 16-bit or float comes
+  back float at every precision. Size, band count, interpretation, resolution
+  and the attached metadata always round-trip.
+
+  One deliberate divergence from the `vips` CLI: `vips canny --sigma 0` does
+  not fail. GObject refuses any value outside `0.01..1000`, silently leaves
+  sigma at its 1.4 default and still exits 0, so the CLI quietly runs a
+  different blur than the one asked for. `try_canny` honours what it is given,
+  as `try_gaussblur` already does, so a sigma below 0.2 is a no-blur request.
+
+  Pinned against `oracle-captures/convolution/canny/`, which captured 42 vips
+  8.18.4 outputs on both libvips paths. Where the two disagree libviprs is the
+  portable C one, as issue #558 settled, and the suite says so at sigma 0.8 and
+  1.6 rather than only at the 1.4 default, which is one of the few sigmas where
+  the two implementations happen to agree.
+
 - Still-image WebP load and lossless save (issues #567 and #568). `decode_webp`
   reads every WebP this build can meet — lossy `VP8`, lossless `VP8L`, alpha,
   and the extended `VP8X` container — and lifts the `ICCP`, `EXIF` and `XMP `
