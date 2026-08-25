@@ -101,10 +101,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[2.999969482421875, 1, -1]` in vips and was `[2.99994, 1.00052, -1.00021]`.
 
   `Lch <-> Labs` and `Cmc <-> Labs` are hub-free in libvips too (`:280`,
-  `:297`, `:312`, `:313`) and still take the hub here, so they keep a
-  one-count error wherever the exact code is a whole number. Truncating still
-  leaves them closer to vips than rounding did, by a factor of three on a
-  swept grid.
+  `:297`, `:312`, `:313`); they took the hub until issue #583, below.
+
+- `Lch <-> Labs` and `Cmc <-> Labs` take the direct routes too, so the output
+  bytes of conversions between those spaces change (issue #583). libvips joins
+  them without an XYZ step (`{ LCH, LABS }` at `colour/colourspace.c:280`,
+  `{ CMC, LABS }` at `:297`, `{ LABS, LCH }` at `:312`, `{ LABS, CMC }` at
+  `:313`) and this port sent them round the hub, which costs the same whole
+  count issue #556 found on `Lab <-> Labs`: the `Lab -> XYZ -> Lab` residue is
+  a few parts in 1e6 and truncation turns that into a lost count whenever the
+  exact code is a whole number.
+
+  Coming back out of `labs` the damage was larger and more visible, because a
+  neutral LabS code is *exactly* neutral. vips answers `C = 0, h = 0` for
+  `LabS [0, 0, 0]`; the hub pushed `a` and `b` off zero and then read a hue off
+  the noise, giving `C = 5.57e-4, h = 338.199` at every `L`. Both `Lch` and
+  `Cmc` inherited that. On a 700-pixel swept grid the hub missed vips on 181 of
+  the 2100 `Lch -> Labs` channels, 748 of the `Labs -> Lch` ones and 681 of the
+  `Labs -> Cmc` ones; all three are now exact.
+
+  The LabS quantiser also rounds its input to `f32` before scaling, which moves
+  a further count on some inputs into `labs` from any space. `Lab2LabS.c:59`
+  reads a `float` image and every libvips route into LabS hands it one, so the
+  quantiser never sees double precision. Under the old rounding that was
+  invisible; under truncation it decides counts. `LCh [0, 1, 30]` is the case
+  that shows it: `sin(30 deg)` is `0.49999999999999994` in `f64` and exactly
+  `0.5` as `f32`, so `b * 256` is either `127.99999999999999` or `128.0`, and
+  vips answers `128`.
+
+  `Cmc -> Labs` is exact on the neutral axis and wherever libvips' CMC inverse
+  tables agree with this crate's bisection, but not everywhere: libvips inverts
+  `Lcmc`, `Ccmc` and `hcmc` through tables sampled every 0.1
+  (`colour/UCS2LCh.c:66-135`) and this crate bisects the forward function
+  instead, which is the more accurate of the two. Where a LabS code sits a hair
+  above a whole number the two land on opposite sides of it. That divergence
+  predates this change and is unrelated to the routing: handed libvips' own
+  `Cmc -> Lch` output, this crate reproduces libvips' `Cmc -> Labs` codes on
+  all 2100 channels of the same grid.
 
 ### Added
 
