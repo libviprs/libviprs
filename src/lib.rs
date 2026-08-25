@@ -169,7 +169,9 @@ pub use codec::{DecodeError, EncodeError, JpegSubsample, TiffCompression};
 pub use colour::{ColourError, Intent, Pcs};
 pub use composite::{CompositeError, CompositeMode};
 pub use connection::{Source, Target, decode_source, encode_to_target};
-pub use conversion::{Angle, Angle45, ConversionError, Interpretation, RasterCopyBuilder};
+pub use conversion::{
+    Align, Angle, Angle45, ConversionError, Interpretation, JoinDirection, RasterCopyBuilder,
+};
 pub use convolution::{Combine, ConvolutionError, Kernel, Precision};
 pub use create::{CreateError, SdfParams};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
