@@ -1882,6 +1882,186 @@ mod tests {
         );
     }
 
+    /// Pins every [`Interpretation`] to its `VipsInterpretation` code and
+    /// nickname in one table, so the mapping cannot drift from
+    /// `libvips/include/vips/image.h:96-117` (8.18.4) when a variant lands.
+    /// `interpretation_code` and `interpretation_nickname` are exhaustive on
+    /// purpose, and the guard at the end of this test keeps the table
+    /// exhaustive with them.
+    #[test]
+    fn interpretation_code_table_matches_vips() {
+        const TABLE: [(Interpretation, i32, &str); 21] = [
+            (Interpretation::Multiband, 0, "multiband"),
+            (Interpretation::Bw, 1, "b-w"),
+            (Interpretation::Histogram, 10, "histogram"),
+            (Interpretation::Xyz, 12, "xyz"),
+            (Interpretation::Lab, 13, "lab"),
+            (Interpretation::Cmyk, 15, "cmyk"),
+            (Interpretation::Labq, 16, "labq"),
+            (Interpretation::Rgb, 17, "rgb"),
+            (Interpretation::Cmc, 18, "cmc"),
+            (Interpretation::Lch, 19, "lch"),
+            (Interpretation::Labs, 21, "labs"),
+            (Interpretation::Srgb, 22, "srgb"),
+            (Interpretation::Yxy, 23, "yxy"),
+            (Interpretation::Fourier, 24, "fourier"),
+            (Interpretation::Rgb16, 25, "rgb16"),
+            (Interpretation::Grey16, 26, "grey16"),
+            (Interpretation::Matrix, 27, "matrix"),
+            (Interpretation::ScRgb, 28, "scrgb"),
+            (Interpretation::Hsv, 29, "hsv"),
+            (Interpretation::OkLab, 30, "oklab"),
+            (Interpretation::OkLch, 31, "oklch"),
+        ];
+
+        for &(interp, code, nickname) in &TABLE {
+            assert_eq!(
+                interpretation_code(interp),
+                code,
+                "{nickname} must write VipsInterpretation {code}"
+            );
+            assert_eq!(
+                interpretation_from_code(code),
+                Some(interp),
+                "VipsInterpretation {code} must read back as {nickname}"
+            );
+            assert_eq!(interpretation_nickname(interp), nickname);
+            assert_eq!(interpretation_from_nickname(nickname), Some(interp));
+
+            // Exhaustiveness guard: a new `Interpretation` variant fails to
+            // compile here, so the table has to grow with the enum.
+            match interp {
+                Interpretation::Multiband
+                | Interpretation::Bw
+                | Interpretation::Histogram
+                | Interpretation::Xyz
+                | Interpretation::Lab
+                | Interpretation::Cmyk
+                | Interpretation::Labq
+                | Interpretation::Rgb
+                | Interpretation::Cmc
+                | Interpretation::Lch
+                | Interpretation::Labs
+                | Interpretation::Srgb
+                | Interpretation::Yxy
+                | Interpretation::Fourier
+                | Interpretation::Rgb16
+                | Interpretation::Grey16
+                | Interpretation::Matrix
+                | Interpretation::ScRgb
+                | Interpretation::Hsv
+                | Interpretation::OkLab
+                | Interpretation::OkLch => {}
+            }
+        }
+
+        // Codes libvips leaves unassigned inside its range stay unknown, and
+        // so does anything past VIPS_INTERPRETATION_LAST (32).
+        for unassigned in [2, 11, 14, 20, 32, 33] {
+            assert_eq!(
+                interpretation_from_code(unassigned),
+                None,
+                "{unassigned} is not a VipsInterpretation"
+            );
+        }
+    }
+
+    /// A `.v` written by real vips tags OkLab/OkLch with `Type = 30` / `31`
+    /// (`VIPS_INTERPRETATION_OKLAB` / `_OKLCH`,
+    /// `libvips/include/vips/image.h:115-116`), so libviprs has to read those
+    /// files back as [`Interpretation::OkLab`] / [`Interpretation::OkLch`]
+    /// instead of falling through to format inference and reporting
+    /// `Multiband`.
+    ///
+    /// The fixture is the byte-for-byte 64-byte header vips 8.18.4 wrote for
+    ///
+    /// ```text
+    /// vips black t.v 4 4 --bands 3
+    /// vips colourspace t.v ok.v oklab      # and again for oklch
+    /// ```
+    ///
+    /// followed by that file's 4x4x3 float pixels (all zero, it is black), so
+    /// nothing binary is checked in. vips writes the header in the machine's
+    /// own byte order; these are the little-endian bytes, which on a
+    /// big-endian host also exercises the decoder's swap path.
+    #[test]
+    fn vips_written_oklab_and_oklch_read_back_tagged() {
+        #[rustfmt::skip]
+        const VIPS_OKLAB_HEADER: [u8; VIPS_HEADER_LEN] = [
+            0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+            0x04, 0x00, 0x00, 0x00, // Xsize 4
+            0x04, 0x00, 0x00, 0x00, // Ysize 4
+            0x03, 0x00, 0x00, 0x00, // Bands 3
+            0x20, 0x00, 0x00, 0x00, // Bbits 32
+            0x06, 0x00, 0x00, 0x00, // BandFmt 6 (float)
+            0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+            0x1e, 0x00, 0x00, 0x00, // Type 30 (VIPS_INTERPRETATION_OKLAB)
+            0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+            0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+            0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Xoffset 0
+            0x00, 0x00, 0x00, 0x00, // Yoffset 0
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x00, // reserved
+        ];
+        // The oklch file vips wrote differs from the oklab one in exactly one
+        // byte: the Type word at offset 28, 30 -> 31.
+        const TYPE_OFFSET: usize = 28;
+
+        for (code, expected) in [(30u8, Interpretation::OkLab), (31, Interpretation::OkLch)] {
+            let mut bytes = VIPS_OKLAB_HEADER.to_vec();
+            bytes[TYPE_OFFSET] = code;
+            // 4x4 pixels, 3 float bands, all zero: `vips black` output.
+            bytes.resize(VIPS_HEADER_LEN + 4 * 4 * 3 * 4, 0);
+
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.interpretation(),
+                expected,
+                "Type {code} must tag {expected:?}"
+            );
+            assert_eq!(
+                back.get_field("interpretation").unwrap().as_str(),
+                interpretation_nickname(expected)
+            );
+            assert_eq!((back.width(), back.height()), (4, 4));
+            assert_eq!(back.format(), PixelFormat::with_channels(3, 4).unwrap());
+        }
+    }
+
+    /// libviprs used to write private codes 1000 / 1001 for OkLab / OkLch,
+    /// before libvips 8.18 assigned them 30 / 31. The private codes stay
+    /// readable so `.v` files libviprs already wrote keep loading, but the
+    /// encoder must never emit them again.
+    #[test]
+    fn legacy_private_oklab_codes_read_but_are_not_written() {
+        assert_eq!(interpretation_from_code(1000), Some(Interpretation::OkLab));
+        assert_eq!(interpretation_from_code(1001), Some(Interpretation::OkLch));
+
+        for (interp, code) in [(Interpretation::OkLab, 30i32), (Interpretation::OkLch, 31)] {
+            let im = Raster::black(2, 2).copy().interpretation(interp).build();
+            let bytes = im.encode_vips().unwrap();
+            let written = i32::from_ne_bytes(bytes[28..32].try_into().unwrap());
+            assert_eq!(written, code, "encode_vips must write the libvips code");
+            // And it round-trips through our own reader.
+            assert_eq!(decode_bytes(&bytes).unwrap().interpretation(), interp);
+        }
+
+        // A legacy libviprs file (private code in the Type word) still loads.
+        let mut legacy = Raster::black(2, 2)
+            .copy()
+            .interpretation(Interpretation::OkLab)
+            .build()
+            .encode_vips()
+            .unwrap();
+        legacy[28..32].copy_from_slice(&1000i32.to_ne_bytes());
+        assert_eq!(
+            decode_bytes(&legacy).unwrap().interpretation(),
+            Interpretation::OkLab
+        );
+    }
+
     // -- free functions -----------------------------------------------------
 
     /**
