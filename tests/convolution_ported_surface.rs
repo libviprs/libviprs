@@ -433,3 +433,48 @@ fn edge_detector_output_is_always_uchar() {
         assert_eq!(im.prewitt().format(), want, "prewitt of {src:?}");
     }
 }
+
+/// The canny surface, which no ported cell reaches: `vips canny` takes
+/// `sigma` and `precision` and nothing else, so the whole call surface is
+/// the receiver plus those two arguments, called from an external crate.
+///
+/// The expected values are the vips 8.18.4 measurements on the 9x9 step
+/// fixture of `oracle-captures/convolution/canny`. Note the two arms come
+/// back in different formats: `Precision::Float` promotes through
+/// gaussblur before the gradient stage sees the image, so the answer is a
+/// float raster, and only the integer arm keeps a byte. Behaviour depth
+/// lives in the unit tests in `src/convolution.rs`.
+#[test]
+fn canny_surface() {
+    let mut data = Vec::with_capacity(9 * 9);
+    for _ in 0..9 {
+        for x in 0..9u32 {
+            data.push(if x < 4 { 0u8 } else { 255 });
+        }
+    }
+    let im = Raster::new(9, 9, PixelFormat::Gray8, data).unwrap();
+
+    let byte = im.canny(1.4, Precision::Integer);
+    assert_eq!(byte.format(), PixelFormat::Gray8, "integer arm stays uchar");
+    assert_eq!((byte.width(), byte.height()), (9, 9), "size round-trips");
+    assert_eq!(pixel_f64(&byte, 4, 4), vec![32.0], "on the edge");
+    assert_eq!(pixel_f64(&byte, 1, 4), vec![0.0], "off the edge");
+    assert_eq!(
+        byte.data(),
+        im.try_canny(1.4, Precision::Integer).unwrap().data(),
+        "try_canny agrees with canny"
+    );
+
+    let float = im.canny(1.4, Precision::Float);
+    assert_eq!(
+        float.format(),
+        PixelFormat::with_channels(1, 4).unwrap(),
+        "the float arm answers a float raster"
+    );
+    let on_edge = pixel_f64(&float, 4, 4);
+    assert!(
+        (on_edge[0] - 47.992_317).abs() < 1e-3,
+        "float arm on the edge: {on_edge:?}"
+    );
+    assert_eq!(pixel_f64(&float, 1, 4), vec![0.0], "float arm off the edge");
+}
