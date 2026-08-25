@@ -9,6 +9,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::join` and its `try_join` twin (issue #551): the port of libvips
+  `vips_join`, the generic two-image spatial join. `a.join(&b,
+  JoinDirection::Horizontal, expand, shim, background, align)` puts `b` to the
+  right of `a` (or below it, with `JoinDirection::Vertical`), separated by
+  `shim` pixels and lined up on the edge `align` names. libviprs already had
+  `arrayjoin` for a whole grid and `insert` for an explicit offset, but
+  nothing for the ordinary "put these two next to each other" case.
+
+  `expand` is the flag worth reading twice, because it does not mean what its
+  name suggests it might. With `expand` false, which is the libvips default,
+  the result is cropped back to the smaller of the two images along the shared
+  axis: joining a 3x2 and a 2x3 horizontally gives 5x2, not 5x3, and the
+  bottom row of the taller image is gone. Pass `expand` true to keep every
+  input pixel, and `background` then fills whatever neither image covers,
+  including the shim gap.
+
+  `align` is `Align::Low`, `Align::Centre`, or `Align::High`, and it parses
+  from the libvips nicknames (`"low"`, `"centre"`, `"high"`, and `"center"`)
+  through `FromStr`. `Centre` is computed the way libvips computes it, as two
+  separate truncating integer divisions `in1 / 2 - in2 / 2`, which is not the
+  same as `(in1 - in2) / 2`: for a 4-high image joined to a 3-high one the
+  first form offsets by 1 and the second by 0. Matching the C exactly here
+  means a libviprs join lands on the same pixel a vips join does.
+
+  Band counts and depths unify exactly as `insert` does, since that is what
+  libvips leans on too, so a one-band image joined to a three-band one gives
+  three bands and an 8-bit joined to a 16-bit gives 16-bit. Failures from the
+  delegated insert and crop arrive as the new
+  `ConversionError::Extract(ExtractError)` variant, and a bad align nickname
+  as `ConversionError::UnknownAlign`. `ConversionError`, `JoinDirection` and
+  `Align` are all `#[non_exhaustive]`.
+
+  Three things are refused up front rather than delegated. A float raster on
+  either side is `ConversionError::FloatFormatUnsupported`, because the
+  placement path underneath reads samples as `u8` or `u16` and panics on
+  4-byte ones; that is not an exotic input, since every `colourspace` result
+  for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is a float raster, so
+  `im.colourspace(Lab).join(&other, ..)` would otherwise panic out of a
+  fallible method. A `shim` above `1000000` is
+  `ConversionError::ShimTooLarge`, matching the bound libvips declares on the
+  property (`VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so
+  `vips join --shim 1000001` is refused before the operation runs). Widening
+  the argument to `u32` had carried the lower bound into the type and dropped
+  the upper one, and without the check `shim = 2147483644` on a 3x2 and a 2x3
+  asks for a 6.44 GB canvas, each raster still under the per-raster
+  allocation budget so the budget never fires. An offset outside `i32`, the
+  range libvips places images in, is
+  `ConversionError::PlacementOffsetOverflow`, and it reports the offset
+  `(x, y)` that did not fit rather than a result size. Note that a `join`
+  canvas too large for `u32` still arrives as
+  `ConversionError::Extract(ExtractError::SizeOverflow)`, so a caller that
+  wants every "too big" outcome matches both.
+
+  A band-promoting join drops the first image's interpretation instead of
+  copying it onto a result it no longer describes. `vips join` of a 1-band
+  `b-w` with a 3-band `srgb` reports `3 bands, srgb`, and keeping `b-w` is
+  not cosmetic: `space_bands(Bw) == 1`, so a later `colourspace(Lab)` reads
+  two of the three bands as passthrough extras and hands back 5 bands instead
+  of 3. Dropping the tag lets the getter infer one from the result format,
+  the same re-stamp `composite2` already does for the same reason. A
+  depth-only promotion keeps the tag, matching `vips join` of `b-w` uchar
+  with `grey16`, which still reports `b-w`.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
@@ -100,6 +163,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `Raster::try_arrayjoin` no longer panics on a float input (issue #551). Its
+  sample copy is unsigned-only and panicked on 4-byte samples, so a fallible
+  method aborted the process on ordinary input: `space_depth` maps Lab, Lch,
+  OkLab, OkLCh, XYZ, scRGB and Yxy all to F32, which makes every `colourspace`
+  result for those spaces a float raster. It is now
+  `ConversionError::FloatFormatUnsupported { op: "arrayjoin" }`, the same
+  guard `join` got, and the panicking `arrayjoin` twin still panics through
+  the usual `expect` path. Real vips handles float on both operations, so this
+  is a libviprs limitation reported honestly rather than parity, and it goes
+  away when the unsigned-only sample helpers grow a float arm.
+
+- `Raster::arrayjoin` now rejects a `shim` above `1000000` with
+  `ConversionError::ShimTooLarge` (issue #551), the same bound `join` got.
+  Both operations declare the property as `VIPS_ARG_INT(class, "shim", 5, ...,
+  0, 1000000, 0)`, and the binary refuses `vips arrayjoin --shim 1000001` with
+  the identical GObject CRITICAL, so the two now agree with each other and
+  with vips. `--shim 1000000` still builds the grid vips builds.
+
+- `Raster::arrayjoin` no longer tags a band-promoted grid with the first
+  image's interpretation (issue #551). `bandalike` promotes a one-band input
+  up to the widest band count in the list, so a grid built from a 1-band
+  `b-w` and a 3-band `srgb` has 3 bands while the copied tag still says
+  `b-w`. `vips arrayjoin` reports `srgb` for that pair. The mis-tag is not
+  cosmetic, since `space_bands(Bw) == 1`: a later colourspace conversion
+  reads bands 1 and 2 of the grid as passthrough extras rather than colour,
+  and returns a different band count with different numbers in it. The tag is
+  now cleared whenever the grid's band count differs from the first image's,
+  which lets the getter infer one from the result format. A depth-only
+  promotion still keeps the tag, matching `vips arrayjoin` of `b-w` uchar
+  with `grey16`. Nothing changes for a grid whose inputs all already share a
+  band count, which is the common case.
 
 - A `.v` written by real vips and tagged `OkLab` or `OkLch` now reads back with
   that tag instead of falling through to format inference and reporting

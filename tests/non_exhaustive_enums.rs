@@ -12,9 +12,9 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    BandError, ColourError, Combine, DrawError, EngineEvent, Intent, Interpretation, Layout,
-    ManifestError, Pcs, PdfError, PixelFormat, PlannerError, Precision, RasterError, ResumeError,
-    SourceError, VerifyError,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, Intent, Interpretation,
+    JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError, Precision,
+    RasterError, ResumeError, SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -275,4 +275,25 @@ fn non_exhaustive_checks_compile() {
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);
     assert_pcs_non_exhaustive(&Pcs::Lab);
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
+    match v {
+        JoinDirection::Horizontal => {}
+        JoinDirection::Vertical => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_align_non_exhaustive(v: &Align) {
+    match v {
+        Align::Low => {}
+        Align::Centre => {}
+        Align::High => {}
+        _ => {}
+    }
 }
