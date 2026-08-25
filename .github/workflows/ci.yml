@@ -1,34 +1,69 @@
 name: CI
 
-# GitHub-side fallback CI (issue #530).
+# The only CI for this repository (issue #585).
 #
-# The real CI lives on our self-hosted Gitea Actions runner (`.gitea/workflows/ci.yml`,
-# migrated in #528) and reports back as the `gitea/ci` commit status. Since that
-# migration no `gitea/*` status has ever reached GitHub, so pull requests have carried
-# no build signal at all. This file is the pre-migration workflow restored verbatim so
-# there is a signal again while the Gitea side is repaired.
-#
-# It does not shadow the Gitea run: Gitea reads `.gitea/workflows` and only falls back
-# to `.github/workflows` when that directory is absent
-# (modules/actions/workflows.go, ListWorkflows), so this workflow runs on GitHub only.
-#
-# libviprs is a public repository, so GitHub-hosted runner minutes are free; the cost
-# here is wall-clock (about 11 minutes) and some duplicated compute once `gitea/ci`
-# reports again. Retire this file, or cut it back to a smoke job, once #530 is closed
-# and `gitea/ci` is a required check.
+# Some history, because the trigger block below reads as over-specified without
+# it. #528 moved CI onto a self-hosted Gitea Actions runner that reported results
+# back here as a `gitea/ci` commit status. That last hop never once worked, so
+# pull requests carried no build signal for about a month (#530). #538 restored
+# this file as a GitHub-side fallback. #585 drops Gitea altogether, so this is
+# now the whole gate: `.gitea/workflows/` and the mirror-relay workflow are gone,
+# and the `GH_STATUS_TOKEN` reporting steps that used to bookend the Gitea jobs
+# went with them.
 
 on:
+  # Branch pushes are what actually carries CI here. This is the fix for the
+  # trigger gap in #585, so it is worth spelling out why `pull_request` alone was
+  # not enough.
+  #
+  # GitHub will not start a `pull_request` run while the pull request has a merge
+  # conflict. Such a run builds `refs/pull/N/merge`, and that ref cannot be
+  # created while the merge fails, so the event is simply dropped: no run, no
+  # queued run, no failure, nothing to notice. Every lane in epic #520 appends to
+  # `## [Unreleased]` in CHANGELOG.md, so a branch starts conflicting with `main`
+  # the moment any other lane merges. That is the normal state here, not the
+  # exception.
+  #
+  # Measured over 2026-08-25, after ci.yml landed on `main`: of the branch pushes
+  # that reached a branch with an open PR, every push whose branch merged cleanly
+  # into `main` produced a run, and the only two that produced no run at all were
+  # the two whose branch conflicted with `main` on CHANGELOG.md (PR #557 at
+  # 10:38:53Z, PR #576 at 10:53:47Z). #576 then needed a manual dispatch before
+  # anyone was willing to merge it. Draft state, concurrency and cancellation were
+  # all ruled out: those same branches got runs while still drafts, and cancelled
+  # runs show up in the run list as cancelled rather than as nothing.
+  #
+  # To re-check this later: the run list for this workflow gives the runs, and
+  # `git merge-tree --write-tree <main-at-that-time> <pushed-sha>` replays the
+  # merge GitHub could not make. The two that produced nothing were
+  # 64d200927c90 and 9e092027d203, both conflicting on CHANGELOG.md.
+  #
+  # A `push` run builds the branch head. It needs no merge commit, so it is
+  # unaffected by whether the PR currently merges.
   push:
-    branches: [main]
+    branches: ['**']
+
+  # `synchronize` is deliberately absent. A push to a branch in this repository is
+  # already covered above, and adding `synchronize` would run the whole suite
+  # twice for every one of those pushes. What is left here are the pull-request
+  # transitions that no push accompanies.
+  #
+  # This is also the only trigger that covers a pull request opened from a fork,
+  # where no push ever reaches this repository. A fork PR gets CI when it is
+  # opened, reopened or marked ready for review, but not on its later pushes. The
+  # repository has no forks today; if that changes, add `synchronize` back and
+  # guard the jobs so in-repo branches do not run twice.
   pull_request:
-    branches: [main]
+    types: [opened, reopened, ready_for_review]
+
   workflow_dispatch:
 
-# Supersede in-flight runs for a branch that gets pushed again, but never cancel a
-# run on `main`, which is the record of what actually landed.
+# One group per branch, shared by the push run and any pull_request run for the
+# same branch, so a newer push supersedes an older run rather than racing it.
+# `main` is excluded: that run is the record of what actually landed.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ (github.head_ref || github.ref_name) != 'main' }}
 
 env:
   CARGO_TERM_COLOR: always

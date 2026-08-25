@@ -1,0 +1,89 @@
+name: Merge Gate
+
+# The release gate: the checks that are too slow to justify on every branch push
+# but have to hold before a release lands. Ported back to GitHub from
+# `.gitea/workflows/merge-gate.yml` as part of dropping Gitea (#585).
+#
+# The Gitea copy bookended the `miri` job with "Report pending to GitHub" and
+# carried a trailing `report` job, both of which existed only to push a
+# `gitea/merge-gate` commit status here through `GH_STATUS_TOKEN`. Running
+# natively on GitHub they report nothing that the run itself does not, so they
+# are gone. The three real jobs are unchanged apart from the loom fix noted
+# below.
+
+on:
+  # The trigger the pre-migration GitHub workflow used, restored as it was: this
+  # gates pull requests into `release`, not day-to-day branch work. Gitea had
+  # widened it to every branch push because that was the only event its mirror
+  # delivered, which is not a reason that applies here.
+  #
+  # `workflow_dispatch` is added deliberately. A `pull_request` run is never
+  # created while the pull request has a merge conflict (the long note in ci.yml
+  # has the measurements), and a release PR is exactly the kind that sits
+  # conflicted for a while. Without a manual trigger the gate would be
+  # unreachable at precisely the moment it matters.
+  pull_request:
+    branches: [release]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Miri is kept, deliberately.
+  #
+  # `cargo +nightly miri test` cannot run on the dev machine at the moment, which
+  # sounds like a reason to drop the job, but the cause is local and says nothing
+  # about this workflow. The nightly installed there is 1.96.0-nightly
+  # (1d8897a4e, 2026-03-13), which is *older* than the crate's MSRV of 1.97, so
+  # the crate does not compile under it at all. `dtolnay/rust-toolchain@nightly`
+  # on a GitHub-hosted runner resolves the current nightly, which is well past
+  # 1.97, so the job builds where it actually runs. `rustup update nightly` is the
+  # local fix.
+  #
+  # It is also real coverage rather than decoration, which is the bar for keeping
+  # a gate at all. The tree is actively maintained for Miri: 48
+  # `#[cfg_attr(miri, ignore)]` annotations across seven modules, each naming the
+  # isolation limit it works around, and a `fix/miri-fs-isolation` branch that
+  # went green through this gate. The last GitHub runs of this workflow, on
+  # 2026-04-25, all passed. Dropping it would quietly remove the only check the
+  # repository has on undefined behaviour.
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +nightly miri test
+
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
+      # `--lib loom_tests` is a test-path filter, so it only ever matched the
+      # `loom_tests` module. `src/loom_checkpoint_dedupe.rs` is a second
+      # `#![cfg(loom)]` suite (the models behind #275, including the ones whose
+      # buggy variants reproduce the pre-fix interleaving) and none of its test
+      # paths contain "loom_tests", so it has never run in CI on either forge.
+      # Run it explicitly rather than widening the filter, so adding a third loom
+      # module is a visible edit here instead of a silent no-op.
+      - run: RUSTFLAGS="--cfg loom" cargo test --lib loom_checkpoint_dedupe
+
+  pdfium-source:
+    name: pdfium-render source audit (#149)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Fail the release gate if the pdfium-render thread-safety fork is not
+      # resolved from the libviprs git source (i.e. the [patch.crates-io] was
+      # dropped and the unpatched, segfault-prone wrapper would be linked).
+      - run: bash scripts/audit-pdfium-source.sh . -- --features pdfium
