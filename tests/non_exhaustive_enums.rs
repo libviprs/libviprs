@@ -12,8 +12,9 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    BandError, Combine, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat,
-    PlannerError, Precision, RasterError, ResumeError, SourceError, VerifyError,
+    BandError, ColourError, Combine, DrawError, EngineEvent, Intent, Interpretation, Layout,
+    ManifestError, Pcs, PdfError, PixelFormat, PlannerError, Precision, RasterError, ResumeError,
+    SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -187,6 +188,75 @@ fn assert_verify_error_non_exhaustive(v: &VerifyError) {
     }
 }
 
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_interpretation_non_exhaustive(v: &Interpretation) {
+    match v {
+        Interpretation::Multiband => {}
+        Interpretation::Bw => {}
+        Interpretation::Histogram => {}
+        Interpretation::Xyz => {}
+        Interpretation::Lab => {}
+        Interpretation::Cmyk => {}
+        Interpretation::Labq => {}
+        Interpretation::Rgb => {}
+        Interpretation::Cmc => {}
+        Interpretation::Lch => {}
+        Interpretation::Labs => {}
+        Interpretation::Srgb => {}
+        Interpretation::Yxy => {}
+        Interpretation::Fourier => {}
+        Interpretation::Rgb16 => {}
+        Interpretation::Grey16 => {}
+        Interpretation::Matrix => {}
+        Interpretation::ScRgb => {}
+        Interpretation::Hsv => {}
+        Interpretation::OkLab => {}
+        Interpretation::OkLch => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_colour_error_non_exhaustive(v: &ColourError) {
+    match v {
+        ColourError::UnknownColourspace { .. } => {}
+        ColourError::UnsupportedColourspace { .. } => {}
+        ColourError::TooFewBands { .. } => {}
+        ColourError::DimensionMismatch { .. } => {}
+        ColourError::NoProfile => {}
+        ColourError::ProfileRead { .. } => {}
+        ColourError::InvalidProfile { .. } => {}
+        ColourError::UnsupportedDeviceSpace { .. } => {}
+        ColourError::UnsupportedDepth { .. } => {}
+        ColourError::IccTransform { .. } => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_intent_non_exhaustive(v: &Intent) {
+    match v {
+        Intent::Perceptual => {}
+        Intent::Relative => {}
+        Intent::Saturation => {}
+        Intent::Absolute => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_pcs_non_exhaustive(v: &Pcs) {
+    match v {
+        Pcs::Lab => {}
+        Pcs::Xyz => {}
+        _ => {}
+    }
+}
+
 /// `PdfError::Pdfium` must be constructible without the `pdfium` feature enabled
 /// (this test crate builds with default features). If the variant is
 /// `#[cfg(feature = "pdfium")]`-gated, this fails to compile.
@@ -202,4 +272,7 @@ fn pdf_error_pdfium_variant_is_feature_independent() {
 fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
+    assert_interpretation_non_exhaustive(&Interpretation::OkLch);
+    assert_intent_non_exhaustive(&Intent::Perceptual);
+    assert_pcs_non_exhaustive(&Pcs::Lab);
 }
