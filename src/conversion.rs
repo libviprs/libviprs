@@ -31,10 +31,42 @@
 //! | [`Raster::falsecolour`] | `vips_falsecolour` | band 0 mapped through the PET false-colour LUT |
 //! | [`Raster::addalpha`] | `vips_addalpha` | one opaque alpha band appended |
 //! | [`Raster::arrayjoin`] | `vips_arrayjoin` | images tiled into a grid |
+//! | [`Raster::join`] | `vips_join` | two images joined left-right or top-bottom |
 //! | [`Raster::grey`] | `vips_grey` | horizontal grey ramp |
 //! | [`Raster::identity`] | `vips_identity` | 256x1 identity LUT |
 //! | [`Raster::identity_ushort`] | `vips_identity` (`ushort: true`) | 65536x1 identity LUT |
 //! | [`Raster::switch`] | `vips_switch` | index image of the first true condition |
+//!
+//! # Join
+//!
+//! [`Raster::join`] is a literal transcription of `conversion/join.c`,
+//! which has no pixel loop of its own: it is [`Raster::insert`] plus an
+//! optional crop.
+//!
+//! * The placement ladder is `join.c:109-156`. A horizontal join puts the
+//!   second image at `x = in1.width + shim`; a vertical one at
+//!   `y = in1.height + shim`. On the other axis [`Align::Low`] gives `0`,
+//!   [`Align::High`] gives `in1 - in2`, and [`Align::Centre`] gives
+//!   `in1 / 2 - in2 / 2` — **two separate truncating integer divisions**,
+//!   exactly as the C writes it. That is not the same as
+//!   `(in1 - in2) / 2`: for `in1 = 4, in2 = 3` the C form gives `1` and
+//!   the combined form gives `0`. Under `High` and `Centre` the offset
+//!   goes negative when the second image is the larger one.
+//! * The insert at `join.c:158-162` always runs with `expand` **true**,
+//!   whatever the caller asked for, so no input pixel is ever lost at
+//!   this stage and `background` fills whatever neither image covers.
+//! * The caller's `expand` only selects the crop at `join.c:164-207`. A
+//!   horizontal join crops to `(0, max(0, y) - y, t.width,
+//!   min(in1.height, in2.height))` and a vertical one to
+//!   `(max(0, x) - x, 0, min(in1.width, in2.width), t.height)`; the
+//!   `max(0, ...)` origin is what recovers the rows or columns the
+//!   negative offset pushed off the top or the left. The crop is skipped
+//!   when the rectangle is already the whole image, as in the C.
+//!
+//! Band and format unification comes free: `join.c` does none itself and
+//! leans on `vips_insert`'s `formatalike` + `bandalike`, so composing on
+//! [`Raster::try_insert`] inherits the crate's equivalent (widest depth,
+//! largest band count, a one-band input replicated).
 //!
 //! # Metadata
 //!
@@ -85,6 +117,7 @@
 //!   semantics of its own and ships with a later geometry batch.
 
 use crate::bands::BandError;
+use crate::extract::ExtractError;
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
 use core::num::NonZeroU16;
@@ -139,6 +172,13 @@ pub enum ConversionError {
     /// odd squares.
     #[error("rot45 requires an odd-sided square image, got {width}x{height}")]
     NotOddSquare { width: u32, height: u32 },
+    /// An align name handed to `Align::from_str` is not one of the
+    /// libvips `VipsAlign` nicknames.
+    #[error("unknown align {name:?}, expected low, centre, or high")]
+    UnknownAlign {
+        /// The name that was not recognised.
+        name: String,
+    },
     /// The result dimensions would overflow `u32`.
     #[error("result size {width}x{height} exceeds u32::MAX")]
     SizeOverflow { width: u64, height: u64 },
@@ -152,6 +192,11 @@ pub enum ConversionError {
     /// A delegated band operation failed.
     #[error(transparent)]
     Band(#[from] BandError),
+    /// A delegated extract or placement operation failed. [`Raster::join`]
+    /// is `insert` plus an optional `extract_area`, so its band-count,
+    /// background, and size errors arrive through here.
+    #[error(transparent)]
+    Extract(#[from] ExtractError),
     /// Constructing the result raster failed (allocation budget, size
     /// overflow).
     #[error(transparent)]
@@ -356,6 +401,60 @@ impl Angle45 {
             Self::D270 => 6,
             Self::D315 => 7,
         }
+    }
+}
+
+/// The axis [`Raster::join`] joins a pair of images along (libvips
+/// `VipsDirection`).
+///
+/// This is deliberately not the crate-root `Direction` of
+/// [`crate::morphology`], which names an erosion/dilation axis, nor
+/// [`crate::mosaicing::MergeDirection`], which names a feathered
+/// tie-point merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum JoinDirection {
+    /// Left-right: the second image goes to the right of the first.
+    Horizontal,
+    /// Top-bottom: the second image goes below the first.
+    Vertical,
+}
+
+/// Which edge the two images of a [`Raster::join`] line up on (libvips
+/// `VipsAlign`).
+///
+/// [`str::parse`] accepts the libvips nicknames (`"low"`, `"centre"`,
+/// `"high"`), plus the `"center"` spelling, mirroring the `&str` surface
+/// [`crate::extract::CompassDirection`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Align {
+    /// Line up on the low coordinate edge: the top for a horizontal
+    /// join, the left for a vertical one. The libvips default.
+    Low,
+    /// Line up on the centre of the shared axis.
+    Centre,
+    /// Line up on the high coordinate edge: the bottom for a horizontal
+    /// join, the right for a vertical one.
+    High,
+}
+
+impl std::str::FromStr for Align {
+    type Err = ConversionError;
+
+    /// Parse a libvips `VipsAlign` nickname: `"low"`, `"centre"`, or
+    /// `"high"`. `"center"` is accepted as a spelling of `"centre"`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "low" => Self::Low,
+            "centre" | "center" => Self::Centre,
+            "high" => Self::High,
+            other => {
+                return Err(ConversionError::UnknownAlign {
+                    name: other.to_string(),
+                });
+            }
+        })
     }
 }
 
@@ -1475,6 +1574,127 @@ impl Raster {
     #[track_caller]
     pub fn arrayjoin(images: &[&Raster], across: Option<u32>, shim: Option<u32>) -> Raster {
         expect_conv("arrayjoin", Self::try_arrayjoin(images, across, shim))
+    }
+
+    // ------------------------------------------------------------------
+    // join
+    // ------------------------------------------------------------------
+
+    /// Fallible form of [`Raster::join`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError::Extract`] wrapping the delegated
+    /// [`Raster::try_insert`] / [`Raster::try_extract_area`] failures:
+    /// [`crate::extract::ExtractError::BandCountMismatch`] when the band
+    /// counts differ and neither is 1,
+    /// [`crate::extract::ExtractError::BackgroundLengthMismatch`] for a
+    /// background vector whose length is neither 1 nor the result band
+    /// count, and
+    /// [`crate::extract::ExtractError::SizeOverflow`] if the joined
+    /// canvas would not fit `u32` dimensions.
+    /// [`ConversionError::SizeOverflow`] if a `shim` large enough pushes
+    /// the placement offset past the signed 32-bit range libvips itself
+    /// works in (`join.c` adds `int` to `int`).
+    /// [`ConversionError::Raster`] on allocation failure.
+    pub fn try_join(
+        &self,
+        other: &Raster,
+        direction: JoinDirection,
+        expand: bool,
+        shim: Option<u32>,
+        background: Option<&[f64]>,
+        align: Option<Align>,
+    ) -> Result<Raster, ConversionError> {
+        let align = align.unwrap_or(Align::Low);
+        let shim = i64::from(shim.unwrap_or(0));
+        let (w1, h1) = (i64::from(self.width()), i64::from(self.height()));
+        let (w2, h2) = (i64::from(other.width()), i64::from(other.height()));
+
+        // join.c:109-156. CENTRE is two separate truncating integer
+        // divisions, `in1 / 2 - in2 / 2`, NOT `(in1 - in2) / 2`: for 4 and
+        // 3 the C form gives 1 where the combined form gives 0. Under
+        // CENTRE and HIGH the offset goes negative when the second image
+        // is the larger one.
+        let (x, y) = match direction {
+            JoinDirection::Horizontal => {
+                let y = match align {
+                    Align::Low => 0,
+                    Align::Centre => h1 / 2 - h2 / 2,
+                    Align::High => h1 - h2,
+                };
+                (w1 + shim, y)
+            }
+            JoinDirection::Vertical => {
+                let x = match align {
+                    Align::Low => 0,
+                    Align::Centre => w1 / 2 - w2 / 2,
+                    Align::High => w1 - w2,
+                };
+                (x, h1 + shim)
+            }
+        };
+        let (Ok(ix), Ok(iy)) = (i32::try_from(x), i32::try_from(y)) else {
+            // Only a shim wider than 2^31 reaches this; report the canvas
+            // the placement asked for.
+            return Err(ConversionError::SizeOverflow {
+                width: (w1.max(x + w2) - x.min(0)) as u64,
+                height: (h1.max(y + h2) - y.min(0)) as u64,
+            });
+        };
+
+        // join.c:158-162: the insert ALWAYS expands, whatever the caller
+        // asked for, so nothing is lost before the crop below decides.
+        let joined = self.try_insert(other, ix, iy, true, background)?;
+
+        // join.c:164-207: the caller's `expand` only selects this crop.
+        let mut out = if expand {
+            joined
+        } else {
+            let (jw, jh) = (i64::from(joined.width()), i64::from(joined.height()));
+            let (left, top, width, height) = match direction {
+                JoinDirection::Horizontal => (0, y.max(0) - y, jw, h1.min(h2)),
+                JoinDirection::Vertical => (x.max(0) - x, 0, w1.min(w2), jh),
+            };
+            if left != 0 || top != 0 || width != jw || height != jh {
+                joined.try_extract_area(left as u32, top as u32, width as u32, height as u32)?
+            } else {
+                joined
+            }
+        };
+        out.meta = self.meta;
+        Ok(out)
+    }
+
+    /// Join this image and `other` left-right or top-bottom (libvips
+    /// `vips_join`).
+    ///
+    /// `shim` is the gap in pixels between the two (default 0) and
+    /// `align` says which edge they line up on (default [`Align::Low`]).
+    /// With `expand` false the result is cropped back to the smaller of
+    /// the two along the shared axis, which is libvips' default; with
+    /// `expand` true it is the bounding box of both, and `background`
+    /// (black when `None`) fills whatever neither image covers, including
+    /// the shim gap. Band counts and depths unify exactly as
+    /// [`Raster::insert`] does. The result carries this image's metadata.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConversionError`]; see [`Raster::try_join`].
+    #[track_caller]
+    pub fn join(
+        &self,
+        other: &Raster,
+        direction: JoinDirection,
+        expand: bool,
+        shim: Option<u32>,
+        background: Option<&[f64]>,
+        align: Option<Align>,
+    ) -> Raster {
+        expect_conv(
+            "join",
+            self.try_join(other, direction, expand, shim, background, align),
+        )
     }
 
     // ------------------------------------------------------------------
@@ -3011,7 +3231,14 @@ mod tests {
      */
     #[test]
     fn join_horizontal_low_crops_to_shorter() {
-        let out = join_a().join(&join_c(), JoinDirection::Horizontal, false, None, None, None);
+        let out = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            None,
+        );
         assert_eq!((out.width(), out.height()), (5, 2));
         assert_eq!(out.data(), &[1, 2, 3, 10, 20, 4, 5, 6, 30, 40]);
     }
@@ -3107,7 +3334,9 @@ mod tests {
         assert_eq!((expanded.width(), expanded.height()), (5, 4));
         assert_eq!(
             expanded.data(),
-            &[0, 1, 2, 3, 4, 0, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+            &[
+                0, 1, 2, 3, 4, 0, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
         );
 
         let cropped = f.join(
@@ -3147,7 +3376,9 @@ mod tests {
         assert_eq!((expanded.width(), expanded.height()), (5, 4));
         assert_eq!(
             expanded.data(),
-            &[1, 2, 3, 4, 0, 5, 6, 7, 8, 0, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+            &[
+                1, 2, 3, 4, 0, 5, 6, 7, 8, 0, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
         );
 
         let cropped = f.join(
@@ -3320,7 +3551,9 @@ mod tests {
         let colour = rgb8(
             2,
             3,
-            vec![10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62],
+            vec![
+                10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62,
+            ],
         );
         let bg = [1.0, 2.0, 3.0];
         let out = join_a().join(
@@ -3380,7 +3613,14 @@ mod tests {
     #[test]
     fn join_meta_from_first() {
         let a = join_a().copy().xres(11.0).build();
-        let out = a.join(&join_c(), JoinDirection::Horizontal, false, None, None, None);
+        let out = a.join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            None,
+        );
         assert_eq!(out.xres(), 11.0);
     }
 

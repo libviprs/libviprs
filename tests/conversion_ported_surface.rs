@@ -409,7 +409,14 @@ fn ported_join_call_sites() {
     assert!("sideways".parse::<Align>().is_err());
 
     let im = a
-        .try_join(&c, JoinDirection::Vertical, false, None, None, Some(Align::Low))
+        .try_join(
+            &c,
+            JoinDirection::Vertical,
+            false,
+            None,
+            None,
+            Some(Align::Low),
+        )
         .unwrap();
     assert_eq!((im.width(), im.height()), (2, 5));
 }

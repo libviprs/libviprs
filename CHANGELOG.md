@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::join` and its `try_join` twin (issue #551): the port of libvips
+  `vips_join`, the generic two-image spatial join. `a.join(&b,
+  JoinDirection::Horizontal, expand, shim, background, align)` puts `b` to the
+  right of `a` (or below it, with `JoinDirection::Vertical`), separated by
+  `shim` pixels and lined up on the edge `align` names. libviprs already had
+  `arrayjoin` for a whole grid and `insert` for an explicit offset, but
+  nothing for the ordinary "put these two next to each other" case.
+
+  `expand` is the flag worth reading twice, because it does not mean what its
+  name suggests it might. With `expand` false, which is the libvips default,
+  the result is cropped back to the smaller of the two images along the shared
+  axis: joining a 3x2 and a 2x3 horizontally gives 5x2, not 5x3, and the
+  bottom row of the taller image is gone. Pass `expand` true to keep every
+  input pixel, and `background` then fills whatever neither image covers,
+  including the shim gap.
+
+  `align` is `Align::Low`, `Align::Centre`, or `Align::High`, and it parses
+  from the libvips nicknames (`"low"`, `"centre"`, `"high"`, and `"center"`)
+  through `FromStr`. `Centre` is computed the way libvips computes it, as two
+  separate truncating integer divisions `in1 / 2 - in2 / 2`, which is not the
+  same as `(in1 - in2) / 2`: for a 4-high image joined to a 3-high one the
+  first form offsets by 1 and the second by 0. Matching the C exactly here
+  means a libviprs join lands on the same pixel a vips join does.
+
+  Band counts and depths unify exactly as `insert` does, since that is what
+  libvips leans on too, so a one-band image joined to a three-band one gives
+  three bands and an 8-bit joined to a 16-bit gives 16-bit. Failures from the
+  delegated insert and crop arrive as the new
+  `ConversionError::Extract(ExtractError)` variant, and a bad align nickname
+  as `ConversionError::UnknownAlign`. `ConversionError`, `JoinDirection` and
+  `Align` are all `#[non_exhaustive]`.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
