@@ -673,7 +673,10 @@ fn read_segment_log(path: &Path) -> Result<Vec<TileCoord>, ResumeError> {
     };
     let frames = bytes.len() / SEGMENT_RECORD_LEN;
     let mut coords = Vec::with_capacity(frames);
-    for chunk in bytes.chunks_exact(SEGMENT_RECORD_LEN) {
+    // Only the complete frames: `as_chunks` hands back any torn trailing
+    // partial record as the `.1` remainder, which is exactly what this
+    // replay drops.
+    for chunk in bytes.as_chunks::<SEGMENT_RECORD_LEN>().0 {
         let level = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let col = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
         let row = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);

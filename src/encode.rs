@@ -749,11 +749,7 @@ mod tests {
         let im2 = decode_bytes(&buf).unwrap();
         assert_eq!(im2.width(), im.width());
         assert_eq!(im2.height(), im.height());
-        let colours: HashSet<[u8; 3]> = im2
-            .data()
-            .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
-            .collect();
+        let colours: HashSet<[u8; 3]> = im2.data().as_chunks::<3>().0.iter().copied().collect();
         assert!(
             colours.len() <= 16,
             "quantized palette had {} colours",
