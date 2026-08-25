@@ -2405,4 +2405,417 @@ mod tests {
         assert_eq!(out.format(), PixelFormat::Gray16);
         assert_eq!(out.getpoint(0, 0), vec![65535.0]);
     }
+
+    // -----------------------------------------------------------------
+    // Edge detectors: sobel / scharr / prewitt
+    // -----------------------------------------------------------------
+
+    /// The `oracle-captures/convolution` `impulse_mono.v` fixture: a
+    /// 21x21 uchar black canvas carrying a single 255 impulse at
+    /// (10, 10). Synthetic and lossless, so the recorded vips output is
+    /// exactly pinnable.
+    fn impulse_mono() -> Raster {
+        let mut data = vec![0u8; 21 * 21];
+        data[10 * 21 + 10] = 255;
+        Raster::new(21, 21, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A single-band uchar raster built from a per-pixel closure.
+    fn gray_from(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Raster {
+        let mut data = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.push(f(x, y));
+            }
+        }
+        Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A single-band 16-bit raster built from a per-pixel closure.
+    fn gray16_from(w: u32, h: u32, f: impl Fn(u32, u32) -> u16) -> Raster {
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.extend_from_slice(&f(x, y).to_ne_bytes());
+            }
+        }
+        Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// A single-band float raster built from a per-pixel closure.
+    fn float_from(w: u32, h: u32, f: impl Fn(u32, u32) -> f32) -> Raster {
+        let mut samples = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                samples.push(f(x, y));
+            }
+        }
+        Raster::from_f32_samples(w, h, float_format(1), &samples).unwrap()
+    }
+
+    /// The three detectors as `(name, method)` pairs, so one captured
+    /// table can be replayed against all of them.
+    fn edge_ops() -> [(&'static str, fn(&Raster) -> Raster); 3] {
+        [
+            ("sobel", Raster::sobel),
+            ("scharr", Raster::scharr),
+            ("prewitt", Raster::prewitt),
+        ]
+    }
+
+    /// Band 0 of a uchar raster at `(x, y)`.
+    fn u8_at(im: &Raster, x: u32, y: u32) -> u8 {
+        let channels = im.format().channels() as u32;
+        im.data()[((y * im.width() + x) * channels) as usize]
+    }
+
+    /// `vips sobel` / `vips scharr` / `vips prewitt` on the 21x21
+    /// impulse, replayed point for point. The sobel numbers are the 27
+    /// probes of the `sobel_impulse` record in
+    /// `oracle-captures/convolution/oracle.json`; the scharr and prewitt
+    /// grids were captured the same way from vips 8.18.4.
+    ///
+    /// The three responses differ only in which neighbours read 254
+    /// rather than 255, and that is the double-saturation signature the
+    /// uchar arm has to reproduce: the inner integer conv clips the
+    /// recovered gradient into `-128..=127` around the 128 offset, so
+    /// `2 * (p - 128)` reaches -256 but only +254, and the abs-sum then
+    /// clips a second time at 255. An implementation that saturated only
+    /// once would write 255 everywhere in the ring.
+    ///
+    /// The trailing number is the sum over the whole 21x21 output, which
+    /// pins `avg` from the same records (2038 / 441 = 4.621315,
+    /// 2036 / 441 = 4.616780) and proves everything outside the probe
+    /// block is zero.
+    #[test]
+    fn edge_detectors_match_the_vips_impulse_response() {
+        // Rows are y = 8..=12, columns x = 8..=12: the oracle probe block.
+        let expected: [[[u8; 5]; 5]; 3] = [
+            [
+                [0, 0, 0, 0, 0],
+                [0, 255, 255, 255, 0],
+                [0, 254, 0, 255, 0],
+                [0, 255, 254, 255, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            [
+                [0, 0, 0, 0, 0],
+                [0, 255, 254, 255, 0],
+                [0, 254, 0, 255, 0],
+                [0, 255, 255, 255, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            [
+                [0, 0, 0, 0, 0],
+                [0, 255, 254, 255, 0],
+                [0, 254, 0, 254, 0],
+                [0, 255, 254, 255, 0],
+                [0, 0, 0, 0, 0],
+            ],
+        ];
+        let totals = [2038u32, 2038, 2036];
+
+        let im = impulse_mono();
+        for (((name, op), block), total) in edge_ops().into_iter().zip(expected).zip(totals) {
+            let out = op(&im);
+            assert_eq!(out.format(), PixelFormat::Gray8, "{name} output format");
+            assert_eq!((out.width(), out.height()), (21, 21), "{name} output size");
+            for (row, wanted) in block.iter().enumerate() {
+                for (col, &want) in wanted.iter().enumerate() {
+                    let (x, y) = (8 + col as u32, 8 + row as u32);
+                    assert_eq!(u8_at(&out, x, y), want, "{name} at ({x},{y})");
+                }
+            }
+            let sum: u32 = out.data().iter().map(|&b| u32::from(b)).sum();
+            assert_eq!(sum, total, "{name} whole-image sum");
+        }
+    }
+
+    /// The measured vertical-step row of the vips 8.18.4 table: a 7x7
+    /// uchar image, background 10 stepping to 20 at x >= 4. A pure
+    /// vertical step is a pure Gx, so the answer is `|Gx|` alone:
+    /// `10 * (1 + 2 + 1)` for sobel, `10 * (3 + 10 + 3)` for scharr,
+    /// `10 * (1 + 1 + 1)` for prewitt, on the two columns straddling the
+    /// step and zero everywhere else.
+    #[test]
+    fn edge_detectors_match_the_measured_vertical_step() {
+        let im = gray_from(7, 7, |x, _| if x >= 4 { 20 } else { 10 });
+        for ((name, op), want) in edge_ops().into_iter().zip([40u8, 160, 30]) {
+            let out = op(&im);
+            assert_eq!(out.format(), PixelFormat::Gray8, "{name} output format");
+            for y in 0..7 {
+                for x in 0..7 {
+                    let expect = if x == 3 || x == 4 { want } else { 0 };
+                    assert_eq!(u8_at(&out, x, y), expect, "{name} at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    /// The uchar arm combines `|Gx| + |Gy|` (`edge.c:96-104`) and every
+    /// other format combines `sqrt(Gx^2 + Gy^2)` (`edge.c:158-182`), so
+    /// the same picture reads differently on the two arms. The fixture is
+    /// a 7x7 corner, background 10 with a 20 quadrant at x >= 4 && y >= 4,
+    /// where Gx and Gy are equal by construction and the two rules are
+    /// furthest apart: `2 * g` against `sqrt(2) * g`.
+    ///
+    /// scharr is the sharpest witness. Its corner gradients are 130 each,
+    /// so the abs-sum is 260 and saturates to 255 while the magnitude is
+    /// 183.847, and a magnitude-based uchar arm could not reach 255 here.
+    ///
+    /// The uchar sobel expectation is 58, not the 60 the vips binary
+    /// prints by default; see
+    /// `edge_uchar_negative_gradient_follows_the_scalar_convi_rounding`.
+    #[test]
+    fn edge_uchar_combines_the_abs_sum_and_float_the_magnitude() {
+        let corner = |x: u32, y: u32| x >= 4 && y >= 4;
+        let uchar = gray_from(7, 7, |x, y| if corner(x, y) { 20 } else { 10 });
+        let float = float_from(7, 7, |x, y| if corner(x, y) { 20.0 } else { 10.0 });
+
+        for ((name, op), (want_uchar, want_float)) in
+            edge_ops()
+                .into_iter()
+                .zip([(58u8, 42u8), (255, 183), (40, 28)])
+        {
+            assert_eq!(u8_at(&op(&uchar), 4, 4), want_uchar, "{name} uchar corner");
+            assert_eq!(u8_at(&op(&float), 4, 4), want_float, "{name} float corner");
+        }
+    }
+
+    /// The float arm ends in `vips_cast_uchar`, which **truncates**
+    /// (`conversion/cast.c:568`, "Floats are truncated (not rounded)").
+    /// [`Raster::cast`] rounds, so the edge detectors must not use it.
+    ///
+    /// Two witnesses. The scharr corner magnitude is `sqrt(2) * 130 =
+    /// 183.847`: truncation gives 183, rounding 184, and vips 8.18.4
+    /// prints 183. The 5x5 float fixture below drives a prewitt response
+    /// whose magnitude lands just under an integer, captured whole from
+    /// the binary.
+    #[test]
+    fn edge_float_path_truncates_the_cast_to_uchar() {
+        let corner = float_from(7, 7, |x, y| if x >= 4 && y >= 4 { 20.0 } else { 10.0 });
+        assert_eq!(u8_at(&corner.scharr(), 4, 4), 183);
+
+        let mut samples = vec![0.0f32; 25];
+        samples[2 * 5 + 3] = 148.98773;
+        samples[3 * 5 + 2] = 1.91181;
+        let im = Raster::from_f32_samples(5, 5, float_format(1), &samples).unwrap();
+        #[rustfmt::skip]
+        let want: [u8; 25] = [
+            0, 0,   0,   0,   0,
+            0, 0,   210, 148, 210,
+            0, 2,   149, 2,   148,
+            0, 1,   210, 149, 210,
+            0, 2,   1,   2,   0,
+        ];
+        assert_eq!(
+            im.prewitt().data(),
+            &want[..],
+            "vips prewitt on the tie fixture"
+        );
+    }
+
+    /// The whole float arm, replayed against vips 8.18.4 output captured
+    /// on two fixtures: a 7x7 float image whose samples are exact
+    /// quarters spanning negatives, and a 5x5 16-bit image (any format
+    /// other than uchar takes the float arm, `edge.c:186-198`).
+    ///
+    /// The float arm is bit-stable: `VIPS_NOVECTOR=1` reproduces both
+    /// captures byte for byte, unlike the uchar arm.
+    #[test]
+    fn edge_float_arm_matches_the_vips_capture() {
+        #[rustfmt::skip]
+        let float_expected: [[u8; 49]; 3] = [
+            [
+                17, 11, 13, 11, 9, 11, 9, 21, 8, 3, 3, 3, 3, 8, 8, 8, 13, 8, 3, 3, 8, 8, 3, 3, 8,
+                13, 8, 8, 8, 3, 3, 3, 3, 8, 21, 8, 3, 3, 3, 3, 3, 9, 17, 11, 13, 11, 9, 11, 20,
+            ],
+            [
+                69, 58, 66, 58, 49, 58, 48, 95, 37, 15, 25, 25, 15, 48, 48, 37, 74, 37, 15, 25, 18,
+                18, 25, 15, 37, 74, 37, 48, 48, 15, 25, 25, 15, 37, 95, 18, 25, 15, 15, 25, 25, 37,
+                79, 58, 66, 58, 49, 58, 80,
+            ],
+            [
+                13, 6, 7, 6, 4, 6, 5, 14, 6, 5, 3, 3, 5, 2, 2, 6, 6, 6, 5, 3, 10, 10, 3, 5, 6, 6,
+                6, 2, 2, 5, 3, 3, 5, 6, 14, 10, 3, 5, 5, 3, 3, 7, 10, 6, 7, 6, 4, 6, 15,
+            ],
+        ];
+        #[rustfmt::skip]
+        let u16_expected: [[u8; 25]; 3] = [
+            [69, 47, 55, 47, 68, 87, 34, 13, 13, 32, 32, 34, 54, 34, 32, 32, 13, 13, 34, 87, 68,
+             47, 55, 47, 69],
+            [255, 235, 255, 235, 255, 255, 149, 63, 102, 72, 192, 149, 255, 149, 192, 72, 102, 63,
+             149, 255, 255, 235, 255, 235, 255],
+            [52, 24, 29, 24, 40, 57, 26, 22, 15, 40, 10, 26, 26, 26, 10, 40, 15, 22, 26, 57, 40,
+             24, 29, 24, 52],
+        ];
+
+        let floats = float_from(7, 7, |x, y| ((x * 3 + y * 5) % 11) as f32 * 0.75 - 4.0);
+        let shorts = gray16_from(5, 5, |x, y| (((x * 3 + y * 5) % 11) * 3 + 300) as u16);
+        for (((name, op), want_float), want_u16) in
+            edge_ops().into_iter().zip(float_expected).zip(u16_expected)
+        {
+            let out = op(&floats);
+            assert_eq!(
+                out.format(),
+                PixelFormat::Gray8,
+                "{name} float input format"
+            );
+            assert_eq!(out.data(), &want_float[..], "{name} on the float fixture");
+
+            let out = op(&shorts);
+            assert_eq!(
+                out.format(),
+                PixelFormat::Gray8,
+                "{name} 16-bit input format"
+            );
+            assert_eq!(out.data(), &want_u16[..], "{name} on the 16-bit fixture");
+        }
+    }
+
+    /// Output is always uchar (`edge.c` ends the non-uchar arm in
+    /// `vips_cast_uchar` and the uchar arm never leaves 8 bits), the band
+    /// count and the dimensions are preserved, and the 16-bit and float
+    /// carriers all narrow to their 8-bit sibling.
+    #[test]
+    fn edge_output_is_always_uchar_with_the_input_bands() {
+        let two8 = PixelFormat::with_channels(2, 1).unwrap();
+        let five16 = PixelFormat::with_channels(5, 2).unwrap();
+        let five8 = PixelFormat::with_channels(5, 1).unwrap();
+        let cases = [
+            (PixelFormat::Gray8, PixelFormat::Gray8),
+            (PixelFormat::Gray16, PixelFormat::Gray8),
+            (PixelFormat::Rgb8, PixelFormat::Rgb8),
+            (PixelFormat::Rgb16, PixelFormat::Rgb8),
+            (PixelFormat::Rgba8, PixelFormat::Rgba8),
+            (PixelFormat::Rgba16, PixelFormat::Rgba8),
+            (PixelFormat::RgbaF32, PixelFormat::Rgba8),
+            (two8, two8),
+            (five16, five8),
+        ];
+        for (src, want) in cases {
+            let im = Raster::zeroed(4, 3, src).unwrap();
+            for (name, op) in edge_ops() {
+                let out = op(&im);
+                assert_eq!(out.format(), want, "{name} of {src:?}");
+                assert_eq!(
+                    (out.width(), out.height()),
+                    (4, 3),
+                    "{name} of {src:?} size"
+                );
+            }
+        }
+    }
+
+    /// Every band is convolved and combined on its own, exactly as
+    /// `vips conv` is per-band: a 7x7 RGB fixture with a 10 -> 20 step at
+    /// x >= 4 in band 0, a flat 77 in band 1, and a 30 -> 60 step at
+    /// x >= 2 in band 2 answers 40 / 0 / 120 for sobel on the columns
+    /// straddling each step, and a flat band contributes nothing anywhere.
+    /// Captured from vips 8.18.4.
+    #[test]
+    fn edge_treats_every_band_independently() {
+        let mut data = Vec::with_capacity(7 * 7 * 3);
+        for _ in 0..7 {
+            for x in 0..7u32 {
+                data.push(if x >= 4 { 20 } else { 10 });
+                data.push(77);
+                data.push(if x >= 2 { 60 } else { 30 });
+            }
+        }
+        let im = Raster::new(7, 7, PixelFormat::Rgb8, data).unwrap();
+
+        for ((name, op), want) in
+            edge_ops()
+                .into_iter()
+                .zip([[40u8, 0, 120], [160, 0, 254], [30, 0, 90]])
+        {
+            let out = op(&im);
+            assert_eq!(out.format(), PixelFormat::Rgb8, "{name} output format");
+            let row = &out.data()[3 * 7 * 3..4 * 7 * 3];
+            let band0: Vec<u8> = row.iter().step_by(3).copied().collect();
+            let band1: Vec<u8> = row.iter().skip(1).step_by(3).copied().collect();
+            let band2: Vec<u8> = row.iter().skip(2).step_by(3).copied().collect();
+            assert_eq!(
+                band0,
+                vec![0, 0, 0, want[0], want[0], 0, 0],
+                "{name} band 0"
+            );
+            assert_eq!(band1, vec![0; 7], "{name} band 1 is flat");
+            assert_eq!(
+                band2,
+                vec![0, want[2], want[2], 0, 0, 0, 0],
+                "{name} band 2"
+            );
+        }
+    }
+
+    /// A NEGATIVE uchar gradient reads two low against the vips binary,
+    /// and this pins that so the gap cannot drift unnoticed.
+    ///
+    /// `vips_convi_gen` divides with C's truncating `/`
+    /// (`convolution/convi.c:710`, `((sum + rounding) / scale) + offset`),
+    /// which for a negative sum rounds towards zero. The HWY vector path
+    /// the shipped binary actually takes for uchar integer convolutions
+    /// finishes with an arithmetic shift instead, which floors, and
+    /// `vips_convi_intize` only requires the two to agree within 2
+    /// (`convi.c:1108-1112`). libviprs ports the scalar C path, so a
+    /// gradient whose sum is negative and even comes back one lower from
+    /// the inner conv and two lower after the abs-sum doubling.
+    ///
+    /// A horizontal 10 -> 20 step at y >= 4 gives sobel's base mask a sum
+    /// of -40 straddling the step. `VIPS_NOVECTOR=1 vips sobel` prints
+    /// 38 here, matching libviprs; the default `vips sobel` prints 40.
+    /// The vertical step of the same size stays positive and both agree
+    /// on 40, which is the control in the same assertion.
+    #[test]
+    fn edge_uchar_negative_gradient_follows_the_scalar_convi_rounding() {
+        let horizontal = gray_from(7, 7, |_, y| if y >= 4 { 20 } else { 10 });
+        assert_eq!(u8_at(&horizontal.sobel(), 3, 3), 38);
+        assert_eq!(u8_at(&horizontal.sobel(), 3, 4), 38);
+
+        let vertical = gray_from(7, 7, |x, _| if x >= 4 { 20 } else { 10 });
+        assert_eq!(u8_at(&vertical.sobel(), 3, 3), 40);
+        assert_eq!(u8_at(&vertical.sobel(), 4, 3), 40);
+    }
+
+    /// The result inherits the source metadata, as a vips pipeline does:
+    /// the interpretation survives even though the format changed, and so
+    /// do the resolution and offset fields.
+    #[test]
+    fn edge_inherits_the_source_metadata() {
+        let im = gray16_from(4, 4, |x, y| u16::try_from(x * 900 + y * 70).unwrap())
+            .copy()
+            .interpretation(Interpretation::Grey16)
+            .xres(42.0)
+            .build();
+        for (name, op) in edge_ops() {
+            let out = op(&im);
+            assert_eq!(
+                out.interpretation(),
+                Interpretation::Grey16,
+                "{name} interpretation"
+            );
+            assert!((out.xres() - 42.0).abs() < 1e-12, "{name} xres");
+        }
+    }
+
+    /// The `try_*` and panicking forms are the same call, and the three
+    /// masks really are different matrices: on the 7x7 vertical step the
+    /// detectors answer 40, 160 and 30, so no two of them agree.
+    #[test]
+    fn edge_try_and_panicking_forms_agree() {
+        let im = gray_from(7, 7, |x, _| if x >= 4 { 20 } else { 10 });
+        let got: Vec<Vec<u8>> = edge_ops()
+            .into_iter()
+            .map(|(_, op)| op(&im).data().to_vec())
+            .collect();
+        assert_ne!(got[0], got[1], "sobel and scharr");
+        assert_ne!(got[1], got[2], "scharr and prewitt");
+        assert_ne!(got[0], got[2], "sobel and prewitt");
+
+        assert_eq!(im.try_sobel().unwrap().data(), got[0].as_slice());
+        assert_eq!(im.try_scharr().unwrap().data(), got[1].as_slice());
+        assert_eq!(im.try_prewitt().unwrap().data(), got[2].as_slice());
+    }
 }
