@@ -36,10 +36,13 @@
 //! * **Masks.** A [`Kernel`] is the double matrix plus its `scale`
 //!   divisor, exactly the pair a libvips matrix image carries. Each output
 //!   pixel of [`Raster::conv`] is `sum(mask[i] * pixel[i]) / scale`
-//!   (`convolution/conv.c`). libvips matrix images also carry an `offset`
-//!   summand; the ported surface builds `Kernel` as a two-field struct
-//!   literal, so the offset is fixed at `0`, the value every mask in the
-//!   ported suites has.
+//!   (`convolution/conv.c`). The scale must be finite and non-zero.
+//!   libvips matrix images also carry an `offset` summand, added once per
+//!   output sample after the division; the engine honours it and carries
+//!   it alongside the scale on its internal mask, but the ported surface
+//!   builds `Kernel` as a two-field struct literal, so the offset is `0`
+//!   on every public entry point, the value every mask in the ported
+//!   suites has.
 //! * **Precision.** [`Precision::Float`] is `vips_convf`: coefficients are
 //!   baked as `mask / scale`, accumulation is `f64`, and the result is a
 //!   32-bit float image regardless of the input depth (libvips promotes
@@ -168,6 +171,17 @@ pub enum ConvolutionError {
     /// The kernel scale is zero, which would divide every sum by zero.
     #[error("kernel scale must be non-zero")]
     ZeroScale,
+    /// A mask scalar is `NaN` or infinite. Neither survives the integer
+    /// path: a non-finite scale rounds to an integer scale of `0` and
+    /// divides by it, and a non-finite offset saturates to `i64::MAX` and
+    /// overflows the summand add.
+    #[error("mask {param} must be finite, got {value}")]
+    NonFiniteMaskParameter {
+        /// Which mask scalar was rejected, `"scale"` or `"offset"`.
+        param: &'static str,
+        /// The offending value, as supplied.
+        value: f64,
+    },
     /// `convsep` needs a `1xN` or `Nx1` kernel (libvips
     /// `vips_check_separable`).
     #[error("separable convolution needs a 1xN or Nx1 kernel, got {width}x{height}")]
@@ -220,12 +234,28 @@ fn rint(v: f64) -> f64 {
     v.round_ties_even()
 }
 
-/// A validated dense view of a [`Kernel`]: dimensions plus the row-major
-/// coefficients.
+/// A validated dense view of a [`Kernel`]: dimensions, the row-major
+/// coefficients, and the two scalars the convolution arithmetic needs.
+///
+/// libvips keeps `scale` and `offset` on the mask image itself
+/// (`vips_image_get_scale` / `vips_image_get_offset`) rather than at the
+/// call site, which is what lets `convolution/convsep.c:89-94` express
+/// "second pass, same mask, offset zero" by copying the mask and stamping
+/// one field. Carrying them here does the same job: a mask and its
+/// scalars cannot be separated on the way into [`conv_raster`], and they
+/// survive a rotation instead of being rebuilt by hand on the far side.
 struct DenseKernel {
     w: usize,
     h: usize,
     coeff: Vec<f64>,
+    /// The divisor applied to each convolution sum, from [`Kernel::scale`].
+    scale: f64,
+    /// The summand applied once per output sample. [`Kernel`] has no
+    /// offset field, so everything on the ported surface leaves this at
+    /// `0.0`; [`DenseKernel::with_offset`] is how an internal caller
+    /// stamps the `vips_image_set_double(mask, "offset", ...)` its C
+    /// original does.
+    offset: f64,
 }
 
 impl DenseKernel {
@@ -249,7 +279,17 @@ impl DenseKernel {
             w,
             h: kernel.data.len(),
             coeff,
+            scale: kernel.scale,
+            offset: 0.0,
         })
+    }
+
+    /// Stamp the mask offset summand, as `convolution/edge.c` and
+    /// `convolution/canny.c` do with
+    /// `vips_image_set_double(mask, "offset", 128.0)`.
+    fn with_offset(mut self, offset: f64) -> Self {
+        self.offset = offset;
+        self
     }
 }
 
@@ -560,16 +600,39 @@ fn clamp_coord(v: i64, size: u32) -> usize {
 // conv
 // ---------------------------------------------------------------------------
 
-/// Convert a double mask to the integer mask, the adjusted scale, and the
-/// rounded offset (`vips__image_intize`): `rint()` every element, then
-/// nudge the rounded scale so an all-ones input keeps the same
-/// input/output brightness ratio as the double mask.
+/// The integer form of a mask, for the `vips_convi` path: the rounded
+/// coefficients, the brightness-corrected scale, and the rounded offset.
 ///
-/// The offset is rounded and nothing more. libvips does not rescale it
-/// along with the nudged scale (`convolution/convi.c:898`), and that is
-/// deliberate rather than an oversight: the summand is applied after the
-/// division, so it is already in output units.
-fn intize(dense: &DenseKernel, scale: f64, offset: f64) -> (Vec<i64>, i64, i64) {
+/// Named fields rather than a tuple because the scale and the offset are
+/// both `i64` and mean entirely different things; transposing them in a
+/// destructuring pattern would compile and quietly produce wrong pixels.
+struct IntKernel {
+    coeff: Vec<i64>,
+    scale: i64,
+    offset: i64,
+}
+
+/// Convert a double mask to its integer form (`vips__image_intize`):
+/// `rint()` every element, then nudge the rounded scale so an all-ones
+/// input keeps the same input/output brightness ratio as the double mask.
+///
+/// The offset is rounded, clamped into `int` range, and nothing more.
+/// `vips__image_intize` does compute an `out_offset` alongside the nudged
+/// scale (`convolution/convi.c:898`), but nothing downstream ever reads
+/// it: `vips_convi_build` keeps the intized mask in a local only to
+/// harvest the coefficients, and `vips_convi_gen` takes both the scale and
+/// the offset off the *original* mask (`convi.c:757`). For the offset that
+/// makes no difference, because `rint()` is idempotent and the summand is
+/// in output units either way. For the scale it does make a difference,
+/// and libviprs diverges from libvips there; that is issue #547, and it
+/// moves real output bytes, so it is deliberately not fixed here.
+///
+/// The clamp keeps the rounded offset inside the `int` that
+/// `vips_convi_gen` reads it into, which also keeps the `i64` add on the
+/// unsigned arm from overflowing on a large finite offset.
+/// [`conv_raster`] has already rejected a non-finite one.
+fn intize(dense: &DenseKernel) -> IntKernel {
+    let scale = dense.scale;
     let sum_double: f64 = dense.coeff.iter().sum();
     let double_result = sum_double / scale;
 
@@ -590,7 +653,11 @@ fn intize(dense: &DenseKernel, scale: f64, offset: f64) -> (Vec<i64>, i64, i64) 
         out_scale = 1.0;
     }
 
-    (imask, out_scale as i64, rint(offset) as i64)
+    IntKernel {
+        coeff: imask,
+        scale: out_scale as i64,
+        offset: rint(dense.offset).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i64,
+    }
 }
 
 /// The clip ceiling for an unsigned format depth.
@@ -606,44 +673,57 @@ fn depth_max(fmt: PixelFormat) -> i64 {
 /// One full 2D convolution pass (both precisions, all formats), the shared
 /// engine behind `conv` and `convsep`.
 ///
-/// The public [`Kernel`] has no offset field, so every caller on the
-/// ported surface convolves with the zero summand.
-fn conv_raster(
-    src: &Raster,
-    dense: &DenseKernel,
-    scale: f64,
-    precision: Precision,
-) -> Result<Raster, ConvolutionError> {
-    conv_raster_offset(src, dense, scale, 0.0, precision)
-}
-
-/// [`conv_raster`] plus the `offset` summand a libvips matrix image
-/// carries next to its `scale`.
+/// `dense` carries the mask, its `scale` divisor and its `offset`
+/// summand, the same three things a libvips matrix image carries. The
+/// public [`Kernel`] has no offset field, so everything on the ported
+/// surface convolves with the zero summand.
 ///
-/// Each arm adds it exactly where its C counterpart does: before the clip
-/// on the integer/unsigned path (`convi.c:710`), after the division and
-/// with no clip on the integer/float-input path (`convi.c:733`), and as
-/// the starting value of the accumulator at float precision, where the
-/// scale is already baked into the coefficients (`convf.c:172`). Both
-/// integer arms use the `rint()`-ed offset [`intize`] hands back, matching
-/// the `int offset = rint(vips_image_get_offset(M))` that
-/// `vips_convi_gen` reads; the float arm keeps it as an unrounded `f64`,
-/// as `vips_convf_gen` does.
+/// Each arm adds the summand exactly where its C counterpart does: before
+/// the clip on the integer/unsigned path (`convi.c:710`), after the
+/// division and with no clip on the integer/float-input path
+/// (`convi.c:733`), and as the starting value of the accumulator at float
+/// precision, where the scale is already baked into the coefficients
+/// (`convf.c:172`). Both integer arms use the `rint()`-ed offset
+/// [`intize`] hands back, matching the `int offset = rint(...)`
+/// `vips_convi_gen` reads off the mask; the float arm keeps it as an
+/// unrounded `f64`, as `vips_convf_gen` does. It is applied once per
+/// output *sample*, not once per tap, so it is one add per sample however
+/// large the mask is, and there is nothing here worth specialising away.
 ///
 /// The edge detectors are what need this: `convolution/edge.c` stamps
 /// `offset = 128.0, scale = 2.0` on its mask for the uchar path, and
 /// `convolution/canny.c` stamps `offset = 128.0` on its gradient mask, so
 /// a signed response lands centred in the unsigned output range instead of
-/// clipping away at zero.
-fn conv_raster_offset(
+/// clipping away at zero. Two libvips rules come with the summand, and a
+/// consumer that ignores either gets wrong pixels:
+///
+/// * `vips_convsep` applies it on the **first pass only**. The second
+///   pass runs against a copy of the mask with the offset stamped back to
+///   zero (`convolution/convsep.c:89-94`), because the summand is in
+///   output units and a two-pass mask would otherwise add it twice.
+/// * `vips_compass` takes the absolute value of every rotation before
+///   combining them (`convolution/compass.c`), and an offset makes that
+///   meaningless: 128 moves the zero point of the response, so `.abs()`
+///   folds it about the wrong value. A compass mask carries offset zero.
+fn conv_raster(
     src: &Raster,
     dense: &DenseKernel,
-    scale: f64,
-    offset: f64,
     precision: Precision,
 ) -> Result<Raster, ConvolutionError> {
+    let (scale, offset) = (dense.scale, dense.offset);
     if scale == 0.0 {
         return Err(ConvolutionError::ZeroScale);
+    }
+    // A `NaN` scale slips straight past the zero test and reaches
+    // `intize`, where `rint(NaN) as i64` is `0` and the integer arm then
+    // divides by it; a non-finite offset saturates `rint(offset) as i64`
+    // to `i64::MAX` and overflows the add, which panics in debug and
+    // silently wraps to black in release. Both are rejected here, at the
+    // one boundary every caller passes through.
+    for (param, value) in [("scale", scale), ("offset", offset)] {
+        if !value.is_finite() {
+            return Err(ConvolutionError::NonFiniteMaskParameter { param, value });
+        }
     }
     let (w, h) = (src.width(), src.height());
     let channels = src.format().channels();
@@ -678,7 +758,11 @@ fn conv_raster_offset(
             Ok(raster_from_f64(w, h, channels, &out)?)
         }
         Precision::Integer => {
-            let (imask, iscale, ioffset) = intize(dense, scale, offset);
+            let IntKernel {
+                coeff: imask,
+                scale: iscale,
+                offset: ioffset,
+            } = intize(dense);
             if src.format().is_float() {
                 // vips_convi_gen keeps a double path for float inputs: the
                 // integer mask, real division, the rounded offset added
@@ -774,6 +858,40 @@ fn rot45_kernel(data: &[Vec<f64>], angle: Angle45) -> Vec<Vec<f64>> {
         .collect()
 }
 
+impl DenseKernel {
+    /// The coefficients back as rows, for the matrix rotation helpers.
+    fn rows(&self) -> Vec<Vec<f64>> {
+        self.coeff.chunks(self.w).map(<[f64]>::to_vec).collect()
+    }
+
+    /// This mask rotated 90 degrees clockwise, keeping its scale and its
+    /// offset. `vips_rot` copies the mask metadata across, which is
+    /// exactly why `convsep.c:94` has to stamp the offset back to zero by
+    /// hand rather than rely on the rotation dropping it.
+    fn rot90(&self) -> Self {
+        self.respun(rot90_kernel(&self.rows()))
+    }
+
+    /// This mask rotated by a multiple of 45 degrees, keeping its scale
+    /// and its offset (`vips_compass` rotates its mask with `vips_rot45`).
+    fn rot45(&self, angle: Angle45) -> Self {
+        self.respun(rot45_kernel(&self.rows(), angle))
+    }
+
+    /// Rebuild from rotated rows, carrying the two scalars across. Going
+    /// back through a [`Kernel`] literal here would silently drop the
+    /// offset, since `Kernel` has nowhere to put it.
+    fn respun(&self, data: Vec<Vec<f64>>) -> Self {
+        DenseKernel {
+            w: data[0].len(),
+            h: data.len(),
+            coeff: data.into_iter().flatten().collect(),
+            scale: self.scale,
+            offset: self.offset,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Raster methods
 // ---------------------------------------------------------------------------
@@ -785,14 +903,16 @@ impl Raster {
     ///
     /// [`ConvolutionError::EmptyKernel`] / [`ConvolutionError::RaggedKernel`]
     /// for a malformed mask, [`ConvolutionError::ZeroScale`] for a zero
-    /// scale, or [`ConvolutionError::Raster`] on allocation failure.
+    /// scale, [`ConvolutionError::NonFiniteMaskParameter`] for a `NaN` or
+    /// infinite one, or [`ConvolutionError::Raster`] on allocation
+    /// failure.
     pub fn try_conv(
         &self,
         kernel: &Kernel,
         precision: Precision,
     ) -> Result<Raster, ConvolutionError> {
         let dense = DenseKernel::new(kernel)?;
-        conv_raster(self, &dense, kernel.scale, precision)
+        conv_raster(self, &dense, precision)
     }
 
     /// Convolve the image with `kernel` (libvips `vips_conv`).
@@ -828,16 +948,14 @@ impl Raster {
                 height: dense.h as u32,
             });
         }
-        // vips_convsep: convolve with the mask, then with the mask rotated
-        // 90 degrees (offset zeroed on the second pass; offsets here are
-        // always zero). The scale divides in both passes.
-        let rotated = Kernel {
-            data: rot90_kernel(&kernel.data),
-            scale: kernel.scale,
-        };
-        let first = conv_raster(self, &dense, kernel.scale, precision)?;
-        let dense2 = DenseKernel::new(&rotated)?;
-        conv_raster(&first, &dense2, rotated.scale, precision)
+        // vips_convsep: convolve with the mask, then with the mask
+        // rotated 90 degrees. The scale divides in both passes, the offset
+        // applies to the first only (`convsep.c:89-94`), which is what the
+        // explicit zeroing below says. Both ride on the mask, so neither
+        // can drift away from the coefficients it belongs to.
+        let first = conv_raster(self, &dense, precision)?;
+        let second = dense.rot90().with_offset(0.0);
+        conv_raster(&first, &second, precision)
     }
 
     /// Separable convolution with a 1D kernel (libvips `vips_convsep`):
@@ -881,14 +999,13 @@ impl Raster {
         }
 
         // vips_compass: convolve, rotate the mask by `angle`, repeat.
+        // The rotation carries the scale and the offset, so the mask stays
+        // one object all the way round the loop.
         let mut results = Vec::with_capacity(times as usize);
-        let mut mask = kernel.clone();
+        let mut mask = dense;
         for _ in 0..times {
-            results.push(self.try_conv(&mask, precision)?);
-            mask = Kernel {
-                data: rot45_kernel(&mask.data, angle),
-                scale: mask.scale,
-            };
+            results.push(conv_raster(self, &mask, precision)?);
+            mask = mask.rot45(angle);
         }
 
         // Take the absolute value of every result, then combine
@@ -1565,45 +1682,58 @@ mod tests {
     /// would skew brightness gets the libvips nudge. Mask [[0.4, 0.4]],
     /// scale 0.8: double result 1.0; rint mask [0, 0], rint scale 1,
     /// int result 0; adjusted scale rint(1 + (0 - 1)) = 0 -> 1. The offset
-    /// rides along rounded but never rescaled, as `vips__image_intize`
-    /// leaves it.
+    /// rides along rounded but never rescaled, as the mask
+    /// `vips_convi_gen` reads leaves it.
     #[test]
     fn intize_matches_vips_image_intize() {
-        let dense = DenseKernel::new(&Kernel {
+        let fractional = Kernel {
             data: vec![vec![0.4, 0.4]],
             scale: 0.8,
-        })
-        .unwrap();
-        let (imask, iscale, ioffset) = intize(&dense, 0.8, 0.0);
-        assert_eq!(imask, vec![0, 0]);
-        assert_eq!(iscale, 1);
-        assert_eq!(ioffset, 0);
+        };
+        let int = intize(&DenseKernel::new(&fractional).unwrap());
+        assert_eq!(int.coeff, vec![0, 0]);
+        assert_eq!(int.scale, 1);
+        assert_eq!(int.offset, 0);
 
         // The scale is nudged from 0.8 to 1 here, and the offset does not
         // follow it: 127.6 rounds to 128 and stays there.
-        let (_, iscale, ioffset) = intize(&dense, 0.8, 127.6);
-        assert_eq!(iscale, 1);
-        assert_eq!(ioffset, 128);
+        let int = intize(&DenseKernel::new(&fractional).unwrap().with_offset(127.6));
+        assert_eq!(int.scale, 1);
+        assert_eq!(int.offset, 128);
 
         // The ported blur mask stays untouched: ints in, sum matches.
-        let dense = DenseKernel::new(&ported_masks()[1]).unwrap();
-        let (imask, iscale, ioffset) = intize(&dense, 9.0, 128.0);
-        assert_eq!(imask, vec![1; 9]);
-        assert_eq!(iscale, 9);
-        assert_eq!(ioffset, 128);
+        let int = intize(
+            &DenseKernel::new(&ported_masks()[1])
+                .unwrap()
+                .with_offset(128.0),
+        );
+        assert_eq!(int.coeff, vec![1; 9]);
+        assert_eq!(int.scale, 9);
+        assert_eq!(int.offset, 128);
 
         // rint() is round-half-to-even, like C under the default mode, for
         // the coefficients and for the offset alike.
-        let dense = DenseKernel::new(&Kernel {
+        let halves = Kernel {
             data: vec![vec![0.5, 1.5, 2.5]],
             scale: 4.5,
-        })
-        .unwrap();
-        let (imask, _, ioffset) = intize(&dense, 4.5, 0.5);
-        assert_eq!(imask, vec![0, 2, 2]);
-        assert_eq!(ioffset, 0);
-        let (_, _, ioffset) = intize(&dense, 4.5, 1.5);
-        assert_eq!(ioffset, 2);
+        };
+        let int = intize(&DenseKernel::new(&halves).unwrap().with_offset(0.5));
+        assert_eq!(int.coeff, vec![0, 2, 2]);
+        assert_eq!(int.offset, 0);
+        let int = intize(&DenseKernel::new(&halves).unwrap().with_offset(1.5));
+        assert_eq!(int.offset, 2);
+
+        // A finite offset too large for a C `int` is clamped rather than
+        // saturated to `i64::MAX`, so the summand add on the unsigned arm
+        // cannot overflow. libvips reads the offset as `int` and gets the
+        // same bound.
+        let int = DenseKernel::new(&halves).unwrap();
+        assert_eq!(intize(&int.with_offset(9.3e18)).offset, i64::from(i32::MAX));
+        let int = DenseKernel::new(&halves).unwrap();
+        assert_eq!(
+            intize(&int.with_offset(-9.3e18)).offset,
+            i64::from(i32::MIN)
+        );
     }
 
     /// FNV-1a over a whole buffer, so a full `data()` comparison fits in
@@ -1628,14 +1758,16 @@ mod tests {
     }
 
     /// The regression guard for the mask offset: at `offset` 0
-    /// `conv_raster_offset` reproduces the pre-offset output byte for byte.
-    /// The digests are FNV-1a over the whole `data()` buffer, captured from
+    /// `conv_raster` reproduces the pre-offset output byte for byte. The
+    /// digests are FNV-1a over the whole `data()` buffer, captured from
     /// the implementation before the summand existed, for all four
     /// `ported_masks()` at both precisions on the uchar, colour, and float
-    /// input arms. The public `conv` must still route through the shim, so
-    /// its bytes have to agree as well.
+    /// input arms. The public `conv` has to agree with them as well.
+    ///
+    /// One case at the bottom deliberately does *not* reproduce the base
+    /// bytes; see the comment there.
     #[test]
-    fn conv_raster_offset_zero_reproduces_the_pre_offset_bytes() {
+    fn conv_raster_at_offset_zero_reproduces_the_pre_offset_bytes() {
         // Per input, per mask: [integer-precision digest, float-precision
         // digest].
         let cases: [(Raster, [[u64; 2]; 4]); 3] = [
@@ -1675,7 +1807,7 @@ mod tests {
                     (Precision::Integer, digests[0]),
                     (Precision::Float, digests[1]),
                 ] {
-                    let out = conv_raster_offset(im, &dense, mask.scale, 0.0, precision).unwrap();
+                    let out = conv_raster(im, &dense, precision).unwrap();
                     let shim = im.conv(mask, precision);
                     assert_eq!(
                         fnv1a(out.data()),
@@ -1687,11 +1819,48 @@ mod tests {
                     assert_eq!(
                         out.data(),
                         shim.data(),
-                        "conv no longer routes through the zero-offset shim"
+                        "conv no longer agrees with the engine it delegates to"
                     );
                 }
             }
         }
+
+        // The one deliberate deviation from base, and the reason for the
+        // `### Fixed` CHANGELOG entry. On the integer-precision float-input
+        // arm the result went from `sum / iscale` to
+        // `sum / iscale + ioffset as f64`, which is bit-identical for every
+        // f64 except `-0.0`: adding `+0.0` promotes it to `+0.0`, and the
+        // sign bit reaches `data()`. It takes a negative integer scale to
+        // reach, which no `ported_masks()` entry has, and which the mask
+        // below does. vips 8.18.4 writes `+0.0` here, C's
+        // `(sum / scale) + offset` promoting the `int 0` the same way, so
+        // base libviprs was the one diverging. libviprs' own float-precision
+        // arm already wrote `+0.0`, and now both arms agree: the two
+        // digests below are the same number.
+        //
+        // Row 0 is all zeros (the `-0.0` sites), row 1 all 5.0, so the rest
+        // of the buffer is pinned alongside the sign bit.
+        const BASE_MINUS_ZERO: u64 = 0x5e65_8c80_2e0c_dfa5;
+        const VIPS_PLUS_ZERO: u64 = 0x453c_3d6d_5edc_8fa5;
+        let samples: Vec<f32> = vec![0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0];
+        let im = Raster::from_f32_samples(4, 2, float_format(1), &samples).unwrap();
+        let negative = Kernel {
+            data: vec![vec![1.0, 1.0, 1.0]],
+            scale: -3.0,
+        };
+        let dense = DenseKernel::new(&negative).unwrap();
+        for precision in [Precision::Integer, Precision::Float] {
+            let out = conv_raster(&im, &dense, precision).unwrap();
+            assert_eq!(
+                fnv1a(out.data()),
+                VIPS_PLUS_ZERO,
+                "negative-scale float input at {precision:?} precision no longer matches vips"
+            );
+        }
+        assert_ne!(
+            VIPS_PLUS_ZERO, BASE_MINUS_ZERO,
+            "the base digest and the vips-matching one must differ, or this case pins nothing"
+        );
     }
 
     /// The uchar recipe of `convolution/edge.c` (`offset` 128, `scale` 2 on
@@ -1714,9 +1883,9 @@ mod tests {
             ],
             scale: 2.0,
         };
-        let dense = DenseKernel::new(&mask).unwrap();
+        let dense = DenseKernel::new(&mask).unwrap().with_offset(128.0);
 
-        let out = conv_raster_offset(&im, &dense, mask.scale, 128.0, Precision::Integer).unwrap();
+        let out = conv_raster(&im, &dense, Precision::Integer).unwrap();
         assert_eq!(out.format(), PixelFormat::Gray8);
         // sum 0 -> (0 + 1) / 2 + 128; sum -1020 -> -509 + 128 -> clipped to
         // 0; sum +1020 -> 510 + 128 -> clipped to 255.
@@ -1725,7 +1894,8 @@ mod tests {
 
         // The same mask with no offset: the low end still clips at 0, but
         // nothing reaches 255 and the flat region is black.
-        let plain = conv_raster_offset(&im, &dense, mask.scale, 0.0, Precision::Integer).unwrap();
+        let plain =
+            conv_raster(&im, &DenseKernel::new(&mask).unwrap(), Precision::Integer).unwrap();
         let got: Vec<f64> = (0..7).map(|y| plain.getpoint(1, y)[0]).collect();
         assert_eq!(got, vec![0.0, 0.0, 0.0, 0.0, 255.0, 255.0, 0.0]);
     }
@@ -1738,7 +1908,6 @@ mod tests {
     fn conv_raster_offset_is_unclipped_on_the_float_input_arms() {
         let im = Raster::from_f32_samples(2, 2, float_format(1), &[10.0; 4]).unwrap();
         let mask = ported_masks().remove(1); // the 3x3 all-ones blur, scale 9
-        let dense = DenseKernel::new(&mask).unwrap();
 
         // Integer precision, float input: intize gives an all-ones mask and
         // scale 9, so the sum is exactly 10 before the offset.
@@ -1748,8 +1917,8 @@ mod tests {
             (0.5, 10.0),
             (1.5, 12.0),
         ] {
-            let out =
-                conv_raster_offset(&im, &dense, mask.scale, offset, Precision::Integer).unwrap();
+            let dense = DenseKernel::new(&mask).unwrap().with_offset(offset);
+            let out = conv_raster(&im, &dense, Precision::Integer).unwrap();
             assert_eq!(out.format(), float_format(1));
             let got = out.getpoint(0, 0)[0];
             assert!(
@@ -1760,14 +1929,100 @@ mod tests {
 
         // Float precision keeps the offset unrounded and unclipped.
         for (offset, want) in [(1000.0, 1010.0), (-1000.0, -990.0), (0.5, 10.5)] {
-            let out =
-                conv_raster_offset(&im, &dense, mask.scale, offset, Precision::Float).unwrap();
+            let dense = DenseKernel::new(&mask).unwrap().with_offset(offset);
+            let out = conv_raster(&im, &dense, Precision::Float).unwrap();
             let got = out.getpoint(1, 1)[0];
             assert!(
                 (got - want).abs() < 1e-4,
                 "float precision, offset {offset}: got {got}, want {want}"
             );
         }
+    }
+
+    /// A non-finite mask scalar is a typed error, not a panic and not a
+    /// silent wrong answer. Before the guard, `f64::INFINITY` as an offset
+    /// saturated `rint(offset) as i64` to `i64::MAX` and overflowed the
+    /// summand add (a panic in debug, black pixels in release), `NaN` as an
+    /// offset was silently dropped to 0 on the integer arms while the float
+    /// arm returned `NaN`, a `NaN` scale slipped past the `scale == 0.0`
+    /// test into an integer divide by zero, and an infinite scale past it
+    /// into an all-zero image.
+    #[test]
+    fn conv_raster_rejects_a_non_finite_scale_or_offset() {
+        let im = noise_gray(4, 4, 11);
+        let ones = Kernel {
+            data: vec![vec![1.0, 1.0, 1.0]],
+            scale: 3.0,
+        };
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for precision in [Precision::Integer, Precision::Float] {
+                let dense = DenseKernel::new(&ones).unwrap().with_offset(bad);
+                assert!(matches!(
+                    conv_raster(&im, &dense, precision),
+                    Err(ConvolutionError::NonFiniteMaskParameter {
+                        param: "offset",
+                        value
+                    }) if value.is_nan() == bad.is_nan()
+                ));
+
+                let scaled = Kernel {
+                    data: ones.data.clone(),
+                    scale: bad,
+                };
+                assert!(matches!(
+                    im.try_conv(&scaled, precision),
+                    Err(ConvolutionError::NonFiniteMaskParameter { param: "scale", .. })
+                ));
+            }
+        }
+
+        // A zero scale keeps its own more specific error.
+        let zero = Kernel {
+            data: ones.data.clone(),
+            scale: 0.0,
+        };
+        assert!(matches!(
+            im.try_conv(&zero, Precision::Integer),
+            Err(ConvolutionError::ZeroScale)
+        ));
+    }
+
+    /// A rotated mask keeps its scale and its offset. Going back through a
+    /// `Kernel` literal would drop the offset silently, which is the whole
+    /// reason the rotation lives on `DenseKernel`.
+    #[test]
+    fn rotating_a_dense_kernel_carries_the_scale_and_offset() {
+        let sobel = Kernel {
+            data: vec![
+                vec![1.0, 2.0, 1.0],
+                vec![0.0, 0.0, 0.0],
+                vec![-1.0, -2.0, -1.0],
+            ],
+            scale: 2.0,
+        };
+        let dense = DenseKernel::new(&sobel).unwrap().with_offset(128.0);
+        for spun in [dense.rot90(), dense.rot45(Angle45::D45)] {
+            assert!(
+                (spun.scale - 2.0).abs() < f64::EPSILON,
+                "rotation dropped the scale: got {}",
+                spun.scale
+            );
+            assert!(
+                (spun.offset - 128.0).abs() < f64::EPSILON,
+                "rotation dropped the offset: got {}",
+                spun.offset
+            );
+            assert_eq!((spun.w, spun.h), (3, 3));
+        }
+
+        // rot90 of a 1xN is an Nx1, coefficients in order.
+        let row = Kernel {
+            data: vec![vec![1.0, 2.0, 3.0]],
+            scale: 6.0,
+        };
+        let spun = DenseKernel::new(&row).unwrap().rot90();
+        assert_eq!((spun.w, spun.h), (1, 3));
+        assert_eq!(spun.coeff, vec![1.0, 2.0, 3.0]);
     }
 
     /// convsep equals the full 2D convolution with the outer-product mask

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ConvolutionError::NonFiniteMaskParameter { param, value }` rejects a `NaN`
+  or infinite mask scale at the convolution boundary (issue #534). `conv`,
+  `convsep`, `compass`, `gaussblur` and `sharpen` all reach the engine through
+  that one check, so they all get it. The enum is `#[non_exhaustive]`, so the
+  new variant is additive.
+
+### Fixed
+
+- A convolution at `Precision::Integer` over a float image with a negative mask
+  scale wrote `-0.0` where vips 8.18.4 writes `+0.0` (issue #534). The integer
+  path divides by the intized scale and then adds the mask offset summand, and
+  C promotes the `int 0` and rewrites the sign along with it; libviprs was
+  skipping the add entirely, so a sum of zero over a negative scale kept its
+  sign bit and reached `data()` as `-0.0`. It does not take a negative scale
+  from the caller to hit: `vips__image_intize`'s brightness nudge turns an
+  ordinary positive scale negative, so `Kernel { data: vec![vec![1.0, 1.0]],
+  scale: 0.4 }` is enough. libviprs' own float-precision arm already wrote
+  `+0.0` for the same input, so the two arms now agree with each other as well
+  as with vips.
+- A `NaN` mask scale used to panic with an integer divide by zero on the
+  `Precision::Integer` path over an unsigned image (issue #534). The
+  `scale == 0.0` guard let it past, and `rint(NaN) as i64` is `0`, so the
+  rounded scale the arithmetic divides by was zero after all. An infinite scale
+  got past the same guard and produced an all-zero image with no diagnostic.
+  Both are now the typed `ConvolutionError::NonFiniteMaskParameter`, on both
+  precisions.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
