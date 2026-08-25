@@ -1,0 +1,5 @@
+# capture.py regenerates every fixture and every intermediate from the vips
+# binary and from the reference GIFs named in it, so only capture.py,
+# commands.sh and oracle.json are pinned here.
+fixtures/
+outputs/

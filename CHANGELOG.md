@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `decode_tiff_page` indexes pages from **zero**, where it used to index from
+  one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
+  be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
+  the first. Every call site that passed a page number has to lose one, and the
+  break is silent on a multi-page file, so it is worth grepping for rather than
+  waiting to be told.
+
+  The old numbering disagreed with libvips, whose `page` argument is `min: 0`
+  on `tiffload`, `pdfload`, `gifload`, `heifload` and `webpload` alike
+  (measured against 8.18.4: `vips tiffload --page 0` loads the first image, and
+  `--page 1` on a single-page file fails with "TIFF does not contain page 1").
+  Anyone moving a pipeline across read the wrong page with no error to show for
+  it. It also disagreed with the `tiff` crate underneath, where
+  `seek_to_image(0)` is the first IFD, so the function was converting between
+  the two conventions for nobody's benefit. A TIFF has no page numbers of its
+  own to justify the offset either: the IFD chain is a linked list.
+
+  The frames/page model in #564 is the reason to move it now rather than later.
+  That model exposes frames as a sequence, a sequence in Rust is indexed from
+  zero, and a `frames()` accessor starting at 0 sitting next to a
+  `decode_tiff_page` starting at 1 would be a permanent source of off-by-ones.
+
+  **PDF page numbers are unchanged and remain 1-based.** `extract_page_image`
+  and its siblings read a numbering the document carries itself, `PdfInfo`
+  reports that numbering, and the CLI's `--page` exposes it to users on those
+  terms. The rule across the crate is that a document's own page number is
+  1-based and a position in a sequence of frames is 0-based.
+
+  A raster from `decode_tiff_page` now also carries `n-pages`, so the count
+  that bounds `page` comes back with the pixels and is readable through
+  `Raster::get_n_pages`. vips attaches the same field on every TIFF load,
+  single-page files included. The out-of-range error names both the index and
+  the count instead of relaying the `tiff` crate's seek failure.
+
 - `Raster::encode_webp` takes a `webp::SaveOptions` carrying a `Compression`
   and a `Keep`, where it used to take a bare `quality: u8` (issue #568). There
   is no lossy WebP encoder reachable in pure Rust: `image-webp` 0.2.4's
@@ -97,6 +131,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `n-pages` set to how many frames the original had — which is what a
   default `vips webpload` does too. Reading every frame is issue #569 and waits
   on the page model.
+
+- Still-image GIF load and save (issues #570, #571). `gifload` was routed
+  through the `image` crate's facade and `encode_gif` was a typed stub; both
+  now go straight to the `gif` crate, because the facade cannot reach what
+  either half needs. `image::codecs::gif::GifDecoder` hard-codes `Rgba8`
+  where vips emits three bands for a GIF with no transparent index anywhere,
+  and its `GifEncoder` has no interlace, no dither, and no palette control at
+  all.
+
+  Load produces frame 0 at the logical screen size, which is exactly what
+  `vips gifload` does by default (`page = 0`, `n = 1`), tagged sRGB and
+  carrying `n-pages`, `loop`, `bits-per-sample`, `palette`, and `interlaced`.
+  Seven of the eight GIFs in the libvips reference suite decode
+  byte-identically to vips, over 3.25 MB of pixels; the eighth is
+  `truncated.gif`, where libviprs recovers sixteen more rows out of the
+  broken tail before it gives up and the first 784 rows still match exactly.
+
+  Three details are worth knowing because they are easy to get wrong and all
+  three were settled against the binary rather than the spec. The canvas
+  around frame 0 is transparent black, not the background colour the header
+  reports. `loop` is not the NETSCAPE repeat count: no application extension
+  means 1, a stored count of 0 means 0 (forever), and a stored count of `n`
+  means `n + 1`. And a frame whose pixel data runs off the end of the file
+  counts as declaring transparency, because the rows that never arrived stay
+  uncomposited, so a truncated GIF loads with four bands where the intact one
+  has three.
+
+  Save writes a single-frame GIF89a and takes `interlace`, `dither` and
+  `bitdepth`. `Raster::save`, `encode_to_buffer` and `encode_to_target` all
+  route `.gif` to it, so the extension dispatch works alongside the direct
+  `encode_gif` / `save_gif` pair.
+
+  **Output is not byte-identical to `vips gifsave`, and it never will be.**
+  LZW is exactly lossless and deterministic both ways, so the bitstream is
+  not where the two disagree; palette quantisation is. vips quantises with
+  libimagequant and libviprs with the median-cut quantiser that already backs
+  `encode_png_palette`, and two algorithms pick two different palettes for
+  the same image. What is matched instead is structural, and all of it is
+  checked: the colour table is `2^bitdepth` entries with the same LZW minimum
+  code size vips writes, a transparent index is reserved at 0 under exactly
+  the same condition (measured over twelve bitdepth and colour-count pairs,
+  so an opaque source with palette headroom reloads as four bands here too),
+  alpha is thresholded at 128 with the sub-threshold pixel zeroed outright,
+  and interlaced rows go out in GIF's four-pass order. Where the palette
+  already fits, the round trip is exact.
+
+  The quantiser gap is bounded rather than waved at. On a 48x32 gradient of
+  1536 distinct colours vips scores `avg_abs_diff 3.895` and
+  `max_abs_diff 22` against its own input, and libviprs scores `3.457` and
+  `12`; on the reference `synth_rgb8` fixture vips scores `3.366` and `23`
+  and libviprs `3.944` and `18`. Neither dominates.
+
+  Encoding is byte-reproducible. It was not, before: the shared quantiser
+  gathered distinct colours through a `HashMap` whose iteration order the
+  default `RandomState` reseeds per process, so identical input produced
+  differently ordered palettes and different bytes on every run. That
+  affected `encode_png_palette` too, and is fixed for both.
+
+  Animated GIF is not included. `decode_gif` loads frame 0 and attaches
+  `n-pages` so a caller can see the rest is there; multi-page load and save
+  arrive with the page model. For the same reason the array-valued fields
+  `delay`, `background` and `gif-palette` are read but not attached, since
+  `MetadataValue` has no array variant yet. `gifsave`'s `effort`, `reuse`,
+  `interpalette-maxerror`, `interframe-maxerror` and `keep-duplicate-frames`
+  are cgif-specific palette-reuse and frame-coalescing machinery with no
+  pure-Rust equivalent and are not modelled.
 
 - SVG rasterisation, behind a new non-default `svg` feature (issue #502).
   `decode_svg` was a typed stub reporting that librsvg was missing; it now

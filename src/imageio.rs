@@ -18,6 +18,7 @@
 //! |---|---|---|
 //! | `.png` | [`crate::sink::encode_png`] | none yet (iCCP embedding is an open gap) |
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
+//! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
@@ -806,7 +807,10 @@ impl Raster {
 pub enum SaveError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, and v/vips")]
+    #[error(
+        "unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, gif, \
+         webp, and v/vips"
+    )]
     UnsupportedExtension { extension: String },
     #[error("encode error: {0}")]
     Encode(#[from] SinkError),
@@ -860,6 +864,18 @@ impl Raster {
                     encoded
                 }
             }
+            // GIF carries no EXIF or ICC through libviprs' encoder, so
+            // `keep_metadata` has nothing to act on: the container holds a
+            // palette, a loop count and per-frame delays, all of which are
+            // structural rather than EXIF-class (`vips gifsave --keep none`
+            // does not drop `delay` either). WebP is the other way round and
+            // takes the flag.
+            "gif" => self
+                .encode_gif(crate::gif::SaveOptions::default())
+                .map_err(|e| match e {
+                    crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                    other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+                })?,
             "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
             _ => return Err(SaveError::UnsupportedExtension { extension }),
