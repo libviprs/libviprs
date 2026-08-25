@@ -220,6 +220,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both are now the typed `ConvolutionError::NonFiniteMaskParameter`, on both
   precisions.
 
+- `colourspace` between `OkLab` and `OkLch`, and between `Lab` and `Lch`, now
+  takes the direct route libvips gives those pairs instead of detouring through
+  the XYZ hub (issue #552). libvips joins each cartesian space to its polar
+  form with a single transform and nothing else in the pipeline
+  (`colour/colourspace.c:244,276,478,494`), so routing them through XYZ added a
+  cube-root round trip real vips never runs. On both pairs the two halves of
+  that round trip fail to invert each other, so a neutral colour picked up a
+  chroma out of nowhere and the hue read off that chroma was meaningless.
+
+  On the Oklab pair the culprit is the matrix: the published inverse is only an
+  8-decimal approximation (it carries the `1.00000001` and `1.00000005` quirk
+  digits), so the round trip pushed a neutral colour's `a` and `b` off zero by
+  about 2e-9, and OkLab `[0.5, 0, 0]` came back as OkLCh
+  `[0.5, 1.9e-9, 94.489]` where vips 8.18.4 returns `[0.5, 0, 0]`.
+
+  On the Lab pair the culprit is the shadow branch, and it is the bigger of the
+  two: `XYZ2Lab` switches to its linear segment at 0.008856 while `Lab2XYZ`
+  switches at `L < 8`, and those rounded decimal constants are not mutual
+  inverses. Dark neutrals came out about 3e5 times further off than the Oklab
+  ones in raw units, so `Lab [5, 0, 0]` converted to LCh
+  `(4.99996, 5.571e-4, 338.199)` where vips returns `5 0 0`. Above about
+  `L = 10` the residue rounds away, which is why the defect only ever showed in
+  the shadows and why a mid-grey fixture says nothing about it. Both pairs
+  convert in place now, so the hue is exact and `OkLab -> OkLch -> OkLab` gives
+  back the value it started with.
+
+- Hue no longer comes out as 180 degrees for a colour whose `a` is `-0.0`
+  (issue #552). Anything that reads a hue off Lab-like coordinates was
+  affected: `colourspace` into `Lch` and `OkLch`, plus the hue term inside
+  `de00` and `de_cmc`, which read the same ladder. (`Cmc` reaches its hue
+  through the XYZ hub, and the hub cannot produce a `-0.0` there.) libvips'
+  `vips_col_ab2h` (`colour/Lab2LCh.c:61-89`) tests `a == 0` and answers
+  0 / 90 / 270 from an explicit branch, and in C that test is true for `-0.0`
+  as well; libviprs was
+  taking `atan2` at its word instead, and `atan2(±0.0, -0.0)` is `±PI`. Against
+  the binary, OkLab `[0.5, -0.0, 0.0]` is OkLCh `0.5 0 0` in vips 8.18.4 and
+  was `[0.5, 0.0, 180.0]` here. The branch is now transcribed from the C, so
+  the whole `a` axis answers the way vips does whichever zero it is handed.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
