@@ -27,21 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sqrt(2) * g`, so the same picture reads 58 through the uchar arm and 42
   through the float one.
 
-  The output is uchar whatever went in, keeping the band count, the
-  dimensions and the metadata, so a 16-bit or float source comes back
-  narrowed. Saturation on the uchar arm happens twice, once inside each
-  convolution and once on the abs sum, which is what makes the recovered
-  gradient span an asymmetric `-256..=254`.
+  The output is uchar whatever went in, so a 16-bit or float source comes
+  back narrowed four bytes per sample to one. Width, height, band count,
+  interpretation, resolution and the attached metadata (EXIF blob, ICC
+  profile, arbitrary attachments) all survive, matching what `vips sobel`
+  hands through. Alpha is convolved as an ordinary band, exactly as libvips
+  does it, so a fully opaque RGBA input comes back fully transparent except
+  along its edges. Saturation on the uchar arm happens twice, once inside
+  each convolution and once on the abs sum, which is what makes the
+  recovered gradient span an asymmetric `-256..=254`.
 
-  One divergence worth knowing about, and it predates these three ops. libviprs
-  ports `vips_convi_gen`, the scalar C integer-convolution loop, which rounds
-  its division towards zero. Released libvips binaries are built with HWY and
-  run a fixed-point vector path instead, which floors, and libvips only
-  requires the two paths to agree within 2. So an integer-precision
-  convolution of an unsigned image whose window sum is negative and even reads
-  one lower here than from the `vips` command, and the edge detectors inherit
-  that doubled. Running the binary with `VIPS_NOVECTOR=1` makes it agree
-  exactly.
+  These three inherit the integer-convolution divergence described under
+  **Changed** below, at a bound of 4.
 
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
@@ -102,6 +99,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- **The documented bound on the integer-convolution divergence against stock
+  libvips is 4, not 2** (issue #558). This is a correction to the disclosure,
+  not to any behaviour, and it matters because anyone who read the old number
+  and set a comparison tolerance of 2 was going to get burned.
+
+  libviprs ports `vips_convi_gen`, the scalar C integer-convolution loop,
+  which rounds its division towards zero. Any libvips built with HWY runs a
+  fixed-point vector path instead, which floors, and libvips itself only
+  requires the two paths to agree within 2 (`convi.c:1107-1112`). So an
+  integer-precision convolution of an unsigned image whose window sum is
+  negative and even reads one lower from libviprs.
+
+  This is a property of the **library**, not of the `vips` command line, which
+  is the other thing the old wording got wrong. pyvips, sharp, ruby-vips and
+  anything linking a distro libvips all hit the identical gap. Setting
+  `VIPS_NOVECTOR=1` in the environment disables the vector path and makes
+  libvips agree with libviprs exactly.
+
+  It reaches `conv` and `convsep` at integer precision, `compass`,
+  `gaussblur`, `sharpen`, and the uchar arm of `sobel` / `scharr` /
+  `prewitt`. On the edge detectors the gap is **quadrupled, not doubled**:
+  the uchar arm recovers each response as `2 * (p - 128)`, which doubles a
+  one-unit gap, and `Gx` and `Gy` can both be off at once. Measured on an 8x3
+  `Gray8` image, `prewitt` at pixel (4,0) reads 106 from libviprs and from
+  `VIPS_NOVECTOR=1 vips`, and 110 from the same binary with the vector path
+  live. The float arm has no such gap and is bit-exact either way.
 
 - **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
   real libvips interpretation codes `30` and `31` in its header `Type` word,**
