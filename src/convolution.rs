@@ -214,9 +214,9 @@
 //!   output bytes, and the `intize` helper documents the detail.
 
 use crate::colour::ColourError;
-use crate::conversion::{Angle45, ConversionError, Interpretation};
+use crate::conversion::{Angle45, ConversionError, Interpretation, cast_float_sample};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError};
+use crate::raster::{Raster, RasterError, alloc_op_output};
 use thiserror::Error;
 
 /// Don't allow the gaussmat/logmat mask radius to go over this
@@ -753,33 +753,51 @@ fn float_format(channels: usize) -> PixelFormat {
 
 /// Build a float raster from `f64` samples (stored as `f32`, the crate's
 /// float depth).
+///
+/// The buffer comes from [`alloc_op_output`] and the raster from
+/// [`Raster::from_op_output`], the same pair `arithmetic.rs` uses, so the
+/// allocation is fallible rather than aborting and the byte budget is not
+/// re-applied to an output that is legitimately wider than its input. Going
+/// through the budgeted [`Raster::new`] instead is what made the panicking
+/// `sobel()` panic on a legal 16-bit input above ~4 GiB, because the float
+/// intermediate is four times the source (issue #575).
 fn raster_from_f64(
     w: u32,
     h: u32,
     channels: usize,
     samples: &[f64],
 ) -> Result<Raster, RasterError> {
-    let f32s: Vec<f32> = samples.iter().map(|&v| v as f32).collect();
-    Raster::from_f32_samples(w, h, float_format(channels), &f32s)
+    debug_assert_eq!(samples.len(), w as usize * h as usize * channels);
+    let fmt = float_format(channels);
+    let mut data = alloc_op_output(w, h, fmt)?;
+    for (out, &v) in data.as_chunks_mut::<4>().0.iter_mut().zip(samples) {
+        *out = (v as f32).to_ne_bytes();
+    }
+    Raster::from_op_output(w, h, fmt, data)
 }
 
 /// Build an unsigned raster in `fmt` from already-clipped integer samples.
+///
+/// Same [`alloc_op_output`] / [`Raster::from_op_output`] pair as
+/// [`raster_from_f64`], for the same reason (issue #575).
 fn raster_from_i64(
     w: u32,
     h: u32,
     fmt: PixelFormat,
     samples: &[i64],
 ) -> Result<Raster, RasterError> {
-    let bpc = fmt.bytes_per_channel();
-    let mut data = Vec::with_capacity(samples.len() * bpc);
-    if bpc == 1 {
-        data.extend(samples.iter().map(|&v| v as u8));
+    debug_assert_eq!(samples.len(), w as usize * h as usize * fmt.channels());
+    let mut data = alloc_op_output(w, h, fmt)?;
+    if fmt.bytes_per_channel() == 1 {
+        for (out, &v) in data.iter_mut().zip(samples) {
+            *out = v as u8;
+        }
     } else {
-        for &v in samples {
-            data.extend_from_slice(&(v as u16).to_ne_bytes());
+        for (out, &v) in data.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
+            *out = (v as u16).to_ne_bytes();
         }
     }
-    Raster::new(w, h, fmt, data)
+    Raster::from_op_output(w, h, fmt, data)
 }
 
 /// Clamp a mask-relative coordinate to the image, replicating edge pixels
@@ -863,13 +881,327 @@ fn depth_max(fmt: PixelFormat) -> i64 {
     }
 }
 
-/// One full 2D convolution pass (both precisions, all formats), the shared
-/// engine behind `conv` and `convsep`.
+// ---------------------------------------------------------------------------
+// The shared traversal
+// ---------------------------------------------------------------------------
+
+/// One surviving mask tap: where it reads, and what it multiplies by.
 ///
-/// `dense` carries the mask, its `scale` divisor and its `offset`
-/// summand, the same three things a libvips matrix image carries. The
-/// public [`Kernel`] has no offset field, so everything on the ported
-/// surface convolves with the zero summand.
+/// `ty` and `tx` are already offset by the traversal's common mask
+/// origin, so the source sample for output `(y, x)` is
+/// `ytab[y + ty] + xtab[x + tx] + band` and there is no clamping left to
+/// do per tap.
+struct Tap<C> {
+    ty: usize,
+    tx: usize,
+    c: C,
+}
+
+/// Compact a row-major `kw` by `kh` mask to its non-zero taps, positioned
+/// against a traversal origin of `(ay, ax)` half-extents.
+///
+/// libvips squeezes zeros out of both convolution cores:
+/// `vips_convf_build` does it to the scaled double mask
+/// (`convolution/convf.c:314-321`) and `vips_convi_build` to the intized
+/// integer one (`convolution/convi.c:1189-1197`), and both inner loops
+/// then run over `nnz` instead of the whole mask.
+///
+/// This is not only cheaper on a sparse mask, it is the answer libvips
+/// gives. `0.0 * inf` is `NaN`, so a structural zero sitting over a
+/// non-finite sample used to poison the entire response and drive the
+/// result to 0 where vips reads 255 (issue #574). All three edge
+/// detectors have structural zeros, so it was reachable straight off the
+/// ported surface. Dropping `+ 0.0 * x` cannot move a finite answer: it
+/// can only change the sign of a zero, and a signed zero does not survive
+/// `a * a`.
+///
+/// A mask that is entirely zero keeps **one** tap, at mask index 0 and
+/// with coefficient zero, because that is what libvips keeps: both cores
+/// force `nnz` back up to 1 rather than leave the inner loop with nothing
+/// to do (`convf.c:325-333`, `convi.c:1199-1206`). It stays observable,
+/// since the surviving tap still multiplies a sample and so still answers
+/// `NaN` over a non-finite one.
+///
+/// The zero test is `c != C::default()`, which is C's `if (coeff[i])`:
+/// `-0.0` counts as zero on both sides.
+fn compact_taps<C: Copy + Default + PartialEq>(
+    kw: usize,
+    kh: usize,
+    coeff: impl Iterator<Item = C>,
+    origin: (usize, usize),
+) -> Vec<Tap<C>> {
+    let (oy, ox) = origin;
+    let (ay, ax) = (kh / 2, kw / 2);
+    let zero = C::default();
+    let mut taps: Vec<Tap<C>> = coeff
+        .enumerate()
+        .filter(|&(_, c)| c != zero)
+        .map(|(k, c)| Tap {
+            ty: oy + k / kw - ay,
+            tx: ox + k % kw - ax,
+            c,
+        })
+        .collect();
+    if taps.is_empty() {
+        taps.push(Tap {
+            ty: oy - ay,
+            tx: ox - ax,
+            c: zero,
+        });
+    }
+    taps
+}
+
+/// Everything one traversal shares across the masks it carries: the
+/// source widened to `f64` **once**, the output geometry, and the two
+/// clamped index tables that replace per-tap edge arithmetic.
+///
+/// The tables are `vips_embed(..., VIPS_EXTEND_COPY)` expressed as
+/// indices rather than as pixels: `convf.c:335-341` embeds the input into
+/// a border-replicated copy and then reads at fixed offsets, and
+/// `ytab`/`xtab` get the same effect without the copy. `ytab[y + ty]` is a
+/// tap's row base and `xtab[x + tx]` its column offset, so the inner loop
+/// carries no clamp and the border costs exactly what the interior does.
+///
+/// Tap positions are relative to `origin`, the largest `kh / 2` and
+/// `kw / 2` over the masks in the traversal, so masks of different sizes
+/// (the 90-degree rotation of a non-square mask, for one) share one pair
+/// of tables.
+struct Scan {
+    samples: Vec<f64>,
+    w: usize,
+    h: usize,
+    channels: usize,
+    origin: (usize, usize),
+    ytab: Vec<usize>,
+    xtab: Vec<usize>,
+}
+
+impl Scan {
+    /// Validate every mask's scale and offset, then decode `src` and build
+    /// the tables.
+    ///
+    /// A `NaN` scale slips straight past the zero test and reaches
+    /// [`intize`], where `rint(NaN) as i64` is `0` and the integer arm then
+    /// divides by it; a non-finite offset saturates `rint(offset) as i64`
+    /// to `i64::MAX` and overflows the add, which panics in debug and
+    /// silently wraps to black in release. Both are rejected here, at the
+    /// one boundary every caller passes through.
+    fn new<const M: usize>(
+        src: &Raster,
+        masks: &[&DenseKernel; M],
+    ) -> Result<Scan, ConvolutionError> {
+        for mask in masks {
+            if mask.scale == 0.0 {
+                return Err(ConvolutionError::ZeroScale);
+            }
+            for (param, value) in [("scale", mask.scale), ("offset", mask.offset)] {
+                if !value.is_finite() {
+                    return Err(ConvolutionError::NonFiniteMaskParameter { param, value });
+                }
+            }
+        }
+        let (w, h) = (src.width() as usize, src.height() as usize);
+        let channels = src.format().channels();
+        let row_stride = w * channels;
+        let oy = masks.iter().map(|m| m.h / 2).max().unwrap_or(0);
+        let ox = masks.iter().map(|m| m.w / 2).max().unwrap_or(0);
+        let ty = masks.iter().map(|m| m.h - 1 - m.h / 2).max().unwrap_or(0);
+        let tx = masks.iter().map(|m| m.w - 1 - m.w / 2).max().unwrap_or(0);
+        let ytab = (0..h + oy + ty)
+            .map(|t| clamp_coord(t as i64 - oy as i64, src.height()) * row_stride)
+            .collect();
+        let xtab = (0..w + ox + tx)
+            .map(|t| clamp_coord(t as i64 - ox as i64, src.width()) * channels)
+            .collect();
+        Ok(Scan {
+            samples: samples_f64(src),
+            w,
+            h,
+            channels,
+            origin: (oy, ox),
+            ytab,
+            xtab,
+        })
+    }
+
+    /// The half-open span of output columns for which tap column `tx`
+    /// reads inside the image without the edge clamp doing anything, and
+    /// the source column that span starts at.
+    ///
+    /// `xtab` is the identity-plus-shift over that span, so the taps there
+    /// walk a contiguous run of samples and the whole row can be added
+    /// with one slice loop. Outside it the clamp is replicating a border
+    /// pixel and the general table lookup earns its keep. Splitting the
+    /// two is what lets the interior vectorise; it cannot change a value,
+    /// because on that span the table and the arithmetic agree by
+    /// construction.
+    #[inline]
+    fn interior(&self, tx: usize) -> (usize, usize, usize) {
+        let ox = self.origin.1;
+        let lo = ox.saturating_sub(tx).min(self.w);
+        let hi = (self.w + ox).saturating_sub(tx).min(self.w).max(lo);
+        (lo, hi, (lo + tx).saturating_sub(ox) * self.channels)
+    }
+
+    /// Add one tap's contribution across a whole output row.
+    ///
+    /// Taps are applied to an output row in mask order, exactly the order
+    /// the per-sample accumulator used to add them in, so the float sums
+    /// keep their rounding.
+    #[inline]
+    fn add_tap<C: Copy, A: Copy>(
+        &self,
+        acc: &mut [A],
+        row: usize,
+        tx: usize,
+        c: C,
+        mut fma: impl FnMut(&mut A, C, f64),
+    ) {
+        let (lo, hi, start) = self.interior(tx);
+        let (samples, xtab) = (&self.samples[..], &self.xtab[..]);
+        for x in 0..lo {
+            let col = xtab[x + tx];
+            for band in 0..self.channels {
+                fma(
+                    &mut acc[x * self.channels + band],
+                    c,
+                    samples[row + col + band],
+                );
+            }
+        }
+        if hi > lo {
+            // Guarded rather than left to an empty slice: a mask wider
+            // than the image can push `start` past the end of `samples`
+            // even when the span itself is empty, and `&v[n..n]` still
+            // demands `n <= v.len()`.
+            let (a, b) = (lo * self.channels, hi * self.channels);
+            let src = &samples[row + start..row + start + (b - a)];
+            for (slot, &s) in acc[a..b].iter_mut().zip(src) {
+                fma(slot, c, s);
+            }
+        }
+        for x in hi..self.w {
+            let col = xtab[x + tx];
+            for band in 0..self.channels {
+                fma(
+                    &mut acc[x * self.channels + band],
+                    c,
+                    samples[row + col + band],
+                );
+            }
+        }
+    }
+
+    /// Walk every output sample once, accumulating all `M` responses in
+    /// `f64` off the same window, and hand each sample's responses to
+    /// `emit` with its flat index.
+    ///
+    /// `init` seeds each accumulator, which is where the float arm's
+    /// offset summand goes (`convf.c:172`).
+    #[inline]
+    fn float<const M: usize>(
+        &self,
+        taps: &[Vec<Tap<f64>>; M],
+        init: [f64; M],
+        mut emit: impl FnMut(usize, [f64; M]),
+    ) {
+        let stride = self.w * self.channels;
+        let mut acc: [Vec<f64>; M] = std::array::from_fn(|_| vec![0.0f64; stride]);
+        let mut idx = 0;
+        for y in 0..self.h {
+            for ((row, mask), &seed) in acc.iter_mut().zip(taps).zip(&init) {
+                row.fill(seed);
+                for t in mask {
+                    let base = self.ytab[y + t.ty];
+                    self.add_tap(row, base, t.tx, t.c, |slot, c, s| *slot += c * s);
+                }
+            }
+            // A transpose of `M` parallel accumulator rows into one array
+            // per sample, which `needless_range_loop` has no spelling for:
+            // the index walks every plane at once, not one of them.
+            #[allow(clippy::needless_range_loop)]
+            for k in 0..stride {
+                emit(idx, std::array::from_fn(|m| acc[m][k]));
+                idx += 1;
+            }
+        }
+    }
+
+    /// [`Scan::float`] with `i64` accumulators: the `CONV_INT` inner loop
+    /// (`convi.c:700-720`), which every unsigned input takes at
+    /// [`Precision::Integer`].
+    #[inline]
+    fn int<const M: usize>(
+        &self,
+        taps: &[Vec<Tap<i64>>; M],
+        mut emit: impl FnMut(usize, [i64; M]),
+    ) {
+        let stride = self.w * self.channels;
+        let mut acc: [Vec<i64>; M] = std::array::from_fn(|_| vec![0i64; stride]);
+        let mut idx = 0;
+        for y in 0..self.h {
+            for (row, mask) in acc.iter_mut().zip(taps) {
+                row.fill(0);
+                for t in mask {
+                    let base = self.ytab[y + t.ty];
+                    self.add_tap(row, base, t.tx, t.c, |slot, c, s| *slot += c * s as i64);
+                }
+            }
+            // A transpose of `M` parallel accumulator rows into one array
+            // per sample, which `needless_range_loop` has no spelling for:
+            // the index walks every plane at once, not one of them.
+            #[allow(clippy::needless_range_loop)]
+            for k in 0..stride {
+                emit(idx, std::array::from_fn(|m| acc[m][k]));
+                idx += 1;
+            }
+        }
+    }
+}
+
+/// `M` output buffers of one raster each, from the fallible
+/// [`alloc_op_output`].
+fn out_buffers<const M: usize>(
+    w: u32,
+    h: u32,
+    fmt: PixelFormat,
+) -> Result<[Vec<u8>; M], RasterError> {
+    let mut out: [Vec<u8>; M] = std::array::from_fn(|_| Vec::new());
+    for buf in &mut out {
+        *buf = alloc_op_output(w, h, fmt)?;
+    }
+    Ok(out)
+}
+
+/// Wrap `M` finished output buffers as rasters.
+fn rasters_from<const M: usize>(
+    w: u32,
+    h: u32,
+    fmt: PixelFormat,
+    buffers: [Vec<u8>; M],
+) -> Result<[Raster; M], RasterError> {
+    let mut built: [Option<Raster>; M] = std::array::from_fn(|_| None);
+    for (slot, data) in built.iter_mut().zip(buffers) {
+        *slot = Some(Raster::from_op_output(w, h, fmt, data)?);
+    }
+    Ok(built.map(|r| r.expect("every slot was just filled")))
+}
+
+/// `M` full 2D convolutions of one source in **one traversal** (both
+/// precisions, all formats), the shared engine behind `conv`, `convsep`,
+/// `compass` and the edge detectors.
+///
+/// Each `DenseKernel` carries the mask, its `scale` divisor and its
+/// `offset` summand, the same three things a libvips matrix image
+/// carries. The public [`Kernel`] has no offset field, so everything on
+/// the ported surface convolves with the zero summand.
+///
+/// Every output sample's `M` responses come off the same window, so the
+/// masks share one source decode, one set of clamped index tables and one
+/// pass over the image instead of `M` of each (issue #562). `M = 1`
+/// monomorphises back to a single convolution: [`conv_raster`] is that
+/// wrapper, and every pin in this module holds it to the byte.
 ///
 /// Each arm adds the summand exactly where its C counterpart does: before
 /// the clip on the integer/unsigned path (`convi.c:710`), after the
@@ -898,118 +1230,108 @@ fn depth_max(fmt: PixelFormat) -> i64 {
 ///   combining them (`convolution/compass.c`), and an offset makes that
 ///   meaningless: 128 moves the zero point of the response, so `.abs()`
 ///   folds it about the wrong value. A compass mask carries offset zero.
-fn conv_raster(
+fn conv_raster_n<const M: usize>(
     src: &Raster,
-    dense: &DenseKernel,
+    masks: [&DenseKernel; M],
     precision: Precision,
-) -> Result<Raster, ConvolutionError> {
-    let (scale, offset) = (dense.scale, dense.offset);
-    if scale == 0.0 {
-        return Err(ConvolutionError::ZeroScale);
-    }
-    // A `NaN` scale slips straight past the zero test and reaches
-    // `intize`, where `rint(NaN) as i64` is `0` and the integer arm then
-    // divides by it; a non-finite offset saturates `rint(offset) as i64`
-    // to `i64::MAX` and overflows the add, which panics in debug and
-    // silently wraps to black in release. Both are rejected here, at the
-    // one boundary every caller passes through.
-    for (param, value) in [("scale", scale), ("offset", offset)] {
-        if !value.is_finite() {
-            return Err(ConvolutionError::NonFiniteMaskParameter { param, value });
-        }
-    }
+) -> Result<[Raster; M], ConvolutionError> {
+    let scan = Scan::new(src, &masks)?;
     let (w, h) = (src.width(), src.height());
     let channels = src.format().channels();
-    let samples = samples_f64(src);
-    let (kw, kh) = (dense.w, dense.h);
-    let (ax, ay) = ((kw / 2) as i64, (kh / 2) as i64);
-    let row_stride = w as usize * channels;
 
     match precision {
         Precision::Float => {
-            // vips_convf: bake the scale into the coefficients, seed the
-            // accumulator with the offset, accumulate in f64, store
-            // 32-bit float.
-            let coeff: Vec<f64> = dense.coeff.iter().map(|&v| v / scale).collect();
-            let mut out = vec![0.0f64; samples.len()];
-            for y in 0..h as i64 {
-                for x in 0..w as i64 {
-                    for b in 0..channels {
-                        let mut sum = offset;
-                        for j in 0..kh as i64 {
-                            let sy = clamp_coord(y + j - ay, h);
-                            for i in 0..kw as i64 {
-                                let sx = clamp_coord(x + i - ax, w);
-                                sum += coeff[j as usize * kw + i as usize]
-                                    * samples[sy * row_stride + sx * channels + b];
-                            }
-                        }
-                        out[y as usize * row_stride + x as usize * channels + b] = sum;
-                    }
+            // vips_convf: bake the scale into the coefficients, squeeze
+            // out the zeros, seed the accumulator with the offset,
+            // accumulate in f64, store 32-bit float.
+            let taps = masks
+                .map(|k| compact_taps(k.w, k.h, k.coeff.iter().map(|&v| v / k.scale), scan.origin));
+            let fmt = float_format(channels);
+            let mut out = out_buffers::<M>(w, h, fmt)?;
+            scan.float(&taps, masks.map(|k| k.offset), |i, sums| {
+                for (buf, &v) in out.iter_mut().zip(&sums) {
+                    buf[i * 4..i * 4 + 4].copy_from_slice(&(v as f32).to_ne_bytes());
                 }
-            }
-            Ok(raster_from_f64(w, h, channels, &out)?)
+            });
+            Ok(rasters_from(w, h, fmt, out)?)
         }
         Precision::Integer => {
-            let IntKernel {
-                coeff: imask,
-                scale: iscale,
-                offset: ioffset,
-            } = intize(dense);
+            let ints: [IntKernel; M] = std::array::from_fn(|m| intize(masks[m]));
             if src.format().is_float() {
                 // vips_convi_gen keeps a double path for float inputs: the
                 // integer mask, real division, the rounded offset added
                 // after it, no rounding of the result and no clip.
-                let mut out = vec![0.0f64; samples.len()];
-                for y in 0..h as i64 {
-                    for x in 0..w as i64 {
-                        for b in 0..channels {
-                            let mut sum = 0.0;
-                            for j in 0..kh as i64 {
-                                let sy = clamp_coord(y + j - ay, h);
-                                for i in 0..kw as i64 {
-                                    let sx = clamp_coord(x + i - ax, w);
-                                    sum += imask[j as usize * kw + i as usize] as f64
-                                        * samples[sy * row_stride + sx * channels + b];
-                                }
-                            }
-                            out[y as usize * row_stride + x as usize * channels + b] =
-                                sum / iscale as f64 + ioffset as f64;
-                        }
+                let taps: [_; M] = std::array::from_fn(|m| {
+                    compact_taps(
+                        masks[m].w,
+                        masks[m].h,
+                        ints[m].coeff.iter().map(|&v| v as f64),
+                        scan.origin,
+                    )
+                });
+                let params: [(f64, f64); M] =
+                    std::array::from_fn(|m| (ints[m].scale as f64, ints[m].offset as f64));
+                let fmt = float_format(channels);
+                let mut out = out_buffers::<M>(w, h, fmt)?;
+                scan.float(&taps, [0.0; M], |i, sums| {
+                    for ((buf, &sum), &(iscale, ioffset)) in out.iter_mut().zip(&sums).zip(&params)
+                    {
+                        let v = (sum / iscale + ioffset) as f32;
+                        buf[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
                     }
-                }
-                Ok(raster_from_f64(w, h, channels, &out)?)
+                });
+                Ok(rasters_from(w, h, fmt, out)?)
             } else {
                 // CONV_INT: i64 accumulation, (sum + scale/2) / scale with
                 // C truncating division, then the offset, then the clip
                 // into the input format. The offset lands before the clip,
                 // so it recentres the response rather than shifting an
                 // already-saturated one.
-                let rounding = iscale / 2;
-                let max = depth_max(src.format());
-                let mut out = vec![0i64; samples.len()];
-                for y in 0..h as i64 {
-                    for x in 0..w as i64 {
-                        for b in 0..channels {
-                            let mut sum = 0i64;
-                            for j in 0..kh as i64 {
-                                let sy = clamp_coord(y + j - ay, h);
-                                for i in 0..kw as i64 {
-                                    let sx = clamp_coord(x + i - ax, w);
-                                    sum += imask[j as usize * kw + i as usize]
-                                        * samples[sy * row_stride + sx * channels + b] as i64;
-                                }
-                            }
-                            let v = (sum + rounding) / iscale + ioffset;
-                            out[y as usize * row_stride + x as usize * channels + b] =
-                                v.clamp(0, max);
+                let taps: [_; M] = std::array::from_fn(|m| {
+                    compact_taps(
+                        masks[m].w,
+                        masks[m].h,
+                        ints[m].coeff.iter().copied(),
+                        scan.origin,
+                    )
+                });
+                let params: [(i64, i64, i64); M] =
+                    std::array::from_fn(|m| (ints[m].scale / 2, ints[m].scale, ints[m].offset));
+                let fmt = src.format();
+                let max = depth_max(fmt);
+                let mut out = out_buffers::<M>(w, h, fmt)?;
+                if fmt.bytes_per_channel() == 1 {
+                    scan.int(&taps, |i, sums| {
+                        for ((buf, &sum), &(rounding, iscale, ioffset)) in
+                            out.iter_mut().zip(&sums).zip(&params)
+                        {
+                            buf[i] = ((sum + rounding) / iscale + ioffset).clamp(0, max) as u8;
                         }
-                    }
+                    });
+                } else {
+                    scan.int(&taps, |i, sums| {
+                        for ((buf, &sum), &(rounding, iscale, ioffset)) in
+                            out.iter_mut().zip(&sums).zip(&params)
+                        {
+                            let v = ((sum + rounding) / iscale + ioffset).clamp(0, max) as u16;
+                            buf[i * 2..i * 2 + 2].copy_from_slice(&v.to_ne_bytes());
+                        }
+                    });
                 }
-                Ok(raster_from_i64(w, h, src.format(), &out)?)
+                Ok(rasters_from(w, h, fmt, out)?)
             }
         }
     }
+}
+
+/// One full 2D convolution pass: [`conv_raster_n`] with a single mask.
+fn conv_raster(
+    src: &Raster,
+    dense: &DenseKernel,
+    precision: Precision,
+) -> Result<Raster, ConvolutionError> {
+    let [out] = conv_raster_n(src, [dense], precision)?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1568,9 +1890,11 @@ const SCHARR_MASK: [[f64; 3]; 3] = [[-3.0, 0.0, 3.0], [-10.0, 0.0, 10.0], [-3.0,
 /// separable, not just this one: sobel is `[1,0,-1]^T * [1,2,1]`, scharr
 /// is `[3,10,3]^T * [-1,0,1]` and prewitt is `[1,1,1]^T * [-1,0,1]`.
 /// libvips exploits it on none of them and neither does this port: the
-/// three ops all run the same two full 2D convolutions, and a separable
+/// three ops all run the same pair of full 2D responses, and a separable
 /// pass would round differently on the integer arm. That is the reason to
-/// leave them alone, not the false premise that only prewitt factors.
+/// leave them alone, not the false premise that only prewitt factors. The
+/// pair is one traversal rather than two passes (issue #562), which is a
+/// different saving entirely and costs no rounding.
 const PREWITT_MASK: [[f64; 3]; 3] = [[-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
 
 /// The scale divisor `vips_edge_build_uchar` stamps on its mask copy
@@ -1584,38 +1908,11 @@ const EDGE_UCHAR_SCALE: f64 = 2.0;
 /// the same reason.
 const EDGE_UCHAR_OFFSET: f64 = 128.0;
 
-/// Both directional responses of a gradient mask: `mask` itself, then
-/// `mask` rotated 90 degrees, each convolved over `src` at `precision`.
-///
-/// This is the two-line shape every gradient operator in
-/// `libvips/convolution` opens with. `vips_edge_build_uchar` does it at
-/// integer precision with a `scale = 2, offset = 128` mask
-/// (`edge.c:127-137`), `vips_edge_build_float` at float precision with the
-/// raw mask (`edge.c:165-168`), and `vips_canny_gradient` does exactly the
-/// same dance with a 2x2 mask and a format-dependent precision
-/// (`canny.c:68-92`). The rotation goes through [`DenseKernel::rot90`], so
-/// the scale and the offset ride along with the coefficients the way
-/// `vips_rot90` carries a mask image's metadata; rebuilding the second
-/// mask by hand is what silently drops them.
-///
-/// The pair is returned in mask order: `.0` is the response to `mask` and
-/// `.1` the response to its rotation. Both rasters have the same
-/// dimensions and band count as `src`, and the same format `conv_raster`
-/// would give for `precision` on its own.
-fn gradient_pair(
-    src: &Raster,
-    mask: &DenseKernel,
-    precision: Precision,
-) -> Result<(Raster, Raster), ConvolutionError> {
-    let first = conv_raster(src, mask, precision)?;
-    let second = conv_raster(src, &mask.rot90(), precision)?;
-    Ok((first, second))
-}
-
 /// Edge detectors: the three named 3x3 gradient operators, `vips_sobel`,
-/// `vips_scharr` and `vips_prewitt`. They live in their own block rather
-/// than the main convolution one because issue #562 restructures this
-/// region; merging the two now would only have to be undone.
+/// `vips_scharr` and `vips_prewitt`. They keep their own block because
+/// they do not go through the `conv_raster_n` entry point at all: they
+/// drive the shared traversal directly, so the combine happens inside it
+/// and neither gradient plane is ever built (issue #562).
 impl Raster {
     /// The whole abstract `VipsEdge` op (`convolution/edge.c`) for one 3x3
     /// gradient mask: the shared engine behind [`Raster::sobel`],
@@ -1629,7 +1926,7 @@ impl Raster {
     /// * **uchar** takes the fast arm (`edge.c:113-155`). The mask is
     ///   stamped with [`EDGE_UCHAR_SCALE`] and [`EDGE_UCHAR_OFFSET`] so a
     ///   signed gradient lands centred in the unsigned output range, both
-    ///   convolutions run at [`Precision::Integer`], and the responses are
+    ///   responses are computed at [`Precision::Integer`], and they are
     ///   recovered as `2 * (p - 128)` and combined as an **abs sum**
     ///   clipped at 255 (`edge.c:97-103`). libvips comments the choice as
     ///   "avoid the sqrt() for uchar", and it is not an approximation of
@@ -1638,11 +1935,11 @@ impl Raster {
     ///   7x7 corner shows directly (sobel reads 58 here and 42 through
     ///   the float arm).
     /// * **every other format** takes the accurate arm
-    ///   (`edge.c:158-182`): two [`Precision::Float`] convolutions with
-    ///   the raw mask, then `sqrt(Gx^2 + Gy^2)`, then [`Raster::try_cast`]
-    ///   to uchar (`vips_cast_uchar` at `edge.c:174`), which clips into
-    ///   `0..=255` and truncates towards zero exactly as
-    ///   `conversion/cast.c:566-568` states.
+    ///   (`edge.c:158-182`): two [`Precision::Float`] responses to the raw
+    ///   mask, then `sqrt(Gx^2 + Gy^2)`, then the `vips_cast_uchar` of
+    ///   `edge.c:174`, which clips into `0..=255` and truncates towards
+    ///   zero exactly as `conversion/cast.c:566-568` states. That cast is
+    ///   [`cast_float_sample`], the same scalar [`Raster::try_cast`] runs.
     ///
     /// The output is uchar either way, keeping the band count, the
     /// dimensions and the metadata of the input.
@@ -1652,13 +1949,19 @@ impl Raster {
     /// the 128 zero point, so the recovered `2 * (p - 128)` spans
     /// `-256..=254`, and the abs sum then clips again at 255. The
     /// asymmetric bound is why the impulse response reads 254 in some
-    /// cells of the ring and 255 in others.
+    /// cells of the ring and 255 in others. Both clips survive the fusion
+    /// unchanged: the intermediate `Raster` the first one used to be
+    /// written into is gone, the clip that filled it is not.
     ///
     /// The float arm keeps libvips' 32-bit intermediates rather than
-    /// promoting to `f64`, and it rounds to `f32` **twice**: once on
-    /// `Gx^2 + Gy^2` and again on the stored root. Both roundings move
-    /// output bytes, so this is not a chain to "simplify" to `f64`. The
-    /// [module docs](crate::convolution) carry the rule and the evidence.
+    /// promoting to `f64`. Each response is rounded to `f32` where
+    /// `vips_convf` stores its float image, and the combine then rounds
+    /// twice more, once on `Gx^2 + Gy^2` and once on the stored root.
+    /// Every one of them moves output bytes, so this is not a chain to
+    /// "simplify" to `f64`. The response rounding now lands on the
+    /// accumulator instead of on the way into a raster, which is the same
+    /// rounding in a cheaper place; the [module docs](crate::convolution)
+    /// carry the rule and weigh the other two against each other.
     fn edge_detect(&self, mask: &[[f64; 3]; 3]) -> Result<Raster, ConvolutionError> {
         let rows: Vec<Vec<f64>> = mask.iter().map(|row| row.to_vec()).collect();
         let channels = self.format().channels();
@@ -1668,53 +1971,77 @@ impl Raster {
 
         // A 1-byte channel is exactly libvips' VIPS_FORMAT_UCHAR: the
         // 16-bit and float carriers are 2 and 4 bytes wide.
-        let data = if self.format().bytes_per_channel() == 1 {
-            let dense = DenseKernel::new(&Kernel {
+        let uchar = self.format().bytes_per_channel() == 1;
+        let dense = if uchar {
+            DenseKernel::new(&Kernel {
                 data: rows,
                 scale: EDGE_UCHAR_SCALE,
             })?
-            .with_offset(EDGE_UCHAR_OFFSET);
-            let (p1, p2) = gradient_pair(self, &dense, Precision::Integer)?;
-            p1.data()
-                .iter()
-                .zip(p2.data())
-                .map(|(&a, &b)| {
-                    let v1 = 2 * (i32::from(a) - 128);
-                    let v2 = 2 * (i32::from(b) - 128);
-                    let v = v1.abs() + v2.abs();
-                    v.min(255) as u8
-                })
-                .collect()
+            .with_offset(EDGE_UCHAR_OFFSET)
         } else {
-            let dense = DenseKernel::new(&Kernel {
+            DenseKernel::new(&Kernel {
                 data: rows,
                 scale: 1.0,
-            })?;
-            let (p1, p2) = gradient_pair(self, &dense, Precision::Float)?;
-            let (gx, gy) = (
-                p1.f32_samples()
-                    .expect("float precision gives a float raster"),
-                p2.f32_samples()
-                    .expect("float precision gives a float raster"),
-            );
-            let magnitude: Vec<f32> = gx
-                .iter()
-                .zip(&gy)
-                .map(|(&a, &b)| {
-                    let square_sum = a * a + b * b;
-                    f64::from(square_sum).sqrt() as f32
-                })
-                .collect();
-            // libvips casts the whole magnitude image rather than each
-            // sample (`edge.c:174` is a `vips_cast` call), and since #561
-            // `try_cast` is that cast: clip into range, then truncate
-            // towards zero, `NaN` to `0`. Materialising the float raster
-            // is what keeps the two spellings from drifting apart again.
-            let float_mag = Raster::from_f32_samples(w, h, p1.format(), &magnitude)?;
-            float_mag.try_cast(fmt)?.data().to_vec()
+            })?
         };
+        let spun = dense.rot90();
+        let masks = [&dense, &spun];
+        let scan = Scan::new(self, &masks)?;
+        let mut data = alloc_op_output(w, h, fmt)?;
 
-        let mut out = Raster::new(w, h, fmt, data)?;
+        if uchar {
+            let ints = [intize(&dense), intize(&spun)];
+            let taps: [_; 2] = std::array::from_fn(|m| {
+                compact_taps(
+                    masks[m].w,
+                    masks[m].h,
+                    ints[m].coeff.iter().copied(),
+                    scan.origin,
+                )
+            });
+            let params: [(i64, i64, i64); 2] =
+                std::array::from_fn(|m| (ints[m].scale / 2, ints[m].scale, ints[m].offset));
+            let max = depth_max(self.format());
+            scan.int(&taps, |i, sums| {
+                let mut acc = 0i32;
+                for (&sum, &(rounding, iscale, ioffset)) in sums.iter().zip(&params) {
+                    // Saturation number one, and it is load bearing: the
+                    // convolution clips its own output into `0..=255`
+                    // around the 128 zero point, so the recovered
+                    // `2 * (p - 128)` spans an asymmetric `-256..=254`.
+                    // Reading it out of an accumulator instead of out of
+                    // a materialised `Raster` drops the buffer, not the
+                    // clip.
+                    let p = ((sum + rounding) / iscale + ioffset).clamp(0, max) as i32;
+                    acc += (2 * (p - 128)).abs();
+                }
+                // Saturation number two.
+                data[i] = acc.min(255) as u8;
+            });
+        } else {
+            let taps = masks
+                .map(|k| compact_taps(k.w, k.h, k.coeff.iter().map(|&v| v / k.scale), scan.origin));
+            scan.float(&taps, masks.map(|k| k.offset), |i, sums| {
+                // The 32-bit rounding of each response is what
+                // `vips_convf` writing a float image does, so it happens
+                // here, before the square, exactly as it did when the two
+                // gradients were rasters.
+                let a = sums[0] as f32;
+                let b = sums[1] as f32;
+                let square_sum = a * a + b * b;
+                let magnitude = f64::from(square_sum).sqrt() as f32;
+                // `edge.c:174` is a `vips_cast` call on the whole
+                // magnitude image, and [`cast_float_sample`] is one
+                // sample of that cast: clip into range, truncate towards
+                // zero, `NaN` to `0`. Calling the same scalar
+                // `Raster::try_cast` calls is what keeps the two
+                // spellings from drifting apart, now that there is no
+                // float raster left to hand it.
+                data[i] = cast_float_sample(f64::from(magnitude), 1) as u8;
+            });
+        }
+
+        let mut out = Raster::from_op_output(w, h, fmt, data)?;
         // vips builds the result inside the input's pipeline, so the
         // interpretation and the resolution survive the format change,
         // and so do the attachments: `vips sobel` on a jpeg carrying 186
@@ -1728,7 +2055,6 @@ impl Raster {
         out.fields = self.fields.clone();
         Ok(out)
     }
-
     /// Fallible form of [`Raster::sobel`], which carries the contract:
     /// the output is always uchar, and the combine rule changes with the
     /// input format.
@@ -1745,9 +2071,11 @@ impl Raster {
     /// Sobel edge detector (libvips `vips_sobel`), which takes no
     /// arguments.
     ///
-    /// Convolves with the 3x3 Sobel mask and with the mask rotated 90
-    /// degrees, then combines the two gradients into an edge map. What
-    /// follows is the contract for all three detectors:
+    /// Answers the 3x3 Sobel mask and the same mask rotated 90 degrees,
+    /// then combines the two gradients into an edge map. Both responses
+    /// and the combine come out of a single traversal, so nothing between
+    /// the input and the output is ever materialised. What follows is the
+    /// contract for all three detectors:
     /// [`Raster::scharr`] and [`Raster::prewitt`] are this op with a
     /// different 3x3 mask and nothing else changed.
     ///
@@ -3145,6 +3473,152 @@ mod tests {
         );
     }
 
+    /// A mask larger than the image it convolves still walks the whole
+    /// window, with every tap clamped onto the one or two rows and columns
+    /// there are.
+    ///
+    /// This is the case the traversal's index tables have to get right at
+    /// both ends. A tap far enough left of a narrow image has an empty
+    /// unclamped span, so the fast interior path covers nothing and every
+    /// sample comes off the replicated border; a tap far enough right has
+    /// the same property from the other side. Both are perfectly legal
+    /// input: `vips_embed` extends by `M->Xsize - 1` regardless of how
+    /// wide the image is.
+    ///
+    /// The reference is the straightforward per-window sum with an
+    /// explicit clamp, so it agrees with the engine only if the tables and
+    /// the clamp agree.
+    #[test]
+    fn a_mask_wider_than_the_image_clamps_every_tap() {
+        let kernel = Kernel {
+            data: (0..7)
+                .map(|j| (0..9).map(|i| f64::from(i * 3 + j) - 12.0).collect())
+                .collect(),
+            scale: 5.0,
+        };
+        for im in [
+            noise_gray(1, 1, 11),
+            noise_gray(1, 6, 12),
+            noise_gray(6, 1, 13),
+            noise_rgb(2, 3, 14),
+        ] {
+            let out = im.conv(&kernel, Precision::Float);
+            assert_eq!(out.width(), im.width());
+            assert_eq!(out.height(), im.height());
+            for y in 0..im.height() {
+                for x in 0..im.width() {
+                    let want = ref_conv(&im, &kernel, i64::from(x), i64::from(y));
+                    let got = out.getpoint(x, y);
+                    for (c, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                        assert!(
+                            (g - w).abs() < 1e-3,
+                            "{}x{} at ({x},{y}) band {c}: got {g}, expected {w}",
+                            im.width(),
+                            im.height()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A structural zero in the mask must not read the sample under it.
+    ///
+    /// libvips squeezes zero coefficients out before it convolves
+    /// (`convf.c:314-321`, `convi.c:1189-1197`), so a zero tap sitting
+    /// over an infinity contributes nothing. Multiplying anyway gives
+    /// `0.0 * inf = NaN`, which poisons the whole response, survives the
+    /// square and the root, and then clips to 0 -- an inverted answer,
+    /// delivered silently (issue #574).
+    ///
+    /// The fixture is a 5x5 float image that is all zero except for a
+    /// single `f32::INFINITY` at its centre. All three masks have
+    /// structural zeros, and all three read the same ring. Captured from
+    /// vips 8.18.4:
+    ///
+    /// ```text
+    /// vips rawload inf5.raw inf5.v 5 5 1 --format float
+    /// vips sobel inf5.v s.v && vips getpoint s.v 2 1   -> 255
+    /// ```
+    ///
+    /// Before the fix the four ring cells at indices 7, 11, 13 and 17
+    /// read 0 where vips reads 255.
+    #[test]
+    fn a_zero_mask_tap_does_not_poison_a_non_finite_sample() {
+        let im = float_from(
+            5,
+            5,
+            |x, y| {
+                if (x, y) == (2, 2) { f32::INFINITY } else { 0.0 }
+            },
+        );
+        #[rustfmt::skip]
+        let want: [u8; 25] = [
+            0,   0,   0,   0,   0,
+            0, 255, 255, 255,   0,
+            0, 255,   0, 255,   0,
+            0, 255, 255, 255,   0,
+            0,   0,   0,   0,   0,
+        ];
+        for (name, op) in edge_ops() {
+            assert_eq!(
+                op(&im).data(),
+                &want[..],
+                "{name} over an infinity: a zero tap must be squeezed out, \
+                 not multiplied. Reading 0 at indices 7, 11, 13 and 17 means \
+                 `0.0 * inf` produced a NaN and drove the magnitude to zero"
+            );
+        }
+    }
+
+    /// An all-zero mask keeps exactly one tap, at mask index 0.
+    ///
+    /// Both libvips cores force `nnz` back up to 1 when every coefficient
+    /// squeezed out (`convf.c:325-333`, `convi.c:1199-1206`), so the
+    /// surviving tap still multiplies a sample and an all-zero mask still
+    /// answers `NaN` over a non-finite one -- but only where the window's
+    /// top-left corner is the non-finite sample, not everywhere in its
+    /// neighbourhood. Captured from vips 8.18.4 on the same 5x5 infinity
+    /// fixture, with a 3x3 all-zero mask at scale 1:
+    ///
+    /// ```text
+    /// vips conv inf5.v z.v zero3.mat --precision float
+    /// vips getpoint z.v 3 3   -> nan     (every other sample: 0)
+    /// ```
+    ///
+    /// Both precisions give the same answer, since the integer arm takes
+    /// the double inner loop on a float input.
+    #[test]
+    fn an_all_zero_mask_keeps_the_single_tap_libvips_keeps() {
+        let im = float_from(
+            5,
+            5,
+            |x, y| {
+                if (x, y) == (2, 2) { f32::INFINITY } else { 0.0 }
+            },
+        );
+        let zeros = Kernel {
+            data: vec![vec![0.0; 3]; 3],
+            scale: 1.0,
+        };
+        for precision in [Precision::Float, Precision::Integer] {
+            let out = im.conv(&zeros, precision);
+            let got = out.f32_samples().expect("conv of a float input is float");
+            for (i, v) in got.iter().enumerate() {
+                let (x, y) = (i % 5, i / 5);
+                if (x, y) == (3, 3) {
+                    assert!(
+                        v.is_nan(),
+                        "{precision:?}: the one surviving tap reads (2,2), so \
+                         (3,3) has to be NaN; got {v}"
+                    );
+                } else {
+                    assert_eq!(*v, 0.0, "{precision:?}: sample {i} at ({x},{y})");
+                }
+            }
+        }
+    }
+
     /// The whole float arm, replayed against vips 8.18.4 output captured
     /// on two fixtures: a 7x7 float image whose samples are exact
     /// quarters spanning negatives, and a 5x5 16-bit image (any format
@@ -3331,22 +3805,26 @@ mod tests {
         assert_eq!(u8_at(&both.prewitt(), 4, 0), 106, "gap-4 fixture");
     }
 
-    /// `gradient_pair` answers with the mask's own response first and the
-    /// rotated one second, and it serves a mask carrying an offset and no
-    /// scale. Both halves are contract rather than accident. The three
-    /// edge detectors combine symmetrically so they cannot tell the order
-    /// apart, but `vips_canny` takes `atan2` off the pair, where a swap
-    /// silently rotates every angle by 90 degrees.
+    /// A fused traversal answers with each mask's own response in the
+    /// order it was handed them, matches what the same masks give one at a
+    /// time, and serves a mask carrying an offset and no scale. All three
+    /// are contract rather than accident. The edge detectors combine
+    /// symmetrically so they cannot tell the order apart, but `vips_canny`
+    /// takes `atan2` off the pair, where a swap silently rotates every
+    /// angle by 90 degrees.
     ///
-    /// The 3x3 mask here is deliberately asymmetric under rotation, so
-    /// `.0` and `.1` really are different images and the ordering
+    /// The 3x3 mask here is deliberately asymmetric under rotation, so the
+    /// two responses really are different images and the ordering
     /// assertion has teeth. The second half is canny's own call shape
     /// (`canny.c:68-92`): a 2x2 `-1/+1` difference stamped
-    /// `offset = 128` with no scale, which is also the only shape the
-    /// helper has to serve that is neither 3x3 nor 1xN, and the only one
-    /// where the even-sized anchor question arises.
+    /// `offset = 128` with no scale, which is the only shape the core has
+    /// to serve that is neither 3x3 nor 1xN, and the only one where the
+    /// even-sized anchor question arises. That anchor rides through
+    /// [`Scan`]'s index tables now, so a 2x2 is also the case that proves
+    /// a mask with no trailing tap below or right of its centre still
+    /// indexes them correctly.
     #[test]
-    fn gradient_pair_answers_the_mask_first_and_serves_canny_s_2x2() {
+    fn conv_raster_n_answers_the_masks_in_order_and_serves_canny_s_2x2() {
         let im = noise_gray(9, 7, 557);
 
         let asymmetric = Kernel {
@@ -3358,7 +3836,8 @@ mod tests {
             scale: 3.0,
         };
         let dense = DenseKernel::new(&asymmetric).unwrap();
-        let (first, second) = gradient_pair(&im, &dense, Precision::Float).unwrap();
+        let rot = dense.rot90();
+        let [first, second] = conv_raster_n(&im, [&dense, &rot], Precision::Float).unwrap();
         assert_eq!(
             first.data(),
             conv_raster(&im, &dense, Precision::Float).unwrap().data(),
@@ -3401,7 +3880,7 @@ mod tests {
             spun.scale
         );
 
-        let (gx, gy) = gradient_pair(&im, &canny, Precision::Integer).unwrap();
+        let [gx, gy] = conv_raster_n(&im, [&canny, &spun], Precision::Integer).unwrap();
         assert_eq!(
             gx.data(),
             conv_raster(&im, &canny, Precision::Integer).unwrap().data(),
@@ -3416,7 +3895,7 @@ mod tests {
         // The offset rides along both halves: a flat image differences to
         // zero everywhere, so every sample recentres on exactly 128.
         let flat = gray_from(4, 4, |_, _| 90);
-        let (fx, fy) = gradient_pair(&flat, &canny, Precision::Integer).unwrap();
+        let [fx, fy] = conv_raster_n(&flat, [&canny, &spun], Precision::Integer).unwrap();
         assert_eq!(fx.data(), &[128u8; 16][..], "flat Gx recentres on 128");
         assert_eq!(fy.data(), &[128u8; 16][..], "flat Gy recentres on 128");
     }

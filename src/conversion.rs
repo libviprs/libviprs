@@ -310,6 +310,40 @@ fn read_f32_flat(data: &[u8], i: usize) -> f32 {
     f32::from_ne_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]])
 }
 
+/// One `vips_cast` sample from a float carrier down to an unsigned one.
+///
+/// `vips_cast` semantics (`conversion/cast.c:566-568`): clip to the
+/// target range, then TRUNCATE. C clips in the source type via
+/// `VIPS_CLIP_UCHAR` / `VIPS_CLIP_USHORT` and then assigns to the narrow
+/// integer, and that implicit conversion truncates rather than rounds.
+/// The C doc comment spells it out: "Floats are truncated (not rounded).
+/// Out of range values are clipped."
+///
+/// `trunc`, NOT `floor`. The two are indistinguishable today, because
+/// every carrier here is unsigned and a negative sample clips to 0 before
+/// the rounding mode can show. C's `(int)` cast truncates toward zero, so
+/// `trunc` is the one that stays right when a signed carrier lands
+/// (#516). Do not simplify it to `floor`.
+///
+/// `NaN` pins to 0 explicitly: `trunc` leaves `NaN` alone and `clamp`
+/// passes it straight through, so without this branch it would reach the
+/// cast and land on 0 by accident rather than by rule.
+///
+/// It lives out here as a scalar rather than inline in
+/// [`Raster::try_cast`] because the fused edge detectors narrow their
+/// magnitude to uchar one sample at a time instead of building a float
+/// raster to hand to `vips_cast` (issue #562). Sharing the one spelling
+/// is what stops the two from drifting apart.
+#[inline]
+pub(crate) fn cast_float_sample(v: f64, out_bpc: usize) -> u32 {
+    let max = if out_bpc == 1 { 255.0 } else { 65535.0 };
+    if v.is_nan() {
+        0
+    } else {
+        v.clamp(0.0, max).trunc() as u32
+    }
+}
+
 /// Write the flat `i`-th sample of a float buffer (native byte order).
 #[inline]
 fn write_f32_flat(data: &mut [u8], i: usize, v: f32) {
@@ -884,32 +918,7 @@ impl Raster {
                 if format.is_float() {
                     write_f32_flat(odata, i, v as f32);
                 } else {
-                    // vips_cast semantics (`cast.c:566-568`): clip to the
-                    // target range, then TRUNCATE. C clips in the source
-                    // type via VIPS_CLIP_UCHAR / VIPS_CLIP_USHORT and then
-                    // assigns to the narrow integer, and that implicit
-                    // conversion truncates rather than rounds. The C doc
-                    // comment spells it out: "Floats are truncated (not
-                    // rounded). Out of range values are clipped."
-                    //
-                    // `trunc`, NOT `floor`. The two are indistinguishable
-                    // today, because every carrier here is unsigned and a
-                    // negative sample clips to 0 before the rounding mode
-                    // can show. C's `(int)` cast truncates toward zero, so
-                    // `trunc` is the one that stays right when a signed
-                    // carrier lands (#516). Do not simplify it to `floor`.
-                    //
-                    // NaN pins to 0 explicitly: `trunc` leaves NaN alone and
-                    // `clamp` passes it straight through, so without this
-                    // branch it would reach the cast and land on 0 by
-                    // accident rather than by rule.
-                    let max = if out_bpc == 1 { 255.0 } else { 65535.0 };
-                    let v = if v.is_nan() {
-                        0
-                    } else {
-                        v.clamp(0.0, max).trunc() as u32
-                    };
-                    write_flat(odata, out_bpc, i, v);
+                    write_flat(odata, out_bpc, i, cast_float_sample(v, out_bpc));
                 }
             }
         }
