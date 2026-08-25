@@ -254,6 +254,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show. C's `(int)` conversion truncates toward zero, so `trunc` is the form
   that stays correct once a signed carrier lands (#516).
 
+- **Breaking (WebP and GIF encode): `Raster::encode_webp` now takes a
+  `webp::SaveOptions` instead of a `quality: u8`, and the three GIF stubs
+  `encode_gif`, `encode_gif_interlaced`, and `encode_gif_dither` collapse into
+  one `Raster::encode_gif(gif::SaveOptions)`** (issue #563). Both still return
+  the same typed `EncodeError::Unsupported` they always have, so nothing that
+  worked stops working, but the call sites have to be updated.
+
+  The WebP change is the one with teeth. vips `webpsave` takes a `Q` factor
+  *and* a `lossless` flag, and quality only means anything on the lossy path.
+  The only pure-Rust WebP encoder libviprs can reach is lossless-only and has
+  no quality knob at all, so the `quality` argument was going to be accepted
+  and thrown away. That inverts the contract (ask for quality 10, get a
+  lossless file possibly larger than the PNG you started from) and it is a
+  semver time bomb: the day a lossy encoder lands, every existing
+  `encode_webp(10)` silently starts producing small lossy files in a patch
+  release. Quality is now unrepresentable rather than ignored, as a
+  `#[non_exhaustive] webp::Compression` whose only variant is `Lossless`, so
+  `Compression::Lossy { .. }` can be added later as a minor bump.
+
+  **Upgrading:** `im.encode_webp(80)` becomes
+  `im.encode_webp(webp::SaveOptions::default())`; `im.encode_gif()` becomes
+  `im.encode_gif(gif::SaveOptions::default())`; `im.encode_gif_interlaced()`
+  becomes `im.encode_gif(gif::SaveOptions { interlaced: true,
+  ..Default::default() })`; and `im.encode_gif_dither(d)` becomes
+  `im.encode_gif(gif::SaveOptions { dither: d, ..Default::default() })`.
+  Neither options struct is `#[non_exhaustive]`, so struct literals and
+  `..Default::default()` both work from outside the crate.
+
+- GIF and WebP files now decode. The `image` dependency is built with its
+  `gif` and `webp` features on (issue #563), where before it carried only
+  `jpeg`, `png`, and `tiff`, so `decode_file` and `decode_bytes` read those
+  two containers instead of reporting an undecodable format. The `hdr` feature
+  is still off and stays off: the crate decodes RGBE as `mantissa * 2^(e-136)`
+  where vips uses the half-bit-centred `(mantissa + 0.5) * 2^(e-136)`, which
+  is a 100% error at mantissa 0, so it was never usable for parity, and
+  leaving it off is also what keeps the unchecked RLE multiply in its Radiance
+  decoder unreachable.
+
 - **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
   real libvips interpretation codes `30` and `31` in its header `Type` word,**
   so it interoperates with vips instead of only with libviprs (issue #535).
@@ -317,6 +355,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   promotion still keeps the tag, matching `vips arrayjoin` of `b-w` uchar
   with `grey16`. Nothing changes for a grid whose inputs all already share a
   band count, which is the common case.
+
+- `decode_file` and `decode_bytes` now identify a format the same way, so the
+  same bytes decode to the same raster whichever entry point you call
+  (issue #563). They disagreed: the file path read a four-byte head, handled
+  `.v` and JPEG itself, and handed everything else to `ImageReader::open`,
+  which resolves the format from the **path extension** and never reads the
+  file, while the in-memory path resolved it from the **content**. A
+  PNG-encoded file named `photo.jpg` therefore failed through `decode_file`
+  and succeeded through `decode_bytes`, and a file with no extension at all
+  failed through `decode_file` with "the image format could not be
+  determined" while decoding perfectly from a buffer. Both entry points now
+  share one magic-byte sniff and one route table, and the extension is not
+  consulted anywhere in the decode path. libvips has always behaved this way:
+  `vips_foreign_find_load` asks each loader's `is_a` in priority order and
+  does not trust the filename.
+
+  The sniff head also grew from 4 bytes to 16. Four is not enough to identify
+  the containers the format work needs next: WebP's magic is `RIFF????WEBP`,
+  which is 12 bytes with a four-byte file-specific length in the middle, and
+  Radiance's is the 10-byte `#?RADIANCE`. Sixteen is what `image`'s own
+  content guess reads, so the sniff never sees less of a file than the
+  fallback does. `.v` and JPEG still decode from a whole in-memory buffer,
+  because their decoders parse the container themselves, and every other
+  format still streams, so no format's memory profile changed.
 
 - A `.v` written by real vips and tagged `OkLab` or `OkLch` now reads back with
   that tag instead of falling through to format inference and reporting

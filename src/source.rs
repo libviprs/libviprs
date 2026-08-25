@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -479,11 +479,17 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 
 /// Decode an image file into a canonical [`Raster`].
 ///
-/// Reads the file at `path`, auto-detects the format (JPEG, PNG, TIFF),
-/// and decodes it into an in-memory [`Raster`] with a canonical
-/// [`PixelFormat`]. Palette and gray+alpha images are promoted to
-/// RGB/RGBA so that downstream code only needs to handle a small set of
-/// uniform formats.
+/// Reads the file at `path`, auto-detects the format, and decodes it into
+/// an in-memory [`Raster`] with a canonical [`PixelFormat`]. Palette and
+/// gray+alpha images are promoted to RGB/RGBA so that downstream code only
+/// needs to handle a small set of uniform formats.
+///
+/// The format is identified from the file's leading magic bytes and never
+/// from its extension, so this returns exactly what [`decode_bytes`] returns
+/// for the same bytes, and a misnamed file still decodes correctly. libvips
+/// resolves a loader the same way. Native `.v`, JPEG, PNG, TIFF, GIF, and
+/// WebP are recognised directly; anything else falls back to the `image`
+/// crate's own content guess.
 ///
 /// # Example usage
 ///
@@ -610,6 +616,164 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
         .map_err(|e| SourceError::Io(std::io::Error::other(e.to_string())))
 }
 
+// ---------------------------------------------------------------------------
+// Format sniffing and routing
+// ---------------------------------------------------------------------------
+
+/// Number of leading bytes read to identify a container.
+///
+/// Sized for the whole format wave rather than for the magics libviprs
+/// reads today: WebP's `RIFF????WEBP` needs 12 (bytes 4..8 are a chunk
+/// length and carry no signature) and Radiance's `#?RADIANCE` needs 10. It
+/// is also exactly how many bytes `image`'s own `with_guessed_format` reads,
+/// so the fallback in [`reader_for`] never sees more of a file than
+/// [`sniff`] did.
+const SNIFF_HEAD_LEN: usize = 16;
+
+/// A container libviprs identifies from the leading magic bytes of a file
+/// or buffer.
+///
+/// Only containers this build can actually reach a decoder for are listed;
+/// an unrecognised one is `None` from [`sniff`] and falls through to
+/// `image`'s own content guess. Growing this list is how a format lane
+/// joins the routing: add a variant, its magic in [`sniff`], and its
+/// decoder in [`SniffedFormat::image_format`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SniffedFormat {
+    /// Native libvips `.v`, either byte order.
+    Vips,
+    /// JPEG (JFIF/EXIF), `FF D8 FF`.
+    Jpeg,
+    /// PNG, `89 P N G 0D 0A 1A 0A`.
+    Png,
+    /// TIFF, little-endian `II*\0` or big-endian `MM\0*`.
+    Tiff,
+    /// GIF, `GIF87a` or `GIF89a`.
+    Gif,
+    /// WebP, `RIFF` + a 4-byte length + `WEBP`.
+    WebP,
+}
+
+impl SniffedFormat {
+    /// Whether [`decode_file_with_limits`] has to read the whole file into
+    /// memory rather than streaming it.
+    ///
+    /// True for exactly two containers, and for reasons that belong to the
+    /// decoder rather than to the format:
+    ///
+    /// * `.v`, because [`crate::imageio::decode_vips_bytes`] parses the
+    ///   libvips header and the JSON metadata trailer itself and needs the
+    ///   buffer addressable end to end.
+    /// * JPEG, because the metadata pass rescans the APP1/APP2 segments for
+    ///   EXIF and ICC after the pixel decode.
+    ///
+    /// Everything else keeps the streaming reader, so widening the table
+    /// above cannot quietly turn a streaming decode into a whole-file read.
+    const fn decodes_from_memory(self) -> bool {
+        matches!(self, Self::Vips | Self::Jpeg)
+    }
+
+    /// The `image` decoder for this container, or `None` for `.v`, which
+    /// libviprs decodes itself.
+    ///
+    /// This is the entire route table, and it is an identity mapping on
+    /// purpose: one sniffed container in, one decoder out, no per-format
+    /// options. Save-side options live in the per-format modules
+    /// ([`crate::webp`], [`crate::gif`]); nothing about how a file is
+    /// decoded should ever need to be configured here.
+    const fn image_format(self) -> Option<image::ImageFormat> {
+        match self {
+            Self::Vips => None,
+            Self::Jpeg => Some(image::ImageFormat::Jpeg),
+            Self::Png => Some(image::ImageFormat::Png),
+            Self::Tiff => Some(image::ImageFormat::Tiff),
+            Self::Gif => Some(image::ImageFormat::Gif),
+            Self::WebP => Some(image::ImageFormat::WebP),
+        }
+    }
+}
+
+/// Identify a container from its leading bytes.
+///
+/// This is the one detector both decode entry points consult. libvips does
+/// the same thing in `vips_foreign_find_load` (`foreign.c`), asking each
+/// loader's `is_a` in priority order and never trusting the filename.
+///
+/// `head` may be shorter than [`SNIFF_HEAD_LEN`]; a buffer too short for a
+/// given magic simply does not match it. The byte patterns are the same
+/// ones `image` 0.25 keeps in its `MAGIC_BYTES` table
+/// (`io/free_functions.rs`), so this sniff and the fallback guess in
+/// [`reader_for`] cannot disagree about the same file.
+pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
+    if crate::imageio::is_vips_bytes(head) {
+        return Some(SniffedFormat::Vips);
+    }
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some(SniffedFormat::Jpeg);
+    }
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(SniffedFormat::Png);
+    }
+    if head.starts_with(b"II*\x00") || head.starts_with(b"MM\x00*") {
+        return Some(SniffedFormat::Tiff);
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some(SniffedFormat::Gif);
+    }
+    // The one masked magic: bytes 4..8 are the RIFF chunk length, which is
+    // file-specific, so the signature is split either side of it.
+    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        return Some(SniffedFormat::WebP);
+    }
+    None
+}
+
+/// Read up to [`SNIFF_HEAD_LEN`] leading bytes, returning the buffer and how
+/// many bytes were actually filled.
+///
+/// A source shorter than the head is not an error: [`sniff`] is given only
+/// the filled prefix and matches nothing it cannot see.
+fn read_head<R: std::io::Read>(mut source: R) -> std::io::Result<([u8; SNIFF_HEAD_LEN], usize)> {
+    let mut head = [0u8; SNIFF_HEAD_LEN];
+    let mut filled = 0;
+    while filled < head.len() {
+        let n = source.read(&mut head[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok((head, filled))
+}
+
+/// Configure an [`ImageReader`] over an already-opened source for a sniffed
+/// container.
+///
+/// This is the single place either entry point turns bytes into a reader
+/// that knows its format. A container [`sniff`] recognised has its format
+/// set directly; anything else falls through to `image`'s own content guess
+/// over the same leading bytes. Either way the answer comes from the
+/// content.
+///
+/// The path extension is deliberately never consulted. `ImageReader::open`
+/// resolves the format from the extension alone and never reads the file,
+/// which is exactly why the file and in-memory entry points used to give
+/// two different answers for one run of bytes (issue #563). Taking an
+/// already-opened reader instead of a path makes that mistake unavailable.
+fn reader_for<R: std::io::BufRead + std::io::Seek>(
+    inner: R,
+    sniffed: Option<SniffedFormat>,
+) -> Result<ImageReader<R>, SourceError> {
+    let mut reader = ImageReader::new(inner);
+    match sniffed.and_then(SniffedFormat::image_format) {
+        Some(format) => {
+            reader.set_format(format);
+            Ok(reader)
+        }
+        None => Ok(reader.with_guessed_format()?),
+    }
+}
+
 /// Decode an image file into a [`Raster`] under explicit [`DecodeLimits`].
 ///
 /// Identical to [`decode_file`] but lets the caller supply the
@@ -623,28 +787,20 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
 /// As [`decode_file`], plus [`SourceError::DimensionLimitExceeded`] when
 /// the decoded `width * height` exceeds the supplied budget.
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
-    // Sniff the leading magic: native .v files and JPEGs take the
-    // in-memory path (the .v decoder parses the libvips header itself,
-    // and the JPEG path scans APP1/APP2 segments for EXIF/ICC metadata
-    // after pixel decode). Every other format keeps the original
-    // streaming reader so its memory profile is unchanged.
-    let mut head = [0u8; 4];
-    {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        let mut filled = 0;
-        while filled < head.len() {
-            let n = file.read(&mut head[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-    }
-    let mut raster = if crate::imageio::is_vips_bytes(&head) || head[..3] == [0xFF, 0xD8, 0xFF] {
+    // Identify the container from its leading magic, never from the path
+    // extension: `decode_bytes_with_limits` has no filename to consult, so
+    // any filename-derived answer here is one the two entry points cannot
+    // both give (issue #563).
+    let mut file = std::fs::File::open(path)?;
+    let (head, filled) = read_head(&mut file)?;
+    let sniffed = sniff(&head[..filled]);
+    let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
         decode_bytes_with_limits(&std::fs::read(path)?, limits)?
     } else {
-        decode_reader(ImageReader::open(path)?, limits)?
+        // Rewind past the sniff and keep reading from the same handle, so
+        // every streaming format's memory profile is unchanged.
+        file.seek(std::io::SeekFrom::Start(0))?;
+        decode_reader(reader_for(std::io::BufReader::new(file), sniffed)?, limits)?
     };
     // Record the source path, like the libvips header's filename slot.
     raster
@@ -680,10 +836,11 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// before any pixel data is allocated, and the `width * height` ceiling
 /// is checked before the [`Raster`] is constructed.
 pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    if crate::imageio::is_vips_bytes(bytes) {
+    let sniffed = sniff(bytes);
+    if sniffed == Some(SniffedFormat::Vips) {
         return crate::imageio::decode_vips_bytes(bytes, limits);
     }
-    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
     let mut raster = decode_reader(reader, limits)?;
     if is_jpeg {
@@ -941,6 +1098,34 @@ mod tests {
             .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
             .unwrap();
         (out, expected)
+    }
+
+    /// Encode a `w x h` RGB image as GIF, so the sniff table's GIF arm and
+    /// the `image` `gif` feature are both exercised on real bytes.
+    fn create_test_gif(w: u32, h: u32) -> Vec<u8> {
+        encode_via_image(w, h, image::ImageFormat::Gif)
+    }
+
+    /// Encode a `w x h` RGB image as WebP. This is the fixture the widened
+    /// sniff head exists for: the `RIFF????WEBP` magic is 12 bytes with a
+    /// file-specific length in the middle, so the old 4-byte head could not
+    /// have identified it.
+    fn create_test_webp(w: u32, h: u32) -> Vec<u8> {
+        encode_via_image(w, h, image::ImageFormat::WebP)
+    }
+
+    /// Shared body of the GIF and WebP fixtures: a deterministic RGB ramp
+    /// written out in `format`.
+    fn encode_via_image(w: u32, h: u32, format: image::ImageFormat) -> Vec<u8> {
+        let mut buf: image::RgbImage = image::ImageBuffer::new(w, h);
+        for (x, y, px) in buf.enumerate_pixels_mut() {
+            *px = image::Rgb([(x * 20) as u8, (y * 30) as u8, 90]);
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(buf)
+            .write_to(&mut Cursor::new(&mut out), format)
+            .unwrap();
+        out
     }
 
     fn create_test_jpeg(w: u32, h: u32) -> Vec<u8> {
@@ -1231,6 +1416,214 @@ mod tests {
         assert_eq!(from_file.format(), from_bytes.format());
         assert_eq!(from_file.format(), PixelFormat::Rgba16);
         assert_eq!(from_file.data(), from_bytes.data());
+    }
+
+    /**
+     * Guards the shared format sniff: `decode_file_with_limits` and
+     * `decode_bytes_with_limits` must identify a container from the same
+     * evidence, so a filename can never change what a given run of bytes
+     * decodes to. Works by writing six buffers to disk under names that
+     * disagree with their content — a PNG called `.jpg`, a JPEG called
+     * `.png`, a PNG with no extension at all, and native `.v`, GIF, and
+     * WebP bytes all called `.png` — then decoding each through both entry
+     * points and
+     * comparing every case before reporting, so one broken route does not
+     * hide the others. Before the shared sniff the file entry point
+     * resolved the format from the path extension (`ImageReader::open`)
+     * while the byte entry point resolved it from the content
+     * (`with_guessed_format`), so the same bytes decoded two different ways
+     * depending on which entry point the caller reached for (issue #563).
+     * The WebP case is also the one that needs the widened sniff head: its
+     * `RIFF????WEBP` magic is 12 bytes with a file-specific length in the
+     * middle, so four bytes could never have identified it.
+     * Input: six mislabelled PNG/JPEG/`.v`/GIF/WebP files → Output: both
+     * entry points return equal dimensions, pixel format, and pixel bytes.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn content_beats_extension_in_both_entry_points() {
+        /// Compact one-line rendering of a decode outcome: the raster's
+        /// shape on success, the error message on failure. Keeps the
+        /// assertion message readable where a `{:?}` of the raster would
+        /// dump the whole pixel buffer.
+        fn outcome(result: &Result<Raster, SourceError>) -> String {
+            match result {
+                Ok(im) => format!("Ok({}x{} {:?})", im.width(), im.height(), im.format()),
+                Err(e) => format!("Err({e})"),
+            }
+        }
+
+        let png = create_test_png(9, 7);
+        let jpeg = create_test_jpeg(9, 7);
+        let gif = create_test_gif(9, 7);
+        let webp = create_test_webp(9, 7);
+        let vips = decode_bytes(&png).unwrap().encode_vips().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut disagreements: Vec<String> = Vec::new();
+        // Each case is (file name, bytes): the name is picked to disagree
+        // with the magic, so extension-based routing cannot get it right.
+        for (name, bytes) in [
+            ("png_bytes_named.jpg", &png),
+            ("jpeg_bytes_named.png", &jpeg),
+            ("png_bytes_with_no_extension", &png),
+            ("vips_bytes_named.png", &vips),
+            ("gif_bytes_named.png", &gif),
+            ("webp_bytes_named.png", &webp),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+
+            let from_bytes = decode_bytes_with_limits(bytes, DecodeLimits::default());
+            let from_file = decode_file_with_limits(&path, DecodeLimits::default());
+
+            match (&from_file, &from_bytes) {
+                (Ok(f), Ok(b)) => {
+                    if (f.width(), f.height(), f.format()) != (b.width(), b.height(), b.format())
+                        || f.data() != b.data()
+                    {
+                        disagreements.push(format!(
+                            "{name}: decode_file_with_limits {} vs decode_bytes_with_limits {} \
+                             (pixel bytes equal: {})",
+                            outcome(&from_file),
+                            outcome(&from_bytes),
+                            f.data() == b.data()
+                        ));
+                    }
+                }
+                _ => disagreements.push(format!(
+                    "{name}: decode_file_with_limits {} vs decode_bytes_with_limits {}",
+                    outcome(&from_file),
+                    outcome(&from_bytes)
+                )),
+            }
+        }
+
+        assert!(
+            disagreements.is_empty(),
+            "the file and byte entry points disagree on {} of 6 inputs:\n  {}",
+            disagreements.len(),
+            disagreements.join("\n  ")
+        );
+    }
+
+    /**
+     * Pins the sniff table itself: every magic libviprs routes on maps to
+     * exactly one container, and nothing else does. Works by running each
+     * known magic (both TIFF byte orders, both GIF versions, both `.v`
+     * byte orders) plus a set of near-misses through `sniff` and comparing
+     * against the expected variant. The WebP case is the one that needs
+     * more than four leading bytes: its signature is split either side of
+     * a file-specific chunk length, which is why the head is
+     * `SNIFF_HEAD_LEN` and not the four bytes it used to be (issue #563).
+     * Input: one buffer per magic plus five non-matches -> Output: the
+     * expected `Option<SniffedFormat>` for each.
+     */
+    #[test]
+    fn sniff_maps_each_magic_to_one_container() {
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 15] = [
+            (
+                "vips le",
+                &[0xb6, 0xa6, 0xf2, 0x08],
+                Some(SniffedFormat::Vips),
+            ),
+            (
+                "vips be",
+                &[0x08, 0xf2, 0xa6, 0xb6],
+                Some(SniffedFormat::Vips),
+            ),
+            (
+                "jpeg jfif",
+                &[0xFF, 0xD8, 0xFF, 0xE0],
+                Some(SniffedFormat::Jpeg),
+            ),
+            (
+                "jpeg exif",
+                &[0xFF, 0xD8, 0xFF, 0xE1],
+                Some(SniffedFormat::Jpeg),
+            ),
+            ("png", b"\x89PNG\r\n\x1a\n", Some(SniffedFormat::Png)),
+            ("tiff le", b"II*\x00", Some(SniffedFormat::Tiff)),
+            ("tiff be", b"MM\x00*", Some(SniffedFormat::Tiff)),
+            ("gif87a", b"GIF87a", Some(SniffedFormat::Gif)),
+            ("gif89a", b"GIF89a", Some(SniffedFormat::Gif)),
+            // Bytes 4..8 are the RIFF chunk length and are deliberately
+            // arbitrary here: the sniff must ignore them entirely.
+            (
+                "webp",
+                b"RIFF\x2a\x13\x00\x00WEBPVP8 ",
+                Some(SniffedFormat::WebP),
+            ),
+            ("riff but not webp", b"RIFF\x00\x00\x00\x00WAVEfmt ", None),
+            // Truncated one byte short of the `WEBP` tag: a 12-byte magic
+            // cannot be decided from 11 bytes.
+            ("webp truncated", b"RIFF\x00\x00\x00\x00WEB", None),
+            ("plain text", b"not an image at all", None),
+            ("empty", b"", None),
+            ("one byte of png", b"\x89", None),
+        ];
+        for (name, head, expected) in cases {
+            assert_eq!(sniff(head), expected, "sniff disagreed on {name}");
+        }
+    }
+
+    /**
+     * Pins the two contracts the route table has to keep as the format
+     * lanes extend it. First, the memory profile: exactly `.v` and JPEG
+     * decode from a whole in-memory buffer, because their decoders parse
+     * the container themselves, and every other format keeps the streaming
+     * reader. A lane that adds a variant and gets this wrong silently turns
+     * a streaming decode into a read-whole-file. Second, the mapping is
+     * identity: one container in, one decoder out, no options and no
+     * many-to-one collapsing.
+     * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
+     * true for exactly `Vips` and `Jpeg`, and distinct `image` formats for
+     * every non-`.v` container.
+     */
+    #[test]
+    fn route_table_is_identity_and_only_vips_and_jpeg_buffer_whole() {
+        let all = [
+            SniffedFormat::Vips,
+            SniffedFormat::Jpeg,
+            SniffedFormat::Png,
+            SniffedFormat::Tiff,
+            SniffedFormat::Gif,
+            SniffedFormat::WebP,
+        ];
+
+        let buffered: Vec<SniffedFormat> = all
+            .iter()
+            .copied()
+            .filter(|f| f.decodes_from_memory())
+            .collect();
+        assert_eq!(
+            buffered,
+            vec![SniffedFormat::Vips, SniffedFormat::Jpeg],
+            "only .v and JPEG may read the whole file into memory"
+        );
+
+        assert_eq!(
+            SniffedFormat::Vips.image_format(),
+            None,
+            ".v is decoded by libviprs itself, not by the image facade"
+        );
+        let mut mapped: Vec<image::ImageFormat> = all
+            .iter()
+            .copied()
+            .filter_map(SniffedFormat::image_format)
+            .collect();
+        assert_eq!(
+            mapped.len(),
+            all.len() - 1,
+            "every container but .v maps to an image decoder"
+        );
+        mapped.sort_by_key(|f| format!("{f:?}"));
+        mapped.dedup();
+        assert_eq!(
+            mapped.len(),
+            all.len() - 1,
+            "the route table must be an identity mapping, not many-to-one"
+        );
     }
 
     /**
