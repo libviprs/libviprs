@@ -1,0 +1,44 @@
+running 9 tests
+test conversion::tests::cast_float_preserves_metadata ... ok
+test conversion::tests::cast_float_to_u8_rounds_and_clips ... ok
+test conversion::tests::cast_float_round_trips_unsigned ... ok
+test conversion::tests::cast_float_to_u16_rounds_and_clips ... ok
+test conversion::tests::cast_float_to_float_retags ... ok
+test conversion::tests::cast_float_clipping_unchanged_by_truncation ... ok
+test conversion::tests::cast_float_to_u8_truncates_vips_oracle_rows ... FAILED
+test conversion::tests::cast_float_to_u16_truncates_in_range ... FAILED
+test conversion::tests::cast_float_nan_still_pins_to_zero ... FAILED
+
+failures:
+
+---- conversion::tests::cast_float_to_u8_truncates_vips_oracle_rows stdout ----
+
+thread 'conversion::tests::cast_float_to_u8_truncates_vips_oracle_rows' (64855285) panicked at src/conversion.rs:2497:9:
+assertion `left == right` failed: vips cast truncates float samples; rounding would give [2, 3, 4, 255]
+  left: [2, 3, 4, 255]
+ right: [1, 2, 3, 254]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- conversion::tests::cast_float_to_u16_truncates_in_range stdout ----
+
+thread 'conversion::tests::cast_float_to_u16_truncates_in_range' (64855283) panicked at src/conversion.rs:2519:9:
+assertion `left == right` failed: vips cast truncates on ushort too; rounding would give [301, 65535, 2]
+  left: [301.0, 65535.0, 2.0]
+ right: [300.0, 65534.0, 1.0]
+
+---- conversion::tests::cast_float_nan_still_pins_to_zero stdout ----
+
+thread 'conversion::tests::cast_float_nan_still_pins_to_zero' (64855278) panicked at src/conversion.rs:2569:9:
+assertion `left == right` failed: NaN pins to 0 rather than falling out of the clamp
+  left: [0, 2]
+ right: [0, 1]
+
+
+failures:
+    conversion::tests::cast_float_nan_still_pins_to_zero
+    conversion::tests::cast_float_to_u16_truncates_in_range
+    conversion::tests::cast_float_to_u8_truncates_vips_oracle_rows
+
+test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 1282 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -383,3 +383,53 @@ fn ported_logmat() {
     assert_eq!(ks.height(), 1);
     assert!((ks.max() - 1.0).abs() < 0.001);
 }
+
+/// The edge-detector surface, which the ported cell does not reach: the
+/// three no-argument detectors and their `try_*` twins, called from an
+/// external crate. `vips sobel` / `scharr` / `prewitt` take no options at
+/// all, so the whole call surface is the receiver.
+///
+/// The expected values are the vips 8.18.4 measurements on a 7x7 uchar
+/// image with a background of 10 stepping to 20: a pure vertical step is
+/// a pure Gx, so the answer is `|Gx|` on the two columns straddling the
+/// step. Behaviour depth lives in the unit tests in `src/convolution.rs`.
+#[test]
+fn edge_detector_surface() {
+    let mut data = Vec::with_capacity(7 * 7);
+    for _ in 0..7 {
+        for x in 0..7u32 {
+            data.push(if x >= 4 { 20u8 } else { 10 });
+        }
+    }
+    let im = Raster::new(7, 7, PixelFormat::Gray8, data).unwrap();
+
+    let cases: [(&str, Raster, Raster, f64); 3] = [
+        ("sobel", im.sobel(), im.try_sobel().unwrap(), 40.0),
+        ("scharr", im.scharr(), im.try_scharr().unwrap(), 160.0),
+        ("prewitt", im.prewitt(), im.try_prewitt().unwrap(), 30.0),
+    ];
+    for (name, out, fallible, step) in cases {
+        assert_eq!(out.format(), PixelFormat::Gray8, "{name} is always uchar");
+        assert_eq!(out.width(), 7, "{name} width");
+        assert_eq!(out.height(), 7, "{name} height");
+        assert_eq!(out.data(), fallible.data(), "{name} try_ form agrees");
+        assert_eq!(pixel_f64(&out, 3, 3), vec![step], "{name} on the step");
+        assert_eq!(pixel_f64(&out, 0, 3), vec![0.0], "{name} off the step");
+    }
+}
+
+/// Every input format answers with an 8-bit raster of the same band
+/// count: `edge.c` dispatches on the format but both arms end in uchar.
+#[test]
+fn edge_detector_output_is_always_uchar() {
+    for (src, want) in [
+        (PixelFormat::Gray16, PixelFormat::Gray8),
+        (PixelFormat::Rgb16, PixelFormat::Rgb8),
+        (PixelFormat::RgbaF32, PixelFormat::Rgba8),
+    ] {
+        let im = Raster::zeroed(5, 4, src).unwrap();
+        assert_eq!(im.sobel().format(), want, "sobel of {src:?}");
+        assert_eq!(im.scharr().format(), want, "scharr of {src:?}");
+        assert_eq!(im.prewitt().format(), want, "prewitt of {src:?}");
+    }
+}

@@ -1,0 +1,60 @@
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/verify_module_public_api.rs (/private/tmp/claude-501/-Users-rom-workspace-mojito/ea208d2c-106d-444a-b3bf-329ca95a4fa9/scratchpad/wt-561/debug/deps/verify_module_public_api-868a6b2d6d2bb1aa)
+
+running 2 tests
+test verify_from_strip_source_is_public_and_requires_on_disk_sink ... ok
+test raster_verify_is_public_and_requires_on_disk_sink ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/worker_executor_hot_cache.rs (/private/tmp/claude-501/-Users-rom-workspace-mojito/ea208d2c-106d-444a-b3bf-329ca95a4fa9/scratchpad/wt-561/debug/deps/worker_executor_hot_cache-73604e26b17116ad)
+
+running 12 tests
+test hot_cache_rejects_budget_below_minimum_strip ... ok
+test failing_executor_error_propagates ... ok
+test worker_lifecycle_vocabulary_flows_through_fan_out_and_engines_stay_silent ... ok
+test custom_executor_identity_stamps_attribution_events ... ok
+test with_observers_fans_out_identical_event_streams ... ok
+test hot_cache_single_pass_canonical_flush_and_cross_concurrency_determinism ... ok
+test strip_attribution_events_are_canonical_and_unattributed_by_default ... ok
+test custom_executor_receives_canonical_specs_and_preserves_output ... ok
+test attribution_specs_identical_across_tile_concurrency ... ok
+test hot_cache_uses_executor_seam ... ok
+test local_executor_byte_identical_to_default_mapreduce ... ok
+test hot_cache_byte_parity_with_streaming_and_mapreduce ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/workspace_layout.rs (/private/tmp/claude-501/-Users-rom-workspace-mojito/ea208d2c-106d-444a-b3bf-329ca95a4fa9/scratchpad/wt-561/debug/deps/workspace_layout-081be14344584b35)
+
+running 3 tests
+test workspace_lockfile_pins_pdfium_render_to_the_fork ... ok
+test root_workspace_contains_both_crates ... ok
+test fuzz_crate_is_a_member_of_the_root_workspace ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests libviprs
+
+running 14 tests
+test src/extensions.rs - extensions (line 26) ... ignored
+test src/manifest.rs - manifest::ManifestBuilder (line 601) ... ignored
+test src/resume.rs - resume (line 46) ... ignored
+test src/retry.rs - retry (line 26) ... ignored
+test src/sink.rs - sink::FsSink::new (line 1022) ... ignored
+test src/sink.rs - sink::FsSink::with_format (line 1159) ... ignored
+test src/draw.rs - draw (line 77) ... ok
+test src/raster.rs - raster::Raster::from_f32_samples (line 431) ... ok
+test src/cancel.rs - cancel (line 30) ... ok
+test src/source.rs - source::DecodeLimits (line 327) ... ok
+test src/planner.rs - planner::PyramidPlanner::estimate_peak_memory (line 390) ... ok
+test src/imageio.rs - imageio::tokenize (line 1201) ... ok
+test src/error.rs - error (line 14) ... ok
+test src/conversion.rs - conversion::Raster::copy (line 804) ... ok
+
+test result: ok. 8 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.77s; merged doctests compilation took 0.74s
