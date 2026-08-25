@@ -132,6 +132,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (cast): a float sample narrowing to an integer format is now
+  truncated toward zero, where it used to be rounded to nearest** (issue #561).
+  `Raster::cast` and `Raster::try_cast` are the operations that move, and so is
+  anything that narrows through them, `Raster::freqmult` included. This changes
+  output bytes for a public API shipped in 0.4.0: casting `1.7` to `Gray8` now
+  gives `1` where it used to give `2`, and `254.6` gives `254` where it used to
+  give `255`. Roughly half of all fractional samples shift down by one.
+
+  The old behaviour was simply wrong against libvips. `cast.c:566-567` says
+  "Floats are truncated (not rounded). Out of range values are clipped", and
+  vips 8.18.4 agrees on every row I measured: `1.7` to `1`, `2.5` to `2`,
+  `3.999` to `3`, `254.6` to `254`, and on the wider target `300.9` to `300`.
+  libviprs answered one above vips on all five. The rustdoc made it worse by
+  claiming the rounding and claiming parity with `vips_cast` in the same
+  paragraph, so it promised libvips compatibility while describing
+  libvips-incompatible behaviour; both halves of that are corrected, and the
+  doc now scopes the parity claim to the formats `PixelFormat` can actually
+  carry.
+
+  Clipping and the `NaN` pin do not move. Those already matched vips (below
+  range to `0`, above range to `255` or `65535`, `NaN` to `0`), and there are
+  now tests pinning each so the next change to this arm cannot quietly take
+  them with it. The truncation is `f64::trunc`, not `f64::floor`, which reads
+  as a distinction without a difference today because every carrier here is
+  unsigned and a negative sample clips to `0` before the rounding mode can
+  show. C's `(int)` conversion truncates toward zero, so `trunc` is the form
+  that stays correct once a signed carrier lands (#516).
+
 - **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
   real libvips interpretation codes `30` and `31` in its header `Type` word,**
   so it interoperates with vips instead of only with libviprs (issue #535).
