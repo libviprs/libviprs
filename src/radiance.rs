@@ -64,6 +64,10 @@
 //! * **A loaded `.hdr` cannot enter the pyramid engine.** See
 //!   [`decode_radiance`].
 //!
+//! Every number this module is pinned against was measured on the real
+//! vips 8.18.4 binary and is recorded, with the commands that produced it,
+//! in `oracle-captures/foreign-radiance/`.
+//!
 //! Every entry point here is fallible and there is no panicking twin,
 //! matching the rest of the codec surface in [`crate::encode`],
 //! [`crate::webp`], and [`crate::gif`]: a decoder's failures come from
@@ -75,7 +79,7 @@ use thiserror::Error;
 
 use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
-use crate::imageio::SaveError;
+use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
 use crate::source::{DecodeLimits, SourceError};
@@ -240,6 +244,27 @@ pub enum RadianceError {
         /// The scanline the file ended inside, from the top.
         row: u32,
     },
+    /// A header line ran past the line cap without a newline, so the file
+    /// is not a header libviprs is willing to scan.
+    ///
+    /// libvips reads header lines into a fixed 4096-byte buffer and
+    /// silently skips whatever does not fit (`vips_sbuf_get_line`,
+    /// `sbuf.c`); libviprs borrows from the input instead of copying, so
+    /// the cap exists only to stop a header with no newline in it from
+    /// being scanned end to end.
+    #[error("radiance: a header line runs past the {cap}-byte cap without a newline")]
+    HeaderLineTooLong {
+        /// The cap the line exceeded, in bytes.
+        cap: usize,
+    },
+    /// A `COLORCORR=` or `PRIMARIES=` line did not carry the three or eight
+    /// numbers it promises. libvips fails the whole load here too
+    /// (`rad2vips_process_line`, `radiance.c:632-660`).
+    #[error("radiance: malformed header line {line:?}")]
+    BadHeaderLine {
+        /// The line as read, lossily decoded.
+        line: String,
+    },
     /// Constructing the decoded [`Raster`] failed.
     #[error(transparent)]
     Raster(#[from] RasterError),
@@ -308,11 +333,43 @@ pub struct SaveOptions {
 /// * [`SourceError::DimensionLimitExceeded`] when `width * height` exceeds
 ///   [`DecodeLimits::max_pixels`].
 pub fn decode_radiance(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    let _ = (bytes, limits);
-    Err(RadianceError::BadMagic {
-        found: String::new(),
+    let mut cursor = Cursor::new(bytes);
+    let header = read_header(&mut cursor)?;
+    let (width, height) = (header.width, header.height);
+
+    limits.check_coord(width, height)?;
+    limits.check_pixels(width, height)?;
+    let needed = u64::from(width) * u64::from(height) * (BANDS * SAMPLE_BYTES) as u64;
+    if needed > limits.max_alloc_bytes {
+        return Err(RadianceError::AllocLimitExceeded {
+            width,
+            height,
+            needed,
+            max_alloc_bytes: limits.max_alloc_bytes,
+        }
+        .into());
     }
-    .into())
+
+    let row_samples = width as usize * BANDS;
+    let mut data = vec![0u8; row_samples * height as usize * SAMPLE_BYTES];
+    let mut scanline = vec![[0u8; 4]; width as usize];
+    for row in 0..height {
+        read_scanline(&mut cursor, &mut scanline, row)?;
+        let base = row as usize * row_samples * SAMPLE_BYTES;
+        for (x, quad) in scanline.iter().enumerate() {
+            let rgb = rgbe_to_float(*quad);
+            for (band, sample) in rgb.iter().enumerate() {
+                let off = base + (x * BANDS + band) * SAMPLE_BYTES;
+                data[off..off + SAMPLE_BYTES].copy_from_slice(&sample.to_ne_bytes());
+            }
+        }
+    }
+
+    let mut raster =
+        Raster::new(width, height, float_rgb(), data).map_err(RadianceError::Raster)?;
+    raster.meta.interpretation = Some(header.interpretation());
+    header.attach_fields(&mut raster);
+    Ok(raster)
 }
 
 impl Raster {
@@ -339,8 +396,44 @@ impl Raster {
     /// [`EncodeError::Encode`] when the raster is not `FloatF32(3)`, or
     /// when its dimensions do not fit the format's 32-bit resolution line.
     pub fn encode_radiance(&self, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
-        let _ = options;
-        Err(EncodeError::encode("radiance encoder not implemented yet"))
+        let format = self.format();
+        if format != float_rgb() {
+            return Err(EncodeError::encode(format!(
+                "radiance carries three float bands; {format:?} has no RGBE spelling, \
+                 cast to FloatF32(3) first"
+            )));
+        }
+        let (width, height) = (self.width(), self.height());
+        // The resolution line is `%8d` of a C `int` (`resolu2str`,
+        // `radiance.c:263-275`), so anything past `i32::MAX` has no
+        // spelling in the format at all.
+        if width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return Err(EncodeError::encode(format!(
+                "radiance cannot spell a {width}x{height} resolution line;                  both axes must fit a signed 32-bit integer"
+            )));
+        }
+
+        let header = Header::for_save(self, options);
+        let mut out = header.write(width, height);
+
+        let mut scanline = vec![[0u8; 4]; width as usize];
+        let data = self.data();
+        let stride = self.stride();
+        for row in 0..height as usize {
+            let base = row * stride;
+            for (x, quad) in scanline.iter_mut().enumerate() {
+                let mut rgb = [0.0f64; BANDS];
+                for (band, sample) in rgb.iter_mut().enumerate() {
+                    let off = base + (x * BANDS + band) * SAMPLE_BYTES;
+                    let mut raw = [0u8; SAMPLE_BYTES];
+                    raw.copy_from_slice(&data[off..off + SAMPLE_BYTES]);
+                    *sample = f64::from(f32::from_ne_bytes(raw));
+                }
+                *quad = float_to_rgbe(rgb);
+            }
+            write_scanline(&mut out, &scanline);
+        }
+        Ok(out)
     }
 
     /// Save the raster to `path` as Radiance `.hdr` (libvips `radsave`).
@@ -356,6 +449,727 @@ impl Raster {
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Bytes per float sample.
+const SAMPLE_BYTES: usize = 4;
+
+/// The pixel format every decode produces and the only one
+/// [`Raster::encode_radiance`] accepts.
+fn float_rgb() -> PixelFormat {
+    PixelFormat::FloatF32(
+        std::num::NonZeroU16::new(BANDS as u16).expect("the band count is non-zero"),
+    )
+}
+
+/// Whether a scanline of this width is run-length encoded.
+///
+/// `MINELEN` and `MAXELEN` (`radiance.c:235-236`) pick an encoding; they do
+/// not gate the save. Outside the range, `scanline_write`
+/// (`radiance.c:955-978`) writes flat, unencoded pixels and
+/// `scanline_read` (`radiance.c:404-484`) reads them back the same way.
+fn uses_run_length(width: u32) -> bool {
+    (MINELEN..=MAXELEN).contains(&width)
+}
+
+/// `2^n`, built straight from the exponent field so it is exact for every
+/// `n` this module uses (`-135..=119` on decode).
+fn exp2(n: i32) -> f64 {
+    debug_assert!(
+        (-1022..=1023).contains(&n),
+        "exp2 is only exact for normals"
+    );
+    f64::from_bits(((n + 1023) as u64) << 52)
+}
+
+/// Split `x` into a significand in `[0.5, 1)` and a power of two, the way
+/// C's `frexp` does. `float2rad.c`'s `setcolr` depends on this exactly:
+/// substituting `log2().floor() + 1` disagrees with it around powers of two.
+fn frexp(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    const EXP_MASK: u64 = 0x7ff << 52;
+    let (bits, offset) = {
+        let raw = x.to_bits();
+        if raw & EXP_MASK == 0 {
+            // Subnormal. Unreachable from `setcolr`, whose `1e-32` floor
+            // sits far above it, but cheap to get right.
+            ((x * exp2(64)).to_bits(), -64)
+        } else {
+            (raw, 0)
+        }
+    };
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let significand = f64::from_bits((bits & !EXP_MASK) | (1022 << 52));
+    (significand, raw_exp - 1022 + offset)
+}
+
+/// Decode one RGBE quadruple (`colr_color`, `rad2float.c`).
+///
+/// The `+ 0.5` is the half-bit centring that separates libvips from the
+/// `image` crate, and the `exponent == 0` arm is a hard zero rather than
+/// `0.5 * 2^-136`.
+fn rgbe_to_float(quad: [u8; 4]) -> [f32; BANDS] {
+    if quad[3] == 0 {
+        return [0.0; BANDS];
+    }
+    let scale = exp2(i32::from(quad[3]) - EXP_BIAS);
+    [
+        ((f64::from(quad[0]) + 0.5) * scale) as f32,
+        ((f64::from(quad[1]) + 0.5) * scale) as f32,
+        ((f64::from(quad[2]) + 0.5) * scale) as f32,
+    ]
+}
+
+/// Encode one RGB triple (`setcolr`, `float2rad.c`).
+///
+/// The conversion to `u8` truncates, as C's does. Where C is undefined —
+/// a non-finite product — Rust saturates and maps NaN to zero, which is
+/// what the measured macOS build of vips 8.18.4 also produces.
+fn float_to_rgbe(rgb: [f64; BANDS]) -> [u8; 4] {
+    let mut d = if rgb[0] > rgb[1] { rgb[0] } else { rgb[1] };
+    if rgb[2] > d {
+        d = rgb[2];
+    }
+    if d <= ZERO_FLOOR {
+        return [0; 4];
+    }
+    let (significand, exponent) = frexp(d);
+    let scale = significand * MANTISSA_SCALE / d;
+    let sample = |v: f64| if v > 0.0 { (v * scale) as u8 } else { 0 };
+    [
+        sample(rgb[0]),
+        sample(rgb[1]),
+        sample(rgb[2]),
+        (exponent + COLXS) as u8,
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Header
+// ---------------------------------------------------------------------------
+
+/// The nominal CRT primaries and EE white point Radiance assumes when a
+/// file carries no `PRIMARIES=` line (`radiance.c:191-199`, `read_new`).
+///
+/// libvips stores these in a `float` array, so the doubles it later
+/// publishes are the `f32` roundings; libviprs matches that rather than
+/// publishing a value the reference implementation cannot produce.
+const DEFAULT_PRIMS: [[f32; 2]; 4] = [
+    [0.640, 0.330],
+    [0.290, 0.600],
+    [0.150, 0.060],
+    [1.0 / 3.0, 1.0 / 3.0],
+];
+
+/// libvips's field names for the eight primary chromaticities
+/// (`prims_name`, `radiance.c:664-669`).
+const PRIMS_NAMES: [[&str; 2]; 4] = [
+    ["rad-prims-rx", "rad-prims-ry"],
+    ["rad-prims-gx", "rad-prims-gy"],
+    ["rad-prims-bx", "rad-prims-by"],
+    ["rad-prims-wx", "rad-prims-wy"],
+];
+
+/// libvips's field names for the three colour-correction factors
+/// (`colcor_name`, `radiance.c:671-675`).
+const COLCOR_NAMES: [&str; BANDS] = ["rad-colcor-r", "rad-colcor-g", "rad-colcor-b"];
+
+/// Everything the Radiance header carries, in the same shape as libvips's
+/// `Read` / `Write` structs (`radiance.c:552-566`, `radiance.c:820-833`).
+struct Header {
+    format: String,
+    expos: f64,
+    colcor: [f32; BANDS],
+    aspect: f64,
+    prims: [[f32; 2]; 4],
+    width: u32,
+    height: u32,
+}
+
+impl Header {
+    /// The defaults `read_new` / `write_new` install before any header line
+    /// is seen.
+    fn defaults() -> Self {
+        Self {
+            format: FORMAT_RGBE.to_string(),
+            expos: 1.0,
+            colcor: [1.0; BANDS],
+            aspect: 1.0,
+            prims: DEFAULT_PRIMS,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// The colour tag the `FORMAT=` line asks for (`radiance.c:693-698`).
+    fn interpretation(&self) -> Interpretation {
+        match self.format.as_str() {
+            FORMAT_RGBE => Interpretation::ScRgb,
+            FORMAT_XYZE => Interpretation::Xyz,
+            _ => Interpretation::Multiband,
+        }
+    }
+
+    /// Publish the header scalars under libvips's own field names, so a
+    /// `.hdr` libviprs loaded and saved keeps what it came with.
+    fn attach_fields(&self, raster: &mut Raster) {
+        raster.fields.set("rad-format", self.format.clone().into());
+        raster.fields.set("rad-expos", self.expos.into());
+        for (name, value) in COLCOR_NAMES.iter().zip(self.colcor) {
+            raster.fields.set(name, f64::from(value).into());
+        }
+        raster.fields.set("rad-aspect", self.aspect.into());
+        for (names, values) in PRIMS_NAMES.iter().zip(self.prims) {
+            for (name, value) in names.iter().zip(values) {
+                raster.fields.set(name, f64::from(value).into());
+            }
+        }
+    }
+
+    /// Rebuild the header for a save, exactly as `vips2rad_make_header`
+    /// does (`radiance.c:876-919`): read each scalar back off the raster
+    /// when it carries one, then let the interpretation override the
+    /// `FORMAT=` line.
+    fn for_save(raster: &Raster, options: SaveOptions) -> Self {
+        let mut header = Self::defaults();
+        // The typed accessors on `MetadataValue` panic on a mismatched
+        // variant, and every one of these fields is caller-writable through
+        // `Raster::set_field`, so read them by pattern instead: a field of
+        // the wrong shape falls back to the Radiance default rather than
+        // taking down a save.
+        let double = |name: &str| match raster.get_field(name) {
+            Some(MetadataValue::Double(v)) => Some(v),
+            Some(MetadataValue::Int(v)) => Some(v as f64),
+            _ => None,
+        };
+
+        if let Some(MetadataValue::Str(value)) = raster.get_field("rad-format") {
+            let value = sanitise_header_value(&value);
+            if !value.is_empty() {
+                header.format = value;
+            }
+        }
+        header.expos = options
+            .exposure
+            .or_else(|| double("rad-expos"))
+            .unwrap_or(1.0);
+        header.aspect = options
+            .aspect
+            .or_else(|| double("rad-aspect"))
+            .unwrap_or(1.0);
+        for (slot, name) in header.colcor.iter_mut().zip(COLCOR_NAMES) {
+            if let Some(v) = double(name) {
+                *slot = v as f32;
+            }
+        }
+        for (slots, names) in header.prims.iter_mut().zip(PRIMS_NAMES) {
+            for (slot, name) in slots.iter_mut().zip(names) {
+                if let Some(v) = double(name) {
+                    *slot = v as f32;
+                }
+            }
+        }
+        match raster.interpretation() {
+            Interpretation::ScRgb => header.format = FORMAT_RGBE.to_string(),
+            Interpretation::Xyz => header.format = FORMAT_XYZE.to_string(),
+            _ => {}
+        }
+        header
+    }
+
+    /// Serialise the header and the resolution line, byte for byte as
+    /// `vips2rad_put_header` does (`radiance.c:921-947`), except for the
+    /// `SOFTWARE=` line: claiming to be vips would be a lie.
+    fn write(&self, width: u32, height: u32) -> Vec<u8> {
+        let mut out = String::new();
+        out.push_str("#?RADIANCE\n");
+        out.push_str(&format!("FORMAT={}\n", self.format));
+        out.push_str(&format!("EXPOSURE={}\n", c_exponential(self.expos)));
+        out.push_str(&format!(
+            "COLORCORR= {:.6} {:.6} {:.6}\n",
+            self.colcor[0], self.colcor[1], self.colcor[2]
+        ));
+        out.push_str(&format!(
+            "SOFTWARE=libviprs {}\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+        out.push_str(&format!("PIXASPECT={:.6}\n", self.aspect));
+        out.push_str("PRIMARIES=");
+        for pair in self.prims {
+            for value in pair {
+                out.push_str(&format!(" {value:.4}"));
+            }
+        }
+        out.push('\n');
+        out.push('\n');
+        // Always `-Y h +X w`: `vips2rad_make_header` stamps `YDECR | YMAJOR`
+        // "for consistency with vips" (`radiance.c:916-919`).
+        out.push_str(&format!("-Y {height:>8} +X {width:>8}\n"));
+        out.into_bytes()
+    }
+}
+
+/// Strip anything that could end a header line early.
+///
+/// `rad-format` is read off the raster, and `Raster::set_field` is public,
+/// so without this a caller-supplied newline would inject header lines into
+/// a saved file.
+fn sanitise_header_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// C's `%e`: six fraction digits and an at-least-two-digit signed
+/// exponent, which Rust's `{:e}` does not produce.
+fn c_exponential(value: f64) -> String {
+    let formatted = format!("{value:.6e}");
+    let (mantissa, exponent) = formatted
+        .split_once('e')
+        .expect("Rust's LowerExp always emits an 'e'");
+    let exponent: i32 = exponent.parse().expect("LowerExp emits a decimal exponent");
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{mantissa}e{sign}{:02}", exponent.abs())
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+/// A position in the untrusted file bytes. Every read is bounds-checked and
+/// returns `None` at the end, so a malformed file becomes a typed error
+/// rather than a panic or an over-read.
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    /// One `\n`-delimited line with any trailing `\r` stripped, matching
+    /// `vips_sbuf_get_line` (`sbuf.c`), which also treats end-of-input as a
+    /// line terminator. `Err` means the line ran past [`MAX_HEADER_LINE`].
+    fn line(&mut self) -> Result<Option<&'a [u8]>, RadianceError> {
+        if self.pos >= self.data.len() {
+            return Ok(None);
+        }
+        let rest = &self.data[self.pos..];
+        let window = rest.len().min(MAX_HEADER_LINE);
+        match rest[..window].iter().position(|&b| b == b'\n') {
+            Some(end) => {
+                self.pos += end + 1;
+                Ok(Some(strip_cr(&rest[..end])))
+            }
+            None if rest.len() <= MAX_HEADER_LINE => {
+                self.pos = self.data.len();
+                Ok(Some(strip_cr(rest)))
+            }
+            None => Err(RadianceError::HeaderLineTooLong {
+                cap: MAX_HEADER_LINE,
+            }),
+        }
+    }
+
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let slice = self.data.get(self.pos..end)?;
+        self.pos = end;
+        Some(slice)
+    }
+
+    fn quad(&mut self) -> Option<[u8; 4]> {
+        let bytes = self.take(4)?;
+        Some([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.data.get(self.pos).copied()
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        let value = self.peek()?;
+        self.pos += 1;
+        Some(value)
+    }
+}
+
+/// Drop a single trailing `\r`, so DOS line endings parse.
+fn strip_cr(line: &[u8]) -> &[u8] {
+    match line.split_last() {
+        Some((b'\r', head)) => head,
+        _ => line,
+    }
+}
+
+/// C's `atof`: the longest numeric prefix, or zero.
+fn atof(text: &[u8]) -> f64 {
+    let mut i = 0;
+    while i < text.len() && text[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    if i < text.len() && (text[i] == b'+' || text[i] == b'-') {
+        i += 1;
+    }
+    while i < text.len() && text[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < text.len() && text[i] == b'.' {
+        i += 1;
+        while i < text.len() && text[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i < text.len() && text[i] | 0x20 == b'e' {
+        let mut j = i + 1;
+        if j < text.len() && (text[j] == b'+' || text[j] == b'-') {
+            j += 1;
+        }
+        if j < text.len() && text[j].is_ascii_digit() {
+            while j < text.len() && text[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    std::str::from_utf8(&text[start..i])
+        .ok()
+        .and_then(|t| t.parse::<f64>().ok())
+        .unwrap_or(0.0)
+}
+
+/// `sscanf("%f %f ...")`: the first `N` whitespace-separated tokens, all of
+/// which must parse, extra tokens ignored. `None` when fewer than `N`
+/// parse, which is how libvips decides a `COLORCORR=` or `PRIMARIES=` line
+/// is malformed.
+fn scan_floats<const N: usize>(text: &[u8]) -> Option<[f32; N]> {
+    let mut out = [0.0f32; N];
+    let mut tokens = text
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty());
+    for slot in &mut out {
+        let token = std::str::from_utf8(tokens.next()?).ok()?;
+        *slot = token.parse::<f32>().ok()?;
+    }
+    Some(out)
+}
+
+/// Read the header lines, the blank line that ends them, and the resolution
+/// line that follows (`getheader` + `str2resolu`, `radiance.c:334-352` and
+/// `radiance.c:276-305`).
+fn read_header(cursor: &mut Cursor<'_>) -> Result<Header, RadianceError> {
+    let first = cursor.line()?.unwrap_or_default();
+    if first != MAGIC {
+        return Err(RadianceError::BadMagic {
+            found: String::from_utf8_lossy(&first[..first.len().min(32)]).into_owned(),
+        });
+    }
+
+    let mut header = Header::defaults();
+    loop {
+        let Some(line) = cursor.line()? else {
+            return Err(RadianceError::TruncatedHeader {
+                expected: "the blank line that ends the header",
+            });
+        };
+        if line.is_empty() {
+            break;
+        }
+        process_header_line(line, &mut header)?;
+    }
+
+    let Some(resolution) = cursor.line()? else {
+        return Err(RadianceError::TruncatedHeader {
+            expected: "the resolution line",
+        });
+    };
+    let (width, height) = parse_resolution(resolution)?;
+    // `radiance.c:698-704`: the same bounds vips applies to the declared
+    // geometry before it initialises the image.
+    let max = i64::from(crate::imageio::DEFAULT_MAX_COORD);
+    if width <= 0 || height <= 0 || width >= max || height >= max {
+        return Err(RadianceError::DimensionOutOfBounds { width, height });
+    }
+    header.width = width as u32;
+    header.height = height as u32;
+    Ok(header)
+}
+
+/// One header line (`rad2vips_process_line`, `radiance.c:632-660`).
+///
+/// The `FORMAT=` arm is where libviprs diverges from the vips 8.18.4
+/// binary: vips calls `formatval(line, read->format)` with the arguments
+/// the wrong way round for the declaration at `radiance.c:314`, so the
+/// parsed value never reaches `read->format` and the XYZ branch at
+/// `radiance.c:695-696` is unreachable. Measured, a file whose header says
+/// `FORMAT=32-bit_rle_xyze` still reports `rad-format: 32-bit_rle_rgbe`.
+/// This reads the line the way the code plainly means to.
+fn process_header_line(line: &[u8], header: &mut Header) -> Result<(), RadianceError> {
+    let malformed = || RadianceError::BadHeaderLine {
+        line: String::from_utf8_lossy(&line[..line.len().min(80)]).into_owned(),
+    };
+    if let Some(rest) = line.strip_prefix(b"FORMAT=".as_slice()) {
+        let value = String::from_utf8_lossy(rest).trim().to_string();
+        if !value.is_empty() {
+            header.format = value;
+        }
+    } else if let Some(rest) = line.strip_prefix(b"EXPOSURE=".as_slice()) {
+        header.expos *= atof(rest);
+    } else if let Some(rest) = line.strip_prefix(b"COLORCORR=".as_slice()) {
+        let values = scan_floats::<BANDS>(rest).ok_or_else(malformed)?;
+        for (slot, value) in header.colcor.iter_mut().zip(values) {
+            *slot *= value;
+        }
+    } else if let Some(rest) = line.strip_prefix(b"PIXASPECT=".as_slice()) {
+        header.aspect *= atof(rest);
+    } else if let Some(rest) = line.strip_prefix(b"PRIMARIES=".as_slice()) {
+        let values = scan_floats::<8>(rest).ok_or_else(malformed)?;
+        for (index, slot) in header.prims.iter_mut().flatten().enumerate() {
+            *slot = values[index];
+        }
+    }
+    Ok(())
+}
+
+/// `str2resolu` plus `scanlen`/`numscans` (`radiance.c:250-251`,
+/// `radiance.c:276-305`): the axis written **second** is the scanline
+/// length, and the `-`/`+` direction flags are parsed and then ignored —
+/// libvips "will not rotate/flip as the FORMAT string asks"
+/// (`radiance.c:70`).
+fn parse_resolution(line: &[u8]) -> Result<(i64, i64), RadianceError> {
+    let malformed = || RadianceError::BadResolution {
+        line: String::from_utf8_lossy(&line[..line.len().min(80)]).into_owned(),
+    };
+    let last = |needle: u8| line.iter().rposition(|&b| b == needle);
+    let (x_at, y_at) = match (last(b'X'), last(b'Y')) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err(malformed()),
+    };
+    let x_extent = c_atoi(&line[x_at + 1..]);
+    let y_extent = c_atoi(&line[y_at + 1..]);
+    if x_extent <= 0 || y_extent <= 0 {
+        return Err(malformed());
+    }
+    // `YMAJOR` is set when the X axis is written after the Y axis, and
+    // `scanlen` then reads the X extent; otherwise the axes swap roles.
+    if x_at > y_at {
+        Ok((x_extent, y_extent))
+    } else {
+        Ok((y_extent, x_extent))
+    }
+}
+
+/// C's `atoi`, saturating rather than overflowing.
+fn c_atoi(text: &[u8]) -> i64 {
+    let mut i = 0;
+    while i < text.len() && text[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let negative = match text.get(i) {
+        Some(b'-') => {
+            i += 1;
+            true
+        }
+        Some(b'+') => {
+            i += 1;
+            false
+        }
+        _ => false,
+    };
+    let mut value: i64 = 0;
+    while i < text.len() && text[i].is_ascii_digit() {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i64::from(text[i] - b'0'));
+        i += 1;
+    }
+    if negative { -value } else { value }
+}
+
+/// One scanline, run-length encoded or flat (`scanline_read`,
+/// `radiance.c:404-484`).
+fn read_scanline(
+    cursor: &mut Cursor<'_>,
+    scanline: &mut [[u8; 4]],
+    row: u32,
+) -> Result<(), RadianceError> {
+    let width = scanline.len();
+    let declared_width = width as u32;
+    if !uses_run_length(declared_width) || cursor.peek() != Some(2) {
+        return read_scanline_old(cursor, scanline, 0, row);
+    }
+    if cursor.remaining() < 4 {
+        return Err(RadianceError::TruncatedScanline { row });
+    }
+    let head = cursor
+        .quad()
+        .ok_or(RadianceError::TruncatedScanline { row })?;
+    scanline[0] = head;
+    if head[1] != 2 || head[2] & 128 != 0 {
+        return read_scanline_old(cursor, scanline, 1, row);
+    }
+    let declared = (u32::from(head[2]) << 8) | u32::from(head[3]);
+    if declared != declared_width {
+        return Err(RadianceError::ScanlineLengthMismatch {
+            row,
+            declared,
+            width: declared_width,
+        });
+    }
+
+    // Four separate component planes, red first, exponent last.
+    for plane in 0..4 {
+        let mut written = 0usize;
+        while written < width {
+            if cursor.remaining() < 2 {
+                return Err(RadianceError::TruncatedScanline { row });
+            }
+            let code = cursor
+                .byte()
+                .ok_or(RadianceError::TruncatedScanline { row })?;
+            let is_run = code > 128;
+            let len = usize::from(if is_run { code & 127 } else { code });
+            if written + len > width {
+                return Err(RadianceError::ScanlineOverrun { row });
+            }
+            if is_run {
+                let value = cursor
+                    .byte()
+                    .ok_or(RadianceError::TruncatedScanline { row })?;
+                for slot in &mut scanline[written..written + len] {
+                    slot[plane] = value;
+                }
+            } else {
+                let bytes = cursor
+                    .take(len)
+                    .ok_or(RadianceError::TruncatedScanline { row })?;
+                for (slot, value) in scanline[written..written + len].iter_mut().zip(bytes) {
+                    slot[plane] = *value;
+                }
+            }
+            written += len;
+        }
+    }
+    Ok(())
+}
+
+/// The old-style scanline (`scanline_read_old`, `radiance.c:376-402`),
+/// which is also what a sub-`MINELEN` or super-`MAXELEN` width uses.
+///
+/// `start` is where in `scanline` to begin, because the new-style reader
+/// falls back to this after already consuming the first pixel.
+fn read_scanline_old(
+    cursor: &mut Cursor<'_>,
+    scanline: &mut [[u8; 4]],
+    start: usize,
+    row: u32,
+) -> Result<(), RadianceError> {
+    let mut at = start;
+    let mut shift = 0u32;
+    while at < scanline.len() {
+        let quad = cursor
+            .quad()
+            .ok_or(RadianceError::TruncatedScanline { row })?;
+        if quad[0] == 1 && quad[1] == 1 && quad[2] == 1 {
+            let Some(previous) = at.checked_sub(1).map(|i| scanline[i]) else {
+                return Err(RadianceError::RepeatWithoutPixel { row });
+            };
+            let repeats = u32::from(quad[3]) << shift;
+            for _ in 0..repeats {
+                if at >= scanline.len() {
+                    break;
+                }
+                scanline[at] = previous;
+                at += 1;
+            }
+            // `radiance.c:392-397`: each chained marker shifts the count
+            // eight bits further left, so four is the most vips accepts.
+            // Without this the count grows without bound, which is the
+            // `image` crate overflow in #539.
+            shift += 8;
+            if shift > 24 {
+                return Err(RadianceError::RunawayRepeat { row });
+            }
+        } else {
+            scanline[at] = quad;
+            at += 1;
+            shift = 0;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+/// One scanline (`scanline_write`, `radiance.c:955-978`).
+///
+/// `MINELEN` and `MAXELEN` choose an encoding here; they do not gate the
+/// save. Measured on vips 8.18.4, a width-4 image writes a flat 4-bytes-
+/// per-pixel payload and a width-40000 image does the same, both
+/// successfully.
+fn write_scanline(out: &mut Vec<u8>, scanline: &[[u8; 4]]) {
+    let width = scanline.len();
+    if !uses_run_length(width as u32) {
+        for quad in scanline {
+            out.extend_from_slice(quad);
+        }
+        return;
+    }
+    out.extend_from_slice(&[2, 2, (width >> 8) as u8, (width & 255) as u8]);
+    for plane in 0..4 {
+        let mut at = 0usize;
+        while at < width {
+            // Find the start and length of the next run worth coding
+            // (`rle_scanline_write`, `radiance.c:508-524`).
+            let mut run_at = at;
+            let mut run_len = 1usize;
+            while run_at < width {
+                run_len = 1;
+                while run_len < 127
+                    && run_at + run_len < width
+                    && scanline[run_at + run_len][plane] == scanline[run_at][plane]
+                {
+                    run_len += 1;
+                }
+                if run_len >= MINRUN {
+                    break;
+                }
+                run_at += run_len;
+            }
+            // Everything before it goes out as literal blocks of up to 128.
+            while at < run_at {
+                let len = 128.min(run_at - at);
+                out.push(len as u8);
+                for quad in &scanline[at..at + len] {
+                    out.push(quad[plane]);
+                }
+                at += len;
+            }
+            if run_len >= MINRUN {
+                out.push(128 + run_len as u8);
+                out.push(scanline[at][plane]);
+                at += run_len;
+            }
+        }
     }
 }
 
@@ -533,7 +1347,11 @@ mod tests {
      */
     #[test]
     fn resolution_line_orientation_matches_vips() {
-        let payload: Vec<u8> = (0..6u8).flat_map(|i| [i, i, i, 128]).collect();
+        // Nothing here may read as `1 1 1`, which is an old-style repeat
+        // marker rather than a pixel.
+        let payload: Vec<u8> = (0..6u8)
+            .flat_map(|i| [i + 10, i + 20, i + 30, 128])
+            .collect();
         for (resolu, want_w, want_h) in [
             ("-Y 1 +X 6", 6, 1),
             ("+X 6 +Y 1", 1, 6),
@@ -768,7 +1586,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should be set"))
                 .as_f64()
         };
-        for (name, want) in [
+        // libvips stores the colour-correction factors and the primaries in
+        // `float` arrays (`COLOR` and `RGBPRIMS`, `radiance.c:184-187`) and
+        // only widens them to double when it publishes the field, so the
+        // value a caller reads back is the f32 rounding. libviprs matches
+        // that rather than publishing a value vips cannot produce, which is
+        // why 0.1 comes back as 0.10000000149011612 and the tolerance here
+        // is single-precision.
+        let cases: [(&str, f64); 13] = [
             ("rad-expos", 2.5),
             ("rad-colcor-r", 1.5),
             ("rad-colcor-g", 2.5),
@@ -782,11 +1607,17 @@ mod tests {
             ("rad-prims-by", 0.6),
             ("rad-prims-wx", 0.7),
             ("rad-prims-wy", 0.8),
-        ] {
+        ];
+        for (name, want) in cases {
             let got = double(name);
+            let tolerance = if name == "rad-expos" || name == "rad-aspect" {
+                1e-12
+            } else {
+                f64::from(f32::EPSILON) * want.abs()
+            };
             assert!(
-                (got - want).abs() <= 1e-9,
-                "{name}: got {got}, expected {want}"
+                (got - want).abs() <= tolerance,
+                "{name}: got {got}, expected {want} within {tolerance}"
             );
         }
         assert_eq!(
@@ -1081,6 +1912,154 @@ mod tests {
         assert_eq!(back.interpretation(), Interpretation::ScRgb);
         let expos = back.get_field("rad-expos").expect("rad-expos").as_f64();
         assert!((expos - 4.0).abs() <= 1e-9, "got {expos}");
+    }
+
+    /**
+     * Tests that the header scalars a save reads back off the raster
+     * cannot break the file, whatever a caller wrote into them. Every one
+     * of these fields is public through `Raster::set_field`, the typed
+     * accessors on `MetadataValue` panic on a mismatched variant, and a
+     * newline inside `rad-format` would inject header lines into the
+     * output. Works by setting a field of the wrong shape and a field
+     * carrying a newline, then saving and reading the result back.
+     * Input: `rad-expos` as a string and `rad-format` carrying
+     * `"x\n\n-Y 9 +X 9"` -> Output: a save that succeeds, a header with
+     * one blank line in it, and a decode that reports the original
+     * geometry.
+     */
+    #[test]
+    fn hostile_header_fields_cannot_corrupt_a_save() {
+        let px: Vec<[f32; 3]> = (0..6).map(|i| [1.0, i as f32 / 8.0, 0.25]).collect();
+        let mut raster = float_raster(6, 1, &px);
+        raster.set_field("rad-expos", "not a number".into());
+        raster.set_field("rad-aspect", MetadataValue::Blob(vec![1, 2, 3]));
+        raster.meta.interpretation = Some(Interpretation::Multiband);
+        raster.set_field("rad-format", "x\n\n-Y 9 +X 9".into());
+
+        let file = raster
+            .encode_radiance(SaveOptions::default())
+            .expect("a hostile field is a fallback, not a failure");
+        assert_eq!(
+            file.windows(2).filter(|w| *w == b"\n\n").count(),
+            1,
+            "exactly one blank line, the one that ends the header"
+        );
+        let back = decode_radiance(&file, DecodeLimits::default()).expect("decodes");
+        assert_eq!(
+            (back.width(), back.height()),
+            (6, 1),
+            "the injected `-Y 9 +X 9` must not have become the resolution line"
+        );
+        // Not a byte comparison: an arbitrary float is not an RGBE fixed
+        // point, so one pass through the codec quantises it. 1.0 encodes to
+        // mantissa 127 and decodes to 127.5/128.
+        let first = back.getpoint(0, 0);
+        assert!(
+            (first[0] - 0.99609375).abs() <= 1e-9,
+            "red should quantise to 127.5/128, got {}",
+            first[0]
+        );
+    }
+
+    /**
+     * Sweeps the seeded fuzz corpus through the decoder, so every
+     * malformation it holds is a `cargo test` regression rather than
+     * something only a fuzz run would notice. The 81-byte #539 reproducer
+     * is the headline entry: the `image` crate panics on it in debug and
+     * spins on it in release. Works by decoding every file under
+     * `fuzz/corpus/fuzz_radiance/` and checking each against the outcome
+     * its name promises.
+     * Input: sixteen corpus files -> Output: the named typed error from
+     * each malformed one, a raster from each valid one, and no panic from
+     * any of them.
+     */
+    #[test]
+    fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fuzz")
+            .join("corpus")
+            .join("fuzz_radiance");
+        let limits = DecodeLimits::default().with_max_alloc_bytes(4 * 1024 * 1024);
+
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("the seeded corpus is in the tree") {
+            let path = entry.expect("corpus entry").path();
+            let name = path
+                .file_name()
+                .expect("corpus entries are files")
+                .to_string_lossy()
+                .into_owned();
+            let bytes = std::fs::read(&path).expect("corpus file");
+            let result = decode_radiance(&bytes, limits);
+            seen += 1;
+
+            let ok = match name.as_str() {
+                "issue-539-chained-old-rle-markers" => {
+                    assert_eq!(bytes.len(), 81, "the #539 reproducer is 81 bytes");
+                    matches!(
+                        result,
+                        Err(SourceError::Radiance(RadianceError::RunawayRepeat { .. }))
+                    )
+                }
+                "rle-length-marker-mismatch" => matches!(
+                    result,
+                    Err(SourceError::Radiance(
+                        RadianceError::ScanlineLengthMismatch { .. }
+                    ))
+                ),
+                "rle-run-overruns-scanline" => matches!(
+                    result,
+                    Err(SourceError::Radiance(RadianceError::ScanlineOverrun { .. }))
+                ),
+                "old-rle-marker-without-pixel" => matches!(
+                    result,
+                    Err(SourceError::Radiance(
+                        RadianceError::RepeatWithoutPixel { .. }
+                    ))
+                ),
+                "truncated-pixel-data" => matches!(
+                    result,
+                    Err(SourceError::Radiance(
+                        RadianceError::TruncatedScanline { .. }
+                    ))
+                ),
+                "header-without-blank-line" | "magic-only" => matches!(
+                    result,
+                    Err(SourceError::Radiance(RadianceError::TruncatedHeader { .. }))
+                ),
+                "unparseable-resolution" => matches!(
+                    result,
+                    Err(SourceError::Radiance(RadianceError::BadResolution { .. }))
+                ),
+                "resolution-out-of-bounds" => matches!(
+                    result,
+                    Err(SourceError::Radiance(
+                        RadianceError::DimensionOutOfBounds { .. }
+                    ))
+                ),
+                "rle-bomb" => matches!(
+                    result,
+                    Err(SourceError::Radiance(
+                        RadianceError::AllocLimitExceeded { .. }
+                    ))
+                ),
+                "empty" => matches!(
+                    result,
+                    Err(SourceError::Radiance(RadianceError::BadMagic { .. }))
+                ),
+                _ => {
+                    assert!(
+                        name.starts_with("valid-")
+                            || name == "dos-line-endings"
+                            || name == "x-major-resolution",
+                        "unclassified corpus entry {name}"
+                    );
+                    result.is_ok()
+                }
+            };
+            assert!(ok, "corpus entry {name}: got {result:?}");
+        }
+        assert_eq!(seen, 16, "the corpus should still hold sixteen seeds");
     }
 
     /**

@@ -45,6 +45,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Radiance HDR (`.hdr`) load and save (issue #506): `decode_radiance` reads a
+  Radiance file into a `FloatF32(3)` raster tagged `ScRgb`, and
+  `Raster::encode_radiance` / `Raster::save_radiance` write one back out.
+  `decode_file` and `decode_bytes` route `.hdr` there automatically from the
+  magic, so an existing caller needs no change. This is the first raster
+  format libviprs decodes itself rather than through the `image` facade.
+
+  It is hand-rolled for a specific reason. `image` decodes RGBE as
+  `mantissa * 2^(e-136)` where libvips uses the half-bit-centred
+  `(mantissa + 0.5) * 2^(e-136)`, and that is not a rounding difference: the
+  error is `0.5/mantissa`, so 0.44% at mantissa 161, 33% at mantissa 1, and
+  100% at mantissa 0. A saturated red HDR pixel has green and blue mantissas
+  of zero, so vips reports a small positive floor there and `image` reports a
+  hard zero, which silently breaks any downstream divide, log, or tone map.
+  The encode side is the matching half, `frexp(max) * 255.9999 / max` with a
+  `1e-32` floor. Together the two are the identity on any RGBE quadruple whose
+  largest mantissa is at least 128 and whose exponent byte is in `23..=255`,
+  which is exactly the normalised form an encoder emits, so a `.hdr` written
+  by vips or by libviprs round-trips byte for byte. Verified against the real
+  vips 8.18.4 binary over the reference suite's two `sample.hdr` images,
+  3,057,600 pixels, decode and encode both byte-identical.
+
+  The carrier is float and never RGBE. vips models Radiance as a *coding*, a
+  4-band uchar raster tagged `VIPS_CODING_RAD` that it unpacks to 3-band float
+  scRGB the moment any operation touches it. libviprs has no coding concept
+  and decodes straight to the float. The visible consequence is that
+  `vipsheader` on a libviprs-loaded `.hdr` reports `bands 3 / float /
+  coding none` where vips reports `bands 4 / uchar / coding rad`; the 4-band
+  spelling was rejected on correctness rather than taste, because `resample`
+  premultiplies on `has_alpha()` and `resize` forks its downscale kernel on
+  it, so an RGBE raster tagged `Rgba8` would be premultiplied by its own
+  exponent byte.
+
+  Two divergences from the vips binary are deliberate and documented at the
+  entry points. `save_radiance` preserves high dynamic range, where a bare
+  `vips radsave` converts to sRGB and clips (measured on `sample.hdr`, max
+  7728 becomes 254.5); the equivalent vips invocation is `float2rad` *then*
+  `radsave`. And the `FORMAT=` header line is actually read, so an XYZE file
+  is tagged `Xyz`; vips 8.18.4 cannot do that because
+  `rad2vips_process_line` passes `formatval`'s two arguments the wrong way
+  round, leaving its own XYZ branch unreachable.
+
+  One honest limitation, stated at `decode_radiance`: a `FloatF32(3)` raster
+  is rejected by `resize` with `RasterError::FloatUnsupported`, so a loaded
+  `.hdr` cannot enter the pyramid engine. The resampling and op surface handle
+  float fine; only the tiled-pyramid path is closed.
+
 - `Raster::join` and its `try_join` twin (issue #551): the port of libvips
   `vips_join`, the generic two-image spatial join. `a.join(&b,
   JoinDirection::Horizontal, expand, shim, background, align)` puts `b` to the

@@ -1553,7 +1553,7 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 15] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 20] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -1590,6 +1590,22 @@ mod tests {
             // Truncated one byte short of the `WEBP` tag: a 12-byte magic
             // cannot be decided from 11 bytes.
             ("webp truncated", b"RIFF\x00\x00\x00\x00WEB", None),
+            // Radiance's magic is a whole line, not a prefix, so the two
+            // near-misses below must not match: `vips__rad_israd` compares
+            // the first line to `#?RADIANCE` in full.
+            (
+                "radiance",
+                b"#?RADIANCE\nFORMAT=",
+                Some(SniffedFormat::Radiance),
+            ),
+            (
+                "radiance dos",
+                b"#?RADIANCE\r\nFORMAT=",
+                Some(SniffedFormat::Radiance),
+            ),
+            ("radiance rgbe", b"#?RGBE\nFORMAT=", None),
+            ("radiance longer first line", b"#?RADIANCEX\n", None),
+            ("radiance with no newline", b"#?RADIANCE", None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -1621,7 +1637,11 @@ mod tests {
             SniffedFormat::Tiff,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
+            SniffedFormat::Radiance,
         ];
+        // `.v` and Radiance are the two containers libviprs decodes itself,
+        // so they are the two the route table maps to no `image` decoder.
+        let self_decoded = [SniffedFormat::Vips, SniffedFormat::Radiance];
 
         let buffered: Vec<SniffedFormat> = all
             .iter()
@@ -1630,15 +1650,21 @@ mod tests {
             .collect();
         assert_eq!(
             buffered,
-            vec![SniffedFormat::Vips, SniffedFormat::Jpeg],
-            "only .v and JPEG may read the whole file into memory"
+            vec![
+                SniffedFormat::Vips,
+                SniffedFormat::Jpeg,
+                SniffedFormat::Radiance
+            ],
+            "only .v, JPEG and Radiance may read the whole file into memory"
         );
 
-        assert_eq!(
-            SniffedFormat::Vips.image_format(),
-            None,
-            ".v is decoded by libviprs itself, not by the image facade"
-        );
+        for format in self_decoded {
+            assert_eq!(
+                format.image_format(),
+                None,
+                "{format:?} is decoded by libviprs itself, not by the image facade"
+            );
+        }
         let mut mapped: Vec<image::ImageFormat> = all
             .iter()
             .copied()
@@ -1646,15 +1672,52 @@ mod tests {
             .collect();
         assert_eq!(
             mapped.len(),
-            all.len() - 1,
-            "every container but .v maps to an image decoder"
+            all.len() - self_decoded.len(),
+            "every container libviprs does not decode itself maps to an image decoder"
         );
         mapped.sort_by_key(|f| format!("{f:?}"));
         mapped.dedup();
         assert_eq!(
             mapped.len(),
-            all.len() - 1,
+            all.len() - self_decoded.len(),
             "the route table must be an identity mapping, not many-to-one"
+        );
+    }
+
+    /**
+     * Verifies that a Radiance file reaches the hand-rolled codec through
+     * both public decode entry points, and that neither consults the file
+     * name to get there. Works by writing one `.hdr` under a misleading
+     * `.png` extension and decoding it from the path and from the bytes.
+     * Input: a 6x1 Radiance file named `misnamed.png` -> Output: the same
+     * `FloatF32(3)` raster from `decode_file` and `decode_bytes`, with the
+     * first pixel at the half-bit value vips prints.
+     */
+    #[test]
+    fn radiance_reaches_its_codec_from_both_entry_points() {
+        let mut file = Vec::new();
+        file.extend_from_slice(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 6\n");
+        for i in 0..6u8 {
+            file.extend_from_slice(&[255, 128, 64, 128 + i]);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("misnamed.png");
+        std::fs::write(&path, &file).unwrap();
+
+        let from_path = decode_file_with_limits(&path, DecodeLimits::default()).unwrap();
+        let from_bytes = decode_bytes(&file).unwrap();
+        for raster in [&from_path, &from_bytes] {
+            assert_eq!((raster.width(), raster.height()), (6, 1));
+            assert_eq!(raster.format().channels(), 3);
+            assert!(raster.format().is_float());
+        }
+        assert_eq!(from_path.data(), from_bytes.data());
+
+        let first = from_bytes.getpoint(0, 0);
+        assert!(
+            (first[0] - 0.998046875).abs() < 1e-9,
+            "the half-bit decode constant, got {}",
+            first[0]
         );
     }
 
