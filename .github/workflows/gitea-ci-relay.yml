@@ -98,5 +98,39 @@ jobs:
             echo "attempt $attempt/24: no Gitea Actions task for $GITHUB_SHA yet"
             sleep 5
           done
-          echo "::error title=Gitea started no CI run::The mirror holds $GITHUB_SHA but Gitea created no Actions task for it within 2 minutes, so no gitea/ci status will ever be posted for this commit. Likely causes: the Actions unit is disabled on the mirror, no runner is registered or online for the libviprs org, or the commit message carries a skip-ci string. See issue #530."
+          echo "::error title=Gitea started no CI run::The mirror holds $GITHUB_SHA but Gitea created no Actions task for it within 2 minutes, so no gitea/ci status will ever be posted for this commit. See the diagnosis step below and issue #530."
           exit 1
+
+      # `/actions/tasks` only lists tasks a runner has claimed (models/actions/task.go,
+      # CreateTaskForRunner), so an empty list cannot on its own tell "Gitea created no
+      # run" apart from "a job is queued and no runner ever took it". Gitea 1.24 has no
+      # API that lists runs, but it does list workflows, which separates "Gitea never
+      # parsed .gitea/workflows" and "a workflow is disabled" from the rest. Dump both
+      # so a red check arrives with the evidence attached instead of a guess.
+      - name: Report what Gitea actually holds
+        if: failure()
+        run: |
+          set -uo pipefail
+          probe() {
+            local label="$1" path="$2" filter="$3"
+            local response code body
+            response="$(curl -s -w '\n%{http_code}' \
+              -H "Authorization: token $GITEA_SYNC_TOKEN" "$GITEA_API/repos/$GITHUB_REPOSITORY/$path")"
+            code="$(printf '%s' "$response" | tail -n1)"
+            body="$(printf '%s' "$response" | sed '$d')"
+            echo "## $label (HTTP $code)"
+            if [ "$code" = "200" ] && [ -n "$body" ]; then
+              printf '%s' "$body" | jq -r "$filter" || printf '%s' "$body"
+            else
+              echo "(no readable body)"
+            fi
+            echo
+          }
+          {
+            echo "# Gitea state for $GITHUB_SHA on $GITHUB_REF_NAME"
+            echo
+            probe "Workflows Gitea has parsed" "actions/workflows" \
+              '"total_count: \(.total_count)", (.workflows[]? | "  \(.path)  state=\(.state)")'
+            probe "Most recent runner-claimed tasks" "actions/tasks?limit=10" \
+              '"total_count: \(.total_count)", (.workflow_runs[]? | "  \(.head_branch)  \(.head_sha[0:12])  \(.workflow_id)  \(.status)")'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
