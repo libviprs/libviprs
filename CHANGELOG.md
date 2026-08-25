@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
+  port of libvips `vips_matrixmultiply`, the dense product of two matrix
+  images. `left.matrixmultiply(&right)` needs `left.width() ==
+  right.height()` and gives a `right.width()` x `left.height()` one-band float
+  matrix stamped `Interpretation::Matrix`, accumulated in `f64` with no scale
+  and no offset (libvips ignores the scale and offset members of both inputs,
+  and libviprs matrices carry neither). Shapes that do not chain are the new
+  `MatrixError::ShapeMismatch` variant rather than a panic, and either operand
+  failing the `vips_check_matrix` gate is the existing
+  `MatrixError::NotOneBand` / `MatrixError::TooLarge`. `MatrixError` is
+  `#[non_exhaustive]`, so the added variant is not a breaking change.
+  The output's width and height come from two independent operands, each
+  capped only at 100000, so the product can be enormously larger than either
+  input: a pair of 400 KB matrices shaped `1 x 100000` and `100000 x 1` asks
+  for a 40 GB result. That size is checked before anything is allocated, so it
+  comes back as `MatrixError::Raster(RasterError::ByteBudgetExceeded)` instead
+  of committing the memory first (the abort class issues #280 and #433 removed
+  elsewhere in the crate).
+
 - `Raster::remainder` / `Raster::try_remainder`, the generic two-image
   remainder (issue #536). This is the image-image companion to the existing
   constant form `rem_const`, and it ports libvips `vips_remainder`: each
@@ -41,6 +60,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since the operation rounds and saturates into an unsigned output, so there
   is no representable place for a fractional or negative sample; cast to an
   unsigned 8- or 16-bit format first.
+
+### Changed
+
+- **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
+  real libvips interpretation codes `30` and `31` in its header `Type` word,**
+  so it interoperates with vips instead of only with libviprs (issue #535).
+  libvips 8.18 assigned those codes (`VIPS_INTERPRETATION_OKLAB` and
+  `VIPS_INTERPRETATION_OKLCH`, `libvips/include/vips/image.h:115-116`), but
+  libviprs still wrote the private extension codes `1000` and `1001` it had
+  picked while libvips had none. The consequence ran both ways: a `.v` written
+  by real vips came back tagged `Multiband`, because `30` matched no arm of the
+  reader and the raster fell through to format inference, and a `.v` written by
+  libviprs was unreadable as OkLab anywhere else. This changes what goes on
+  disk: newly written files hold `30` / `31` where they used to hold `1000` /
+  `1001`. The change is one-way. The reader keeps `1000` and `1001` as legacy
+  aliases, so files libviprs has already written still load with their
+  OkLab/OkLch tag intact, but nothing emits those codes any more, and a file
+  written by this version does not read as OkLab on libviprs 0.4.0 or earlier.
+  **Upgrading:** nothing to do to keep reading the files you already have. The
+  aliases are permanent, not a deprecation window: `1000` and `1001` stay
+  reserved for OkLab/OkLch forever and will never be reused, because retiring
+  them would silently re-break every `.v` libviprs has already written. To make
+  an already-written file readable by vips, re-encode it with this version
+  (load it and save it again); there is no in-place header rewrite.
+
+- The panicking matrix operations no longer double the operation name in their
+  panic message (issue #339's class, found while reviewing #533). Every
+  `MatrixError` variant except the transparent `Raster` tail already opens with
+  the operation that failed, so the wrapper's own `"<op>: "` prefix produced
+  `matrixinvert: matrixinvert: non-square matrix (3x2)`. The prefix is now
+  applied only to the `Raster` tail, whose message names no operation. Code
+  matching on the typed errors is unaffected; only the panic text changes.
+
+### Fixed
+
+- A `.v` written by real vips and tagged `OkLab` or `OkLch` now reads back with
+  that tag instead of falling through to format inference and reporting
+  `Multiband` (issue #535). See the **Breaking (`.v` container)** entry under
+  _Changed_ for what moved on disk and what an upgrader has to do.
 
 ## [0.4.0] — 2026-07-20
 
