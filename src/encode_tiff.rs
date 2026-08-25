@@ -751,7 +751,7 @@ mod tests {
         let out = dir.path().join("gray16.tif");
         im.save_tiff(&out, TiffCompression::Deflate).unwrap();
 
-        let back = decode_tiff_page(&out, 1).unwrap();
+        let back = decode_tiff_page(&out, 0).unwrap();
         assert_eq!(back.width(), im.width());
         assert_eq!(back.height(), im.height());
         assert_eq!(back.format(), PixelFormat::Gray16);
@@ -769,7 +769,7 @@ mod tests {
         let out = dir.path().join("rgb8.tif");
         im.save_tiff(&out, TiffCompression::Deflate).unwrap();
 
-        let back = decode_tiff_page(&out, 1).unwrap();
+        let back = decode_tiff_page(&out, 0).unwrap();
         assert_eq!(back.width(), im.width());
         assert_eq!(back.height(), im.height());
         assert_eq!(back.format(), PixelFormat::Rgb8);
@@ -787,7 +787,7 @@ mod tests {
         let out = dir.path().join("rgba16_deflate.tif");
         im.save_tiff(&out, TiffCompression::Deflate).unwrap();
 
-        let back = decode_tiff_page(&out, 1).unwrap();
+        let back = decode_tiff_page(&out, 0).unwrap();
         assert_eq!(back.width(), im.width());
         assert_eq!(back.height(), im.height());
         assert_eq!(back.format(), PixelFormat::Rgba16);
@@ -805,7 +805,7 @@ mod tests {
         let out = dir.path().join("rgba16_lzw.tif");
         im.save_tiff(&out, TiffCompression::Lzw).unwrap();
 
-        let back = decode_tiff_page(&out, 1).unwrap();
+        let back = decode_tiff_page(&out, 0).unwrap();
         assert_eq!(back.width(), im.width());
         assert_eq!(back.height(), im.height());
         assert_eq!(back.format(), PixelFormat::Rgba16);
@@ -851,21 +851,71 @@ mod tests {
 
         assert_eq!(tiff_page_count(&path).unwrap(), 3);
 
-        for p in 1..=3u32 {
+        // The fixture writes page `p` (counting the IFD chain from zero) as
+        // the constant `p * 10`, so the returned samples pin exactly which
+        // image the index selected. `page` is a zero-based index over
+        // `0..tiff_page_count`, matching `vips tiffload --page`, which loads
+        // the first image at `--page 0` (measured against 8.18.4).
+        for p in 0..3u32 {
             let page = decode_tiff_page(&path, p).unwrap();
             assert_eq!(page.width(), 4);
             assert_eq!(page.height(), 4);
+            assert_eq!(
+                page.data(),
+                vec![(p as u8).saturating_mul(10); 16],
+                "page {p} must be the {p}th image in the IFD chain"
+            );
         }
-        // Page 2 was written with the constant value 10.
-        assert_eq!(decode_tiff_page(&path, 2).unwrap().data(), vec![10u8; 16]);
     }
 
     #[test]
-    fn decode_tiff_page_rejects_page_zero() {
+    fn decode_tiff_page_zero_is_the_first_image() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.tif");
         std::fs::write(&path, multipage_gray8_fixture(2)).unwrap();
-        assert!(decode_tiff_page(&path, 0).is_err());
+        // Page 0 used to be rejected outright. It is now the first image,
+        // written by the fixture as the constant 0.
+        assert_eq!(decode_tiff_page(&path, 0).unwrap().data(), vec![0u8; 16]);
+    }
+
+    #[test]
+    fn decode_tiff_page_rejects_a_page_past_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.tif");
+        std::fs::write(&path, multipage_gray8_fixture(2)).unwrap();
+        // Valid indices for a two-page file are 0 and 1, so 2 is one past the
+        // end. vips draws the line in the same place: `vips tiffload` on a
+        // single-page file with `--page 1` fails with "TIFF does not contain
+        // page 1".
+        let err = decode_tiff_page(&path, 2).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("out of range") && message.contains('2'),
+            "out-of-range page must name the index and the count, got {message}"
+        );
+    }
+
+    #[test]
+    fn decode_tiff_page_attaches_the_page_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let multi = dir.path().join("multi.tif");
+        std::fs::write(&multi, multipage_gray8_fixture(3)).unwrap();
+        let single = dir.path().join("single.tif");
+        std::fs::write(&single, multipage_gray8_fixture(1)).unwrap();
+
+        // `n-pages` is the count and `page` is an index into `0..n-pages`, so
+        // the count travels back with every page. vips's tiffload attaches the
+        // same field to every TIFF it loads, single-page ones included:
+        // `vipsheader -f n-pages` reports 3 for a three-page file and 1 for a
+        // one-page file (measured against 8.18.4).
+        for p in 0..3u32 {
+            assert_eq!(
+                decode_tiff_page(&multi, p).unwrap().get_n_pages(),
+                3,
+                "page {p} of a three-page file must report n-pages = 3"
+            );
+        }
+        assert_eq!(decode_tiff_page(&single, 0).unwrap().get_n_pages(), 1);
     }
 
     #[test]
@@ -955,7 +1005,7 @@ mod tests {
         let out = dir.path().join("multi5.tif");
         im.save_tiff(&out, TiffCompression::None).unwrap();
 
-        let back = decode_tiff_page(&out, 1).unwrap();
+        let back = decode_tiff_page(&out, 0).unwrap();
         assert_eq!(back.width(), 6);
         assert_eq!(back.height(), 4);
         assert_eq!(back.format(), PixelFormat::with_channels(5, 1).unwrap());
@@ -973,7 +1023,7 @@ mod tests {
         let out = dir.path().join("multi2.tif");
         im.save_tiff(&out, TiffCompression::Deflate).unwrap();
 
-        let back = decode_tiff_page(&out, 1).unwrap();
+        let back = decode_tiff_page(&out, 0).unwrap();
         assert_eq!(back.format(), PixelFormat::with_channels(2, 1).unwrap());
         assert_eq!(back.data(), im.data());
     }
