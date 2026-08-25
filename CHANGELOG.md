@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `Raster::encode_webp` takes a `webp::SaveOptions` carrying a `Compression`
+  and a `Keep`, where it used to take a bare `quality: u8` (issue #568). There
+  is no lossy WebP encoder reachable in pure Rust: `image-webp` 0.2.4's
+  `encoder.rs` writes a `VP8L` chunk and has no quality knob anywhere in it. A
+  `quality` argument the encoder throws away inverts the contract — ask for
+  quality 10, get a lossless file possibly larger than the PNG you started
+  with — and it is a semver time bomb, because the day a lossy encoder lands
+  every existing `encode_webp(10)` would silently start emitting small lossy
+  files in a patch release. Making quality unrepresentable turns that into a
+  compile error now instead. `Compression` is `#[non_exhaustive]`, so
+  `Lossy { .. }` can join it as a minor bump.
+
+  A 16-bit raster is also refused rather than narrowed, with a message naming
+  the remedy. vips narrows the same input by a right shift of 8, silently
+  (measured: 255 becomes 0, 65535 becomes 255). The reason not to copy that is
+  internal consistency: `Raster::cast` to an 8-bit format *clips*, so an
+  automatic narrow inside the encoder would disagree with the crate's own cast
+  while looking like it did the same thing. Cast first and the narrowing is
+  yours.
+
 - `decode_svg` takes a `SvgOptions` instead of a bare `Option<f64>` DPI
   (issue #502). It used to be `decode_svg(data, Some(144.0))`, and it is now
   `decode_svg(data, SvgOptions { dpi: 144.0, ..Default::default() })`. The old
@@ -53,6 +73,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   swept grid.
 
 ### Added
+
+- Still-image WebP load and lossless save (issues #567 and #568). `decode_webp`
+  reads every WebP this build can meet — lossy `VP8`, lossless `VP8L`, alpha,
+  and the extended `VP8X` container — and lifts the `ICCP`, `EXIF` and `XMP `
+  chunks onto the raster as `icc-profile-data`, `exif-data` and `xmp-data`, the
+  same names the JPEG loader uses, so `Raster::icc_profile` finds a WebP
+  profile without knowing where it came from. `Raster::encode_webp` and
+  `Raster::save_webp` write the lossless form, and `.webp` is now a live row in
+  both shared dispatchers: `Raster::save` by extension and
+  `Raster::encode_to_buffer` by format name. `save_stripped` drops the metadata
+  chunks, which is `webpsave --keep none`.
+
+  The lossy decode is bit-exact against libwebp rather than merely close, and
+  the lossless round trip is the identity, so `decode_webp(encode_webp(x))` is
+  `x` for every 8-bit raster. Both directions of the differential are pinned in
+  `oracle-captures/foreign-webp/`, including vips 8.18.4 reading four files
+  libviprs wrote.
+
+  Two things worth knowing before you use it. A one-band raster comes back as
+  three bands, because WebP stores no greyscale at all and `vips webpsave` does
+  the same. And an animated WebP loads **frame 0 only**, at one frame's size,
+  with `n-pages` set to how many frames the original had — which is what a
+  default `vips webpload` does too. Reading every frame is issue #569 and waits
+  on the page model.
 
 - Still-image GIF load and save (issues #570, #571). `gifload` was routed
   through the `image` crate's facade and `encode_gif` was a typed stub; both
@@ -363,6 +407,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The edge detectors answer both gradients in one traversal instead of two,
+  and combine them without materialising either (issue #562). `sobel`,
+  `scharr` and `prewitt` used to run the convolution engine twice over the
+  same source: each pass widened every sample to `f64` on its own, walked
+  every window on its own, and wrote a full-image intermediate raster, and a
+  third pass then combined the two. Every output sample's two responses come
+  off the same nine source values, so it collapses into one pass with two
+  accumulators. Not one output byte moves; the same 24 hard-coded digests and
+  the same vips captures pin it.
+
+  Measured on aarch64 at `opt-level = 3`, best of 21 runs against the same
+  fixtures built by the same code, alternating the two binaries so they share
+  the machine's noise:
+
+  | fixture | before | after | |
+  |---|---|---|---|
+  | 2048x2048 `Gray8` | 59.3 ms | 23.0 ms | 2.6x |
+  | 4096x4096 `Gray8` | 249 ms | 96.7 ms | 2.6x |
+  | 1024x1024 `Rgb8` | 43.6 ms | 16.7 ms | 2.6x |
+  | 1024x1024 `FloatF32(1)` | 16.6 ms | 2.5 ms | 6.6x |
+  | 512x512 `FloatF32(3)` | 11.8 ms | 1.9 ms | 6.3x |
+
+  Peak resident size on a 4096x4096 `sobel` goes from 326 MB to 166 MB on
+  `Gray8` and from 806 MB to 278 MB on `FloatF32(1)`.
+
+  A plain `conv` gets most of it too, 2.5x on 8-bit and 4.7x on float, because
+  the same rework took the edge clamp out of the inner loop. The clamped
+  source index is now a pair of small lookup tables built once, which is
+  `vips_embed(..., VIPS_EXTEND_COPY)` written as indices instead of as pixels,
+  and the interior of each row is a contiguous run the compiler can vectorise.
+  Zero taps are skipped as well, which is the #574 fix paying for itself:
+  sobel's mask is six taps, not nine.
+
 - **The integer-convolution parity contract is now stated on
   `Precision::Integer`, and the divergence against a stock libvips is
   unbounded rather than "at most 2" or "at most 4"** (issue #558). No
@@ -547,6 +624,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- A zero mask coefficient no longer poisons a non-finite sample (issue #574).
+  libvips squeezes zero taps out of a mask before it convolves, in both cores
+  (`convolution/convf.c:314-321` and `convolution/convi.c:1189-1197`), and
+  this port iterated every tap instead. `0.0 * inf` is `NaN`, so a structural
+  zero sitting over an infinity poisoned the whole response, survived the
+  square and the root, and clipped to 0. On a 5x5 float image that is all zero
+  except for an infinity at its centre, `sobel` read `0` at four cells of the
+  impulse ring where vips reads `255`, and `scharr` and `prewitt` did the same
+  thing for the same reason: all three masks have structural zeros. The taps
+  are now compacted after the scale division, exactly where vips does it, so
+  the answers match.
+
+  It reaches further than the edge detectors, because the same engine serves
+  `conv`, `convsep`, `compass` and `gaussblur`. Any mask with a zero
+  coefficient over a non-finite sample had the property, and a `.v` file can
+  carry `inf` or `NaN`. Finite input is untouched: dropping `+ 0.0 * x` can
+  only change the sign of a zero, and a signed zero does not survive `a * a`.
+
+  An all-zero mask keeps one tap rather than none, which is not the same as
+  skipping everything. Both C cores force the tap count back up to 1 at mask
+  index 0 when the whole mask squeezed away, so an all-zero mask still answers
+  `NaN` over an infinity, but only at the single output pixel whose window
+  top-left is the infinity. Measured on vips 8.18.4 and pinned.
+
+- The edge detectors no longer build float or unsigned intermediates through
+  the byte-budgeted `Raster::new`, so `sobel()`, `scharr()` and `prewitt()`
+  cannot panic on a legal input any more (issue #575). A 16-bit source above
+  about 4 GiB implied a float intermediate over the 8 GiB
+  `DEFAULT_MAX_ALLOC_BYTES` ceiling, and the panicking twins turned that
+  rejection into a process-ending `expect` on an input the crate accepts. The
+  convolution buffers now go through `alloc_op_output` and
+  `Raster::from_op_output`, the fallible budget-free pair `arithmetic.rs`
+  already uses and that issue #279 exists to provide. The edge detectors go
+  further and never build the intermediates at all. The `try_reserve` and
+  per-row streaming halves of #575 are untouched and stay open.
 
 - `Raster::try_arrayjoin` no longer panics on a float input (issue #551). Its
   sample copy is unsigned-only and panicked on 4-byte samples, so a fallible
