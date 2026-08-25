@@ -4287,4 +4287,163 @@ mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------
+    // scRGB -> sRGB goes through the interpolated libvips LUT (#581)
+    // -----------------------------------------------------------------
+
+    /// One LabS pixel converted to `target`, as integer codes.
+    fn labs_to(labs_l: f64, target: Interpretation) -> Vec<f64> {
+        labs_px([labs_l, 0.0, 0.0])
+            .colourspace(target)
+            .getpoint(0, 0)
+    }
+
+    /**
+     * Tests that the linear -> sRGB encode is the libvips 256-entry
+     * integer LUT read with a piecewise-linear interpolation, not the
+     * analytic IEC 61966-2-1 curve.
+     *
+     * vips never evaluates the transfer function per pixel.
+     * `LabQ2sRGB.c:126-146` builds `Y2v[i] = rintf(255 * encode(i/255))`
+     * once, in `float`, and `vips_col_scRGB2sRGB` (`:282-353`) then
+     * interpolates between two ALREADY-ROUNDED integer entries and
+     * `rintf`s the chord. That stacks three quantisations the analytic
+     * form has none of, and it moves the answer by a whole count on
+     * 5434 of the 32768 neutral LabS L codes.
+     *
+     * Works by driving the measured `Labs -> b-w` and `Labs -> sRGB`
+     * codes at L values where the two disagree, plus controls where they
+     * agree so the test cannot pass by shifting everything.
+     *
+     * Input: `vips rawload labs.raw in.v 32768 1 3 --format short
+     * --interpretation labs`, then `vips colourspace in.v out.v b-w`
+     * (and `srgb`) and `vips rawsave out.v out.raw`, on 8.18.4.
+     */
+    #[test]
+    fn scrgb_to_srgb_reads_the_interpolated_vips_lut() {
+        // (LabS L, vips b-w, vips sRGB). The first five are codes where
+        // the analytic curve answers one LESS than vips; the last three
+        // are controls the two already agreed on.
+        let cases: [(f64, f64, f64); 8] = [
+            (134.0, 2.0, 2.0),
+            (224.0, 3.0, 3.0),
+            (313.0, 4.0, 4.0),
+            (402.0, 5.0, 5.0),
+            (20000.0, 148.0, 148.0),
+            (0.0, 0.0, 0.0),
+            (1000.0, 11.0, 11.0),
+            (32767.0, 255.0, 255.0),
+        ];
+
+        for (l, want_bw, want_srgb) in cases {
+            let bw = labs_to(l, Interpretation::Bw);
+            assert!(
+                (bw[0] - want_bw).abs() < 1e-9,
+                "labs [{l}, 0, 0] -> b-w: vips says {want_bw}, got {}",
+                bw[0]
+            );
+            let srgb = labs_to(l, Interpretation::Srgb);
+            for (c, got) in srgb.iter().enumerate().take(3) {
+                assert!(
+                    (got - want_srgb).abs() < 1e-9,
+                    "labs [{l}, 0, 0] -> srgb band {c}: vips says \
+                     {want_srgb}, got {got}"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the chord is finished with `rintf`, which is round half
+     * to EVEN, and not with a half-away-from-zero round.
+     *
+     * `LabQ2sRGB.c:337` / `:422` end the interpolation with `rintf(v)`,
+     * and the Homebrew arm64 8.18.4 build compiles that to `frintx`,
+     * i.e. the default round-to-nearest-ties-to-even mode. The 16-bit
+     * table is where that is observable: the chord lands on an exact
+     * `.5` for 70 of the 32768 neutral LabS L codes, and the two rules
+     * disagree on half of them.
+     *
+     * Works by pinning one tie that resolves DOWN and one that resolves
+     * UP, so neither `floor` nor `ceil` nor half-away can pass both.
+     * L = 4746 puts the chord at exactly 9404.5 and vips answers 9404
+     * (half-away would say 9405); L = 5505 puts it at exactly 10651.5
+     * and vips answers 10652.
+     *
+     * Input: as above, then `vips colourspace in.v out.v grey16`.
+     */
+    #[test]
+    fn scrgb_to_srgb_rounds_ties_to_even() {
+        for (l, want) in [(4746.0, 9404.0), (5505.0, 10652.0)] {
+            let grey = labs_to(l, Interpretation::Grey16);
+            assert!(
+                (grey[0] - want).abs() < 1e-9,
+                "labs [{l}, 0, 0] -> grey16: vips says {want}, got {}",
+                grey[0]
+            );
+        }
+    }
+
+    /**
+     * Tests that the 16-bit spaces take their own 65536-entry table
+     * rather than scaling the 8-bit one, and that the table really is
+     * sampled at 65536 points.
+     *
+     * `calcul_tables_16` (`LabQ2sRGB.c:174`) builds `vips_Y2v_16` at the
+     * full 16-bit range, so `rgb16` and `grey16` resolve detail the
+     * 8-bit table cannot: L = 491 and L = 4746 both quantise to a flat
+     * neutral in sRGB but come out with a per-channel spread at 16 bits.
+     *
+     * Input: as above, with `vips colourspace in.v out.v rgb16`.
+     */
+    #[test]
+    fn rgb16_takes_the_65536_entry_table() {
+        let cases: [(f64, [f64; 3]); 4] = [
+            (491.0, [1405.0, 1404.0, 1404.0]),
+            (4746.0, [9404.0, 9405.0, 9404.0]),
+            (6923.0, [13040.0, 13041.0, 13039.0]),
+            (20000.0, [37845.0, 37846.0, 37843.0]),
+        ];
+
+        for (l, want) in cases {
+            let px = labs_to(l, Interpretation::Rgb16);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-9,
+                    "labs [{l}, 0, 0] -> rgb16 band {c}: vips says {exp}, \
+                     got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the HSV arm quantises through the SAME LUT, because
+     * `{ *, HSV }` reaches HSV via `vips_scRGB2sRGB` then
+     * `vips_sRGB2HSV` (`colourspace.c:336`, `:355` onward) and so sees
+     * the LUT's 8-bit codes, not an analytic encode rounded afterwards.
+     *
+     * Works by picking L = 491, the one neutral LabS code in this set
+     * where the LUT breaks the grey: it gives sRGB [6, 5, 5], so HSV
+     * reports a real saturation of 42, while the analytic encode gives a
+     * flat [5, 5, 5] and therefore saturation 0. That makes the case
+     * discriminating on the HSV arm specifically rather than on the sRGB
+     * codes it is built from.
+     *
+     * Input: as above, with `vips colourspace in.v out.v hsv`.
+     */
+    #[test]
+    fn hsv_quantises_through_the_lut_sampled_srgb() {
+        let px = labs_to(491.0, Interpretation::Hsv);
+        let want = [0.0, 42.0, 6.0];
+        for (c, &exp) in want.iter().enumerate() {
+            assert!(
+                (px[c] - exp).abs() < 1e-9,
+                "labs [491, 0, 0] -> hsv band {c}: vips says {exp}, got {}",
+                px[c]
+            );
+        }
+    }
 }
