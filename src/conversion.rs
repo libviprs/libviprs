@@ -1704,16 +1704,7 @@ impl Raster {
     ///
     /// `across` is the number of images per row (default: all of them in
     /// one row); `shim` is the gap in pixels between cells (default 0,
-    /// maximum `1000000` as in libvips). Float rasters are not supported
-    /// yet on any input.
-    ///
-    /// Known divergence: `across` is currently clamped to the number of
-    /// images, so a value larger than the list gives one full row. Real
-    /// vips does not clamp, and lays out the empty trailing cells: `vips
-    /// arrayjoin "a.v c.v" out.v --across 5` on a 3x2 and a 2x3 gives 15x3,
-    /// where libviprs gives 6x3. vips also refuses `--across 0` and
-    /// `--across 1000001` at the property boundary, which libviprs clamps
-    /// instead. Every cell is the size of the
+    /// maximum `1000000` as in libvips). Every cell is the size of the
     /// largest input; smaller images sit at the top-left of their cell and
     /// the remainder (and any trailing empty cells and shim gaps) is
     /// filled with black, libvips' default background. Band counts are
@@ -1722,8 +1713,18 @@ impl Raster {
     /// input. The result carries the metadata of the first image, except
     /// that a band promotion drops the interpretation so it is inferred
     /// from the result format instead of describing the first image's
-    /// narrower band count. Panicking form of [`Raster::try_arrayjoin`],
-    /// matching the ported-test call surface.
+    /// narrower band count. Float rasters are not supported yet on any
+    /// input. Panicking form of [`Raster::try_arrayjoin`], matching the
+    /// ported-test call surface.
+    ///
+    /// Known divergence: `across` is clamped to the number of images here,
+    /// so a value larger than the list gives one full row. Real vips does
+    /// not clamp, and lays the empty trailing cells out: `vips arrayjoin
+    /// "a.v c.v" out.v --across 5` on a 3x2 and a 2x3 gives 15x3 where
+    /// libviprs gives 6x3, and `--across 3` gives 9x3 where libviprs gives
+    /// 6x3. vips also refuses `--across 0` and `--across 1000001` at the
+    /// property boundary (`VIPS_ARG_INT(..., 1, 1000000, 1)`), which
+    /// libviprs clamps instead.
     ///
     /// # Panics
     ///
