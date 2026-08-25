@@ -29,6 +29,30 @@
 //! * [`Raster::save_bigtiff`] (64-bit-offset container, deferred).
 //! * [`Raster::save_tiff_tiled`] (tiled layout plus pyramid/subifd, deferred).
 //!
+//! ## Page indexing
+//!
+//! `page` in [`decode_tiff_page`] is a **zero-based index**: page 0 is the
+//! first image, and the valid range is `0..`[`tiff_page_count`]. That is the
+//! libvips convention, whose `page` argument is `min: 0` on `tiffload`,
+//! `pdfload`, `gifload`, `heifload` and `webpload` alike, and it is also the
+//! [`tiff`] crate's, where `seek_to_image(0)` is the first IFD. A TIFF carries
+//! no page numbers of its own: the IFD chain is a linked list, so there is
+//! nothing in the file to number from one.
+//!
+//! `n-pages` (readable through [`Raster::get_n_pages`]) is the matching
+//! **count**, not an index, so the last page of a file is
+//! `get_n_pages() - 1`. [`decode_tiff_page`] attaches it to every raster it
+//! returns, single-page files included, which is what vips's `tiffload` does
+//! (`vipsheader -f n-pages` reports 3 for a three-page file and 1 for a
+//! one-page one).
+//!
+//! The crate's PDF readers ([`crate::extract_page_image`] and friends) are
+//! **1-based**, and that is deliberate rather than an oversight left behind
+//! here. A PDF carries its own page numbering, [`crate::PdfInfo`] reports that
+//! numbering straight out of the document, and the CLI exposes `--page` to
+//! users on those terms. The rule across the crate is that a document's own
+//! page number is 1-based and a position in a sequence of frames is 0-based.
+//!
 //! ## Pixel formats
 //!
 //! The encoder handles the 8- and 16-bit gray, RGB, and RGBA formats, plus the
@@ -67,7 +91,7 @@ use tiff::encoder::{
 use tiff::tags::Tag;
 
 use crate::codec::{DecodeError, TiffCompression};
-use crate::imageio::SaveError;
+use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::sink::SinkError;
@@ -513,6 +537,14 @@ fn decode_current_image<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<Rast
 pub fn tiff_page_count(path: &Path) -> Result<u32, DecodeError> {
     let file = std::fs::File::open(path)?;
     let mut decoder = Decoder::new(std::io::BufReader::new(file)).map_err(tiff_decode_err)?;
+    count_images(&mut decoder)
+}
+
+/// Walk a decoder's IFD chain to the end and report how many images it holds.
+///
+/// The decoder is left positioned on the last image, so a caller that also
+/// wants pixels needs a second decoder over the same bytes.
+fn count_images<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<u32, DecodeError> {
     let mut count = 1u32;
     while decoder.more_images() {
         decoder.next_image().map_err(tiff_decode_err)?;
@@ -521,27 +553,52 @@ pub fn tiff_page_count(path: &Path) -> Result<u32, DecodeError> {
     Ok(count)
 }
 
-/// Decode a single 1-indexed page from a multi-page TIFF file.
+/// Decode a single page from a multi-page TIFF file, indexed from zero.
 ///
-/// Page 1 is the first image. Passing 0, or a page past the end of the file,
-/// is an error.
+/// `page` is a **zero-based index** into the file's IFD chain: page 0 is the
+/// first image and the valid range is `0..`[`tiff_page_count`]. This mirrors
+/// the libvips `page` argument, which is `min: 0` on `tiffload` and on every
+/// other multi-page loader vips has.
+///
+/// The returned raster carries `n-pages` set to the file's page count, so the
+/// bound `page` has to stay under travels back with the pixels and is readable
+/// through [`Raster::get_n_pages`]. `n-pages` is a count and `page` is an
+/// index, which makes the last page of a file `get_n_pages() - 1`.
+///
+/// PDF page numbers in this crate are 1-based instead
+/// ([`crate::extract_page_image`] and friends); see the module docs for why
+/// the two conventions differ.
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] if the file cannot be opened, the page index is
-/// out of range, the TIFF is malformed, or the page uses a color or sample
-/// type this lane does not decode.
+/// Returns [`DecodeError`] if the file cannot be opened, `page` is at or past
+/// the file's page count, the TIFF is malformed, or the page uses a color or
+/// sample type this lane does not decode.
 pub fn decode_tiff_page(path: &Path, page: u32) -> Result<Raster, DecodeError> {
-    if page == 0 {
-        return Err(decode_err("TIFF pages are 1-indexed; page 0 is invalid"));
-    }
     let bytes = std::fs::read(path)?;
     let bytes = normalize_multiband_photometric(&bytes);
+
+    // Counting first buys two things: an out-of-range index reports the bound
+    // it missed instead of whatever the `tiff` crate's seek happens to say,
+    // and the count can ride back out on the raster as `n-pages`.
+    let mut counter = Decoder::new(Cursor::new(bytes.as_ref())).map_err(tiff_decode_err)?;
+    let n_pages = count_images(&mut counter)?;
+    if page >= n_pages {
+        return Err(decode_err(format!(
+            "TIFF page {page} is out of range: pages are indexed from 0 and \
+             this file has {n_pages}"
+        )));
+    }
+
     let mut decoder = Decoder::new(Cursor::new(bytes.as_ref())).map_err(tiff_decode_err)?;
     decoder
-        .seek_to_image((page - 1) as usize)
+        .seek_to_image(page as usize)
         .map_err(tiff_decode_err)?;
-    decode_current_image(&mut decoder)
+    let mut raster = decode_current_image(&mut decoder)?;
+    raster
+        .fields
+        .set("n-pages", MetadataValue::Int(i64::from(n_pages)));
+    Ok(raster)
 }
 
 // ---------------------------------------------------------------------------
