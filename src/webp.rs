@@ -591,7 +591,8 @@ mod tests {
      * 100-byte `--lossless --keep none` capture and comparing every pixel
      * to the `vips getpoint` output recorded beside it.
      * Input: `LOSSLESS_RGB` -> Output: 4x3 `Rgb8`, pixels equal to
-     * `RAMP_PIXELS`.
+     * `RAMP_PIXELS`, and no `n-pages` field, which is what `vipsheader
+     * -a` reports for the same file.
      */
     #[test]
     fn lossless_decode_matches_vips_getpoint() {
@@ -600,6 +601,10 @@ mod tests {
         assert_eq!((raster.width(), raster.height()), (4, 3));
         assert_eq!(raster.format(), PixelFormat::Rgb8);
         assert_eq!(pixels(&raster), RAMP_PIXELS.map(Vec::from).to_vec());
+        // A still image carries no `n-pages` at all, as vips reports:
+        // `vipsheader -a` on this capture lists no such field.
+        assert_eq!(raster.get_field("n-pages"), None);
+        assert_eq!(raster.get_n_pages(), 1);
     }
 
     /**
