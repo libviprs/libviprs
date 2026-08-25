@@ -5090,7 +5090,10 @@ mod tests {
     /// 4096 samples.
     ///
     /// Both digests are asserted: the one libviprs must produce, and the
-    /// one it must not.
+    /// one it must not. They are the capture's own, from
+    /// `oracle.json -> vector_scalar_sweep`, which records a
+    /// `vector_raw_sha256` and a `novector_raw_sha256` for every
+    /// (fixture, precision, sigma) it swept.
     #[test]
     fn canny_targets_the_portable_c_libvips_where_the_two_disagree() {
         let noise = canny_noise64();
