@@ -123,4 +123,56 @@ set -e
 /opt/homebrew/bin/vips black outputs/wide16385.v 16385 1 --bands 3
 /opt/homebrew/bin/vips copy outputs/wide16385.v outputs/wide16385-srgb.v --interpretation srgb
 /opt/homebrew/bin/vips webpsave outputs/wide16385-srgb.v outputs/wide16385.webp --lossless
+/opt/homebrew/bin/vipsheader -a fixtures/viprs_rgb.webp
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 0 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 1 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 2 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 3 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 0 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 1 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 2 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 3 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 0 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 1 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 2 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgb.webp 3 2
+/opt/homebrew/bin/vipsheader -a fixtures/viprs_rgba.webp
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 0 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 1 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 2 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 3 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 0 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 1 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 2 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 3 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 0 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 1 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 2 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_rgba.webp 3 2
+/opt/homebrew/bin/vipsheader -a fixtures/viprs_grey.webp
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 0 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 1 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 2 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 3 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 0 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 1 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 2 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 3 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 0 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 1 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 2 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_grey.webp 3 2
+/opt/homebrew/bin/vipsheader -a fixtures/viprs_meta.webp
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 0 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 1 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 2 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 3 0
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 0 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 1 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 2 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 3 1
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 0 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 1 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 2 2
+/opt/homebrew/bin/vips getpoint fixtures/viprs_meta.webp 3 2
 /opt/homebrew/bin/vips --version

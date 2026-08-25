@@ -18,10 +18,11 @@
 //! |---|---|---|
 //! | `.png` | [`crate::sink::encode_png`] | none yet (iCCP embedding is an open gap) |
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
+//! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
-//! Formats libviprs cannot encode yet (WebP, TIFF-with-metadata, ...)
-//! return [`SaveError::UnsupportedExtension`]; they arrive with the
+//! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
+//! [`SaveError::UnsupportedExtension`]; they arrive with the
 //! foreign-format batch. Structured EXIF tag writing (`exif-ifd0-*`
 //! fields into the TIFF directory of a JPEG APP1 segment) is also
 //! deferred to the foreign batch: those fields round-trip through `.v`
@@ -789,6 +790,7 @@ impl Raster {
                     encoded
                 }
             }
+            "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
             _ => return Err(SaveError::UnsupportedExtension { extension }),
         };
@@ -1736,11 +1738,6 @@ mod tests {
         assert_eq!(back.width(), 2);
         assert_eq!(back.data(), im.data());
 
-        let err = im.save(&dir.path().join("out.webp")).unwrap_err();
-        assert!(
-            matches!(err, SaveError::UnsupportedExtension { .. }),
-            "{err}"
-        );
         let err = im.save(&dir.path().join("noextension")).unwrap_err();
         assert!(
             matches!(err, SaveError::UnsupportedExtension { .. }),

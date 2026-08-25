@@ -18,6 +18,8 @@ from the format spec:
     `n-pages`, leaving the toilet roll to `n=-1`
   * the exact width at which `webpsave` starts refusing an image, which is
     one pixel below where `image-webp` 0.2.4 starts refusing one
+  * that vips reads back what libviprs writes, with the same pixels, the
+    same band count and the same three metadata fields
 
 The libvips C line numbers quoted in `src/webp.rs` come from the source tree
 at the commit recorded in `meta.reference_c` below. Every *number* here came
@@ -343,6 +345,39 @@ records["width_ceiling"] = {
             "reference decoder then refuses to read. libviprs applies the "
             "libwebp ceiling rather than the crate's.",
     "results": ceiling,
+}
+
+# ---------------------------------------------------------------------------
+# 8. The other direction: vips reading what libviprs wrote.
+#
+# The four `viprs_*.webp` fixtures are NOT produced by this script. They came
+# out of `Raster::save_webp` at `SaveOptions::default()` on the same 4x3 ramp
+# used above (plus a 21-step greyscale, and a flat raster carrying the three
+# metadata blobs from record 6), and they are checked in so this half of the
+# differential is reproducible without a Rust toolchain. Regenerate them by
+# saving those rasters and copying the files back in.
+# ---------------------------------------------------------------------------
+reverse = {}
+for name in ("viprs_rgb", "viprs_rgba", "viprs_grey", "viprs_meta"):
+    path = os.path.join(FIX, f"{name}.webp")
+    if not os.path.exists(path):
+        continue
+    reverse[name] = {
+        "sha256": sha256(path),
+        "bytes": os.path.getsize(path),
+        "chunks": chunks(path),
+        "header": header(path, all_fields=True),
+        "getpoint": getpoint(path, 4, 3),
+    }
+records["vips_reads_libviprs_output"] = {
+    "what": "vips 8.18.4 loading four files libviprs wrote. Pixels, band "
+            "count and interpretation all match what vips reports for its "
+            "own output of the same rasters, the greyscale one promotes to "
+            "3 bands with the luminance repeated, and all three metadata "
+            "chunks come back under the same field names. This is the half "
+            "of the differential a unit test cannot run, since it needs the "
+            "binary.",
+    "files": reverse,
 }
 
 with open(os.path.join(ROOT, "oracle.json"), "w") as f:

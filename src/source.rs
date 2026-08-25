@@ -531,9 +531,9 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// The format is identified from the file's leading magic bytes and never
 /// from its extension, so this returns exactly what [`decode_bytes`] returns
 /// for the same bytes, and a misnamed file still decodes correctly. libvips
-/// resolves a loader the same way. Native `.v`, JPEG, PNG, TIFF, GIF, and
-/// WebP are recognised directly; anything else falls back to the `image`
-/// crate's own content guess.
+/// resolves a loader the same way. Native `.v`, JPEG, PNG, TIFF, GIF,
+/// WebP, and Radiance are recognised directly; anything else falls back to
+/// the `image` crate's own content guess.
 ///
 /// # Example usage
 ///
@@ -715,15 +715,18 @@ impl SniffedFormat {
     /// * Radiance, because [`crate::radiance::decode_radiance`] walks the
     ///   header lines and the run-length-encoded body over one addressable
     ///   buffer.
+    /// * WebP, because [`crate::webp::decode_webp`] reads the `ICCP`,
+    ///   `EXIF` and `XMP ` chunks out of the RIFF directory as well as the
+    ///   frame, and the frame is rarely the last chunk in the file.
     ///
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
     const fn decodes_from_memory(self) -> bool {
-        matches!(self, Self::Vips | Self::Jpeg | Self::Radiance)
+        matches!(self, Self::Vips | Self::Jpeg | Self::Radiance | Self::WebP)
     }
 
-    /// The `image` decoder for this container, or `None` for `.v` and
-    /// Radiance, which libviprs decodes itself.
+    /// The `image` decoder for this container, or `None` for `.v`,
+    /// Radiance and WebP, which libviprs decodes itself.
     ///
     /// This is the entire route table, and it is an identity mapping on
     /// purpose: one sniffed container in, one decoder out, no per-format
@@ -737,7 +740,10 @@ impl SniffedFormat {
             Self::Png => Some(image::ImageFormat::Png),
             Self::Tiff => Some(image::ImageFormat::Tiff),
             Self::Gif => Some(image::ImageFormat::Gif),
-            Self::WebP => Some(image::ImageFormat::WebP),
+            // The `image` facade's WebP decoder reports neither the frame
+            // count nor the XMP chunk, and [`crate::webp`] needs both, so
+            // that module drives `image-webp` directly (issue #567).
+            Self::WebP => None,
             // `image`'s Radiance route is behind its `hdr` feature, which
             // this build deliberately leaves off: the crate decodes RGBE as
             // `mantissa * 2^(e-136)` where vips uses the half-bit-centred
@@ -908,6 +914,9 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     }
     if sniffed == Some(SniffedFormat::Radiance) {
         return crate::radiance::decode_radiance(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::WebP) {
+        return crate::webp::decode_webp(bytes, limits);
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
@@ -1654,19 +1663,19 @@ mod tests {
 
     /**
      * Pins the two contracts the route table has to keep as the format
-     * lanes extend it. First, the memory profile: exactly `.v` and JPEG
-     * decode from a whole in-memory buffer, because their decoders parse
-     * the container themselves, and every other format keeps the streaming
-     * reader. A lane that adds a variant and gets this wrong silently turns
-     * a streaming decode into a read-whole-file. Second, the mapping is
-     * identity: one container in, one decoder out, no options and no
-     * many-to-one collapsing.
+     * lanes extend it. First, the memory profile: only the containers
+     * whose decoders parse the container themselves read a whole in-memory
+     * buffer, and every other format keeps the streaming reader. A lane
+     * that adds a variant and gets this wrong silently turns a streaming
+     * decode into a read-whole-file. Second, the mapping is identity: one
+     * container in, one decoder out, no options and no many-to-one
+     * collapsing.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
-     * true for exactly `Vips` and `Jpeg`, and distinct `image` formats for
-     * every non-`.v` container.
+     * true for exactly `Vips`, `Jpeg`, `Radiance` and `WebP`, and distinct
+     * `image` formats for every container libviprs does not decode itself.
      */
     #[test]
-    fn route_table_is_identity_and_only_vips_and_jpeg_buffer_whole() {
+    fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
         let all = [
             SniffedFormat::Vips,
             SniffedFormat::Jpeg,
@@ -1676,9 +1685,13 @@ mod tests {
             SniffedFormat::WebP,
             SniffedFormat::Radiance,
         ];
-        // `.v` and Radiance are the two containers libviprs decodes itself,
-        // so they are the two the route table maps to no `image` decoder.
-        let self_decoded = [SniffedFormat::Vips, SniffedFormat::Radiance];
+        // These are the containers libviprs decodes itself, so they are
+        // the ones the route table maps to no `image` decoder.
+        let self_decoded = [
+            SniffedFormat::Vips,
+            SniffedFormat::Radiance,
+            SniffedFormat::WebP,
+        ];
 
         let buffered: Vec<SniffedFormat> = all
             .iter()
@@ -1690,9 +1703,10 @@ mod tests {
             vec![
                 SniffedFormat::Vips,
                 SniffedFormat::Jpeg,
+                SniffedFormat::WebP,
                 SniffedFormat::Radiance
             ],
-            "only .v, JPEG and Radiance may read the whole file into memory"
+            "only .v, JPEG, WebP and Radiance may read the whole file into memory"
         );
 
         for format in self_decoded {

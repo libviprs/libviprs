@@ -230,9 +230,11 @@ pub fn encode_to_target<W: Write>(
 impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
-    /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"` /
-    /// `"png"` and `"v"` / `"vips"` are wired; any other format returns
-    /// [`EncodeError::Unsupported`].
+    /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
+    /// `"png"`, `"webp"` and `"v"` / `"vips"` are wired; any other format
+    /// returns [`EncodeError::Unsupported`]. `"webp"` encodes losslessly
+    /// at [`crate::webp::SaveOptions::default`], keeping any attached
+    /// metadata; [`Raster::encode_webp`] takes the options explicitly.
     ///
     /// # Errors
     ///
@@ -255,6 +257,7 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
             crate::sink::encode_jpeg(raster, DEFAULT_JPEG_QUALITY).map_err(sink_err_to_encode)
         }
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
+        "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
         "v" | "vips" => raster.encode_vips().map_err(save_err_to_encode),
         _ => Err(EncodeError::unsupported(format.to_owned())),
     }

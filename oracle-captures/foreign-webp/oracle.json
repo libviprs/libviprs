@@ -787,6 +787,331 @@
           ]
         }
       }
+    },
+    "vips_reads_libviprs_output": {
+      "what": "vips 8.18.4 loading four files libviprs wrote. Pixels, band count and interpretation all match what vips reports for its own output of the same rasters, the greyscale one promotes to 3 bands with the luminance repeated, and all three metadata chunks come back under the same field names. This is the half of the differential a unit test cannot run, since it needs the binary.",
+      "files": {
+        "viprs_rgb": {
+          "sha256": "4b16dbc4bb89410a1056e5d3f43ac0510e13fca26fa8952fb336a26efdcda87f",
+          "bytes": 162,
+          "chunks": [
+            [
+              "VP8L",
+              141
+            ]
+          ],
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_rgb.webp: 4x3 uchar, 3 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_rgb.webp\nvips-loader: webpload",
+          "getpoint": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              61,
+              97,
+              29
+            ],
+            [
+              122,
+              194,
+              58
+            ],
+            [
+              183,
+              35,
+              87
+            ],
+            [
+              13,
+              151,
+              211
+            ],
+            [
+              74,
+              248,
+              240
+            ],
+            [
+              135,
+              89,
+              13
+            ],
+            [
+              196,
+              186,
+              42
+            ],
+            [
+              26,
+              46,
+              166
+            ],
+            [
+              87,
+              143,
+              195
+            ],
+            [
+              148,
+              240,
+              224
+            ],
+            [
+              209,
+              81,
+              253
+            ]
+          ]
+        },
+        "viprs_rgba": {
+          "sha256": "2023af34d541f014195f76286269ec7039c6a813ad55c64abf011949a29d7630",
+          "bytes": 204,
+          "chunks": [
+            [
+              "VP8L",
+              183
+            ]
+          ],
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_rgba.webp: 4x3 uchar, 4 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 4\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_rgba.webp\nvips-loader: webpload",
+          "getpoint": [
+            [
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              61,
+              97,
+              29,
+              85
+            ],
+            [
+              122,
+              194,
+              58,
+              170
+            ],
+            [
+              183,
+              35,
+              87,
+              255
+            ],
+            [
+              13,
+              151,
+              211,
+              40
+            ],
+            [
+              74,
+              248,
+              240,
+              125
+            ],
+            [
+              135,
+              89,
+              13,
+              210
+            ],
+            [
+              196,
+              186,
+              42,
+              39
+            ],
+            [
+              26,
+              46,
+              166,
+              80
+            ],
+            [
+              87,
+              143,
+              195,
+              165
+            ],
+            [
+              148,
+              240,
+              224,
+              250
+            ],
+            [
+              209,
+              81,
+              253,
+              79
+            ]
+          ]
+        },
+        "viprs_grey": {
+          "sha256": "2936c8957e27091e3684ca6e3af7a89c954fa10b1c8b9c5fc615787b7c2218aa",
+          "bytes": 78,
+          "chunks": [
+            [
+              "VP8L",
+              58
+            ]
+          ],
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_grey.webp: 4x3 uchar, 3 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_grey.webp\nvips-loader: webpload",
+          "getpoint": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              21,
+              21,
+              21
+            ],
+            [
+              42,
+              42,
+              42
+            ],
+            [
+              63,
+              63,
+              63
+            ],
+            [
+              84,
+              84,
+              84
+            ],
+            [
+              105,
+              105,
+              105
+            ],
+            [
+              126,
+              126,
+              126
+            ],
+            [
+              147,
+              147,
+              147
+            ],
+            [
+              168,
+              168,
+              168
+            ],
+            [
+              189,
+              189,
+              189
+            ],
+            [
+              210,
+              210,
+              210
+            ],
+            [
+              231,
+              231,
+              231
+            ]
+          ]
+        },
+        "viprs_meta": {
+          "sha256": "dbe9b7e7e81ae51bb13eebb19abad9be38f6d0fdb05ed64374fc0772dc85cc5d",
+          "bytes": 192,
+          "chunks": [
+            [
+              "VP8X",
+              10
+            ],
+            [
+              "ICCP",
+              24
+            ],
+            [
+              "VP8L",
+              57
+            ],
+            [
+              "EXIF",
+              10
+            ],
+            [
+              "XMP ",
+              37
+            ]
+          ],
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_meta.webp: 4x3 uchar, 3 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/viprs_meta.webp\nvips-loader: webpload\nicc-profile-data: 24 bytes of binary data\nexif-data: 10 bytes of binary data\nexif-ifd0-XResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-YResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-ResolutionUnit: 2 (Inch, Short, 1 components, 2 bytes)\nexif-ifd2-ExifVersion: Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)\nexif-ifd2-FlashpixVersion: FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)\nexif-ifd2-ColorSpace: 65535 (Uncalibrated, Short, 1 components, 2 bytes)\nxmp-data: 37 bytes of binary data",
+          "getpoint": [
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ],
+            [
+              9,
+              9,
+              9
+            ]
+          ]
+        }
+      }
     }
   }
 }
