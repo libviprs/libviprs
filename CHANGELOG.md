@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `decode_tiff_page` indexes pages from **zero**, where it used to index from
+  one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
+  be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
+  the first. Every call site that passed a page number has to lose one, and the
+  break is silent on a multi-page file, so it is worth grepping for rather than
+  waiting to be told.
+
+  The old numbering disagreed with libvips, whose `page` argument is `min: 0`
+  on `tiffload`, `pdfload`, `gifload`, `heifload` and `webpload` alike
+  (measured against 8.18.4: `vips tiffload --page 0` loads the first image, and
+  `--page 1` on a single-page file fails with "TIFF does not contain page 1").
+  Anyone moving a pipeline across read the wrong page with no error to show for
+  it. It also disagreed with the `tiff` crate underneath, where
+  `seek_to_image(0)` is the first IFD, so the function was converting between
+  the two conventions for nobody's benefit. A TIFF has no page numbers of its
+  own to justify the offset either: the IFD chain is a linked list.
+
+  The frames/page model in #564 is the reason to move it now rather than later.
+  That model exposes frames as a sequence, a sequence in Rust is indexed from
+  zero, and a `frames()` accessor starting at 0 sitting next to a
+  `decode_tiff_page` starting at 1 would be a permanent source of off-by-ones.
+
+  **PDF page numbers are unchanged and remain 1-based.** `extract_page_image`
+  and its siblings read a numbering the document carries itself, `PdfInfo`
+  reports that numbering, and the CLI's `--page` exposes it to users on those
+  terms. The rule across the crate is that a document's own page number is
+  1-based and a position in a sequence of frames is 0-based.
+
+  A raster from `decode_tiff_page` now also carries `n-pages`, so the count
+  that bounds `page` comes back with the pixels and is readable through
+  `Raster::get_n_pages`. vips attaches the same field on every TIFF load,
+  single-page files included. The out-of-range error names both the index and
+  the count instead of relaying the `tiff` crate's seek failure.
+
 - `Raster::encode_webp` takes a `webp::SaveOptions` carrying a `Compression`
   and a `Keep`, where it used to take a bare `quality: u8` (issue #568). There
   is no lossy WebP encoder reachable in pure Rust: `image-webp` 0.2.4's
