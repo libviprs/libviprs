@@ -3112,8 +3112,11 @@ mod tests {
     }
 
     /**
-     * Tests the LabS code scaling: Lab [50,0,0] stores as L ~16384 (of
+     * Tests the LabS code scaling: Lab [50,0,0] stores as L 16383 (of
      * 32767) with a,b at 0, matching the libvips signed-16-bit codes.
+     * 50 * 32767/100 is 16383.5, and `Lab2LabS.c:66` lands that in a
+     * `signed short`, so the half goes away rather than rounding up.
+     * Measured: `vips colourspace <lab> <out> labs` prints 16383.
      */
     #[test]
     fn labs_code_scaling() {
@@ -3121,12 +3124,219 @@ mod tests {
         assert_eq!(labs.interpretation(), Interpretation::Labs);
         let px = labs.getpoint(0, 0);
         assert!(
-            (px[0] - 16384.0).abs() < 1.0,
-            "L code should be ~16384, got {}",
+            (px[0] - 16383.0).abs() < 1e-6,
+            "L code should be 16383, got {}",
             px[0]
         );
-        assert!(px[1].abs() < 1.0 && px[2].abs() < 1.0);
+        assert!(px[1].abs() < 1e-6 && px[2].abs() < 1e-6);
         assert!((px[3] - 42.0).abs() < 1e-6, "extra band untouched");
+    }
+
+    /// One Lab pixel as a float raster, so the input words are the exact
+    /// `f32` samples `vips rawload --format float --interpretation lab`
+    /// hands `Lab2LabS.c`.
+    fn lab_px(lab: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &lab, Interpretation::Lab)
+    }
+
+    /// One LabS pixel. libviprs carries LabS in the float raster (it has
+    /// no signed-16-bit format), so the code values are exact here too.
+    fn labs_px(labs: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &labs, Interpretation::Labs)
+    }
+
+    /**
+     * Tests that Lab -> LabS truncates the scaled code toward zero
+     * rather than rounding it, which is what `Lab2LabS.c:66-68` does by
+     * assigning the clipped double into a `signed short`.
+     *
+     * Every expectation is a measurement from vips 8.18.4, taken with
+     * `vips rawload px.raw in.v 1 1 3 --format float --interpretation lab`
+     * so the input words are exact, then `vips colourspace in.v out.v
+     * labs` and `vips getpoint out.v 0 0`.
+     *
+     * The `+/-0.501953125` pair is the discriminator that matters most:
+     * it scales to exactly +/-128.5, so truncate-toward-zero gives
+     * +/-128, round-half-away gives +/-129, and floor gives 128 / -129.
+     * vips answers +/-128, so LabS truncates toward zero and does not
+     * floor -- LabS is the one signed carrier in this module, so the two
+     * are genuinely distinguishable here.
+     */
+    #[test]
+    fn labs_encode_truncates_toward_zero() {
+        let cases: [([f64; 3], [f64; 3]); 18] = [
+            // L: 50 * 327.67 = 16383.5 -> 16383, not 16384.
+            ([50.0, 0.0, 0.0], [16383.0, 0.0, 0.0]),
+            // 0.1 * 327.67 = 32.767 -> 32, not 33.
+            ([0.1, 0.0, 0.0], [32.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [327.0, 0.0, 0.0]),
+            ([5.0, 0.0, 0.0], [1638.0, 0.0, 0.0]),
+            ([8.0, 0.0, 0.0], [2621.0, 0.0, 0.0]),
+            ([100.0, 0.0, 0.0], [32767.0, 0.0, 0.0]),
+            // VIPS_CLIP(0, ..., SHRT_MAX) on L: no negatives, no overflow.
+            ([200.0, 0.0, 0.0], [32767.0, 0.0, 0.0]),
+            ([-10.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            // a/b scale by 256. 0.1 -> +/-25.6, so +/-25 either side of
+            // zero: truncation is symmetric, floor would give -26.
+            ([50.0, 0.1, -0.1], [16383.0, 25.0, -25.0]),
+            // Exact halves: +/-128.5 -> +/-128.
+            ([50.0, 0.501953125, -0.501953125], [16383.0, 128.0, -128.0]),
+            // Exact halves again, small: +/-1.5 -> +/-1.
+            ([50.0, 0.005859375, -0.005859375], [16383.0, 1.0, -1.0]),
+            ([50.0, 1.0, -1.0], [16383.0, 256.0, -256.0]),
+            ([50.0, 50.5, -50.5], [16383.0, 12928.0, -12928.0]),
+            // VIPS_CLIP(SHRT_MIN, ..., SHRT_MAX) on a/b.
+            ([50.0, 200.0, -200.0], [16383.0, 32767.0, -32768.0]),
+            ([50.0, 127.99609375, -128.0], [16383.0, 32767.0, -32768.0]),
+            // Shadow-branch L, where the XYZ hub is worst.
+            ([3.0, 1.0, -1.0], [983.0, 256.0, -256.0]),
+            ([5.0, 0.501953125, -0.501953125], [1638.0, 128.0, -128.0]),
+            ([0.0, -128.0, 1.0], [0.0, -32768.0, 256.0]),
+        ];
+
+        for (lab, want) in cases {
+            let px = lab_px(lab).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "lab {lab:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that LabS -> Lab is the plain division `LabS2Lab.c:57-59`
+     * does, with no quantisation of its own. Values measured from vips
+     * 8.18.4 with `vips rawload px.raw in.v 1 1 3 --format short
+     * --interpretation labs` then `colourspace ... lab`.
+     *
+     * The last four cases sit under L = 8, where the XYZ hub's
+     * `lab_f`/`lab_to_xyz` branch constants stop being mutual inverses,
+     * so they only land if the direct edge is taken.
+     */
+    #[test]
+    fn labs_decode_is_the_plain_division() {
+        let cases: [([f64; 3], [f64; 3]); 10] = [
+            ([16383.0, 0.0, 0.0], [49.99847412109375, 0.0, 0.0]),
+            ([16384.0, 0.0, 0.0], [50.00152587890625, 0.0, 0.0]),
+            ([32767.0, 0.0, 0.0], [100.0, 0.0, 0.0]),
+            ([0.0, 128.0, -128.0], [0.0, 0.5, -0.5]),
+            ([0.0, -1.0, 1.0], [0.0, -0.00390625, 0.00390625]),
+            ([0.0, 32767.0, -32768.0], [0.0, 127.99609375, -128.0]),
+            (
+                [1638.0, 25.0, -25.0],
+                [4.998931884765625, 0.09765625, -0.09765625],
+            ),
+            (
+                [327.0, 1.0, -1.0],
+                [0.99795526266098022, 0.00390625, -0.00390625],
+            ),
+            ([983.0, 256.0, -256.0], [2.999969482421875, 1.0, -1.0]),
+            ([2621.0, 0.0, 0.0], [7.9989013671875, 0.0, 0.0]),
+        ];
+
+        for (labs, want) in cases {
+            let px = labs_px(labs)
+                .colourspace(Interpretation::Lab)
+                .getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "labs {labs:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the Lab <-> LabS edge really does skip the XYZ hub, by
+     * pinning pixels where the two routes cannot agree.
+     *
+     * Truncation and the hub do not mix. `Lab -> XYZ -> Lab` leaves a
+     * residue of a few parts in 1e6 (the `lab_f` / `lab_to_xyz` branch
+     * constants are not mutual inverses), which rounding used to absorb
+     * and truncation cannot: whenever the exact code is a whole number,
+     * a residue of -1e-6 drops it a whole count. So the direct edge is
+     * not a performance nicety once the quantiser is right, it is the
+     * only route that reproduces vips.
+     *
+     * Works by computing the hub answer here, through the same
+     * `to_xyz` / `from_xyz_into` pair the generic route uses, and
+     * asserting it misses the measured vips value that
+     * `try_colourspace` hits.
+     */
+    #[test]
+    fn labs_direct_edge_beats_the_xyz_hub() {
+        // vips: lab [0, -128, 1] -> labs [0, -32768, 256].
+        let lab = [0.0, -128.0, 1.0];
+        let direct = lab_px(lab).colourspace(Interpretation::Labs).getpoint(0, 0);
+        assert!(
+            (direct[1] + 32768.0).abs() < 1e-6 && (direct[2] - 256.0).abs() < 1e-6,
+            "direct edge should give vips's [-32768, 256], got {direct:?}"
+        );
+
+        let mut hub = [0.0f64; 4];
+        from_xyz_into(
+            Interpretation::Labs,
+            to_xyz(Interpretation::Lab, &lab),
+            &mut hub,
+        );
+        assert!(
+            (hub[1] - direct[1]).abs() > 0.5 || (hub[2] - direct[2]).abs() > 0.5,
+            "the hub is supposed to miss by a count here, but gave {hub:?}"
+        );
+
+        // The same in reverse: vips says labs [983, 256, -256] decodes to
+        // lab [2.999969482421875, 1, -1] exactly.
+        let labs = [983.0, 256.0, -256.0];
+        let back = labs_px(labs)
+            .colourspace(Interpretation::Lab)
+            .getpoint(0, 0);
+        assert!(
+            (back[1] - 1.0).abs() < 1e-6 && (back[2] + 1.0).abs() < 1e-6,
+            "direct edge should give vips's [1, -1], got {back:?}"
+        );
+        let hub_back = xyz_to_lab(to_xyz(Interpretation::Labs, &labs), D65);
+        assert!(
+            (hub_back[1] - 1.0).abs() > 1e-4,
+            "the hub is supposed to drift here, but gave {hub_back:?}"
+        );
+    }
+
+    /**
+     * Tests that the truncation is not confined to the direct edge:
+     * every other route into LabS ends in `vips_Lab2LabS` too
+     * (`colourspace.c:229` onward), so the hub arm of `from_xyz_into`
+     * has to truncate as well. Values measured from vips 8.18.4 with
+     * `vips rawload px.raw in.v 1 1 3 --format uchar --interpretation
+     * srgb` then `colourspace in.v out.v labs`.
+     */
+    #[test]
+    fn labs_hub_routes_truncate_too() {
+        let cases: [([u8; 3], [f64; 3]); 7] = [
+            ([255, 255, 255], [32767.0, 1.0, -2.0]),
+            ([0, 0, 0], [0.0, 0.0, 0.0]),
+            ([255, 0, 0], [17442.0, 20507.0, 17208.0]),
+            ([0, 255, 0], [28748.0, -22063.0, 21294.0]),
+            ([0, 0, 255], [10584.0, 20274.0, -27613.0]),
+            ([128, 128, 128], [17558.0, 0.0, -1.0]),
+            ([10, 20, 30], [1949.0, -170.0, -2083.0]),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "srgb {rgb:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
     }
 
     /**
