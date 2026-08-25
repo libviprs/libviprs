@@ -413,11 +413,10 @@ fn xyz_to_scrgb(xyz: [f64; 3]) -> [f64; 3] {
 /// buy a tidier range by diverging from the C, so the range is documented
 /// instead.
 ///
-/// Two divergences from the C are deliberate, both in this crate's
-/// favour: the chroma beside this hue uses [`f64::hypot`], which does not
-/// overflow where the C's `hypotf` does at around 1.8e19, and a
-/// non-finite `(a, b)` follows IEEE `atan2` (so `(inf, inf)` is 45
-/// degrees) where the C's `b / a` is NaN and propagates.
+/// One divergence from the C is deliberate: a non-finite `(a, b)` follows
+/// IEEE `atan2` here, so `(inf, inf)` is 45 degrees, where the C's
+/// `b / a` is NaN and propagates through `atan` to the output. See
+/// [`lab_to_lch`] for the matching chroma divergence.
 fn ab_to_h(a: f64, b: f64) -> f64 {
     if a == 0.0 {
         // Matches `if (a == 0)` in the C, which `-0.0` also enters.
@@ -434,6 +433,16 @@ fn ab_to_h(a: f64, b: f64) -> f64 {
     }
 }
 
+/// Lab-like cartesian to polar (libvips `vips_Lab2LCh_line`,
+/// `colour/Lab2LCh.c:114`, and `vips_Oklab2Oklch_line`,
+/// `colour/Oklab2Oklch.c:64`, which are the same two lines of arithmetic
+/// over `float`).
+///
+/// The chroma uses [`f64::hypot`] where the C squares and adds,
+/// `sqrtf(a * a + b * b)`. That is a deliberate divergence in this
+/// crate's favour: `a * a` overflows an `f32` to infinity once `a` passes
+/// about 1.8e19, the square root of `f32::MAX`, and `hypot` has no such
+/// intermediate to overflow.
 fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
     [lab[0], lab[1].hypot(lab[2]), ab_to_h(lab[1], lab[2])]
 }
