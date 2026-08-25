@@ -1,19 +1,23 @@
 name: gitea-ci-relay
 
-# Nudges the Gitea pull mirror so `.gitea/workflows/*` runs against the commit that
-# was just pushed, then checks that it actually did.
+# Pushes land on GitHub first and reach our Gitea Actions runner through a pull
+# mirror. This workflow nudges that mirror so `.gitea/workflows/*` runs against the
+# commit that was just pushed, then checks that the rest of the chain actually
+# happened.
 #
+# The chain has three links, and the old single-step job checked none of them.
 # `POST /mirror-sync` only queues the sync and answers 200 with an empty body
-# (routers/api/v1/repo/mirror.go), so a green POST proves the repo exists, is a
-# mirror, and the token can write, and nothing else. It says nothing about whether
-# the mirror advanced or whether Gitea started a run. That silence is how issue #530
-# stayed invisible for a month: the relay was green the whole time while no `gitea/*`
-# status ever reached GitHub.
+# (routers/api/v1/repo/mirror.go), so a passing `curl -sf` proves the repo exists,
+# is a mirror, and the token can write, and stops there. That is why this workflow
+# was green for the month described in #530 while no `gitea/*` status ever arrived.
 #
-# `verify-sync` closes the gap. It waits for the mirrored branch head to reach this
-# commit, then for a Gitea Actions task to exist for that SHA, and fails loudly when
-# either never happens. Its two failure modes map onto the two halves of the pipeline,
-# so a red check here names the thing that is broken instead of hiding it.
+#   1. the mirror reaches the pushed commit            -> verify-sync, step 1
+#   2. Gitea runs CI for it                            -> verify-sync, step 2
+#   3. the result comes back as a `gitea/*` status     -> await-gitea-status
+#
+# Link 3 is the one that is broken today, so it gets its own job. Waiting for it
+# costs wall-clock rather than money (libviprs is public), but it is still a long
+# wait, so it runs on `main` and on manual dispatch rather than on every branch.
 
 on:
   push:
@@ -36,52 +40,54 @@ jobs:
 
   verify-sync:
     needs: nudge-mirror
-    # Branch deletions carry no commit to wait for, and tag pushes have no branch head
-    # to compare against.
+    # Branch deletions carry no commit to wait for, and tag pushes have no branch
+    # head to compare against.
     if: startsWith(github.ref, 'refs/heads/') && !github.event.deleted
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 20
     env:
       GITEA_SYNC_TOKEN: ${{ secrets.GITEA_SYNC_TOKEN }}
     steps:
       - name: Wait for the mirror to reach this commit
         run: |
           set -euo pipefail
-          branch="$GITHUB_REF_NAME"
-          want="$GITHUB_SHA"
           # `/branches/*` is a wildcard route, so branch names containing `/` are fine.
-          url="$GITEA_API/repos/$GITHUB_REPOSITORY/branches/$branch"
+          url="$GITEA_API/repos/$GITHUB_REPOSITORY/branches/$GITHUB_REF_NAME"
           for attempt in $(seq 1 36); do
             got="$(curl -sf -H "Authorization: token $GITEA_SYNC_TOKEN" "$url" \
               | jq -r '.commit.id // empty')" || got=""
-            if [ "$got" = "$want" ]; then
-              echo "Mirror reached $want on '$branch' after ~$((attempt * 5))s."
+            if [ "$got" = "$GITHUB_SHA" ]; then
+              echo "Mirror reached $GITHUB_SHA on '$GITHUB_REF_NAME' after ~$((attempt * 5))s."
               exit 0
             fi
-            echo "attempt $attempt/36: mirror is at '${got:-<unreadable>}', waiting for $want"
+            echo "attempt $attempt/36: mirror is at '${got:-<unreadable>}', waiting for $GITHUB_SHA"
             sleep 5
           done
-          echo "::error title=Gitea mirror never synced::The pull mirror did not reach $want on '$branch' within 3 minutes. The mirror-sync POST was accepted, so the sync was queued and then did not complete. Check the Gitea pull-mirror settings and the sync log for libviprs/libviprs (issue #530)."
+          echo "::error title=Gitea mirror never synced::The pull mirror did not reach $GITHUB_SHA on '$GITHUB_REF_NAME' within 3 minutes. The mirror-sync POST was accepted, so the sync was queued and then did not complete. Check the pull-mirror settings and sync log on Gitea (issue #530)."
           exit 1
 
       - name: Wait for Gitea to start a CI run for this commit
         run: |
           set -euo pipefail
           url="$GITEA_API/repos/$GITHUB_REPOSITORY/actions/tasks?limit=50"
-          for attempt in $(seq 1 24); do
+          # `/actions/tasks` lists tasks a runner has already claimed
+          # (models/actions/task.go, CreateTaskForRunner), not queued jobs, so this
+          # has to outwait the runner's queue and not just Gitea's dispatch. Ten
+          # minutes: observed pickup on this instance is a few minutes when the
+          # runner is busy with another Rust build.
+          for attempt in $(seq 1 120); do
             response="$(curl -s -w '\n%{http_code}' \
               -H "Authorization: token $GITEA_SYNC_TOKEN" "$url")"
             code="$(printf '%s' "$response" | tail -n1)"
             body="$(printf '%s' "$response" | sed '$d')"
             [ -n "$body" ] || body='{}'
 
-            # This route sits behind `reqRepoReader(unit.TypeActions)`, so a 404 on a
-            # token that just wrote to the repo means the Actions unit is switched off
-            # for the mirror. That is also the silent gate in Gitea's notify(): with the
-            # unit disabled it returns before detecting any workflow, which is exactly
-            # the "sync succeeded, nothing ran" shape of #530.
+            # This route sits behind `reqRepoReader(unit.TypeActions)`, so a 404 or 403
+            # on a token that just wrote to the repo means the Actions unit is switched
+            # off for the mirror. That is also the silent gate in Gitea's notify(): with
+            # the unit disabled it returns before detecting any workflow.
             if [ "$code" = "404" ] || [ "$code" = "403" ]; then
-              echo "::error title=Gitea Actions unavailable on the mirror::GET /actions/tasks returned HTTP $code. That route requires read access to the repository's Actions unit, so this almost certainly means the Actions unit is disabled on the mirrored repo (Settings -> Units -> Actions), which makes Gitea drop every workflow trigger silently. See issue #530."
+              echo "::error title=Gitea Actions unavailable on the mirror::GET /actions/tasks returned HTTP $code. That route requires read access to the repository's Actions unit, so the unit is almost certainly disabled on the mirrored repo (Settings -> Units -> Actions), which makes Gitea drop every workflow trigger silently. See issue #530."
               exit 1
             fi
             if [ "$code" != "200" ]; then
@@ -92,21 +98,20 @@ jobs:
             matches="$(printf '%s' "$body" \
               | jq --arg sha "$GITHUB_SHA" '[.workflow_runs[]? | select(.head_sha == $sha)] | length')"
             if [ "$matches" -gt 0 ]; then
-              echo "Gitea started $matches task(s) for $GITHUB_SHA."
+              echo "Gitea is running $matches task(s) for $GITHUB_SHA."
               exit 0
             fi
-            echo "attempt $attempt/24: no Gitea Actions task for $GITHUB_SHA yet"
+            echo "attempt $attempt/120: no Gitea Actions task for $GITHUB_SHA yet"
             sleep 5
           done
-          echo "::error title=Gitea started no CI run::The mirror holds $GITHUB_SHA but Gitea created no Actions task for it within 2 minutes, so no gitea/ci status will ever be posted for this commit. See the diagnosis step below and issue #530."
+          echo "::error title=Gitea started no CI run::The mirror holds $GITHUB_SHA but no Gitea Actions task claimed it within 10 minutes. Either Gitea created no run, or it queued one and no runner picked it up. See the diagnosis below and issue #530."
           exit 1
 
-      # `/actions/tasks` only lists tasks a runner has claimed (models/actions/task.go,
-      # CreateTaskForRunner), so an empty list cannot on its own tell "Gitea created no
-      # run" apart from "a job is queued and no runner ever took it". Gitea 1.24 has no
-      # API that lists runs, but it does list workflows, which separates "Gitea never
-      # parsed .gitea/workflows" and "a workflow is disabled" from the rest. Dump both
-      # so a red check arrives with the evidence attached instead of a guess.
+      # `/actions/tasks` cannot on its own separate "Gitea created no run" from "a job
+      # is queued and no runner took it", and Gitea 1.24 exposes no API that lists runs.
+      # It does list workflows, which at least rules in or out "Gitea never parsed
+      # .gitea/workflows" and "a workflow is disabled". Dump both so a red check arrives
+      # carrying its evidence instead of a guess.
       - name: Report what Gitea actually holds
         if: failure()
         run: |
@@ -134,3 +139,33 @@ jobs:
             probe "Most recent runner-claimed tasks" "actions/tasks?limit=10" \
               '"total_count: \(.total_count)", (.workflow_runs[]? | "  \(.head_branch)  \(.head_sha[0:12])  \(.workflow_id)  \(.status)")'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The whole point of the Gitea round trip is a `gitea/*` commit status on GitHub.
+  # Nothing else in this workflow can tell whether that last hop works, because it
+  # happens inside the Gitea `report` job and fails silently there. Watch for it
+  # directly. On `main` only: a merge is worth one long wait, a branch push is not.
+  await-gitea-status:
+    needs: verify-sync
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      statuses: read
+    steps:
+      - name: Wait for a gitea/* status to arrive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 80); do
+            contexts="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" \
+              --jq '[.statuses[] | select(.context | startswith("gitea/")) | "\(.context)=\(.state)"] | join(" ")')"
+            if [ -n "$contexts" ]; then
+              echo "Gitea reported back: $contexts"
+              exit 0
+            fi
+            echo "attempt $attempt/80: no gitea/* status on $GITHUB_SHA yet"
+            sleep 30
+          done
+          echo "::error title=Gitea never reported back::Gitea ran CI for $GITHUB_SHA but posted no gitea/* commit status within 40 minutes. The runs happen; the last hop does not. The reporting steps authenticate with secrets.GH_STATUS_TOKEN, so that secret is almost certainly unset, expired, or missing the repo:status scope on Gitea. See issue #530."
+          exit 1
