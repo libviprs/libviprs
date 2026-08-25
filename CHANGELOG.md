@@ -84,6 +84,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   added to the content-sniffing route table, because it has no fixed leading
   magic; `decode_svg` is the entry point.
 
+- Radiance HDR (`.hdr`) load and save (issue #506): `decode_radiance` reads a
+  Radiance file into a `FloatF32(3)` raster tagged `ScRgb`, and
+  `Raster::encode_radiance` / `Raster::save_radiance` write one back out.
+  `decode_file` and `decode_bytes` route `.hdr` there automatically from the
+  magic, so an existing caller needs no change. This is the first raster
+  format libviprs decodes itself rather than through the `image` facade.
+
+  It is hand-rolled for a specific reason. `image` decodes RGBE as
+  `mantissa * 2^(e-136)` where libvips uses the half-bit-centred
+  `(mantissa + 0.5) * 2^(e-136)`, and that is not a rounding difference: the
+  error is `0.5/mantissa`, so 0.44% at mantissa 161, 33% at mantissa 1, and
+  100% at mantissa 0. A saturated red HDR pixel has green and blue mantissas
+  of zero, so vips reports a small positive floor there and `image` reports a
+  hard zero, which silently breaks any downstream divide, log, or tone map.
+  The encode side is the matching half, `frexp(max) * 255.9999 / max` with a
+  `1e-32` floor. Together the two are the identity on any RGBE quadruple whose
+  largest mantissa is at least 128 and whose exponent byte is in `23..=255`,
+  which is exactly the normalised form an encoder emits, so a `.hdr` written
+  by vips or by libviprs round-trips byte for byte. Verified against the real
+  vips 8.18.4 binary over the reference suite's two `sample.hdr` images,
+  3,057,600 pixels, decode and encode both byte-identical.
+
+  The carrier is float and never RGBE. vips models Radiance as a *coding*, a
+  4-band uchar raster tagged `VIPS_CODING_RAD` that it unpacks to 3-band float
+  scRGB the moment any operation touches it. libviprs has no coding concept
+  and decodes straight to the float. The visible consequence is that
+  `vipsheader` on a libviprs-loaded `.hdr` reports `bands 3 / float /
+  coding none` where vips reports `bands 4 / uchar / coding rad`; the 4-band
+  spelling was rejected on correctness rather than taste, because `resample`
+  premultiplies on `has_alpha()` and `resize` forks its downscale kernel on
+  it, so an RGBE raster tagged `Rgba8` would be premultiplied by its own
+  exponent byte.
+
+  One divergence from the vips binary is deliberate and documented at the
+  entry point: `save_radiance` preserves high dynamic range, where a bare
+  `vips radsave` converts to sRGB and clips (measured on `sample.hdr`, max
+  7728 becomes 254.5). The equivalent vips invocation is `float2rad` *then*
+  `radsave`, and that is the pair `save_radiance` matches.
+
+  The `FORMAT=` header line is read past and ignored on load, so every
+  `.hdr` is tagged `ScRgb` and `rad-format` always reads back as
+  `32-bit_rle_rgbe`, `32-bit_rle_xyze` files included. That is a port of a
+  libvips defect, not an oversight: `radiance.c:693-698` picks the colour
+  tag from the parsed format, but the arm is unreachable, because
+  `radiance.c:636` calls `formatval(line, read->format)` while
+  `radiance.c:314` declares `formatval(char fmt[MAXFMTLEN], const char *s)`
+  with `fmt` as the output buffer. The arguments are swapped, nothing is
+  parsed, and the `COLRFMT` default survives. Honouring the line would put
+  a third behaviour in the world, matching neither the source nor the
+  binary, and the interpretation tag is consumed by `colourspace`, so it
+  would move pixels rather than just the header. If upstream fixes
+  `formatval`, libviprs should follow. The save side is unaffected and
+  still writes `32-bit_rle_xyze` for an `Xyz` raster.
+
+  One honest limitation, stated at `decode_radiance`: a `FloatF32(3)` raster
+  is rejected by `resize` with `RasterError::FloatUnsupported`, so a loaded
+  `.hdr` cannot enter the pyramid engine. The resampling and op surface handle
+  float fine; only the tiled-pyramid path is closed.
+
 - `Raster::join` and its `try_join` twin (issue #551): the port of libvips
   `vips_join`, the generic two-image spatial join. `a.join(&b,
   JoinDirection::Horizontal, expand, shim, background, align)` puts `b` to the

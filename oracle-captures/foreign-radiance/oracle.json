@@ -1,0 +1,529 @@
+{
+  "meta": {
+    "area": "foreign-radiance",
+    "issue": 506,
+    "vips_version": "vips-8.18.4",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "captured_by": "oracle-captures/foreign-radiance/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for line numbers; the binary is the 8.18.4 release and is not the same artefact, so every number here comes from the binary"
+  },
+  "notes": [
+    "`vips getpoint` on a .hdr prints FOUR values; the fourth is an out-of-bounds read (getpoint.c:105 sizes the array from the coded band count while vips_image_decode has already reduced the buffer to 3 bands). Every getpoint record here goes through rad2float first.",
+    "Two different files named sample.hdr exist on this machine: 141x980 in the libviprs reference-test checkout and 1655x1764 in the libvips source tree. Records name which one they used.",
+    "The existing oracle-captures/foreign/oracle.json record for loads['sample.hdr'] has the four-value getpoint bug baked in."
+  ],
+  "records": {
+    "decode_half_bit_constant": {
+      "what": "vips decodes RGBE as (mantissa + 0.5) * 2^(e - 136), with a hard zero when the exponent byte is 0. The `image` crate's plain mantissa * 2^(e - 136) gives 4080 0 0 for the fourth pixel here, a 100% error on the two zero mantissas.",
+      "file": "fixtures/flat6.hdr",
+      "width_below_MINELEN": true,
+      "rgbe": [
+        [
+          255,
+          255,
+          255,
+          128
+        ],
+        [
+          128,
+          128,
+          128,
+          128
+        ],
+        [
+          64,
+          32,
+          16,
+          129
+        ],
+        [
+          255,
+          0,
+          0,
+          140
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          2,
+          3,
+          0
+        ]
+      ],
+      "header": {
+        "width": "6",
+        "height": "1",
+        "bands": "4",
+        "format": "uchar",
+        "coding": "rad",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/flat6.hdr",
+        "vips-loader": "radload",
+        "rad-format": "32-bit_rle_rgbe",
+        "rad-expos": "1",
+        "rad-colcor-r": "1",
+        "rad-colcor-g": "1",
+        "rad-colcor-b": "1",
+        "rad-aspect": "1",
+        "rad-prims-rx": "0.64",
+        "rad-prims-ry": "0.33",
+        "rad-prims-gx": "0.29",
+        "rad-prims-gy": "0.6",
+        "rad-prims-bx": "0.15",
+        "rad-prims-by": "0.06",
+        "rad-prims-wx": "0.333333",
+        "rad-prims-wy": "0.333333"
+      },
+      "getpoint": [
+        {
+          "x": 0,
+          "y": 0,
+          "values": [
+            0.998046875,
+            0.998046875,
+            0.998046875
+          ]
+        },
+        {
+          "x": 1,
+          "y": 0,
+          "values": [
+            0.501953125,
+            0.501953125,
+            0.501953125
+          ]
+        },
+        {
+          "x": 2,
+          "y": 0,
+          "values": [
+            0.50390625,
+            0.25390625,
+            0.12890625
+          ]
+        },
+        {
+          "x": 3,
+          "y": 0,
+          "values": [
+            4088.0,
+            8.0,
+            8.0
+          ]
+        },
+        {
+          "x": 4,
+          "y": 0,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "x": 5,
+          "y": 0,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ]
+    },
+    "encode_setcolr": {
+      "what": "float2rad's setcolr: frexp(max) * 255.9999 / max, a 1e-32 floor, negatives clamped to zero, and a TRUNCATING conversion to uchar. Width 6 is below MINELEN so radsave writes these bytes flat.",
+      "inputs": [
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1e-33,
+          1e-33,
+          1e-33
+        ],
+        [
+          1e-31,
+          0.0,
+          0.0
+        ],
+        [
+          4088.0,
+          8.0,
+          8.0
+        ],
+        [
+          -1.0,
+          2.0,
+          -3.0
+        ],
+        [
+          65504.0,
+          1.0,
+          0.001
+        ],
+        [
+          0.998046875,
+          0.501953125,
+          0.12890625
+        ],
+        [
+          Infinity,
+          1.0,
+          1.0
+        ],
+        [
+          2.0,
+          2.0,
+          2.0
+        ],
+        [
+          0.998046875,
+          0.998046875,
+          0.998046875
+        ],
+        [
+          3.0517578125e-05,
+          1.0,
+          1.0
+        ]
+      ],
+      "rgbe": [
+        127,
+        63,
+        31,
+        129,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        129,
+        0,
+        0,
+        26,
+        255,
+        0,
+        0,
+        140,
+        0,
+        127,
+        0,
+        130,
+        255,
+        0,
+        0,
+        144,
+        255,
+        128,
+        32,
+        128,
+        0,
+        0,
+        0,
+        128,
+        127,
+        127,
+        127,
+        130,
+        255,
+        255,
+        255,
+        128,
+        0,
+        127,
+        127,
+        129
+      ],
+      "notes": "The infinity row is undefined behaviour in C (the product is NaN and the conversion to uchar is unspecified); this build produces 0 0 0 128, which is also what Rust's saturating cast gives."
+    },
+    "encode_rle_scanline": {
+      "what": "rle_scanline_write: four separate component planes, MINRUN 4, run code 128 + count, literal blocks of up to 128.",
+      "inputs": [
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.0625,
+          0.25
+        ],
+        [
+          1.0,
+          0.125,
+          0.25
+        ],
+        [
+          1.0,
+          0.1875,
+          0.25
+        ],
+        [
+          1.0,
+          0.25,
+          0.25
+        ],
+        [
+          1.0,
+          0.3125,
+          0.25
+        ],
+        [
+          1.0,
+          0.375,
+          0.25
+        ],
+        [
+          1.0,
+          0.4375,
+          0.25
+        ],
+        [
+          1.0,
+          0.5,
+          0.25
+        ],
+        [
+          1.0,
+          0.5625,
+          0.25
+        ],
+        [
+          1.0,
+          0.625,
+          0.25
+        ]
+      ],
+      "resolution_line": "-Y        1 +X       16\n",
+      "payload": [
+        2,
+        2,
+        0,
+        16,
+        144,
+        127,
+        134,
+        63,
+        10,
+        7,
+        15,
+        23,
+        31,
+        39,
+        47,
+        55,
+        63,
+        71,
+        79,
+        144,
+        31,
+        144,
+        129
+      ],
+      "decoded": "planes are: red run of 16 x 127, green run of 6 x 63 then a 10-byte literal, blue run of 16 x 31, exponent run of 16 x 129"
+    },
+    "size_range_selects_an_encoding": {
+      "what": "MINELEN 8 and MAXELEN 0x7fff are NOT a dimension gate. scanline_write (radiance.c:955-978) falls back to a flat, unencoded write outside 8..=32767 and run-length encodes inside it. Both widths below save successfully.",
+      "widths": {
+        "4": {
+          "exit": 0,
+          "resolution_line": "-Y        2 +X        4\n",
+          "payload_bytes": 32,
+          "flat_payload_bytes": 32,
+          "run_length_encoded": false
+        },
+        "16": {
+          "exit": 0,
+          "resolution_line": "-Y        2 +X       16\n",
+          "payload_bytes": 24,
+          "flat_payload_bytes": 128,
+          "run_length_encoded": true
+        },
+        "40000": {
+          "exit": 0,
+          "resolution_line": "-Y        2 +X    40000\n",
+          "payload_bytes": 320000,
+          "flat_payload_bytes": 320000,
+          "run_length_encoded": false
+        }
+      }
+    },
+    "resolution_orientation": {
+      "what": "The axis written SECOND is the scanline length (scanlen/numscans, radiance.c:250-251), so `+X 6 +Y 1` is a 1x6 image. The -/+ direction flags are parsed and then ignored: libvips 'will not rotate/flip as the FORMAT string asks' (radiance.c:70).",
+      "lines": {
+        "-Y 1 +X 6": {
+          "summary": "fixtures/orient_-Y_1_+X_6.hdr: 6x1, rad, radload"
+        },
+        "+X 6 +Y 1": {
+          "summary": "fixtures/orient_+X_6_+Y_1.hdr: 1x6, rad, radload"
+        },
+        "-Y 1 -X 6": {
+          "summary": "fixtures/orient_-Y_1_-X_6.hdr: 6x1, rad, radload"
+        }
+      }
+    },
+    "involution": {
+      "what": "rad2float after float2rad after rad2float reproduces the float payload byte for byte. The sharper statement, verified over 298,240 combinations in src/radiance.rs, is that float2rad after rad2float is the IDENTITY on an RGBE quadruple whose largest mantissa is at least 128 and whose exponent byte is in 23..=255 -- exactly the normalised form any encoder emits. Below exponent 23 the 1e-32 floor collapses the pixel to all-zero, and a largest mantissa under 128 is rescaled: (127,63,31,129) becomes (254,126,62,128).",
+      "images": {
+        "sample.hdr 141x980 (libviprs reference-test checkout)": {
+          "source_sha256": "f2c0c514afde4432ed00102c08676307b39c46bbeda6344ab9fdc8ac7ec8296a",
+          "header": {
+            "summary": "/Users/rom/workspace/libviprs/libviprs-tests/tmp/libvips-reference-tests/test-suite/images/sample.hdr: 141x980, rad, radload"
+          },
+          "float_payload_sha256_original": "0bd59c454cef526f10541511870873be89c1ab599bc45e7c088773911cdb2979",
+          "float_payload_sha256_round_tripped": "0bd59c454cef526f10541511870873be89c1ab599bc45e7c088773911cdb2979",
+          "encoded_payload_sha256": "cd97fb487643c78da2870eb9922f3e395b687f63f0e746195c347f77bed94aeb"
+        },
+        "sample.hdr 1655x1764 (libvips source tree)": {
+          "source_sha256": "f0c0a6f80341ca8b4ef3b39e91daa4aa422c208acc4f5c183a1e43e81dac8564",
+          "header": {
+            "summary": "/Users/rom/workspace/libvips/test/test-suite/images/sample.hdr: 1655x1764, rad, radload"
+          },
+          "float_payload_sha256_original": "795fb942744128c89ac908a2d50461e88a659b77a1a7f044dfd14b096651dd4d",
+          "float_payload_sha256_round_tripped": "795fb942744128c89ac908a2d50461e88a659b77a1a7f044dfd14b096651dd4d",
+          "encoded_payload_sha256": "6513ad8defb5e2a468c632d618fa28116a580ce3eeb409c58524371593ffaedb"
+        }
+      }
+    },
+    "save_trap": {
+      "what": "`vips radsave` on an image that is not already VIPS_CODING_RAD routes through vips_colourspace(-> sRGB) and clips to uchar, so the only HDR-preserving save path in vips is float2rad THEN radsave. libviprs's save_radiance is equivalent to the pair, which means libviprs round-trips high dynamic range where a bare `vips radsave` does not. That is a deliberate divergence.",
+      "image": "sample.hdr 141x980",
+      "values": {
+        "original": {
+          "max": 7728.0,
+          "avg": 51.784629
+        },
+        "radsave_alone": {
+          "max": 254.5,
+          "avg": 228.068244
+        },
+        "float2rad_then_radsave": {
+          "max": 7728.0,
+          "avg": 51.784629
+        }
+      }
+    },
+    "scope_and_defects": {
+      "registered_suffixes": [
+        ".hdr"
+      ],
+      "dot_pic_is_not_registered": true,
+      "magic_is_the_whole_first_line": {
+        "what": "vips__rad_israd (radiance.c:568-577) reads the first line and compares it to `#?RADIANCE` in full, so `#?RGBE` is not a Radiance file. Measured, such a file falls through to magickload.",
+        "rgbe_magic_header": {
+          "summary": "fixtures/rgbe_magic.hdr: 6x1 ushort, 3 bands, rgb16, magickload"
+        }
+      },
+      "format_line_is_never_read": {
+        "what": "rad2vips_process_line calls formatval(line, read->format) with the arguments the wrong way round for the declaration at radiance.c:314, so the parsed FORMAT= value never reaches read->format and the XYZ branch at radiance.c:695-696 is unreachable in this build. libviprs reproduces this and always tags scRGB: the interpretation tag is consumed by colourspace(), so honouring FORMAT= would move pixels and not just the header. Follow upstream if formatval is fixed.",
+        "xyze_header": {
+          "width": "6",
+          "height": "1",
+          "bands": "4",
+          "format": "uchar",
+          "coding": "rad",
+          "interpretation": "scrgb",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "fixtures/xyze6.hdr",
+          "vips-loader": "radload",
+          "rad-format": "32-bit_rle_rgbe",
+          "rad-expos": "1",
+          "rad-colcor-r": "1",
+          "rad-colcor-g": "1",
+          "rad-colcor-b": "1",
+          "rad-aspect": "1",
+          "rad-prims-rx": "0.64",
+          "rad-prims-ry": "0.33",
+          "rad-prims-gx": "0.29",
+          "rad-prims-gy": "0.6",
+          "rad-prims-bx": "0.15",
+          "rad-prims-by": "0.06",
+          "rad-prims-wx": "0.333333",
+          "rad-prims-wy": "0.333333"
+        },
+        "bogus_format_header": {
+          "width": "6",
+          "height": "1",
+          "bands": "4",
+          "format": "uchar",
+          "coding": "rad",
+          "interpretation": "scrgb",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "fixtures/bogusfmt6.hdr",
+          "vips-loader": "radload",
+          "rad-format": "32-bit_rle_rgbe",
+          "rad-expos": "1",
+          "rad-colcor-r": "1",
+          "rad-colcor-g": "1",
+          "rad-colcor-b": "1",
+          "rad-aspect": "1",
+          "rad-prims-rx": "0.64",
+          "rad-prims-ry": "0.33",
+          "rad-prims-gx": "0.29",
+          "rad-prims-gy": "0.6",
+          "rad-prims-bx": "0.15",
+          "rad-prims-by": "0.06",
+          "rad-prims-wx": "0.333333",
+          "rad-prims-wy": "0.333333"
+        }
+      },
+      "radsave_cannot_save_mono": {
+        "what": "radsave advertises saveable = MONO | RGB (radsave.c:96-97) but a one-band image fails outright, so there is no mono behaviour for libviprs to match.",
+        "exit": 1,
+        "stderr": "float2rad: image must have at least 3 bands"
+      }
+    }
+  }
+}
