@@ -15,7 +15,7 @@
 //! operation from a later batch, the setup is reproduced with direct
 //! `Raster` construction and the conversion expressions are kept literal.
 
-use libviprs::{Align, Angle, Interpretation, JoinDirection, PixelFormat, Raster};
+use libviprs::{Align, Angle, ConversionError, Interpretation, JoinDirection, PixelFormat, Raster};
 
 /// The ported `make_test_mono`: a 100x100 Gray8 band-reject ring image.
 fn make_test_mono() -> Raster {
@@ -419,4 +419,48 @@ fn ported_join_call_sites() {
         )
         .unwrap();
     assert_eq!((im.width(), im.height()), (2, 5));
+
+    // The guards a caller outside the crate has to be able to name and
+    // match: the libvips shim bound, and float input, which reaches this
+    // through any `colourspace` result rather than as an exotic case.
+    assert!(matches!(
+        a.try_join(
+            &c,
+            JoinDirection::Horizontal,
+            false,
+            Some(1_000_001),
+            None,
+            None
+        ),
+        Err(ConversionError::ShimTooLarge {
+            shim: 1_000_001,
+            max: 1_000_000
+        })
+    ));
+    let ramp = Raster::grey(4, 4, false);
+    assert!(matches!(
+        ramp.try_join(&c, JoinDirection::Horizontal, false, None, None, None),
+        Err(ConversionError::FloatFormatUnsupported { op: "join" })
+    ));
+}
+
+/// The interpretation a band-promoting join and arrayjoin report, pinned
+/// from outside the crate: `vips join` of a 1-band `b-w` with a 3-band
+/// `srgb` reports `srgb`, and so does `vips arrayjoin` of the same pair.
+/// A tag naming a band count the result no longer has is read wrong
+/// downstream, since `space_bands(Bw) == 1`.
+#[test]
+fn ported_join_band_promotion_interpretation() {
+    let mono = Raster::new(1, 1, PixelFormat::Gray8, vec![7])
+        .unwrap()
+        .copy()
+        .interpretation(Interpretation::Bw)
+        .build();
+    let colour = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+
+    let im = mono.join(&colour, JoinDirection::Horizontal, true, None, None, None);
+    assert_eq!(im.interpretation(), Interpretation::Srgb);
+
+    let im = Raster::arrayjoin(&[&mono, &colour], None, None);
+    assert_eq!(im.interpretation(), Interpretation::Srgb);
 }

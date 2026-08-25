@@ -179,16 +179,67 @@ pub enum ConversionError {
         /// The name that was not recognised.
         name: String,
     },
-    /// The result dimensions would overflow `u32`.
+    /// The result dimensions would overflow `u32`. `arrayjoin` reports the
+    /// grid it was asked to build. [`Raster::join`] does not use this
+    /// variant: its canvas is sized inside the delegated
+    /// [`Raster::try_insert`], so an oversized canvas arrives as
+    /// [`ConversionError::Extract`] wrapping
+    /// [`crate::extract::ExtractError::SizeOverflow`], and an offset that
+    /// will not fit the placement is
+    /// [`ConversionError::PlacementOffsetOverflow`]. A caller that wants
+    /// every "this is too big" outcome from `join` has to match both.
     #[error("result size {width}x{height} exceeds u32::MAX")]
     SizeOverflow { width: u64, height: u64 },
-    /// The operation needs a float sample capability it does not have
-    /// yet. No conversion operation returns this since the float
-    /// [`PixelFormat`] variants landed; the variant is retained for API
-    /// stability and for later batches that grow float surface
-    /// incrementally.
-    #[error("{op} requires a float sample format it does not support yet")]
-    FloatFormatUnsupported { op: &'static str },
+    /// A `shim` above the maximum libvips accepts. `join.c` declares the
+    /// property as `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so
+    /// GObject refuses `vips join --shim 1000001` before the operation
+    /// runs at all. Widening the argument to `u32` here carried the lower
+    /// bound into the type but not the upper one, so the upper bound is
+    /// checked instead: without it a single argument asks for a canvas of
+    /// several gigabytes out of two tiny inputs.
+    #[error("shim must be at most {max}, got {shim}")]
+    ShimTooLarge {
+        /// The `shim` that was asked for.
+        shim: u32,
+        /// The largest `shim` libvips accepts, `1000000`.
+        max: u32,
+    },
+    /// The offset [`Raster::join`] computed for the second image does not
+    /// fit the signed 32-bit range images are placed at (`join.c` does
+    /// this arithmetic in `int`, and [`Raster::try_insert`] takes `i32`
+    /// coordinates). With `shim` bounded by
+    /// [`ConversionError::ShimTooLarge`] only a large input *dimension*
+    /// reaches this, either directly (`w1 + shim` past `i32::MAX`) or
+    /// through a negative offset under [`Align::Centre`] / [`Align::High`],
+    /// where the second image reaching left of or above the first makes
+    /// the offset negative. Some offsets rejected here name a canvas that
+    /// would have fitted `u32` and the allocation budget; lifting that
+    /// needs the placement widened to `i64` end to end, which is its own
+    /// change.
+    #[error("join placement offset ({x}, {y}) does not fit i32")]
+    PlacementOffsetOverflow {
+        /// Horizontal offset of the second image from the first image's
+        /// origin, in pixels. Negative when the second image reaches left
+        /// of it.
+        x: i64,
+        /// Vertical offset of the second image from the first image's
+        /// origin, in pixels. Negative when the second image reaches above
+        /// it.
+        y: i64,
+    },
+    /// The operation was handed a float raster it cannot read yet.
+    /// [`Raster::try_join`] returns this instead of delegating into the
+    /// unsigned-only placement path, which reads samples as `u8` or `u16`
+    /// and panics on 4-byte ones. Float input is ordinary rather than
+    /// exotic here: every `colourspace` result for Lab, Lch, OkLab, OkLCh,
+    /// XYZ, scRGB and Yxy is a float raster, so `im.colourspace(Lab)` is
+    /// already one. Mirrors
+    /// [`crate::arithmetic::ArithmeticError::FloatUnsupported`].
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatFormatUnsupported {
+        /// The operation that was asked for.
+        op: &'static str,
+    },
     /// A delegated band operation failed.
     #[error(transparent)]
     Band(#[from] BandError),
@@ -629,6 +680,64 @@ fn remap(
     }
     out.meta = src.meta;
     Ok(out)
+}
+
+/// The largest `shim` [`Raster::join`] accepts, matching the libvips
+/// property bound: `join.c` declares `VIPS_ARG_INT(class, "shim", 5, ...,
+/// 0, 1000000, 0)`, and GObject refuses anything above it before the
+/// operation is even built.
+const JOIN_SHIM_MAX: u32 = 1_000_000;
+
+/// Where the second image sits relative to the first, in pixels from the
+/// first image's origin (`join.c:109-156`).
+///
+/// Every input is widened to `i64` first, so nothing here can wrap: the
+/// dimensions come from `u32` and `shim` is bounded by [`JOIN_SHIM_MAX`],
+/// which puts every intermediate under 2^33. The result is then range
+/// checked against the `i32` placement [`Raster::try_insert`] takes and
+/// libvips itself computes in.
+///
+/// [`Align::Centre`] is two separate truncating integer divisions,
+/// `in1 / 2 - in2 / 2`, NOT `(in1 - in2) / 2`: for 4 and 3 the C form gives
+/// 1 where the combined form gives 0. Under `Centre` and [`Align::High`]
+/// the offset goes negative when the second image is the larger one.
+///
+/// Split out of [`Raster::try_join`] so the range check is testable without
+/// building the multi-gigabyte input the real call would need to reach it.
+///
+/// # Errors
+///
+/// [`ConversionError::PlacementOffsetOverflow`] if the offset falls
+/// outside `i32`.
+fn join_placement(
+    (w1, h1): (i64, i64),
+    (w2, h2): (i64, i64),
+    direction: JoinDirection,
+    align: Align,
+    shim: i64,
+) -> Result<(i32, i32), ConversionError> {
+    let (x, y) = match direction {
+        JoinDirection::Horizontal => {
+            let y = match align {
+                Align::Low => 0,
+                Align::Centre => h1 / 2 - h2 / 2,
+                Align::High => h1 - h2,
+            };
+            (w1 + shim, y)
+        }
+        JoinDirection::Vertical => {
+            let x = match align {
+                Align::Low => 0,
+                Align::Centre => w1 / 2 - w2 / 2,
+                Align::High => w1 - w2,
+            };
+            (x, h1 + shim)
+        }
+    };
+    let (Ok(ix), Ok(iy)) = (i32::try_from(x), i32::try_from(y)) else {
+        return Err(ConversionError::PlacementOffsetOverflow { x, y });
+    };
+    Ok((ix, iy))
 }
 
 impl Raster {
@@ -1551,6 +1660,15 @@ impl Raster {
             }
         }
         out.meta = images[0].meta;
+        // Same re-stamp as `join`: `bandalike` can give the grid more bands
+        // than images[0] has, and images[0]'s interpretation then describes
+        // an image that no longer exists. `space_bands(Bw) == 1`, so a
+        // grid left tagged `b-w` reads downstream as grey plus passthrough
+        // extras. Drop the tag and let the getter infer from the format. A
+        // depth-only promotion keeps the tag, matching vips.
+        if out.bands() != images[0].bands() {
+            out.meta.interpretation = None;
+        }
         Ok(out)
     }
 
@@ -1564,9 +1682,11 @@ impl Raster {
     /// filled with black, libvips' default background. Band counts are
     /// aligned like libvips `bandalike` (a one-band image is replicated up
     /// to the widest count) and depths promote numerically to the widest
-    /// input. The result carries the metadata of the first image.
-    /// Panicking form of [`Raster::try_arrayjoin`], matching the
-    /// ported-test call surface.
+    /// input. The result carries the metadata of the first image, except
+    /// that a band promotion drops the interpretation so it is inferred
+    /// from the result format instead of describing the first image's
+    /// narrower band count. Panicking form of [`Raster::try_arrayjoin`],
+    /// matching the ported-test call surface.
     ///
     /// # Panics
     ///
@@ -1584,19 +1704,43 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// [`ConversionError::Extract`] wrapping the delegated
-    /// [`Raster::try_insert`] / [`Raster::try_extract_area`] failures:
-    /// [`crate::extract::ExtractError::BandCountMismatch`] when the band
-    /// counts differ and neither is 1,
-    /// [`crate::extract::ExtractError::BackgroundLengthMismatch`] for a
-    /// background vector whose length is neither 1 nor the result band
-    /// count, and
-    /// [`crate::extract::ExtractError::SizeOverflow`] if the joined
-    /// canvas would not fit `u32` dimensions.
-    /// [`ConversionError::SizeOverflow`] if a `shim` large enough pushes
-    /// the placement offset past the signed 32-bit range libvips itself
-    /// works in (`join.c` adds `int` to `int`).
-    /// [`ConversionError::Raster`] on allocation failure.
+    /// Checked here, before anything is placed or allocated:
+    ///
+    /// * [`ConversionError::FloatFormatUnsupported`] if either input is a
+    ///   float raster. The placement path underneath reads samples as `u8`
+    ///   or `u16` and panics on 4-byte ones, so a float input is rejected
+    ///   up front rather than delegated into a panic.
+    /// * [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`,
+    ///   the bound libvips declares on the property.
+    /// * [`ConversionError::PlacementOffsetOverflow`] if the offset the
+    ///   second image would sit at falls outside `i32`, the range libvips
+    ///   places images in.
+    ///
+    /// Delegated to [`Raster::try_insert`], arriving as
+    /// [`ConversionError::Extract`]:
+    ///
+    /// * [`crate::extract::ExtractError::BandCountMismatch`] when the band
+    ///   counts differ and neither is 1.
+    /// * [`crate::extract::ExtractError::BackgroundLengthMismatch`] for a
+    ///   background vector whose length is neither 1 nor the result band
+    ///   count.
+    /// * [`crate::extract::ExtractError::SizeOverflow`] if the joined
+    ///   canvas would not fit `u32` dimensions.
+    /// * [`crate::extract::ExtractError::Raster`] on allocation failure,
+    ///   including [`crate::raster::RasterError::ByteBudgetExceeded`] for a
+    ///   canvas that fits `u32` but not the allocation budget. Note this is
+    ///   nested inside [`ConversionError::Extract`]; `try_join` never
+    ///   constructs [`ConversionError::Raster`] itself.
+    ///
+    /// Delegated to [`Raster::try_extract_area`] for the `expand`-false
+    /// crop, also arriving as [`ConversionError::Extract`]:
+    ///
+    /// * [`crate::extract::ExtractError::EmptyArea`] if the crop would be
+    ///   zero-sized, and
+    ///   [`crate::extract::ExtractError::AreaOutOfBounds`] if it would
+    ///   leave the canvas. Neither is reachable through `join` as the
+    ///   placement is computed today; they are listed because the crop can
+    ///   raise them and a `#[non_exhaustive]` match should expect them.
     pub fn try_join(
         &self,
         other: &Raster,
@@ -1606,42 +1750,34 @@ impl Raster {
         background: Option<&[f64]>,
         align: Option<Align>,
     ) -> Result<Raster, ConversionError> {
+        // The placement path (`insert` -> `blit`) is unsigned-only and
+        // panics on 4-byte samples. Float input is not exotic: `space_depth`
+        // maps every one of Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to
+        // F32, so `im.colourspace(Lab).join(..)` arrives here as float.
+        // Reject it as a typed error rather than delegating into a panic
+        // from a fallible method.
+        if self.format().is_float() || other.format().is_float() {
+            return Err(ConversionError::FloatFormatUnsupported { op: "join" });
+        }
         let align = align.unwrap_or(Align::Low);
-        let shim = i64::from(shim.unwrap_or(0));
+        let shim = shim.unwrap_or(0);
+        // libvips carries this bound in the property declaration, so
+        // `vips join --shim 1000001` never reaches the operation. Widening
+        // to `u32` kept the lower bound and dropped the upper one, and
+        // without it one argument buys a multi-gigabyte canvas out of two
+        // 3x2 inputs, each raster staying under the per-raster budget.
+        if shim > JOIN_SHIM_MAX {
+            return Err(ConversionError::ShimTooLarge {
+                shim,
+                max: JOIN_SHIM_MAX,
+            });
+        }
+        let shim = i64::from(shim);
         let (w1, h1) = (i64::from(self.width()), i64::from(self.height()));
         let (w2, h2) = (i64::from(other.width()), i64::from(other.height()));
 
-        // join.c:109-156. CENTRE is two separate truncating integer
-        // divisions, `in1 / 2 - in2 / 2`, NOT `(in1 - in2) / 2`: for 4 and
-        // 3 the C form gives 1 where the combined form gives 0. Under
-        // CENTRE and HIGH the offset goes negative when the second image
-        // is the larger one.
-        let (x, y) = match direction {
-            JoinDirection::Horizontal => {
-                let y = match align {
-                    Align::Low => 0,
-                    Align::Centre => h1 / 2 - h2 / 2,
-                    Align::High => h1 - h2,
-                };
-                (w1 + shim, y)
-            }
-            JoinDirection::Vertical => {
-                let x = match align {
-                    Align::Low => 0,
-                    Align::Centre => w1 / 2 - w2 / 2,
-                    Align::High => w1 - w2,
-                };
-                (x, h1 + shim)
-            }
-        };
-        let (Ok(ix), Ok(iy)) = (i32::try_from(x), i32::try_from(y)) else {
-            // Only a shim wider than 2^31 reaches this; report the canvas
-            // the placement asked for.
-            return Err(ConversionError::SizeOverflow {
-                width: (w1.max(x + w2) - x.min(0)) as u64,
-                height: (h1.max(y + h2) - y.min(0)) as u64,
-            });
-        };
+        let (ix, iy) = join_placement((w1, h1), (w2, h2), direction, align, shim)?;
+        let (x, y) = (i64::from(ix), i64::from(iy));
 
         // join.c:158-162: the insert ALWAYS expands, whatever the caller
         // asked for, so nothing is lost before the crop below decides.
@@ -1663,20 +1799,39 @@ impl Raster {
             }
         };
         out.meta = self.meta;
+        // libvips `bandalike` promotes a one-band input up to the other's
+        // band count, so the result can have more bands than in1 has. in1's
+        // interpretation then describes an image that no longer exists:
+        // `vips join` of 1-band `b-w` with 3-band `srgb` reports `3 bands,
+        // srgb`, and keeping `b-w` here is not cosmetic, since
+        // `space_bands(Bw) == 1` makes a later `colourspace` read two of the
+        // three bands as passthrough extras and hand back 5 bands of
+        // garbage. Drop the tag so the getter infers one from the format
+        // instead, the same re-stamp `composite2` does for the same reason.
+        // A depth-only promotion is left alone on purpose: vips keeps `b-w`
+        // when joining `b-w` uchar with `grey16`, so the trigger is
+        // specifically the band count changing.
+        if out.bands() != self.bands() {
+            out.meta.interpretation = None;
+        }
         Ok(out)
     }
 
     /// Join this image and `other` left-right or top-bottom (libvips
     /// `vips_join`).
     ///
-    /// `shim` is the gap in pixels between the two (default 0) and
-    /// `align` says which edge they line up on (default [`Align::Low`]).
-    /// With `expand` false the result is cropped back to the smaller of
-    /// the two along the shared axis, which is libvips' default; with
-    /// `expand` true it is the bounding box of both, and `background`
-    /// (black when `None`) fills whatever neither image covers, including
-    /// the shim gap. Band counts and depths unify exactly as
-    /// [`Raster::insert`] does. The result carries this image's metadata.
+    /// `shim` is the gap in pixels between the two (default 0, maximum
+    /// `1000000` as in libvips) and `align` says which edge they line up on
+    /// (default [`Align::Low`]). With `expand` false the result is cropped
+    /// back to the smaller of the two along the shared axis, which is
+    /// libvips' default; with `expand` true it is the bounding box of both,
+    /// and `background` (black when `None`) fills whatever neither image
+    /// covers, including the shim gap. Band counts and depths unify exactly
+    /// as [`Raster::insert`] does. The result carries this image's
+    /// metadata, except that a band promotion drops the interpretation so
+    /// it is inferred from the result format rather than describing this
+    /// image's narrower band count. Float rasters are not supported yet on
+    /// either side.
     ///
     /// # Panics
     ///
@@ -3208,6 +3363,48 @@ mod tests {
         let b = gray8(1, 1, vec![2]);
         assert_eq!(Raster::arrayjoin(&[&a, &b], None, None).xres(), 11.0);
     }
+
+    /**
+     * Tests that a band-promoting grid does not keep the first image's
+     * interpretation, which no longer describes the band count.
+     * `vips arrayjoin "gbw.v csrgb.v" out.v` reports `6x3 uchar, 3 bands,
+     * srgb`; keeping `b-w` here matters because `space_bands(Bw) == 1`, so
+     * a later colourspace conversion reads two of the three bands as
+     * passthrough extras.
+     * Works by tagging the mono input explicitly, the way a decoder tags
+     * one, then reading the tag back off the grid.
+     * Input: Gray8 1x1 tagged `Bw` + Rgb8 1x1 -> Rgb8 grid tagged `Srgb`.
+     */
+    #[test]
+    fn arrayjoin_band_promotion_drops_the_first_images_tag() {
+        let mono = gray8(1, 1, vec![1])
+            .copy()
+            .interpretation(Interpretation::Bw)
+            .build();
+        let colour = rgb8(1, 1, vec![10, 20, 30]);
+        let out = Raster::arrayjoin(&[&mono, &colour], None, None);
+        assert_eq!(out.format(), PixelFormat::Rgb8);
+        assert_eq!(out.interpretation(), Interpretation::Srgb);
+    }
+
+    /**
+     * Tests that a depth-only promotion keeps the tag, the complement of
+     * the band-promotion case. `vips arrayjoin "gbw.v g16.v" out.v` reports
+     * `ushort, 1 band, b-w`, so the re-stamp must key off the band count
+     * and nothing else.
+     * Input: Gray8 1x1 tagged `Bw` + Gray16 1x1 -> Gray16 grid still `Bw`.
+     */
+    #[test]
+    fn arrayjoin_depth_promotion_keeps_the_first_images_tag() {
+        let mono = gray8(1, 1, vec![1])
+            .copy()
+            .interpretation(Interpretation::Bw)
+            .build();
+        let wide = gray16(1, 1, &[300]);
+        let out = Raster::arrayjoin(&[&mono, &wide], None, None);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!(out.interpretation(), Interpretation::Bw);
+    }
     // ------------------------------------------------------------------
     // join
     // ------------------------------------------------------------------
@@ -3544,7 +3741,14 @@ mod tests {
      * Tests that band alignment comes through from `insert`: a one-band
      * image joined with a three-band one gives three bands, the mono
      * samples replicated, and a three-value background is used per band.
-     * Input: Gray8 3x2 + Rgb8 2x3 horizontal, expand, background [1,2,3].
+     * Also tests that the promotion does not carry the first image's
+     * interpretation onto a band count it no longer describes: `vips join
+     * gbw.v csrgb.v out.v horizontal` reports `5x2 uchar, 3 bands, srgb`,
+     * not `b-w`. The first image is tagged explicitly, the way a decoder
+     * tags one, since an untagged Gray8 already infers `Bw` and would not
+     * discriminate.
+     * Input: Gray8 3x2 tagged `Bw` + Rgb8 2x3 horizontal, expand,
+     * background [1,2,3].
      */
     #[test]
     fn join_band_promotion_mono_and_colour() {
@@ -3556,7 +3760,9 @@ mod tests {
             ],
         );
         let bg = [1.0, 2.0, 3.0];
-        let out = join_a().join(
+        let mono = join_a().copy().interpretation(Interpretation::Bw).build();
+        assert_eq!(mono.interpretation(), Interpretation::Bw);
+        let out = mono.join(
             &colour,
             JoinDirection::Horizontal,
             true,
@@ -3570,22 +3776,30 @@ mod tests {
         assert_eq!(out.getpoint(3, 0), vec![10.0, 11.0, 12.0]);
         assert_eq!(out.getpoint(0, 2), vec![1.0, 2.0, 3.0]);
         assert_eq!(out.getpoint(4, 2), vec![60.0, 61.0, 62.0]);
+        assert_eq!(out.interpretation(), Interpretation::Srgb);
     }
 
     /**
      * Tests depth promotion: an 8-bit image joined with a 16-bit one
-     * gives 16-bit samples with the numbers unchanged.
-     * Input: Gray8 3x2 + Gray16 2x3 horizontal, expand -> Gray16 5x3.
+     * gives 16-bit samples with the numbers unchanged, and keeps the first
+     * image's interpretation. `vips join` of a `b-w` uchar with a `grey16`
+     * reports `b-w`, so a depth-only promotion must NOT trigger the
+     * re-stamp that a band promotion does: the trigger is the band count
+     * changing, nothing else.
+     * Input: Gray8 3x2 tagged `Bw` + Gray16 2x3 horizontal, expand ->
+     * Gray16 5x3 still tagged `Bw`.
      */
     #[test]
     fn join_depth_promotion_8_and_16_bit() {
         let wide = gray16(2, 3, &[10, 20, 30, 40, 50, 60]);
-        let out = join_a().join(&wide, JoinDirection::Horizontal, true, None, None, None);
+        let base = join_a().copy().interpretation(Interpretation::Bw).build();
+        let out = base.join(&wide, JoinDirection::Horizontal, true, None, None, None);
         assert_eq!(out.format(), PixelFormat::Gray16);
         assert_eq!((out.width(), out.height()), (5, 3));
         assert_eq!(out.getpoint(0, 0), vec![1.0]);
         assert_eq!(out.getpoint(4, 2), vec![60.0]);
         assert_eq!(out.getpoint(0, 2), vec![0.0]);
+        assert_eq!(out.interpretation(), Interpretation::Bw);
     }
 
     /**
@@ -3622,6 +3836,146 @@ mod tests {
             None,
         );
         assert_eq!(out.xres(), 11.0);
+    }
+
+    /**
+     * Tests that a float input comes back as a typed error rather than
+     * panicking out of a fallible method. The placement path underneath
+     * reads samples as u8 or u16 and panics on 4-byte ones, and float input
+     * is ordinary here: `space_depth` maps Lab, Lch, OkLab, OkLCh, XYZ,
+     * scRGB and Yxy all to F32, so `im.colourspace(Lab).join(..)` is a
+     * float join. Works by joining against the float `grey` ramp in each
+     * operand position.
+     * Input: FloatF32 2x2 ramp on either side of a Gray8 3x2.
+     */
+    #[test]
+    fn try_join_float_input_is_a_typed_error_not_a_panic() {
+        let ramp = Raster::grey(2, 2, false);
+        assert!(ramp.format().is_float());
+        for (a, b) in [(&ramp, &join_a()), (&join_a(), &ramp)] {
+            assert!(matches!(
+                a.try_join(b, JoinDirection::Horizontal, false, None, None, None),
+                Err(ConversionError::FloatFormatUnsupported { op: "join" })
+            ));
+        }
+    }
+
+    /**
+     * Tests the libvips bound on `shim`. `join.c` declares the property as
+     * `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, and the binary
+     * refuses `vips join a.v c.v out.v horizontal --shim 1000001` at the
+     * property boundary. Without the check one argument buys a
+     * multi-gigabyte canvas out of two tiny inputs, each raster still under
+     * the per-raster allocation budget so the budget never fires.
+     * Works by asserting the typed error one past the bound, which costs no
+     * allocation at all.
+     * Input: 3x2 + 2x3, shim 1000001.
+     */
+    #[test]
+    fn try_join_shim_above_the_vips_maximum_is_rejected() {
+        assert!(matches!(
+            join_a().try_join(
+                &join_c(),
+                JoinDirection::Horizontal,
+                false,
+                Some(1_000_001),
+                None,
+                None,
+            ),
+            Err(ConversionError::ShimTooLarge {
+                shim: 1_000_001,
+                max: 1_000_000
+            })
+        ));
+        // And well past it, where the old code allocated 6.44 GB.
+        assert!(matches!(
+            join_a().try_join(
+                &join_c(),
+                JoinDirection::Horizontal,
+                false,
+                Some(2_147_483_644),
+                None,
+                None,
+            ),
+            Err(ConversionError::ShimTooLarge { .. })
+        ));
+    }
+
+    /**
+     * Tests that the bound is inclusive, so the check is off by nothing:
+     * `vips join a.v c.v out.v horizontal --shim 1000000` succeeds and
+     * reports `1000005x2 uchar`.
+     * Input: 3x2 + 2x3, shim 1000000 -> 1000005x2.
+     */
+    #[test]
+    fn join_shim_at_the_vips_maximum_is_accepted() {
+        let out = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            Some(1_000_000),
+            None,
+            None,
+        );
+        assert_eq!((out.width(), out.height()), (1_000_005, 2));
+    }
+
+    /**
+     * Tests the placement range check and what it reports. `join.c` does
+     * its offset arithmetic in `int` and `insert` takes `i32`, so an offset
+     * outside that range cannot be placed. The error names the offset that
+     * did not fit, not a result size: the old message reported
+     * `result size 2147483650x3 exceeds u32::MAX` for a value comfortably
+     * under `u32::MAX`, which was simply false.
+     * Tested on the placement helper rather than through `try_join`,
+     * because reaching it through the real call needs a 3 GB input now that
+     * `shim` is bounded; the helper is what `try_join` calls, unchanged.
+     * Input: 1x1 joined vertically with 3000000000x1 on align high, where
+     * `x = 1 - 3e9` falls below `i32::MIN` even though the canvas would fit
+     * `u32` and the allocation budget.
+     */
+    #[test]
+    fn join_placement_offset_outside_i32_is_typed_and_honest() {
+        assert!(matches!(
+            join_placement(
+                (1, 1),
+                (3_000_000_000, 1),
+                JoinDirection::Vertical,
+                Align::High,
+                0,
+            ),
+            Err(ConversionError::PlacementOffsetOverflow {
+                x: -2_999_999_999,
+                y: 1
+            })
+        ));
+        // Above i32::MAX as well, from a wide first image plus a shim.
+        assert!(matches!(
+            join_placement(
+                (4_000_000_000, 1),
+                (1, 1),
+                JoinDirection::Horizontal,
+                Align::Low,
+                1_000_000,
+            ),
+            Err(ConversionError::PlacementOffsetOverflow {
+                x: 4_001_000_000,
+                y: 0
+            })
+        ));
+        // The message names the offset, and nothing else.
+        let e = join_placement(
+            (1, 1),
+            (3_000_000_000, 1),
+            JoinDirection::Vertical,
+            Align::High,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "join placement offset (-2999999999, 1) does not fit i32"
+        );
     }
 
     /**

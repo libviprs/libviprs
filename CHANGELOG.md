@@ -41,6 +41,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `ConversionError::UnknownAlign`. `ConversionError`, `JoinDirection` and
   `Align` are all `#[non_exhaustive]`.
 
+  Three things are refused up front rather than delegated. A float raster on
+  either side is `ConversionError::FloatFormatUnsupported`, because the
+  placement path underneath reads samples as `u8` or `u16` and panics on
+  4-byte ones; that is not an exotic input, since every `colourspace` result
+  for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is a float raster, so
+  `im.colourspace(Lab).join(&other, ..)` would otherwise panic out of a
+  fallible method. A `shim` above `1000000` is
+  `ConversionError::ShimTooLarge`, matching the bound libvips declares on the
+  property (`VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so
+  `vips join --shim 1000001` is refused before the operation runs). Widening
+  the argument to `u32` had carried the lower bound into the type and dropped
+  the upper one, and without the check `shim = 2147483644` on a 3x2 and a 2x3
+  asks for a 6.44 GB canvas, each raster still under the per-raster
+  allocation budget so the budget never fires. An offset outside `i32`, the
+  range libvips places images in, is
+  `ConversionError::PlacementOffsetOverflow`, and it reports the offset
+  `(x, y)` that did not fit rather than a result size. Note that a `join`
+  canvas too large for `u32` still arrives as
+  `ConversionError::Extract(ExtractError::SizeOverflow)`, so a caller that
+  wants every "too big" outcome matches both.
+
+  A band-promoting join drops the first image's interpretation instead of
+  copying it onto a result it no longer describes. `vips join` of a 1-band
+  `b-w` with a 3-band `srgb` reports `3 bands, srgb`, and keeping `b-w` is
+  not cosmetic: `space_bands(Bw) == 1`, so a later `colourspace(Lab)` reads
+  two of the three bands as passthrough extras and hands back 5 bands instead
+  of 3. Dropping the tag lets the getter infer one from the result format,
+  the same re-stamp `composite2` already does for the same reason. A
+  depth-only promotion keeps the tag, matching `vips join` of `b-w` uchar
+  with `grey16`, which still reports `b-w`.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
@@ -132,6 +163,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `Raster::arrayjoin` no longer tags a band-promoted grid with the first
+  image's interpretation (issue #551). `bandalike` promotes a one-band input
+  up to the widest band count in the list, so a grid built from a 1-band
+  `b-w` and a 3-band `srgb` has 3 bands while the copied tag still says
+  `b-w`. `vips arrayjoin` reports `srgb` for that pair. The mis-tag is not
+  cosmetic, since `space_bands(Bw) == 1`: a later colourspace conversion
+  reads bands 1 and 2 of the grid as passthrough extras rather than colour,
+  and returns a different band count with different numbers in it. The tag is
+  now cleared whenever the grid's band count differs from the first image's,
+  which lets the getter infer one from the result format. A depth-only
+  promotion still keeps the tag, matching `vips arrayjoin` of `b-w` uchar
+  with `grey16`. Nothing changes for a grid whose inputs all already share a
+  band count, which is the common case.
 
 - A `.v` written by real vips and tagged `OkLab` or `OkLch` now reads back with
   that tag instead of falling through to format inference and reporting
