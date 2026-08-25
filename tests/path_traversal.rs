@@ -135,26 +135,106 @@ fn svg_referencing(href: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// An href that certainly exists and is readable, one that certainly does
-/// not, and a relative traversal, must all be indistinguishable in the
-/// rendered output. Any difference is an existence oracle.
+/// Write a real SVG to disk that paints solid magenta. This is the payload
+/// the leak would surface: `load_sub_svg` re-parses a referenced SVG without
+/// needing any raster-decoding feature, so if the resolver reads the file its
+/// colour lands in the output pixels.
+#[cfg(feature = "svg")]
+fn write_readable_svg(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("secret.svg");
+    fs::write(
+        &path,
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff00ff"/></svg>"##,
+    )
+    .unwrap();
+    path
+}
+
+/// The strongest form of the leak: an href pointing at a readable file whose
+/// contents the resolver can parse. With usvg's stock resolver the file is
+/// read off disk and its magenta fills the output; with the lockdown the
+/// render stays empty.
+///
+/// This is the test that actually discriminates. Pointing an href at
+/// `/etc/passwd` does *not*: it is not a parseable image, so the stock
+/// resolver returns `None` for it too and a test built on it passes either
+/// way. Measured, not assumed.
+#[test]
+#[cfg(feature = "svg")]
+fn svg_image_href_does_not_read_a_readable_file_off_disk() {
+    use libviprs::{SvgOptions, decode_svg};
+
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write_readable_svg(dir.path());
+
+    let im = decode_svg(
+        &svg_referencing(&secret.display().to_string()),
+        SvgOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        im.data().iter().all(|&b| b == 0),
+        "the resolver must not read {} off disk; found non-zero pixels",
+        secret.display()
+    );
+}
+
+/// The same leak reached by traversal rather than by absolute path. The
+/// working directory during a test run is the crate root, so a relative href
+/// climbs out of it to find the file.
+#[test]
+#[cfg(feature = "svg")]
+fn svg_image_href_does_not_follow_a_relative_traversal_off_disk() {
+    use libviprs::{SvgOptions, decode_svg};
+
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write_readable_svg(dir.path());
+
+    // Build a path that is relative to the process working directory and
+    // still lands on the file, which is what an attacker gets when
+    // `resources_dir` is `None`.
+    let cwd = std::env::current_dir().unwrap();
+    let mut rel = std::path::PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        rel.push("..");
+    }
+    let traversal = rel.join(secret.strip_prefix("/").unwrap_or(&secret));
+
+    let im = decode_svg(
+        &svg_referencing(&traversal.display().to_string()),
+        SvgOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        im.data().iter().all(|&b| b == 0),
+        "a relative traversal must not reach {}",
+        secret.display()
+    );
+}
+
+/// An href that resolves to a readable, parseable file and one that cannot
+/// exist must be indistinguishable in the output. Any difference is an
+/// existence oracle.
 #[test]
 #[cfg(feature = "svg")]
 fn svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one() {
     use libviprs::{SvgOptions, decode_svg};
 
-    let existing = decode_svg(&svg_referencing("/etc/passwd"), SvgOptions::default())
-        .expect("the document itself is valid; only the href is refused");
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write_readable_svg(dir.path());
+
+    let existing = decode_svg(
+        &svg_referencing(&secret.display().to_string()),
+        SvgOptions::default(),
+    )
+    .expect("the document itself is valid; only the href is refused");
     let missing = decode_svg(
-        &svg_referencing("/nonexistent/libviprs-502-not-a-real-path/passwd"),
+        &svg_referencing("/nonexistent/libviprs-502-not-a-real-path/secret.svg"),
         SvgOptions::default(),
     )
     .expect("the document itself is valid; only the href is refused");
-    let traversal = decode_svg(
-        &svg_referencing("../../../../../../etc/passwd"),
-        SvgOptions::default(),
-    )
-    .expect("the document itself is valid; only the href is refused");
+    let unreadable = decode_svg(&svg_referencing("/etc/passwd"), SvgOptions::default())
+        .expect("the document itself is valid; only the href is refused");
 
     assert_eq!(
         existing.data(),
@@ -163,8 +243,8 @@ fn svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one() {
     );
     assert_eq!(
         existing.data(),
-        traversal.data(),
-        "a relative traversal must render identically to a missing path"
+        unreadable.data(),
+        "an href that exists but is not an image must be indistinguishable too"
     );
     assert_eq!(
         (existing.width(), existing.height()),
@@ -181,40 +261,16 @@ fn svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one() {
 fn svg_image_href_renders_nothing_at_all() {
     use libviprs::{SvgOptions, decode_svg};
 
-    let im = decode_svg(&svg_referencing("/etc/passwd"), SvgOptions::default()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write_readable_svg(dir.path());
+    let im = decode_svg(
+        &svg_referencing(&secret.display().to_string()),
+        SvgOptions::default(),
+    )
+    .unwrap();
     assert!(
         im.data().iter().all(|&b| b == 0),
         "a refused href must leave a fully transparent raster, not partial content"
-    );
-}
-
-/// A real, readable image on disk is the strongest form of the leak: with the
-/// stock resolver its pixels appear in the output. Point an href at a PNG
-/// this test just wrote and assert the render stays empty.
-#[test]
-#[cfg(feature = "svg")]
-fn svg_image_href_does_not_read_a_readable_image_off_disk() {
-    use libviprs::{SvgOptions, decode_svg};
-
-    let dir = tempfile::tempdir().unwrap();
-    let secret = dir.path().join("secret.png");
-    // A 1x1 opaque magenta PNG. If the resolver reads it, the 8x8 output is
-    // filled with magenta instead of staying transparent.
-    let png: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
-        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8,
-        0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x0B, 0x02, 0xA0, 0x9C, 0x99, 0x2F, 0x38, 0x00, 0x00,
-        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
-    fs::write(&secret, png).unwrap();
-
-    let doc = svg_referencing(&secret.display().to_string());
-    let im = decode_svg(&doc, SvgOptions::default()).unwrap();
-    assert!(
-        im.data().iter().all(|&b| b == 0),
-        "the resolver must not read {} off disk",
-        secret.display()
     );
 }
 

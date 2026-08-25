@@ -215,7 +215,6 @@ pub use histogram::HistogramError;
 // the same reason the deferred foreign free functions are re-exported above.
 // `SvgOptions` travels with it so a caller never has to name the module path
 // just to build the argument.
-pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
 pub use imageio::{
     MetadataError, MetadataValue, SaveError, ThumbnailGeometry, parse_thumbnail_geometry, tokenize,
 };
@@ -275,6 +274,7 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
+pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root

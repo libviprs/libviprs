@@ -82,9 +82,15 @@
 //!   Helvetica while libviprs finds Vera. Two shapers, two rasterisers, two
 //!   font sets: **text-bearing SVGs do not match the oracle and no amount of
 //!   work in this module changes that.** Text is wired to the bundled face
-//!   so it renders deterministically instead of rendering as nothing, and
-//!   issue #587 characterises how far off it lands. Do not build a parity
-//!   expectation on it.
+//!   so it renders deterministically instead of rendering as nothing rather
+//!   than to chase a match. Measured on a 120x40 document reading "Hello" at
+//!   `font-size="24"`, `font-family="Helvetica"`, against
+//!   `vips svgload` 8.18.4: **12.8% of pixels differ** (612 of 4800), the
+//!   maximum channel delta is the full **255**, and the inked run is 6 px
+//!   wider, spanning columns 6-63 where vips spans 6-57 and rows 10-27 where
+//!   vips spans 11-27. The advance width moves, so the divergence is
+//!   layout-level and not an antialiasing tolerance you can widen your way
+//!   past. Do not build a parity expectation on it.
 //! * **Format sniffing.** SVG is not in the [`crate::source`] route table
 //!   and is not auto-detected by [`decode_bytes`](crate::source::decode_bytes).
 //!   SVG has no fixed leading magic: librsvg's `is_a` decompresses a
@@ -223,11 +229,153 @@ pub fn decode_svg_with_limits(
     options: SvgOptions,
     limits: DecodeLimits,
 ) -> Result<Raster, DecodeError> {
+    rasterise(data, options, limits)
+}
+
+/// The `svg`-feature-off body: the same typed `Unsupported` the deferred
+/// foreign decoders in [`crate::foreign_stubs`] report, so a caller compiled
+/// either way sees one signature and one error type.
+#[cfg(not(feature = "svg"))]
+fn rasterise(
+    data: &[u8],
+    options: SvgOptions,
+    limits: DecodeLimits,
+) -> Result<Raster, DecodeError> {
     let _ = (data, options, limits);
     Err(DecodeError::Io(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "SVG rasterisation is not available in this build",
+        "SVG rasterisation is not available in this build \
+         (enable the `svg` feature)",
     )))
+}
+
+/// The family name of the bundled face, as it appears in `Vera.ttf`'s name
+/// table. Every generic CSS family is pointed at it, so a document asking
+/// for `sans-serif`, for `Helvetica`, or for nothing at all resolves to the
+/// one face this crate ships rather than to whatever is installed.
+#[cfg(feature = "svg")]
+const BUNDLED_FAMILY: &str = "Bitstream Vera Sans";
+
+/// Round like libvips' `VIPS_ROUND_UINT`, which is `(int)(R + 0.5)`
+/// (`include/vips/util.h:92`): round-half-up on a non-negative value.
+///
+/// The cast saturates rather than wrapping, so a document declaring an
+/// absurd width arrives at [`DecodeLimits::check_coord`] as a large number
+/// and is refused there, instead of wrapping into a small one that would
+/// pass. A non-finite value casts to 0 and is refused as a zero-sized image.
+#[cfg(feature = "svg")]
+fn round_uint(v: f64) -> u32 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0;
+    }
+    (v + 0.5) as u32
+}
+
+/// Build the `usvg` parse options for one decode.
+///
+/// Two things here are security decisions and not tuning:
+///
+/// * `image_href_resolver` has **both** halves replaced with closures that
+///   return `None`. The stock `resolve_string` calls `Path::exists` and then
+///   `fs::read` on the href (`usvg-0.48.1/src/parser/image.rs:85-110`), which
+///   is an arbitrary read plus an existence oracle on untrusted input. The
+///   data half is closed too, because an `image/svg+xml` payload re-enters
+///   the parser and there is no reason to keep that door open when nothing
+///   can be rendered through it anyway.
+/// * `resources_dir` is pinned to `None`. It is already the default, and
+///   with the resolver closed it cannot matter, but a future edit that
+///   restores a resolver should have to consciously re-open this too.
+#[cfg(feature = "svg")]
+fn parse_options(dpi: f64) -> resvg::usvg::Options<'static> {
+    let mut opts = resvg::usvg::Options {
+        // Never resolve an href against a directory.
+        resources_dir: None,
+        // usvg uses this for CSS unit conversion exactly where librsvg uses
+        // `rsvg_handle_set_dpi` (`svgload.c:561`), which is what makes the
+        // physical-unit behaviour agree.
+        dpi: dpi as f32,
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_mime, _data, _opts| None),
+            resolve_string: Box::new(|_href, _opts| None),
+        },
+        // libvips' SVG loader inherits librsvg's 12pt default font size, and
+        // usvg defaults to the same 12.0, so this is left alone.
+        ..Default::default()
+    };
+    opts.font_family = BUNDLED_FAMILY.to_string();
+    let db = opts.fontdb_mut();
+    db.load_font_data(crate::create::VERA_TTF.to_vec());
+    db.set_serif_family(BUNDLED_FAMILY);
+    db.set_sans_serif_family(BUNDLED_FAMILY);
+    db.set_cursive_family(BUNDLED_FAMILY);
+    db.set_fantasy_family(BUNDLED_FAMILY);
+    db.set_monospace_family(BUNDLED_FAMILY);
+    opts
+}
+
+/// The real rasteriser.
+///
+/// Order matters: the input gate runs before the parse, the geometry is
+/// resolved and bounded before the pixmap is allocated, and the demultiply
+/// runs on the way out. Nothing allocates on the untrusted geometry until
+/// [`DecodeLimits`] has agreed to it.
+#[cfg(feature = "svg")]
+fn rasterise(
+    data: &[u8],
+    options: SvgOptions,
+    limits: DecodeLimits,
+) -> Result<Raster, DecodeError> {
+    if !options.unlimited && data.len() > MAX_INPUT_BYTES {
+        return Err(DecodeError::SvgInputTooLarge {
+            bytes: data.len(),
+            max_bytes: MAX_INPUT_BYTES,
+        });
+    }
+
+    let opts = parse_options(options.dpi);
+    let tree = resvg::usvg::Tree::from_data(data, &opts).map_err(|e| DecodeError::SvgParse {
+        message: e.to_string(),
+    })?;
+
+    // `svgload.c:362`. Both knobs multiply in; only `dpi` reaches the
+    // resolution below.
+    let total_scale = options.scale * options.dpi / 72.0;
+    let natural = tree.size();
+    let width = round_uint(f64::from(natural.width()) * total_scale);
+    let height = round_uint(f64::from(natural.height()) * total_scale);
+    if width == 0 || height == 0 {
+        // vips bails out here with "zero-sized image" (`svgload.c:588`).
+        return Err(DecodeError::SvgZeroSize { width, height });
+    }
+    // Bound the *scaled* geometry before anything is allocated. This is the
+    // ceiling that actually matters for SVG, because the input can be tiny
+    // and the output enormous, and `SvgOptions::unlimited` deliberately does
+    // not lift it.
+    limits.check_coord(width, height)?;
+    limits.check_pixels(width, height)?;
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
+        DecodeError::DimensionLimitExceeded {
+            width,
+            height,
+            max_pixels: limits.max_pixels,
+        }
+    })?;
+    #[allow(clippy::cast_possible_truncation)]
+    let t = resvg::tiny_skia::Transform::from_scale(total_scale as f32, total_scale as f32);
+    resvg::render(&tree, t, &mut pixmap.as_mut());
+
+    // tiny-skia renders premultiplied, and vips unpremultiplies every cairo
+    // row on the way out (`svgload.c:733`, `vips__premultiplied_bgra2rgba`).
+    // tiny-skia is already RGBA rather than BGRA, so only the unpremultiply
+    // half of that pass is needed.
+    let pixels = pixmap.take_demultiplied();
+    let mut raster = Raster::new(width, height, crate::pixel::PixelFormat::Rgba8, pixels)?;
+    // vips stores pixels per millimetre (`svgload.c:593`).
+    let res = options.dpi / 25.4;
+    raster.meta.xres = res;
+    raster.meta.yres = res;
+    Ok(raster)
 }
 
 #[cfg(test)]
@@ -237,12 +385,16 @@ mod tests {
     /// A 10x6 document with an explicit pixel size and one opaque red rect.
     const RED_10X6: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><rect x="0" y="0" width="10" height="6" fill="#ff0000"/></svg>"##;
     /// A document with only a `viewBox` and no width/height.
+    #[cfg(feature = "svg")]
     const VIEWBOX_20X10: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"><rect x="0" y="0" width="20" height="10" fill="#00ff00"/></svg>"##;
     /// Fractional pixel dimensions, to pin the rounding rule.
+    #[cfg(feature = "svg")]
     const FRACTIONAL: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10.4" height="6.6"><rect width="10" height="6" fill="#123456"/></svg>"##;
     /// Physical (millimetre) dimensions, to pin the double DPI application.
+    #[cfg(feature = "svg")]
     const MILLIMETRES: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"><rect width="10" height="5" fill="#0000ff"/></svg>"##;
     /// Half-opacity red over the left half of a 4x2 document.
+    #[cfg(feature = "svg")]
     const HALF_ALPHA: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect x="0" y="0" width="2" height="2" fill="#ff0000" fill-opacity="0.5"/></svg>"##;
 
     /// Read the RGBA sample at `(x, y)` out of an `Rgba8` raster.
@@ -617,7 +769,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, DecodeError::SvgZeroSize { width: 0, height: 0 }),
+            matches!(
+                err,
+                DecodeError::SvgZeroSize {
+                    width: 0,
+                    height: 0
+                }
+            ),
             "expected SvgZeroSize, got {err:?}"
         );
     }
@@ -659,7 +817,13 @@ mod tests {
         let doc = br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="20"><text x="2" y="15" font-size="14" fill="#000000">Hi</text></svg>"##;
         let im = decode_svg(doc, SvgOptions::default()).unwrap();
         assert_eq!((im.width(), im.height()), (60, 20));
-        let inked = im.data().chunks_exact(4).filter(|p| p[3] != 0).count();
+        let inked = im
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] != 0)
+            .count();
         assert!(
             inked > 0,
             "text must render against the bundled face, got a blank raster"
