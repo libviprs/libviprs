@@ -353,36 +353,39 @@ fn pow_vips(base: f64, exp: f64) -> f64 {
 /// [`Raster::try_remainder`] and the constant [`Raster::try_rem_const`] so
 /// the two forms cannot drift apart.
 ///
-/// The body is the *floored* remainder `a - b * (a / b).floor()`, with a zero
-/// divisor short-circuited to `0` before the division so `0 / 0` never forms
-/// (`b == 0.0` catches `-0.0` too).
+/// The body is C's *truncating* `%`, with a zero divisor short-circuited to
+/// `0` before the division so `0 / 0` never forms (`b == 0.0` catches `-0.0`
+/// too). Rust's `%` on `f64` truncates exactly as C's does on integers, and
+/// the operands here are always whole numbers read out of an integer carrier.
 ///
 /// libvips does not pick one definition, it dispatches on format
 /// (`remainder.c:101,116`): `IREMAINDER` uses C's truncating `%` for `CHAR`,
-/// `SHORT` and `INT`, while `FREMAINDER` uses `a - b * floor(a / b)` for
-/// `FLOAT` and `DOUBLE`. So the floored body here matches `FREMAINDER` for a
-/// future float carrier, is provably identical to truncated on the unsigned
-/// carriers the crate has today (verified exhaustively over all 4,294,836,225
-/// pairs with `a` in `0..=65535` and `b` in `1..=65535`, zero disagreements),
-/// and would knowingly diverge from `IREMAINDER` on a signed one. It is *not*
-/// a form that is correct for every future carrier.
+/// `UCHAR`, `SHORT`, `USHORT`, `INT` and `UINT`, while `FREMAINDER` uses
+/// `a - b * floor(a / b)` for `FLOAT` and `DOUBLE`. Every carrier the crate
+/// has today is an unsigned integer one, so `IREMAINDER` is the only branch
+/// reachable and this kernel implements it. Both remainder forms therefore
+/// match vips on the carrier they actually run on, including the negative
+/// divisor [`Raster::try_rem_const`] can be handed: measured against vips
+/// 8.18.4, `remainder_const` on a uchar `[7,20,30]` with `c = -3` gives
+/// `[1,2,0]`, which is what this returns.
 ///
-/// **A signed or float carrier needs a signedness branch here**: truncate for
-/// the signed integer formats, keep this body for the float ones, exactly as
-/// `remainder.c` does. The one place the split is already reachable is
-/// [`Raster::try_rem_const`], whose divisor is an unconstrained `f64`; see the
-/// divergence note there.
+/// The two definitions are indistinguishable on non-negative operands, so the
+/// image-image form cannot tell them apart at all (verified exhaustively over
+/// all 4,294,836,225 pairs with `a` in `0..=65535` and `b` in `1..=65535`,
+/// zero disagreements). Only a negative divisor separates them, and only
+/// [`Raster::try_rem_const`] can supply one.
 ///
-/// The zero case is a deliberate divergence: libvips writes `-1` in both
-/// branches, which an unsigned carrier cannot hold, so the crate-wide
+/// **A float carrier needs the floored branch added here**: keep this body
+/// for the integer formats and add `a - b * (a / b).floor()` for the float
+/// ones, exactly as `remainder.c` does. That is measured rather than guessed:
+/// the same uchar `[7,20,30]` cast to `float` first gives `[-2,-1,0]`.
+///
+/// The zero case is the one deliberate divergence: libvips writes `-1` in
+/// both branches, which an unsigned carrier cannot hold, so the crate-wide
 /// `x % 0 == 0` convention wins.
 #[inline]
 fn remainder_vips(a: f64, b: f64) -> f64 {
-    if b == 0.0 {
-        0.0
-    } else {
-        a - b * (a / b).floor()
-    }
+    if b == 0.0 { 0.0 } else { a % b }
 }
 
 /// Error unless `a` and `b` share pixel dimensions and band count.
@@ -1527,32 +1530,13 @@ impl Raster {
     /// Remainder of every sample divided by a constant (libvips
     /// `remainder_const`); a zero divisor produces `0`.
     ///
-    /// The kernel is the shared `remainder_vips`, the same *floored*
-    /// remainder [`Raster::try_remainder`] uses, so the constant and
-    /// image-image forms cannot disagree for identical operands. That choice
-    /// is observable here in a way it is not there: `c` is an unconstrained
-    /// `f64`, so a negative divisor is reachable, and floored and truncated
-    /// split on exactly those.
-    ///
-    /// # Divergences from libvips
-    ///
-    /// * **A zero divisor produces `0`, where libvips produces `-1`.** The
-    ///   crate-wide convention; [`Raster::try_remainder`] carries the
-    ///   measurement and the reasoning.
-    /// * **A negative `c` takes the float branch, not the integer one.**
-    ///   libvips casts the constant to `int` for an integer input and runs
-    ///   the truncating `IREMAINDER`, so `vips remainder_const` on a uchar
-    ///   `[7,20,30]` with `c = -3` measures `[1,2,0]` against vips 8.18.4,
-    ///   while the same input cast to `float` first measures `[-2,-1,0]`.
-    ///   This computes the float answer and then saturates it into the
-    ///   unsigned output, giving `[0,0,0]`. One kernel shared across both
-    ///   forms costs this case; two kernels would cost the guarantee that
-    ///   the forms agree, and the shared one is what survives a carrier
-    ///   change (issue #536).
-    /// * **Unsigned carriers only.** A float raster is rejected with
-    ///   [`ArithmeticError::FloatUnsupported`], because the output is an
-    ///   unsigned integer raster with nowhere to put a fractional sample.
-    ///   Cast to an unsigned 8- or 16-bit format first.
+    /// The kernel is the shared `remainder_vips`, the same truncating `%`
+    /// [`Raster::try_remainder`] uses, so the constant and image-image forms
+    /// cannot disagree for identical operands. `c` is an unconstrained `f64`,
+    /// so unlike the image-image form this one can be handed a negative
+    /// divisor, and truncating is what libvips does there for an integer
+    /// input: measured against vips 8.18.4, `remainder_const` on a uchar
+    /// `[7,20,30]` with `c = -3` gives `[1,2,0]`.
     ///
     /// # Errors
     ///
@@ -2010,21 +1994,23 @@ impl Raster {
     /// cast both inputs to the smallest common format, which on this crate's
     /// unsigned carriers is exactly `max(a_bpc, b_bpc)`.
     ///
-    /// The kernel is the shared `remainder_vips`, the *floored* remainder
-    /// `a - b * (a / b).floor()`, which [`Raster::rem_const`] runs too so
-    /// the two forms cannot disagree for identical operands.
+    /// The kernel is the shared `remainder_vips`, C's truncating `%`, which
+    /// [`Raster::rem_const`] runs too so the two forms cannot disagree for
+    /// identical operands.
     ///
     /// libvips does not pick one definition, it dispatches on format
-    /// (`remainder.c:101,116`): truncating `%` in `IREMAINDER` for `CHAR`,
-    /// `SHORT` and `INT`, floored in `FREMAINDER` for `FLOAT` and `DOUBLE`.
-    /// So floored matches `FREMAINDER` for a future float carrier, is
-    /// provably identical to truncated on the unsigned carriers the crate
-    /// has today (verified exhaustively over all 4,294,836,225 pairs with
-    /// `a` in `0..=65535` and `b` in `1..=65535`, zero disagreements), and
-    /// would knowingly diverge from `IREMAINDER` on a signed one. It is not
-    /// a form that stays correct for every carrier, and the kernel says so
-    /// where it is defined: a signed carrier needs a signedness branch
-    /// added there.
+    /// (`remainder.c:101,116`): truncating `%` in `IREMAINDER` for the
+    /// integer formats, floored `a - b * floor(a / b)` in `FREMAINDER` for
+    /// `FLOAT` and `DOUBLE`. Every carrier the crate has today is an
+    /// unsigned integer one, so `IREMAINDER` is the branch this operation
+    /// runs and it matches vips exactly. The choice is in any case invisible
+    /// here: truncated and floored agree on every non-negative operand pair,
+    /// verified exhaustively over all 4,294,836,225 pairs with `a` in
+    /// `0..=65535` and `b` in `1..=65535`, zero disagreements. Only a
+    /// negative divisor separates them, which this form cannot produce and
+    /// [`Raster::rem_const`] can. A float carrier will need the floored
+    /// branch added to the kernel, and the kernel says so where it is
+    /// defined.
     ///
     /// # Divergences from libvips
     ///
@@ -4242,26 +4228,30 @@ mod tests {
         assert_eq!(r.getpoint(1, 0), vec![0.0]);
     }
 
-    /// The shared `remainder_vips` kernel is FLOORED, not truncated, and
-    /// nothing else in the suite can tell the two apart: every operand the
-    /// crate's unsigned carriers can hold agrees under both definitions, so
-    /// swapping the body for `a % b` leaves the whole suite green. This pins
-    /// the choice directly, on the operands where the definitions split.
+    /// The shared `remainder_vips` kernel is TRUNCATED, matching libvips
+    /// `IREMAINDER`, which is the only branch the crate's unsigned integer
+    /// carriers can reach.
     ///
-    /// Rust's `%` is C's truncating `%`, which is what libvips `IREMAINDER`
-    /// runs for `CHAR` / `SHORT` / `INT`, so asserting both in one place
-    /// shows the divergence a signed carrier would inherit.
+    /// Nothing else in the suite can tell truncated from floored: the two
+    /// agree on every non-negative operand pair, so the image-image form is
+    /// blind to the choice and swapping the body leaves its tests green.
+    /// This pins the definition directly, on the operands where the two
+    /// split. Rust's `%` on `f64` truncates exactly as C's does on integers,
+    /// which is what `IREMAINDER` runs.
     #[test]
-    fn remainder_vips_is_floored_not_truncated() {
-        // Negative dividend: floored takes the sign of the divisor.
-        assert_eq!(remainder_vips(-7.0, 3.0), 2.0);
-        assert_eq!((-7.0f64) % 3.0, -1.0);
-        // Negative divisor: the same split, mirrored. This one is reachable
-        // today through `rem_const`, whose divisor is an unconstrained f64.
-        assert_eq!(remainder_vips(7.0, -3.0), -2.0);
-        assert_eq!(7.0f64 % -3.0, 1.0);
-        // Non-negative operands, i.e. everything an unsigned carrier holds:
-        // the two definitions agree.
+    fn remainder_vips_is_truncated_matching_iremainder() {
+        // Negative divisor: truncated keeps the sign of the dividend. This
+        // is the one split reachable today, through `rem_const`. Floored
+        // would give -2, -1, 0 here; vips 8.18.4 measures 1, 2, 0 on a uchar
+        // carrier, which is what `IREMAINDER` and this kernel produce.
+        assert_eq!(remainder_vips(7.0, -3.0), 1.0);
+        assert_eq!(remainder_vips(20.0, -3.0), 2.0);
+        assert_eq!(remainder_vips(30.0, -3.0), 0.0);
+        // Negative dividend: unreachable on an unsigned carrier, pinned so
+        // the definition is unambiguous either way. Floored would give 2.
+        assert_eq!(remainder_vips(-7.0, 3.0), -1.0);
+        // Non-negative operands, i.e. everything the image-image form can
+        // see: truncated and floored agree, so these hold under both.
         assert_eq!(remainder_vips(7.0, 3.0), 1.0);
         assert_eq!(remainder_vips(3.0, 7.0), 3.0);
         assert_eq!(remainder_vips(0.0, 7.0), 0.0);
@@ -4272,21 +4262,23 @@ mod tests {
         assert_eq!(remainder_vips(7.0, -0.0), 0.0);
     }
 
-    /// rem_const shares the floored kernel with the image-image form, so a
-    /// negative constant follows libvips's FLOAT branch and the result is
-    /// then saturated into the unsigned output.
+    /// rem_const shares the truncating `remainder_vips` kernel with the
+    /// image-image form, and truncating is what libvips runs for an integer
+    /// input, so a negative constant matches vips rather than diverging.
     ///
-    /// This is a DELIBERATE divergence from vips on an integer carrier,
-    /// where `remainder_const` casts the constant to `int` and truncates.
-    /// Measured against vips 8.18.4 on uchar `[7,20,30]` with `c = -3`:
-    /// `vips remainder_const` gives `[1,2,0]`, and the same input cast to
-    /// `float` first gives `[-2,-1,0]`, which is what this kernel computes
-    /// before the unsigned clamp turns it into `[0,0,0]`. A positive
-    /// constant is untouched, since floored and truncated agree there.
+    /// Measured against vips 8.18.4 on uchar `[7,20,30]`:
+    /// `vips remainder_const a out -- -3` gives `[1,2,0]`. The same input
+    /// cast to `float` first gives `[-2,-1,0]`, because `remainder_const`
+    /// dispatches on format and the float path floors. That is the branch a
+    /// future float carrier will need, and it is not the branch this is.
+    ///
+    /// `c = 3` happens to give the same `[1,2,0]`, which is a coincidence of
+    /// these operands, not the point: the negative case is the one where the
+    /// two definitions could have disagreed.
     #[test]
-    fn rem_const_negative_divisor_is_floored_then_saturated() {
+    fn rem_const_negative_divisor_matches_the_vips_integer_branch() {
         let a = gray(3, 1, vec![7, 20, 30]);
-        assert_eq!(a.rem_const(-3.0).data().to_vec(), vec![0, 0, 0]);
+        assert_eq!(a.rem_const(-3.0).data().to_vec(), vec![1, 2, 0]);
         assert_eq!(a.rem_const(3.0).data().to_vec(), vec![1, 2, 0]);
     }
 
