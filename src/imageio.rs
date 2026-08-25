@@ -41,6 +41,16 @@
 //! and float, and enforces the [`DecodeLimits::max_coord`] dimension
 //! ceiling on untrusted header geometry.
 //!
+//! The interpretation word holds libvips' own `VipsInterpretation` codes,
+//! which since libvips 8.18 include `30` and `31` for OkLab and OkLch
+//! (`libvips/include/vips/image.h:115-116`); a `.v` libviprs writes now
+//! carries the same tag real vips writes. Files libviprs wrote before this
+//! release carry the private codes `1000` / `1001` it used while libvips
+//! had none, and still read back tagged, because the reader keeps those two
+//! as permanently reserved read-only aliases. Nothing writes them any more,
+//! so the incompatibility only runs the other way: a `.v` written now reads
+//! as `Multiband` on libviprs 0.4.0 and earlier.
+//!
 //! # Metadata fields
 //!
 //! [`Raster::get_field`] / [`Raster::set_field`] expose the libvips
@@ -401,9 +411,10 @@ fn interpretation_from_nickname(s: &str) -> Option<Interpretation> {
 }
 
 /// The libvips `VipsInterpretation` enum value for the `.v` header
-/// `Type` word. `OkLab` / `OkLch` have no libvips code; they use
-/// libviprs extension codes above the libvips range and round-trip
-/// through libviprs-written files only.
+/// `Type` word, as declared in `libvips/include/vips/image.h:96-117`
+/// (8.18.4). `OkLab` and `OkLch` are `VIPS_INTERPRETATION_OKLAB` = 30
+/// and `VIPS_INTERPRETATION_OKLCH` = 31 (`image.h:115-116`), so a `.v`
+/// libviprs writes carries the same tag real vips writes.
 fn interpretation_code(i: Interpretation) -> i32 {
     match i {
         Interpretation::Multiband => 0,
@@ -425,13 +436,19 @@ fn interpretation_code(i: Interpretation) -> i32 {
         Interpretation::Matrix => 27,
         Interpretation::ScRgb => 28,
         Interpretation::Hsv => 29,
-        Interpretation::OkLab => 1000,
-        Interpretation::OkLch => 1001,
+        Interpretation::OkLab => 30,
+        Interpretation::OkLch => 31,
     }
 }
 
-/// Inverse of [`interpretation_code`]; unknown codes read as `None` and
-/// the raster falls back to format inference, like an untagged image.
+/// The `.v` header `Type` word back to an [`Interpretation`]: a *left*
+/// inverse of [`interpretation_code`] (every code that function writes reads
+/// back as the variant it came from), widened by the two read-only legacy
+/// aliases `1000` / `1001`, which land on `OkLab` / `OkLch` alongside the
+/// libvips codes `30` / `31`. So it is not a bijection, and it is not the
+/// other direction of the round trip for those four codes. Unknown codes
+/// read as `None` and the raster falls back to format inference, like an
+/// untagged image.
 fn interpretation_from_code(code: i32) -> Option<Interpretation> {
     Some(match code {
         0 => Interpretation::Multiband,
@@ -453,6 +470,14 @@ fn interpretation_from_code(code: i32) -> Option<Interpretation> {
         27 => Interpretation::Matrix,
         28 => Interpretation::ScRgb,
         29 => Interpretation::Hsv,
+        30 => Interpretation::OkLab,
+        31 => Interpretation::OkLch,
+        // Read-only legacy aliases: before libvips 8.18 assigned 30 / 31,
+        // libviprs wrote these private codes above the libvips range. Files
+        // it already wrote keep loading; nothing emits them any more. They
+        // are reserved permanently and must never be reused for anything
+        // else: the only thing retiring them would achieve is to silently
+        // re-break every `.v` libviprs has already written.
         1000 => Interpretation::OkLab,
         1001 => Interpretation::OkLch,
         _ => return None,
@@ -1880,6 +1905,252 @@ mod tests {
             parse_vips_xml_orientation(b"<field name=\"orientation-foo\">6</field>"),
             None
         );
+    }
+
+    /// Pins every [`Interpretation`] to its `VipsInterpretation` code and
+    /// nickname, so the mapping cannot drift from
+    /// `libvips/include/vips/image.h:96-117` (8.18.4) when a variant lands.
+    ///
+    /// The table here is the `vips_tag` match, which is exhaustive on
+    /// purpose: a new variant does not compile until it is handed both a code
+    /// and a nickname right there, and every assertion below is driven off
+    /// what it returns rather than off a second copy. `VARIANTS` only supplies
+    /// the iteration order; the sweep at the end pins its contents from the
+    /// other side, so a variant left out of it is caught as soon as the reader
+    /// learns the code. The real guarantee that no variant ships untagged is
+    /// still that the production `interpretation_code` and
+    /// `interpretation_nickname` have no `_` arm.
+    #[test]
+    fn interpretation_code_table_matches_vips() {
+        // The `VipsInterpretation` code and libvips nickname every variant
+        // must carry, straight off `image.h`. Exhaustive: adding a variant
+        // to `Interpretation` breaks this match until both are filled in.
+        fn vips_tag(i: Interpretation) -> (i32, &'static str) {
+            match i {
+                Interpretation::Multiband => (0, "multiband"),
+                Interpretation::Bw => (1, "b-w"),
+                Interpretation::Histogram => (10, "histogram"),
+                Interpretation::Xyz => (12, "xyz"),
+                Interpretation::Lab => (13, "lab"),
+                Interpretation::Cmyk => (15, "cmyk"),
+                Interpretation::Labq => (16, "labq"),
+                Interpretation::Rgb => (17, "rgb"),
+                Interpretation::Cmc => (18, "cmc"),
+                Interpretation::Lch => (19, "lch"),
+                Interpretation::Labs => (21, "labs"),
+                Interpretation::Srgb => (22, "srgb"),
+                Interpretation::Yxy => (23, "yxy"),
+                Interpretation::Fourier => (24, "fourier"),
+                Interpretation::Rgb16 => (25, "rgb16"),
+                Interpretation::Grey16 => (26, "grey16"),
+                Interpretation::Matrix => (27, "matrix"),
+                Interpretation::ScRgb => (28, "scrgb"),
+                Interpretation::Hsv => (29, "hsv"),
+                Interpretation::OkLab => (30, "oklab"),
+                Interpretation::OkLch => (31, "oklch"),
+            }
+        }
+
+        const VARIANTS: [Interpretation; 21] = [
+            Interpretation::Multiband,
+            Interpretation::Bw,
+            Interpretation::Histogram,
+            Interpretation::Xyz,
+            Interpretation::Lab,
+            Interpretation::Cmyk,
+            Interpretation::Labq,
+            Interpretation::Rgb,
+            Interpretation::Cmc,
+            Interpretation::Lch,
+            Interpretation::Labs,
+            Interpretation::Srgb,
+            Interpretation::Yxy,
+            Interpretation::Fourier,
+            Interpretation::Rgb16,
+            Interpretation::Grey16,
+            Interpretation::Matrix,
+            Interpretation::ScRgb,
+            Interpretation::Hsv,
+            Interpretation::OkLab,
+            Interpretation::OkLch,
+        ];
+
+        for interp in VARIANTS {
+            let (code, nickname) = vips_tag(interp);
+            assert_eq!(
+                interpretation_code(interp),
+                code,
+                "{nickname} must write VipsInterpretation {code}"
+            );
+            assert_eq!(
+                interpretation_from_code(code),
+                Some(interp),
+                "VipsInterpretation {code} must read back as {nickname}"
+            );
+            assert_eq!(interpretation_nickname(interp), nickname);
+            assert_eq!(interpretation_from_nickname(nickname), Some(interp));
+        }
+
+        // Nothing in the language binds `VARIANTS`' length to the enum, so
+        // pin it against the reader instead: every code the reader accepts
+        // has to be one this test drives, and every code it rejects has to
+        // be one this test does not. That covers VIPS_INTERPRETATION_ERROR
+        // (-1), which vips does emit, the codes libvips leaves unassigned
+        // inside its range (2, 11, 14, 20), and everything past
+        // VIPS_INTERPRETATION_LAST (32). The read-only legacy aliases 1000 /
+        // 1001 sit outside this range on purpose and are pinned by
+        // `legacy_private_oklab_codes_read_but_are_not_written`.
+        for code in -1..=64 {
+            let driven = VARIANTS.iter().any(|&v| vips_tag(v).0 == code);
+            assert_eq!(
+                interpretation_from_code(code).is_some(),
+                driven,
+                "VipsInterpretation {code}: the reader and this table disagree"
+            );
+        }
+    }
+
+    /// A `.v` written by real vips tags OkLab/OkLch with `Type = 30` / `31`
+    /// (`VIPS_INTERPRETATION_OKLAB` / `_OKLCH`,
+    /// `libvips/include/vips/image.h:115-116`), so libviprs has to read those
+    /// files back as [`Interpretation::OkLab`] / [`Interpretation::OkLch`]
+    /// instead of falling through to format inference and reporting
+    /// `Multiband`.
+    ///
+    /// The fixture is the byte-for-byte 64-byte header vips 8.18.4 wrote for
+    ///
+    /// ```text
+    /// vips black t.v 4 4 --bands 3
+    /// vips colourspace t.v ok.v oklab      # and again for oklch
+    /// ```
+    ///
+    /// followed by that file's 4x4x3 float pixels (all zero, it is black), so
+    /// nothing binary is checked in. vips writes the header in the machine's
+    /// own byte order; these are the little-endian bytes, which on a
+    /// big-endian host also exercises the decoder's swap path.
+    #[test]
+    fn vips_written_oklab_and_oklch_read_back_tagged() {
+        #[rustfmt::skip]
+        const VIPS_OKLAB_HEADER: [u8; VIPS_HEADER_LEN] = [
+            0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+            0x04, 0x00, 0x00, 0x00, // Xsize 4
+            0x04, 0x00, 0x00, 0x00, // Ysize 4
+            0x03, 0x00, 0x00, 0x00, // Bands 3
+            0x20, 0x00, 0x00, 0x00, // Bbits 32
+            0x06, 0x00, 0x00, 0x00, // BandFmt 6 (float)
+            0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+            0x1e, 0x00, 0x00, 0x00, // Type 30 (VIPS_INTERPRETATION_OKLAB)
+            0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+            0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+            0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Xoffset 0
+            0x00, 0x00, 0x00, 0x00, // Yoffset 0
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x00, // reserved
+        ];
+        // The oklch file vips wrote differs from the oklab one in exactly one
+        // byte: the Type word at offset 28, 30 -> 31.
+        const TYPE_OFFSET: usize = 28;
+
+        for (code, expected) in [(30u8, Interpretation::OkLab), (31, Interpretation::OkLch)] {
+            let mut bytes = VIPS_OKLAB_HEADER.to_vec();
+            bytes[TYPE_OFFSET] = code;
+            // 4x4 pixels, 3 float bands, all zero: `vips black` output.
+            bytes.resize(VIPS_HEADER_LEN + 4 * 4 * 3 * 4, 0);
+
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.interpretation(),
+                expected,
+                "Type {code} must tag {expected:?}"
+            );
+            assert_eq!(
+                back.get_field("interpretation").unwrap().as_str(),
+                interpretation_nickname(expected)
+            );
+            assert_eq!((back.width(), back.height()), (4, 4));
+            assert_eq!(back.format(), PixelFormat::with_channels(3, 4).unwrap());
+        }
+    }
+
+    /// libviprs used to write private codes 1000 / 1001 for OkLab / OkLch,
+    /// before libvips 8.18 assigned them 30 / 31. The private codes stay
+    /// readable so `.v` files libviprs already wrote keep loading, but the
+    /// encoder must never emit them again.
+    #[test]
+    fn legacy_private_oklab_codes_read_but_are_not_written() {
+        // The header `Type` word, the same offset the vips fixture patches.
+        const TYPE_OFFSET: usize = 28;
+
+        assert_eq!(interpretation_from_code(1000), Some(Interpretation::OkLab));
+        assert_eq!(interpretation_from_code(1001), Some(Interpretation::OkLch));
+
+        for (interp, code) in [(Interpretation::OkLab, 30i32), (Interpretation::OkLch, 31)] {
+            let im = Raster::black(2, 2).copy().interpretation(interp).build();
+            let bytes = im.encode_vips().unwrap();
+            let written =
+                i32::from_ne_bytes(bytes[TYPE_OFFSET..TYPE_OFFSET + 4].try_into().unwrap());
+            assert_eq!(written, code, "encode_vips must write the libvips code");
+            // And it round-trips through our own reader.
+            assert_eq!(decode_bytes(&bytes).unwrap().interpretation(), interp);
+        }
+
+        // A legacy libviprs file (private code in the Type word) still loads.
+        let mut legacy = Raster::black(2, 2)
+            .copy()
+            .interpretation(Interpretation::OkLab)
+            .build()
+            .encode_vips()
+            .unwrap();
+        legacy[TYPE_OFFSET..TYPE_OFFSET + 4].copy_from_slice(&1000i32.to_ne_bytes());
+        assert_eq!(
+            decode_bytes(&legacy).unwrap().interpretation(),
+            Interpretation::OkLab
+        );
+
+        // The one above is written in the host's byte order, which is the
+        // easy half. A migrating file is a fixed byte pattern on somebody
+        // else's disk, and 1000 / 1001 have a low byte of 0xe8 / 0xe9, so
+        // unlike the codes 30 / 31 they do not survive a byte-order swap by
+        // accident. This is the explicit little-endian header, laid out like
+        // the vips fixture above, which puts the decoder's swap path under
+        // test on a big-endian host.
+        #[rustfmt::skip]
+        const LEGACY_LE_HEADER: [u8; VIPS_HEADER_LEN] = [
+            0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+            0x02, 0x00, 0x00, 0x00, // Xsize 2
+            0x02, 0x00, 0x00, 0x00, // Ysize 2
+            0x03, 0x00, 0x00, 0x00, // Bands 3
+            0x20, 0x00, 0x00, 0x00, // Bbits 32
+            0x06, 0x00, 0x00, 0x00, // BandFmt 6 (float)
+            0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+            0xe8, 0x03, 0x00, 0x00, // Type 1000 (legacy libviprs OkLab)
+            0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+            0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+            0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Xoffset 0
+            0x00, 0x00, 0x00, 0x00, // Yoffset 0
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x00, // reserved
+        ];
+
+        for (legacy_code, expected) in [
+            (1000i32, Interpretation::OkLab),
+            (1001, Interpretation::OkLch),
+        ] {
+            let mut bytes = LEGACY_LE_HEADER.to_vec();
+            bytes[TYPE_OFFSET..TYPE_OFFSET + 4].copy_from_slice(&legacy_code.to_le_bytes());
+            // 2x2 pixels, 3 float bands, all zero.
+            bytes.resize(VIPS_HEADER_LEN + 2 * 2 * 3 * 4, 0);
+
+            assert_eq!(
+                decode_bytes(&bytes).unwrap().interpretation(),
+                expected,
+                "little-endian legacy Type {legacy_code} must still read as {expected:?}"
+            );
+        }
     }
 
     // -- free functions -----------------------------------------------------
