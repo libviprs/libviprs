@@ -747,10 +747,24 @@ impl Raster {
     /// The number of pages this raster represents (libvips `n-pages`),
     /// defaulting to `1` for a single-page image.
     ///
-    /// Reads the attached `n-pages` field that the multi-page loaders set
-    /// (animated GIF/WebP, multi-page TIFF/PDF). A single-page raster has no
-    /// such field and reports `1`, matching the oracle (`n-pages = 1` for
-    /// `sample.jpg`, `5` / `4` / `3` / `35` for the animated fixtures).
+    /// Reads the attached `n-pages` field. Three loaders set it and they do
+    /// not agree on when, so the field being *present* does not mean the
+    /// image has more than one page:
+    ///
+    /// * [`crate::gif`] and [`decode_tiff_page`](crate::decode_tiff_page)
+    ///   attach it on every load, a one-frame GIF and a single-page TIFF
+    ///   included, where it reads `1`;
+    /// * [`crate::webp`] attaches it only when the file is animated, so a
+    ///   still WebP carries no such field at all, which is what
+    ///   `vipsheader -a` reports for one;
+    /// * the PDF loader does not attach it.
+    ///
+    /// A raster with no `n-pages` field reports `1` either way, matching the
+    /// oracle (`n-pages = 1` for `sample.jpg`, `5` / `4` / `3` / `35` for the
+    /// animated fixtures).
+    ///
+    /// The count is 1-based and the page index is 0-based (issue #566), so a
+    /// sweep over every page is `for page in 0..raster.get_n_pages()`.
     pub fn get_n_pages(&self) -> u32 {
         match self.get_field("n-pages") {
             Some(MetadataValue::Int(n)) => u32::try_from(n).ok().filter(|&n| n > 0).unwrap_or(1),
