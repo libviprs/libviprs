@@ -41,6 +41,7 @@
 //! | [`Raster::sub`] | `vips_subtract` | float raster (signed differences survive) |
 //! | [`Raster::mul`] | `vips_multiply` | image-image arithmetic |
 //! | [`Raster::div`], [`Raster::div_const`], [`Raster::div_vec`] | `vips_divide` | float raster |
+//! | [`Raster::remainder`] | `vips_remainder` | samplewise `a % b`, integer raster |
 //! | [`Raster::linear`] / [`Raster::linear_uchar`] | `vips_linear1` (default / `uchar` option) | `a * x + b`, float / uchar raster |
 //! | [`Raster::sum`] | `vips_sum` | pixelwise sum of an image list |
 //! | [`Raster::minpair`] / [`Raster::maxpair`] | `vips_minpair` / `vips_maxpair` | pixelwise extremum of two images |
@@ -1929,6 +1930,74 @@ impl Raster {
     #[track_caller]
     pub fn div(&self, other: &Raster) -> Raster {
         expect_arith("div", self.try_div(other))
+    }
+    /// Remainder of `self` divided by `other` samplewise (libvips
+    /// `remainder`), the image-image companion to [`Raster::rem_const`].
+    ///
+    /// The output depth is the wider of the two input depths. libvips gets
+    /// there via the identity promotion table (`vips_remainder_format_table`,
+    /// `remainder.c:173-178`) applied after `vips__formatalike` has already
+    /// cast both inputs to the smallest common format, which on this crate's
+    /// unsigned carriers is exactly `max(a_bpc, b_bpc)`.
+    ///
+    /// The kernel is the *floored* remainder `a - b * (a / b).floor()`.
+    /// libvips carries both definitions (`remainder.c:92-158`): truncated
+    /// `%` in its `IREMAINDER` macro for the integer formats, floored in
+    /// `FREMAINDER` for the float ones. The two agree on every value the
+    /// unsigned carriers here can hold, so the choice is not observable
+    /// today, but the floored form is the one that stays correct the day a
+    /// signed or float carrier arrives.
+    ///
+    /// # Divergences from libvips
+    ///
+    /// Three, all deliberate:
+    ///
+    /// * **A zero divisor produces `0`, where libvips produces `-1`.**
+    ///   `remainder.c:96,105` writes `q[x] = p2[x] ? p1[x] % p2[x] : -1;`,
+    ///   and on a uchar carrier that `-1` reads back as `255` (measured
+    ///   against vips 8.18.4: divisor `[[0,7,0],[7,0,7]]` gives
+    ///   `[255,6,255,5,255,4]`). libviprs has no signed carrier, so `-1` is
+    ///   not representable here at all, and `x % 0 == 0` is the crate-wide
+    ///   convention the module header already states under "Division by
+    ///   zero" and [`Raster::rem_const`] already follows.
+    /// * **No band broadcast and no size alignment.** libvips runs
+    ///   `bandalike` (a 1-band operand repeated across an n-band one) and
+    ///   then `sizealike` (the smaller image zero-padded up to the larger)
+    ///   before the kernel sees anything. Here the two rasters must agree
+    ///   exactly on width, height, and band count, which is how every other
+    ///   image-image operation in this module behaves. Matching the family
+    ///   matters more than matching libvips on this point. ([`Raster::add`]
+    ///   in [`crate::raster_ops`] is the crate's one broadcasting operation
+    ///   and is not the model for this family.)
+    /// * **Unsigned carriers only.** A float raster on either side is
+    ///   rejected, so libvips's integer/float kernel split collapses to the
+    ///   integer branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArithmeticError::DimensionMismatch`] or
+    /// [`ArithmeticError::BandCountMismatch`] if the images disagree, or
+    /// [`ArithmeticError::FloatUnsupported`] if either input is a float raster
+    /// (this integer op rounds and saturates into an unsigned output).
+    pub fn try_remainder(&self, other: &Raster) -> Result<Raster, ArithmeticError> {
+        binary_map("remainder", self, other, false, |a, b| {
+            if b == 0.0 {
+                0.0
+            } else {
+                a - b * (a / b).floor()
+            }
+        })
+    }
+
+    /// Panicking form of [`Raster::try_remainder`], matching the ported-test
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ArithmeticError`]; see [`Raster::try_remainder`].
+    #[track_caller]
+    pub fn remainder(&self, other: &Raster) -> Raster {
+        expect_arith("remainder", self.try_remainder(other))
     }
 
     /// Samplewise minimum of two images (libvips `minpair`); mixed depths

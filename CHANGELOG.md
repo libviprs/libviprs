@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Raster::remainder` / `Raster::try_remainder`, the generic two-image
+  remainder (issue #536). This is the image-image companion to the existing
+  constant form `rem_const`, and it ports libvips `vips_remainder`: each
+  sample of the result is `self` mod the matching sample of `other`. Output
+  depth is the wider of the two input depths, matching the identity promotion
+  table libvips applies after formatalike, so `uchar % uchar` stays 8-bit and
+  `uchar % ushort` promotes to 16-bit. The kernel is the floored remainder
+  `a - b * floor(a / b)` rather than a truncating `%`; the two agree on every
+  value the crate's unsigned carriers can hold, and the floored one is what
+  libvips uses for its float formats, so it stays correct if a signed or float
+  carrier ever lands.
+
+  Three deliberate divergences from libvips, all spelled out on the method's
+  docs. A zero divisor gives `0` here where libvips gives `-1` (which reads
+  back as `255` through a uchar carrier), since libviprs has no signed carrier
+  and `x % 0 == 0` is already the crate-wide convention. There is no band
+  broadcast and no size alignment: the two rasters must agree exactly on
+  width, height, and band count, the same contract every other image-image
+  operation in the arithmetic module has, rather than libvips's
+  bandalike-then-sizealike. And float rasters are rejected on either side,
+  since the operation rounds and saturates into an unsigned output.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
