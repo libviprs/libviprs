@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `colourspace` to `labs` now truncates the LabS code toward zero instead of
+  rounding it, so the output bytes of every conversion into `labs` change
+  (issue #556). `Lab [50, 0, 0]` came out as `16384` and is now `16383`, which
+  is what vips 8.18.4 prints: `50 * 32767/100` is exactly `16383.5`, and
+  `colour/Lab2LabS.c:66-68` clips in `double` and then assigns into a
+  `signed short`, so C drops the fraction rather than rounding it. The `a` and
+  `b` channels had the same defect at the `256` scale. Truncation here is
+  toward zero and not floor, which is a distinction LabS is the only space in
+  this module to make, being the only signed carrier: `a = -0.501953125`
+  scales to `-128.5` and vips answers `-128`, not `-129`.
+
+  Every route into `labs` is affected, not only `Lab -> Labs`, because
+  `vips_Lab2LabS` is the last stage of all of them (`colour/colourspace.c:229`
+  onward). Expect codes to move by one count, and by at most one.
+
+- `Lab <-> Labs` takes the direct route libvips gives it
+  (`{ LAB, LABS, { vips_Lab2LabS } }` at `colour/colourspace.c:246` and
+  `{ LABS, LAB, { vips_LabS2Lab } }` at `:310`) instead of meeting at the XYZ
+  hub (issue #556). This is not the optimisation it looks like. `Lab -> XYZ ->
+  Lab` leaves a residue of a few parts in 1e6, because `lab_f` switches at
+  `t < 0.008856` and `lab_to_xyz` at `L < 8.0` and those rounded decimals are
+  not mutual inverses. Rounding used to absorb that residue; truncation cannot,
+  so a code that should land on a whole number loses a whole count whenever the
+  residue is negative. `Lab [0, -128, 1]` is `[0, -32768, 256]` in vips and was
+  `[0, -32767, 255]` through the hub. Coming back the other way the hub drifts
+  in the shadow branch instead: `Labs [983, 256, -256]` is
+  `[2.999969482421875, 1, -1]` in vips and was `[2.99994, 1.00052, -1.00021]`.
+
+  `Lch <-> Labs` and `Cmc <-> Labs` are hub-free in libvips too (`:280`,
+  `:297`, `:312`, `:313`) and still take the hub here, so they keep a
+  one-count error wherever the exact code is a whole number. Truncating still
+  leaves them closer to vips than rounding did, by a factor of three on a
+  swept grid.
+
 ### Added
 
 - `Raster::join` and its `try_join` twin (issue #551): the port of libvips
@@ -72,6 +108,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depth-only promotion keeps the tag, matching `vips join` of `b-w` uchar
   with `grey16`, which still reports `b-w`.
 
+- `Raster::sobel`, `Raster::scharr` and `Raster::prewitt`, with their
+  `try_*` twins (issues #537, #549, #550): the port of libvips `vips_sobel`,
+  `vips_scharr` and `vips_prewitt`. They are one abstract op in libvips
+  (`convolution/edge.c`) differing only in a 3x3 mask, they take no arguments
+  at all, and each convolves with its mask and with the mask rotated 90
+  degrees before combining the two gradients into an edge map.
+
+  How the gradients combine depends on the input format, and the two rules are
+  not approximations of each other. A uchar input takes the fast arm: the mask
+  is stamped `scale = 2, offset = 128` so a signed response lands centred in
+  the unsigned range, both convolutions run at integer precision, and the
+  result is `|Gx| + |Gy|` clipped at 255. Every other format takes the
+  accurate arm: two float convolutions with the raw mask, then
+  `sqrt(Gx^2 + Gy^2)`, then a truncating cast down to 8 bits. On a corner
+  where `Gx` and `Gy` are equal the abs sum is `2 * g` where the magnitude is
+  `sqrt(2) * g`, so the same picture reads 58 through the uchar arm and 42
+  through the float one.
+
+  The output is uchar whatever went in, so a 16-bit or float source comes
+  back narrowed four bytes per sample to one. Width, height, band count,
+  interpretation, resolution and the attached metadata (EXIF blob, ICC
+  profile, arbitrary attachments) all survive, matching what `vips sobel`
+  hands through. Alpha is convolved as an ordinary band, exactly as libvips
+  does it, so a fully opaque RGBA input comes back fully transparent except
+  along its edges. Saturation on the uchar arm happens twice, once inside
+  each convolution and once on the abs sum, which is what makes the
+  recovered gradient span an asymmetric `-256..=254`.
+
+  These three inherit the integer-convolution divergence described under
+  **Changed** below, at a bound of 4.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
@@ -131,6 +198,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- **The documented bound on the integer-convolution divergence against stock
+  libvips is 4, not 2** (issue #558). This is a correction to the disclosure,
+  not to any behaviour, and it matters because anyone who read the old number
+  and set a comparison tolerance of 2 was going to get burned.
+
+  libviprs ports `vips_convi_gen`, the scalar C integer-convolution loop,
+  which rounds its division towards zero. Any libvips built with HWY runs a
+  fixed-point vector path instead, which floors, and libvips itself only
+  requires the two paths to agree within 2 (`convi.c:1107-1112`). So an
+  integer-precision convolution of an unsigned image whose window sum is
+  negative and even reads one lower from libviprs.
+
+  This is a property of the **library**, not of the `vips` command line, which
+  is the other thing the old wording got wrong. pyvips, sharp, ruby-vips and
+  anything linking a distro libvips all hit the identical gap. Setting
+  `VIPS_NOVECTOR=1` in the environment disables the vector path and makes
+  libvips agree with libviprs exactly.
+
+  It reaches `conv` and `convsep` at integer precision, `compass`,
+  `gaussblur`, `sharpen`, and the uchar arm of `sobel` / `scharr` /
+  `prewitt`. On the edge detectors the gap is **quadrupled, not doubled**:
+  the uchar arm recovers each response as `2 * (p - 128)`, which doubles a
+  one-unit gap, and `Gx` and `Gy` can both be off at once. Measured on an 8x3
+  `Gray8` image, `prewitt` at pixel (4,0) reads 106 from libviprs and from
+  `VIPS_NOVECTOR=1 vips`, and 110 from the same binary with the vector path
+  live. The float arm has no such gap and is bit-exact either way.
+
+- **Breaking (cast): a float sample narrowing to an integer format is now
+  truncated toward zero, where it used to be rounded to nearest** (issue #561).
+  `Raster::cast` and `Raster::try_cast` are the operations that move, and so is
+  anything that narrows through them, `Raster::freqmult` included. This changes
+  output bytes for a public API shipped in 0.4.0: casting `1.7` to `Gray8` now
+  gives `1` where it used to give `2`, and `254.6` gives `254` where it used to
+  give `255`. Roughly half of all fractional samples shift down by one.
+
+  The old behaviour was simply wrong against libvips. `cast.c:566-567` says
+  "Floats are truncated (not rounded). Out of range values are clipped", and
+  vips 8.18.4 agrees on every row I measured: `1.7` to `1`, `2.5` to `2`,
+  `3.999` to `3`, `254.6` to `254`, and on the wider target `300.9` to `300`.
+  libviprs answered one above vips on all five. The rustdoc made it worse by
+  claiming the rounding and claiming parity with `vips_cast` in the same
+  paragraph, so it promised libvips compatibility while describing
+  libvips-incompatible behaviour; both halves of that are corrected, and the
+  doc now scopes the parity claim to the formats `PixelFormat` can actually
+  carry.
+
+  Clipping and the `NaN` pin do not move. Those already matched vips (below
+  range to `0`, above range to `255` or `65535`, `NaN` to `0`), and there are
+  now tests pinning each so the next change to this arm cannot quietly take
+  them with it. The truncation is `f64::trunc`, not `f64::floor`, which reads
+  as a distinction without a difference today because every carrier here is
+  unsigned and a negative sample clips to `0` before the rounding mode can
+  show. C's `(int)` conversion truncates toward zero, so `trunc` is the form
+  that stays correct once a signed carrier lands (#516).
 
 - **Breaking (WebP and GIF encode): `Raster::encode_webp` now takes a
   `webp::SaveOptions` instead of a `quality: u8`, and the three GIF stubs
