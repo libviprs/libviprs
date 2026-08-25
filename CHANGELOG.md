@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `Raster::encode_webp` takes a `webp::SaveOptions` carrying a `Compression`
+  and a `Keep`, where it used to take a bare `quality: u8` (issue #568). There
+  is no lossy WebP encoder reachable in pure Rust: `image-webp` 0.2.4's
+  `encoder.rs` writes a `VP8L` chunk and has no quality knob anywhere in it. A
+  `quality` argument the encoder throws away inverts the contract — ask for
+  quality 10, get a lossless file possibly larger than the PNG you started
+  with — and it is a semver time bomb, because the day a lossy encoder lands
+  every existing `encode_webp(10)` would silently start emitting small lossy
+  files in a patch release. Making quality unrepresentable turns that into a
+  compile error now instead. `Compression` is `#[non_exhaustive]`, so
+  `Lossy { .. }` can join it as a minor bump.
+
+  A 16-bit raster is also refused rather than narrowed, with a message naming
+  the remedy. vips narrows the same input by a right shift of 8, silently
+  (measured: 255 becomes 0, 65535 becomes 255). The reason not to copy that is
+  internal consistency: `Raster::cast` to an 8-bit format *clips*, so an
+  automatic narrow inside the encoder would disagree with the crate's own cast
+  while looking like it did the same thing. Cast first and the narrowing is
+  yours.
+
 - `decode_svg` takes a `SvgOptions` instead of a bare `Option<f64>` DPI
   (issue #502). It used to be `decode_svg(data, Some(144.0))`, and it is now
   `decode_svg(data, SvgOptions { dpi: 144.0, ..Default::default() })`. The old
@@ -53,6 +73,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   swept grid.
 
 ### Added
+
+- Still-image WebP load and lossless save (issues #567 and #568). `decode_webp`
+  reads every WebP this build can meet — lossy `VP8`, lossless `VP8L`, alpha,
+  and the extended `VP8X` container — and lifts the `ICCP`, `EXIF` and `XMP `
+  chunks onto the raster as `icc-profile-data`, `exif-data` and `xmp-data`, the
+  same names the JPEG loader uses, so `Raster::icc_profile` finds a WebP
+  profile without knowing where it came from. `Raster::encode_webp` and
+  `Raster::save_webp` write the lossless form, and `.webp` is now a live row in
+  both shared dispatchers: `Raster::save` by extension and
+  `Raster::encode_to_buffer` by format name. `save_stripped` drops the metadata
+  chunks, which is `webpsave --keep none`.
+
+  The lossy decode is bit-exact against libwebp rather than merely close, and
+  the lossless round trip is the identity, so `decode_webp(encode_webp(x))` is
+  `x` for every 8-bit raster. Both directions of the differential are pinned in
+  `oracle-captures/foreign-webp/`, including vips 8.18.4 reading four files
+  libviprs wrote.
+
+  Two things worth knowing before you use it. A one-band raster comes back as
+  three bands, because WebP stores no greyscale at all and `vips webpsave` does
+  the same. And an animated WebP loads **frame 0 only**, at one frame's size,
+  with `n-pages` set to how many frames the original had — which is what a
+  default `vips webpload` does too. Reading every frame is issue #569 and waits
+  on the page model.
 
 - SVG rasterisation, behind a new non-default `svg` feature (issue #502).
   `decode_svg` was a typed stub reporting that librsvg was missing; it now

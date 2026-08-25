@@ -2,13 +2,15 @@
 //! [`Raster`].
 //!
 //! This module is the single file the GIF lane (issue #499) owns. Like
-//! [`crate::webp`] it exists ahead of that lane so four format PRs do not
-//! collide inside [`crate::encode`] (issue #563). The encode side is still a
-//! typed stub: GIF save needs the multi-page animation model and the palette
-//! quantisation work the lane carries, so [`Raster::encode_gif`] reports
-//! [`EncodeError::Unsupported`]. As with [`crate::webp`] that is a
-//! scheduling decision and not a missing dependency: enabling the `image`
-//! crate's `gif` feature brings `image::codecs::gif::GifEncoder` with it.
+//! [`crate::webp`] it was carved out ahead of that lane so four format PRs
+//! do not collide inside [`crate::encode`] (issue #563). The encode side is
+//! still a typed stub: GIF save needs the multi-page animation model and the
+//! palette quantisation work the lane carries, so [`Raster::encode_gif`]
+//! reports [`EncodeError::Unsupported`]. That is a scheduling decision and
+//! not a missing dependency: enabling the `image` crate's `gif` feature
+//! brings `image::codecs::gif::GifEncoder` with it. [`crate::webp`] was in
+//! the same position and is not any more; its lane landed in issues #567 and
+//! #568, so that module is a worked example of where this one is going.
 //! Decoding is not handled here; a GIF is
 //! recognised by its magic in the shared sniff table in [`crate::source`]
 //! and decoded through the `image` facade like every other streaming format.

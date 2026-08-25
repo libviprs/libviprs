@@ -291,6 +291,16 @@ fn assert_webp_compression_non_exhaustive(v: &libviprs::webp::Compression) {
     }
 }
 
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_webp_keep_non_exhaustive(v: &libviprs::webp::Keep) {
+    match v {
+        libviprs::webp::Keep::All => {}
+        libviprs::webp::Keep::None => {}
+        _ => {}
+    }
+}
+
 /// `PdfError::Pdfium` must be constructible without the `pdfium` feature enabled
 /// (this test crate builds with default features). If the variant is
 /// `#[cfg(feature = "pdfium")]`-gated, this fails to compile.
@@ -306,6 +316,7 @@ fn pdf_error_pdfium_variant_is_feature_independent() {
 fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
     assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
+    assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);

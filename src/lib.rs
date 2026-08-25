@@ -281,6 +281,11 @@ pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
 pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
+// `decode_webp` is re-exported for the reason `decode_radiance` is: it is
+// the format-specific decode entry point a caller reaches for when they
+// already know the bytes are WebP. The option types stay behind
+// `libviprs::webp::` so the crate root does not gain a second `SaveOptions`.
+pub use webp::decode_webp;
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root

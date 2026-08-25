@@ -1,0 +1,9 @@
+# capture.py regenerates everything below from its own deterministic ramps
+# and the vips binary, so only capture.py, commands.sh, oracle.json and the
+# five .webp files src/webp.rs embeds verbatim are pinned.
+#
+# outputs/ holds the intermediate .v files and the probe images for the
+# records that need no fixture (the greyscale promotion, the 16-bit shift,
+# the width ceiling).
+fixtures/*.raw
+outputs/
