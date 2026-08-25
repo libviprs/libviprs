@@ -822,17 +822,26 @@ impl Raster {
     ///
     /// Changes the sample format without changing the band count.
     /// Widening (8 to 16 bit) preserves sample values numerically (a `200`
-    /// stays `200`); narrowing (16 to 8 bit) clips values above `255`,
-    /// matching the default (non-shifting) behaviour of `vips_cast`.
+    /// stays `200`); narrowing (16 to 8 bit) clips values above `255`.
     /// Casting to a float format stores the exact sample value as an
     /// `f32` (a `200` becomes `200.0`, never rescaled); casting a float
-    /// raster to an unsigned format rounds to the nearest integer and
-    /// clips to the target range (`0..=255` or `0..=65535`), with `NaN`
-    /// clipping to `0`. Casting to the current depth retags the format
-    /// and copies the pixels. Metadata is carried over.
+    /// raster to an unsigned format clips to the target range (`0..=255`
+    /// or `0..=65535`) and then **truncates toward zero**, so `1.7`
+    /// becomes `1` and `2.5` becomes `2`. `NaN` pins to `0`. Casting to
+    /// the current depth retags the format and copies the pixels.
+    /// Metadata is carried over.
     ///
-    /// The signed (`char`/`short`/`int`) and `double`/complex targets of
-    /// `vips_cast` remain unrepresentable in [`PixelFormat`].
+    /// Truncating is what `vips_cast` does: "Floats are truncated (not
+    /// rounded). Out of range values are clipped" (`cast.c:566-567`).
+    /// libviprs rounded to nearest before this, so a float-to-integer
+    /// cast could land one above the value vips gives (issue #561).
+    ///
+    /// Parity with `vips_cast` reaches only as far as [`PixelFormat`]
+    /// does. The signed (`char`/`short`/`int`), `double`, and complex
+    /// targets have no representation here, so a cast to one of those is
+    /// not expressible rather than wrong; and the `shift` option, which
+    /// rescales instead of clipping when the depth changes, is not
+    /// implemented, so this is always the non-shifting behaviour.
     ///
     /// # Errors
     ///
@@ -875,14 +884,30 @@ impl Raster {
                 if format.is_float() {
                     write_f32_flat(odata, i, v as f32);
                 } else {
-                    // vips_cast semantics: round to nearest, clip to the
-                    // target range. NaN pins to 0 explicitly (min/max would
-                    // pass it through to the non-NaN bound instead).
+                    // vips_cast semantics (`cast.c:566-568`): clip to the
+                    // target range, then TRUNCATE. C clips in the source
+                    // type via VIPS_CLIP_UCHAR / VIPS_CLIP_USHORT and then
+                    // assigns to the narrow integer, and that implicit
+                    // conversion truncates rather than rounds. The C doc
+                    // comment spells it out: "Floats are truncated (not
+                    // rounded). Out of range values are clipped."
+                    //
+                    // `trunc`, NOT `floor`. The two are indistinguishable
+                    // today, because every carrier here is unsigned and a
+                    // negative sample clips to 0 before the rounding mode
+                    // can show. C's `(int)` cast truncates toward zero, so
+                    // `trunc` is the one that stays right when a signed
+                    // carrier lands (#516). Do not simplify it to `floor`.
+                    //
+                    // NaN pins to 0 explicitly: `trunc` leaves NaN alone and
+                    // `clamp` passes it straight through, so without this
+                    // branch it would reach the cast and land on 0 by
+                    // accident rather than by rule.
                     let max = if out_bpc == 1 { 255.0 } else { 65535.0 };
                     let v = if v.is_nan() {
                         0
                     } else {
-                        v.round().clamp(0.0, max) as u32
+                        v.clamp(0.0, max).trunc() as u32
                     };
                     write_flat(odata, out_bpc, i, v);
                 }
@@ -2442,26 +2467,31 @@ mod tests {
     }
 
     /**
-     * Tests float -> u8 casting: round to nearest, clip to 0..=255, and
-     * NaN pins to 0 (not to a clip bound).
-     * Input: [-1.5, 0.4, 0.5, 254.6, 300.0, NaN] -> [0, 0, 1, 255, 255, 0].
+     * Tests float -> u8 casting: truncate toward zero, clip to 0..=255,
+     * and NaN pins to 0 (not to a clip bound). The `0.5` sample is the
+     * one that moved when the rounding mode was corrected to match
+     * `vips_cast` (issue #561): it used to answer 1.
+     * Input: [-1.5, 0.4, 0.5, 254.6, 300.0, NaN] -> [0, 0, 0, 254, 255, 0].
      */
     #[test]
-    fn cast_float_to_u8_rounds_and_clips() {
+    fn cast_float_to_u8_truncates_and_clips() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im =
             Raster::from_f32_samples(6, 1, f1, &[-1.5, 0.4, 0.5, 254.6, 300.0, f32::NAN]).unwrap();
         let out = im.cast(PixelFormat::Gray8);
         assert_eq!(out.format(), PixelFormat::Gray8);
-        assert_eq!(out.data(), &[0, 0, 1, 255, 255, 0]);
+        assert_eq!(out.data(), &[0, 0, 0, 254, 255, 0]);
     }
 
     /**
-     * Tests float -> u16 casting: round to nearest and clip to 0..=65535.
-     * Input: [-3.0, 0.5, 65534.6, 70000.0] -> [0, 1, 65535, 65535].
+     * Tests float -> u16 casting: truncate toward zero and clip to
+     * 0..=65535. The `0.5` and `65534.6` samples are the ones that moved
+     * with the rounding-mode correction (issue #561); they used to answer
+     * 1 and 65535.
+     * Input: [-3.0, 0.5, 65534.6, 70000.0] -> [0, 0, 65534, 65535].
      */
     #[test]
-    fn cast_float_to_u16_rounds_and_clips() {
+    fn cast_float_to_u16_truncates_and_clips() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im = Raster::from_f32_samples(4, 1, f1, &[-3.0, 0.5, 65534.6, 70000.0]).unwrap();
         let out = im.cast(PixelFormat::Gray16);
@@ -2473,7 +2503,109 @@ mod tests {
                 .chain(out.getpoint(2, 0))
                 .chain(out.getpoint(3, 0))
                 .collect::<Vec<_>>(),
-            vec![0.0, 1.0, 65535.0, 65535.0]
+            vec![0.0, 0.0, 65534.0, 65535.0]
+        );
+    }
+
+    /**
+     * Tests the vips 8.18.4 oracle rows for float -> uchar: `vips cast`
+     * TRUNCATES the fraction away, it does not round to nearest
+     * (`cast.c:566-567`, "Floats are truncated (not rounded)").
+     * Works by pinning the four values measured against the binary with
+     * `vips csvload p.csv p.v && vips cast p.v pu.v uchar`, none of which
+     * sit near a clip bound, so the rounding mode is the only thing they
+     * can disagree on (issue #561).
+     * Input: [1.7, 2.5, 3.999, 254.6] -> [1, 2, 3, 254], never
+     * [2, 3, 4, 255].
+     */
+    #[test]
+    fn cast_float_to_u8_truncates_vips_oracle_rows() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 1, f1, &[1.7, 2.5, 3.999, 254.6]).unwrap();
+        let out = im.cast(PixelFormat::Gray8);
+        assert_eq!(out.format(), PixelFormat::Gray8);
+        assert_eq!(
+            out.data(),
+            &[1, 2, 3, 254],
+            "vips cast truncates float samples; rounding would give [2, 3, 4, 255]"
+        );
+    }
+
+    /**
+     * Tests that the same truncation holds on the wider unsigned target,
+     * where a value can be fractional without being anywhere near the
+     * clip. Works by casting to Gray16 the `300.9` row measured as `300`
+     * by `vips cast p.v ps.v ushort` — the same input that clips to 255 on
+     * uchar, so this separates the rounding mode from the clip (issue
+     * #561).
+     * Input: [300.9, 65534.6, 1.5] -> [300, 65534, 1].
+     */
+    #[test]
+    fn cast_float_to_u16_truncates_in_range() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(3, 1, f1, &[300.9, 65534.6, 1.5]).unwrap();
+        let out = im.cast(PixelFormat::Gray16);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!(
+            (0..3).flat_map(|x| out.getpoint(x, 0)).collect::<Vec<_>>(),
+            vec![300.0, 65534.0, 1.0],
+            "vips cast truncates on ushort too; rounding would give [301, 65535, 2]"
+        );
+    }
+
+    /**
+     * Tests that the clip bounds did NOT move when the rounding mode did
+     * (issue #561): clipping was already correct against vips, so the
+     * truncation fix must leave it alone.
+     * Works by pinning the below-range and above-range rows measured on
+     * the binary for both unsigned targets.
+     * Input: uchar [-0.5, -3.7, 300.9] -> [0, 0, 255];
+     * ushort [-3.0, 65535.5, 70000.0] -> [0, 65535, 65535].
+     */
+    #[test]
+    fn cast_float_clipping_unchanged_by_truncation() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let u8_in = Raster::from_f32_samples(3, 1, f1, &[-0.5, -3.7, 300.9]).unwrap();
+        assert_eq!(
+            u8_in.cast(PixelFormat::Gray8).data(),
+            &[0, 0, 255],
+            "out-of-range uchar samples still clip to the format bounds"
+        );
+
+        let u16_in = Raster::from_f32_samples(3, 1, f1, &[-3.0, 65535.5, 70000.0]).unwrap();
+        let out = u16_in.cast(PixelFormat::Gray16);
+        assert_eq!(
+            (0..3).flat_map(|x| out.getpoint(x, 0)).collect::<Vec<_>>(),
+            vec![0.0, 65535.0, 65535.0],
+            "out-of-range ushort samples still clip to the format bounds"
+        );
+    }
+
+    /**
+     * Tests that the NaN -> 0 pin survived the rounding-mode change
+     * (issue #561). NaN already matched vips, and it needs its own branch
+     * either way: `f64::trunc` of NaN is NaN and `f64::clamp` passes NaN
+     * straight through to the cast, so nothing in the arithmetic puts it
+     * at 0 on its own.
+     * Works by casting a NaN sample to both unsigned targets. Measured on
+     * the binary as `vips math a.v nan.v asin` over `2` (csvload cannot
+     * parse the literal `nan`), then `vips cast nan.v out.v uchar` -> 0.
+     * Input: [NaN, 1.7] -> uchar [0, 1] and ushort [0, 1].
+     */
+    #[test]
+    fn cast_float_nan_still_pins_to_zero() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(2, 1, f1, &[f32::NAN, 1.7]).unwrap();
+        assert_eq!(
+            im.cast(PixelFormat::Gray8).data(),
+            &[0, 1],
+            "NaN pins to 0 rather than falling out of the clamp"
+        );
+        let wide = im.cast(PixelFormat::Gray16);
+        assert_eq!(
+            (0..2).flat_map(|x| wide.getpoint(x, 0)).collect::<Vec<_>>(),
+            vec![0.0, 1.0],
+            "NaN pins to 0 on the wide target too"
         );
     }
 
