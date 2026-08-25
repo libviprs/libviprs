@@ -853,6 +853,12 @@ fn ported_surface_hough_circle() {
 /// The 2-image `remainder` call site (`a % b`), the image-image companion
 /// to the `rem_const` site `ported_surface_mul_div_pow_mod` pins. Both the
 /// panicking and the fallible form are part of the contract.
+///
+/// The sample point is deliberately (5, 5) and not the centre: `make_test_mono`
+/// is a radial gradient that is flat `0` inside `r <= 0.5`, so a centre sample
+/// asserts `0 % 7 == 0` and an all-zero stub of the right shape passes. (5, 5)
+/// sits in the non-zero annulus, and the `assert_ne!` below keeps it there if
+/// the fixture ever moves.
 #[test]
 fn ported_surface_remainder() {
     let mono = make_test_mono();
@@ -860,15 +866,20 @@ fn ported_surface_remainder() {
 
     let result = mono.remainder(&divisor);
     assert_eq!(result.format(), PixelFormat::Gray8);
-    let px_m = mono.getpoint(50, 50);
-    let px_r = result.getpoint(50, 50);
-    assert!(
-        (px_r[0] - (px_m[0] as i64 % 7) as f64).abs() < 1.0,
-        "remainder at (50,50) should be {} % 7, got {}",
+    let px_m = mono.getpoint(5, 5);
+    assert_ne!(
+        px_m[0], 0.0,
+        "(5,5) must be in the non-zero annulus for this assertion to discriminate"
+    );
+    let px_r = result.getpoint(5, 5);
+    assert_eq!(
+        px_r[0],
+        (px_m[0] as u32 % 7) as f64,
+        "remainder at (5,5) should be {} % 7, got {}",
         px_m[0],
         px_r[0]
     );
 
     let fallible = mono.try_remainder(&divisor).expect("same size, same bands");
-    assert!((fallible.avg() - result.avg()).abs() < 0.001);
+    assert_eq!(fallible.data(), result.data());
 }

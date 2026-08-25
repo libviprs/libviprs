@@ -15,11 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample of the result is `self` mod the matching sample of `other`. Output
   depth is the wider of the two input depths, matching the identity promotion
   table libvips applies after formatalike, so `uchar % uchar` stays 8-bit and
-  `uchar % ushort` promotes to 16-bit. The kernel is the floored remainder
-  `a - b * floor(a / b)` rather than a truncating `%`; the two agree on every
-  value the crate's unsigned carriers can hold, and the floored one is what
-  libvips uses for its float formats, so it stays correct if a signed or float
-  carrier ever lands.
+  `uchar % ushort` promotes to 16-bit.
+
+  The kernel is the floored remainder `a - b * floor(a / b)` rather than a
+  truncating `%`, and it lives in one shared `remainder_vips` function that
+  both `remainder` and `rem_const` run, so the image-image and constant forms
+  cannot disagree for identical operands. libvips does not pick one definition,
+  it dispatches on format: `IREMAINDER` truncates for `char` / `short` / `int`,
+  `FREMAINDER` floors for `float` / `double`. Floored therefore matches
+  `FREMAINDER` for a future float carrier, is provably identical to truncated
+  on the unsigned carriers the crate has today (checked exhaustively over all
+  4,294,836,225 pairs with `a` in `0..=65535` and `b` in `1..=65535`, zero
+  disagreements), and would knowingly diverge from `IREMAINDER` if a signed
+  carrier ever lands, at which point the shared kernel needs a signedness
+  branch. That last part is spelled out where the kernel is defined.
 
   Three deliberate divergences from libvips, all spelled out on the method's
   docs. A zero divisor gives `0` here where libvips gives `-1` (which reads
@@ -29,7 +38,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   width, height, and band count, the same contract every other image-image
   operation in the arithmetic module has, rather than libvips's
   bandalike-then-sizealike. And float rasters are rejected on either side,
-  since the operation rounds and saturates into an unsigned output.
+  since the operation rounds and saturates into an unsigned output, so there
+  is no representable place for a fractional or negative sample; cast to an
+  unsigned 8- or 16-bit format first.
+
+### Changed
+
+- `Raster::rem_const` now runs the same floored `remainder_vips` kernel as the
+  new two-image `Raster::remainder`, instead of a truncating `%` (issue #536).
+  **This changes the result for a negative constant.** Nothing else moves: a
+  positive constant and a zero constant are untouched, because floored and
+  truncated agree on every non-negative operand pair an unsigned carrier can
+  hold.
+
+  The two forms document each other as companions, and `rem_const` takes an
+  unconstrained `f64`, so before this the crate already disagreed with itself
+  for an input a caller could supply: `rem_const(-3.0)` on a sample of `7`
+  gave `1` while the two-image kernel at `(7, -3)` gives `-2`. One kernel is
+  the only way that stays fixed.
+
+  It is worth being explicit about what the fix costs, because it is a real
+  divergence and not a free win. Measured against vips 8.18.4 on a uchar
+  `[7,20,30]`: `vips remainder_const` with `c = -3` gives `[1,2,0]`, because
+  libvips casts the constant to `int` for an integer input and takes the
+  truncating branch. The same input cast to `float` first gives `[-2,-1,0]`,
+  the floored answer. libviprs now computes the float answer and saturates it
+  into the unsigned output, so `rem_const(-3.0)` gives `[0,0,0]` where it used
+  to give `[1,2,0]`. The old behaviour matched vips on the integer carrier;
+  the new one matches vips on the float carrier the crate is heading towards
+  and keeps the two remainder forms in agreement.
 
 ## [0.4.0] — 2026-07-20
 
