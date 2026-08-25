@@ -274,6 +274,13 @@ pub enum SourceError {
     /// header or pixel data, unsupported coding/band format).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
+    /// A malformed Radiance `.hdr` file. libviprs decodes Radiance itself
+    /// rather than through the `image` crate (see [`crate::radiance`]), so
+    /// its failures arrive as the codec's own typed
+    /// [`RadianceError`](crate::radiance::RadianceError) rather than as an
+    /// opaque string.
+    #[error(transparent)]
+    Radiance(#[from] crate::radiance::RadianceError),
 }
 
 /// Resource limits applied to a single image decode.
@@ -652,6 +659,8 @@ pub(crate) enum SniffedFormat {
     Gif,
     /// WebP, `RIFF` + a 4-byte length + `WEBP`.
     WebP,
+    /// Radiance HDR, the first line `#?RADIANCE`.
+    Radiance,
 }
 
 impl SniffedFormat {
@@ -666,15 +675,18 @@ impl SniffedFormat {
     ///   buffer addressable end to end.
     /// * JPEG, because the metadata pass rescans the APP1/APP2 segments for
     ///   EXIF and ICC after the pixel decode.
+    /// * Radiance, because [`crate::radiance::decode_radiance`] walks the
+    ///   header lines and the run-length-encoded body over one addressable
+    ///   buffer.
     ///
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
     const fn decodes_from_memory(self) -> bool {
-        matches!(self, Self::Vips | Self::Jpeg)
+        matches!(self, Self::Vips | Self::Jpeg | Self::Radiance)
     }
 
-    /// The `image` decoder for this container, or `None` for `.v`, which
-    /// libviprs decodes itself.
+    /// The `image` decoder for this container, or `None` for `.v` and
+    /// Radiance, which libviprs decodes itself.
     ///
     /// This is the entire route table, and it is an identity mapping on
     /// purpose: one sniffed container in, one decoder out, no per-format
@@ -689,6 +701,12 @@ impl SniffedFormat {
             Self::Tiff => Some(image::ImageFormat::Tiff),
             Self::Gif => Some(image::ImageFormat::Gif),
             Self::WebP => Some(image::ImageFormat::WebP),
+            // `image`'s Radiance route is behind its `hdr` feature, which
+            // this build deliberately leaves off: the crate decodes RGBE as
+            // `mantissa * 2^(e-136)` where vips uses the half-bit-centred
+            // `(mantissa + 0.5) * 2^(e-136)`, a 100% error at mantissa 0.
+            // [`crate::radiance`] hand-rolls the codec instead.
+            Self::Radiance => None,
         }
     }
 }
@@ -724,6 +742,17 @@ pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
     // file-specific, so the signature is split either side of it.
     if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
         return Some(SniffedFormat::WebP);
+    }
+    // Radiance's magic is a whole *line*, not a prefix: `vips__rad_israd`
+    // (`radiance.c:568-577`) reads the first line and compares it to
+    // `#?RADIANCE` in full, so the near-miss `#?RGBE` is not Radiance and
+    // neither is `#?RADIANCEX`.
+    let magic = crate::radiance::MAGIC;
+    if head.len() > magic.len()
+        && head.starts_with(magic)
+        && matches!(head[magic.len()], b'\n' | b'\r')
+    {
+        return Some(SniffedFormat::Radiance);
     }
     None
 }
@@ -839,6 +868,9 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     let sniffed = sniff(bytes);
     if sniffed == Some(SniffedFormat::Vips) {
         return crate::imageio::decode_vips_bytes(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::Radiance) {
+        return crate::radiance::decode_radiance(bytes, limits);
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);

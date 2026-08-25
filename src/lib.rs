@@ -137,6 +137,7 @@ pub mod pdf;
 pub mod pixel;
 pub mod planner;
 pub(crate) mod poison;
+pub mod radiance;
 pub mod raster;
 pub(crate) mod raster_ops;
 pub mod resample;
@@ -232,6 +233,11 @@ pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
+// `decode_radiance` is re-exported beside the error type because it is the
+// format-specific decode entry point a caller reaches for when they already
+// know the bytes are Radiance, exactly as `decode_tiff_page` is; the
+// content-sniffing `decode_bytes` / `decode_file` reach it too.
+pub use radiance::{RadianceError, decode_radiance};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
