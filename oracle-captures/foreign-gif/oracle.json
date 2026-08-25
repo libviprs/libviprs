@@ -1,0 +1,704 @@
+{
+  "loads": {
+    "cogs.gif": {
+      "bands": 4,
+      "bits-per-sample": 4,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 0,
+          "disposal": 2,
+          "transparent": true,
+          "transparent_index": 15
+        },
+        "interlaced": false,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 418,
+        "lzw_minimum_code_size": 4,
+        "rect": [
+          0,
+          0,
+          85,
+          77
+        ]
+      },
+      "frame_zero_bytes": 26180,
+      "frame_zero_pixel_sha256": "54ab332876f960fbb23d273bb47ec6bf7f0b4870c81c5f0bcd9ede6c733d7d52",
+      "frames_on_the_wire": 5,
+      "height": 77,
+      "interlaced": null,
+      "interpretation": "srgb",
+      "loop": 32761,
+      "lossy_decoder": false,
+      "n-pages": 5,
+      "netscape_loop_count": 32760,
+      "width": 85
+    },
+    "cramps.gif": {
+      "bands": 3,
+      "bits-per-sample": 4,
+      "first_frame": {
+        "gce": null,
+        "interlaced": true,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 13011,
+        "lzw_minimum_code_size": 4,
+        "rect": [
+          0,
+          0,
+          159,
+          203
+        ]
+      },
+      "frame_zero_bytes": 96831,
+      "frame_zero_pixel_sha256": "d6af6db54eeccd0070c838fae98c724520f10183a459e15c7d79973dd0cf715e",
+      "frames_on_the_wire": 1,
+      "height": 203,
+      "interlaced": "1",
+      "interpretation": "srgb",
+      "loop": 1,
+      "lossy_decoder": false,
+      "n-pages": 1,
+      "netscape_loop_count": null,
+      "width": 159
+    },
+    "dispose-background.gif": {
+      "bands": 4,
+      "bits-per-sample": 7,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 50,
+          "disposal": 2,
+          "transparent": true,
+          "transparent_index": 66
+        },
+        "interlaced": false,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 2670,
+        "lzw_minimum_code_size": 7,
+        "rect": [
+          0,
+          0,
+          192,
+          168
+        ]
+      },
+      "frame_zero_bytes": 129024,
+      "frame_zero_pixel_sha256": "e831e71fdba9045d9294978a637e305c3107cd133fff93c0aa421cf1d91493c1",
+      "frames_on_the_wire": 3,
+      "height": 168,
+      "interlaced": null,
+      "interpretation": "srgb",
+      "loop": 11,
+      "lossy_decoder": false,
+      "n-pages": 3,
+      "netscape_loop_count": 10,
+      "width": 192
+    },
+    "dispose-previous.gif": {
+      "bands": 4,
+      "bits-per-sample": 1,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 10,
+          "disposal": 1,
+          "transparent": true,
+          "transparent_index": 2
+        },
+        "interlaced": false,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 422,
+        "lzw_minimum_code_size": 2,
+        "rect": [
+          0,
+          0,
+          100,
+          100
+        ]
+      },
+      "frame_zero_bytes": 40000,
+      "frame_zero_pixel_sha256": "b8fca5362470860e36e2036adb0d0c1c343d5123192ccc0a2d81274f45463833",
+      "frames_on_the_wire": 3,
+      "height": 100,
+      "interlaced": null,
+      "interpretation": "srgb",
+      "loop": 1,
+      "lossy_decoder": false,
+      "n-pages": 3,
+      "netscape_loop_count": null,
+      "width": 100
+    },
+    "garden.gif": {
+      "bands": 4,
+      "bits-per-sample": 8,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 10,
+          "disposal": 1,
+          "transparent": true,
+          "transparent_index": 0
+        },
+        "interlaced": false,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 439569,
+        "lzw_minimum_code_size": 8,
+        "rect": [
+          0,
+          0,
+          800,
+          800
+        ]
+      },
+      "frame_zero_bytes": 2560000,
+      "frame_zero_pixel_sha256": "1463e572483f4eb1adad6277f45d6cd416e10d8a8eadafa65b6b5042924ba262",
+      "frames_on_the_wire": 35,
+      "height": 800,
+      "interlaced": null,
+      "interpretation": "srgb",
+      "loop": 0,
+      "lossy_decoder": false,
+      "n-pages": 35,
+      "netscape_loop_count": 0,
+      "width": 800
+    },
+    "inset.gif": {
+      "background": "0 0 255",
+      "bands": 3,
+      "bits-per-sample": 2,
+      "corner_pixel": [
+        0,
+        0,
+        0
+      ],
+      "gif-palette": "-16777216 -16776961 -65536 -16711936",
+      "inset_pixel": [
+        255,
+        0,
+        0
+      ],
+      "note": "the corner is transparent black even though the header reports a blue background, and the file is 3 bands because no frame declares transparency"
+    },
+    "invalid_multiframe.gif": {
+      "bands": 4,
+      "bits-per-sample": 5,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 0,
+          "disposal": 1,
+          "transparent": true,
+          "transparent_index": 0
+        },
+        "interlaced": false,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 36,
+        "lzw_minimum_code_size": 5,
+        "rect": [
+          0,
+          0,
+          10,
+          9
+        ]
+      },
+      "frame_zero_bytes": 360,
+      "frame_zero_pixel_sha256": "a3d8c71c5dc54fd05d822554a90905440228f3938f2a0508c1e134e0f1787811",
+      "frames_on_the_wire": 4,
+      "height": 9,
+      "interlaced": null,
+      "interpretation": "srgb",
+      "loop": 32761,
+      "lossy_decoder": false,
+      "n-pages": 4,
+      "netscape_loop_count": 32760,
+      "width": 10
+    },
+    "trans-x.gif": {
+      "bands": 4,
+      "bits-per-sample": 8,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 10,
+          "disposal": 0,
+          "transparent": true,
+          "transparent_index": 0
+        },
+        "interlaced": true,
+        "local_colour_table_entries": 0,
+        "lzw_bytes": 291,
+        "lzw_minimum_code_size": 8,
+        "rect": [
+          0,
+          0,
+          100,
+          100
+        ]
+      },
+      "frame_zero_bytes": 40000,
+      "frame_zero_pixel_sha256": "8a08c46646daeec9d5af07e4977ca79e6e2eb2942c9492af55f5aa0d7398a9c2",
+      "frames_on_the_wire": 1,
+      "height": 100,
+      "interlaced": "1",
+      "interpretation": "srgb",
+      "loop": 1,
+      "lossy_decoder": false,
+      "n-pages": 1,
+      "netscape_loop_count": null,
+      "width": 100
+    },
+    "truncated.gif": {
+      "bands": 4,
+      "bits-per-sample": 3,
+      "first_frame": {
+        "gce": {
+          "delay_cs": 0,
+          "disposal": 0,
+          "transparent": false,
+          "transparent_index": 0
+        },
+        "interlaced": false,
+        "local_colour_table_entries": 0,
+        "lzw_minimum_code_size": 3,
+        "rect": [
+          0,
+          0,
+          575,
+          800
+        ],
+        "truncated": "image data"
+      },
+      "frame_zero_bytes": 1840000,
+      "frame_zero_pixel_sha256": "b15da97cccb1582359088b30146f8c4828b79629f12ce1802480fcdb613add4e",
+      "frames_on_the_wire": 1,
+      "height": 800,
+      "interlaced": null,
+      "interpretation": "srgb",
+      "loop": 1,
+      "lossy_decoder": false,
+      "n-pages": 1,
+      "netscape_loop_count": null,
+      "width": 575
+    },
+    "truncation_flips_the_band_count": {
+      "intact_bands": 3,
+      "note": "libnsgif reports a frame whose data runs out as transparent, so the rows that never arrived stay uncomposited; vips warns rather than failing because fail-on defaults to none",
+      "truncated_bands": 4
+    }
+  },
+  "notes": [
+    "GIF's LZW is exactly lossless and fully deterministic in both directions. The existing oracle-captures/foreign/ capture tags loads[\"cogs.gif\"] with \"lossy_decoder\": true, which is wrong and worse than cosmetic: it would let a real palette-expansion, disposal or blending bug pass as decoder drift. Every load record here is a byte-exact pixel hash.",
+    "Do not assert on the fourth value vips getpoint prints for a 3-band image. getpoint.c:105 sizes its output array from the CODED band count while vips_image_decode has already reduced the buffer, so the extra value is an out-of-bounds read. No record here uses getpoint.",
+    "gifsave never writes a 256-colour palette: cgifsave.c:795-796 caps at min(255, 1 << bitdepth) to keep one index free for transparency, so a 256-colour source is lossy for vips too.",
+    "loop is not the NETSCAPE count. No application extension means loop 1, a stored count of 0 means loop 0 (forever), a stored count of n means loop n + 1."
+  ],
+  "saves": {
+    "alpha_threshold": {
+      "note": "cgifsave.c:538-548 promotes alpha >= 128 to 255 and zeroes the whole pixel below it, colour included",
+      "reload_bands": 4,
+      "row0": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ],
+        [
+          200,
+          100,
+          50,
+          255
+        ]
+      ],
+      "source_alpha": [
+        0,
+        8,
+        16,
+        24,
+        32,
+        40,
+        48,
+        56,
+        64,
+        72,
+        80,
+        88,
+        96,
+        104,
+        112,
+        120,
+        128,
+        136,
+        144,
+        152,
+        160,
+        168,
+        176,
+        184,
+        192,
+        200,
+        208,
+        216,
+        224,
+        232,
+        240,
+        248
+      ]
+    },
+    "bitdepth": {
+      "1": {
+        "bytes": 92,
+        "global_colour_table_entries": 2,
+        "lzw_minimum_code_size": 2,
+        "transparent": false
+      },
+      "2": {
+        "bytes": 118,
+        "global_colour_table_entries": 4,
+        "lzw_minimum_code_size": 2,
+        "transparent": false
+      },
+      "3": {
+        "bytes": 164,
+        "global_colour_table_entries": 8,
+        "lzw_minimum_code_size": 3,
+        "transparent": false
+      },
+      "4": {
+        "bytes": 217,
+        "global_colour_table_entries": 16,
+        "lzw_minimum_code_size": 4,
+        "transparent": false
+      },
+      "5": {
+        "bytes": 301,
+        "global_colour_table_entries": 32,
+        "lzw_minimum_code_size": 5,
+        "transparent": false
+      },
+      "6": {
+        "bytes": 439,
+        "global_colour_table_entries": 64,
+        "lzw_minimum_code_size": 6,
+        "transparent": false
+      },
+      "7": {
+        "bytes": 696,
+        "global_colour_table_entries": 128,
+        "lzw_minimum_code_size": 7,
+        "transparent": false
+      },
+      "8": {
+        "bytes": 1114,
+        "global_colour_table_entries": 256,
+        "lzw_minimum_code_size": 8,
+        "transparent": false
+      }
+    },
+    "dither": {
+      "levels": {
+        "0": {
+          "pixels_changed_vs_dither_0": 0
+        },
+        "0.25": {
+          "pixels_changed_vs_dither_0": 70
+        },
+        "0.5": {
+          "pixels_changed_vs_dither_0": 95
+        },
+        "0.75": {
+          "pixels_changed_vs_dither_0": 88
+        },
+        "1": {
+          "pixels_changed_vs_dither_0": 90
+        }
+      },
+      "note": "not monotone in pixels changed, so only the dither == 0 identity is worth pinning as an equality",
+      "total_pixels": 768
+    },
+    "interlace": {
+      "interlaced_flag": true,
+      "note": "GIF's four passes: rows 0,8,..; 4,12,..; 2,6,..; then every odd row",
+      "progressive_flag": false,
+      "reload_identical": true,
+      "stored_source_rows": [
+        0,
+        4,
+        2,
+        6,
+        1,
+        3,
+        5,
+        7
+      ]
+    },
+    "quantisation_error": {
+      "note": "vips quantises with libimagequant and libviprs with median cut, so the palettes differ by construction; these are the numbers src/gif.rs is required to stay in band with",
+      "sources": {
+        "cycle768": {
+          "avg_abs_diff": 0.063802,
+          "distinct_colours": 256,
+          "max_abs_diff": 16,
+          "reload_bands": 3
+        },
+        "gradient48x32": {
+          "avg_abs_diff": 3.895399,
+          "distinct_colours": 1536,
+          "max_abs_diff": 22,
+          "reload_bands": 3
+        }
+      }
+    },
+    "transparent_index_reservation": {
+      "bitdepth1_unique2": {
+        "global_colour_table_entries": 2,
+        "reload_bands": 3,
+        "transparent": false,
+        "transparent_index": 0
+      },
+      "bitdepth2_unique2": {
+        "global_colour_table_entries": 4,
+        "reload_bands": 4,
+        "transparent": true,
+        "transparent_index": 0
+      },
+      "bitdepth2_unique8": {
+        "global_colour_table_entries": 4,
+        "reload_bands": 3,
+        "transparent": false,
+        "transparent_index": 0
+      },
+      "bitdepth4_unique100": {
+        "global_colour_table_entries": 16,
+        "reload_bands": 3,
+        "transparent": false,
+        "transparent_index": 0
+      },
+      "bitdepth4_unique8": {
+        "global_colour_table_entries": 16,
+        "reload_bands": 4,
+        "transparent": true,
+        "transparent_index": 0
+      },
+      "bitdepth6_unique100": {
+        "global_colour_table_entries": 64,
+        "reload_bands": 3,
+        "transparent": false,
+        "transparent_index": 0
+      },
+      "bitdepth6_unique8": {
+        "global_colour_table_entries": 16,
+        "reload_bands": 4,
+        "transparent": true,
+        "transparent_index": 0
+      },
+      "bitdepth8_unique16": {
+        "global_colour_table_entries": 32,
+        "reload_bands": 4,
+        "transparent": true,
+        "transparent_index": 0
+      },
+      "bitdepth8_unique2": {
+        "global_colour_table_entries": 4,
+        "reload_bands": 4,
+        "transparent": true,
+        "transparent_index": 0
+      },
+      "bitdepth8_unique254": {
+        "global_colour_table_entries": 256,
+        "reload_bands": 4,
+        "transparent": true,
+        "transparent_index": 0
+      },
+      "bitdepth8_unique255": {
+        "global_colour_table_entries": 256,
+        "reload_bands": 3,
+        "transparent": false,
+        "transparent_index": 0
+      },
+      "bitdepth8_unique256": {
+        "global_colour_table_entries": 256,
+        "reload_bands": 3,
+        "transparent": false,
+        "transparent_index": 0
+      }
+    }
+  },
+  "vips_version": "vips-8.18.4"
+}

@@ -19,6 +19,21 @@ ab_glyph = "0.2"
 arbitrary = { version = "1", features = ["derive"] }
 blake3 = "1.8.4"
 flate2 = "1"
+# The GIF codec, taken directly rather than only through the `image` facade
+# (issue #499). `image`'s `GifEncoder` exposes `new`, `new_with_speed`,
+# `set_repeat`, `encode`, `encode_frame(s)` and nothing else: measured on
+# `image` 0.25.10's `codecs/gif.rs`, zero occurrences of "interlac" and zero
+# of "dither", and `encode` routes straight to `Frame::from_rgb_speed` with
+# no palette control, so none of `gifsave`'s three headline options is
+# reachable there. `gif::Frame::interlaced` (`common.rs:155`) and
+# `from_indexed_pixels` are. Taking both is free in lockfile terms: the
+# `image` `gif` feature already pulls this exact crate, so there is no new
+# node in the graph.
+#
+# `default-features = false` ALONE COMPILES TO AN EMPTY CRATE:
+# `gif-0.14.2/src/lib.rs:113` is a crate-level `#![cfg(feature = "std")]`.
+# The `std` feature is not optional here, it is the whole library.
+gif = { version = "0.14", default-features = false, features = ["std"] }
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -253,6 +268,7 @@ test-util = []
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 flate2 = { workspace = true }
+gif = { workspace = true }
 image = { workspace = true }
 image-webp = { workspace = true }
 lopdf = { workspace = true }
