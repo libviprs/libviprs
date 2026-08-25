@@ -1693,6 +1693,36 @@ mod tests {
     }
 
     /**
+     * Tests that `.webp` is a live row in the extension route and that
+     * the lossless encoder behind it round-trips: the file written by
+     * `save` decodes back to the same pixels, and `save_stripped` drops
+     * the metadata chunks the plain `save` embeds. Works by attaching an
+     * ICC blob, saving both ways, and reading each file back.
+     * Input: 2x2 Rgb8 with `icc-profile-data` -> Output: identical
+     * pixels from both files, the profile present after `save` and
+     * absent after `save_stripped`.
+     */
+    #[test]
+    fn save_webp_round_trips_losslessly_and_honours_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut im = rgb_2x2();
+        im.fields
+            .set("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3, 4]));
+
+        let kept = dir.path().join("kept.webp");
+        im.save(&kept).unwrap();
+        let back = decode_file(&kept).unwrap();
+        assert_eq!(back.data(), im.data(), "the WebP encoder is lossless");
+        assert_eq!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
+
+        let stripped = dir.path().join("stripped.webp");
+        im.save_stripped(&stripped).unwrap();
+        let bare = decode_file(&stripped).unwrap();
+        assert_eq!(bare.data(), im.data());
+        assert_eq!(bare.icc_profile(), None);
+    }
+
+    /**
      * Tests save dispatch to PNG: the file decodes back to the same
      * pixels (PNG is lossless), and unknown extensions error.
      */

@@ -1,0 +1,792 @@
+{
+  "meta": {
+    "area": "foreign-webp",
+    "issues": [
+      567,
+      568
+    ],
+    "vips_version": "vips-8.18.4",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "captured_by": "oracle-captures/foreign-webp/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted in src/webp.rs; the binary every number here came out of is the 8.18.4 release and is not the same artefact"
+  },
+  "notes": [
+    "webpsave narrows 16-bit input by `>> 8`, and does so whether the image is tagged rgb16 or srgb, so the shift is not interpretation-driven."
+  ],
+  "records": {
+    "ll_rgb": {
+      "what": "`vips webpsave --lossless --keep none` on a 4x3 Rgb8 ramp, then every pixel read back. The round trip is the identity: the bytes that went in are the bytes that come out.",
+      "fixture": "fixtures/ll_rgb.webp",
+      "sha256": "2ff60773adf77c312a58df983981129c008a9c5e5bf38855f5f5f5cae159027e",
+      "bytes": 100,
+      "chunks": [
+        [
+          "VP8L",
+          80
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/ll_rgb.webp: 4x3 uchar, 3 bands, srgb, webpload",
+      "source_bytes": [
+        0,
+        0,
+        0,
+        61,
+        97,
+        29,
+        122,
+        194,
+        58,
+        183,
+        35,
+        87,
+        13,
+        151,
+        211,
+        74,
+        248,
+        240,
+        135,
+        89,
+        13,
+        196,
+        186,
+        42,
+        26,
+        46,
+        166,
+        87,
+        143,
+        195,
+        148,
+        240,
+        224,
+        209,
+        81,
+        253
+      ],
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ],
+      "identity": true
+    },
+    "ll_rgba": {
+      "what": "`vips webpsave --lossless --keep none` on a 4x3 Rgba8 ramp, then every pixel read back. The round trip is the identity: the bytes that went in are the bytes that come out.",
+      "fixture": "fixtures/ll_rgba.webp",
+      "sha256": "f4162a67a29b3c5a9cd747d12dfc2b716a840f8861ba6b961c013255a1246287",
+      "bytes": 116,
+      "chunks": [
+        [
+          "VP8L",
+          96
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/ll_rgba.webp: 4x3 uchar, 4 bands, srgb, webpload",
+      "source_bytes": [
+        0,
+        0,
+        0,
+        0,
+        61,
+        97,
+        29,
+        85,
+        122,
+        194,
+        58,
+        170,
+        183,
+        35,
+        87,
+        255,
+        13,
+        151,
+        211,
+        40,
+        74,
+        248,
+        240,
+        125,
+        135,
+        89,
+        13,
+        210,
+        196,
+        186,
+        42,
+        39,
+        26,
+        46,
+        166,
+        80,
+        87,
+        143,
+        195,
+        165,
+        148,
+        240,
+        224,
+        250,
+        209,
+        81,
+        253,
+        79
+      ],
+      "getpoint": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29,
+          85
+        ],
+        [
+          122,
+          194,
+          58,
+          170
+        ],
+        [
+          183,
+          35,
+          87,
+          255
+        ],
+        [
+          13,
+          151,
+          211,
+          40
+        ],
+        [
+          74,
+          248,
+          240,
+          125
+        ],
+        [
+          135,
+          89,
+          13,
+          210
+        ],
+        [
+          196,
+          186,
+          42,
+          39
+        ],
+        [
+          26,
+          46,
+          166,
+          80
+        ],
+        [
+          87,
+          143,
+          195,
+          165
+        ],
+        [
+          148,
+          240,
+          224,
+          250
+        ],
+        [
+          209,
+          81,
+          253,
+          79
+        ]
+      ],
+      "identity": true
+    },
+    "lossy_rgb": {
+      "what": "`vips webpsave` at the default Q on the same 4x3 ramp. VP8 reconstruction is integer-specified and libwebp's default chroma upsampling is the fancy (bilinear) one, so a correct pure-Rust decoder reproduces these values exactly rather than approximately. libviprs pins them with no tolerance.",
+      "fixture": "fixtures/lossy_rgb.webp",
+      "sha256": "196f3c1b11a081e8140a27c6033137384ad005a0b12f24845e2e3c94c208dfb3",
+      "bytes": 96,
+      "chunks": [
+        [
+          "VP8 ",
+          76
+        ]
+      ],
+      "getpoint": [
+        [
+          0,
+          14,
+          20
+        ],
+        [
+          56,
+          92,
+          82
+        ],
+        [
+          160,
+          153,
+          112
+        ],
+        [
+          112,
+          85,
+          28
+        ],
+        [
+          73,
+          125,
+          155
+        ],
+        [
+          166,
+          197,
+          214
+        ],
+        [
+          100,
+          90,
+          80
+        ],
+        [
+          201,
+          171,
+          147
+        ],
+        [
+          26,
+          66,
+          144
+        ],
+        [
+          115,
+          136,
+          204
+        ],
+        [
+          219,
+          204,
+          253
+        ],
+        [
+          160,
+          126,
+          165
+        ]
+      ],
+      "differs_from_source": true
+    },
+    "grey_promotes_to_rgb": {
+      "what": "A 1-band b-w uchar image saved with `webpsave` loads back as 3 bands srgb. `vips -l` registers the saver as `rgb alpha`, and the container has no greyscale colour type at all, so the luminance is repeated into all three bands.",
+      "source_bytes": [
+        0,
+        61,
+        122,
+        183,
+        13,
+        74,
+        135,
+        196,
+        26,
+        87,
+        148,
+        209
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/outputs/grey.webp: 4x3 uchar, 3 bands, srgb, webpload",
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          61,
+          61
+        ],
+        [
+          122,
+          122,
+          122
+        ],
+        [
+          183,
+          183,
+          183
+        ],
+        [
+          13,
+          13,
+          13
+        ],
+        [
+          74,
+          74,
+          74
+        ],
+        [
+          135,
+          135,
+          135
+        ],
+        [
+          196,
+          196,
+          196
+        ],
+        [
+          26,
+          26,
+          26
+        ],
+        [
+          87,
+          87,
+          87
+        ],
+        [
+          148,
+          148,
+          148
+        ],
+        [
+          209,
+          209,
+          209
+        ]
+      ],
+      "bands_in": 1,
+      "bands_out": 3,
+      "luminance_preserved": true
+    },
+    "sixteen_bit_is_shifted_not_clipped": {
+      "what": "`vips webpsave` accepts a ushort image and narrows it to uchar by a RIGHT SHIFT OF 8, not by clipping: 255 -> 0 and 65535 -> 255. libviprs refuses the raster instead and tells the caller to cast, because `Raster::cast` to an 8-bit format CLIPS, so an automatic narrow here would disagree with the crate's own cast while looking like it did the same thing.",
+      "header_in": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/outputs/rgb16-srgb.v: 4x2 ushort, 3 bands, srgb",
+      "header_out": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/outputs/rgb16.webp: 4x2 uchar, 3 bands, srgb, webpload",
+      "in": [
+        0,
+        1,
+        255,
+        256,
+        257,
+        511,
+        512,
+        65535,
+        0,
+        1,
+        255,
+        256,
+        257,
+        511,
+        512,
+        65535,
+        0,
+        1,
+        255,
+        256,
+        257,
+        511,
+        512,
+        65535
+      ],
+      "out": [
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        2,
+        255,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        2,
+        255,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        2,
+        255
+      ],
+      "is_right_shift_8": true,
+      "is_clip_255": false
+    },
+    "animation_default_load_is_frame_zero": {
+      "what": "`webpsave --page-height 3` on a 4x9 toilet roll writes three ANMF frames. A DEFAULT `webpload` reads 4x3, i.e. frame 0 only, and reports `n-pages: 3`; the 4x9 roll needs `[n=-1]`. libviprs matches the default: frame 0 plus the page count, with the roll left to issue #569 and the page model.",
+      "fixture": "fixtures/anim3.webp",
+      "sha256": "391753147d3c18e87a07bdc91d3e250a900c5c9a7d9adb1bbec718d810a4e95a",
+      "bytes": 374,
+      "chunks": [
+        [
+          "VP8X",
+          10
+        ],
+        [
+          "ANIM",
+          6
+        ],
+        [
+          "ANMF",
+          104
+        ],
+        [
+          "ANMF",
+          100
+        ],
+        [
+          "ANMF",
+          102
+        ]
+      ],
+      "header_default": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/anim3.webp: 4x3 uchar, 3 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/anim3.webp\nvips-loader: webpload\nloop: 0\ndelay: 100 100 100 \nn-pages: 3",
+      "header_n_minus_1": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/anim3.webp: 4x9 uchar, 3 bands, srgb, webpload",
+      "getpoint_frame0": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ],
+      "frame0_equals_first_three_rows": true
+    },
+    "metadata_chunks": {
+      "what": "The ll_rgb VP8L bitstream rewrapped in an extended container with ICCP, EXIF and XMP chunks. vips lifts them into `icc-profile-data`, `exif-data` and `xmp-data`, as raw chunk payloads with nothing stripped: the JPEG loader's `Exif\\0\\0` prefix does not exist in a WebP EXIF chunk. libviprs attaches the same three names.",
+      "fixture": "fixtures/meta.webp",
+      "sha256": "b6c4b990313058c5a4dd78896c886b73d209064ab28e3f51efa3f1a2d7b40f82",
+      "bytes": 214,
+      "chunks": [
+        [
+          "VP8X",
+          10
+        ],
+        [
+          "ICCP",
+          24
+        ],
+        [
+          "VP8L",
+          80
+        ],
+        [
+          "EXIF",
+          10
+        ],
+        [
+          "XMP ",
+          37
+        ]
+      ],
+      "icc": [
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39
+      ],
+      "exif": [
+        73,
+        73,
+        42,
+        0,
+        8,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "xmp": [
+        60,
+        120,
+        58,
+        120,
+        109,
+        112,
+        109,
+        101,
+        116,
+        97,
+        32,
+        120,
+        109,
+        108,
+        110,
+        115,
+        58,
+        120,
+        61,
+        34,
+        97,
+        100,
+        111,
+        98,
+        101,
+        58,
+        110,
+        115,
+        58,
+        109,
+        101,
+        116,
+        97,
+        47,
+        34,
+        47,
+        62
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/meta.webp: 4x3 uchar, 3 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/fixtures/meta.webp\nvips-loader: webpload\nicc-profile-data: 24 bytes of binary data\nexif-data: 10 bytes of binary data\nexif-ifd0-XResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-YResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-ResolutionUnit: 2 (Inch, Short, 1 components, 2 bytes)\nexif-ifd2-ExifVersion: Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)\nexif-ifd2-FlashpixVersion: FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)\nexif-ifd2-ColorSpace: 65535 (Uncalibrated, Short, 1 components, 2 bytes)\nxmp-data: 37 bytes of binary data",
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ]
+    },
+    "webpsave_chunk_order": {
+      "what": "`webpsave --profile` writes VP8X, ICCP, VP8L, EXIF in that order. Note the EXIF chunk vips synthesises from the resolution fields even though the source raster carried none; libviprs writes back only what is attached.",
+      "profile": "/Users/rom/workspace/libvips/test/test-suite/images/sRGB.icm",
+      "chunks": [
+        [
+          "VP8X",
+          10
+        ],
+        [
+          "ICCP",
+          6922
+        ],
+        [
+          "VP8L",
+          80
+        ],
+        [
+          "EXIF",
+          186
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/outputs/with_icc.webp: 4x3 uchar, 3 bands, srgb, webpload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/497-webp/oracle-captures/foreign-webp/outputs/with_icc.webp\nvips-loader: webpload\nicc-profile-data: 6922 bytes of binary data\nexif-data: 186 bytes of binary data\nresolution-unit: in\nexif-ifd0-Orientation: 1 (Top-left, Short, 1 components, 2 bytes)\nexif-ifd0-XResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-YResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-ResolutionUnit: 2 (Inch, Short, 1 components, 2 bytes)\nexif-ifd0-YCbCrPositioning: 1 (Centred, Short, 1 components, 2 bytes)\nexif-ifd2-ExifVersion: Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)\nexif-ifd2-ComponentsConfiguration: Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)\nexif-ifd2-FlashpixVersion: FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)\nexif-ifd2-ColorSpace: 65535 (Uncalibrated, Short, 1 components, 2 bytes)\nexif-ifd2-PixelXDimension: 4 (4, Long, 1 components, 4 bytes)\nexif-ifd2-PixelYDimension: 3 (3, Long, 1 components, 4 bytes)\norientation: 1"
+    },
+    "width_ceiling": {
+      "what": "`webpsave` accepts a width of 16383 and refuses 16384 with `image too large`: libwebp's WEBP_MAX_DIMENSION is 16383. `image-webp` 0.2.4's `encode_frame` guards on `width > 16384` instead, so it will happily write a 16384-wide VP8L that the reference decoder then refuses to read. libviprs applies the libwebp ceiling rather than the crate's.",
+      "results": {
+        "16383": {
+          "ok": true,
+          "stderr": []
+        },
+        "16384": {
+          "ok": false,
+          "stderr": [
+            "webpsave: image too large"
+          ]
+        },
+        "16385": {
+          "ok": false,
+          "stderr": [
+            "webpsave: image too large"
+          ]
+        }
+      }
+    }
+  }
+}

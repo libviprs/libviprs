@@ -313,6 +313,24 @@ mod tests {
         total as f64 / a.len() as f64
     }
 
+    /// `"webp"` is a live row in the shared format dispatch, and the
+    /// bytes it returns are the same ones `Raster::encode_webp` writes
+    /// at the default options, so the connection lane and the codec
+    /// module cannot drift apart.
+    #[test]
+    fn encode_for_format_routes_webp_to_the_lossless_encoder() {
+        let raster = sample_raster();
+        let via_dispatch = raster.encode_to_buffer("webp").unwrap();
+        let direct = raster
+            .encode_webp(crate::webp::SaveOptions::default())
+            .unwrap();
+        assert_eq!(via_dispatch, direct);
+        assert_eq!(&via_dispatch[..4], b"RIFF");
+        assert_eq!(&via_dispatch[8..12], b"WEBP");
+        let back = crate::decode_bytes(&via_dispatch).unwrap();
+        assert_eq!(back.data(), raster.data());
+    }
+
     /// Oracle `stdin-load-pixel-parity-jpeg`: the same JPEG bytes decode
     /// bit-identically whether read through a [`Source`] (stdin) or handed
     /// straight to `decode_bytes` (file). `max_abs_pixel_diff == 0.0`.
