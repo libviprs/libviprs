@@ -1,0 +1,121 @@
+name: CI
+
+# GitHub-side fallback CI (issue #530).
+#
+# The real CI lives on our self-hosted Gitea Actions runner (`.gitea/workflows/ci.yml`,
+# migrated in #528) and reports back as the `gitea/ci` commit status. Since that
+# migration no `gitea/*` status has ever reached GitHub, so pull requests have carried
+# no build signal at all. This file is the pre-migration workflow restored verbatim so
+# there is a signal again while the Gitea side is repaired.
+#
+# It does not shadow the Gitea run: Gitea reads `.gitea/workflows` and only falls back
+# to `.github/workflows` when that directory is absent
+# (modules/actions/workflows.go, ListWorkflows), so this workflow runs on GitHub only.
+#
+# libviprs is a public repository, so GitHub-hosted runner minutes are free; the cost
+# here is wall-clock (about 11 minutes) and some duplicated compute once `gitea/ci`
+# reports again. Retire this file, or cut it back to a smoke job, once #530 is closed
+# and `gitea/ci` is a required check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Supersede in-flight runs for a branch that gets pushed again, but never cancel a
+# run on `main`, which is the record of what actually landed.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features pdfium -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The object-store-sink module (and its `#[cfg(test)] mod tests`) is
+      # feature-gated, so it is invisible to the default clippy/test jobs above.
+      # Lint it explicitly so regressions in the sink are caught (issue #382).
+      - run: cargo clippy --all-targets --features object-store-sink -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # `s3` is a deprecated alias for `object-store-sink`, retained for consumers
+      # that pinned the old feature name. Nothing else in CI exercises it, so a
+      # broken alias would go unnoticed; build it explicitly so it keeps resolving.
+      - run: cargo build --features s3
+
+  msrv:
+    name: MSRV (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+      - run: cargo check --all-targets --features pdfium
+
+  docs:
+    name: Docs (deny broken intra-doc links)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # All features so the gated surface resolves instead of reading as broken
+      # links; docs.rs itself builds with `all-features` (issue #146).
+      - run: cargo doc --no-deps --all-features
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      # The object-store-sink module and its unit tests are feature-gated, so
+      # bare `cargo test` never compiles or runs them. Exercise the feature so
+      # the sink's tests and doctests actually execute in CI (issue #382).
+      - run: cargo test --features object-store-sink
+
+  integration-test:
+    name: Integration Tests (libviprs-tests)
+    runs-on: ubuntu-latest
+    steps:
+      # Check out libviprs at the current branch/PR ref into the "libviprs" subdirectory.
+      # libviprs-tests depends on { path = "../libviprs" }, so the two repos must be siblings.
+      - uses: actions/checkout@v4
+        with:
+          path: libviprs
+      - name: Clone libviprs-tests (matching branch or main)
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          git clone --depth 1 --branch "$BRANCH" https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests 2>/dev/null \
+            || git clone --depth 1 https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libviprs-tests
+      - name: Run integration tests
+        working-directory: libviprs-tests
+        run: cargo test
+      # Compile and run the feature-gated object-store sink integration tests
+      # (the S3 leg of phase3 and the stub-contract test) so they are not
+      # silently excluded from CI (issue #382).
+      - name: Run object-store sink integration tests
+        working-directory: libviprs-tests
+        run: cargo test --features object-store-sink
