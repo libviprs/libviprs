@@ -297,6 +297,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The edge detectors answer both gradients in one traversal instead of two,
+  and combine them without materialising either (issue #562). `sobel`,
+  `scharr` and `prewitt` used to run the convolution engine twice over the
+  same source: each pass widened every sample to `f64` on its own, walked
+  every window on its own, and wrote a full-image intermediate raster, and a
+  third pass then combined the two. Every output sample's two responses come
+  off the same nine source values, so it collapses into one pass with two
+  accumulators. Not one output byte moves; the same 24 hard-coded digests and
+  the same vips captures pin it.
+
+  Measured on aarch64 at `opt-level = 3`, best of 21 runs against the same
+  fixtures built by the same code, alternating the two binaries so they share
+  the machine's noise:
+
+  | fixture | before | after | |
+  |---|---|---|---|
+  | 2048x2048 `Gray8` | 59.3 ms | 23.0 ms | 2.6x |
+  | 4096x4096 `Gray8` | 249 ms | 96.7 ms | 2.6x |
+  | 1024x1024 `Rgb8` | 43.6 ms | 16.7 ms | 2.6x |
+  | 1024x1024 `FloatF32(1)` | 16.6 ms | 2.5 ms | 6.6x |
+  | 512x512 `FloatF32(3)` | 11.8 ms | 1.9 ms | 6.3x |
+
+  Peak resident size on a 4096x4096 `sobel` goes from 326 MB to 166 MB on
+  `Gray8` and from 806 MB to 278 MB on `FloatF32(1)`.
+
+  A plain `conv` gets most of it too, 2.5x on 8-bit and 4.7x on float, because
+  the same rework took the edge clamp out of the inner loop. The clamped
+  source index is now a pair of small lookup tables built once, which is
+  `vips_embed(..., VIPS_EXTEND_COPY)` written as indices instead of as pixels,
+  and the interior of each row is a contiguous run the compiler can vectorise.
+  Zero taps are skipped as well, which is the #574 fix paying for itself:
+  sobel's mask is six taps, not nine.
+
 - **The integer-convolution parity contract is now stated on
   `Precision::Integer`, and the divergence against a stock libvips is
   unbounded rather than "at most 2" or "at most 4"** (issue #558). No
@@ -481,6 +514,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- A zero mask coefficient no longer poisons a non-finite sample (issue #574).
+  libvips squeezes zero taps out of a mask before it convolves, in both cores
+  (`convolution/convf.c:314-321` and `convolution/convi.c:1189-1197`), and
+  this port iterated every tap instead. `0.0 * inf` is `NaN`, so a structural
+  zero sitting over an infinity poisoned the whole response, survived the
+  square and the root, and clipped to 0. On a 5x5 float image that is all zero
+  except for an infinity at its centre, `sobel` read `0` at four cells of the
+  impulse ring where vips reads `255`, and `scharr` and `prewitt` did the same
+  thing for the same reason: all three masks have structural zeros. The taps
+  are now compacted after the scale division, exactly where vips does it, so
+  the answers match.
+
+  It reaches further than the edge detectors, because the same engine serves
+  `conv`, `convsep`, `compass` and `gaussblur`. Any mask with a zero
+  coefficient over a non-finite sample had the property, and a `.v` file can
+  carry `inf` or `NaN`. Finite input is untouched: dropping `+ 0.0 * x` can
+  only change the sign of a zero, and a signed zero does not survive `a * a`.
+
+  An all-zero mask keeps one tap rather than none, which is not the same as
+  skipping everything. Both C cores force the tap count back up to 1 at mask
+  index 0 when the whole mask squeezed away, so an all-zero mask still answers
+  `NaN` over an infinity, but only at the single output pixel whose window
+  top-left is the infinity. Measured on vips 8.18.4 and pinned.
+
+- The edge detectors no longer build float or unsigned intermediates through
+  the byte-budgeted `Raster::new`, so `sobel()`, `scharr()` and `prewitt()`
+  cannot panic on a legal input any more (issue #575). A 16-bit source above
+  about 4 GiB implied a float intermediate over the 8 GiB
+  `DEFAULT_MAX_ALLOC_BYTES` ceiling, and the panicking twins turned that
+  rejection into a process-ending `expect` on an input the crate accepts. The
+  convolution buffers now go through `alloc_op_output` and
+  `Raster::from_op_output`, the fallible budget-free pair `arithmetic.rs`
+  already uses and that issue #279 exists to provide. The edge detectors go
+  further and never build the intermediates at all. The `try_reserve` and
+  per-row streaming halves of #575 are untouched and stay open.
 
 - `Raster::try_arrayjoin` no longer panics on a float input (issue #551). Its
   sample copy is unsigned-only and panicked on 4-byte samples, so a fallible
