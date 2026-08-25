@@ -5167,6 +5167,32 @@ mod tests {
         assert_f32_grid(&promoted, &want, "record sigma_step9_0.2_float");
     }
 
+    /// Images small enough that every 3x3 window is mostly border, which
+    /// is where replacing the `Extend::Copy` embed with a clamped read
+    /// would show up if the two were not the same thing. A 1x1 image
+    /// embeds to 3x3 copies of one pixel, so every neighbour ties with
+    /// the centre and the `<=` against `low` zeroes it.
+    ///
+    /// Measured with `VIPS_NOVECTOR=1 vips canny --sigma 0.01`, on both
+    /// precisions (below 0.2 the blur is a copy, so the two arms agree).
+    #[test]
+    fn canny_handles_images_smaller_than_its_own_window() {
+        let cases: [(u32, u32, Vec<u8>, Vec<u8>); 4] = [
+            (1, 1, vec![200], vec![0]),
+            (1, 3, vec![0, 128, 255], vec![0, 32, 0]),
+            (3, 1, vec![0, 128, 255], vec![0, 32, 0]),
+            (2, 2, vec![0, 255, 90, 10], vec![0, 32, 32, 64]),
+        ];
+        for (w, h, src, want) in cases {
+            let im = Raster::new(w, h, PixelFormat::Gray8, src).unwrap();
+            for precision in [Precision::Integer, Precision::Float] {
+                let out = im.canny(0.01, precision);
+                assert_eq!((out.width(), out.height()), (w, h), "{w}x{h} size");
+                assert_eq!(out.data(), want.as_slice(), "{w}x{h} at {precision:?}");
+            }
+        }
+    }
+
     /// The `try_*` and panicking forms are the same call, and a sigma
     /// outside the mask generator's range is a typed error rather than a
     /// panic.
