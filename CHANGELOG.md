@@ -125,6 +125,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both are now the typed `ConvolutionError::NonFiniteMaskParameter`, on both
   precisions.
 
+- `colourspace` between `OkLab` and `OkLch`, and between `Lab` and `Lch`, now
+  takes the direct route libvips gives those pairs instead of detouring through
+  the XYZ hub (issue #552). libvips joins each cartesian space to its polar
+  form with a single transform and nothing else in the pipeline
+  (`colour/colourspace.c:244,276,478,494`), so routing them through XYZ added
+  an `Oklab2XYZ` / `XYZ2Oklab` round trip that real vips never runs. The
+  published Oklab inverse matrix is only an 8-decimal approximation (it carries
+  the `1.00000001` and `1.00000005` quirk digits), so that round trip pushed a
+  neutral colour's `a` and `b` off zero by about 2e-9, and the hue read off
+  them was then meaningless: OkLab `[0.5, 0, 0]` came back as OkLCh
+  `[0.5, 1.9e-9, 94.489]` where vips 8.18.4 returns `[0.5, 0, 0]`. The polar
+  conversion happens in place now, so the hue is exact and `OkLab -> OkLch ->
+  OkLab` gives back the value it started with. Lab and Lch were already exact
+  through the hub, since `Lab2XYZ` and `XYZ2Lab` invert each other
+  analytically, so that pair just gets the shorter path.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
