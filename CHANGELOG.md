@@ -9,6 +9,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::join` and its `try_join` twin (issue #551): the port of libvips
+  `vips_join`, the generic two-image spatial join. `a.join(&b,
+  JoinDirection::Horizontal, expand, shim, background, align)` puts `b` to the
+  right of `a` (or below it, with `JoinDirection::Vertical`), separated by
+  `shim` pixels and lined up on the edge `align` names. libviprs already had
+  `arrayjoin` for a whole grid and `insert` for an explicit offset, but
+  nothing for the ordinary "put these two next to each other" case.
+
+  `expand` is the flag worth reading twice, because it does not mean what its
+  name suggests it might. With `expand` false, which is the libvips default,
+  the result is cropped back to the smaller of the two images along the shared
+  axis: joining a 3x2 and a 2x3 horizontally gives 5x2, not 5x3, and the
+  bottom row of the taller image is gone. Pass `expand` true to keep every
+  input pixel, and `background` then fills whatever neither image covers,
+  including the shim gap.
+
+  `align` is `Align::Low`, `Align::Centre`, or `Align::High`, and it parses
+  from the libvips nicknames (`"low"`, `"centre"`, `"high"`, and `"center"`)
+  through `FromStr`. `Centre` is computed the way libvips computes it, as two
+  separate truncating integer divisions `in1 / 2 - in2 / 2`, which is not the
+  same as `(in1 - in2) / 2`: for a 4-high image joined to a 3-high one the
+  first form offsets by 1 and the second by 0. Matching the C exactly here
+  means a libviprs join lands on the same pixel a vips join does.
+
+  Band counts and depths unify exactly as `insert` does, since that is what
+  libvips leans on too, so a one-band image joined to a three-band one gives
+  three bands and an 8-bit joined to a 16-bit gives 16-bit. Failures from the
+  delegated insert and crop arrive as the new
+  `ConversionError::Extract(ExtractError)` variant, and a bad align nickname
+  as `ConversionError::UnknownAlign`. `ConversionError`, `JoinDirection` and
+  `Align` are all `#[non_exhaustive]`.
+
+  Three things are refused up front rather than delegated. A float raster on
+  either side is `ConversionError::FloatFormatUnsupported`, because the
+  placement path underneath reads samples as `u8` or `u16` and panics on
+  4-byte ones; that is not an exotic input, since every `colourspace` result
+  for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is a float raster, so
+  `im.colourspace(Lab).join(&other, ..)` would otherwise panic out of a
+  fallible method. A `shim` above `1000000` is
+  `ConversionError::ShimTooLarge`, matching the bound libvips declares on the
+  property (`VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so
+  `vips join --shim 1000001` is refused before the operation runs). Widening
+  the argument to `u32` had carried the lower bound into the type and dropped
+  the upper one, and without the check `shim = 2147483644` on a 3x2 and a 2x3
+  asks for a 6.44 GB canvas, each raster still under the per-raster
+  allocation budget so the budget never fires. An offset outside `i32`, the
+  range libvips places images in, is
+  `ConversionError::PlacementOffsetOverflow`, and it reports the offset
+  `(x, y)` that did not fit rather than a result size. Note that a `join`
+  canvas too large for `u32` still arrives as
+  `ConversionError::Extract(ExtractError::SizeOverflow)`, so a caller that
+  wants every "too big" outcome matches both.
+
+  A band-promoting join drops the first image's interpretation instead of
+  copying it onto a result it no longer describes. `vips join` of a 1-band
+  `b-w` with a 3-band `srgb` reports `3 bands, srgb`, and keeping `b-w` is
+  not cosmetic: `space_bands(Bw) == 1`, so a later `colourspace(Lab)` reads
+  two of the three bands as passthrough extras and hands back 5 bands instead
+  of 3. Dropping the tag lets the getter infer one from the result format,
+  the same re-stamp `composite2` already does for the same reason. A
+  depth-only promotion keeps the tag, matching `vips join` of `b-w` uchar
+  with `grey16`, which still reports `b-w`.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
@@ -139,6 +202,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Raster::try_arrayjoin` no longer panics on a float input (issue #551). Its
+  sample copy is unsigned-only and panicked on 4-byte samples, so a fallible
+  method aborted the process on ordinary input: `space_depth` maps Lab, Lch,
+  OkLab, OkLCh, XYZ, scRGB and Yxy all to F32, which makes every `colourspace`
+  result for those spaces a float raster. It is now
+  `ConversionError::FloatFormatUnsupported { op: "arrayjoin" }`, the same
+  guard `join` got, and the panicking `arrayjoin` twin still panics through
+  the usual `expect` path. Real vips handles float on both operations, so this
+  is a libviprs limitation reported honestly rather than parity, and it goes
+  away when the unsigned-only sample helpers grow a float arm.
+
+- `Raster::arrayjoin` now rejects a `shim` above `1000000` with
+  `ConversionError::ShimTooLarge` (issue #551), the same bound `join` got.
+  Both operations declare the property as `VIPS_ARG_INT(class, "shim", 5, ...,
+  0, 1000000, 0)`, and the binary refuses `vips arrayjoin --shim 1000001` with
+  the identical GObject CRITICAL, so the two now agree with each other and
+  with vips. `--shim 1000000` still builds the grid vips builds.
+
+- `Raster::arrayjoin` no longer tags a band-promoted grid with the first
+  image's interpretation (issue #551). `bandalike` promotes a one-band input
+  up to the widest band count in the list, so a grid built from a 1-band
+  `b-w` and a 3-band `srgb` has 3 bands while the copied tag still says
+  `b-w`. `vips arrayjoin` reports `srgb` for that pair. The mis-tag is not
+  cosmetic, since `space_bands(Bw) == 1`: a later colourspace conversion
+  reads bands 1 and 2 of the grid as passthrough extras rather than colour,
+  and returns a different band count with different numbers in it. The tag is
+  now cleared whenever the grid's band count differs from the first image's,
+  which lets the getter infer one from the result format. A depth-only
+  promotion still keeps the tag, matching `vips arrayjoin` of `b-w` uchar
+  with `grey16`. Nothing changes for a grid whose inputs all already share a
+  band count, which is the common case.
+
 - `decode_file` and `decode_bytes` now identify a format the same way, so the
   same bytes decode to the same raster whichever entry point you call
   (issue #563). They disagreed: the file path read a four-byte head, handled
@@ -186,6 +281,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   got past the same guard and produced an all-zero image with no diagnostic.
   Both are now the typed `ConvolutionError::NonFiniteMaskParameter`, on both
   precisions.
+
+- `colourspace` between `OkLab` and `OkLch`, and between `Lab` and `Lch`, now
+  takes the direct route libvips gives those pairs instead of detouring through
+  the XYZ hub (issue #552). libvips joins each cartesian space to its polar
+  form with a single transform and nothing else in the pipeline
+  (`colour/colourspace.c:244,276,478,494`), so routing them through XYZ added a
+  cube-root round trip real vips never runs. On both pairs the two halves of
+  that round trip fail to invert each other, so a neutral colour picked up a
+  chroma out of nowhere and the hue read off that chroma was meaningless.
+
+  On the Oklab pair the culprit is the matrix: the published inverse is only an
+  8-decimal approximation (it carries the `1.00000001` and `1.00000005` quirk
+  digits), so the round trip pushed a neutral colour's `a` and `b` off zero by
+  about 2e-9, and OkLab `[0.5, 0, 0]` came back as OkLCh
+  `[0.5, 1.9e-9, 94.489]` where vips 8.18.4 returns `[0.5, 0, 0]`.
+
+  On the Lab pair the culprit is the shadow branch, and it is the bigger of the
+  two: `XYZ2Lab` switches to its linear segment at 0.008856 while `Lab2XYZ`
+  switches at `L < 8`, and those rounded decimal constants are not mutual
+  inverses. Dark neutrals came out about 3e5 times further off than the Oklab
+  ones in raw units, so `Lab [5, 0, 0]` converted to LCh
+  `(4.99996, 5.571e-4, 338.199)` where vips returns `5 0 0`. Above about
+  `L = 10` the residue rounds away, which is why the defect only ever showed in
+  the shadows and why a mid-grey fixture says nothing about it. Both pairs
+  convert in place now, so the hue is exact and `OkLab -> OkLch -> OkLab` gives
+  back the value it started with.
+
+- Hue no longer comes out as 180 degrees for a colour whose `a` is `-0.0`
+  (issue #552). Anything that reads a hue off Lab-like coordinates was
+  affected: `colourspace` into `Lch` and `OkLch`, plus the hue term inside
+  `de00` and `de_cmc`, which read the same ladder. (`Cmc` reaches its hue
+  through the XYZ hub, and the hub cannot produce a `-0.0` there.) libvips'
+  `vips_col_ab2h` (`colour/Lab2LCh.c:61-89`) tests `a == 0` and answers
+  0 / 90 / 270 from an explicit branch, and in C that test is true for `-0.0`
+  as well; libviprs was
+  taking `atan2` at its word instead, and `atan2(±0.0, -0.0)` is `±PI`. Against
+  the binary, OkLab `[0.5, -0.0, 0.0]` is OkLCh `0.5 0 0` in vips 8.18.4 and
+  was `[0.5, 0.0, 180.0]` here. The branch is now transcribed from the C, so
+  the whole `a` axis answers the way vips does whichever zero it is handed.
 
 ## [0.4.0] — 2026-07-20
 

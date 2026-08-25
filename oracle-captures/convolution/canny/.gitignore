@@ -1,0 +1,5 @@
+# capture.py regenerates everything below from the PNM/mat inputs and the vips
+# binary, so only the inputs, capture.py, commands.sh and oracle.json are pinned.
+fixtures/*.v
+fixtures/*.raw
+fixtures/outputs/

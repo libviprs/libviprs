@@ -12,8 +12,9 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    BandError, Combine, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat,
-    PlannerError, Precision, RasterError, ResumeError, SourceError, VerifyError,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, Intent, Interpretation,
+    JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError, Precision,
+    RasterError, ResumeError, SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -189,6 +190,75 @@ fn assert_verify_error_non_exhaustive(v: &VerifyError) {
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
+fn assert_interpretation_non_exhaustive(v: &Interpretation) {
+    match v {
+        Interpretation::Multiband => {}
+        Interpretation::Bw => {}
+        Interpretation::Histogram => {}
+        Interpretation::Xyz => {}
+        Interpretation::Lab => {}
+        Interpretation::Cmyk => {}
+        Interpretation::Labq => {}
+        Interpretation::Rgb => {}
+        Interpretation::Cmc => {}
+        Interpretation::Lch => {}
+        Interpretation::Labs => {}
+        Interpretation::Srgb => {}
+        Interpretation::Yxy => {}
+        Interpretation::Fourier => {}
+        Interpretation::Rgb16 => {}
+        Interpretation::Grey16 => {}
+        Interpretation::Matrix => {}
+        Interpretation::ScRgb => {}
+        Interpretation::Hsv => {}
+        Interpretation::OkLab => {}
+        Interpretation::OkLch => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_colour_error_non_exhaustive(v: &ColourError) {
+    match v {
+        ColourError::UnknownColourspace { .. } => {}
+        ColourError::UnsupportedColourspace { .. } => {}
+        ColourError::TooFewBands { .. } => {}
+        ColourError::DimensionMismatch { .. } => {}
+        ColourError::NoProfile => {}
+        ColourError::ProfileRead { .. } => {}
+        ColourError::InvalidProfile { .. } => {}
+        ColourError::UnsupportedDeviceSpace { .. } => {}
+        ColourError::UnsupportedDepth { .. } => {}
+        ColourError::IccTransform { .. } => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_intent_non_exhaustive(v: &Intent) {
+    match v {
+        Intent::Perceptual => {}
+        Intent::Relative => {}
+        Intent::Saturation => {}
+        Intent::Absolute => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_pcs_non_exhaustive(v: &Pcs) {
+    match v {
+        Pcs::Lab => {}
+        Pcs::Xyz => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
 // `Compression` has exactly one variant today, so clippy reads the match as an
 // equality check and suggests an `if`. The match is the point: an `if` would
 // not fail to compile the day the enum regresses to exhaustive.
@@ -216,4 +286,28 @@ fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
     assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
+    assert_interpretation_non_exhaustive(&Interpretation::OkLch);
+    assert_intent_non_exhaustive(&Intent::Perceptual);
+    assert_pcs_non_exhaustive(&Pcs::Lab);
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
+    match v {
+        JoinDirection::Horizontal => {}
+        JoinDirection::Vertical => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_align_non_exhaustive(v: &Align) {
+    match v {
+        Align::Low => {}
+        Align::Centre => {}
+        Align::High => {}
+        _ => {}
+    }
 }
