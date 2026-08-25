@@ -2,18 +2,17 @@
 //!
 //! A matrix image is a small one-band image holding dense numeric data,
 //! produced by [`Raster::from_matrix`] and stamped
-//! [`Interpretation::Matrix`]. This module carries the two operations
-//! the ported suite calls on them:
+//! [`Interpretation::Matrix`]. This module carries the operations
+//! libviprs offers on them:
 //!
 //! | libviprs | libvips | notes |
 //! |---|---|---|
 //! | [`Raster::matrixinvert`] | `vips_matrixinvert` | dense inverse of a square matrix image |
+//! | [`Raster::matrixmultiply`] | `vips_matrixmultiply` | dense product of two matrix images |
 //! | [`Raster::invertlut`] | `vips_invertlut` | inverse LUT from measured `(x, f(x))` rows |
 //!
 //! [`Raster::buildlut`] (the forward companion of `invertlut`) already
-//! lives in [`crate::create`] with the other generators;
-//! `vips_matrixmultiply` is not called by the ported suite and stays
-//! unimplemented.
+//! lives in [`crate::create`] with the other generators.
 //!
 //! # Semantics
 //!
@@ -24,6 +23,16 @@
 //!   solving one unit vector per column. A zero row, or a pivot smaller
 //!   than `2 * DBL_MIN`, is a typed [`MatrixError::Singular`] error,
 //!   matching the C thresholds exactly.
+//! * **`matrixmultiply`** is a faithful port of libvips
+//!   `mosaicing/matrixmultiply.c:105-127`: both operands go through the
+//!   `vips_check_matrix` gate, the left matrix's width has to equal the
+//!   right matrix's height (`matrixmultiply.c:90` raises `"bad sizes"`
+//!   otherwise, here [`MatrixError::BadSizes`]), and the output is a
+//!   `right.width` x `left.height` matrix image whose every element is
+//!   the plain `f64` dot product of a left row with a right column.
+//!   There is no scale and no offset: `vips_matrixmultiply`'s own docs
+//!   say the scale and offset members of both inputs are ignored, and
+//!   libviprs matrices carry neither.
 //! * **`invertlut`** is a faithful port of libvips `create/invertlut.c`:
 //!   rows of the input matrix are measured points, column 0 the input
 //!   level and each further column one band's measured response, all in
@@ -32,10 +41,10 @@
 //!   the head to `(0, 0)` and the tail to `(1, 1)`. The output is a
 //!   `size` x 1 image (default 256) with one band per measured column,
 //!   stamped [`Interpretation::Histogram`].
-//! * **Precision.** Both operations compute in `f64` and store results
-//!   in [`PixelFormat::FloatF32`] rasters (libvips stores `double`;
-//!   libviprs carries float data as `f32`, the same trade documented by
-//!   [`crate::create`] for `from_matrix` itself).
+//! * **Precision.** All three operations compute in `f64` and store
+//!   results in [`PixelFormat::FloatF32`] rasters (libvips stores
+//!   `double`; libviprs carries float data as `f32`, the same trade
+//!   documented by [`crate::create`] for `from_matrix` itself).
 
 use std::num::NonZeroU16;
 
@@ -87,6 +96,21 @@ pub enum MatrixError {
     /// pivot below the libvips `TOO_SMALL` threshold.
     #[error("matrixinvert: singular or near-singular matrix")]
     Singular,
+    /// `matrixmultiply` was given operands whose shapes do not chain:
+    /// the left matrix's width has to equal the right matrix's height.
+    #[error("{op}: bad sizes: left is {left_w}x{left_h}, right is {right_w}x{right_h}")]
+    BadSizes {
+        /// The operation that failed.
+        op: &'static str,
+        /// Width of the left matrix.
+        left_w: u32,
+        /// Height of the left matrix.
+        left_h: u32,
+        /// Width of the right matrix.
+        right_w: u32,
+        /// Height of the right matrix.
+        right_h: u32,
+    },
     /// `invertlut` needs an input column plus at least one measured
     /// column.
     #[error("invertlut: bad input matrix: need at least two columns, got {columns}")]
@@ -356,6 +380,76 @@ impl Raster {
     #[track_caller]
     pub fn matrixinvert(&self) -> Raster {
         expect_matrix("matrixinvert", self.try_matrixinvert())
+    }
+
+    // -----------------------------------------------------------------
+    // matrixmultiply
+    // -----------------------------------------------------------------
+
+    /// Fallible form of [`Raster::matrixmultiply`].
+    ///
+    /// # Errors
+    ///
+    /// [`MatrixError::NotOneBand`] / [`MatrixError::TooLarge`] for
+    /// either operand `vips_check_matrix` would reject,
+    /// [`MatrixError::BadSizes`] when `self.width()` is not
+    /// `right.height()`, or [`MatrixError::Raster`] on allocation
+    /// failure.
+    pub fn try_matrixmultiply(&self, right: &Raster) -> Result<Raster, MatrixError> {
+        let left_rows = check_matrix("matrixmultiply", self)?;
+        let right_rows = check_matrix("matrixmultiply", right)?;
+        if self.width() != right.height() {
+            return Err(MatrixError::BadSizes {
+                op: "matrixmultiply",
+                left_w: self.width(),
+                left_h: self.height(),
+                right_w: right.width(),
+                right_h: right.height(),
+            });
+        }
+
+        // `vips_matrixmultiply_gen`: one f64 accumulator per output
+        // cell, sweeping a left row against a right column.
+        let product: Vec<Vec<f64>> = left_rows
+            .iter()
+            .map(|left_row| {
+                (0..right.width() as usize)
+                    .map(|col| {
+                        left_row
+                            .iter()
+                            .zip(right_rows.iter())
+                            .map(|(&a, right_row)| a * right_row[col])
+                            .sum()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        matrix_raster(
+            &product,
+            right.width(),
+            self.height(),
+            1,
+            Interpretation::Matrix,
+        )
+    }
+
+    /// Multiply two matrix images (libvips `vips_matrixmultiply`): the
+    /// dense product of `self` on the left with `right` on the right,
+    /// which needs `self.width() == right.height()` and gives a
+    /// `right.width()` x `self.height()` matrix image stamped
+    /// [`Interpretation::Matrix`]. Elements accumulate in `f64`, with no
+    /// scale and no offset. Panicking form of
+    /// [`Raster::try_matrixmultiply`], matching the ported-test call
+    /// surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`MatrixError`]; see
+    /// [`Raster::try_matrixmultiply`].
+    #[track_caller]
+    pub fn matrixmultiply(&self, right: &Raster) -> Raster {
+        expect_matrix("matrixmultiply", self.try_matrixmultiply(right))
     }
 
     // -----------------------------------------------------------------
@@ -851,15 +945,11 @@ mod tests {
         assert_eq!(out.width(), 4);
         assert_eq!(out.height(), 4);
         let got = rows(&out);
-        for i in 0..4 {
-            for j in 0..4 {
+        for (i, row) in got.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
                 let expected = if i == j { 1.0 } else { 0.0 };
                 // f32 storage of an f64 accumulation, so a loose bound.
-                assert!(
-                    (got[i][j] - expected).abs() < 1e-5,
-                    "({i},{j}): {} vs {expected}",
-                    got[i][j]
-                );
+                assert!((v - expected).abs() < 1e-5, "({i},{j}): {v} vs {expected}");
             }
         }
     }

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
+  port of libvips `vips_matrixmultiply`, the dense product of two matrix
+  images. `left.matrixmultiply(&right)` needs `left.width() ==
+  right.height()` and gives a `right.width()` x `left.height()` one-band float
+  matrix stamped `Interpretation::Matrix`, accumulated in `f64` with no scale
+  and no offset (libvips ignores the scale and offset members of both inputs,
+  and libviprs matrices carry neither). Shapes that do not chain are the new
+  `MatrixError::BadSizes` variant rather than a panic, and either operand
+  failing the `vips_check_matrix` gate is the existing
+  `MatrixError::NotOneBand` / `MatrixError::TooLarge`. `MatrixError` is
+  `#[non_exhaustive]`, so the added variant is not a breaking change.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
