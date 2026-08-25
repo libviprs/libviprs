@@ -205,7 +205,9 @@ pub struct SaveOptions {
 ///
 /// * [`SourceError::Io`] when the container is truncated mid-chunk.
 /// * [`SourceError::Decode`] wrapping the codec's own error for a
-///   malformed bitstream, a missing chunk, or a metadata chunk larger than
+///   malformed bitstream or a missing chunk, or `image`'s
+///   [`LimitErrorKind::InsufficientMemory`](image::error::LimitErrorKind)
+///   when the frame buffer or a metadata chunk would exceed
 ///   [`DecodeLimits::max_alloc_bytes`].
 /// * [`SourceError::CoordLimitExceeded`] when either declared axis exceeds
 ///   [`DecodeLimits::max_coord`].
@@ -239,6 +241,16 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
             height,
             max_pixels: limits.max_pixels,
         })?;
+    // And the allocation budget, which `check_pixels` does not imply: a
+    // 1-gigapixel `max_pixels` permits a 4 GiB `Rgba8` frame, four times the
+    // default `max_alloc_bytes`. The shared `image`-crate path spends the
+    // same budget through `Limits::reserve`, so this refuses the same frames
+    // it would and reports the same typed error.
+    if size as u64 > limits.max_alloc_bytes {
+        return Err(SourceError::Decode(image::ImageError::Limits(
+            image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
+        )));
+    }
 
     // Metadata first, so an over-budget chunk is reported before the frame
     // allocation rather than after it.
@@ -872,9 +884,10 @@ mod tests {
      * to. Works by decoding the animation capture under a coordinate
      * ceiling and a pixel ceiling below its 4x3 geometry, and checking
      * each reports its own typed variant.
-     * Input: `ANIM3` under `max_coord = 2` and under `max_pixels = 4` ->
-     * Output: `CoordLimitExceeded` and `DimensionLimitExceeded`, both
-     * naming 4x3.
+     * Input: `ANIM3` under `max_coord = 2`, under `max_pixels = 4`, and
+     * under `max_alloc_bytes = 8` -> Output: `CoordLimitExceeded` and
+     * `DimensionLimitExceeded` naming 4x3, and `InsufficientMemory` for
+     * the frame buffer.
      */
     #[test]
     fn decode_limits_are_enforced_on_the_declared_geometry() {
@@ -896,6 +909,18 @@ mod tests {
                 max_pixels: 4
             })
         ));
+        // The allocation budget is separate: 12 pixels are inside every
+        // pixel ceiling above and still need 36 bytes of frame buffer.
+        let starved = DecodeLimits::default().with_max_alloc_bytes(8);
+        let err = decode_webp(&ANIM3, starved).expect_err("8 bytes is not a 4x3 RGB frame");
+        assert!(
+            matches!(
+                err,
+                SourceError::Decode(image::ImageError::Limits(ref l))
+                    if matches!(l.kind(), image::error::LimitErrorKind::InsufficientMemory)
+            ),
+            "{err:?}"
+        );
     }
 
     /**
