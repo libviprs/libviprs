@@ -247,6 +247,11 @@ pub use planner::{
 // know the bytes are Radiance, exactly as `decode_tiff_page` is; the
 // content-sniffing `decode_bytes` / `decode_file` reach it too.
 pub use radiance::{RadianceError, decode_radiance};
+// `decode_gif` is re-exported beside its error type for the same reason
+// `decode_radiance` is: it is the direct entry point for a caller who
+// already knows the bytes are a GIF and does not want to go through the
+// sniff route.
+pub use gif::{GifError, decode_gif};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,

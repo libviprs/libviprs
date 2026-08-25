@@ -735,7 +735,10 @@ impl Raster {
 pub enum SaveError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, and v/vips")]
+    #[error(
+        "unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, gif, \
+         and v/vips"
+    )]
     UnsupportedExtension { extension: String },
     #[error("encode error: {0}")]
     Encode(#[from] SinkError),
@@ -789,6 +792,17 @@ impl Raster {
                     encoded
                 }
             }
+            // GIF carries no EXIF or ICC through libviprs' encoder, so
+            // `keep_metadata` has nothing to act on: the container holds a
+            // palette, a loop count and per-frame delays, all of which are
+            // structural rather than EXIF-class (`vips gifsave --keep none`
+            // does not drop `delay` either).
+            "gif" => self
+                .encode_gif(crate::gif::SaveOptions::default())
+                .map_err(|e| match e {
+                    crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                    other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+                })?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
             _ => return Err(SaveError::UnsupportedExtension { extension }),
         };
