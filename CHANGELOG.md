@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
+  port of libvips `vips_matrixmultiply`, the dense product of two matrix
+  images. `left.matrixmultiply(&right)` needs `left.width() ==
+  right.height()` and gives a `right.width()` x `left.height()` one-band float
+  matrix stamped `Interpretation::Matrix`, accumulated in `f64` with no scale
+  and no offset (libvips ignores the scale and offset members of both inputs,
+  and libviprs matrices carry neither). Shapes that do not chain are the new
+  `MatrixError::ShapeMismatch` variant rather than a panic, and either operand
+  failing the `vips_check_matrix` gate is the existing
+  `MatrixError::NotOneBand` / `MatrixError::TooLarge`. `MatrixError` is
+  `#[non_exhaustive]`, so the added variant is not a breaking change.
+  The output's width and height come from two independent operands, each
+  capped only at 100000, so the product can be enormously larger than either
+  input: a pair of 400 KB matrices shaped `1 x 100000` and `100000 x 1` asks
+  for a 40 GB result. That size is checked before anything is allocated, so it
+  comes back as `MatrixError::Raster(RasterError::ByteBudgetExceeded)` instead
+  of committing the memory first (the abort class issues #280 and #433 removed
+  elsewhere in the crate).
+
 ### Changed
 
 - **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
@@ -30,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them would silently re-break every `.v` libviprs has already written. To make
   an already-written file readable by vips, re-encode it with this version
   (load it and save it again); there is no in-place header rewrite.
+
+- The panicking matrix operations no longer double the operation name in their
+  panic message (issue #339's class, found while reviewing #533). Every
+  `MatrixError` variant except the transparent `Raster` tail already opens with
+  the operation that failed, so the wrapper's own `"<op>: "` prefix produced
+  `matrixinvert: matrixinvert: non-square matrix (3x2)`. The prefix is now
+  applied only to the `Raster` tail, whose message names no operation. Code
+  matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
 

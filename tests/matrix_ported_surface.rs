@@ -74,3 +74,26 @@ fn matrix_family_surface() {
     let sized: Raster = lut.invertlut_size(512);
     assert_eq!(sized.width(), 512);
 }
+
+/// `matrixmultiply` and its `try_` twin compile from the external
+/// position, produce the measured vips product, and report incompatible
+/// sizes as a typed error rather than a panic.
+#[test]
+fn matrixmultiply_surface() {
+    let left = Raster::from_matrix(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+    let right = Raster::from_matrix(&[vec![7.0, 8.0], vec![9.0, 10.0], vec![11.0, 12.0]]);
+
+    let product: Raster = left.matrixmultiply(&right);
+    assert_eq!(product.width(), 2);
+    assert_eq!(product.height(), 2);
+    let p = product.getpoint(0, 0);
+    assert!((p[0] - 58.0).abs() < 0.001, "(0,0): {}", p[0]);
+    let p = product.getpoint(1, 1);
+    assert!((p[0] - 154.0).abs() < 0.001, "(1,1): {}", p[0]);
+
+    let ok: Result<Raster, MatrixError> = left.try_matrixmultiply(&right);
+    assert!(ok.is_ok());
+
+    let bad: Result<Raster, MatrixError> = left.try_matrixmultiply(&left);
+    assert!(matches!(bad, Err(MatrixError::ShapeMismatch { .. })));
+}
