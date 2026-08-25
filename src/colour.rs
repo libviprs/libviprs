@@ -1318,7 +1318,7 @@ fn icc_device_to_lab(
     {
         let m = profile.colorant_matrix();
         let mut out = Vec::with_capacity(pixels);
-        for px in device.chunks_exact(3) {
+        for px in device.as_chunks::<3>().0 {
             let v = m.mul_vector(Vector3d {
                 v: [
                     lin.eval(0, px[0] as f64),
@@ -1340,8 +1340,8 @@ fn icc_device_to_lab(
                 detail: format!("{e:?}"),
             })?;
         let mut out = Vec::with_capacity(pixels);
-        for px in device.chunks_exact(1) {
-            let v = lin.evaluate_value(px[0]) as f64;
+        for &px in device {
+            let v = lin.evaluate_value(px) as f64;
             out.push(xyz_to_lab([ICC_D50[0] * v, v, ICC_D50[2] * v], ICC_D50));
         }
         return Ok(out);
@@ -1376,7 +1376,9 @@ fn icc_device_to_lab_fallback(
             detail: format!("{e:?}"),
         })?;
     Ok(pcs
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|px| {
             xyz_to_lab(
                 [

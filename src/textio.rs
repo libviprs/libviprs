@@ -178,8 +178,8 @@ impl Raster {
             out.extend_from_slice(data);
         } else {
             // 16-bit: native-endian samples out as big-endian.
-            for chunk in data.chunks_exact(2) {
-                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+            for &chunk in data.as_chunks::<2>().0 {
+                let v = u16::from_ne_bytes(chunk);
                 out.extend_from_slice(&v.to_be_bytes());
             }
         }
@@ -407,8 +407,8 @@ impl Raster {
                 buf.extend_from_slice(body);
             } else {
                 // Binary 16-bit samples are big-endian; store native-endian.
-                for chunk in body.chunks_exact(2) {
-                    let v = u16::from_be_bytes([chunk[0], chunk[1]]);
+                for &chunk in body.as_chunks::<2>().0 {
+                    let v = u16::from_be_bytes(chunk);
                     buf.extend_from_slice(&v.to_ne_bytes());
                 }
             }

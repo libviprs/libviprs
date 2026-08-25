@@ -957,12 +957,12 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
         })?;
     let mut data = bytes[VIPS_HEADER_LEN..end].to_vec();
     if swapped && bpc == 2 {
-        for pair in data.chunks_exact_mut(2) {
+        for pair in data.as_chunks_mut::<2>().0 {
             pair.swap(0, 1);
         }
     }
     if swapped && bpc == 4 {
-        for quad in data.chunks_exact_mut(4) {
+        for quad in data.as_chunks_mut::<4>().0 {
             quad.reverse();
         }
     }

@@ -2163,11 +2163,11 @@ mod tests {
         let fmt = PixelFormat::FloatF32(n);
         let mut a = Raster::zeroed(30, 5, fmt).unwrap();
         let mut b = Raster::zeroed(30, 5, fmt).unwrap();
-        for v in a.data_mut().chunks_exact_mut(4) {
-            v.copy_from_slice(&100.0f32.to_ne_bytes());
+        for v in a.data_mut().as_chunks_mut::<4>().0 {
+            *v = 100.0f32.to_ne_bytes();
         }
-        for v in b.data_mut().chunks_exact_mut(4) {
-            v.copy_from_slice(&200.0f32.to_ne_bytes());
+        for v in b.data_mut().as_chunks_mut::<4>().0 {
+            *v = 200.0f32.to_ne_bytes();
         }
         let dx = 10 - a.width() as i32;
         let join = a.merge(&b, MergeDirection::Horizontal, dx, 0);

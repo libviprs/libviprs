@@ -1061,7 +1061,7 @@ fn cmyk_to_rgb_raster(cmyk_data: &[u8], width: u32, height: u32) -> Result<Raste
         return Err(PdfError::Decode("CMYK data too short".to_string()));
     }
     let mut rgb = Vec::with_capacity(rgb_len);
-    for chunk in cmyk_data[..cmyk_len].chunks_exact(4) {
+    for chunk in cmyk_data[..cmyk_len].as_chunks::<4>().0 {
         let c = chunk[0] as f32 / 255.0;
         let m = chunk[1] as f32 / 255.0;
         let y = chunk[2] as f32 / 255.0;

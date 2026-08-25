@@ -793,9 +793,7 @@ fn pack_bytes(img: image::DynamicImage, color: image::ColorType) -> Vec<u8> {
 fn la16_to_rgba16_bytes(samples: &[u16]) -> Vec<u8> {
     // 2 input samples per pixel → 4 output channels × 2 bytes.
     let mut bytes = Vec::with_capacity(samples.len() * 4);
-    for pair in samples.chunks_exact(2) {
-        let luma = pair[0];
-        let alpha = pair[1];
+    for &[luma, alpha] in samples.as_chunks::<2>().0 {
         bytes.extend_from_slice(&luma.to_ne_bytes());
         bytes.extend_from_slice(&luma.to_ne_bytes());
         bytes.extend_from_slice(&luma.to_ne_bytes());
