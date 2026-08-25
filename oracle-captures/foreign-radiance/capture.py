@@ -332,8 +332,10 @@ records["scope_and_defects"] = {
                 "with the arguments the wrong way round for the declaration "
                 "at radiance.c:314, so the parsed FORMAT= value never reaches "
                 "read->format and the XYZ branch at radiance.c:695-696 is "
-                "unreachable in this build. libviprs implements the intent "
-                "and tags XYZ; that is a written divergence.",
+                "unreachable in this build. libviprs reproduces this and "
+                "always tags scRGB: the interpretation tag is consumed by "
+                "colourspace(), so honouring FORMAT= would move pixels and "
+                "not just the header. Follow upstream if formatval is fixed.",
         "xyze_header": header(xyze, all_fields=True),
         "bogus_format_header": header(bogus, all_fields=True),
     },

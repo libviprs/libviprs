@@ -14,7 +14,7 @@
 //!
 //! | libviprs method | libvips equivalent | result |
 //! |---|---|---|
-//! | [`decode_radiance`] | `radload` + `rad2float` | [`PixelFormat::FloatF32`]`(3)` raster tagged [`Interpretation::ScRgb`] |
+//! | [`decode_radiance`] | `radload` + `rad2float` | [`PixelFormat::FloatF32`]`(3)` raster, always tagged [`Interpretation::ScRgb`] |
 //! | [`Raster::encode_radiance`] | `float2rad` + `radsave_buffer` | `.hdr` bytes |
 //! | [`Raster::save_radiance`] | `float2rad` + `radsave` | `.hdr` file |
 //!
@@ -56,6 +56,20 @@
 //!   (`radiance.c:392-397`) and the scanline-length check
 //!   (`radiance.c:437-440`), plus the run overrun check
 //!   (`radiance.c:451-454`). See [`RadianceError`].
+//! * **The `FORMAT=` line is ignored on load, on purpose.** vips picks the
+//!   colour tag from it at `radiance.c:693-698`, but that arm is
+//!   unreachable: `radiance.c:636` calls `formatval(line, read->format)`
+//!   while `radiance.c:314` declares `formatval(char fmt[MAXFMTLEN], const
+//!   char *s)` with `fmt` as the output buffer, so the arguments are
+//!   swapped and `read->format` keeps its `COLRFMT` default. Measured, a
+//!   file declaring `FORMAT=32-bit_rle_xyze` still reports
+//!   `rad-format: 32-bit_rle_rgbe` and `interpretation: scrgb`. libviprs
+//!   reproduces that rather than the evident intent, because the tag
+//!   reaches pixels through `colourspace()` and an `Xyz` tag would break
+//!   op-surface parity. **If upstream fixes `formatval`, libviprs should
+//!   follow.** The save side is unaffected and still writes
+//!   `32-bit_rle_xyze` for an `Xyz` raster (`radiance.c:899-901`, which
+//!   reads `in->Type` and is live).
 //! * **`.hdr` only.** `vips -l` registers exactly one suffix
 //!   (`vips__rad_suffs`, `radiance.c:1035`) and the magic is exactly the
 //!   first line `#?RADIANCE` (`vips__rad_israd`, `radiance.c:568-577`).
@@ -293,11 +307,19 @@ pub struct SaveOptions {
 /// Decode Radiance `.hdr` bytes into a three-band float [`Raster`]
 /// (libvips `radload` followed by `rad2float`).
 ///
-/// The result is [`PixelFormat::FloatF32`]`(3)` tagged
-/// [`Interpretation::ScRgb`], or [`Interpretation::Xyz`] when the file's
-/// `FORMAT=` line says `32-bit_rle_xyze`. Samples are linear radiance
-/// values with no upper bound, which is the point of the format: a bright
-/// pixel reads back as `4088.0`, not as a clipped `1.0`.
+/// The result is [`PixelFormat::FloatF32`]`(3)`, always tagged
+/// [`Interpretation::ScRgb`]. Samples are linear radiance values with no
+/// upper bound, which is the point of the format: a bright pixel reads
+/// back as `4088.0`, not as a clipped `1.0`.
+///
+/// The `FORMAT=` header line is read past and ignored, and so is
+/// `32-bit_rle_xyze` in particular, because vips ignores it too: the tag
+/// arm at `radiance.c:693-698` is unreachable behind an argument-order
+/// defect at `radiance.c:636`. Matching the reference is deliberate here
+/// rather than inherited, because the interpretation tag is consumed by
+/// [`Raster::colourspace`] and a different tag would move pixels, not just
+/// the header. See the module docs for the full reproduction; if upstream
+/// fixes it, libviprs should follow.
 ///
 /// # The fixed point
 ///
@@ -367,7 +389,25 @@ pub fn decode_radiance(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sou
 
     let mut raster =
         Raster::new(width, height, float_rgb(), data).map_err(RadianceError::Raster)?;
-    raster.meta.interpretation = Some(header.interpretation());
+    // Always scRGB, never XYZ. `radiance.c:693-698` picks the tag from the
+    // `FORMAT=` line, but the line is never parsed: `rad2vips_process_line`
+    // calls `formatval(line, read->format)` at `radiance.c:636` while
+    // `radiance.c:314` declares `formatval(char fmt[MAXFMTLEN], const char
+    // *s)` with `fmt` as the OUTPUT buffer, so the arguments are swapped and
+    // `read->format` keeps the `COLRFMT` default it was given at
+    // `radiance.c:610`. The XYZ arm is unreachable in every 8.18.x build.
+    // Measured: a file declaring `FORMAT=32-bit_rle_xyze` still reports
+    // `rad-format: 32-bit_rle_rgbe` and `interpretation: scrgb`.
+    //
+    // libviprs matches the reference rather than the evident intent, because
+    // this tag reaches PIXELS and not just the header: `colourspace()` reads
+    // it, so an `Xyz` tag would make an XYZE file convert to sRGB
+    // differently here than in vips. That is an op-surface parity break,
+    // which is a worse trade than the header divergence this module already
+    // accepts. If upstream fixes `formatval`, libviprs should follow and
+    // start honouring `FORMAT=`; the save side already writes
+    // `32-bit_rle_xyze` for an `Xyz` raster, so only this line moves.
+    raster.meta.interpretation = Some(Interpretation::ScRgb);
     header.attach_fields(&mut raster);
     Ok(raster)
 }
@@ -605,15 +645,6 @@ impl Header {
             prims: DEFAULT_PRIMS,
             width: 0,
             height: 0,
-        }
-    }
-
-    /// The colour tag the `FORMAT=` line asks for (`radiance.c:693-698`).
-    fn interpretation(&self) -> Interpretation {
-        match self.format.as_str() {
-            FORMAT_RGBE => Interpretation::ScRgb,
-            FORMAT_XYZE => Interpretation::Xyz,
-            _ => Interpretation::Multiband,
         }
     }
 
@@ -914,22 +945,30 @@ fn read_header(cursor: &mut Cursor<'_>) -> Result<Header, RadianceError> {
 
 /// One header line (`rad2vips_process_line`, `radiance.c:632-660`).
 ///
-/// The `FORMAT=` arm is where libviprs diverges from the vips 8.18.4
-/// binary: vips calls `formatval(line, read->format)` with the arguments
-/// the wrong way round for the declaration at `radiance.c:314`, so the
-/// parsed value never reaches `read->format` and the XYZ branch at
-/// `radiance.c:695-696` is unreachable. Measured, a file whose header says
-/// `FORMAT=32-bit_rle_xyze` still reports `rad-format: 32-bit_rle_rgbe`.
-/// This reads the line the way the code plainly means to.
+/// The `FORMAT=` arm is deliberately empty, and that is a port of a
+/// libvips defect rather than an oversight. `radiance.c:636` calls
+/// `formatval(line, read->format)` while `radiance.c:314` declares
+/// `formatval(char fmt[MAXFMTLEN], const char *s)` with `fmt` as the
+/// **output** buffer: the arguments are swapped, so the call parses the
+/// empty destination instead of the header line, matches nothing, and
+/// returns 0 without writing. `read->format` therefore keeps the `COLRFMT`
+/// default installed at `radiance.c:610`, and the `XYZ` branch at
+/// `radiance.c:695-696` is unreachable. Measured on 8.18.4: a file
+/// declaring `FORMAT=32-bit_rle_xyze` still reports
+/// `rad-format: 32-bit_rle_rgbe` and `interpretation: scrgb`.
+///
+/// libviprs reproduces that, so `rad-format` always reads back as
+/// `32-bit_rle_rgbe` and [`decode_radiance`] always tags
+/// [`Interpretation::ScRgb`]. Honouring the line would put a third
+/// behaviour in the world, matching neither the source nor the binary, and
+/// it would move pixels rather than just the header. If upstream fixes
+/// `formatval`, libviprs should follow.
 fn process_header_line(line: &[u8], header: &mut Header) -> Result<(), RadianceError> {
     let malformed = || RadianceError::BadHeaderLine {
         line: String::from_utf8_lossy(&line[..line.len().min(80)]).into_owned(),
     };
-    if let Some(rest) = line.strip_prefix(b"FORMAT=".as_slice()) {
-        let value = String::from_utf8_lossy(rest).trim().to_string();
-        if !value.is_empty() {
-            header.format = value;
-        }
+    if line.starts_with(b"FORMAT=".as_slice()) {
+        // Recognised and discarded, exactly as vips does. See above.
     } else if let Some(rest) = line.strip_prefix(b"EXPOSURE=".as_slice()) {
         header.expos *= atof(rest);
     } else if let Some(rest) = line.strip_prefix(b"COLORCORR=".as_slice()) {
@@ -1620,6 +1659,9 @@ mod tests {
                 "{name}: got {got}, expected {want} within {tolerance}"
             );
         }
+        // Always the `COLRFMT` default, whatever the file declared: the
+        // `FORMAT=` line is never parsed. See
+        // `the_format_line_is_ignored_exactly_as_vips_ignores_it`.
         assert_eq!(
             raster
                 .get_field("rad-format")
@@ -1631,33 +1673,85 @@ mod tests {
     }
 
     /**
-     * Tests that the `FORMAT=` line selects the colour interpretation the
-     * way `radiance.c:693-698` intends: `32-bit_rle_rgbe` is scRGB,
-     * `32-bit_rle_xyze` is XYZ, anything else is untagged. This is a
-     * deliberate divergence from the vips 8.18.4 *binary*, which reports
-     * scRGB for every `.hdr` because `rad2vips_process_line` calls
-     * `formatval(line, read->format)` with the arguments the wrong way
-     * round (`radiance.c:636`), so the parsed value never reaches
-     * `read->format` and the XYZ branch is unreachable. Works by decoding
-     * the same pixels under three `FORMAT=` values.
-     * Input: rgbe, xyze, and a nonsense format -> Output: `ScRgb`, `Xyz`,
-     * and `Multiband`.
+     * Tests that the `FORMAT=` line is read past and ignored, which is what
+     * vips does and NOT what `radiance.c:693-698` reads like it does. The
+     * tag arm there is unreachable: `radiance.c:636` calls
+     * `formatval(line, read->format)` while `radiance.c:314` declares
+     * `formatval(char fmt[MAXFMTLEN], const char *s)` with `fmt` as the
+     * output buffer, so the arguments are swapped, the header line is never
+     * parsed, and `read->format` keeps the `COLRFMT` default from
+     * `radiance.c:610`. Measured on vips 8.18.4, a file declaring
+     * `FORMAT=32-bit_rle_xyze` reports `rad-format: 32-bit_rle_rgbe` and
+     * `interpretation: scrgb`; this pins libviprs to the same answer.
+     *
+     * Matching the reference here is deliberate rather than inherited,
+     * because the interpretation tag reaches pixels: `colourspace()` reads
+     * it, so tagging `Xyz` would make an XYZE file convert to sRGB
+     * differently in libviprs than in vips. **If upstream fixes
+     * `formatval`, libviprs should follow and start honouring `FORMAT=`**,
+     * and this test is the thing that will fail when someone tries.
+     *
+     * Works by decoding the same pixels under three `FORMAT=` values, plus
+     * a file with no `FORMAT=` line at all.
+     * Input: rgbe, xyze, a nonsense format, and no format line -> Output:
+     * `ScRgb` and `rad-format: 32-bit_rle_rgbe` from every one of them.
      */
     #[test]
-    fn the_format_line_selects_the_interpretation() {
-        for (format, want) in [
-            (FORMAT_RGBE, Interpretation::ScRgb),
-            (FORMAT_XYZE, Interpretation::Xyz),
-            ("something_else", Interpretation::Multiband),
-        ] {
-            let file = hdr_file(
-                &[&format!("FORMAT={format}")],
-                "-Y 1 +X 2",
-                &[1, 2, 3, 128, 4, 5, 6, 128],
-            );
+    fn the_format_line_is_ignored_exactly_as_vips_ignores_it() {
+        let mut headers: Vec<Vec<String>> = vec![
+            vec![format!("FORMAT={FORMAT_RGBE}")],
+            vec![format!("FORMAT={FORMAT_XYZE}")],
+            vec!["FORMAT=something_else".to_string()],
+            vec![],
+        ];
+        for header in &mut headers {
+            let lines: Vec<&str> = header.iter().map(String::as_str).collect();
+            let file = hdr_file(&lines, "-Y 1 +X 2", &[1, 2, 3, 128, 4, 5, 6, 128]);
             let raster = decode_radiance(&file, DecodeLimits::default()).expect("decodes");
-            assert_eq!(raster.interpretation(), want, "FORMAT={format}");
+            assert_eq!(
+                raster.interpretation(),
+                Interpretation::ScRgb,
+                "vips tags every .hdr scRGB, whatever {lines:?} declares"
+            );
+            assert_eq!(
+                raster.get_field("rad-format").expect("rad-format").as_str(),
+                FORMAT_RGBE,
+                "the COLRFMT default is what vips publishes, for {lines:?}"
+            );
         }
+    }
+
+    /**
+     * Tests that the save side still writes `FORMAT=32-bit_rle_xyze` for an
+     * `Xyz` raster. Unlike the load side, `vips2rad_make_header`'s
+     * interpretation override at `radiance.c:899-901` is live: it reads
+     * `in->Type` rather than a parsed header line, so there is nothing
+     * broken about it and nothing to reproduce. Works by tagging a raster
+     * `Xyz` and reading the header line back off the encoded bytes.
+     * Input: a 6x1 `FloatF32(3)` raster tagged `Xyz` -> Output: a file
+     * whose `FORMAT=` line is `32-bit_rle_xyze`, which vips will then load
+     * back as scRGB because of the load-side defect above.
+     */
+    #[test]
+    fn save_writes_the_xyze_format_line_for_an_xyz_raster() {
+        let px: Vec<[f32; 3]> = (0..6).map(|i| [1.0, i as f32 / 8.0, 0.25]).collect();
+        let mut raster = float_raster(6, 1, &px);
+        raster.meta.interpretation = Some(Interpretation::Xyz);
+        let file = raster
+            .encode_radiance(SaveOptions::default())
+            .expect("encodes");
+        let text = String::from_utf8_lossy(&file[..file.len().min(256)]).to_string();
+        assert!(
+            text.contains(&format!("FORMAT={FORMAT_XYZE}\n")),
+            "an Xyz raster writes the CIE format line: {text:?}"
+        );
+        assert_eq!(
+            decode_radiance(&file, DecodeLimits::default())
+                .expect("decodes")
+                .interpretation(),
+            Interpretation::ScRgb,
+            "and reading it back gives scRGB, because the load side cannot see it"
+        );
     }
 
     /**

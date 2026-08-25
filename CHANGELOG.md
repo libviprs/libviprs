@@ -78,14 +78,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, so an RGBE raster tagged `Rgba8` would be premultiplied by its own
   exponent byte.
 
-  Two divergences from the vips binary are deliberate and documented at the
-  entry points. `save_radiance` preserves high dynamic range, where a bare
+  One divergence from the vips binary is deliberate and documented at the
+  entry point: `save_radiance` preserves high dynamic range, where a bare
   `vips radsave` converts to sRGB and clips (measured on `sample.hdr`, max
-  7728 becomes 254.5); the equivalent vips invocation is `float2rad` *then*
-  `radsave`. And the `FORMAT=` header line is actually read, so an XYZE file
-  is tagged `Xyz`; vips 8.18.4 cannot do that because
-  `rad2vips_process_line` passes `formatval`'s two arguments the wrong way
-  round, leaving its own XYZ branch unreachable.
+  7728 becomes 254.5). The equivalent vips invocation is `float2rad` *then*
+  `radsave`, and that is the pair `save_radiance` matches.
+
+  The `FORMAT=` header line is read past and ignored on load, so every
+  `.hdr` is tagged `ScRgb` and `rad-format` always reads back as
+  `32-bit_rle_rgbe`, `32-bit_rle_xyze` files included. That is a port of a
+  libvips defect, not an oversight: `radiance.c:693-698` picks the colour
+  tag from the parsed format, but the arm is unreachable, because
+  `radiance.c:636` calls `formatval(line, read->format)` while
+  `radiance.c:314` declares `formatval(char fmt[MAXFMTLEN], const char *s)`
+  with `fmt` as the output buffer. The arguments are swapped, nothing is
+  parsed, and the `COLRFMT` default survives. Honouring the line would put
+  a third behaviour in the world, matching neither the source nor the
+  binary, and the interpretation tag is consumed by `colourspace`, so it
+  would move pixels rather than just the header. If upstream fixes
+  `formatval`, libviprs should follow. The save side is unaffected and
+  still writes `32-bit_rle_xyze` for an `Xyz` raster.
 
   One honest limitation, stated at `decode_radiance`: a `FloatF32(3)` raster
   is rejected by `resize` with `RasterError::FloatUnsupported`, so a loaded
