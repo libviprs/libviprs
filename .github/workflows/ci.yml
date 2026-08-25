@@ -33,6 +33,11 @@ on:
   # all ruled out: those same branches got runs while still drafts, and cancelled
   # runs show up in the run list as cancelled rather than as nothing.
   #
+  # To re-check this later: the run list for this workflow gives the runs, and
+  # `git merge-tree --write-tree <main-at-that-time> <pushed-sha>` replays the
+  # merge GitHub could not make. The two that produced nothing were
+  # 64d200927c90 and 9e092027d203, both conflicting on CHANGELOG.md.
+  #
   # A `push` run builds the branch head. It needs no merge commit, so it is
   # unaffected by whether the PR currently merges.
   push:
