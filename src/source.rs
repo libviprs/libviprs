@@ -1234,6 +1234,87 @@ mod tests {
     }
 
     /**
+     * Guards the shared format sniff: `decode_file_with_limits` and
+     * `decode_bytes_with_limits` must identify a container from the same
+     * evidence, so a filename can never change what a given run of bytes
+     * decodes to. Works by writing four buffers to disk under names that
+     * disagree with their content — a PNG called `.jpg`, a JPEG called
+     * `.png`, a PNG with no extension at all, and native `.v` bytes called
+     * `.png` — then decoding each one through both entry points and
+     * comparing every case before reporting, so one broken route does not
+     * hide the others. Before the shared sniff the file entry point
+     * resolved the format from the path extension (`ImageReader::open`)
+     * while the byte entry point resolved it from the content
+     * (`with_guessed_format`), so the same bytes decoded two different ways
+     * depending on which entry point the caller reached for (issue #563).
+     * Input: four mislabelled PNG/JPEG/`.v` files → Output: both entry
+     * points return equal dimensions, pixel format, and pixel bytes.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn content_beats_extension_in_both_entry_points() {
+        /// Compact one-line rendering of a decode outcome: the raster's
+        /// shape on success, the error message on failure. Keeps the
+        /// assertion message readable where a `{:?}` of the raster would
+        /// dump the whole pixel buffer.
+        fn outcome(result: &Result<Raster, SourceError>) -> String {
+            match result {
+                Ok(im) => format!("Ok({}x{} {:?})", im.width(), im.height(), im.format()),
+                Err(e) => format!("Err({e})"),
+            }
+        }
+
+        let png = create_test_png(9, 7);
+        let jpeg = create_test_jpeg(9, 7);
+        let vips = decode_bytes(&png).unwrap().encode_vips().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut disagreements: Vec<String> = Vec::new();
+        // Each case is (file name, bytes): the name is picked to disagree
+        // with the magic, so extension-based routing cannot get it right.
+        for (name, bytes) in [
+            ("png_bytes_named.jpg", &png),
+            ("jpeg_bytes_named.png", &jpeg),
+            ("png_bytes_with_no_extension", &png),
+            ("vips_bytes_named.png", &vips),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+
+            let from_bytes = decode_bytes_with_limits(bytes, DecodeLimits::default());
+            let from_file = decode_file_with_limits(&path, DecodeLimits::default());
+
+            match (&from_file, &from_bytes) {
+                (Ok(f), Ok(b)) => {
+                    if (f.width(), f.height(), f.format()) != (b.width(), b.height(), b.format())
+                        || f.data() != b.data()
+                    {
+                        disagreements.push(format!(
+                            "{name}: decode_file_with_limits {} vs decode_bytes_with_limits {} \
+                             (pixel bytes equal: {})",
+                            outcome(&from_file),
+                            outcome(&from_bytes),
+                            f.data() == b.data()
+                        ));
+                    }
+                }
+                _ => disagreements.push(format!(
+                    "{name}: decode_file_with_limits {} vs decode_bytes_with_limits {}",
+                    outcome(&from_file),
+                    outcome(&from_bytes)
+                )),
+            }
+        }
+
+        assert!(
+            disagreements.is_empty(),
+            "the file and byte entry points disagree on {} of 4 inputs:\n  {}",
+            disagreements.len(),
+            disagreements.join("\n  ")
+        );
+    }
+
+    /**
      * Verifies the streaming La16 conversion produces the exact RGBA16
      * native-endian byte layout: luminance replicated across R, G, B and
      * the alpha sample last, two bytes each. Works by encoding a known
