@@ -38,20 +38,20 @@
 //! That is a summary of the libvips route table
 //! (`colour/colourspace.c:223-497`), not a transcription of it. libvips
 //! stores an explicit pipeline per ordered pair, and plenty of those
-//! pipelines never reach XYZ. This port takes six of them directly, the
+//! pipelines never reach XYZ. This port takes ten of them directly, the
 //! same-family cartesian/polar pairs `Lab <-> Lch` (`:244`, `:276`) and
-//! `OkLab <-> OkLCh` (`:478`, `:494`), and the coding pair
-//! `Lab <-> Labs` (`:246`, `:310`), because on those the hub inserts a
-//! round trip that changes the answer rather than only costing time (the
-//! `direct_edge` source notes carry the measured damage). Everything
-//! else goes through the hub here, including these hub-free edges of
-//! libvips', which is where the next direct route will be wanted:
+//! `OkLab <-> OkLCh` (`:478`, `:494`), and the three pairs that reach the
+//! signed-16-bit coding, `Lab <-> Labs` (`:246`, `:310`),
+//! `Lch <-> Labs` (`:280`, `:312`) and `Cmc <-> Labs` (`:297`, `:313`),
+//! because on those the hub inserts a round trip that changes the answer
+//! rather than only costing time (the `direct_edge` source notes carry
+//! the measured damage). Everything else goes through the hub here,
+//! including these hub-free edges of libvips', which is where the next
+//! direct route will be wanted:
 //!
-//! * the rest of the Lab family reaches `Lch`, `Cmc` and `Labs` from each
-//!   other with no XYZ step: `{ LAB, CMC }` (`:245`), `{ LCH, CMC }`
-//!   (`:279`), `{ LCH, LABS }` (`:280`), `{ CMC, LCH }` (`:295`),
-//!   `{ CMC, LABS }` (`:297`), `{ LABS, LCH }` (`:312`),
-//!   `{ LABS, CMC }` (`:313`), and the rest of `:293-313`;
+//! * the rest of the Lab family reaches `Lch` and `Cmc` from each other
+//!   with no XYZ step: `{ LAB, CMC }` (`:245`), `{ LCH, CMC }` (`:279`),
+//!   `{ CMC, LAB }` (`:293`), `{ CMC, LCH }` (`:295`);
 //! * the 8/16-bit RGB block (`srgb`, `scrgb`, `hsv`, `b-w`, `rgb16`,
 //!   `grey16`) converts among itself with no XYZ step (`:352-441`).
 //!
@@ -75,7 +75,9 @@
 //! * `labs` as Lab scaled to the signed-16-bit code range
 //!   (`L * 32767/100`, `a`,`b * 256`), clipped and then **truncated
 //!   toward zero**, because `colour/Lab2LabS.c:66-68` stores the clipped
-//!   double into a `signed short`. There is no signed 16-bit
+//!   double into a `signed short`. The Lab value is rounded to `f32`
+//!   first, because `Lab2LabS.c:59` reads a `float` image and every
+//!   libvips route into LabS hands it one. There is no signed 16-bit
 //!   [`PixelFormat`], so the samples are carried in a float raster whose
 //!   values match the libvips LabS codes;
 //! * Oklab / OkLCh per Ottosson's published matrices (the same constants
@@ -552,6 +554,33 @@ fn hcmc_to_h(c: f64, hcmc: f64) -> f64 {
     hcmc.rem_euclid(360.0)
 }
 
+/// LCh -> the CMC uniform space, the whole of `vips_LCh2CMC_line`
+/// (`colour/LCh2UCS.c:200-216`).
+///
+/// This is the only place the CMC encode lives, so the XYZ hub arm of
+/// [`from_xyz_into`] and the `{ LABS, CMC }` direct edge cannot drift
+/// apart.
+fn lch_to_cmc(lch: [f64; 3]) -> [f64; 3] {
+    [
+        l_to_lcmc(lch[0]),
+        c_to_ccmc(lch[1]),
+        ch_to_hcmc(lch[1], lch[2]),
+    ]
+}
+
+/// The CMC uniform space -> LCh, the whole of `vips_CMC2LCh_line`
+/// (`colour/UCS2LCh.c:238-254`), and the only place the CMC decode
+/// lives.
+///
+/// libvips inverts the three CMC functions through interpolation tables
+/// sampled every 0.1 (`UCS2LCh.c:66-135`); this module bisects the
+/// forward function instead, which is the more accurate of the two and
+/// the one divergence from the binary that survives the direct edges.
+fn cmc_to_lch(cmc: [f64; 3]) -> [f64; 3] {
+    let c = ccmc_to_c(cmc[1]);
+    [lcmc_to_l(cmc[0]), c, hcmc_to_h(c, cmc[2])]
+}
+
 // --- Oklab (Ottosson's published matrices, as used by libvips) ---
 
 fn xyz_to_oklab(xyz: [f64; 3]) -> [f64; 3] {
@@ -733,7 +762,19 @@ const LABS_AB_SCALE: f64 = 32768.0 / 128.0;
 /// binary picks truncation: `a = +/-0.501953125` scales to `+/-128.5`
 /// and comes back `+/-128`, where flooring would give `128 / -129` and
 /// rounding `129 / -129`.
+///
+/// The input is rounded to `f32` first, which is the other half of that
+/// same line: `Lab2LabS.c:59` declares `float *restrict p`, and every
+/// libvips route ending in LabS hands it a float Lab image, so the
+/// quantiser never sees more than single precision. That is invisible
+/// under rounding and decides whole counts under truncation.
+/// `LCh [0, 1, 30]` is the case that shows it: `sin(30 deg)` is
+/// 0.49999999999999994 in `f64` and exactly 0.5 as `f32`, so `b * 256`
+/// is 127.99999999999999 or 128.0, and vips answers 128. Feeding this a
+/// value that was already an `f32` sample, which is what the `Lab` and
+/// `Labs` rasters carry, leaves it unchanged.
 fn lab_to_labs(lab: [f64; 3]) -> [f64; 3] {
+    let lab = lab.map(|v| v as f32 as f64);
     [
         (lab[0] * LABS_L_SCALE).clamp(0.0, 32767.0).trunc(),
         (lab[1] * LABS_AB_SCALE).clamp(-32768.0, 32767.0).trunc(),
@@ -750,6 +791,30 @@ fn labs_to_lab(labs: [f64; 3]) -> [f64; 3] {
         labs[1] / LABS_AB_SCALE,
         labs[2] / LABS_AB_SCALE,
     ]
+}
+
+/// LCh -> the LabS codes, `{ LCH, LABS, { vips_LCh2Lab, vips_Lab2LabS } }`
+/// (`colourspace.c:280`).
+fn lch_to_labs(lch: [f64; 3]) -> [f64; 3] {
+    lab_to_labs(lch_to_lab(lch))
+}
+
+/// LabS -> LCh, `{ LABS, LCH, { vips_LabS2Lab, vips_Lab2LCh } }`
+/// (`colourspace.c:312`).
+fn labs_to_lch(labs: [f64; 3]) -> [f64; 3] {
+    lab_to_lch(labs_to_lab(labs))
+}
+
+/// CMC -> the LabS codes, `{ CMC, LABS, { vips_CMC2LCh, vips_LCh2Lab,
+/// vips_Lab2LabS } }` (`colourspace.c:297`).
+fn cmc_to_labs(cmc: [f64; 3]) -> [f64; 3] {
+    lab_to_labs(lch_to_lab(cmc_to_lch(cmc)))
+}
+
+/// LabS -> CMC, `{ LABS, CMC, { vips_LabS2Lab, vips_Lab2LCh,
+/// vips_LCh2CMC } }` (`colourspace.c:313`).
+fn labs_to_cmc(labs: [f64; 3]) -> [f64; 3] {
+    lch_to_cmc(lab_to_lch(labs_to_lab(labs)))
 }
 
 // --- Mono (gamma-encoded CIE linear luminance, libvips scRGB2BW) ---
@@ -853,7 +918,15 @@ fn alias_source(space: Interpretation) -> Interpretation {
 /// (:276), `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }` (:478) and
 /// `{ OKLCH, OKLAB, { vips_Oklch2Oklab } }` (:494). It joins Lab to its
 /// signed-16-bit coding the same way: `{ LAB, LABS, { vips_Lab2LabS } }`
-/// (:246) and `{ LABS, LAB, { vips_LabS2Lab } }` (:310).
+/// (:246) and `{ LABS, LAB, { vips_LabS2Lab } }` (:310). And it reaches
+/// that coding from the two other Lab-family spaces without an XYZ step
+/// either, through Lab: `{ LCH, LABS, { vips_LCh2Lab, vips_Lab2LabS } }`
+/// (:280), `{ LABS, LCH, { vips_LabS2Lab, vips_Lab2LCh } }` (:312),
+/// `{ CMC, LABS, { vips_CMC2LCh, vips_LCh2Lab, vips_Lab2LabS } }` (:297)
+/// and `{ LABS, CMC, { vips_LabS2Lab, vips_Lab2LCh, vips_LCh2CMC } }`
+/// (:313). A multi-stage pipeline is still a direct edge here as long as
+/// XYZ is not one of the stages: what costs accuracy is the round trip,
+/// not the number of steps.
 ///
 /// Sending any of those through the hub inserts a round trip libvips
 /// never runs, and on every one of them the two halves of that round
@@ -889,32 +962,50 @@ fn alias_source(space: Interpretation) -> Interpretation {
 /// right. Coming back, `LabS [983, 256, -256]` is `[2.999969482421875,
 /// 1, -1]` in vips and `[2.99994, 1.00052, -1.00021]` through the hub.
 ///
+/// The `Lch` and `Cmc` edges inherit both defects at once, because their
+/// pipelines end in the same truncating store and start from the same
+/// shadow branch. On a 700-pixel LCh sweep (`L` in
+/// {0, 1, 3, 5, 8, 10, 20, 50, 80, 100}, `C` in
+/// {0, 1, 25, 50, 100, 127, 128}, `h` in {0, 30, 45, 90, 135, 180, 225,
+/// 270, 315, 359}) the hub missed vips on 181 of the 2100 `LCh -> LabS`
+/// channels, and on a 700-pixel LabS sweep it missed on 748 of the 2100
+/// `LabS -> LCh` channels and 681 of the `LabS -> CMC` ones. All three
+/// come back exact on the direct edges. The `LabS -> LCh` and
+/// `LabS -> CMC` numbers are large because a neutral LabS code is
+/// *exactly* neutral, so vips answers `C = 0, h = 0` and the hub reads a
+/// hue off its own noise: 338.199 degrees, at every `L`.
+///
 /// Taking the edge keeps the polar pairs a pure polar swap and the LabS
 /// pair a pure scale.
 ///
 /// Every entry owns its **complete** target-side production, quantiser
 /// included, because this table never reaches `from_xyz_into`. That is
 /// why the `signed short` truncation lives inside `lab_to_labs` rather
-/// than at the `Labs` arm there: a route added here cannot lose it.
+/// than at the `Labs` arm there, and why the CMC encode lives inside
+/// `lch_to_cmc` rather than at the `Cmc` arm: a route added here cannot
+/// lose either of them.
 ///
 /// Cross-family polar pairs are deliberately absent: libvips routes
 /// `{ OKLCH, LCH }` (:483) through XYZ like everything else, and so does
 /// this table by returning `None` for it.
 ///
-/// Same-family is the rule for what is here, not for what libvips joins
-/// directly. `{ LCH, CMC }` (:279), `{ CMC, LCH }` (:295),
-/// `{ LCH, LABS }` (:280), `{ LABS, LCH }` (:312), `{ CMC, LABS }`
-/// (:297) and `{ LABS, CMC }` (:313) are hub-free in libvips as well,
-/// and `Lch` and `Cmc` are supported spaces here, so those still pay the
-/// hub round trip; the module docs list the rest of the hub-free edges
-/// this port has not taken.
+/// What is here is still not everything libvips joins directly.
+/// `{ LAB, CMC }` (:245), `{ CMC, LAB }` (:293), `{ LCH, CMC }` (:279)
+/// and `{ CMC, LCH }` (:295) are hub-free there as well, and all four
+/// spaces are supported here, so those still pay the hub round trip; the
+/// module docs list the rest of the hub-free edges this port has not
+/// taken.
 fn direct_edge(src: Interpretation, target: Interpretation) -> Option<fn([f64; 3]) -> [f64; 3]> {
-    use Interpretation::{Lab, Labs, Lch, OkLab, OkLch};
+    use Interpretation::{Cmc, Lab, Labs, Lch, OkLab, OkLch};
     match (src, target) {
         (Lab, Lch) | (OkLab, OkLch) => Some(lab_to_lch),
         (Lch, Lab) | (OkLch, OkLab) => Some(lch_to_lab),
         (Lab, Labs) => Some(lab_to_labs),
         (Labs, Lab) => Some(labs_to_lab),
+        (Lch, Labs) => Some(lch_to_labs),
+        (Labs, Lch) => Some(labs_to_lch),
+        (Cmc, Labs) => Some(cmc_to_labs),
+        (Labs, Cmc) => Some(labs_to_cmc),
         _ => None,
     }
 }
@@ -926,11 +1017,7 @@ fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
         Interpretation::Xyz => [v[0], v[1], v[2]],
         Interpretation::Lab => lab_to_xyz([v[0], v[1], v[2]], D65),
         Interpretation::Lch => lab_to_xyz(lch_to_lab([v[0], v[1], v[2]]), D65),
-        Interpretation::Cmc => {
-            let c = ccmc_to_c(v[1]);
-            let lch = [lcmc_to_l(v[0]), c, hcmc_to_h(c, v[2])];
-            lab_to_xyz(lch_to_lab(lch), D65)
-        }
+        Interpretation::Cmc => lab_to_xyz(lch_to_lab(cmc_to_lch([v[0], v[1], v[2]])), D65),
         Interpretation::Labs => lab_to_xyz(labs_to_lab([v[0], v[1], v[2]]), D65),
         Interpretation::ScRgb => scrgb_to_xyz([v[0], v[1], v[2]]),
         Interpretation::Hsv => {
@@ -973,11 +1060,10 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
         Interpretation::Xyz => out[..3].copy_from_slice(&xyz),
         Interpretation::Lab => out[..3].copy_from_slice(&xyz_to_lab(xyz, D65)),
         Interpretation::Lch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_lab(xyz, D65))),
+        // `lch_to_cmc` carries the CMC encode, so this arm and the
+        // `{ LABS, CMC }` direct edge quantise through one function.
         Interpretation::Cmc => {
-            let lch = lab_to_lch(xyz_to_lab(xyz, D65));
-            out[0] = l_to_lcmc(lch[0]);
-            out[1] = c_to_ccmc(lch[1]);
-            out[2] = ch_to_hcmc(lch[1], lch[2]);
+            out[..3].copy_from_slice(&lch_to_cmc(lab_to_lch(xyz_to_lab(xyz, D65))));
         }
         // `lab_to_labs` carries the `signed short` truncation, so this
         // arm and the direct edge quantise through one function.
