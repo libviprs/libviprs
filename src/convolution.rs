@@ -152,19 +152,43 @@
 //! the uchar arm of [`Raster::sobel`], [`Raster::scharr`] and
 //! [`Raster::prewitt`].
 //!
-//! * **The vectorised divide, issue #558.** libviprs ports
-//!   `vips_convi_gen`, the scalar C loop, which divides with C's `/` and
-//!   so rounds towards zero (`convolution/convi.c:710`). Any libvips
-//!   built with HWY runs a fixed-point vector path instead, finishing in
-//!   an arithmetic shift, i.e. a floor, and `vips_convi_intize` only
-//!   requires the two to agree within 2 (`convi.c:1107-1112`). So an
-//!   integer-precision convolution of an unsigned image whose window sum
-//!   is negative and even reads one lower here.
+//! * **The two integer-convolution kernels, issue #558.** libviprs ports
+//!   `vips_convi_gen`, the portable C loop, which divides with C's `/`
+//!   and so rounds towards zero (`convolution/convi.c:710`). libvips's
+//!   own documentation names that loop as the specification and flags
+//!   its alternative as a deviation from it (`convi.c:1276-1284`, quoted
+//!   in full on [`Precision::Integer`]), and it is what libvips falls
+//!   back to whenever `vips_convi_intize` declines a mask. On uchar
+//!   images a Highway-enabled libvips otherwise runs a fixed-point vector
+//!   path, and **the two paths convolve with different coefficients**:
+//!   `intize` rebuilds the mask over a power-of-two denominator, so a
+//!   3x3 box blur of scale 9 is applied as `57/512 = 0.111328` rather
+//!   than `1/9 = 0.111111`.
+//!
+//!   That is the mechanism, and it is worth being precise about, because
+//!   two plausible-sounding descriptions of it are **false**:
+//!
+//!   * It is not the rounding mode. On a window summing to 1147 the C
+//!     path gives `(1147 + 4) / 9 = 127`, flooring gives 127, and the
+//!     vector path gives `(57 * 1147 + 256) >> 9 = 128`. Switching this
+//!     module from truncation to floor would move zero bytes for
+//!     `gaussblur`, for `conv` with a non-negative mask, and for
+//!     `canny`'s first stage, precisely the cases with the largest
+//!     measured deltas.
+//!   * There is no "window sum negative and even reads one lower" rule,
+//!     and no bound of 2. `vips_convi_intize`'s accuracy check
+//!     (`convi.c:1096-1113`) is a DC-gain test against exact real
+//!     arithmetic at one grey level on a flat field; `vips_convi_gen`
+//!     appears nowhere in it. It constrains `sum(w_hat - w)` and says
+//!     nothing about per-pixel error, `sum((w_hat - w) * p)`. A mask it
+//!     accepts has been measured **128 of 255** apart.
 //!
 //!   This is a property of the **library**, not of the `vips` command:
 //!   pyvips, sharp, ruby-vips and anything linking a distro libvips hit
 //!   the identical gap. `VIPS_NOVECTOR=1` in the environment disables the
-//!   vector path and makes libvips agree with libviprs exactly.
+//!   vector path and makes libvips agree with libviprs exactly. It is
+//!   read once at library init, though, so it works for a CLI comparison
+//!   and not for a caller who already holds an `Image`.
 //!
 //!   The edge detectors inherit it **quadrupled, not doubled**. The uchar
 //!   arm recovers each response as `2 * (p - 128)`, which doubles a
@@ -172,9 +196,17 @@
 //!   an 8x3 `Gray8` image, `prewitt` at `(4, 0)` reads 106 from libviprs
 //!   and from `VIPS_NOVECTOR=1 vips`, and 110 from the same binary with
 //!   the vector path live, because the two inner convolutions read 123
-//!   and 80 here against 122 and 79 there. **Compare against an
+//!   and 80 here against 122 and 79 there. `vips sobel` over the
+//!   `oracle-captures/convolution` `sample_mono` fixture differs on
+//!   44177 of 128180 samples, by at most 4. **Compare against an
 //!   HWY-enabled libvips with a tolerance of 4 on the edge detectors, not
 //!   2.** The float arm has no such gap and is bit-exact either way.
+//!
+//!   The full contract, including the regimes where the two paths cannot
+//!   differ at all, is on [`Precision::Integer`]. The dual-path evidence
+//!   is captured in `oracle-captures/convolution/`, which records every
+//!   integer-conv record on both libvips paths with a `paths_agree` flag
+//!   and asserts it.
 //!
 //! * **The intized scale, issue #547.** `vips_convi_gen` reads the scale
 //!   off the *original* mask where `vips__image_intize` computes a nudged
@@ -182,7 +214,7 @@
 //!   output bytes, and the `intize` helper documents the detail.
 
 use crate::colour::ColourError;
-use crate::conversion::{Angle45, Interpretation};
+use crate::conversion::{Angle45, ConversionError, Interpretation};
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
 use thiserror::Error;
@@ -205,8 +237,80 @@ const SHARPEN_Y3: f64 = 20.0;
 pub enum Precision {
     /// Integer arithmetic: the mask is converted to integers with
     /// `rint()` and the result stays in the input format.
+    ///
+    /// # Parity contract (issue #558)
+    ///
+    /// At [`Precision::Float`], libviprs reproduces libvips 8.18.4 byte for
+    /// byte.
+    ///
+    /// At `Precision::Integer` **on uchar images**, libvips has two
+    /// implementations that disagree, and it does not bound the
+    /// disagreement. libviprs implements the portable C one,
+    /// `vips_convi_gen`. That is the formula libvips documents, and it
+    /// says so in its own words at `convolution/convi.c:1276-1284`:
+    ///
+    /// > `@mask` is converted to an integer mask with `rint()` of each
+    /// > element ... For `UCHAR` images, `vips_convi` uses a fast vector
+    /// > path based on half-float arithmetic. **This can produce slightly
+    /// > different results.** Disable the vector path with
+    /// > `--vips-novector` or `VIPS_NOVECTOR` or
+    /// > `vips_vector_set_enabled()`.
+    ///
+    /// It is also the path libvips itself falls back to whenever
+    /// `vips_convi_intize` declines a mask, which it does on ordinary
+    /// input, so it is the floor rather than one of two options.
+    ///
+    /// **`VIPS_NOVECTOR=1 vips` reproduces libviprs byte for byte.** A
+    /// SIMD-enabled `vips` runs a fixed-point approximation that
+    /// convolves with **requantised coefficients**, not merely a
+    /// different rounding: a 3x3 box blur, scale 9, over a window summing
+    /// to 1147 gives `(1147 + 4) / 9 = 127` here and
+    /// `(57 * 1147 + 256) >> 9 = 128` there, because that path is
+    /// filtering with `57/512`, not `1/9`. Flooring instead of
+    /// truncating also gives 127, so the rounding mode is not the
+    /// mechanism.
+    ///
+    /// Measured divergence against a vectorised 8.18.4: up to **4** for
+    /// [`Raster::gaussblur`] and the uchar edge detectors, and **128 of
+    /// 255**, half of full scale, for a hostile mask that libvips's own
+    /// accuracy gate still accepts (`[45 -17 -25 / -33 -15 -34 /
+    /// 55 53 -26]`, scale 3, over a near-binary noise field; the same
+    /// mask reaches 73 over smoother noise and 2 over a zone-plate, so
+    /// even that is a fixture's number rather than a bound). Downstream
+    /// of a non-linear consumer such as `canny --precision integer` it is
+    /// unbounded outright, because non-maximum suppression turns a
+    /// one-unit blur difference into a keep-or-zero decision. Which path
+    /// a given `vips` runs depends on its build, its CPU, `VIPS_NOVECTOR`
+    /// and the mask.
+    ///
+    /// There is no honest tolerance to quote. `vips_convi_intize`'s check
+    /// (`convi.c:1096-1113`) is often read as bounding the two paths
+    /// within 2; it does not. It compares the requantised mask against
+    /// exact real arithmetic, at one grey level, on a flat field, and
+    /// `vips_convi_gen` appears nowhere in it. It constrains
+    /// `sum(w_hat - w)`, a DC-gain term, and says nothing about
+    /// per-pixel error, which is `sum((w_hat - w) * p)`.
+    ///
+    /// Three regimes exist, not two, and nothing on this API surface
+    /// tells you which one a mask is in: the vector path can run and
+    /// disagree; it can run and agree (any scale whose requantisation is
+    /// exact, including every power of two, and every scale-1 mask); or
+    /// libvips can decline the mask and run the C path itself. Sigma 1.4,
+    /// the [`Raster::gaussblur`] default, is lucky only for the
+    /// *separable* gaussmat, whose scale is 64. The 2D gaussmat at the
+    /// same sigma has scale 216 and is not.
+    ///
+    /// [`Raster::sharpen`], `morph`, `rank`, every ushort or float input,
+    /// and every [`Precision::Float`] path are unaffected: `sharpen`
+    /// convolves the `L` of `LabS`, which is 16-bit, and the vector path
+    /// is gated on `BandFmt == VIPS_FORMAT_UCHAR` (`convi.c:1151`).
     Integer,
     /// Floating-point arithmetic: the result is a 32-bit float image.
+    ///
+    /// `vips_convf` has one implementation, so this precision is
+    /// identical on every libvips build: `VIPS_NOVECTOR=1` changes
+    /// nothing, and the two-path divergence documented on
+    /// [`Precision::Integer`] does not reach it.
     Float,
 }
 
@@ -297,6 +401,12 @@ pub enum ConvolutionError {
     /// source interpretation or too few bands).
     #[error(transparent)]
     Colour(#[from] ColourError),
+    /// The `vips_cast` that closes the edge detectors' float arm failed
+    /// (`edge.c:174`). It casts a float magnitude image to uchar without
+    /// changing the band count, so in practice only the allocation inside
+    /// [`Raster::try_cast`] can reach this.
+    #[error(transparent)]
+    Conversion(#[from] ConversionError),
     /// Constructing a result raster failed (allocation budget, size
     /// overflow).
     #[error(transparent)]
@@ -1005,9 +1115,12 @@ impl Raster {
     /// See the [module docs](crate::convolution) for the integer/float
     /// precision semantics and output formats.
     ///
-    /// At [`Precision::Integer`] the result diverges from an HWY-enabled
-    /// libvips by up to one unit per sample (issues #558 and #547); see
-    /// [Divergence from stock libvips](crate::convolution#divergence-from-stock-libvips).
+    /// At [`Precision::Integer`] on a uchar image the result diverges
+    /// from an HWY-enabled libvips, by an amount nobody has bounded
+    /// (issues #558 and #547); `VIPS_NOVECTOR=1 vips` reproduces this
+    /// exactly. See [`Precision::Integer`] for the contract and
+    /// [Divergence from stock libvips](crate::convolution#divergence-from-stock-libvips)
+    /// for the mechanism.
     ///
     /// # Panics
     ///
@@ -1499,35 +1612,6 @@ fn gradient_pair(
     Ok((first, second))
 }
 
-/// `vips_cast_uchar` on one sample: clip into `0..=255` as a double, then
-/// **truncate** towards zero.
-///
-/// `conversion/cast.c:568` spells the rule out: "Floats are truncated (not
-/// rounded). Out of range values are clipped." The clip runs first and on
-/// the double (`CAST_FLOAT_INT` at `cast.c:231`), then C's narrowing
-/// conversion to `unsigned char` drops the fraction.
-///
-/// [`Raster::cast`] is not a substitute: libviprs rounds on the same
-/// conversion (`conversion.rs`, pinned by `cast_float_to_u8_rounds_and_clips`),
-/// so it answers 184 where vips answers 183 for a scharr corner. That
-/// difference is a live parity gap in `cast` itself, tracked as issue
-/// #561; once `cast` truncates, this helper is redundant and is deleted
-/// along with the gap rather than relocated.
-///
-/// A `NaN` reaches C as undefined behaviour here (it survives both halves
-/// of `VIPS_CLIP` and then converts to an unsigned char). Nothing in the
-/// edge pipeline can produce one from a finite input, so this maps it to
-/// `0` rather than inventing a value.
-#[inline]
-fn cast_uchar_truncating(v: f64) -> u8 {
-    if v.is_nan() {
-        return 0;
-    }
-    // `as` on a float truncates towards zero, and the clamp has already
-    // put the value in range.
-    v.clamp(0.0, 255.0) as u8
-}
-
 /// Edge detectors: the three named 3x3 gradient operators, `vips_sobel`,
 /// `vips_scharr` and `vips_prewitt`. They live in their own block rather
 /// than the main convolution one because issue #562 restructures this
@@ -1555,8 +1639,10 @@ impl Raster {
     ///   the float arm).
     /// * **every other format** takes the accurate arm
     ///   (`edge.c:158-182`): two [`Precision::Float`] convolutions with
-    ///   the raw mask, then `sqrt(Gx^2 + Gy^2)`, then
-    ///   [`cast_uchar_truncating`] (`vips_cast_uchar` at `edge.c:174`).
+    ///   the raw mask, then `sqrt(Gx^2 + Gy^2)`, then [`Raster::try_cast`]
+    ///   to uchar (`vips_cast_uchar` at `edge.c:174`), which clips into
+    ///   `0..=255` and truncates towards zero exactly as
+    ///   `conversion/cast.c:566-568` states.
     ///
     /// The output is uchar either way, keeping the band count, the
     /// dimensions and the metadata of the input.
@@ -1577,6 +1663,8 @@ impl Raster {
         let rows: Vec<Vec<f64>> = mask.iter().map(|row| row.to_vec()).collect();
         let channels = self.format().channels();
         let (w, h) = (self.width(), self.height());
+        let fmt = PixelFormat::with_channels(channels, 1)
+            .expect("an existing raster's band count has an 8-bit format");
 
         // A 1-byte channel is exactly libvips' VIPS_FORMAT_UCHAR: the
         // 16-bit and float carriers are 2 and 4 bytes wide.
@@ -1609,18 +1697,23 @@ impl Raster {
                 p2.f32_samples()
                     .expect("float precision gives a float raster"),
             );
-            gx.iter()
+            let magnitude: Vec<f32> = gx
+                .iter()
                 .zip(&gy)
                 .map(|(&a, &b)| {
                     let square_sum = a * a + b * b;
-                    let magnitude = f64::from(square_sum).sqrt() as f32;
-                    cast_uchar_truncating(f64::from(magnitude))
+                    f64::from(square_sum).sqrt() as f32
                 })
-                .collect()
+                .collect();
+            // libvips casts the whole magnitude image rather than each
+            // sample (`edge.c:174` is a `vips_cast` call), and since #561
+            // `try_cast` is that cast: clip into range, then truncate
+            // towards zero, `NaN` to `0`. Materialising the float raster
+            // is what keeps the two spellings from drifting apart again.
+            let float_mag = Raster::from_f32_samples(w, h, p1.format(), &magnitude)?;
+            float_mag.try_cast(fmt)?.data().to_vec()
         };
 
-        let fmt = PixelFormat::with_channels(channels, 1)
-            .expect("an existing raster's band count has an 8-bit format");
         let mut out = Raster::new(w, h, fmt, data)?;
         // vips builds the result inside the input's pipeline, so the
         // interpretation and the resolution survive the format change,

@@ -163,32 +163,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The documented bound on the integer-convolution divergence against stock
-  libvips is 4, not 2** (issue #558). This is a correction to the disclosure,
-  not to any behaviour, and it matters because anyone who read the old number
-  and set a comparison tolerance of 2 was going to get burned.
+- **The integer-convolution parity contract is now stated on
+  `Precision::Integer`, and the divergence against a stock libvips is
+  unbounded rather than "at most 2" or "at most 4"** (issue #558). No
+  convolution arithmetic changed here. What changed is that the claim is
+  written down honestly and is checkable, because two earlier statements of
+  it in this changelog and in the module docs were wrong.
 
-  libviprs ports `vips_convi_gen`, the scalar C integer-convolution loop,
-  which rounds its division towards zero. Any libvips built with HWY runs a
-  fixed-point vector path instead, which floors, and libvips itself only
-  requires the two paths to agree within 2 (`convi.c:1107-1112`). So an
+  libviprs ports `vips_convi_gen`, the portable C integer-convolution loop.
+  libvips's own documentation names that loop as the specification and flags
+  the alternative as a deviation from it: "`@mask` is converted to an integer
+  mask with `rint()` of each element ... For `UCHAR` images, `vips_convi` uses
+  a fast vector path based on half-float arithmetic. **This can produce
+  slightly different results.** Disable the vector path with
+  `--vips-novector` or `VIPS_NOVECTOR`" (`convi.c:1276-1284`). It is also what
+  libvips falls back to whenever `vips_convi_intize` declines a mask, which it
+  does on ordinary input, so it is the floor rather than one of two options.
+  `VIPS_NOVECTOR=1 vips` reproduces libviprs byte for byte.
+
+  The first correction is the **mechanism**. The old wording said the two
+  paths differ in how they round the final divide, so that "an
   integer-precision convolution of an unsigned image whose window sum is
-  negative and even reads one lower from libviprs.
+  negative and even reads one lower from libviprs". That is not the dominant
+  effect and the rule does not hold. `vips_convi_intize` rebuilds the mask
+  over a power-of-two denominator, so the vector path **convolves with
+  different coefficients**: a 3x3 box blur of scale 9 is applied as
+  `57/512 = 0.111328`, not `1/9`. On a window summing to 1147 the C path gives
+  `(1147 + 4) / 9 = 127`, flooring also gives 127, and the vector path gives
+  `(57 * 1147 + 256) >> 9 = 128`. Changing how libviprs rounds would move zero
+  bytes for `gaussblur`, for `conv` with a non-negative mask, and for
+  `canny`'s first stage.
 
-  This is a property of the **library**, not of the `vips` command line, which
-  is the other thing the old wording got wrong. pyvips, sharp, ruby-vips and
-  anything linking a distro libvips all hit the identical gap. Setting
-  `VIPS_NOVECTOR=1` in the environment disables the vector path and makes
-  libvips agree with libviprs exactly.
+  The second correction is the **bound**, and it is the one that matters if
+  you are writing a comparison. `vips_convi_intize`'s accuracy check
+  (`convi.c:1096-1113`) is not a bound on the two paths at all: it compares
+  the requantised mask against exact real arithmetic, at one grey level, on a
+  flat field, so it constrains DC gain and says nothing about per-pixel error.
+  Of 400 random 3x3 masks, 301 were accepted onto the vector path and 179 of
+  those diverge by more than 2. One accepted mask,
+  `[45 -17 -25 / -33 -15 -34 / 55 53 -26]` at scale 3, has been measured
+  **128 of 255** apart over a near-binary noise field, and 73 and 2 over two
+  other inputs, so even that is a fixture's number and not a bound. Use
+  `VIPS_NOVECTOR=1` rather than a tolerance.
+
+  Three regimes exist, not two, and nothing on this API surface tells you
+  which one a mask is in: the vector path can run and disagree; it can run and
+  agree (scale 1, or any exact requantisation, including every power-of-two
+  scale); or libvips can decline the mask and run the C path itself. Sigma
+  1.4, the `gaussblur` default, is lucky only for the *separable* gaussmat,
+  whose scale is 64. The 2D gaussmat at the same sigma has scale 216 and is
+  not, which is why a suite pinned only at the default sees none of this.
+
+  This is a property of the **library**, not of the `vips` command line.
+  pyvips, sharp, ruby-vips and anything linking a distro libvips all hit the
+  identical gap, and `VIPS_NOVECTOR` is read once at library init, so the
+  escape hatch works for a CLI comparison and not for a caller who already
+  holds an `Image`.
 
   It reaches `conv` and `convsep` at integer precision, `compass`,
-  `gaussblur`, `sharpen`, and the uchar arm of `sobel` / `scharr` /
-  `prewitt`. On the edge detectors the gap is **quadrupled, not doubled**:
-  the uchar arm recovers each response as `2 * (p - 128)`, which doubles a
-  one-unit gap, and `Gx` and `Gy` can both be off at once. Measured on an 8x3
-  `Gray8` image, `prewitt` at pixel (4,0) reads 106 from libviprs and from
+  `gaussblur`, and the uchar arm of `sobel` / `scharr` / `prewitt`. On the
+  edge detectors the gap is **quadrupled, not doubled**: the uchar arm
+  recovers each response as `2 * (p - 128)`, which doubles a one-unit gap, and
+  `Gx` and `Gy` can both be off at once. Measured on an 8x3 `Gray8` image,
+  `prewitt` at pixel (4,0) reads 106 from libviprs and from
   `VIPS_NOVECTOR=1 vips`, and 110 from the same binary with the vector path
   live. The float arm has no such gap and is bit-exact either way.
+
+  `sharpen` is **not** in that list any more, and dropping it is a third
+  correction. It convolves the `L` of `LabS`, which is 16-bit, and the vector
+  path is gated on `BandFmt == VIPS_FORMAT_UCHAR` (`convi.c:1151`), so both
+  libvips builds take the C path, and `VIPS_INFO=1` says so. Any `sharpen`
+  deviation is a separate libviprs bug, tracked as issue #581.
+
+- The edge detectors' float arm now closes through `Raster::try_cast` instead
+  of a private `cast_uchar_truncating` helper (issues #558, #561). #561 made
+  `try_cast` truncate float samples toward zero, which is exactly what the
+  helper existed to work around, so the helper was a second copy of
+  `vips_cast`'s rule with nothing left to add, and its doc comment still
+  claimed libviprs rounded, which stopped being true the moment #561 landed.
+  libvips builds that arm out of a `vips_cast` call on the whole magnitude
+  image (`edge.c:174`), so going through `try_cast` also matches the shape of
+  the original. `sobel`, `scharr` and `prewitt` produce identical bytes; the
+  pinned impulse, vertical-step and truncation fixtures all still pass. The
+  one visible consequence is a new
+  `ConvolutionError::Conversion(ConversionError)` variant, which only the
+  allocation inside `try_cast` can reach in practice. `ConvolutionError` is
+  `#[non_exhaustive]`, so matching code is unaffected.
 
 - **Breaking (cast): a float sample narrowing to an integer format is now
   truncated toward zero, where it used to be rounded to nearest** (issue #561).
