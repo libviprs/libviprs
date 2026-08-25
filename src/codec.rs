@@ -40,7 +40,7 @@ pub type DecodeError = crate::source::SourceError;
 /// the pure-Rust `image` / `png` crates surface their crate errors through
 /// [`EncodeError::Encode`]; writes to a caller-supplied target surface
 /// through [`EncodeError::Io`]; and formats that require an external C
-/// library (HEIF/AVIF, JP2K, JPEG-XL, WebP encode, UHDR, magick, ...) return
+/// library (HEIF/AVIF, JP2K, JPEG-XL, UHDR, magick, ...) return
 /// [`EncodeError::Unsupported`] so the ported cells compile and pin the typed
 /// error path.
 #[derive(Debug, Error)]
@@ -62,9 +62,13 @@ pub enum EncodeError {
     /// The requested output format is not available in this build.
     ///
     /// The deferred lanes return this for genuinely-external formats that
-    /// have no mature pure-Rust encoder (HEIF/AVIF, JP2K, JPEG-XL, WebP
-    /// encode, UHDR, FITS, magick, TIFF JPEG/CCITT, ...). The call sites
-    /// compile and assert on the typed error rather than a panic.
+    /// have no mature pure-Rust encoder (HEIF/AVIF, JP2K, JPEG-XL, UHDR,
+    /// FITS, magick, TIFF JPEG/CCITT, ...). The call sites compile and
+    /// assert on the typed error rather than a panic.
+    ///
+    /// [`crate::webp`] and [`crate::gif`] also return it, but for a
+    /// different reason: a pure-Rust codec is reachable for both, and the
+    /// stubs are waiting on their own lanes rather than on a dependency.
     #[error("unsupported encode format: {format}")]
     Unsupported {
         /// The format name the caller asked for (for example `"heif"`).

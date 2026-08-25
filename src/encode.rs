@@ -15,14 +15,13 @@
 //!   exposes neither knob: [`Raster::encode_png_interlaced`] (Adam7) and
 //!   [`Raster::encode_png_palette`] (median-cut quantized indexed PNG).
 //! * **Typed [`EncodeError::Unsupported`] stubs**, because this build has no
-//!   accessible encoder for them and the format needs capabilities the crate
-//!   cannot reach from this lane: [`Raster::jpegsave_buffer_restart`]
-//!   (`"jpeg-restart"`: `image`'s JPEG encoder writes no restart markers),
-//!   [`Raster::encode_webp`] (`"webp"`: no mature pure-Rust WebP encoder), and
-//!   [`Raster::encode_gif`] / [`Raster::encode_gif_interlaced`] /
-//!   [`Raster::encode_gif_dither`] (`"gif"`: the `image` dependency is built
-//!   without the `gif` feature, and GIF save additionally needs the multi-page
-//!   animation and palette-dither support the ported cell exercises).
+//!   accessible encoder for them: [`Raster::jpegsave_buffer_restart`]
+//!   (`"jpeg-restart"`: `image`'s JPEG encoder writes no restart markers).
+//!
+//! WebP and GIF used to keep their stubs here too. They now live in
+//! [`crate::webp`] and [`crate::gif`], one file per format, so the four
+//! format lanes each own exactly one file instead of all four rewriting this
+//! header and the adjacent stub bodies (issue #563).
 //!
 //! ## Subsampling caveat
 //!
@@ -287,57 +286,6 @@ impl Raster {
         write_chunk(&mut out, b"IDAT", &idat);
         write_chunk(&mut out, b"IEND", &[]);
         Ok(out)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Formats with no accessible pure-Rust encoder in this build
-// ---------------------------------------------------------------------------
-
-impl Raster {
-    /// libvips `webpsave_buffer`.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"webp"`: there is no
-    /// mature pure-Rust WebP encoder and the `image` dependency is built
-    /// without WebP support.
-    pub fn encode_webp(&self, quality: u8) -> Result<Vec<u8>, EncodeError> {
-        let _ = quality;
-        Err(EncodeError::unsupported("webp"))
-    }
-
-    /// libvips `gifsave_buffer`.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"gif"`: the `image`
-    /// dependency is built without the `gif` feature (unreachable from this
-    /// lane), and GIF save additionally needs the multi-page animation and
-    /// palette handling the ported cell exercises.
-    pub fn encode_gif(&self) -> Result<Vec<u8>, EncodeError> {
-        Err(EncodeError::unsupported("gif"))
-    }
-
-    /// libvips `gifsave_buffer` with interlacing.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"gif"`; see
-    /// [`Raster::encode_gif`].
-    pub fn encode_gif_interlaced(&self) -> Result<Vec<u8>, EncodeError> {
-        Err(EncodeError::unsupported("gif"))
-    }
-
-    /// libvips `gifsave_buffer` with a dither level (0.0-1.0).
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"gif"`; see
-    /// [`Raster::encode_gif`].
-    pub fn encode_gif_dither(&self, dither: f64) -> Result<Vec<u8>, EncodeError> {
-        let _ = dither;
-        Err(EncodeError::unsupported("gif"))
     }
 }
 
@@ -845,30 +793,6 @@ mod tests {
         match im.jpegsave_buffer_restart(10) {
             Err(EncodeError::Unsupported { format }) => assert_eq!(format, "jpeg-restart"),
             other => panic!("expected Unsupported(jpeg-restart), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn encode_webp_is_unsupported() {
-        let im = rgb8(8, 8, |_, _| [1, 2, 3]);
-        match im.encode_webp(80) {
-            Err(EncodeError::Unsupported { format }) => assert_eq!(format, "webp"),
-            other => panic!("expected Unsupported(webp), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn encode_gif_family_is_unsupported() {
-        let im = rgb8(8, 8, |_, _| [1, 2, 3]);
-        for res in [
-            im.encode_gif(),
-            im.encode_gif_interlaced(),
-            im.encode_gif_dither(0.5),
-        ] {
-            match res {
-                Err(EncodeError::Unsupported { format }) => assert_eq!(format, "gif"),
-                other => panic!("expected Unsupported(gif), got {other:?}"),
-            }
         }
     }
 

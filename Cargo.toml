@@ -19,7 +19,24 @@ ab_glyph = "0.2"
 arbitrary = { version = "1", features = ["derive"] }
 blake3 = "1.8.4"
 flate2 = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+# Pure-Rust codec facade. The feature list is the crate's decodable
+# format set, and it is edited here once for the whole format wave
+# (issue #563) rather than once per lane: every feature added recompiles
+# the 36k-LOC crate, so batching the change is measurably cheaper than
+# three separate edits, and it keeps four lanes off one conflicting line.
+# `hdr` is deliberately absent. The crate decodes RGBE as
+# `mantissa * 2^(e-136)` where vips uses the half-bit-centred
+# `(mantissa + 0.5) * 2^(e-136)`, a 100% error at mantissa 0, so it was
+# never usable for parity (#506 hand-rolls its own decoder). Leaving the
+# feature off is also what keeps the #539 RLE multiply overflow in
+# `codecs/hdr/decoder.rs` unreachable.
+image = { version = "0.25", default-features = false, features = [
+    "gif",
+    "jpeg",
+    "png",
+    "tiff",
+    "webp",
+] }
 libfuzzer-sys = "0.4"
 libviprs = { path = "." }
 loom = "0.7"

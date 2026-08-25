@@ -118,6 +118,7 @@ pub mod extract;
 pub mod foreign_stubs;
 pub mod freqfilt;
 pub mod geo;
+pub mod gif;
 pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
@@ -156,6 +157,7 @@ pub mod streaming_mapreduce;
 pub(crate) mod sync_queue;
 pub mod textio;
 pub mod verify;
+pub mod webp;
 
 // Curated crate-root surface: types and high-level entry points only.
 // Leaf helpers, constants, and free functions stay behind their module path
