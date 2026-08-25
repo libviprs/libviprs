@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `colourspace` to `labs` now truncates the LabS code toward zero instead of
+  rounding it, so the output bytes of every conversion into `labs` change
+  (issue #556). `Lab [50, 0, 0]` came out as `16384` and is now `16383`, which
+  is what vips 8.18.4 prints: `50 * 32767/100` is exactly `16383.5`, and
+  `colour/Lab2LabS.c:66-68` clips in `double` and then assigns into a
+  `signed short`, so C drops the fraction rather than rounding it. The `a` and
+  `b` channels had the same defect at the `256` scale. Truncation here is
+  toward zero and not floor, which is a distinction LabS is the only space in
+  this module to make, being the only signed carrier: `a = -0.501953125`
+  scales to `-128.5` and vips answers `-128`, not `-129`.
+
+  Every route into `labs` is affected, not only `Lab -> Labs`, because
+  `vips_Lab2LabS` is the last stage of all of them (`colour/colourspace.c:229`
+  onward). Expect codes to move by one count, and by at most one.
+
+- `Lab <-> Labs` takes the direct route libvips gives it
+  (`{ LAB, LABS, { vips_Lab2LabS } }` at `colour/colourspace.c:246` and
+  `{ LABS, LAB, { vips_LabS2Lab } }` at `:310`) instead of meeting at the XYZ
+  hub (issue #556). This is not the optimisation it looks like. `Lab -> XYZ ->
+  Lab` leaves a residue of a few parts in 1e6, because `lab_f` switches at
+  `t < 0.008856` and `lab_to_xyz` at `L < 8.0` and those rounded decimals are
+  not mutual inverses. Rounding used to absorb that residue; truncation cannot,
+  so a code that should land on a whole number loses a whole count whenever the
+  residue is negative. `Lab [0, -128, 1]` is `[0, -32768, 256]` in vips and was
+  `[0, -32767, 255]` through the hub. Coming back the other way the hub drifts
+  in the shadow branch instead: `Labs [983, 256, -256]` is
+  `[2.999969482421875, 1, -1]` in vips and was `[2.99994, 1.00052, -1.00021]`.
+
+  `Lch <-> Labs` and `Cmc <-> Labs` are hub-free in libvips too (`:280`,
+  `:297`, `:312`, `:313`) and still take the hub here, so they keep a
+  one-count error wherever the exact code is a whole number. Truncating still
+  leaves them closer to vips than rounding did, by a factor of three on a
+  swept grid.
+
 ### Added
 
 - `Raster::join` and its `try_join` twin (issue #551): the port of libvips
