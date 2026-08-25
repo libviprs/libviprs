@@ -15,7 +15,7 @@ use crate::raster::Raster;
 
 /// Read the `n`-th channel sample at byte offset `off` as `f64`, honouring the
 /// format's sample type (native byte order for 16-bit and float).
-fn sample_f64(data: &[u8], off: usize, channel: usize, fmt: PixelFormat) -> f64 {
+pub(crate) fn sample_f64(data: &[u8], off: usize, channel: usize, fmt: PixelFormat) -> f64 {
     match fmt.bytes_per_channel() {
         1 => data[off + channel] as f64,
         2 => {
