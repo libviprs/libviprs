@@ -939,16 +939,24 @@ mod tests {
     fn decode_tiff_page_rejects_a_page_past_the_end() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.tif");
-        std::fs::write(&path, multipage_gray8_fixture(2)).unwrap();
-        // Valid indices for a two-page file are 0 and 1, so 2 is one past the
-        // end. vips draws the line in the same place: `vips tiffload` on a
-        // single-page file with `--page 1` fails with "TIFF does not contain
-        // page 1".
-        let err = decode_tiff_page(&path, 2).unwrap_err();
-        let message = err.to_string();
+        std::fs::write(&path, multipage_gray8_fixture(3)).unwrap();
+
+        // Valid indices for a three-page file are 0, 1 and 2, so 3 is the
+        // first one past the end. vips draws the line in the same place:
+        // `vips tiffload` on a single-page file with `--page 1` fails with
+        // "TIFF does not contain page 1".
+        assert!(decode_tiff_page(&path, 3).is_err());
+
+        // The message has to carry both numbers, because "page 5" on its own
+        // does not tell a caller whether they are one over or four over.
+        let message = decode_tiff_page(&path, 5).unwrap_err().to_string();
         assert!(
-            message.contains("out of range") && message.contains('2'),
+            message.contains("page 5") && message.contains("has 3"),
             "out-of-range page must name the index and the count, got {message}"
+        );
+        assert!(
+            message.contains("indexed from 0"),
+            "out-of-range page must say which base it counted from, got {message}"
         );
     }
 
