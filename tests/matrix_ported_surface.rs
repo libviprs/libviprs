@@ -95,5 +95,5 @@ fn matrixmultiply_surface() {
     assert!(ok.is_ok());
 
     let bad: Result<Raster, MatrixError> = left.try_matrixmultiply(&left);
-    assert!(matches!(bad, Err(MatrixError::BadSizes { .. })));
+    assert!(matches!(bad, Err(MatrixError::ShapeMismatch { .. })));
 }
