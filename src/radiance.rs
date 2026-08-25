@@ -4,7 +4,7 @@
 //! copy-pasted from Greg Ward's Radiance 5.4 sources) together with
 //! `colour/rad2float.c` and `colour/float2rad.c` (the sample codec), which
 //! libvips keeps in separate files because it models Radiance as a
-//! *coding* — a 4-band uchar raster tagged `VIPS_CODING_RAD` that any real
+//! *coding*, a 4-band uchar raster tagged `VIPS_CODING_RAD` that any real
 //! operation silently unpacks. libviprs has no coding concept, so this
 //! module fuses the two halves: [`decode_radiance`] is `radload` composed
 //! with `rad2float`, and [`Raster::encode_radiance`] is `float2rad`
@@ -303,7 +303,7 @@ pub struct SaveOptions {
 ///
 /// `float2rad` after `rad2float` reproduces the original RGBE quadruple
 /// exactly when its largest mantissa is at least 128 and its exponent byte
-/// is in `23..=255` — verified here over 298,240 combinations. Those are
+/// is in `23..=255`, verified here over 298,240 combinations. Those are
 /// precisely the quadruples an encoder produces, so a `.hdr` written by
 /// vips or by [`Raster::encode_radiance`] round-trips byte for byte.
 /// Outside that domain the pair renormalises rather than repeating itself:
@@ -529,8 +529,8 @@ fn rgbe_to_float(quad: [u8; 4]) -> [f32; BANDS] {
 
 /// Encode one RGB triple (`setcolr`, `float2rad.c`).
 ///
-/// The conversion to `u8` truncates, as C's does. Where C is undefined —
-/// a non-finite product — Rust saturates and maps NaN to zero, which is
+/// The conversion to `u8` truncates, as C's does. Where C is undefined
+/// (a non-finite product) Rust saturates and maps NaN to zero, which is
 /// what the measured macOS build of vips 8.18.4 also produces.
 fn float_to_rgbe(rgb: [f64; BANDS]) -> [u8; 4] {
     let mut d = if rgb[0] > rgb[1] { rgb[0] } else { rgb[1] };
@@ -950,7 +950,7 @@ fn process_header_line(line: &[u8], header: &mut Header) -> Result<(), RadianceE
 
 /// `str2resolu` plus `scanlen`/`numscans` (`radiance.c:250-251`,
 /// `radiance.c:276-305`): the axis written **second** is the scanline
-/// length, and the `-`/`+` direction flags are parsed and then ignored —
+/// length, and the `-`/`+` direction flags are parsed and then ignored:
 /// libvips "will not rotate/flip as the FORMAT string asks"
 /// (`radiance.c:70`).
 fn parse_resolution(line: &[u8]) -> Result<(i64, i64), RadianceError> {
