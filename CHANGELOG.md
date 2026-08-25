@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `Raster::arrayjoin` no longer clamps `across` to the number of images
+  (issue #577). A value larger than the list used to collapse into one full
+  row; it now lays out that many cells wide and leaves the trailing ones
+  background, which is what vips does. Anyone passing an `across` above their
+  image count gets different output geometry out of the same call, with no
+  error to notice it by, so it is worth grepping for.
+
+  Measured against vips 8.18.4 on two inputs whose sizes differ, a 3x2 and a
+  2x3, so the grid cell is 3x3 (`vips black a.v 3 2; vips black b.v 2 3;
+  vips arrayjoin "a.v b.v" o.v --across N`):
+
+  | `across` | vips | libviprs before | libviprs now |
+  |---|---|---|---|
+  | 1 | 3x6 | 3x6 | 3x6 |
+  | 2 | 6x3 | 6x3 | 6x3 |
+  | 3 | 9x3 | 6x3 | 9x3 |
+  | 5 | 15x3 | 6x3 | 15x3 |
+  | 10 | 30x3 | 6x3 | 30x3 |
+
+  `shim` follows `across` rather than the image count with it, since
+  `arrayjoin.c:259-260` sizes the row as `hspacing * across + shim *
+  (across - 1)`: the same pair with `--across 4 --shim 2` is 18x3, where the
+  clamp gave 8x3.
+
+  An explicit `across` outside `1..=1000000` is now the typed
+  `ConversionError::AcrossOutOfRange` instead of being silently clamped.
+  That is the range libvips declares on the property
+  (`VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)` in
+  `arrayjoin.c:400-406`), and GObject refuses both ends before the operation
+  is built, so `--across 0` and `--across 1000001` never produce a grid there
+  either. The default is unchanged and is not range checked, because vips
+  assigns `join->across = n` straight to the struct field and bypasses its own
+  property check the same way.
+
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
   be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
