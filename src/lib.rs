@@ -154,6 +154,7 @@ pub mod source;
 pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
+pub mod svg;
 pub(crate) mod sync_queue;
 pub mod textio;
 pub mod verify;
@@ -193,12 +194,15 @@ pub use error::OpError;
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
 // The deferred foreign-format free functions and options are re-exported at
 // the root because the ported foreign cell reaches them there
-// (`use libviprs::{magickload, decode_svg, ...}`), matching the imageio
+// (`use libviprs::{magickload, decode_openslide, ...}`), matching the imageio
 // convention above. The deferred encoders and `dzsave_buffer` are inherent
-// methods on `Raster`, so they need no re-export.
+// methods on `Raster`, so they need no re-export. `decode_svg` used to live
+// here too; it moved to `crate::svg` when the SVG lane made it real
+// (issue #502) and is re-exported from there, so the crate-root spelling is
+// unchanged.
 pub use foreign_stubs::{
-    MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, decode_svg,
-    magickload, magickload_with,
+    MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, magickload,
+    magickload_with,
 };
 pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
@@ -206,6 +210,11 @@ pub use histogram::HistogramError;
 // The imageio free functions are re-exported at the root (not just behind
 // the module path) because the ported tests import them from the crate
 // root (`use libviprs::{tokenize, parse_thumbnail_geometry, ...}`).
+// `decode_svg` keeps its crate-root spelling because the ported foreign and
+// connection cells import it from there (`use libviprs::{decode_svg, ...}`),
+// the same reason the deferred foreign free functions are re-exported above.
+// `SvgOptions` travels with it so a caller never has to name the module path
+// just to build the argument.
 pub use imageio::{
     MetadataError, MetadataValue, SaveError, ThumbnailGeometry, parse_thumbnail_geometry, tokenize,
 };
@@ -265,6 +274,7 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
+pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root

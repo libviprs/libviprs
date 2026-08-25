@@ -113,6 +113,27 @@ proptest = "1"
 # mixed-radix planner (with Bluestein fallback) handles every image size, not
 # just powers of two, matching what libvips gets from FFTW.
 rustfft = "6"
+# Pure-Rust SVG rasteriser (Apache-2.0 OR MIT), used by the `svg` feature's
+# `decode_svg` to stand in for the librsvg + cairo pair vips loads SVG
+# through. Chosen for the same reason as every other codec here: it keeps
+# the crate pure Rust, and it is the only maintained pure-Rust renderer with
+# a real SVG 1.1 static-subset implementation behind it.
+#
+# Pinned at 0.48.1 on purpose, not floated. 0.47.x shapes text through
+# `rustybuzz` and parses faces with `ttf-parser`, both RUSTSEC-flagged
+# unmaintained (RUSTSEC-2026-0206, RUSTSEC-2026-0192); 0.48 is the release
+# that moved to `harfrust` and `skrifa`, so the lower bound is a security
+# floor rather than a taste.
+#
+# `default-features = false` drops `system-fonts` and `raster-images`.
+# Dropping `system-fonts` is deliberate and permanent: resolving faces from
+# whatever happens to be installed would make rasterised output depend on
+# the machine, which is the one thing a parity crate cannot have. `text` is
+# kept so text-bearing documents render against the bundled face in `fonts/`
+# instead of silently rendering as nothing (issue #587 characterises how far
+# that lands from vips). The whole dependency sits behind the non-default
+# `svg` feature, so the +29 crates are opt-in.
+resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
@@ -190,6 +211,13 @@ object-store-sink = []
 # still enabling it.
 s3 = ["object-store-sink"]
 tracing = ["dep:tracing"]
+# Gates the SVG rasteriser in [`crate::svg`] and the real body of
+# `decode_svg`. Non-default because it is the only feature in the crate that
+# costs a meaningful number of dependencies: +29 lock entries for `resvg` and
+# its tree. Every one of them is pure Rust with no `build.rs` C compile and no
+# `-sys` crate, so enabling it does not put a C toolchain in the build, but
+# nobody who does not rasterise SVG should pay for the compile.
+svg = ["dep:resvg"]
 packfile = ["dep:tar", "dep:zip"]
 # Gates public `Serialize` / `Deserialize` derives on the wire/config types
 # (`PyramidPlan`, `LevelPlan`, `TileCoord`, `TileRect`, `Layout`,
@@ -218,6 +246,7 @@ image = { workspace = true }
 lopdf = { workspace = true }
 moxcms = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
+resvg = { workspace = true, optional = true }
 rustfft = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

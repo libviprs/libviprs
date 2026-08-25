@@ -86,6 +86,10 @@ jobs:
       # feature-gated, so it is invisible to the default clippy/test jobs above.
       # Lint it explicitly so regressions in the sink are caught (issue #382).
       - run: cargo clippy --all-targets --features object-store-sink -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # Same for the SVG rasteriser: `svg` is non-default because it costs 29
+      # crates, so the default clippy job never sees `src/svg.rs` at all
+      # (issue #502).
+      - run: cargo clippy --all-targets --features svg -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # `s3` is a deprecated alias for `object-store-sink`, retained for consumers
       # that pinned the old feature name. Nothing else in CI exercises it, so a
       # broken alias would go unnoticed; build it explicitly so it keeps resolving.
@@ -126,6 +130,12 @@ jobs:
       # bare `cargo test` never compiles or runs them. Exercise the feature so
       # the sink's tests and doctests actually execute in CI (issue #382).
       - run: cargo test --features object-store-sink
+      # The SVG module and its unit tests are behind the non-default `svg`
+      # feature, and the `<image xlink:href>` lockdown tests in
+      # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs
+      # none of them, and the lockdown is a security regression test, so it
+      # needs to actually execute (issue #502).
+      - run: cargo test --features svg
 
   integration-test:
     name: Integration Tests (libviprs-tests)
