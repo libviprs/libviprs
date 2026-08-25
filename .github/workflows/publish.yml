@@ -1,20 +1,27 @@
 name: publish
 
-# Migrated from GitHub Actions (.github/workflows/publish.yml) to run on our
-# self-hosted Gitea Actions runner.
+# Publishes the `libviprs` crate to crates.io. Ported back to GitHub from
+# `.gitea/workflows/publish.yml` as part of dropping Gitea (#585). The job body
+# below is the pre-migration GitHub workflow restored as it was, including the
+# `permissions: contents: read` line that the Gitea copy had dropped.
 #
-# Publishes the `libviprs` crate to crates.io after a merge lands on the
-# `release` branch (the release flow is: bump -> PR into `release` -> PR
-# `release` -> `main` -> tag; this fires on the push that lands the release on
-# `release`, delivered to Gitea via the mirror sync). Also runnable on demand
-# via workflow_dispatch, with a dry-run toggle.
+# !!! ONE DELIBERATE DIFFERENCE: THIS IS MANUAL-ONLY !!!
 #
-# !!! ACTION REQUIRED — SECRET NOT SET !!!
-# This workflow needs a `CARGO_REGISTRY_TOKEN` secret: a crates.io API token
-# scoped to publish `libviprs`. It is NOT currently set on Gitea (nor was it on
-# GitHub). Add it as a Gitea org/repo secret before relying on publishing —
-# without it the `cargo publish` step fails. Until then publishing is a no-op
-# on the dry-run path and fails on the real path.
+# The original fired automatically on the push that landed a release on the
+# `release` branch. That trigger is commented out below rather than restored,
+# because re-arming it would be a change in release behaviour smuggled in under a
+# CI migration, and #585 says not to do that.
+#
+# The specific hazard: `CARGO_REGISTRY_TOKEN` is not a repository secret here, but
+# this repository belongs to an org whose secrets I cannot read, so I cannot prove
+# it is not inherited. Publishing has been dormant on GitHub since #528 moved CI
+# away in July. If the token does resolve, restoring the push trigger would turn
+# the next merge into `release` into a live upload to crates.io, silently, as a
+# side effect of a CI change. Manual dispatch cannot do that by accident, and it
+# keeps the `dry_run` toggle, which is how you would want to test this anyway.
+#
+# To re-arm it, uncomment the two `push` lines, having first confirmed that
+# `CARGO_REGISTRY_TOKEN` resolves and that #344 is resolved.
 #
 # NOTE (issue #344): the crate currently depends on the libviprs pdfium-render
 # *fork* (git-pinned) for its `sync` feature, which upstream `pdfium-render`
@@ -24,14 +31,17 @@ name: publish
 # `pdfium_lock` fallback). This workflow is ready for when that lands.
 
 on:
-  push:
-    branches: [release]
+  # push:
+  #   branches: [release]
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Package + verify only (cargo publish --dry-run), do not upload"
         type: boolean
         default: false
+
+permissions:
+  contents: read
 
 # Never run two publishes concurrently; never cancel an in-flight upload.
 concurrency:
