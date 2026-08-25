@@ -1847,7 +1847,7 @@ impl Raster {
 /// The bundled default face for [`Raster::text`]: Bitstream Vera Sans
 /// (licence in `fonts/VERA-COPYRIGHT.TXT`; free redistribution bundled
 /// with software).
-static VERA_TTF: &[u8] = include_bytes!("../fonts/Vera.ttf");
+pub(crate) static VERA_TTF: &[u8] = include_bytes!("../fonts/Vera.ttf");
 
 /// libvips' default text size in points (`vips_text` default font
 /// "sans 12").

@@ -3,8 +3,8 @@
 //!
 //! The ported foreign and connection cells reference a set of encoders and
 //! decoders for formats that have no mature pure-Rust implementation yet
-//! (HEIF/AVIF, JPEG 2000, JPEG XL, Ultra HDR, the ImageMagick delegate, SVG
-//! rasterisation, OpenSlide, and the libvips `fail_on` strictness knob). This
+//! (HEIF/AVIF, JPEG 2000, JPEG XL, Ultra HDR, the ImageMagick delegate,
+//! OpenSlide, and the libvips `fail_on` strictness knob). This
 //! module supplies those symbols so the cells compile and pin the typed error
 //! path:
 //!
@@ -238,18 +238,6 @@ pub fn magickload_with(path: &Path, opts: MagickLoadOptions) -> Result<Raster, D
     )))
 }
 
-/// Rasterise an SVG document from bytes at an optional DPI (libvips
-/// `svgload_buffer`).
-///
-/// # Errors
-///
-/// Always a [`DecodeError`]: SVG rasterisation needs an external `librsvg`
-/// path.
-pub fn decode_svg(data: &[u8], dpi: Option<f64>) -> Result<Raster, DecodeError> {
-    let _ = (data, dpi);
-    Err(decode_unavailable("SVG rasterisation"))
-}
-
 /// Open a whole-slide image at the given pyramid level through OpenSlide
 /// (libvips `openslideload`).
 ///
@@ -478,10 +466,6 @@ mod tests {
         assert!(magickload_with(path, MagickLoadOptions::default()).is_err());
         assert!(decode_openslide(path, 0).is_err());
         assert!(decode_file_fail_on(path, "warning").is_err());
-
-        let svg = b"<svg/>";
-        let err = decode_svg(svg, None).unwrap_err();
-        assert!(err.to_string().contains("SVG"));
 
         let err = decode_bytes_fail_on(b"1,2,3", "truncated").unwrap_err();
         assert!(err.to_string().contains("truncated"));

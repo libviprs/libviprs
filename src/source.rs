@@ -274,6 +274,43 @@ pub enum SourceError {
     /// header or pixel data, unsupported coding/band format).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
+    /// An SVG document `usvg` refused to parse, raised by
+    /// [`crate::svg::decode_svg`]. Carries the underlying message rather
+    /// than the foreign error type so `SourceError` does not leak a
+    /// feature-gated dependency into its public shape.
+    #[error("SVG parse error: {message}")]
+    SvgParse {
+        /// The `usvg` parse failure, rendered through its `Display`.
+        message: String,
+    },
+    /// An SVG buffer larger than the input ceiling with
+    /// [`crate::svg::SvgOptions::unlimited`] left false. Distinct from the
+    /// output-geometry ceilings: this bounds the *document* before it is
+    /// parsed, where [`CoordLimitExceeded`](SourceError::CoordLimitExceeded)
+    /// and [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded)
+    /// bound the raster it renders to.
+    #[error(
+        "SVG input is {bytes} bytes, over the {max_bytes}-byte ceiling; \
+         set SvgOptions::unlimited to lift it"
+    )]
+    SvgInputTooLarge {
+        /// The length of the buffer that was offered.
+        bytes: usize,
+        /// The ceiling in force, [`crate::svg::MAX_INPUT_BYTES`].
+        max_bytes: usize,
+    },
+    /// An SVG whose scaled geometry rounded to zero on at least one axis,
+    /// mirroring the `zero-sized image` bail-out in libvips
+    /// `svgload.c:588`. Reported instead of constructing a zero-dimension
+    /// [`Raster`], which [`crate::raster::RasterError::ZeroDimension`]
+    /// would refuse anyway with less context about why.
+    #[error("SVG renders to a zero-sized image ({width}x{height} after scaling)")]
+    SvgZeroSize {
+        /// The rounded output width, in pixels.
+        width: u32,
+        /// The rounded output height, in pixels.
+        height: u32,
+    },
 }
 
 /// Resource limits applied to a single image decode.
