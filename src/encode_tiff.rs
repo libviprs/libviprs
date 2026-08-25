@@ -133,8 +133,10 @@ fn tiff_decode_err(err: tiff::TiffError) -> DecodeError {
 /// Reinterpret a native-byte-order 16-bit sample buffer as `u16` values.
 fn as_u16_samples(bytes: &[u8]) -> Vec<u16> {
     bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_ne_bytes(c))
         .collect()
 }
 

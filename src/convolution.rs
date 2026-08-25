@@ -1161,10 +1161,12 @@ impl Raster {
         let mut sharpened = labs.clone();
         for (dst, s) in sharpened
             .data_mut()
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip(out_samples.iter())
         {
-            dst.copy_from_slice(&s.to_ne_bytes());
+            *dst = s.to_ne_bytes();
         }
         Ok(sharpened.try_colourspace(old_interpretation)?)
     }

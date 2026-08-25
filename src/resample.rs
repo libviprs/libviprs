@@ -3296,10 +3296,9 @@ mod tests {
             ("reduce-fractional", im.reduce(1.5, 1.5, "nearest")),
         ] {
             assert_eq!(out.format(), PixelFormat::Rgba8);
-            for chunk in out.data().chunks_exact(4) {
-                let px = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            for px in out.data().as_chunks::<4>().0 {
                 assert!(
-                    PALETTE.contains(&px),
+                    PALETTE.contains(px),
                     "{label} nearest corrupted a semi-transparent pixel: {px:?} \
                      is not an exact source sample (premultiply round-trip)"
                 );
