@@ -3778,4 +3778,427 @@ mod tests {
         let b = im.icc_import_with(Intent::Relative, None, None);
         assert_eq!(a.data(), b.data());
     }
+
+    /// One LCh pixel as a float raster, so the input words are the exact
+    /// `f32` samples `vips rawload --format float --interpretation lch`
+    /// hands `LCh2Lab.c`.
+    fn lch_px(lch: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &lch, Interpretation::Lch)
+    }
+
+    /// One CMC pixel as a float raster, the same shape
+    /// `vips rawload --format float --interpretation cmc` produces.
+    fn cmc_px(cmc: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &cmc, Interpretation::Cmc)
+    }
+
+    /**
+     * Tests that the LabS quantiser reads a **float** Lab rather than
+     * the f64 one the rest of this module carries.
+     *
+     * `Lab2LabS.c:59` declares `float *restrict p`, and every libvips
+     * route that ends in LabS hands it a float image, so the Lab value
+     * is rounded to `f32` before the scale-and-truncate. That rounding
+     * is not cosmetic once the quantiser truncates: it decides whole
+     * counts.
+     *
+     * `LCh [0, 1, 30]` is the case that shows it. `sin(30 deg)` is
+     * 0.49999999999999994 in f64 and exactly 0.5 once stored as `f32`,
+     * so `b * 256` is either 127.99999999999999 (truncating to 127) or
+     * 128.0 (truncating to 128). vips 8.18.4 prints 128.
+     *
+     * Works by pinning the whole triple for LCh inputs whose `a`/`b`
+     * land on an f32 boundary, measured with `vips rawload px.raw in.v
+     * 1 1 3 --format float --interpretation lch`, `vips colourspace
+     * in.v out.v labs`, `vips rawsave out.v out.raw`.
+     */
+    #[test]
+    fn labs_quantiser_reads_a_float_lab() {
+        let cases: [([f64; 3], [f64; 3]); 4] = [
+            ([0.0, 1.0, 30.0], [0.0, 221.0, 128.0]),
+            ([50.0, 1.0, 30.0], [16383.0, 221.0, 128.0]),
+            ([50.0, 25.0, 30.0], [16383.0, 5542.0, 3200.0]),
+            ([20.0, 100.0, 30.0], [6553.0, 22170.0, 12800.0]),
+        ];
+
+        for (lch, want) in cases {
+            let px = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "lch {lch:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `LCh -> LabS` edge, `{ LCH, LABS,
+     * { vips_LCh2Lab, vips_Lab2LabS } }` (`colourspace.c:280`), which
+     * never touches XYZ.
+     *
+     * Every expectation is a measurement from vips 8.18.4 taken through
+     * `rawload` / `colourspace` / `rawsave`, so the input words and the
+     * output codes are both exact.
+     *
+     * The low-`L` rows are the ones the XYZ hub cannot reach: under
+     * `L = 8` the `lab_f` / `lab_to_xyz` branch constants stop being
+     * mutual inverses, and a residue of a few parts in 1e6 costs a whole
+     * count once the code lands on an integer.
+     */
+    #[test]
+    fn lch_to_labs_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 16] = [
+            ([50.0, 0.0, 0.0], [16383.0, 0.0, 0.0]),
+            ([50.0, 1.0, 0.0], [16383.0, 256.0, 0.0]),
+            ([50.0, 1.0, 180.0], [16383.0, -256.0, 0.0]),
+            ([50.0, 25.0, 90.0], [16383.0, 0.0, 6400.0]),
+            ([50.0, 25.0, 270.0], [16383.0, 0.0, -6400.0]),
+            ([100.0, 128.0, 0.0], [32767.0, 32767.0, 0.0]),
+            ([0.0, 128.0, 180.0], [0.0, -32768.0, 0.0]),
+            ([10.0, 25.0, 270.0], [3276.0, 0.0, -6400.0]),
+            ([20.0, 50.5, 180.0], [6553.0, -12928.0, 0.0]),
+            ([80.0, 1.0, 0.0], [26213.0, 256.0, 0.0]),
+            // Under L = 8, where the hub residue is worst.
+            ([8.0, 1.0, 180.0], [2621.0, -256.0, 0.0]),
+            ([5.0, 0.5019531, 0.0], [1638.0, 128.0, 0.0]),
+            ([4.0, 0.5, 180.0], [1310.0, -128.0, 0.0]),
+            ([3.0, 1.0, 0.0], [983.0, 256.0, 0.0]),
+            ([3.0, 1.0, 180.0], [983.0, -256.0, 0.0]),
+            ([2.0, 2.0, 180.0], [655.0, -512.0, 0.0]),
+        ];
+
+        for (lch, want) in cases {
+            let px = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "lch {lch:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `LabS -> LCh` edge, `{ LABS, LCH,
+     * { vips_LabS2Lab, vips_Lab2LCh } }` (`colourspace.c:312`).
+     *
+     * The neutral rows are the loud ones. A LabS code with `a = b = 0`
+     * is exactly neutral, so vips answers `C = 0, h = 0`, but the hub's
+     * `Lab -> XYZ -> Lab` round trip pushes `a` and `b` off zero and the
+     * hue read off them is garbage: 338.199 degrees, at every `L`.
+     *
+     * The tolerance is 1e-4 rather than the 1e-6 used for code pins,
+     * because vips prints these through `float`: `hypot(127.99609375,
+     * 128)` is 181.0165738689659 in f64 and 181.01657104492188 once
+     * rounded to f32.
+     */
+    #[test]
+    fn labs_to_lch_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 15] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([327.0, 0.0, 0.0], [0.9979552626609802, 0.0, 0.0]),
+            ([983.0, 0.0, 0.0], [2.999969482421875, 0.0, 0.0]),
+            ([1638.0, 0.0, 0.0], [4.998931884765625, 0.0, 0.0]),
+            ([2621.0, 0.0, 0.0], [7.9989013671875, 0.0, 0.0]),
+            ([3276.0, 0.0, 0.0], [9.99786376953125, 0.0, 0.0]),
+            ([6553.0, 0.0, 0.0], [19.998779296875, 0.0, 0.0]),
+            ([16383.0, 0.0, 0.0], [49.99847412109375, 0.0, 0.0]),
+            ([32767.0, 0.0, 0.0], [100.0, 0.0, 0.0]),
+            // The `vips_col_ab2h` quadrant ladder, one count off zero.
+            ([0.0, 1.0, 0.0], [0.0, 0.00390625, 0.0]),
+            ([0.0, -1.0, 0.0], [0.0, 0.00390625, 180.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.00390625, 90.0]),
+            ([0.0, 0.0, -1.0], [0.0, 0.00390625, 270.0]),
+            (
+                [983.0, 256.0, -256.0],
+                [2.999969482421875, 1.4142135381698608, 315.0],
+            ),
+            (
+                [32767.0, 32767.0, -32768.0],
+                [100.0, 181.01657104492188, 314.9991149902344],
+            ),
+        ];
+
+        for (labs, want) in cases {
+            let px = labs_px(labs)
+                .colourspace(Interpretation::Lch)
+                .getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-4,
+                    "labs {labs:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `LabS -> CMC` edge, `{ LABS, CMC,
+     * { vips_LabS2Lab, vips_Lab2LCh, vips_LCh2CMC } }`
+     * (`colourspace.c:313`).
+     *
+     * Same neutral-hue story as `LabS -> LCh`: vips answers `Ccmc = 0,
+     * hcmc = 0` on the neutral axis and the hub answers 338.199 degrees.
+     *
+     * `LabS [0, 256, 0]` is the row that shows the CMC hue correction is
+     * really being applied and not skipped: `h = 0` with `C = 1` comes
+     * back as 9.931086e-05, not 0, because `ch_to_hcmc`'s `d * f` term
+     * is small but not zero there.
+     */
+    #[test]
+    fn labs_to_cmc_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 13] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([327.0, 0.0, 0.0], [1.740433931350708, 0.0, 0.0]),
+            ([983.0, 0.0, 0.0], [5.2319464683532715, 0.0, 0.0]),
+            ([1638.0, 0.0, 0.0], [8.71813678741455, 0.0, 0.0]),
+            ([2621.0, 0.0, 0.0], [13.95008373260498, 0.0, 0.0]),
+            ([3276.0, 0.0, 0.0], [17.4362735748291, 0.0, 0.0]),
+            ([6553.0, 0.0, 0.0], [34.2913818359375, 0.0, 0.0]),
+            ([16383.0, 0.0, 0.0], [65.7352523803711, 0.0, 0.0]),
+            ([32767.0, 0.0, 0.0], [100.00244903564453, 0.0, 0.0]),
+            (
+                [0.0, 256.0, 0.0],
+                [0.0, 1.3314666748046875, 9.931086242431775e-05],
+            ),
+            ([0.0, -1.0, 0.0], [0.0, 0.004822731018066406, 180.0]),
+            (
+                [0.0, -32768.0, 0.0],
+                [0.0, 50.649295806884766, 192.8778839111328],
+            ),
+            (
+                [16383.0, 0.0, 6400.0],
+                [65.7352523803711, 18.706565856933594, 114.02556610107422],
+            ),
+        ];
+
+        for (labs, want) in cases {
+            let px = labs_px(labs)
+                .colourspace(Interpretation::Cmc)
+                .getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-4,
+                    "labs {labs:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `CMC -> LabS` edge, `{ CMC, LABS,
+     * { vips_CMC2LCh, vips_LCh2Lab, vips_Lab2LabS } }`
+     * (`colourspace.c:297`).
+     *
+     * The CMC inverse is the one place this module and libvips really do
+     * compute different numbers: libvips inverts `Lcmc`, `Ccmc` and
+     * `hcmc` through interpolation tables sampled every 0.1
+     * (`UCS2LCh.c:66-135`) and this module bisects the forward function.
+     * The tables are the coarser of the two, by about 6e-8 in `L`, so a
+     * CMC value whose LabS code sits a hair above a whole number cannot
+     * be matched from either side: `Lcmc = 3.4861903190612793` scales to
+     * 655.0000104 in libvips and 654.99999 here.
+     *
+     * So the pins are chosen at codes with real slack, generated by
+     * running `vips colourspace <lch> <out> cmc` on `LCh [L, 0, 0]` for
+     * an `L` whose code is not near an integer, plus two chromatic
+     * values where the tables and the bisection agree.
+     */
+    #[test]
+    fn cmc_to_labs_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 19] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([0.871999979019165, 0.0, 0.0], [163.0, 0.0, 0.0]),
+            ([2.615999937057495, 0.0, 0.0], [491.0, 0.0, 0.0]),
+            ([4.359999656677246, 0.0, 0.0], [819.0, 0.0, 0.0]),
+            ([6.97599983215332, 0.0, 0.0], [1310.0, 0.0, 0.0]),
+            ([10.46399974822998, 0.0, 0.0], [1966.0, 0.0, 0.0]),
+            ([13.079999923706055, 0.0, 0.0], [2457.0, 0.0, 0.0]),
+            ([15.695999145507812, 0.0, 0.0], [2949.0, 0.0, 0.0]),
+            ([20.92799949645996, 0.0, 0.0], [3932.0, 0.0, 0.0]),
+            ([26.15999984741211, 0.0, 0.0], [4915.0, 0.0, 0.0]),
+            ([34.293174743652344, 0.0, 0.0], [6553.0, 0.0, 0.0]),
+            ([46.950042724609375, 0.0, 0.0], [9830.0, 0.0, 0.0]),
+            ([65.73650360107422, 0.0, 0.0], [16383.0, 0.0, 0.0]),
+            ([80.73076629638672, 0.0, 0.0], [22936.0, 0.0, 0.0]),
+            ([93.87285614013672, 0.0, 0.0], [29490.0, 0.0, 0.0]),
+            (
+                [87.4730759, 22.4464149, 16.5072842],
+                [26213.0, 8152.0, 2492.0],
+            ),
+            (
+                [61.5259094, 16.0966263, 316.1648865],
+                [14745.0, 3342.0, -3844.0],
+            ),
+            // The two the hub cannot reach: `a` lands on a whole code,
+            // so the XYZ round trip's residue costs a count.
+            (
+                [0.0, 50.649295806884766, 192.8778839111328],
+                [0.0, -32768.0, 0.0],
+            ),
+            (
+                [0.0, 1.3314666748046875, 9.931086242431775e-05],
+                [0.0, 256.0, 0.0],
+            ),
+        ];
+
+        for (cmc, want) in cases {
+            let px = cmc_px(cmc).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "cmc {cmc:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that adding these edges did not fork the arithmetic: where
+     * the XYZ round trip leaves no residue, the direct edge and the hub
+     * agree, and both match vips. Where it does, only the direct edge
+     * matches.
+     *
+     * This is the check #556 had to invent. `direct_edge` never reaches
+     * `from_xyz_into`, so an entry that reproduced the target-side
+     * production instead of sharing it would drift silently. The LabS
+     * truncation lives in `lab_to_labs` and the CMC encode in
+     * `lch_to_cmc` for exactly that reason, and this test is what says
+     * so out loud.
+     *
+     * Works by driving `to_xyz` / `from_xyz_into` directly for the hub
+     * answer and `try_colourspace` for the routed one, then comparing
+     * both against measured vips values.
+     */
+    #[test]
+    fn lab_family_direct_edges_agree_with_the_hub_off_the_integer_codes() {
+        // Off the integer codes and above the shadow branch, the hub's
+        // residue is far too small to move a count, so all three agree.
+        let agree: [([f64; 3], [f64; 3]); 5] = [
+            ([50.0, 1.0, 37.0], [16383.0, 204.0, 154.0]),
+            ([80.0, 33.3, 17.0], [26213.0, 8152.0, 2492.0]),
+            ([60.0, 12.7, 203.0], [19660.0, -2992.0, -1270.0]),
+            ([45.0, 19.9, 311.0], [14745.0, 3342.0, -3844.0]),
+            ([90.0, 3.3, 61.0], [29490.0, 409.0, 738.0]),
+        ];
+        for (lch, want) in agree {
+            let direct = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+            let mut hub = [0.0f64; 4];
+            from_xyz_into(
+                Interpretation::Labs,
+                to_xyz(Interpretation::Lch, &lch),
+                &mut hub,
+            );
+            for c in 0..3 {
+                assert!(
+                    (direct[c] - want[c]).abs() < 1e-6,
+                    "lch {lch:?} band {c}: vips says {}, direct gave {}",
+                    want[c],
+                    direct[c]
+                );
+                assert!(
+                    (hub[c] - want[c]).abs() < 1e-6,
+                    "lch {lch:?} band {c}: the hub should agree here, \
+                     vips says {}, hub gave {}",
+                    want[c],
+                    hub[c]
+                );
+            }
+        }
+
+        // On an integer code under the shadow branch, only the direct
+        // edge can reach vips's answer.
+        let lch = [3.0, 1.0, 180.0];
+        let direct = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+        assert!(
+            (direct[1] + 256.0).abs() < 1e-6,
+            "direct edge should give vips's -256, got {direct:?}"
+        );
+        let mut hub = [0.0f64; 4];
+        from_xyz_into(
+            Interpretation::Labs,
+            to_xyz(Interpretation::Lch, &lch),
+            &mut hub,
+        );
+        assert!(
+            (hub[1] - direct[1]).abs() > 0.5,
+            "the hub is supposed to miss by a count here, but gave {hub:?}"
+        );
+
+        // The same for CMC, whose encoder the hub arm shares: a neutral
+        // LabS is neutral in CMC too, and the hub invents a hue.
+        let labs = [1638.0, 0.0, 0.0];
+        let direct = labs_px(labs)
+            .colourspace(Interpretation::Cmc)
+            .getpoint(0, 0);
+        assert!(
+            direct[1].abs() < 1e-4 && direct[2].abs() < 1e-4,
+            "direct edge should give vips's neutral [0, 0], got {direct:?}"
+        );
+        let mut hub = [0.0f64; 4];
+        from_xyz_into(
+            Interpretation::Cmc,
+            to_xyz(Interpretation::Labs, &labs),
+            &mut hub,
+        );
+        assert!(
+            hub[2] > 1.0,
+            "the hub is supposed to invent a hue here, but gave {hub:?}"
+        );
+    }
+
+    /**
+     * Tests that the hub arm still owns the same CMC encoder after the
+     * direct edges were added: `srgb -> cmc` is a genuine XYZ route
+     * (`colourspace.c:395`) and its answers are unchanged.
+     *
+     * Values measured from vips 8.18.4 with `vips rawload px.raw in.v
+     * 1 1 3 --format uchar --interpretation srgb` then `vips colourspace
+     * in.v out.v cmc`. The tolerance is 1e-4 because vips stages this
+     * route through `float` images and prints `float`.
+     *
+     * Only saturated colours are pinned. White and mid-grey come out of
+     * the sRGB primaries matrix with a chroma of about 0.01, where the
+     * hue is numerically meaningless and this crate and libvips already
+     * disagree by 0.1 degrees for reasons that predate these edges.
+     */
+    #[test]
+    fn cmc_hub_route_shares_the_encoder() {
+        let cases: [([u8; 3], [f64; 3]); 4] = [
+            (
+                [255, 0, 0],
+                [68.3399887084961, 44.80427551269531, 43.62641525268555],
+            ),
+            (
+                [0, 255, 0],
+                [92.4504623413086, 48.64079666137695, 156.00975036621094],
+            ),
+            (
+                [0, 0, 255],
+                [49.44218444824219, 52.046016693115234, 311.6222839355469],
+            ),
+            (
+                [10, 20, 30],
+                [10.37486743927002, 8.466974258422852, 267.78424072265625],
+            ),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Cmc).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-4,
+                    "srgb {rgb:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
 }
