@@ -271,7 +271,10 @@ pub enum SourceError {
         max_coord: u32,
     },
     /// A malformed or unsupported native `.v` file (bad magic, truncated
-    /// header or pixel data, unsupported coding/band format).
+    /// header or pixel data, unsupported coding/band format, or a metadata
+    /// trailer that opens with `{` and is not valid JSON, which is a
+    /// corrupt libviprs trailer rather than a foreign one; see the
+    /// [`crate::imageio`] container contract).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
     /// A malformed Radiance `.hdr` file. libviprs decodes Radiance itself
