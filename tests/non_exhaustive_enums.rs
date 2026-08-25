@@ -14,8 +14,29 @@
 use libviprs::{
     Align, BandError, ColourError, Combine, DrawError, EngineEvent, Intent, Interpretation,
     JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError, Precision,
-    RasterError, ResumeError, SourceError, VerifyError,
+    RadianceError, RasterError, ResumeError, SourceError, VerifyError,
 };
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_radiance_error_non_exhaustive(v: &RadianceError) {
+    match v {
+        RadianceError::BadMagic { .. } => {}
+        RadianceError::TruncatedHeader { .. } => {}
+        RadianceError::BadResolution { .. } => {}
+        RadianceError::DimensionOutOfBounds { .. } => {}
+        RadianceError::AllocLimitExceeded { .. } => {}
+        RadianceError::ScanlineLengthMismatch { .. } => {}
+        RadianceError::ScanlineOverrun { .. } => {}
+        RadianceError::RunawayRepeat { .. } => {}
+        RadianceError::RepeatWithoutPixel { .. } => {}
+        RadianceError::TruncatedScanline { .. } => {}
+        RadianceError::HeaderLineTooLong { .. } => {}
+        RadianceError::BadHeaderLine { .. } => {}
+        RadianceError::Raster(_) => {}
+        _ => {}
+    }
+}
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]

@@ -25,3 +25,8 @@ doc = false
 name = "fuzz_pdf_render"
 path = "fuzz_targets/fuzz_pdf_render.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_radiance"
+path = "fuzz_targets/fuzz_radiance.rs"
+doc = false
