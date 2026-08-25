@@ -28,6 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of committing the memory first (the abort class issues #280 and #433 removed
   elsewhere in the crate).
 
+- `Raster::remainder` / `Raster::try_remainder`, the generic two-image
+  remainder (issue #536). This is the image-image companion to the existing
+  constant form `rem_const`, and it ports libvips `vips_remainder`: each
+  sample of the result is `self` mod the matching sample of `other`. Output
+  depth is the wider of the two input depths, matching the identity promotion
+  table libvips applies after formatalike, so `uchar % uchar` stays 8-bit and
+  `uchar % ushort` promotes to 16-bit.
+
+  The kernel is C's truncating `%`, and it lives in one shared `remainder_vips`
+  function that both `remainder` and `rem_const` run, so the image-image and
+  constant forms cannot disagree for identical operands. libvips does not pick
+  one definition, it dispatches on format: `IREMAINDER` truncates for the
+  integer formats, `FREMAINDER` floors for `float` and `double`. Every carrier
+  the crate has today is an unsigned integer one, so truncating is the branch
+  that matches vips, on both forms, including the negative constant `rem_const`
+  can be handed. The choice is invisible to the image-image form in any case,
+  since the two definitions agree on every non-negative operand pair (checked
+  exhaustively over all 4,294,836,225 pairs with `a` in `0..=65535` and `b` in
+  `1..=65535`, zero disagreements). A float carrier will need the floored
+  branch added, which is spelled out where the kernel is defined.
+
+  Three deliberate divergences from libvips, all spelled out on the method's
+  docs. A zero divisor gives `0` here where libvips gives `-1` (which reads
+  back as `255` through a uchar carrier), since libviprs has no signed carrier
+  and `x % 0 == 0` is already the crate-wide convention. There is no band
+  broadcast and no size alignment: the two rasters must agree exactly on
+  width, height, and band count, the same contract every other image-image
+  operation in the arithmetic module has, rather than libvips's
+  bandalike-then-sizealike. And float rasters are rejected on either side,
+  since the operation rounds and saturates into an unsigned output, so there
+  is no representable place for a fractional or negative sample; cast to an
+  unsigned 8- or 16-bit format first.
+
 ### Changed
 
 - **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
