@@ -1070,10 +1070,16 @@ impl Scan {
                 );
             }
         }
-        let (a, b) = (lo * self.channels, hi * self.channels);
-        let src = &samples[row + start..row + start + (b - a)];
-        for (slot, &s) in acc[a..b].iter_mut().zip(src) {
-            fma(slot, c, s);
+        if hi > lo {
+            // Guarded rather than left to an empty slice: a mask wider
+            // than the image can push `start` past the end of `samples`
+            // even when the span itself is empty, and `&v[n..n]` still
+            // demands `n <= v.len()`.
+            let (a, b) = (lo * self.channels, hi * self.channels);
+            let src = &samples[row + start..row + start + (b - a)];
+            for (slot, &s) in acc[a..b].iter_mut().zip(src) {
+                fma(slot, c, s);
+            }
         }
         for x in hi..self.w {
             let col = xtab[x + tx];
@@ -3465,6 +3471,55 @@ mod tests {
              back as f32 (math2.c:147-162), and that is what lifts ~148.99999 \
              to exactly 149.0 before the truncating cast"
         );
+    }
+
+    /// A mask larger than the image it convolves still walks the whole
+    /// window, with every tap clamped onto the one or two rows and columns
+    /// there are.
+    ///
+    /// This is the case the traversal's index tables have to get right at
+    /// both ends. A tap far enough left of a narrow image has an empty
+    /// unclamped span, so the fast interior path covers nothing and every
+    /// sample comes off the replicated border; a tap far enough right has
+    /// the same property from the other side. Both are perfectly legal
+    /// input: `vips_embed` extends by `M->Xsize - 1` regardless of how
+    /// wide the image is.
+    ///
+    /// The reference is the straightforward per-window sum with an
+    /// explicit clamp, so it agrees with the engine only if the tables and
+    /// the clamp agree.
+    #[test]
+    fn a_mask_wider_than_the_image_clamps_every_tap() {
+        let kernel = Kernel {
+            data: (0..7)
+                .map(|j| (0..9).map(|i| f64::from(i * 3 + j) - 12.0).collect())
+                .collect(),
+            scale: 5.0,
+        };
+        for im in [
+            noise_gray(1, 1, 11),
+            noise_gray(1, 6, 12),
+            noise_gray(6, 1, 13),
+            noise_rgb(2, 3, 14),
+        ] {
+            let out = im.conv(&kernel, Precision::Float);
+            assert_eq!(out.width(), im.width());
+            assert_eq!(out.height(), im.height());
+            for y in 0..im.height() {
+                for x in 0..im.width() {
+                    let want = ref_conv(&im, &kernel, i64::from(x), i64::from(y));
+                    let got = out.getpoint(x, y);
+                    for (c, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                        assert!(
+                            (g - w).abs() < 1e-3,
+                            "{}x{} at ({x},{y}) band {c}: got {g}, expected {w}",
+                            im.width(),
+                            im.height()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// A structural zero in the mask must not read the sample under it.
