@@ -560,11 +560,16 @@ fn clamp_coord(v: i64, size: u32) -> usize {
 // conv
 // ---------------------------------------------------------------------------
 
-/// Convert a double mask to the integer mask plus adjusted scale
-/// (`vips__image_intize`): `rint()` every element, then nudge the rounded
-/// scale so an all-ones input keeps the same input/output brightness ratio
-/// as the double mask.
-fn intize(dense: &DenseKernel, scale: f64) -> (Vec<i64>, i64) {
+/// Convert a double mask to the integer mask, the adjusted scale, and the
+/// rounded offset (`vips__image_intize`): `rint()` every element, then
+/// nudge the rounded scale so an all-ones input keeps the same
+/// input/output brightness ratio as the double mask.
+///
+/// The offset is rounded and nothing more. libvips does not rescale it
+/// along with the nudged scale (`convolution/convi.c:898`), and that is
+/// deliberate rather than an oversight: the summand is applied after the
+/// division, so it is already in output units.
+fn intize(dense: &DenseKernel, scale: f64, offset: f64) -> (Vec<i64>, i64, i64) {
     let sum_double: f64 = dense.coeff.iter().sum();
     let double_result = sum_double / scale;
 
@@ -585,7 +590,7 @@ fn intize(dense: &DenseKernel, scale: f64) -> (Vec<i64>, i64) {
         out_scale = 1.0;
     }
 
-    (imask, out_scale as i64)
+    (imask, out_scale as i64, rint(offset) as i64)
 }
 
 /// The clip ceiling for an unsigned format depth.
@@ -600,10 +605,41 @@ fn depth_max(fmt: PixelFormat) -> i64 {
 
 /// One full 2D convolution pass (both precisions, all formats), the shared
 /// engine behind `conv` and `convsep`.
+///
+/// The public [`Kernel`] has no offset field, so every caller on the
+/// ported surface convolves with the zero summand.
 fn conv_raster(
     src: &Raster,
     dense: &DenseKernel,
     scale: f64,
+    precision: Precision,
+) -> Result<Raster, ConvolutionError> {
+    conv_raster_offset(src, dense, scale, 0.0, precision)
+}
+
+/// [`conv_raster`] plus the `offset` summand a libvips matrix image
+/// carries next to its `scale`.
+///
+/// Each arm adds it exactly where its C counterpart does: before the clip
+/// on the integer/unsigned path (`convi.c:710`), after the division and
+/// with no clip on the integer/float-input path (`convi.c:733`), and as
+/// the starting value of the accumulator at float precision, where the
+/// scale is already baked into the coefficients (`convf.c:172`). Both
+/// integer arms use the `rint()`-ed offset [`intize`] hands back, matching
+/// the `int offset = rint(vips_image_get_offset(M))` that
+/// `vips_convi_gen` reads; the float arm keeps it as an unrounded `f64`,
+/// as `vips_convf_gen` does.
+///
+/// The edge detectors are what need this: `convolution/edge.c` stamps
+/// `offset = 128.0, scale = 2.0` on its mask for the uchar path, and
+/// `convolution/canny.c` stamps `offset = 128.0` on its gradient mask, so
+/// a signed response lands centred in the unsigned output range instead of
+/// clipping away at zero.
+fn conv_raster_offset(
+    src: &Raster,
+    dense: &DenseKernel,
+    scale: f64,
+    offset: f64,
     precision: Precision,
 ) -> Result<Raster, ConvolutionError> {
     if scale == 0.0 {
@@ -618,14 +654,15 @@ fn conv_raster(
 
     match precision {
         Precision::Float => {
-            // vips_convf: bake the scale into the coefficients, accumulate
-            // in f64, store 32-bit float.
+            // vips_convf: bake the scale into the coefficients, seed the
+            // accumulator with the offset, accumulate in f64, store
+            // 32-bit float.
             let coeff: Vec<f64> = dense.coeff.iter().map(|&v| v / scale).collect();
             let mut out = vec![0.0f64; samples.len()];
             for y in 0..h as i64 {
                 for x in 0..w as i64 {
                     for b in 0..channels {
-                        let mut sum = 0.0;
+                        let mut sum = offset;
                         for j in 0..kh as i64 {
                             let sy = clamp_coord(y + j - ay, h);
                             for i in 0..kw as i64 {
@@ -641,10 +678,11 @@ fn conv_raster(
             Ok(raster_from_f64(w, h, channels, &out)?)
         }
         Precision::Integer => {
-            let (imask, iscale) = intize(dense, scale);
+            let (imask, iscale, ioffset) = intize(dense, scale, offset);
             if src.format().is_float() {
                 // vips_convi_gen keeps a double path for float inputs: the
-                // integer mask, real division, no rounding, no clip.
+                // integer mask, real division, the rounded offset added
+                // after it, no rounding of the result and no clip.
                 let mut out = vec![0.0f64; samples.len()];
                 for y in 0..h as i64 {
                     for x in 0..w as i64 {
@@ -659,14 +697,17 @@ fn conv_raster(
                                 }
                             }
                             out[y as usize * row_stride + x as usize * channels + b] =
-                                sum / iscale as f64;
+                                sum / iscale as f64 + ioffset as f64;
                         }
                     }
                 }
                 Ok(raster_from_f64(w, h, channels, &out)?)
             } else {
                 // CONV_INT: i64 accumulation, (sum + scale/2) / scale with
-                // C truncating division, clipped into the input format.
+                // C truncating division, then the offset, then the clip
+                // into the input format. The offset lands before the clip,
+                // so it recentres the response rather than shifting an
+                // already-saturated one.
                 let rounding = iscale / 2;
                 let max = depth_max(src.format());
                 let mut out = vec![0i64; samples.len()];
@@ -682,7 +723,7 @@ fn conv_raster(
                                         * samples[sy * row_stride + sx * channels + b] as i64;
                                 }
                             }
-                            let v = (sum + rounding) / iscale;
+                            let v = (sum + rounding) / iscale + ioffset;
                             out[y as usize * row_stride + x as usize * channels + b] =
                                 v.clamp(0, max);
                         }
