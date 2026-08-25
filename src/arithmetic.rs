@@ -4091,6 +4091,87 @@ mod tests {
         assert_eq!(r.getpoint(0, 0), vec![1.0]);
         assert_eq!(r.getpoint(1, 0), vec![0.0]);
     }
+    /// The measured vips 8.18.4 oracle for the 2-image remainder:
+    /// `a = uchar [[10,20,30],[40,50,60]]`, `b = uchar` all 7, and
+    /// `vips remainder a b` gives a uchar raster holding `[3,6,2,5,1,4]`.
+    /// The output format is the identity promotion (`remainder.c:173-178`)
+    /// applied after formatalike, i.e. the wider of the two input depths.
+    #[test]
+    fn remainder_matches_vips_oracle() {
+        let a = gray(3, 2, vec![10, 20, 30, 40, 50, 60]);
+        let b = gray(3, 2, vec![7; 6]);
+        let r = a.remainder(&b);
+        assert_eq!(r.format(), PixelFormat::Gray8);
+        assert_eq!(r.data().to_vec(), vec![3, 6, 2, 5, 1, 4]);
+    }
+
+    /// A zero divisor gives `0`, the crate-wide `x % 0 == 0` convention the
+    /// module header states and `rem_const` already follows.
+    ///
+    /// This is a DELIBERATE divergence from vips, which writes `-1`
+    /// (`remainder.c:96,105`: `q[x] = p2[x] ? p1[x] % p2[x] : -1;`). Measured
+    /// with divisor `[[0,7,0],[7,0,7]]`, vips 8.18.4 gives
+    /// `[255,6,255,5,255,4]` — the `-1` read back through the uchar carrier.
+    /// libviprs has no signed carrier, so `-1` is unrepresentable here.
+    #[test]
+    fn remainder_by_zero_is_zero_not_the_vips_minus_one() {
+        let a = gray(3, 2, vec![10, 20, 30, 40, 50, 60]);
+        let b = gray(3, 2, vec![0, 7, 0, 7, 0, 7]);
+        assert_eq!(a.remainder(&b).data().to_vec(), vec![0, 6, 0, 5, 0, 4]);
+    }
+
+    /// Format promotion is the identity table applied to the formatalike
+    /// result, so the output depth is the wider input depth: `uchar %
+    /// uchar` stays 8-bit and `uchar % ushort` promotes to 16-bit.
+    #[test]
+    fn remainder_promotes_to_the_wider_depth() {
+        let a = gray(2, 1, vec![10, 200]);
+        let narrow = a.remainder(&gray(2, 1, vec![7, 7]));
+        assert_eq!(narrow.format(), PixelFormat::Gray8);
+        assert_eq!(narrow.getpoint(0, 0), vec![3.0]);
+
+        let wide = a.remainder(&gray16(2, 1, &[7, 300]));
+        assert_eq!(wide.format(), PixelFormat::Gray16);
+        assert_eq!(wide.getpoint(0, 0), vec![3.0]);
+        // 200 % 300 == 200: the dividend survives a larger divisor.
+        assert_eq!(wide.getpoint(1, 0), vec![200.0]);
+    }
+
+    /// remainder requires exact dimension and band-count equality (no
+    /// bandalike, no sizealike — see [`Raster::try_remainder`]) and rejects
+    /// float operands on either side, all as typed errors.
+    #[test]
+    fn remainder_typed_errors() {
+        let a = gray(2, 1, vec![10, 20]);
+        assert!(matches!(
+            a.try_remainder(&gray(1, 1, vec![7])),
+            Err(ArithmeticError::DimensionMismatch {
+                expected_w: 2,
+                expected_h: 1,
+                got_w: 1,
+                got_h: 1
+            })
+        ));
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![7; 6]).unwrap();
+        assert!(matches!(
+            a.try_remainder(&rgb),
+            Err(ArithmeticError::BandCountMismatch {
+                expected: 1,
+                got: 3
+            })
+        ));
+
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f = Raster::zeroed(2, 1, f1).unwrap();
+        assert!(matches!(
+            f.try_remainder(&a),
+            Err(ArithmeticError::FloatUnsupported { op: "remainder" })
+        ));
+        assert!(matches!(
+            a.try_remainder(&f),
+            Err(ArithmeticError::FloatUnsupported { op: "remainder" })
+        ));
+    }
 
     /// Binary ops reject mismatched dimensions and band counts with typed
     /// errors, and the panicking surface reports the op name.

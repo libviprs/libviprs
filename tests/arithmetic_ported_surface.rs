@@ -849,3 +849,26 @@ fn ported_surface_hough_circle() {
         "Radius should be ~40, got {r}"
     );
 }
+
+/// The 2-image `remainder` call site (`a % b`), the image-image companion
+/// to the `rem_const` site `ported_surface_mul_div_pow_mod` pins. Both the
+/// panicking and the fallible form are part of the contract.
+#[test]
+fn ported_surface_remainder() {
+    let mono = make_test_mono();
+    let divisor = Raster::new(100, 100, PixelFormat::Gray8, vec![7u8; 100 * 100]).unwrap();
+
+    let result = mono.remainder(&divisor);
+    assert_eq!(result.format(), PixelFormat::Gray8);
+    let px_m = mono.getpoint(50, 50);
+    let px_r = result.getpoint(50, 50);
+    assert!(
+        (px_r[0] - (px_m[0] as i64 % 7) as f64).abs() < 1.0,
+        "remainder at (50,50) should be {} % 7, got {}",
+        px_m[0],
+        px_r[0]
+    );
+
+    let fallible = mono.try_remainder(&divisor).expect("same size, same bands");
+    assert!((fallible.avg() - result.avg()).abs() < 0.001);
+}
