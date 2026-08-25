@@ -445,21 +445,40 @@ fn png_crc32(bytes: &[u8]) -> u32 {
 fn quantize(pixels: &[[u8; 4]], max: usize) -> (Vec<[u8; 4]>, Vec<u8>) {
     use std::collections::HashMap;
 
+    let palette = quantize_palette(pixels, max);
+    let mut cache: HashMap<[u8; 4], u8> = HashMap::new();
+    let indices = pixels
+        .iter()
+        .map(|&p| *cache.entry(p).or_insert_with(|| nearest(&palette, p)))
+        .collect();
+    (palette, indices)
+}
+
+/// The palette half of [`quantize`]: median-cut over the distinct colours in
+/// `pixels`, weighted by how often each occurs, capped at `max` entries.
+///
+/// Split out so [`crate::gif`] can take the palette without also paying for a
+/// nearest-colour index pass it is about to redo with error diffusion.
+///
+/// The distinct colours are **sorted** before the split loop. They arrive from
+/// a `HashMap`, whose iteration order the default `RandomState` reseeds per
+/// process, so without the sort both the box seeding and the fits-in-`max`
+/// fast path produce a palette in a different order on every run. That made
+/// [`Raster::encode_png_palette`] emit different bytes for identical input,
+/// which is the one thing a content-addressed store (see
+/// [`crate::dedupe`]) cannot tolerate.
+pub(crate) fn quantize_palette(pixels: &[[u8; 4]], max: usize) -> Vec<[u8; 4]> {
+    use std::collections::HashMap;
+
     let mut counts: HashMap<[u8; 4], u32> = HashMap::new();
     for &p in pixels {
         *counts.entry(p).or_insert(0) += 1;
     }
-    let uniques: Vec<([u8; 4], u32)> = counts.into_iter().collect();
+    let mut uniques: Vec<([u8; 4], u32)> = counts.into_iter().collect();
+    uniques.sort_unstable_by_key(|&(c, _)| c);
 
     if uniques.len() <= max {
-        let palette: Vec<[u8; 4]> = uniques.iter().map(|&(c, _)| c).collect();
-        let index_of: HashMap<[u8; 4], u8> = palette
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| (c, i as u8))
-            .collect();
-        let indices = pixels.iter().map(|p| index_of[p]).collect();
-        return (palette, indices);
+        return uniques.iter().map(|&(c, _)| c).collect();
     }
 
     let mut boxes: Vec<Vec<([u8; 4], u32)>> = vec![uniques];
@@ -498,13 +517,7 @@ fn quantize(pixels: &[[u8; 4]], max: usize) -> (Vec<[u8; 4]>, Vec<u8>) {
         boxes.push(right);
     }
 
-    let palette: Vec<[u8; 4]> = boxes.iter().map(|b| box_average(b)).collect();
-    let mut cache: HashMap<[u8; 4], u8> = HashMap::new();
-    let indices = pixels
-        .iter()
-        .map(|&p| *cache.entry(p).or_insert_with(|| nearest(&palette, p)))
-        .collect();
-    (palette, indices)
+    boxes.iter().map(|b| box_average(b)).collect()
 }
 
 /// The count-weighted average colour of a median-cut box.
@@ -527,7 +540,7 @@ fn box_average(b: &[([u8; 4], u32)]) -> [u8; 4] {
 }
 
 /// The index of the palette entry nearest `c` in squared-Euclidean RGBA space.
-fn nearest(palette: &[[u8; 4]], c: [u8; 4]) -> u8 {
+pub(crate) fn nearest(palette: &[[u8; 4]], c: [u8; 4]) -> u8 {
     let mut best_i = 0usize;
     let mut best_d = i64::MAX;
     for (i, &q) in palette.iter().enumerate() {
