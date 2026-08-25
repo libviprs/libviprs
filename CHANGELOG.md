@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::sobel`, `Raster::scharr` and `Raster::prewitt`, with their
+  `try_*` twins (issues #537, #549, #550): the port of libvips `vips_sobel`,
+  `vips_scharr` and `vips_prewitt`. They are one abstract op in libvips
+  (`convolution/edge.c`) differing only in a 3x3 mask, they take no arguments
+  at all, and each convolves with its mask and with the mask rotated 90
+  degrees before combining the two gradients into an edge map.
+
+  How the gradients combine depends on the input format, and the two rules are
+  not approximations of each other. A uchar input takes the fast arm: the mask
+  is stamped `scale = 2, offset = 128` so a signed response lands centred in
+  the unsigned range, both convolutions run at integer precision, and the
+  result is `|Gx| + |Gy|` clipped at 255. Every other format takes the
+  accurate arm: two float convolutions with the raw mask, then
+  `sqrt(Gx^2 + Gy^2)`, then a truncating cast down to 8 bits. On a corner
+  where `Gx` and `Gy` are equal the abs sum is `2 * g` where the magnitude is
+  `sqrt(2) * g`, so the same picture reads 58 through the uchar arm and 42
+  through the float one.
+
+  The output is uchar whatever went in, keeping the band count, the
+  dimensions and the metadata, so a 16-bit or float source comes back
+  narrowed. Saturation on the uchar arm happens twice, once inside each
+  convolution and once on the abs sum, which is what makes the recovered
+  gradient span an asymmetric `-256..=254`.
+
+  One divergence worth knowing about, and it predates these three ops. libviprs
+  ports `vips_convi_gen`, the scalar C integer-convolution loop, which rounds
+  its division towards zero. Released libvips binaries are built with HWY and
+  run a fixed-point vector path instead, which floors, and libvips only
+  requires the two paths to agree within 2. So an integer-precision
+  convolution of an unsigned image whose window sum is negative and even reads
+  one lower here than from the `vips` command, and the edge detectors inherit
+  that doubled. Running the binary with `VIPS_NOVECTOR=1` makes it agree
+  exactly.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
