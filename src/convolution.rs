@@ -7,15 +7,18 @@
 //! [`crate::composite`], [`crate::colour`], [`crate::morphology`],
 //! [`crate::mosaicing`], and [`crate::create`]): 2D convolution with a
 //! mask at integer or float precision, separable convolution, rotating
-//! compass convolution, Gaussian blur, unsharp-mask sharpening, and the
-//! two template correlations. Operations that can fail on caller input
-//! exist in two forms, following the established convention:
+//! compass convolution, Gaussian blur, unsharp-mask sharpening, the two
+//! template correlations, and the three named edge detectors. Operations
+//! that can fail on caller input exist in two forms, following the
+//! established convention:
 //!
 //! * a fallible `try_*` method returning `Result<_, ConvolutionError>`
 //!   with typed errors for bad kernels and unsupported shapes; and
 //! * a panicking convenience method matching the ported-test call surface
 //!   (`conv`, `convsep`, `compass`, `gaussblur`, `sharpen`, `spcor`,
-//!   `fastcor`) exactly, delegating to the `try_*` form.
+//!   `fastcor`) exactly, delegating to the `try_*` form. The edge
+//!   detectors (`sobel`, `scharr`, `prewitt`) keep the same pair even
+//!   though no ported test reaches them.
 //!
 //! # Operations
 //!
@@ -28,6 +31,9 @@
 //! | [`Raster::sharpen`] | `vips_sharpen` | unsharp-masked image |
 //! | [`Raster::spcor`] | `vips_spcor` | normalised cross-correlation surface |
 //! | [`Raster::fastcor`] | `vips_fastcor` | sum-of-squared-differences surface |
+//! | [`Raster::sobel`] | `vips_sobel` | Sobel edge map, always uchar |
+//! | [`Raster::scharr`] | `vips_scharr` | Scharr edge map, always uchar |
+//! | [`Raster::prewitt`] | `vips_prewitt` | Prewitt edge map, always uchar |
 //! | [`Kernel::gaussmat`] | `vips_gaussmat` | Gaussian mask |
 //! | [`Kernel::logmat`] | `vips_logmat` | Laplacian-of-Gaussian mask |
 //!
@@ -89,6 +95,44 @@
 //!   sRGB and mono value (verified exhaustively over all 256^3 sRGB
 //!   triples). 16-bit sources round-trip within LabS quantisation, as in
 //!   libvips.
+//! * **Edge detectors.** [`Raster::sobel`], [`Raster::scharr`] and
+//!   [`Raster::prewitt`] are one abstract op in libvips
+//!   (`convolution/edge.c:49-63`) differing only in a 3x3 mask, and they
+//!   take no arguments at all. Each convolves with its mask and with the
+//!   mask rotated 90 degrees, then combines the two gradients, and the
+//!   combine rule depends on the input format (`edge.c:186-200`). A uchar
+//!   input takes the fast arm: the mask is stamped `scale = 2,
+//!   offset = 128`, both convolutions run at [`Precision::Integer`], and
+//!   the responses combine as `|Gx| + |Gy|` clipped at 255
+//!   (`edge.c:97-103`). Every other format takes the accurate arm: two
+//!   [`Precision::Float`] convolutions with the raw mask, then
+//!   `sqrt(Gx^2 + Gy^2)`, then a **truncating** cast to uchar
+//!   (`edge.c:158-182`, `conversion/cast.c:568`). The two arms are not two
+//!   spellings of one formula: on a corner where `Gx == Gy` the abs sum is
+//!   `2 * g` where the magnitude is `sqrt(2) * g`. The output is uchar for
+//!   every input format, keeping the band count, the dimensions and the
+//!   metadata. Saturation on the uchar arm happens twice, once inside each
+//!   convolution (which bounds the recovered gradient to `-256..=254`, an
+//!   asymmetric range) and once on the abs sum at 255.
+//! * **The edge float arm rounds to `f32` twice, and both roundings move
+//!   output bytes.** libvips builds that arm out of ordinary image
+//!   operations, and every one of them writes a 32-bit float image, so
+//!   promoting the chain to `f64` is a parity break rather than a
+//!   cleanup. `vips_multiply` and `vips_add` round `Gx^2 + Gy^2` to
+//!   `f32`; then `vips_pow_const1(0.5)` special-cases the exponent to a
+//!   `double` `sqrt()` and stores the root as `f32` again
+//!   (`arithmetic/math2.c:147-162`). The truncating cast that follows
+//!   turns either rounding into a whole output value wherever the
+//!   magnitude lands just under an integer. The pinned tie fixture is
+//!   driven by the **second** one: `Gx = 1.91181, Gy = 148.98773` gives
+//!   ~148.99999 under both the `f32` and the `f64` square sum, and it is
+//!   rounding *that* to `f32` which reaches exactly 149.0, so vips writes
+//!   149 where an all-`f64` chain writes 148. Over 5M random gradient
+//!   pairs in `-260..=260` each rounding moves bytes the other does not:
+//!   dropping the square-sum rounding alone changed 7-14 results,
+//!   dropping the post-`sqrt` store alone 2-5, and dropping both 14-20.
+//!   `vips_canny` computes `gx*gx + gy*gy` in the image's own float type
+//!   (`POLAR(TYPE)`) for the same reason, so the rule carries forward.
 //! * **Mask precision defaults.** `gaussmat` and `logmat` default to
 //!   integer precision in libvips (`create/gaussmat.c`, `create/logmat.c`
 //!   both init `precision = VIPS_PRECISION_INTEGER`); the ported
@@ -97,6 +141,45 @@
 //!   [`Kernel::logmat`] keeps the libvips default (the ported call sites
 //!   pass three arguments) and [`Kernel::logmat_with_precision`] exposes
 //!   the float form the libvips originals use.
+//!
+//! # Divergence from stock libvips
+//!
+//! Integer-precision convolution is where this module and a stock libvips
+//! knowingly disagree. Two gaps are open, neither is fixed here, and both
+//! reach every operation that runs an integer convolution:
+//! [`Raster::conv`] and [`Raster::convsep`] at [`Precision::Integer`],
+//! [`Raster::compass`], [`Raster::gaussblur`], [`Raster::sharpen`], and
+//! the uchar arm of [`Raster::sobel`], [`Raster::scharr`] and
+//! [`Raster::prewitt`].
+//!
+//! * **The vectorised divide, issue #558.** libviprs ports
+//!   `vips_convi_gen`, the scalar C loop, which divides with C's `/` and
+//!   so rounds towards zero (`convolution/convi.c:710`). Any libvips
+//!   built with HWY runs a fixed-point vector path instead, finishing in
+//!   an arithmetic shift, i.e. a floor, and `vips_convi_intize` only
+//!   requires the two to agree within 2 (`convi.c:1107-1112`). So an
+//!   integer-precision convolution of an unsigned image whose window sum
+//!   is negative and even reads one lower here.
+//!
+//!   This is a property of the **library**, not of the `vips` command:
+//!   pyvips, sharp, ruby-vips and anything linking a distro libvips hit
+//!   the identical gap. `VIPS_NOVECTOR=1` in the environment disables the
+//!   vector path and makes libvips agree with libviprs exactly.
+//!
+//!   The edge detectors inherit it **quadrupled, not doubled**. The uchar
+//!   arm recovers each response as `2 * (p - 128)`, which doubles a
+//!   one-unit gap, and `Gx` and `Gy` can both be off at once. Measured on
+//!   an 8x3 `Gray8` image, `prewitt` at `(4, 0)` reads 106 from libviprs
+//!   and from `VIPS_NOVECTOR=1 vips`, and 110 from the same binary with
+//!   the vector path live, because the two inner convolutions read 123
+//!   and 80 here against 122 and 79 there. **Compare against an
+//!   HWY-enabled libvips with a tolerance of 4 on the edge detectors, not
+//!   2.** The float arm has no such gap and is bit-exact either way.
+//!
+//! * **The intized scale, issue #547.** `vips_convi_gen` reads the scale
+//!   off the *original* mask where `vips__image_intize` computes a nudged
+//!   one; libviprs divides by the nudged scale. That also moves real
+//!   output bytes, and the `intize` helper documents the detail.
 
 use crate::colour::ColourError;
 use crate::conversion::{Angle45, Interpretation};
@@ -922,6 +1005,10 @@ impl Raster {
     /// See the [module docs](crate::convolution) for the integer/float
     /// precision semantics and output formats.
     ///
+    /// At [`Precision::Integer`] the result diverges from an HWY-enabled
+    /// libvips by up to one unit per sample (issues #558 and #547); see
+    /// [Divergence from stock libvips](crate::convolution#divergence-from-stock-libvips).
+    ///
     /// # Panics
     ///
     /// Panics on any [`ConvolutionError`]; see [`Raster::try_conv`].
@@ -1349,6 +1436,339 @@ impl Raster {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Edge detectors (the abstract VipsEdge op)
+// ---------------------------------------------------------------------------
+
+/// `vips_sobel`'s mask (`convolution/edge.c:244-247`). This is the
+/// **vertical** derivative; the horizontal one is its
+/// [`DenseKernel::rot90`].
+const SOBEL_MASK: [[f64; 3]; 3] = [[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]];
+
+/// `vips_scharr`'s mask (`convolution/edge.c:277-280`). This one is the
+/// **horizontal** derivative where sobel's is the vertical one, which is
+/// why the two impulse responses are each other's vertical mirror.
+const SCHARR_MASK: [[f64; 3]; 3] = [[-3.0, 0.0, 3.0], [-10.0, 0.0, 10.0], [-3.0, 0.0, 3.0]];
+
+/// `vips_prewitt`'s mask (`convolution/edge.c:310-313`), the horizontal
+/// derivative like scharr's. All three masks are rank 1, so all three are
+/// separable, not just this one: sobel is `[1,0,-1]^T * [1,2,1]`, scharr
+/// is `[3,10,3]^T * [-1,0,1]` and prewitt is `[1,1,1]^T * [-1,0,1]`.
+/// libvips exploits it on none of them and neither does this port: the
+/// three ops all run the same two full 2D convolutions, and a separable
+/// pass would round differently on the integer arm. That is the reason to
+/// leave them alone, not the false premise that only prewitt factors.
+const PREWITT_MASK: [[f64; 3]; 3] = [[-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
+
+/// The scale divisor `vips_edge_build_uchar` stamps on its mask copy
+/// (`convolution/edge.c:126`): halving the response keeps a full-swing
+/// gradient inside the 8 bits the recentred convolution has to fit into.
+const EDGE_UCHAR_SCALE: f64 = 2.0;
+
+/// The offset summand `vips_edge_build_uchar` stamps on its mask copy
+/// (`convolution/edge.c:125`), and the zero point the combine step
+/// subtracts back out. `convolution/canny.c:83` stamps the same 128 for
+/// the same reason.
+const EDGE_UCHAR_OFFSET: f64 = 128.0;
+
+/// Both directional responses of a gradient mask: `mask` itself, then
+/// `mask` rotated 90 degrees, each convolved over `src` at `precision`.
+///
+/// This is the two-line shape every gradient operator in
+/// `libvips/convolution` opens with. `vips_edge_build_uchar` does it at
+/// integer precision with a `scale = 2, offset = 128` mask
+/// (`edge.c:127-137`), `vips_edge_build_float` at float precision with the
+/// raw mask (`edge.c:165-168`), and `vips_canny_gradient` does exactly the
+/// same dance with a 2x2 mask and a format-dependent precision
+/// (`canny.c:68-92`). The rotation goes through [`DenseKernel::rot90`], so
+/// the scale and the offset ride along with the coefficients the way
+/// `vips_rot90` carries a mask image's metadata; rebuilding the second
+/// mask by hand is what silently drops them.
+///
+/// The pair is returned in mask order: `.0` is the response to `mask` and
+/// `.1` the response to its rotation. Both rasters have the same
+/// dimensions and band count as `src`, and the same format `conv_raster`
+/// would give for `precision` on its own.
+fn gradient_pair(
+    src: &Raster,
+    mask: &DenseKernel,
+    precision: Precision,
+) -> Result<(Raster, Raster), ConvolutionError> {
+    let first = conv_raster(src, mask, precision)?;
+    let second = conv_raster(src, &mask.rot90(), precision)?;
+    Ok((first, second))
+}
+
+/// `vips_cast_uchar` on one sample: clip into `0..=255` as a double, then
+/// **truncate** towards zero.
+///
+/// `conversion/cast.c:568` spells the rule out: "Floats are truncated (not
+/// rounded). Out of range values are clipped." The clip runs first and on
+/// the double (`CAST_FLOAT_INT` at `cast.c:231`), then C's narrowing
+/// conversion to `unsigned char` drops the fraction.
+///
+/// [`Raster::cast`] is not a substitute: libviprs rounds on the same
+/// conversion (`conversion.rs`, pinned by `cast_float_to_u8_rounds_and_clips`),
+/// so it answers 184 where vips answers 183 for a scharr corner. That
+/// difference is a live parity gap in `cast` itself, tracked as issue
+/// #561; once `cast` truncates, this helper is redundant and is deleted
+/// along with the gap rather than relocated.
+///
+/// A `NaN` reaches C as undefined behaviour here (it survives both halves
+/// of `VIPS_CLIP` and then converts to an unsigned char). Nothing in the
+/// edge pipeline can produce one from a finite input, so this maps it to
+/// `0` rather than inventing a value.
+#[inline]
+fn cast_uchar_truncating(v: f64) -> u8 {
+    if v.is_nan() {
+        return 0;
+    }
+    // `as` on a float truncates towards zero, and the clamp has already
+    // put the value in range.
+    v.clamp(0.0, 255.0) as u8
+}
+
+/// Edge detectors: the three named 3x3 gradient operators, `vips_sobel`,
+/// `vips_scharr` and `vips_prewitt`. They live in their own block rather
+/// than the main convolution one because issue #562 restructures this
+/// region; merging the two now would only have to be undone.
+impl Raster {
+    /// The whole abstract `VipsEdge` op (`convolution/edge.c`) for one 3x3
+    /// gradient mask: the shared engine behind [`Raster::sobel`],
+    /// [`Raster::scharr`] and [`Raster::prewitt`], which differ only in
+    /// the matrix they hand it.
+    ///
+    /// `vips_edge_build` dispatches purely on the input format
+    /// (`edge.c:186-200`), and the two arms are not two spellings of one
+    /// formula:
+    ///
+    /// * **uchar** takes the fast arm (`edge.c:113-155`). The mask is
+    ///   stamped with [`EDGE_UCHAR_SCALE`] and [`EDGE_UCHAR_OFFSET`] so a
+    ///   signed gradient lands centred in the unsigned output range, both
+    ///   convolutions run at [`Precision::Integer`], and the responses are
+    ///   recovered as `2 * (p - 128)` and combined as an **abs sum**
+    ///   clipped at 255 (`edge.c:97-103`). libvips comments the choice as
+    ///   "avoid the sqrt() for uchar", and it is not an approximation of
+    ///   the other arm: on a corner where `Gx == Gy` the abs sum is
+    ///   `2 * g` where the magnitude is `sqrt(2) * g`, which the measured
+    ///   7x7 corner shows directly (sobel reads 58 here and 42 through
+    ///   the float arm).
+    /// * **every other format** takes the accurate arm
+    ///   (`edge.c:158-182`): two [`Precision::Float`] convolutions with
+    ///   the raw mask, then `sqrt(Gx^2 + Gy^2)`, then
+    ///   [`cast_uchar_truncating`] (`vips_cast_uchar` at `edge.c:174`).
+    ///
+    /// The output is uchar either way, keeping the band count, the
+    /// dimensions and the metadata of the input.
+    ///
+    /// Saturation on the uchar arm happens **twice**, and both are load
+    /// bearing. The convolution clips its own output into `0..=255` around
+    /// the 128 zero point, so the recovered `2 * (p - 128)` spans
+    /// `-256..=254`, and the abs sum then clips again at 255. The
+    /// asymmetric bound is why the impulse response reads 254 in some
+    /// cells of the ring and 255 in others.
+    ///
+    /// The float arm keeps libvips' 32-bit intermediates rather than
+    /// promoting to `f64`, and it rounds to `f32` **twice**: once on
+    /// `Gx^2 + Gy^2` and again on the stored root. Both roundings move
+    /// output bytes, so this is not a chain to "simplify" to `f64`. The
+    /// [module docs](crate::convolution) carry the rule and the evidence.
+    fn edge_detect(&self, mask: &[[f64; 3]; 3]) -> Result<Raster, ConvolutionError> {
+        let rows: Vec<Vec<f64>> = mask.iter().map(|row| row.to_vec()).collect();
+        let channels = self.format().channels();
+        let (w, h) = (self.width(), self.height());
+
+        // A 1-byte channel is exactly libvips' VIPS_FORMAT_UCHAR: the
+        // 16-bit and float carriers are 2 and 4 bytes wide.
+        let data = if self.format().bytes_per_channel() == 1 {
+            let dense = DenseKernel::new(&Kernel {
+                data: rows,
+                scale: EDGE_UCHAR_SCALE,
+            })?
+            .with_offset(EDGE_UCHAR_OFFSET);
+            let (p1, p2) = gradient_pair(self, &dense, Precision::Integer)?;
+            p1.data()
+                .iter()
+                .zip(p2.data())
+                .map(|(&a, &b)| {
+                    let v1 = 2 * (i32::from(a) - 128);
+                    let v2 = 2 * (i32::from(b) - 128);
+                    let v = v1.abs() + v2.abs();
+                    v.min(255) as u8
+                })
+                .collect()
+        } else {
+            let dense = DenseKernel::new(&Kernel {
+                data: rows,
+                scale: 1.0,
+            })?;
+            let (p1, p2) = gradient_pair(self, &dense, Precision::Float)?;
+            let (gx, gy) = (
+                p1.f32_samples()
+                    .expect("float precision gives a float raster"),
+                p2.f32_samples()
+                    .expect("float precision gives a float raster"),
+            );
+            gx.iter()
+                .zip(&gy)
+                .map(|(&a, &b)| {
+                    let square_sum = a * a + b * b;
+                    let magnitude = f64::from(square_sum).sqrt() as f32;
+                    cast_uchar_truncating(f64::from(magnitude))
+                })
+                .collect()
+        };
+
+        let fmt = PixelFormat::with_channels(channels, 1)
+            .expect("an existing raster's band count has an 8-bit format");
+        let mut out = Raster::new(w, h, fmt, data)?;
+        // vips builds the result inside the input's pipeline, so the
+        // interpretation and the resolution survive the format change,
+        // and so do the attachments: `vips sobel` on a jpeg carrying 186
+        // bytes of `exif-data` and a 564-byte ICC profile hands both
+        // through unchanged, on either arm. Carrying them is the intended
+        // policy for new ops here. `conv`, `convsep`, `compass`,
+        // `gaussblur`, `spcor` and `fastcor` still return
+        // `RasterMeta::default()` and drop the fields; that is a
+        // divergence in those six, not a decision taken here.
+        out.meta = self.meta;
+        out.fields = self.fields.clone();
+        Ok(out)
+    }
+
+    /// Fallible form of [`Raster::sobel`], which carries the contract:
+    /// the output is always uchar, and the combine rule changes with the
+    /// input format.
+    ///
+    /// # Errors
+    ///
+    /// [`ConvolutionError::Raster`] if the result raster cannot be
+    /// allocated. The mask is a compile-time constant with a non-zero
+    /// finite scale, so no other variant is reachable today.
+    pub fn try_sobel(&self) -> Result<Raster, ConvolutionError> {
+        self.edge_detect(&SOBEL_MASK)
+    }
+
+    /// Sobel edge detector (libvips `vips_sobel`), which takes no
+    /// arguments.
+    ///
+    /// Convolves with the 3x3 Sobel mask and with the mask rotated 90
+    /// degrees, then combines the two gradients into an edge map. What
+    /// follows is the contract for all three detectors:
+    /// [`Raster::scharr`] and [`Raster::prewitt`] are this op with a
+    /// different 3x3 mask and nothing else changed.
+    ///
+    /// **The output is always uchar**, whatever went in. That is a
+    /// narrowing step in the middle of a pipeline rather than a neutral
+    /// one: `Gray16` comes back `Gray8` and `RgbaF32` comes back
+    /// `Rgba8`, four bytes per sample down to one. Width, height, band
+    /// count, interpretation, resolution and the attached metadata all
+    /// survive.
+    ///
+    /// **The combine rule changes with the input format**, and the two
+    /// rules are different functions rather than two precisions of one
+    /// (`edge.c:186-200`):
+    ///
+    /// * a uchar input takes the fast arm, `|Gx| + |Gy|` **clipped at
+    ///   255**, through two integer convolutions;
+    /// * every other format takes the accurate arm,
+    ///   `sqrt(Gx^2 + Gy^2)` through two float convolutions and then a
+    ///   **truncating** cast down to uchar.
+    ///
+    /// So casting to float first "for accuracy" does not refine the
+    /// answer, it swaps the formula: the same 7x7 corner reads 58 through
+    /// the uchar arm and 42 through the float one.
+    ///
+    /// **Alpha is convolved as an ordinary band.** `rgba.sobel()` gives
+    /// back an image whose alpha channel is itself an edge map, so a
+    /// fully opaque input comes out fully transparent except along its
+    /// edges. That is faithful to `vips sobel`, which runs the combine
+    /// over `width * Bands` with no alpha case (`edge.c:76-105`), and it
+    /// is rarely what a caller wants: split the colour bands off first if
+    /// it is not.
+    ///
+    /// See also [`Raster::scharr`], which saturates far sooner, and
+    /// [`Raster::prewitt`], which responds the most weakly, plus
+    /// [Divergence from stock libvips](crate::convolution#divergence-from-stock-libvips)
+    /// for the uchar arm's gap against an HWY-enabled libvips.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConvolutionError`]; see [`Raster::try_sobel`].
+    #[track_caller]
+    pub fn sobel(&self) -> Raster {
+        expect_conv("sobel", self.try_sobel())
+    }
+
+    /// Fallible form of [`Raster::scharr`]. The output is always uchar
+    /// and the combine rule changes with the input format; the contract
+    /// is on [`Raster::sobel`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConvolutionError::Raster`] if the result raster cannot be
+    /// allocated; see [`Raster::try_sobel`].
+    pub fn try_scharr(&self) -> Result<Raster, ConvolutionError> {
+        self.edge_detect(&SCHARR_MASK)
+    }
+
+    /// Scharr edge detector (libvips `vips_scharr`), which takes no
+    /// arguments.
+    ///
+    /// The same op as [`Raster::sobel`] with the Scharr mask, and the
+    /// same contract: always-uchar output, a combine rule that changes
+    /// with the input format, and alpha edge-detected as an ordinary
+    /// band. [`Raster::sobel`] spells all three out.
+    ///
+    /// Scharr's taps sum to four times sobel's (`3 + 10 + 3` against
+    /// `1 + 2 + 1`; it is the centre tap alone that is five times as
+    /// heavy), so on 8-bit input it reads closer to a threshold than to a
+    /// gradient. A plain 10 -> 20 step already answers 160, and a corner
+    /// of that same ten-level step saturates outright at 255. Reach for
+    /// it when you want edges marked rather than measured.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConvolutionError`]; see [`Raster::try_scharr`].
+    #[track_caller]
+    pub fn scharr(&self) -> Raster {
+        expect_conv("scharr", self.try_scharr())
+    }
+
+    /// Fallible form of [`Raster::prewitt`]. The output is always uchar
+    /// and the combine rule changes with the input format; the contract
+    /// is on [`Raster::sobel`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConvolutionError::Raster`] if the result raster cannot be
+    /// allocated; see [`Raster::try_sobel`].
+    pub fn try_prewitt(&self) -> Result<Raster, ConvolutionError> {
+        self.edge_detect(&PREWITT_MASK)
+    }
+
+    /// Prewitt edge detector (libvips `vips_prewitt`), which takes no
+    /// arguments.
+    ///
+    /// The same op as [`Raster::sobel`] with the Prewitt mask, and the
+    /// same contract: always-uchar output, a combine rule that changes
+    /// with the input format, and alpha edge-detected as an ordinary
+    /// band. [`Raster::sobel`] spells all three out.
+    ///
+    /// Prewitt weights its three taps equally instead of favouring the
+    /// centre row, so it responds the most weakly of the three and keeps
+    /// its headroom the longest: a 10 -> 20 step answers 30 where sobel
+    /// answers 40 and scharr 160.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConvolutionError`]; see [`Raster::try_prewitt`].
+    #[track_caller]
+    pub fn prewitt(&self) -> Raster {
+        expect_conv("prewitt", self.try_prewitt())
+    }
+}
+
 /// Shared correlation validation: equal band counts.
 fn check_correlation_bands(image: &Raster, template: &Raster) -> Result<usize, ConvolutionError> {
     let channels = image.format().channels();
@@ -1400,6 +1820,7 @@ fn convsep_short_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imageio::MetadataValue;
 
     /// Deterministic pseudo-random byte stream for synthetic images.
     fn lcg(seed: u32) -> impl FnMut() -> u8 {
@@ -2404,5 +2825,564 @@ mod tests {
         let out = im.conv(&double, Precision::Integer);
         assert_eq!(out.format(), PixelFormat::Gray16);
         assert_eq!(out.getpoint(0, 0), vec![65535.0]);
+    }
+
+    // -----------------------------------------------------------------
+    // Edge detectors: sobel / scharr / prewitt
+    // -----------------------------------------------------------------
+
+    /// The `oracle-captures/convolution` `impulse_mono.v` fixture: a
+    /// 21x21 uchar black canvas carrying a single 255 impulse at
+    /// (10, 10). Synthetic and lossless, so the recorded vips output is
+    /// exactly pinnable.
+    fn impulse_mono() -> Raster {
+        let mut data = vec![0u8; 21 * 21];
+        data[10 * 21 + 10] = 255;
+        Raster::new(21, 21, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A single-band uchar raster built from a per-pixel closure.
+    fn gray_from(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Raster {
+        let mut data = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.push(f(x, y));
+            }
+        }
+        Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A single-band 16-bit raster built from a per-pixel closure.
+    fn gray16_from(w: u32, h: u32, f: impl Fn(u32, u32) -> u16) -> Raster {
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.extend_from_slice(&f(x, y).to_ne_bytes());
+            }
+        }
+        Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// A single-band float raster built from a per-pixel closure.
+    fn float_from(w: u32, h: u32, f: impl Fn(u32, u32) -> f32) -> Raster {
+        let mut samples = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                samples.push(f(x, y));
+            }
+        }
+        Raster::from_f32_samples(w, h, float_format(1), &samples).unwrap()
+    }
+
+    /// One named edge detector: the method name for assertion messages
+    /// and the method itself.
+    type EdgeOp = (&'static str, fn(&Raster) -> Raster);
+
+    /// The three detectors as `(name, method)` pairs, so one captured
+    /// table can be replayed against all of them.
+    fn edge_ops() -> [EdgeOp; 3] {
+        [
+            ("sobel", Raster::sobel),
+            ("scharr", Raster::scharr),
+            ("prewitt", Raster::prewitt),
+        ]
+    }
+
+    /// Band 0 of a uchar raster at `(x, y)`.
+    fn u8_at(im: &Raster, x: u32, y: u32) -> u8 {
+        let channels = im.format().channels() as u32;
+        im.data()[((y * im.width() + x) * channels) as usize]
+    }
+
+    /// `vips sobel` / `vips scharr` / `vips prewitt` on the 21x21
+    /// impulse, replayed point for point. The sobel numbers are the 27
+    /// probes of the `sobel_impulse` record in
+    /// `oracle-captures/convolution/oracle.json`; the scharr and prewitt
+    /// grids were captured the same way from vips 8.18.4.
+    ///
+    /// The three responses differ only in which neighbours read 254
+    /// rather than 255, and that is the double-saturation signature the
+    /// uchar arm has to reproduce: the inner integer conv clips the
+    /// recovered gradient into `-128..=127` around the 128 offset, so
+    /// `2 * (p - 128)` reaches -256 but only +254, and the abs-sum then
+    /// clips a second time at 255. An implementation that saturated only
+    /// once would write 255 everywhere in the ring.
+    ///
+    /// The trailing number is the sum over the whole 21x21 output, which
+    /// pins `avg` from the same records (2038 / 441 = 4.621315,
+    /// 2036 / 441 = 4.616780) and proves everything outside the probe
+    /// block is zero.
+    #[test]
+    fn edge_detectors_match_the_vips_impulse_response() {
+        // Rows are y = 8..=12, columns x = 8..=12: the oracle probe block.
+        let expected: [[[u8; 5]; 5]; 3] = [
+            [
+                [0, 0, 0, 0, 0],
+                [0, 255, 255, 255, 0],
+                [0, 254, 0, 255, 0],
+                [0, 255, 254, 255, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            [
+                [0, 0, 0, 0, 0],
+                [0, 255, 254, 255, 0],
+                [0, 254, 0, 255, 0],
+                [0, 255, 255, 255, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            [
+                [0, 0, 0, 0, 0],
+                [0, 255, 254, 255, 0],
+                [0, 254, 0, 254, 0],
+                [0, 255, 254, 255, 0],
+                [0, 0, 0, 0, 0],
+            ],
+        ];
+        let totals = [2038u32, 2038, 2036];
+
+        let im = impulse_mono();
+        for (((name, op), block), total) in edge_ops().into_iter().zip(expected).zip(totals) {
+            let out = op(&im);
+            assert_eq!(out.format(), PixelFormat::Gray8, "{name} output format");
+            assert_eq!((out.width(), out.height()), (21, 21), "{name} output size");
+            for (row, wanted) in block.iter().enumerate() {
+                for (col, &want) in wanted.iter().enumerate() {
+                    let (x, y) = (8 + col as u32, 8 + row as u32);
+                    assert_eq!(u8_at(&out, x, y), want, "{name} at ({x},{y})");
+                }
+            }
+            let sum: u32 = out.data().iter().map(|&b| u32::from(b)).sum();
+            assert_eq!(sum, total, "{name} whole-image sum");
+        }
+    }
+
+    /// The measured vertical-step row of the vips 8.18.4 table: a 7x7
+    /// uchar image, background 10 stepping to 20 at x >= 4. A pure
+    /// vertical step is a pure Gx, so the answer is `|Gx|` alone:
+    /// `10 * (1 + 2 + 1)` for sobel, `10 * (3 + 10 + 3)` for scharr,
+    /// `10 * (1 + 1 + 1)` for prewitt, on the two columns straddling the
+    /// step and zero everywhere else.
+    #[test]
+    fn edge_detectors_match_the_measured_vertical_step() {
+        let im = gray_from(7, 7, |x, _| if x >= 4 { 20 } else { 10 });
+        for ((name, op), want) in edge_ops().into_iter().zip([40u8, 160, 30]) {
+            let out = op(&im);
+            assert_eq!(out.format(), PixelFormat::Gray8, "{name} output format");
+            for y in 0..7 {
+                for x in 0..7 {
+                    let expect = if x == 3 || x == 4 { want } else { 0 };
+                    assert_eq!(u8_at(&out, x, y), expect, "{name} at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    /// The uchar arm combines `|Gx| + |Gy|` (`edge.c:97-103`) and every
+    /// other format combines `sqrt(Gx^2 + Gy^2)` (`edge.c:158-182`), so
+    /// the same picture reads differently on the two arms. The fixture is
+    /// a 7x7 corner, background 10 with a 20 quadrant at x >= 4 && y >= 4,
+    /// where Gx and Gy are equal by construction and the two rules are
+    /// furthest apart: `2 * g` against `sqrt(2) * g`.
+    ///
+    /// scharr is the sharpest witness. Its corner gradients are 130 each,
+    /// so the abs-sum is 260 and saturates to 255 while the magnitude is
+    /// 183.847, and a magnitude-based uchar arm could not reach 255 here.
+    ///
+    /// The uchar sobel expectation is 58, not the 60 the vips binary
+    /// prints by default; see
+    /// `edge_uchar_negative_gradient_follows_the_scalar_convi_rounding`.
+    #[test]
+    fn edge_uchar_combines_the_abs_sum_and_float_the_magnitude() {
+        let corner = |x: u32, y: u32| x >= 4 && y >= 4;
+        let uchar = gray_from(7, 7, |x, y| if corner(x, y) { 20 } else { 10 });
+        let float = float_from(7, 7, |x, y| if corner(x, y) { 20.0 } else { 10.0 });
+
+        for ((name, op), (want_uchar, want_float)) in
+            edge_ops()
+                .into_iter()
+                .zip([(58u8, 42u8), (255, 183), (40, 28)])
+        {
+            assert_eq!(u8_at(&op(&uchar), 4, 4), want_uchar, "{name} uchar corner");
+            assert_eq!(u8_at(&op(&float), 4, 4), want_float, "{name} float corner");
+        }
+    }
+
+    /// The float arm ends in `vips_cast_uchar`, which **truncates**
+    /// (`conversion/cast.c:568`, "Floats are truncated (not rounded)").
+    /// [`Raster::cast`] rounds, so the edge detectors must not use it.
+    ///
+    /// Two witnesses. The scharr corner magnitude is `sqrt(2) * 130 =
+    /// 183.847`: truncation gives 183, rounding 184, and vips 8.18.4
+    /// prints 183. The 5x5 float fixture below drives a prewitt response
+    /// whose magnitude lands just under an integer, captured whole from
+    /// the binary.
+    ///
+    /// That second fixture also pins the **`f32`** intermediates, which
+    /// is a separate rule from truncation and easy to mistake for it. The
+    /// magnitude there is ~148.99999 under both an `f32` and an `f64`
+    /// square sum; what reaches 149 is storing the root as `f32`
+    /// (`arithmetic/math2.c:147-162`). An implementation that truncates
+    /// correctly but computes the whole chain in `f64` answers 148 and
+    /// fails here.
+    #[test]
+    fn edge_float_path_truncates_the_cast_to_uchar() {
+        let corner = float_from(7, 7, |x, y| if x >= 4 && y >= 4 { 20.0 } else { 10.0 });
+        assert_eq!(u8_at(&corner.scharr(), 4, 4), 183);
+
+        let mut samples = vec![0.0f32; 25];
+        samples[2 * 5 + 3] = 148.98773;
+        samples[3 * 5 + 2] = 1.91181;
+        let im = Raster::from_f32_samples(5, 5, float_format(1), &samples).unwrap();
+        #[rustfmt::skip]
+        let want: [u8; 25] = [
+            0, 0,   0,   0,   0,
+            0, 0,   210, 148, 210,
+            0, 2,   149, 2,   148,
+            0, 1,   210, 149, 210,
+            0, 2,   1,   2,   0,
+        ];
+        assert_eq!(
+            im.prewitt().data(),
+            &want[..],
+            "vips prewitt on the tie fixture: this arm needs f32 \
+             intermediates, not f64. Reading 148 where 149 is expected means \
+             the chain has been promoted to f64 - the sqrt result is stored \
+             back as f32 (math2.c:147-162), and that is what lifts ~148.99999 \
+             to exactly 149.0 before the truncating cast"
+        );
+    }
+
+    /// The whole float arm, replayed against vips 8.18.4 output captured
+    /// on two fixtures: a 7x7 float image whose samples are exact
+    /// quarters spanning negatives, and a 5x5 16-bit image (any format
+    /// other than uchar takes the float arm, `edge.c:186-200`).
+    ///
+    /// The float arm is bit-stable: `VIPS_NOVECTOR=1` reproduces both
+    /// captures byte for byte, unlike the uchar arm.
+    #[test]
+    fn edge_float_arm_matches_the_vips_capture() {
+        #[rustfmt::skip]
+        let float_expected: [[u8; 49]; 3] = [
+            [
+                17, 11, 13, 11, 9, 11, 9, 21, 8, 3, 3, 3, 3, 8, 8, 8, 13, 8, 3, 3, 8, 8, 3, 3, 8,
+                13, 8, 8, 8, 3, 3, 3, 3, 8, 21, 8, 3, 3, 3, 3, 3, 9, 17, 11, 13, 11, 9, 11, 20,
+            ],
+            [
+                69, 58, 66, 58, 49, 58, 48, 95, 37, 15, 25, 25, 15, 48, 48, 37, 74, 37, 15, 25, 18,
+                18, 25, 15, 37, 74, 37, 48, 48, 15, 25, 25, 15, 37, 95, 18, 25, 15, 15, 25, 25, 37,
+                79, 58, 66, 58, 49, 58, 80,
+            ],
+            [
+                13, 6, 7, 6, 4, 6, 5, 14, 6, 5, 3, 3, 5, 2, 2, 6, 6, 6, 5, 3, 10, 10, 3, 5, 6, 6,
+                6, 2, 2, 5, 3, 3, 5, 6, 14, 10, 3, 5, 5, 3, 3, 7, 10, 6, 7, 6, 4, 6, 15,
+            ],
+        ];
+        #[rustfmt::skip]
+        let u16_expected: [[u8; 25]; 3] = [
+            [69, 47, 55, 47, 68, 87, 34, 13, 13, 32, 32, 34, 54, 34, 32, 32, 13, 13, 34, 87, 68,
+             47, 55, 47, 69],
+            [255, 235, 255, 235, 255, 255, 149, 63, 102, 72, 192, 149, 255, 149, 192, 72, 102, 63,
+             149, 255, 255, 235, 255, 235, 255],
+            [52, 24, 29, 24, 40, 57, 26, 22, 15, 40, 10, 26, 26, 26, 10, 40, 15, 22, 26, 57, 40,
+             24, 29, 24, 52],
+        ];
+
+        let floats = float_from(7, 7, |x, y| ((x * 3 + y * 5) % 11) as f32 * 0.75 - 4.0);
+        let shorts = gray16_from(5, 5, |x, y| (((x * 3 + y * 5) % 11) * 3 + 300) as u16);
+        for (((name, op), want_float), want_u16) in
+            edge_ops().into_iter().zip(float_expected).zip(u16_expected)
+        {
+            let out = op(&floats);
+            assert_eq!(
+                out.format(),
+                PixelFormat::Gray8,
+                "{name} float input format"
+            );
+            assert_eq!(out.data(), &want_float[..], "{name} on the float fixture");
+
+            let out = op(&shorts);
+            assert_eq!(
+                out.format(),
+                PixelFormat::Gray8,
+                "{name} 16-bit input format"
+            );
+            assert_eq!(out.data(), &want_u16[..], "{name} on the 16-bit fixture");
+        }
+    }
+
+    /// Output is always uchar (`edge.c` ends the non-uchar arm in
+    /// `vips_cast_uchar` and the uchar arm never leaves 8 bits), the band
+    /// count and the dimensions are preserved, and the 16-bit and float
+    /// carriers all narrow to their 8-bit sibling.
+    #[test]
+    fn edge_output_is_always_uchar_with_the_input_bands() {
+        let two8 = PixelFormat::with_channels(2, 1).unwrap();
+        let five16 = PixelFormat::with_channels(5, 2).unwrap();
+        let five8 = PixelFormat::with_channels(5, 1).unwrap();
+        let cases = [
+            (PixelFormat::Gray8, PixelFormat::Gray8),
+            (PixelFormat::Gray16, PixelFormat::Gray8),
+            (PixelFormat::Rgb8, PixelFormat::Rgb8),
+            (PixelFormat::Rgb16, PixelFormat::Rgb8),
+            (PixelFormat::Rgba8, PixelFormat::Rgba8),
+            (PixelFormat::Rgba16, PixelFormat::Rgba8),
+            (PixelFormat::RgbaF32, PixelFormat::Rgba8),
+            (two8, two8),
+            (five16, five8),
+        ];
+        for (src, want) in cases {
+            let im = Raster::zeroed(4, 3, src).unwrap();
+            for (name, op) in edge_ops() {
+                let out = op(&im);
+                assert_eq!(out.format(), want, "{name} of {src:?}");
+                assert_eq!(
+                    (out.width(), out.height()),
+                    (4, 3),
+                    "{name} of {src:?} size"
+                );
+            }
+        }
+    }
+
+    /// Every band is convolved and combined on its own, exactly as
+    /// `vips conv` is per-band: a 7x7 RGB fixture with a 10 -> 20 step at
+    /// x >= 4 in band 0, a flat 77 in band 1, and a 30 -> 60 step at
+    /// x >= 2 in band 2 answers 40 / 0 / 120 for sobel on the columns
+    /// straddling each step, and a flat band contributes nothing anywhere.
+    /// Captured from vips 8.18.4.
+    #[test]
+    fn edge_treats_every_band_independently() {
+        let mut data = Vec::with_capacity(7 * 7 * 3);
+        for _ in 0..7 {
+            for x in 0..7u32 {
+                data.push(if x >= 4 { 20 } else { 10 });
+                data.push(77);
+                data.push(if x >= 2 { 60 } else { 30 });
+            }
+        }
+        let im = Raster::new(7, 7, PixelFormat::Rgb8, data).unwrap();
+
+        for ((name, op), want) in
+            edge_ops()
+                .into_iter()
+                .zip([[40u8, 0, 120], [160, 0, 254], [30, 0, 90]])
+        {
+            let out = op(&im);
+            assert_eq!(out.format(), PixelFormat::Rgb8, "{name} output format");
+            let row = &out.data()[3 * 7 * 3..4 * 7 * 3];
+            let band0: Vec<u8> = row.iter().step_by(3).copied().collect();
+            let band1: Vec<u8> = row.iter().skip(1).step_by(3).copied().collect();
+            let band2: Vec<u8> = row.iter().skip(2).step_by(3).copied().collect();
+            assert_eq!(
+                band0,
+                vec![0, 0, 0, want[0], want[0], 0, 0],
+                "{name} band 0"
+            );
+            assert_eq!(band1, vec![0; 7], "{name} band 1 is flat");
+            assert_eq!(
+                band2,
+                vec![0, want[2], want[2], 0, 0, 0, 0],
+                "{name} band 2"
+            );
+        }
+    }
+
+    /// A negative uchar gradient reads low against an HWY-enabled
+    /// libvips, and this pins the gap so it cannot drift unnoticed.
+    /// **The bound is 4, not 2** (issue #558).
+    ///
+    /// `vips_convi_gen` divides with C's truncating `/`
+    /// (`convolution/convi.c:710`, `((sum + rounding) / scale) + offset`),
+    /// which for a negative sum rounds towards zero. Any libvips built
+    /// with HWY takes a vector path for uchar integer convolutions that
+    /// finishes with an arithmetic shift instead, which floors, and
+    /// `vips_convi_intize` only requires the two to agree within 2
+    /// (`convi.c:1107-1112`). That is a property of the library, not of
+    /// the `vips` command, so pyvips and every other binding sees it too.
+    /// libviprs ports the scalar C path, so an inner conv whose window
+    /// sum is negative and even reads one lower here, and the uchar arm's
+    /// `2 * (p - 128)` recovery doubles that to two per gradient.
+    ///
+    /// Two fixtures, both measured against vips 8.18.4.
+    ///
+    /// One gradient affected, gap 2: a horizontal 10 -> 20 step at
+    /// y >= 4 gives sobel's base mask a sum of -40 straddling the step.
+    /// `VIPS_NOVECTOR=1 vips sobel` prints 38 here, matching libviprs;
+    /// the default `vips sobel` prints 40. The vertical step of the same
+    /// size stays positive and both agree on 40, the control in the same
+    /// assertion.
+    ///
+    /// **Both gradients affected, gap 4**, which is the bound a caller
+    /// actually has to allow for. On the 8x3 fixture below, `prewitt` at
+    /// (4,0) puts both inner convolutions on the negative-and-even case:
+    /// libviprs and `VIPS_NOVECTOR=1 vips` read 123 and 80 and answer
+    /// 106, while the same binary with the vector path live reads 122 and
+    /// 79 and answers 110.
+    #[test]
+    fn edge_uchar_negative_gradient_follows_the_scalar_convi_rounding() {
+        let horizontal = gray_from(7, 7, |_, y| if y >= 4 { 20 } else { 10 });
+        assert_eq!(u8_at(&horizontal.sobel(), 3, 3), 38);
+        assert_eq!(u8_at(&horizontal.sobel(), 3, 4), 38);
+
+        let vertical = gray_from(7, 7, |x, _| if x >= 4 { 20 } else { 10 });
+        assert_eq!(u8_at(&vertical.sobel(), 3, 3), 40);
+        assert_eq!(u8_at(&vertical.sobel(), 4, 3), 40);
+
+        #[rustfmt::skip]
+        let pixels: Vec<u8> = vec![
+            79, 46, 165, 221, 20, 220, 238, 241,
+            190, 170, 207, 147, 79, 137, 17, 42,
+            243, 112, 225, 97, 123, 226, 86, 173,
+        ];
+        let both = Raster::new(8, 3, PixelFormat::Gray8, pixels).unwrap();
+        assert_eq!(u8_at(&both.prewitt(), 4, 0), 106, "gap-4 fixture");
+    }
+
+    /// `gradient_pair` answers with the mask's own response first and the
+    /// rotated one second, and it serves a mask carrying an offset and no
+    /// scale. Both halves are contract rather than accident. The three
+    /// edge detectors combine symmetrically so they cannot tell the order
+    /// apart, but `vips_canny` takes `atan2` off the pair, where a swap
+    /// silently rotates every angle by 90 degrees.
+    ///
+    /// The 3x3 mask here is deliberately asymmetric under rotation, so
+    /// `.0` and `.1` really are different images and the ordering
+    /// assertion has teeth. The second half is canny's own call shape
+    /// (`canny.c:68-92`): a 2x2 `-1/+1` difference stamped
+    /// `offset = 128` with no scale, which is also the only shape the
+    /// helper has to serve that is neither 3x3 nor 1xN, and the only one
+    /// where the even-sized anchor question arises.
+    #[test]
+    fn gradient_pair_answers_the_mask_first_and_serves_canny_s_2x2() {
+        let im = noise_gray(9, 7, 557);
+
+        let asymmetric = Kernel {
+            data: vec![
+                vec![1.0, 2.0, 3.0],
+                vec![4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0],
+            ],
+            scale: 3.0,
+        };
+        let dense = DenseKernel::new(&asymmetric).unwrap();
+        let (first, second) = gradient_pair(&im, &dense, Precision::Float).unwrap();
+        assert_eq!(
+            first.data(),
+            conv_raster(&im, &dense, Precision::Float).unwrap().data(),
+            "`.0` must be the response to the mask itself"
+        );
+        assert_eq!(
+            second.data(),
+            conv_raster(&im, &dense.rot90(), Precision::Float)
+                .unwrap()
+                .data(),
+            "`.1` must be the response to the rotated mask"
+        );
+        assert_ne!(
+            first.data(),
+            second.data(),
+            "the mask has to be asymmetric or the ordering claim is untestable"
+        );
+
+        let canny = DenseKernel::new(&Kernel {
+            data: vec![vec![-1.0, 1.0], vec![-1.0, 1.0]],
+            scale: 1.0,
+        })
+        .unwrap()
+        .with_offset(EDGE_UCHAR_OFFSET);
+        let spun = canny.rot90();
+        assert_eq!((spun.w, spun.h), (2, 2), "rot90 of a 2x2 is a 2x2");
+        assert_eq!(
+            spun.coeff,
+            vec![-1.0, -1.0, 1.0, 1.0],
+            "rot90 of [[-1,1],[-1,1]] is [[-1,-1],[1,1]]"
+        );
+        assert!(
+            (spun.offset - EDGE_UCHAR_OFFSET).abs() < f64::EPSILON,
+            "the 2x2 rotation dropped the offset: got {}",
+            spun.offset
+        );
+        assert!(
+            (spun.scale - 1.0).abs() < f64::EPSILON,
+            "the 2x2 rotation dropped the scale: got {}",
+            spun.scale
+        );
+
+        let (gx, gy) = gradient_pair(&im, &canny, Precision::Integer).unwrap();
+        assert_eq!(
+            gx.data(),
+            conv_raster(&im, &canny, Precision::Integer).unwrap().data(),
+            "2x2 `.0` is the mask response"
+        );
+        assert_eq!(
+            gy.data(),
+            conv_raster(&im, &spun, Precision::Integer).unwrap().data(),
+            "2x2 `.1` is the rot90 response"
+        );
+
+        // The offset rides along both halves: a flat image differences to
+        // zero everywhere, so every sample recentres on exactly 128.
+        let flat = gray_from(4, 4, |_, _| 90);
+        let (fx, fy) = gradient_pair(&flat, &canny, Precision::Integer).unwrap();
+        assert_eq!(fx.data(), &[128u8; 16][..], "flat Gx recentres on 128");
+        assert_eq!(fy.data(), &[128u8; 16][..], "flat Gy recentres on 128");
+    }
+
+    /// The result inherits the source metadata, as a vips pipeline does:
+    /// the interpretation survives even though the format changed, and so
+    /// do the resolution and offset fields.
+    ///
+    /// The **attached** fields survive too, which is what `vips sobel`
+    /// does and is easy to drop by accident: a jpeg carrying 186 bytes of
+    /// `exif-data` and a 564-byte ICC profile comes back out of the
+    /// binary carrying both, on either arm. `out.meta` alone would leave
+    /// them behind.
+    #[test]
+    fn edge_inherits_the_source_metadata() {
+        let mut im = gray16_from(4, 4, |x, y| u16::try_from(x * 900 + y * 70).unwrap())
+            .copy()
+            .interpretation(Interpretation::Grey16)
+            .xres(42.0)
+            .build();
+        im.set_field("exif-data", MetadataValue::Blob(vec![7, 8, 9]));
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2]));
+        for (name, op) in edge_ops() {
+            let out = op(&im);
+            assert_eq!(
+                out.interpretation(),
+                Interpretation::Grey16,
+                "{name} interpretation"
+            );
+            assert!((out.xres() - 42.0).abs() < 1e-12, "{name} xres");
+            assert_eq!(
+                out.get_field("exif-data"),
+                Some(MetadataValue::Blob(vec![7, 8, 9])),
+                "{name} dropped the EXIF blob"
+            );
+            assert_eq!(
+                out.get_field("icc-profile-data"),
+                Some(MetadataValue::Blob(vec![1, 2])),
+                "{name} dropped the ICC profile"
+            );
+        }
+    }
+
+    /// The `try_*` and panicking forms are the same call, and the three
+    /// masks really are different matrices: on the 7x7 vertical step the
+    /// detectors answer 40, 160 and 30, so no two of them agree.
+    #[test]
+    fn edge_try_and_panicking_forms_agree() {
+        let im = gray_from(7, 7, |x, _| if x >= 4 { 20 } else { 10 });
+        let got: Vec<Vec<u8>> = edge_ops()
+            .into_iter()
+            .map(|(_, op)| op(&im).data().to_vec())
+            .collect();
+        assert_ne!(got[0], got[1], "sobel and scharr");
+        assert_ne!(got[1], got[2], "scharr and prewitt");
+        assert_ne!(got[0], got[2], "sobel and prewitt");
+
+        assert_eq!(im.try_sobel().unwrap().data(), got[0].as_slice());
+        assert_eq!(im.try_scharr().unwrap().data(), got[1].as_slice());
+        assert_eq!(im.try_prewitt().unwrap().data(), got[2].as_slice());
     }
 }

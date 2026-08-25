@@ -108,6 +108,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depth-only promotion keeps the tag, matching `vips join` of `b-w` uchar
   with `grey16`, which still reports `b-w`.
 
+- `Raster::sobel`, `Raster::scharr` and `Raster::prewitt`, with their
+  `try_*` twins (issues #537, #549, #550): the port of libvips `vips_sobel`,
+  `vips_scharr` and `vips_prewitt`. They are one abstract op in libvips
+  (`convolution/edge.c`) differing only in a 3x3 mask, they take no arguments
+  at all, and each convolves with its mask and with the mask rotated 90
+  degrees before combining the two gradients into an edge map.
+
+  How the gradients combine depends on the input format, and the two rules are
+  not approximations of each other. A uchar input takes the fast arm: the mask
+  is stamped `scale = 2, offset = 128` so a signed response lands centred in
+  the unsigned range, both convolutions run at integer precision, and the
+  result is `|Gx| + |Gy|` clipped at 255. Every other format takes the
+  accurate arm: two float convolutions with the raw mask, then
+  `sqrt(Gx^2 + Gy^2)`, then a truncating cast down to 8 bits. On a corner
+  where `Gx` and `Gy` are equal the abs sum is `2 * g` where the magnitude is
+  `sqrt(2) * g`, so the same picture reads 58 through the uchar arm and 42
+  through the float one.
+
+  The output is uchar whatever went in, so a 16-bit or float source comes
+  back narrowed four bytes per sample to one. Width, height, band count,
+  interpretation, resolution and the attached metadata (EXIF blob, ICC
+  profile, arbitrary attachments) all survive, matching what `vips sobel`
+  hands through. Alpha is convolved as an ordinary band, exactly as libvips
+  does it, so a fully opaque RGBA input comes back fully transparent except
+  along its edges. Saturation on the uchar arm happens twice, once inside
+  each convolution and once on the abs sum, which is what makes the
+  recovered gradient span an asymmetric `-256..=254`.
+
+  These three inherit the integer-convolution divergence described under
+  **Changed** below, at a bound of 4.
+
 - `Raster::matrixmultiply` and its `try_matrixmultiply` twin (issue #533): the
   port of libvips `vips_matrixmultiply`, the dense product of two matrix
   images. `left.matrixmultiply(&right)` needs `left.width() ==
@@ -167,6 +198,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- **The documented bound on the integer-convolution divergence against stock
+  libvips is 4, not 2** (issue #558). This is a correction to the disclosure,
+  not to any behaviour, and it matters because anyone who read the old number
+  and set a comparison tolerance of 2 was going to get burned.
+
+  libviprs ports `vips_convi_gen`, the scalar C integer-convolution loop,
+  which rounds its division towards zero. Any libvips built with HWY runs a
+  fixed-point vector path instead, which floors, and libvips itself only
+  requires the two paths to agree within 2 (`convi.c:1107-1112`). So an
+  integer-precision convolution of an unsigned image whose window sum is
+  negative and even reads one lower from libviprs.
+
+  This is a property of the **library**, not of the `vips` command line, which
+  is the other thing the old wording got wrong. pyvips, sharp, ruby-vips and
+  anything linking a distro libvips all hit the identical gap. Setting
+  `VIPS_NOVECTOR=1` in the environment disables the vector path and makes
+  libvips agree with libviprs exactly.
+
+  It reaches `conv` and `convsep` at integer precision, `compass`,
+  `gaussblur`, `sharpen`, and the uchar arm of `sobel` / `scharr` /
+  `prewitt`. On the edge detectors the gap is **quadrupled, not doubled**:
+  the uchar arm recovers each response as `2 * (p - 128)`, which doubles a
+  one-unit gap, and `Gx` and `Gy` can both be off at once. Measured on an 8x3
+  `Gray8` image, `prewitt` at pixel (4,0) reads 106 from libviprs and from
+  `VIPS_NOVECTOR=1 vips`, and 110 from the same binary with the vector path
+  live. The float arm has no such gap and is bit-exact either way.
 
 - **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
   real libvips interpretation codes `30` and `31` in its header `Type` word,**
