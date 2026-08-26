@@ -172,8 +172,10 @@
 //!
 //! # Divergence from stock libvips
 //!
-//! Integer-precision convolution is where this module and a stock libvips
-//! knowingly disagree. Two gaps are open and neither is closable here.
+//! Three gaps are open between this module and a stock libvips. The first
+//! two are integer-precision arithmetic and neither is closable here. The
+//! third is not arithmetic at all: it is an argument vips accepts and this
+//! module deliberately refuses, and it applies at either precision.
 //!
 //! The first reaches every operation that runs an integer convolution:
 //! [`Raster::conv`] and [`Raster::convsep`] at [`Precision::Integer`],
@@ -183,7 +185,9 @@
 //! the three that convolve with a mask the caller handed in,
 //! [`Raster::conv`], [`Raster::convsep`] and [`Raster::compass`], because
 //! it is about a scale libvips cannot hold and every mask this module
-//! builds for itself carries an integer one.
+//! builds for itself carries an integer one. The third reaches
+//! [`Raster::compass`] alone, and reaches it before `precision` is ever
+//! read.
 //!
 //! * **The two integer-convolution kernels, issue #558.** libviprs ports
 //!   `vips_convi_gen`, the portable C loop, which divides with C's `/`
