@@ -1516,6 +1516,42 @@ mod tests {
     }
 
     /**
+     * Tests that a byte count landing exactly on 2^64 saturates instead of
+     * wrapping to zero.
+     * Works by declaring the one geometry whose product is the wrap point
+     * itself: 2^24 by 2^24 with 2^14 bands of four-byte float is exactly
+     * 2^64 bytes. A wrapping multiply gives `0` there, which clears every
+     * budget, takes an empty payload slice and then indexes it; the
+     * saturating one gives `u64::MAX`, which no available byte count can
+     * reach. Every ceiling is lifted, as a caller may lift them, so the
+     * byte count is the only guard left standing. The neighbouring case
+     * above is far from the wrap point and so cannot catch this.
+     * Input: 2^24 x 2^24 x 2^14 at BITPIX -32 -> Output: `TruncatedData`,
+     * refused without allocating anything.
+     */
+    #[test]
+    fn a_byte_count_of_exactly_two_to_the_64_saturates_rather_than_wrapping() {
+        let file = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                  -32",
+            "NAXIS   =                    3",
+            &format!("NAXIS1  = {:>20}", 1u64 << 24),
+            &format!("NAXIS2  = {:>20}", 1u64 << 24),
+            &format!("NAXIS3  = {:>20}", 1u64 << 14),
+        ]);
+        let unbounded = DecodeLimits::default()
+            .with_max_coord(u32::MAX)
+            .with_max_width(u32::MAX)
+            .with_max_height(u32::MAX)
+            .with_max_pixels(u64::MAX)
+            .with_max_alloc_bytes(u64::MAX);
+        assert!(matches!(
+            decode_fits(&file, unbounded),
+            Err(SourceError::Fits(FitsError::TruncatedData { .. }))
+        ));
+    }
+
+    /**
      * Tests that a data segment shorter than the header claims is refused.
      * Works by declaring a 4x3 image and supplying four bytes, so the
      * decoder has to notice before it indexes past the buffer.
@@ -1536,6 +1572,50 @@ mod tests {
             decode_fits(&file, DecodeLimits::default()),
             Err(SourceError::Fits(FitsError::TruncatedData {
                 found: 4,
+                needed: 12
+            }))
+        ));
+    }
+
+    /**
+     * Tests that the truncation check sits exactly on the declared byte
+     * count, not one either side of it.
+     * Works by handing the same 4x3 BITPIX 8 header a payload of exactly
+     * the twelve bytes it claims, which has to decode, and then one byte
+     * fewer, which has to be refused. The case above is eight bytes short
+     * so it reads the same whether the comparison is `<` or `<=`; this
+     * pair pins the edge from both sides.
+     * Input: 12 then 11 bytes under a 12-byte claim -> Output: the 4x3
+     * raster, then `TruncatedData { found: 11, needed: 12 }`.
+     */
+    #[test]
+    fn the_truncation_check_sits_on_the_exact_declared_byte_count() {
+        let head = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    4",
+            "NAXIS2  =                    3",
+        ]);
+
+        let mut exact = head.clone();
+        exact.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let raster = decode_fits(&exact, DecodeLimits::default())
+            .expect("a payload of exactly the declared length decodes");
+        assert_eq!(raster.width(), 4);
+        assert_eq!(raster.height(), 3);
+        assert_eq!(
+            raster.data(),
+            &[9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4],
+            "the last row in the file is the top row of the image"
+        );
+
+        let mut short = head;
+        short.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert!(matches!(
+            decode_fits(&short, DecodeLimits::default()),
+            Err(SourceError::Fits(FitsError::TruncatedData {
+                found: 11,
                 needed: 12
             }))
         ));
