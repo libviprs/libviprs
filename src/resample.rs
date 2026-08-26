@@ -3388,9 +3388,10 @@ mod tests {
     /// units the alpha band carries, never a fraction of `max`. Measured on the
     /// binary, `alpha = 0.02` on the same `(100, 100, 100, alpha)` pixel gives
     /// `5000` under scRGB (`max_alpha` 1), `1275000` under the 255 default and
-    /// `327675008` under RGB16 (`max_alpha` 65535), and `alpha = 0.005` gives 0
-    /// in all three. So the 16-bit carrier's dead zone is `0.01 / 65535` of
-    /// full scale, not `0.01`.
+    /// `327675008` under RGB16 (`max_alpha` 65535 — vips prints the float32
+    /// rounding of the exact 327675000), and `alpha = 0.005` gives 0 in all
+    /// three. So the 16-bit carrier's dead zone is `0.01 / 65535` of full
+    /// scale, not `0.01`.
     #[test]
     fn unpremultiply_dead_zone_does_not_scale_with_max() {
         for (max, want) in [
