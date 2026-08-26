@@ -175,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Parity with vips is nonetheless **exact, with no tolerance anywhere**: project
   a libviprs decode through that RGBA-half funnel and it reproduces the
-  `vips rawsave` payload byte for byte on all nineteen fixtures, lossy B44 and
+  `vips rawsave` payload byte for byte on all twenty fixtures, lossy B44 and
   DWA codings included. The fixtures are written by the OpenEXR reference
   implementation 3.4.15, so no capture is circular.
 
@@ -184,10 +184,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExrError::UnsupportedSampleType` names it. vips does not refuse them, it
   converts them to half, so an object ID above 65504 reads back there as
   infinity. **Multi-part files decode their first part only**, which is also
-  all vips can reach; the real count comes back as `n-pages`. **Deep EXR does
-  not load** in either. Chroma-subsampled channels do not load. And a
-  `FloatF32(n)` raster is rejected by the pyramid engine, as a loaded `.hdr`
-  already is, so cast to an integer format first if you need tiles.
+  all vips can reach; the real count comes back as `exr-parts`, deliberately
+  not the shared `n-pages`, because vips attaches no page count to an EXR and
+  an EXR part is a layer rather than a page a caller could ask `decode_exr`
+  for. **Deep EXR does not load** in either. Chroma-subsampled channels do not
+  load. And a `FloatF32(n)` raster is rejected by the pyramid engine, as a
+  loaded `.hdr` already is, so cast to an integer format first if you need
+  tiles.
+
+  The decode allocation budget, `DecodeLimits::max_alloc_bytes`, is priced
+  off the channels the header **declares** and not off the bands the
+  selection keeps. An EXR body is compressed and the decoder builds one
+  full-resolution buffer per declared channel before it decompresses
+  anything, so an ordinary compositing render declaring sixty-four channels
+  costs sixty-four buffers however few of them survive selection. Pricing off
+  the selection would under-count that by `declared / selected`, with nothing
+  bounding the ratio.
 
   This costs **ten net-new lock entries**: `exr` 1.74.2 with
   `default-features = false`, plus `bit_field`, `lebe`, `libm`, `paste`,

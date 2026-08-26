@@ -198,6 +198,16 @@ void writeDeep(const std::string &name, int width, int height)
 const std::vector<std::string> RGB  = {"R", "G", "B"};
 const std::vector<std::string> RGBA = {"R", "G", "B", "A"};
 
+// The shape of an ordinary compositing render: the beauty pass plus a
+// stack of AOVs, sixteen channels declared where a loader selects four.
+// The R/G/B/A ramp is written first so the payload is bit-identical to
+// rgba_half_zip.exr's, which makes the extra twelve channels the only
+// variable between the two files.
+const std::vector<std::string> RGBA_AOV = {
+    "R", "G", "B", "A",
+    "AO", "Z", "NX", "NY", "NZ", "PX", "PY", "PZ", "UVX", "UVY", "ID", "EMIT",
+};
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -230,6 +240,11 @@ int main(int argc, char **argv)
 
     // Channel counts.
     writeScanline("rgb_half_zip.exr",  RGB,   HALF, ZIP_COMPRESSION, 8, 4);
+    // Sixteen channels declared, four of them selectable. A loader that
+    // asks the decoder for every channel pays for sixteen full-resolution
+    // buffers whatever it later keeps, so this is the file that tells a
+    // selected-channel allocation budget apart from a declared-channel one.
+    writeScanline("rgba_aov_half_zip.exr", RGBA_AOV, HALF, ZIP_COMPRESSION, 8, 4);
     writeScanline("y_half_zip.exr",    {"Y"}, HALF, ZIP_COMPRESSION, 8, 4);
     writeScanline("z_float_zip.exr",   {"Z"}, FLOAT, ZIP_COMPRESSION, 8, 4);
 

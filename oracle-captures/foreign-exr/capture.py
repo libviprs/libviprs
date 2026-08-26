@@ -147,6 +147,27 @@ def main():
                 "bands": records["y_half_zip"]["vipsheader"].get("bands"),
                 "first_two_pixels": records["y_half_zip"]["vips_first_two_pixels"],
             },
+            "extra_channels_are_ignored": {
+                "file": "fixtures/rgba_aov_half_zip.exr",
+                "what": (
+                    "Sixteen HALF channels: R, G, B, A and twelve AOVs. The RGBA "
+                    "wrapper takes the four it knows and drops the rest, so the "
+                    "decoded payload is byte-identical to the four-channel "
+                    "rgba_half_zip.exr and the twelve AOVs are unreachable "
+                    "through vips. Recorded because the file also separates a "
+                    "loader that prices its allocation budget off the channels it "
+                    "selects from one that prices it off the channels the header "
+                    "declares: those are 4 and 16 here."
+                ),
+                "bands": records["rgba_aov_half_zip"]["vipsheader"].get("bands"),
+                "payload_sha256": records["rgba_aov_half_zip"].get(
+                    "vips_payload_sha256"
+                ),
+                "equals_four_channel_payload": records["rgba_aov_half_zip"].get(
+                    "vips_payload_sha256"
+                )
+                == records["rgba_half_zip"].get("vips_payload_sha256"),
+            },
             "unrecognised_channels_decode_to_black": {
                 "file": "fixtures/z_float_zip.exr",
                 "what": (

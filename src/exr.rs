@@ -52,8 +52,12 @@
 //! * **First part only.** vips opens with `ImfOpenTiledInputFile` and then
 //!   `ImfOpenInputFile` (`openexr2vips.c:164-165`); neither is multi-part
 //!   aware, so parts past the first are unreachable there. libviprs reads
-//!   the first part too and reports the part count as `n-pages` so the
-//!   caller can at least see what was skipped.
+//!   the first part too and reports the part count as `exr-parts` so the
+//!   caller can at least see what was skipped. Deliberately **not**
+//!   `n-pages`: `vipsheader -a` reports no such field for any EXR, an EXR
+//!   part is a layer rather than a page, and [`decode_exr`] has no part
+//!   selector, so putting the count behind [`Raster::get_n_pages`] would
+//!   invite a `0..n` sweep over parts nothing here can address.
 //! * **Tiled and scanline files both decode, and tiled ones carry their
 //!   tile geometry.** `read_header` (`openexr2vips.c:230-232`) sets
 //!   `VIPS_META_TILE_WIDTH` / `VIPS_META_TILE_HEIGHT` for a tiled file and
@@ -218,7 +222,11 @@ pub enum ExrError {
     /// [`DecodeLimits::max_alloc_bytes`].
     ///
     /// An EXR body is compressed, so a small file can declare a very
-    /// large data window; this is the budget that bounds it.
+    /// large data window; this is the budget that bounds it. The price is
+    /// per channel the header **declares**, not per band the selection
+    /// keeps, because the decoder builds a full-resolution buffer for
+    /// every declared channel before it decompresses anything. A file
+    /// declaring sixty-four channels and selecting four costs sixty-four.
     #[error(
         "exr: decoding {width}x{height}x{channels} needs {needed} bytes, above the \
          {max_alloc_bytes}-byte decode allocation budget"
@@ -228,7 +236,9 @@ pub enum ExrError {
         width: u32,
         /// The declared data-window height.
         height: u32,
-        /// How many channels the selection produced.
+        /// How many channels the first part **declares**, which is what
+        /// the decoder allocates for and may be more than the number of
+        /// bands the raster would have had.
         channels: usize,
         /// Bytes the decoded raster would need.
         needed: u64,
@@ -336,15 +346,25 @@ struct Selection {
 /// | `exr-channels` | the selected names, comma separated, in band order. OpenEXR does not forbid a comma inside a channel name, so treat this as a label rather than as something to split on when the names are not the usual `R`/`G`/`B`/`A` |
 /// | `exr-compression` | the first part's compression method |
 /// | `exr-data-window-left` / `-top` | the data-window origin, which the pixels have been normalised away from |
-/// | `n-pages` | how many parts the file has; only the first is decoded |
+/// | `exr-parts` | how many parts the file has; only the first is decoded |
 /// | `tile-width` / `tile-height` | set only for a tiled file, as vips does |
+///
+/// The part count is `exr-parts` and not the shared `n-pages` on purpose.
+/// vips attaches no `n-pages` to an EXR at all, so a raster from here
+/// reports [`Raster::get_n_pages`]` == 1` exactly as one loaded through
+/// `openexrload` does. Beyond parity, the two counts mean different
+/// things: `n-pages` is paired with a page index a caller can ask a
+/// loader for ([`crate::decode_tiff_page`] takes one), while an EXR part
+/// is a layer, and `decode_exr` takes no part argument, so a sweep over
+/// `0..get_n_pages()` would be a sweep over something unreachable.
+/// `exr-parts` says what it is and leaves the page model alone.
 ///
 /// # Limitations
 ///
 /// * **UINT channels do not load.** They need the unsigned sample carrier
 ///   from issue #517. [`ExrError::UnsupportedSampleType`] names it.
 /// * **Multi-part files decode their first part only**, which is also all
-///   vips can reach. `n-pages` reports the real count.
+///   vips can reach. `exr-parts` reports the real count.
 /// * **Deep EXR does not load** ([`ExrError::DeepData`]). Neither does it
 ///   in vips.
 /// * **Chroma-subsampled channels do not load**
@@ -405,18 +425,39 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
                 max: usize::from(u16::MAX),
             })?;
 
+    // The price is per DECLARED channel, not per selected band. The read
+    // below asks for `all_channels()`, and `exr` builds one
+    // full-resolution sample buffer per channel the header declares
+    // (`image/read/samples.rs`, `create_samples_level_reader`, a
+    // `vec![_; resolution.area()]` for each) before it decompresses a
+    // single block. So a 4096x4096 file declaring 64 FLOAT channels
+    // allocates 4 GiB no matter that the selection keeps four of them, and
+    // pricing off `bands` would under-count that by `declared / selected`,
+    // a ratio nothing bounds. `exr` carries no `try_reserve` call at all,
+    // so the top of that range is a process abort rather than an error,
+    // which is exactly the failure class this budget exists to prevent.
+    //
+    // `SAMPLE_BYTES` is the f32 carrier's 4, and a declared HALF channel
+    // only costs `exr` 2, so this over-prices half files. That is the safe
+    // direction, and it is also the true price of the interleaved output
+    // buffer built after the decode, which costs the selected bands again
+    // on top of what `exr` is holding. The budget is therefore a floor on
+    // the peak rather than the peak itself.
+    //
     // Saturating rather than wrapping, because `max_coord`, `max_pixels`
     // and `max_alloc_bytes` are all caller-settable: a caller who lifts
     // every ceiling must still get a refusal here rather than a wrapped
     // price that waves a huge allocation through.
+    let declared = header.channels.list.len();
     let needed = u64::from(width)
         .saturating_mul(u64::from(height))
-        .saturating_mul((bands * SAMPLE_BYTES) as u64);
+        .saturating_mul(declared as u64)
+        .saturating_mul(SAMPLE_BYTES as u64);
     if needed > limits.max_alloc_bytes {
         return Err(ExrError::AllocLimitExceeded {
             width,
             height,
-            channels: bands,
+            channels: declared,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
         }
@@ -640,9 +681,13 @@ fn attach_fields(
     raster
         .fields
         .set("exr-data-window-top", MetadataValue::Int(i64::from(top)));
+    // `exr-parts`, not `n-pages`. vips attaches no page count to an EXR,
+    // and an EXR part is a layer rather than a page: `decode_exr` has no
+    // part selector, so a count read back through `Raster::get_n_pages`
+    // would promise an iteration this loader cannot serve.
     raster
         .fields
-        .set("n-pages", MetadataValue::Int(part_count as i64));
+        .set("exr-parts", MetadataValue::Int(part_count as i64));
     // vips sets these two for a tiled file and leaves them absent for a
     // scanline one (`read_header`, `openexr2vips.c:229-232`), so the
     // presence of the field is itself the signal.
@@ -1036,6 +1081,66 @@ mod tests {
     }
 
     /**
+     * Tests that the alloc budget is priced off the channels the header
+     * DECLARES and not off the bands the selection keeps, which is what
+     * the decoder actually allocates for.
+     * Works by decoding a 16-channel 8x4 file whose selection is the four
+     * R/G/B/A bands, under a 1024-byte budget. Priced off the selection
+     * that is 8*4*4*4 = 512 bytes and passes; priced off the sixteen
+     * declared channels it is 8*4*16*4 = 2048 and must not. `exr` builds
+     * one full-resolution buffer per declared channel before it
+     * decompresses anything, and it has no `try_reserve` anywhere, so an
+     * under-count here is an abort rather than an error on a file that
+     * declares enough channels.
+     * Input: `rgba_aov_half_zip.exr` (16 declared, 4 selected) with
+     * `max_alloc_bytes = 1024` -> Output: `AllocLimitExceeded { channels:
+     * 16, needed: 2048, .. }`, with `channels` naming the count the price
+     * was computed from so the message is not self-contradicting.
+     */
+    #[test]
+    fn alloc_budget_prices_every_declared_channel_not_only_the_selected_ones() {
+        let selected_price = 8 * 4 * 4 * SAMPLE_BYTES as u64;
+        assert_eq!(
+            selected_price, 512,
+            "the four selected bands cost this much"
+        );
+        let limits = DecodeLimits::default().with_max_alloc_bytes(1024);
+        assert!(
+            selected_price <= 1024,
+            "the budget has to sit above the selected price, or the test would \
+             pass for the wrong reason"
+        );
+
+        let err = decode_exr(&fixture("rgba_aov_half_zip"), limits).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SourceError::Exr(ExrError::AllocLimitExceeded {
+                    width: 8,
+                    height: 4,
+                    channels: 16,
+                    needed: 2048,
+                    max_alloc_bytes: 1024,
+                })
+            ),
+            "expected the sixteen declared channels to be priced at 2048 bytes, \
+             got {err:?}"
+        );
+
+        // And the same file decodes to the four selected bands once the
+        // budget covers the declared price, so this is a budget rule and
+        // not a refusal to read a multi-AOV render.
+        let raster = decode_exr(&fixture("rgba_aov_half_zip"), DecodeLimits::default()).unwrap();
+        assert_eq!((raster.width(), raster.height()), (8, 4));
+        assert_eq!(raster.format().channels(), 4);
+        assert!(raster.format().is_float());
+        assert_eq!(
+            raster.get_field("exr-channels"),
+            Some(MetadataValue::Str("R,G,B,A".to_owned()))
+        );
+    }
+
+    /**
      * Tests that the coordinate ceiling is enforced on the declared data
      * window, the same budget every other decoder applies.
      * Works by lowering `max_coord` below the fixture's width.
@@ -1111,12 +1216,18 @@ mod tests {
 
     /**
      * Tests that the compression method and part count reach the caller
-     * as metadata, since neither survives into the pixels.
-     * Works by reading both fields back off a single-part ZIP file.
-     * `n-pages` is how the multi-part ceiling is made visible: vips
-     * reports nothing at all and silently decodes part zero.
+     * as metadata, since neither survives into the pixels, and that the
+     * part count travels under `exr-parts` rather than the shared
+     * `n-pages`.
+     * Works by reading all three fields back off a single-part ZIP file.
+     * `exr-parts` is how the multi-part ceiling is made visible: vips
+     * reports nothing at all and silently decodes part zero. It is not
+     * `n-pages` because `vipsheader -a` attaches none to an EXR (measured,
+     * `oracle-captures/foreign-exr/oracle.json`) and because an EXR part
+     * is a layer, not a page a caller can ask this loader for.
      * Input: `rgba_half_zip.exr` -> Output: `exr-compression` `"zip"`,
-     * `n-pages` 1.
+     * `exr-parts` 1, no `n-pages` field, and `get_n_pages()` 1 as vips
+     * reports for the same file.
      */
     #[test]
     fn compression_and_part_count_are_attached() {
@@ -1125,7 +1236,19 @@ mod tests {
             raster.get_field("exr-compression"),
             Some(MetadataValue::Str("zip".to_owned()))
         );
-        assert_eq!(raster.get_field("n-pages"), Some(MetadataValue::Int(1)));
+        assert_eq!(raster.get_field("exr-parts"), Some(MetadataValue::Int(1)));
+        assert_eq!(
+            raster.get_field("n-pages"),
+            None,
+            "an EXR carries no page count, matching `vipsheader -a`, which \
+             reports none for any of the fixtures"
+        );
+        assert_eq!(
+            raster.get_n_pages(),
+            1,
+            "the shared accessor must read 1 for an EXR, the same value it \
+             reads for a raster vips loaded through openexrload"
+        );
         let piz = decode_exr(&fixture("rgba_half_piz"), DecodeLimits::default()).unwrap();
         assert_eq!(
             piz.get_field("exr-compression"),
@@ -1188,7 +1311,7 @@ mod tests {
      * the whole claim of this module: the lossless codings carry the
      * samples exactly, so any residual difference would be a real bug and
      * not rounding.
-     * Input: nineteen reference-written fixtures -> Output: the captured
+     * Input: twenty reference-written fixtures -> Output: the captured
      * vips digest for each.
      */
     #[test]
@@ -1199,7 +1322,7 @@ mod tests {
         // `oracle-captures/foreign-exr/` against vips 8.18.4, from
         // fixtures written by OpenEXR 3.4.15. `vips_payload_sha256` in
         // oracle.json is the same value.
-        let cases: [(&str, &str, &str); 19] = [
+        let cases: [(&str, &str, &str); 20] = [
             // The lossless sweep, all one payload.
             (
                 "rgba_half_none",
@@ -1291,6 +1414,15 @@ mod tests {
                 "Y",
                 "e86796bead796bc30d8755bfcc5b8383bf771956780bf6128343e6a2109202a6",
             ),
+            // Sixteen declared channels, four of them selectable. The RGBA
+            // wrapper takes R/G/B/A and drops the twelve AOVs, so vips
+            // lands back on the lossless payload and libviprs' selection
+            // has to agree channel for channel.
+            (
+                "rgba_aov_half_zip",
+                "R,G,B,A",
+                "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+            ),
             // The black-image wart, reproduced exactly through the funnel
             // and NOT in the raster libviprs actually returns.
             (
@@ -1336,8 +1468,10 @@ mod tests {
      * result against the name. The `data-window-bomb` seed is the shape
      * that matters most: 455 bytes declaring a 200000x200000 window, which
      * has to be refused from the header rather than allocated and then
-     * regretted.
-     * Input: eleven corpus files -> Output: the named outcome from each,
+     * regretted. `valid-many-channels` is the other budget shape: sixteen
+     * declared channels where four are selected, so a mutator that grows
+     * the channel list grows the decoder's allocation with it.
+     * Input: twelve corpus files -> Output: the named outcome from each,
      * and no panic from any of them.
      */
     #[test]
@@ -1392,6 +1526,14 @@ mod tests {
                     matches!(&result, Ok(r) if r.format().channels() == 4)
                 }
                 "valid-depth-only" => matches!(&result, Ok(r) if r.format().channels() == 1),
+                // Sixteen declared channels, four selected. Under this
+                // seed's 4 MiB budget the 2048-byte declared price passes,
+                // so the fuzzer gets a file whose channel list it can grow
+                // against the check rather than one that is refused up
+                // front.
+                "valid-many-channels" => {
+                    matches!(&result, Ok(r) if r.format().channels() == 4)
+                }
                 other => panic!(
                     "corpus file {other:?} has no expected outcome; add one here \
                      when you add a seed"
@@ -1399,7 +1541,7 @@ mod tests {
             };
             assert!(ok, "corpus file {name:?} gave {result:?}");
         }
-        assert_eq!(seen, 11, "the corpus should hold eleven seeds");
+        assert_eq!(seen, 12, "the corpus should hold twelve seeds");
     }
 
     /**

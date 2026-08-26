@@ -58,6 +58,13 @@
           1.0
         ]
       },
+      "extra_channels_are_ignored": {
+        "file": "fixtures/rgba_aov_half_zip.exr",
+        "what": "Sixteen HALF channels: R, G, B, A and twelve AOVs. The RGBA wrapper takes the four it knows and drops the rest, so the decoded payload is byte-identical to the four-channel rgba_half_zip.exr and the twelve AOVs are unreachable through vips. Recorded because the file also separates a loader that prices its allocation budget off the channels it selects from one that prices it off the channels the header declares: those are 4 and 16 here.",
+        "bands": "4",
+        "payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "equals_four_channel_payload": true
+      },
       "unrecognised_channels_decode_to_black": {
         "file": "fixtures/z_float_zip.exr",
         "what": "A single FLOAT channel named Z. The RGBA wrapper recognises none of R/G/B/Y, so it returns its fill values and vips reports an entirely black image with NO error and NO warning. The file's depth data is unreachable through vips.",
@@ -164,7 +171,7 @@
       "vips_l_exr": "VipsForeignLoadOpenexr (openexrload), load an OpenEXR image (.exr), priority=200, untrusted, is_a, get_flags, get_flags_filename, header, load",
       "save_attempt": {
         "exit": 1,
-        "stderr": "VipsForeignSave: \"/var/folders/1k/g0rh1p_d4z9f6dz49jnh0jdw0000gn/T/tmpzxwlvf3v/out.exr\" is not a known file format"
+        "stderr": "VipsForeignSave: \"/var/folders/1k/g0rh1p_d4z9f6dz49jnh0jdw0000gn/T/tmpeb4rqmmh/out.exr\" is not a known file format"
       }
     }
   },
@@ -211,6 +218,42 @@
         19.0,
         22.5,
         1.0
+      ]
+    },
+    "rgba_aov_half_zip": {
+      "file": "fixtures/rgba_aov_half_zip.exr",
+      "sha256": "ab1d54472c8e8376477cbb3ce4db1dd60ab65f38ac5bcd132f10492b4643ce23",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_aov_half_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
       ]
     },
     "rgba_float_fine": {
