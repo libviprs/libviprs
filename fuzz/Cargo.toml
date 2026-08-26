@@ -35,3 +35,13 @@ doc = false
 name = "fuzz_jxl"
 path = "fuzz_targets/fuzz_jxl.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_exr"
+path = "fuzz_targets/fuzz_exr.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fits"
+path = "fuzz_targets/fuzz_fits.rs"
+doc = false

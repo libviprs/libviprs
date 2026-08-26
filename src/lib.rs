@@ -113,8 +113,10 @@ pub mod encode_tiff;
 pub mod engine;
 pub mod engine_builder;
 pub mod error;
+pub mod exr;
 pub mod extensions;
 pub mod extract;
+pub mod fits;
 pub mod foreign_stubs;
 pub mod freqfilt;
 pub mod geo;
@@ -183,10 +185,15 @@ pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
 // The TIFF free functions are re-exported at the root (not just behind the
 // module path) because the ported foreign cells call them unqualified
-// (`tiff_page_count(...)`, `decode_tiff_page(...)`). The `save_tiff` family
-// and the `tiff_save` / `tiff_load` round-trip are inherent methods on
-// `Raster` and travel with the already-exported `Raster` type.
-pub use encode_tiff::{decode_tiff_page, tiff_page_count};
+// (`tiff_page_count(...)`, `decode_tiff_page(...)`). The `_with_limits` twins
+// come with them: they are the same two entry points with the resource
+// ceilings passed in rather than defaulted, and splitting a pair across two
+// import paths would only make the bounded form the harder one to reach. The
+// `save_tiff` family and the `tiff_save` / `tiff_load` round-trip are inherent
+// methods on `Raster` and travel with the already-exported `Raster` type.
+pub use encode_tiff::{
+    decode_tiff_page, decode_tiff_page_with_limits, tiff_page_count, tiff_page_count_with_limits,
+};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations,
     generate_pyramid_region, is_blank_tile,
@@ -253,6 +260,16 @@ pub use radiance::{RadianceError, decode_radiance};
 // already knows the bytes are a GIF and does not want to go through the
 // sniff route.
 pub use gif::{GifError, decode_gif};
+// `decode_exr` is re-exported beside its error type for the same reason
+// `decode_radiance` is: it is the direct entry point for a caller who
+// already knows the bytes are an OpenEXR file. There is no encoder half
+// to pair it with, because libvips has never shipped an EXR writer.
+pub use exr::{ExrError, decode_exr};
+// `decode_fits` is re-exported for the reason `decode_radiance` is: it is
+// the direct entry point for a caller who already knows the bytes are FITS.
+// The parser's own ceilings stay behind `libviprs::fits::` rather than
+// crowding the crate root with three numeric constants.
+pub use fits::{FitsError, decode_fits};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,

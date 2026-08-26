@@ -247,6 +247,13 @@ impl Raster {
     /// variant an unrecognised format name gets, so the dispatch has one
     /// answer for "this build cannot write that" however the caller
     /// arrived at it.
+    /// `"png"`, `"gif"`, `"webp"`, `"fits"` / `"fit"` / `"fts"` and
+    /// `"v"` / `"vips"` are wired; any other
+    /// format returns [`EncodeError::Unsupported`]. `"webp"` encodes
+    /// losslessly at [`crate::webp::SaveOptions::default`], keeping any
+    /// attached metadata, and `"gif"` at
+    /// [`crate::gif::SaveOptions::default`]; [`Raster::encode_webp`] and
+    /// [`Raster::encode_gif`] take the options explicitly.
     ///
     /// # Errors
     ///
@@ -272,6 +279,10 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
         "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
+        // The three suffixes vips registers for FITS (`vips__fits_suffs`,
+        // `fits.c:125`). `fitssave` takes no options, so there is nothing
+        // to default here.
+        "fits" | "fit" | "fts" => raster.encode_fits(),
         "v" | "vips" => raster.encode_vips().map_err(save_err_to_encode),
         _ => Err(EncodeError::unsupported(format.to_owned())),
     }
