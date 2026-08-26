@@ -149,7 +149,7 @@ println!(
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.97+ (edition 2024)
 - libpdfium shared library (only if using the `pdfium` feature)
 
 ### PDFium setup
