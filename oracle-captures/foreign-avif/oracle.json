@@ -1,0 +1,1183 @@
+{
+  "meta": {
+    "area": "foreign-avif",
+    "issues": [638, 605],
+    "scope": "AVIF still images, load side. Not heifload parity: heifload also reads HEVC, AVC and JPEG payloads and heifsave writes HEVC by default. heifsave appears here only as the thing that made the fixtures.",
+    "vips_version": "vips-8.18.6",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "libheif": "1.23.2",
+    "av1_encoder": "3.14.1",
+    "captured_by": "oracle-captures/foreign-avif/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted above; the binary every number here came out of is a later release build and is not the same artefact"
+  },
+  "notes": [
+    "This machine's vips moved from 8.18.4 to 8.18.6 DURING this capture, under a `brew upgrade` I did not start, taking libheif from 1.23.1 to 1.23.2 with it. Everything here was re-measured on the version recorded in meta. The one cross-version check I could still run before the 8.18.4 keg stopped loading (its libultrahdr had gone) says the drift did not move anything: the 10-bit lossless fixture came out byte-identical on both, sha256 053eadef26480dc8a24af96e654272d197157f5ddec68c490406a2c0392b2001. Every other capture in oracle-captures/ cites 8.18.4, so treat that as the version they were taken at, not as the version installed now.",
+    "`vips heifsave --help` and `vips heifload --help` print the generic driver usage and exit 0. They are not an existence test and they are not an argument list. The bare `vips heifsave` invocation is, and its output is in build_and_argument_surface.",
+    "The heif codec is a DYNAMIC MODULE on this build. `--vips-config` says `true (dynamic module: true)` whether or not the module can actually dlopen, and when its x265 dependency went missing mid-session every heif operation vanished while the config line stayed exactly the same. Check that an operation RUNS, not that the config claims it.",
+    "Everything ran under `env -u VIPS_NOVECTOR`. Nothing in the heif path is vectorised, so it changes no number here, but an inherited empty VIPS_NOVECTOR would still have counted as set and it costs nothing to remove the question.",
+    "HEIC is out of scope for #605 and is not a target here. Where it would differ: `.heic` keeps the default `hevc` compression instead of being overridden to AV1 (see filename_decides_the_codec), its major brand is `heix` rather than `avif`, and its payload needs an HEVC decoder, which is the whole reason #498 closed. The heifload side -- carrier, left justify, band count, nclx handling -- is shared code and behaves the same.",
+    "`heifsave_buffer` and `heifsave_target` register only `.heic` and `.heif` (see build_and_argument_surface), and the `.avif` compression override lives in `vips_foreign_save_heif_file_build`, so it does not apply to them. Writing AVIF to a target needs an explicit `--compression av1`."
+  ],
+  "records": {
+    "build_and_argument_surface": {
+      "what": "The oracle, checked rather than assumed. `--vips-config` names the compiled-in support and `vips -l` names the registered operations and their suffixes; `vips <op> --help` does NOT, it prints generic driver usage and exits 0 even for an operation that does not exist. The heif codec is a DYNAMIC MODULE here, so it can be present in the config line and still fail to dlopen; the argument dumps below only exist because it loaded.",
+      "vips_config_heif": [
+        "HEIC/AVIF load/save with libheif: true (dynamic module: true)"
+      ],
+      "registered_operations": [
+        "VipsForeignLoadHeif (heifload_base), load a HEIF image, priority=0",
+        "VipsForeignLoadHeifFile (heifload), load a HEIF image (.heic, .heif, .avif), priority=0, is_a, get_flags, header, load",
+        "VipsForeignLoadHeifBuffer (heifload_buffer), load a HEIF image, priority=0, is_a_buffer, get_flags, header, load",
+        "VipsForeignLoadHeifSource (heifload_source), load a HEIF image, nocache, priority=0, is_a_source, get_flags, header, load",
+        "VipsForeignSaveHeif (heifsave_base), save image in HEIF format, priority=0, rgb alpha",
+        "VipsForeignSaveHeifFile (heifsave), save image in HEIF format, nocache (.heic, .heif, .avif), priority=0, rgb alpha",
+        "VipsForeignSaveHeifBuffer (heifsave_buffer), save image in HEIF format, nocache (.heic, .heif), priority=0, rgb alpha",
+        "VipsForeignSaveHeifTarget (heifsave_target), save image in HEIF format, nocache (.heic, .heif), priority=0, rgb alpha"
+      ],
+      "heifsave_arguments": "save image in HEIF format\nusage:\n   heifsave in filename [--option-name option-value ...]\nwhere:\n   in           - Image to save, input VipsImage\n   filename     - Filename to save to, input gchararray\noptional arguments:\n   Q            - Q factor, input gint\n\t\t\tdefault: 50\n\t\t\tmin: 1, max: 100\n   bitdepth     - Number of bits per pixel, input gint\n\t\t\tdefault: 12\n\t\t\tmin: 8, max: 12\n   lossless     - Enable lossless compression, input gboolean\n\t\t\tdefault: false\n   compression  - Compression format, input VipsForeignHeifCompression\n\t\t\tdefault enum: hevc\n\t\t\tallowed enums: hevc, avc, jpeg, av1\n   effort       - CPU effort, input gint\n\t\t\tdefault: 4\n\t\t\tmin: 0, max: 9\n   subsample-mode - Select chroma subsample operation mode, input VipsForeignSubsample\n\t\t\tdefault enum: auto\n\t\t\tallowed enums: auto, on, off\n   encoder      - Select encoder to use, input VipsForeignHeifEncoder\n\t\t\tdefault enum: auto\n\t\t\tallowed enums: auto, aom, rav1e, svt, x265\n   tune         - Tuning parameters, input gchararray\n   keep         - Which metadata to retain, input VipsForeignKeep\n\t\t\tdefault flags: exif:xmp:iptc:icc:other:gainmap:all\n\t\t\tallowed flags: none, exif, xmp, iptc, icc, other, gainmap, all\n   background   - Background value, input VipsArrayDouble\n   page-height  - Set page height for multipage save, input gint\n\t\t\tdefault: 0\n\t\t\tmin: 0, max: 100000000\n   profile      - Filename of ICC profile to embed, input gchararray\noperation flags: sequential nocache \n",
+      "heifload_arguments": "load a HEIF image\nusage:\n   heifload filename out [--option-name option-value ...]\nwhere:\n   filename     - Filename to load from, input gchararray\n   out          - Output image, output VipsImage\noptional arguments:\n   page         - First page to load, input gint\n\t\t\tdefault: 0\n\t\t\tmin: 0, max: 100000\n   n            - Number of pages to load, -1 for all, input gint\n\t\t\tdefault: 1\n\t\t\tmin: -1, max: 100000\n   thumbnail    - Fetch thumbnail image, input gboolean\n\t\t\tdefault: false\n   unlimited    - Remove all denial of service limits, input gboolean\n\t\t\tdefault: false\n   flags        - Flags for this file, output VipsForeignFlags\n\t\t\tdefault flags: \n\t\t\tallowed flags: none, partial, bigendian, sequential, all\n   memory       - Force open via memory, input gboolean\n\t\t\tdefault: false\n   access       - Required access pattern for this file, input VipsAccess\n\t\t\tdefault enum: random\n\t\t\tallowed enums: random, sequential, sequential-unbuffered\n   fail-on      - Error level to fail on, input VipsFailOn\n\t\t\tdefault enum: none\n\t\t\tallowed enums: none, truncated, error, warning\n   revalidate   - Don't use a cached result for this operation, input gboolean\n\t\t\tdefault: false\n"
+    },
+    "bit_depth_carrier": {
+      "what": "THE record. One ushort rgb16 ramp written at 8, 10 and 12 bits and read straight back, so each row is a full round trip and the two halves have to be read apart. At 8 bits the carrier is UCHAR/srgb and the load side is a memcpy, so the row shows only heifsave's narrow, a plain `>> 8` (heifsave.c:394-411). At 10 and 12 the carrier is USHORT/RGB16 and the load side LEFT JUSTIFIES: heifload.c:1000-1016 does `v = ((p[0] << 8) | p[1]) << (16 - bits_per_pixel)` on the big-endian samples libheif hands back, which composes with heifsave's `>> (16 - bitdepth)` into `(v >> s) << s`. That is what the booleans below test, each computed from the two measured arrays rather than from a table anyone typed. Load side alone, in the form a port needs it: a decoder that gives you 0..1023 for 10-bit must return `sample << 6`, so the low 6 bits are always zero and the maximum is 65472. For 12-bit it is `sample << 4` and 65520.",
+      "carrier_by_bitdepth": {
+        "8": "uchar / srgb",
+        "10": "ushort / rgb16",
+        "12": "ushort / rgb16"
+      },
+      "why_it_matters": "A port that decodes 10-bit AVIF into u8, or into u16 rescaled to full 0..65535 range, passes every header assertion (4x3, 3 bands, ushort, rgb16, bits-per-sample 10) and produces wrong pixels everywhere. The carrier is u16 and the scale is `value << (16 - bits)`.",
+      "c_reference": "heifload.c:748-761 picks the format and interpretation from `bits_per_pixel > 8` and nothing else; heifload.c:1000-1016 does the byte swap and the shift; vips__heif_chroma at heifload.c:296-310 is what asks libheif for RRGGBB_BE above 8 bits.",
+      "by_bitdepth": {
+        "8": {
+          "fixture": "fixtures/rgb8.avif",
+          "sha256": "d5a55b1a4a56ec66c0cfcd573424f3b7efa4ebd1c529e18f3538f6603909f932",
+          "bytes": 323,
+          "saved_with": "--bitdepth 8 --lossless --keep none",
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "3",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgb8.avif",
+            "vips-loader": "heifload",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "8"
+          },
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 234",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@270+53",
+            "  iinf 35",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 106",
+            "    ipco 75",
+            "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+            "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+            "mdat 61 payload_sha256=9048732e335f69c3fe7bd5a36edae9d962e6b861ab80d797e5fae676721347bc"
+          ],
+          "getpoint": [[0, 0, 0], [1, 3, 4], [15, 16, 127], [128, 255, 255], [0, 0, 0], [1, 3, 4], [15, 16, 127], [128, 255, 255], [0, 0, 0], [1, 3, 4], [15, 16, 127], [128, 255, 255]],
+          "source_16bit": [0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535],
+          "read_back": [0, 0, 0, 1, 3, 4, 15, 16, 127, 128, 255, 255, 0, 0, 0, 1, 3, 4, 15, 16, 127, 128, 255, 255, 0, 0, 0, 1, 3, 4, 15, 16, 127, 128, 255, 255],
+          "format": "uchar",
+          "interpretation": "srgb",
+          "bits_per_sample": 8,
+          "heif_bitdepth_deprecated": 8,
+          "is_narrow_then_left_justify": false,
+          "is_plain_right_shift": true,
+          "is_full_scale_rescale": false,
+          "max_representable": 255,
+          "low_bits_always_zero": 0
+        },
+        "10": {
+          "fixture": "fixtures/rgb10.avif",
+          "sha256": "053eadef26480dc8a24af96e654272d197157f5ddec68c490406a2c0392b2001",
+          "bytes": 331,
+          "saved_with": "--bitdepth 10 --lossless --keep none",
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "3",
+            "format": "ushort",
+            "coding": "none",
+            "interpretation": "rgb16",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgb10.avif",
+            "vips-loader": "heifload",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "10"
+          },
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 234",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@270+61",
+            "  iinf 35",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 106",
+            "    ipco 75",
+            "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=1 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=10|10|10",
+            "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+            "mdat 69 payload_sha256=167a9600a26851ebf744e7e7c06d3ddb56371ec5ae5e321f9c8e8e61f36d7bcf"
+          ],
+          "getpoint": [[0, 0, 192], [256, 960, 1024], [4032, 4096, 32704], [32768, 65472, 65472], [0, 0, 192], [256, 960, 1024], [4032, 4096, 32704], [32768, 65472, 65472], [0, 0, 192], [256, 960, 1024], [4032, 4096, 32704], [32768, 65472, 65472]],
+          "source_16bit": [0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535],
+          "read_back": [0, 0, 192, 256, 960, 1024, 4032, 4096, 32704, 32768, 65472, 65472, 0, 0, 192, 256, 960, 1024, 4032, 4096, 32704, 32768, 65472, 65472, 0, 0, 192, 256, 960, 1024, 4032, 4096, 32704, 32768, 65472, 65472],
+          "format": "ushort",
+          "interpretation": "rgb16",
+          "bits_per_sample": 10,
+          "heif_bitdepth_deprecated": 10,
+          "is_narrow_then_left_justify": true,
+          "is_plain_right_shift": false,
+          "is_full_scale_rescale": false,
+          "max_representable": 65472,
+          "low_bits_always_zero": 6
+        },
+        "12": {
+          "fixture": "fixtures/rgb12.avif",
+          "sha256": "d26f611773104800ed6b045de349433329346c9f0e56af876a11d347591a96bb",
+          "bytes": 338,
+          "saved_with": "--bitdepth 12 --lossless --keep none",
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "3",
+            "format": "ushort",
+            "coding": "none",
+            "interpretation": "rgb16",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgb12.avif",
+            "vips-loader": "heifload",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "12"
+          },
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 234",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@270+68",
+            "  iinf 35",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 106",
+            "    ipco 75",
+            "      av1C 12 marker=1 version=1 seq_profile=2 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=1 twelve_bit=1 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=12|12|12",
+            "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+            "mdat 76 payload_sha256=1efd747d566f3db1f447699238e61ac57e7acc34c84772a4a9c5ad3e5abc1c1e"
+          ],
+          "getpoint": [[0, 0, 240], [256, 1008, 1024], [4080, 4096, 32752], [32768, 65472, 65520], [0, 0, 240], [256, 1008, 1024], [4080, 4096, 32752], [32768, 65472, 65520], [0, 0, 240], [256, 1008, 1024], [4080, 4096, 32752], [32768, 65472, 65520]],
+          "source_16bit": [0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535],
+          "read_back": [0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520, 0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520, 0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520],
+          "format": "ushort",
+          "interpretation": "rgb16",
+          "bits_per_sample": 12,
+          "heif_bitdepth_deprecated": 12,
+          "is_narrow_then_left_justify": true,
+          "is_plain_right_shift": false,
+          "is_full_scale_rescale": false,
+          "max_representable": 65520,
+          "low_bits_always_zero": 4
+        }
+      }
+    },
+    "eight_bit_lossless_identity": {
+      "what": "`heifsave --lossless --bitdepth 8` to a `.avif` and straight back is the identity, for 3 bands and for 4. AV1 lossless with matrix_coefficients 0 (identity/GBR) and 4:4:4 chroma stores the RGB planes as-is, so there is no colour conversion to disagree about. A correct decoder reproduces these bytes exactly rather than approximately.",
+      "cases": {
+        "rgb8": {
+          "fixture": "fixtures/rgb8.avif",
+          "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
+          "bytes": 355,
+          "saved_with": "--bitdepth 8 --lossless --keep none",
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "3",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgb8.avif",
+            "vips-loader": "heifload",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "8"
+          },
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 234",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@270+85",
+            "  iinf 35",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 106",
+            "    ipco 75",
+            "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+            "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+            "mdat 93 payload_sha256=80c0c76b0eb55ed6f098c6e3e8fb03bbee194fea1293cb225acf1b536727687c"
+          ],
+          "getpoint": [[0, 0, 0], [61, 97, 29], [122, 194, 58], [183, 35, 87], [13, 151, 211], [74, 248, 240], [135, 89, 13], [196, 186, 42], [26, 46, 166], [87, 143, 195], [148, 240, 224], [209, 81, 253]],
+          "source_bytes": [0, 0, 0, 61, 97, 29, 122, 194, 58, 183, 35, 87, 13, 151, 211, 74, 248, 240, 135, 89, 13, 196, 186, 42, 26, 46, 166, 87, 143, 195, 148, 240, 224, 209, 81, 253],
+          "bands_in": 3,
+          "bands_out": 3,
+          "identity": true
+        },
+        "rgba8": {
+          "fixture": "fixtures/rgba8.avif",
+          "sha256": "a5fffea3141fad6db384fbb22440cb157f7440ba0be488529ccad01a529ad300",
+          "bytes": 551,
+          "saved_with": "--bitdepth 8 --lossless --keep none",
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "4",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgba8.avif",
+            "vips-loader": "heifload",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "8"
+          },
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 388",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 52 version=0 construction_method=0 offset_size=4 length_size=4 items=1@424+85|2@509+42",
+            "  iinf 56",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "    infe 21 version=2 item_ID=2 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 195",
+            "    ipco 157",
+            "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+            "      av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=1 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      pixi 14 num_channels=1 bits_per_channel=8",
+            "      auxC 56 aux_type=urn:mpeg:mpegB:cicp:systems:auxiliary:alpha aux_subtype_bytes=0",
+            "    ipma 30 version=0 flags=0 entries=1=1*,2,3,4|2=5*,3,6,7*",
+            "  iref 26",
+            "    auxl 14 from_item_ID=2 to_item_IDs=1",
+            "mdat 135 payload_sha256=1b0605ed6f06878d0aa01d2113c3b39f53b74b8350e5d101bef816805cf53819"
+          ],
+          "getpoint": [[0, 0, 0, 0], [61, 97, 29, 85], [122, 194, 58, 170], [183, 35, 87, 255], [13, 151, 211, 40], [74, 248, 240, 125], [135, 89, 13, 210], [196, 186, 42, 39], [26, 46, 166, 80], [87, 143, 195, 165], [148, 240, 224, 250], [209, 81, 253, 79]],
+          "source_bytes": [0, 0, 0, 0, 61, 97, 29, 85, 122, 194, 58, 170, 183, 35, 87, 255, 13, 151, 211, 40, 74, 248, 240, 125, 135, 89, 13, 210, 196, 186, 42, 39, 26, 46, 166, 80, 87, 143, 195, 165, 148, 240, 224, 250, 209, 81, 253, 79],
+          "bands_in": 4,
+          "bands_out": 4,
+          "identity": true
+        }
+      }
+    },
+    "alpha": {
+      "what": "Alpha survives at 8 bits exactly (record 2) and at 10 bits through the same `(v >> 6) << 6`, so the alpha band is not special-cased on the way back. Structurally it is not part of the colour image at all: the container carries a SECOND av1C item with monochrome=1 and its own pixi, tagged by an auxC of `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and joined to the primary item by an `iref` of type `auxl`. A port walking the meta box has to follow that reference; there is no fourth plane in the colour item to find.",
+      "c_reference": "heifload.c:585-589 sets bands to 4 from heif_image_handle_has_alpha_channel and nothing else; heifsave.c:293 sets save_alpha_channel from Bands > 3.",
+      "where_to_look": "the `boxes` of eight_bit_lossless_identity.cases.rgba8 and of alpha.rgba10 below: two av1C, two pixi, an auxC, and an iref/auxl from item 2 back to item 1",
+      "rgba10": {
+        "fixture": "fixtures/rgba10.avif",
+        "sha256": "94575b40e71c8b96393c015309995293bc12bfc4b1165b4d82f55ebc88be8f8f",
+        "bytes": 553,
+        "saved_with": "--bitdepth 10 --lossless --keep none",
+        "header": {
+          "width": "4",
+          "height": "3",
+          "bands": "4",
+          "format": "ushort",
+          "coding": "none",
+          "interpretation": "rgb16",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "fixtures/rgba10.avif",
+          "vips-loader": "heifload",
+          "heif-primary": "0",
+          "n-pages": "1",
+          "heif-compression": "av1",
+          "bits-per-sample": "10"
+        },
+        "boxes": [
+          "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+          "meta 388",
+          "  hdlr 33 handler_type=pict",
+          "  iloc 52 version=0 construction_method=0 offset_size=4 length_size=4 items=1@424+85|2@509+44",
+          "  iinf 56",
+          "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+          "    infe 21 version=2 item_ID=2 protection_index=0 item_type=av01 item_name=",
+          "  pitm 14 item_ID=1",
+          "  iprp 195",
+          "    ipco 157",
+          "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=1 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "      ispe 20 width=4 height=3",
+          "      pixi 16 num_channels=3 bits_per_channel=10|10|10",
+          "      av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=1 twelve_bit=0 monochrome=1 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "      pixi 14 num_channels=1 bits_per_channel=10",
+          "      auxC 56 aux_type=urn:mpeg:mpegB:cicp:systems:auxiliary:alpha aux_subtype_bytes=0",
+          "    ipma 30 version=0 flags=0 entries=1=1*,2,3,4|2=5*,3,6,7*",
+          "  iref 26",
+          "    auxl 14 from_item_ID=2 to_item_IDs=1",
+          "mdat 137 payload_sha256=ecf96e457223d79e4d4a35bf50b9f0594774a9bd1cb726f67953891be85b097b"
+        ],
+        "getpoint": [[0, 0, 192, 256], [960, 1024, 4032, 4096], [32704, 32768, 65472, 65472], [0, 0, 192, 256], [960, 1024, 4032, 4096], [32704, 32768, 65472, 65472], [0, 0, 192, 256], [960, 1024, 4032, 4096], [32704, 32768, 65472, 65472], [0, 0, 192, 256], [960, 1024, 4032, 4096], [32704, 32768, 65472, 65472]],
+        "source_16bit": [0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535, 0, 1, 255, 256, 1023, 1024, 4095, 4096, 32767, 32768, 65472, 65535],
+        "bands_out": 4,
+        "alpha_takes_the_same_left_justify": true
+      }
+    },
+    "greyscale_promotes_to_rgb": {
+      "what": "A 1-band b-w uchar image saved to `.avif` loads back as 3 bands srgb with the luminance repeated. Two separate reasons, and only the second is about loading: `heifsave` is registered `rgb alpha`, so foreign.c:1479-1481 colourspaces a mono source up to sRGB before it ever reaches the encoder; and heifload always decodes to RGB regardless of what it was given (heifload.c:763-765, `FIXME .. we always decode to RGB in generate`). So even a genuinely monochrome AVIF -- which this saver cannot write, but an encoder elsewhere can -- comes back as 3 bands. A port must not return 1 band for one.",
+      "record": {
+        "fixture": "fixtures/grey8.avif",
+        "sha256": "c3556dcd3083f794807dbe55394a5ac72bc634466fd5f4cc4570631ad25b58f9",
+        "bytes": 315,
+        "saved_with": "--bitdepth 8 --lossless --keep none",
+        "header": {
+          "width": "4",
+          "height": "3",
+          "bands": "3",
+          "format": "uchar",
+          "coding": "none",
+          "interpretation": "srgb",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "fixtures/grey8.avif",
+          "vips-loader": "heifload",
+          "heif-primary": "0",
+          "n-pages": "1",
+          "heif-compression": "av1",
+          "bits-per-sample": "8"
+        },
+        "boxes": [
+          "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+          "meta 234",
+          "  hdlr 33 handler_type=pict",
+          "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@270+45",
+          "  iinf 35",
+          "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+          "  pitm 14 item_ID=1",
+          "  iprp 106",
+          "    ipco 75",
+          "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "      ispe 20 width=4 height=3",
+          "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+          "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+          "mdat 53 payload_sha256=50f1aef44fd205cddb32c41d2ccf5dafb4b3d3cd0595ba9a7fe5a181cb38a356"
+        ],
+        "getpoint": [[0, 0, 0], [61, 61, 61], [122, 122, 122], [183, 183, 183], [13, 13, 13], [74, 74, 74], [135, 135, 135], [196, 196, 196], [26, 26, 26], [87, 87, 87], [148, 148, 148], [209, 209, 209]],
+        "source_bytes": [0, 61, 122, 183, 13, 74, 135, 196, 26, 87, 148, 209],
+        "bands_in": 1,
+        "bands_out": 3,
+        "luminance_repeated": true
+      }
+    },
+    "default_bitdepth_follows_interpretation": {
+      "what": "`heifsave` declares `bitdepth` with a default of 12, and that default is overwritten in build: heifsave.c:536-541 sets it to 12 only when the READY image is tagged RGB16 or GREY16, and to 8 otherwise. Measured, a uchar srgb source gets 8 and a ushort source gets 12. The third row is the interesting one: a ushort image tagged plain `srgb` ALSO gets 12, because foreign.c:1476-1481 colourspaces any ushort source to RGB16 before heifsave sees it, keying off the ORIGINAL BandFmt (foreign.c:1403). That has a consequence for reading heifsave.c: the `vips_bitdepth = 8` arm at heifsave.c:400-403 and 417-420, and the negative shift it would compute for bitdepth 10, are unreachable through the file saver.",
+      "cases": {
+        "uchar srgb": {
+          "summary": "outputs/default_uchar_srgb.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "bits_per_sample": 8,
+          "read_back": [0, 0, 0, 61, 97, 29, 122, 194, 58, 183, 35, 87, 13, 151, 211, 74, 248, 240, 135, 89, 13, 196, 186, 42, 26, 46, 166, 87, 143, 195, 148, 240, 224, 209, 81, 253]
+        },
+        "ushort rgb16": {
+          "summary": "outputs/default_ushort_rgb16.avif: 4x3 ushort, 3 bands, rgb16, heifload",
+          "bits_per_sample": 12,
+          "read_back": [0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520, 0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520, 0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520]
+        },
+        "ushort srgb": {
+          "summary": "outputs/default_ushort_srgb.avif: 4x3 ushort, 3 bands, rgb16, heifload",
+          "bits_per_sample": 12,
+          "read_back": [0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520, 0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520, 0, 0, 240, 256, 1008, 1024, 4080, 4096, 32752, 32768, 65472, 65520]
+        }
+      }
+    },
+    "eight_bit_source_at_deeper_bitdepth": {
+      "what": "`heifsave --bitdepth 10` (or 12) on a UCHAR source shifts left by `bitdepth - 8` on the way in (heifsave.c:379-392) and heifload shifts left by `16 - bitdepth` on the way out, so the two compose to exactly `value << 8`. Measured, 255 comes back as 65280 and not 65535: it is a shift, never a `* 257` replicate, so an 8-bit white does not survive as a 16-bit white. Recorded because it is the obvious place to 'fix' a round trip that looks lossy and it would be wrong to.",
+      "cases": {
+        "10": {
+          "summary": "outputs/u8_at_10.avif: 4x3 ushort, 3 bands, rgb16, heifload",
+          "bits_per_sample": 10,
+          "source_bytes": [0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255],
+          "read_back": [0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280],
+          "is_shift_left_8": true,
+          "is_replicate_257": false,
+          "max_read_back": 65280
+        },
+        "12": {
+          "summary": "outputs/u8_at_12.avif: 4x3 ushort, 3 bands, rgb16, heifload",
+          "bits_per_sample": 12,
+          "source_bytes": [0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255, 0, 1, 127, 128, 254, 255],
+          "read_back": [0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280, 0, 256, 32512, 32768, 65024, 65280],
+          "is_shift_left_8": true,
+          "is_replicate_257": false,
+          "max_read_back": 65280
+        }
+      }
+    },
+    "colour_information": {
+      "what": "AVIF can carry colour two ways and libvips uses exactly one of them on the way back. Lossless save writes a `colr` box of type `nclx` with matrix_coefficients 0, because heif_matrix_coefficients_RGB_GBR is what makes AV1 lossless identity (heifsave.c:295-310); a LOSSY save writes no `colr` box at all, since that branch is guarded on `heif->lossless`. Either way heifload THROWS THE NCLX AWAY: heifload.c:719-721 logs `heifload: ignoring nclx profile` and attaches nothing. Only a `rICC` or `prof` colr becomes `icc-profile-data` (heifload.c:694-717). So a tagged and an untagged file differ in exactly one header field and not in the interpretation, which stays srgb at 8 bits and rgb16 above regardless (heifload.c:754-761). Note also that supplying an ICC DISPLACES the nclx box rather than joining it: the icc_tagged case below is lossless and still has only one colr.",
+      "cases": {
+        "lossless_untagged": {
+          "see": "eight_bit_lossless_identity.cases.rgb8 for the full boxes and header; the colr line and the absence of an ICC field are the point here",
+          "colr": "colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "has_icc_profile_data": false
+        },
+        "lossy_untagged": {
+          "fixture": "fixtures/rgb8_q50_420.avif",
+          "sha256": "88cd77d627f65601d430710bcf34ad40f424c1ee80e4459d3d36588a6623cd6c",
+          "bytes": 305,
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 214",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@250+55",
+            "  iinf 35",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 86",
+            "    ipco 56",
+            "      av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+            "    ipma 22 version=0 flags=0 entries=1=1*,2,3",
+            "mdat 63 payload_sha256=af01063788258aeadd4b4e97c1145bf4fc31c00bb8e710db3e7a0c05f1276113"
+          ],
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "3",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgb8_q50_420.avif",
+            "vips-loader": "heifload",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "8"
+          },
+          "getpoint": [[0, 26, 13], [25, 103, 90], [180, 160, 87], [105, 85, 12], [66, 144, 131], [146, 224, 211], [111, 91, 18], [199, 179, 106], [12, 58, 143], [90, 136, 221], [228, 189, 255], [157, 118, 198]],
+          "has_icc_profile_data": false
+        },
+        "icc_tagged": {
+          "fixture": "fixtures/rgb8_icc.avif",
+          "sha256": "0ecd8dd3e1b1a7912f37195b796ead6f9e9e0a786bae257fae6d7af9aa2bc403",
+          "bytes": 828,
+          "profile": "libvips built-in `srgb`, via `heifsave --profile srgb`",
+          "boxes": [
+            "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+            "meta 707",
+            "  hdlr 33 handler_type=pict",
+            "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@743+85",
+            "  iinf 35",
+            "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+            "  pitm 14 item_ID=1",
+            "  iprp 579",
+            "    ipco 548",
+            "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+            "      colr 492 colour_type=rICC profile_bytes=480 profile_sha256=c56e1685d888f5edb92fe07f2750f387f8fe8e91b32ff8fb0b56bfbbb9458353",
+            "      ispe 20 width=4 height=3",
+            "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+            "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+            "mdat 93 payload_sha256=80c0c76b0eb55ed6f098c6e3e8fb03bbee194fea1293cb225acf1b536727687c"
+          ],
+          "header": {
+            "width": "4",
+            "height": "3",
+            "bands": "3",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rgb8_icc.avif",
+            "vips-loader": "heifload",
+            "icc-profile-data": "480 bytes of binary data",
+            "heif-primary": "0",
+            "n-pages": "1",
+            "heif-compression": "av1",
+            "bits-per-sample": "8"
+          },
+          "getpoint": [[0, 0, 0], [61, 97, 29], [122, 194, 58], [183, 35, 87], [13, 151, 211], [74, 248, 240], [135, 89, 13], [196, 186, 42], [26, 46, 166], [87, 143, 195], [148, 240, 224], [209, 81, 253]]
+        },
+        "icc_survives_a_resave": {
+          "what": "heifsave.c:286-289 falls back to the image's own VIPS_META_ICC_NAME when no --profile is given",
+          "colr": "colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "icc_profile_data": null
+        }
+      }
+    },
+    "chroma_subsampling": {
+      "what": "`heifsave` on this build does expose `subsample-mode` with `auto`, `on` and `off`, so this is a real axis rather than an assumed one. Measured through the av1C box's own subsampling flags rather than by guessing from file size: `auto` is 4:2:0 below Q 90 and 4:4:4 at Q 90 and above (heifsave.c:608-612 picks the encoder's `chroma` string as `Q >= 90 ? 444 : 420`), `on` forces 4:2:0 at any Q, `off` forces 4:4:4, and `lossless` overrides the argument to `off` (heifsave.c:530-532) so the lossless_on row is 4:4:4 despite asking for subsampling. seq_profile moves with it: 0 (Main) for 4:2:0 8-bit, 1 (High) for 4:4:4 8-bit, 2 (Professional) for 12-bit. This is the axis a decoder is most likely to get subtly wrong, because a 4:2:0 file needs chroma upsampling and a 4:4:4 one does not.",
+      "fixture_444": "fixtures/rgb8_q90_444.avif",
+      "fixture_444_sha256": "d345b59dfb67063cdcb54463b8535b2bf700d9206b4165ff26b0cd30f070b74b",
+      "fixture_444_boxes": [
+        "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+        "meta 214",
+        "  hdlr 33 handler_type=pict",
+        "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@250+82",
+        "  iinf 35",
+        "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+        "  pitm 14 item_ID=1",
+        "  iprp 86",
+        "    ipco 56",
+        "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+        "      ispe 20 width=4 height=3",
+        "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+        "    ipma 22 version=0 flags=0 entries=1=1*,2,3",
+        "mdat 90 payload_sha256=f8b3b1ca1cde28425baa5cc60bdc9608dc83fb74cc7f0ba96bc9a2dca51a4512"
+      ],
+      "fixture_444_getpoint": [[9, 0, 0], [62, 97, 33], [122, 191, 66], [184, 33, 86], [16, 148, 210], [69, 253, 229], [139, 88, 25], [193, 189, 40], [30, 46, 167], [83, 145, 186], [144, 244, 220], [205, 84, 251]],
+      "sweep": {
+        "q50_auto": {
+          "saved_with": "--Q 50",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": null,
+          "bytes": 305
+        },
+        "q89_auto": {
+          "saved_with": "--Q 89",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": null,
+          "bytes": 322
+        },
+        "q90_auto": {
+          "saved_with": "--Q 90",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": null,
+          "bytes": 332
+        },
+        "q50_off": {
+          "saved_with": "--Q 50 --subsample-mode off",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": null,
+          "bytes": 307
+        },
+        "q90_on": {
+          "saved_with": "--Q 90 --subsample-mode on",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": null,
+          "bytes": 321
+        },
+        "lossless_auto": {
+          "saved_with": "--lossless",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": "colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "bytes": 355
+        },
+        "lossless_on": {
+          "saved_with": "--lossless --subsample-mode on",
+          "av1C": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "colr": "colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "bytes": 355
+        }
+      }
+    },
+    "odd_dimensions": {
+      "what": "A 3x3 image at the default Q, so 4:2:0 over an odd width and an odd height. The chroma planes are 2x2 and the reconstruction has to handle the half-covered right column and bottom row. Pinned because it is where a hand-rolled upsampler diverges first and the header gives no hint that it has.",
+      "fixture": "fixtures/odd3x3_q50.avif",
+      "sha256": "401e4ef6ebba5e06831ef417b093568ed41a0241da394c9fd951d12d440286fc",
+      "bytes": 306,
+      "source_bytes": [0, 0, 0, 61, 97, 29, 122, 194, 58, 13, 151, 211, 74, 248, 240, 135, 89, 13, 26, 46, 166, 87, 143, 195, 148, 240, 224],
+      "header": {
+        "width": "3",
+        "height": "3",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/odd3x3_q50.avif",
+        "vips-loader": "heifload",
+        "heif-primary": "0",
+        "n-pages": "1",
+        "heif-compression": "av1",
+        "bits-per-sample": "8"
+      },
+      "boxes": [
+        "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+        "meta 214",
+        "  hdlr 33 handler_type=pict",
+        "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@250+56",
+        "  iinf 35",
+        "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+        "  pitm 14 item_ID=1",
+        "  iprp 86",
+        "    ipco 56",
+        "      av1C 12 marker=1 version=1 seq_profile=0 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=1 chroma_subsampling_y=1 chroma_sample_position=0 initial_presentation_delay_present=0 config_obus_bytes=0",
+        "      ispe 20 width=3 height=3",
+        "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+        "    ipma 22 version=0 flags=0 entries=1=1*,2,3",
+        "mdat 64 payload_sha256=0d9cf3fbc8a24ecf42c982273115c7c38f9b77ac526534798a0c4973b3e66f9a"
+      ],
+      "getpoint": [[0, 16, 36], [42, 100, 120], [150, 178, 58], [75, 133, 153], [142, 200, 220], [84, 112, 0], [13, 59, 137], [92, 138, 216], [144, 243, 223]],
+      "one_by_one": {
+        "exit": 0,
+        "stderr": [],
+        "header": {
+          "width": "1",
+          "height": "1",
+          "bands": "3",
+          "format": "uchar",
+          "coding": "none",
+          "interpretation": "srgb",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "outputs/one1x1.avif",
+          "vips-loader": "heifload",
+          "heif-primary": "0",
+          "n-pages": "1",
+          "heif-compression": "av1",
+          "bits-per-sample": "8"
+        },
+        "boxes": [
+          "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+          "meta 234",
+          "  hdlr 33 handler_type=pict",
+          "  iloc 34 version=0 construction_method=0 offset_size=4 length_size=4 items=1@270+32",
+          "  iinf 35",
+          "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+          "  pitm 14 item_ID=1",
+          "  iprp 106",
+          "    ipco 75",
+          "      av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "      colr 19 colour_type=nclx colour_primaries=1 transfer_characteristics=13 matrix_coefficients=0 full_range_flag=1",
+          "      ispe 20 width=1 height=1",
+          "      pixi 16 num_channels=3 bits_per_channel=8|8|8",
+          "    ipma 23 version=0 flags=0 entries=1=1*,2,3,4",
+          "mdat 40 payload_sha256=0fa7bce5b9a670eb3dfc6c9a570f503819ebfc6aaa84f172d947033cee85ce69"
+        ]
+      }
+    },
+    "filename_decides_the_codec": {
+      "what": "`heifsave` defaults `compression` to hevc (heifsave.c:856) and then heifsave.c:889-890 overrides it to AV1 for any filename ending `.avif`, AFTER the argument has been parsed, so `--compression hevc` on a `.avif` is silently ignored. Measured both ways round. The brand follows: `.avif` gets a major brand of `avif` with `mif1 avif miaf` compatible, `.heic` gets `heix`. This is why #605 says to capture with an AVIF payload specifically rather than a generic `.heic`: the same operation and the same arguments produce a file a pure-Rust AV1 decoder cannot read, purely from the extension.",
+      "heic_note": "The `.heic` row is here as the contrast only. HEIC is NOT a target of #605 and nothing else in this capture touches it. Same code path, different payload codec, and the heifload side is identical apart from `heif-compression`.",
+      "cases": {
+        "avif_default": {
+          "saved_with": "",
+          "exit": 0,
+          "heif_compression_read_back": "av1",
+          "ftyp": "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+          "av1C_or_hvcC": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "stderr": []
+        },
+        "avif_asking_for_hevc": {
+          "saved_with": "--compression hevc",
+          "exit": 0,
+          "heif_compression_read_back": "av1",
+          "ftyp": "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+          "av1C_or_hvcC": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "stderr": []
+        },
+        "avif_asking_for_avc": {
+          "saved_with": "--compression avc",
+          "exit": 0,
+          "heif_compression_read_back": "av1",
+          "ftyp": "ftyp 28 major_brand=avif minor_version=0 compatible_brands=mif1|avif|miaf",
+          "av1C_or_hvcC": "av1C 12 marker=1 version=1 seq_profile=1 seq_level_idx_0=0 seq_tier_0=0 high_bitdepth=0 twelve_bit=0 monochrome=0 chroma_subsampling_x=0 chroma_subsampling_y=0 chroma_sample_position=2 initial_presentation_delay_present=0 config_obus_bytes=0",
+          "stderr": []
+        },
+        "heic_default": {
+          "saved_with": "",
+          "exit": 0,
+          "heif_compression_read_back": "hevc",
+          "ftyp": "ftyp 28 major_brand=heix minor_version=0 compatible_brands=mif1|heix|miaf",
+          "av1C_or_hvcC": "hvcC 119 body=010408000000000000000000fff000fcfff8f800000f03600001001740010c01ffff0408000003009e380000030000ffba0240610001002a4201010408000003009e380000030000ff90041020b2dd55d35cdc04340010000003019000000300108062000100084401c1703060b120",
+          "stderr": []
+        }
+      }
+    },
+    "encoder_selection": {
+      "what": "`heifsave --encoder` offers auto/aom/rav1e/svt/x265, but the enum is the SUPERSET libvips knows about rather than what this libheif was built with, and asking for a missing one is NOT an error: heifsave.c:565-567 emits a `g_warning` and heifsave.c:571-576 then falls back to heif_context_get_encoder_for_format, so the exit status is 0 and you silently get the default encoder. Measured, every row here writes the SAME bytes, so this build has exactly one AV1 encoder and `--encoder rav1e` is a no-op with a warning. Worth pinning because a differential that selects an encoder and trusts the exit code is not testing what it thinks it is. Every fixture in this directory came out of whichever encoder these rows agree on. Only the bytes depend on it, not the decoded pixels.",
+      "cases": {
+        "auto": {
+          "exit": 0,
+          "bytes": 355,
+          "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
+          "warned_not_found": false,
+          "stderr": [],
+          "same_bytes_as_auto": true
+        },
+        "aom": {
+          "exit": 0,
+          "bytes": 355,
+          "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
+          "warned_not_found": false,
+          "stderr": [],
+          "same_bytes_as_auto": true
+        },
+        "rav1e": {
+          "exit": 0,
+          "bytes": 355,
+          "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
+          "warned_not_found": true,
+          "stderr": [
+            "(vips:1686): VIPS-WARNING **: 08:38:43.743: heifsave: could not find rav1e"
+          ],
+          "same_bytes_as_auto": true
+        },
+        "svt": {
+          "exit": 0,
+          "bytes": 355,
+          "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
+          "warned_not_found": true,
+          "stderr": [
+            "(vips:1687): VIPS-WARNING **: 08:38:43.786: heifsave: could not find svt"
+          ],
+          "same_bytes_as_auto": true
+        },
+        "x265": {
+          "exit": 0,
+          "bytes": 355,
+          "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
+          "warned_not_found": true,
+          "stderr": [
+            "(vips:1699): VIPS-WARNING **: 08:38:43.828: heifsave: could not find x265"
+          ],
+          "same_bytes_as_auto": true
+        }
+      }
+    },
+    "bitdepth_argument_domain": {
+      "what": "Two gates, and only one of them fails. The GObject property is declared 8..12 (heifsave.c:789-795), so 7, 13 and 16 are rejected by the property system with a GLib-GObject-CRITICAL on stderr and then IGNORED: exit status 0, and the file comes out at whatever the interpretation-derived default was, 12 here. 9 and 11 are inside the property range and reach heifsave.c:545-551, which knows AVIF has only 8, 10 and 12, and that one is a real error with exit 1. So `--bitdepth 16` quietly writes a 12-bit file. A port validating a bitdepth it read out of a file should accept exactly {8, 10, 12}.",
+      "cases": {
+        "7": {
+          "exit": 0,
+          "stderr": [
+            "(vips:1700): GLib-GObject-CRITICAL **: 08:38:43.867: value \"7\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
+          ],
+          "bits_per_sample_read_back": "12"
+        },
+        "8": {
+          "exit": 0,
+          "stderr": [],
+          "bits_per_sample_read_back": "8"
+        },
+        "9": {
+          "exit": 1,
+          "stderr": [
+            "heifsave: 9-bit colour depth not supported"
+          ],
+          "bits_per_sample_read_back": null
+        },
+        "10": {
+          "exit": 0,
+          "stderr": [],
+          "bits_per_sample_read_back": "10"
+        },
+        "11": {
+          "exit": 1,
+          "stderr": [
+            "heifsave: 11-bit colour depth not supported"
+          ],
+          "bits_per_sample_read_back": null
+        },
+        "12": {
+          "exit": 0,
+          "stderr": [],
+          "bits_per_sample_read_back": "12"
+        },
+        "13": {
+          "exit": 0,
+          "stderr": [
+            "(vips:1711): GLib-GObject-CRITICAL **: 08:38:44.274: value \"13\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
+          ],
+          "bits_per_sample_read_back": "12"
+        },
+        "16": {
+          "exit": 0,
+          "stderr": [
+            "(vips:1713): GLib-GObject-CRITICAL **: 08:38:44.356: value \"16\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
+          ],
+          "bits_per_sample_read_back": "12"
+        }
+      }
+    },
+    "metadata_default_keep": {
+      "what": "Every fixture here is saved `--keep none`. With the DEFAULT keep, heifsave writes an EXIF block the source raster never carried, synthesised from the resolution fields: XResolution/YResolution/ResolutionUnit plus an Exif 2.1 version and the pixel dimensions. heifload lifts it back as `exif-data` and libexif expands it into `exif-ifd*` fields. Worth pinning because a differential that saves with defaults and compares byte counts will see this and blame the codec.",
+      "header": {
+        "width": "4",
+        "height": "3",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "outputs/keep_all.avif",
+        "vips-loader": "heifload",
+        "exif-data": "186 bytes of binary data",
+        "resolution-unit": "in",
+        "exif-ifd0-XResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+        "exif-ifd0-YResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+        "exif-ifd0-ResolutionUnit": "2 (Inch, Short, 1 components, 2 bytes)",
+        "exif-ifd0-YCbCrPositioning": "1 (Centred, Short, 1 components, 2 bytes)",
+        "exif-ifd2-ExifVersion": "Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-ComponentsConfiguration": "Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-FlashpixVersion": "FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-ColorSpace": "65535 (Uncalibrated, Short, 1 components, 2 bytes)",
+        "exif-ifd2-PixelXDimension": "4 (4, Long, 1 components, 4 bytes)",
+        "exif-ifd2-PixelYDimension": "3 (3, Long, 1 components, 4 bytes)",
+        "heif-primary": "0",
+        "n-pages": "1",
+        "heif-compression": "av1",
+        "bits-per-sample": "8"
+      },
+      "extra_items": [
+        "    infe 21 version=2 item_ID=1 protection_index=0 item_type=av01 item_name=",
+        "    infe 21 version=2 item_ID=2 protection_index=0 item_type=Exif item_name=",
+        "mdat 283 payload_sha256=9810006244ddbaaba8c99f49aea98a90b90accc96e91d47cd5979855deb31606"
+      ]
+    },
+    "malformed_and_truncated": {
+      "header_is_not_a_decode": "zeroed_mdat.avif is the case to read first. Its container is intact, so vipsheader succeeds and reports 4x3 uchar srgb heifload with every heif-* field present, and the decode fails only when pixels are pulled, with `Corrupt frame detected` and one `error in tile 0 x N` warning per strip. A port must not treat a parsed header as a decodable image, and must fail at generate rather than returning zeros.",
+      "what": "The other half of this record is that a file libvips does not RECOGNISE does not fail: `vips_foreign_load_heif_is_a` (heifload.c:400-425) requires the first 4 bytes to be a big-endian box length that is a multiple of 4 and no larger than 2048, and bytes 4..12 to equal one of ten literal `ftyp` magics (heifload.c:380-391). Fail any of that and vips falls through to the NEXT loader, which on this build is magickload, and the file may well load anyway through ImageMagick's own HEIF delegate -- with a different loader name in the header and different behaviour. `ftypavis`, the AVIF SEQUENCE brand, is the live example: it is missing from the magic list, so an otherwise valid file goes to magickload. A genuinely truncated file that DOES pass is_a fails inside libheif instead, with a `No 'meta' box` error preceded by a run of `bad seek to N` warnings from the vips source as it hunts for the end. And when the fallback DOES land, it can be invisible: brand_avis.avif goes to magickload and returns the same pixels as the original, so nothing but `vips-loader` and the missing heif-* fields says anything happened.",
+      "fail_on_note": "`heifload`'s `fail-on` argument does not change any of this: the truncated file fails while reading the header, before fail-on has anything to gate.",
+      "reference_pixel_1_0": "the undamaged fixtures/rgb8.avif reads 61 97 29 at (1,0); a case below that loads and reports something else decoded different pixels out of the same payload",
+      "cases": {
+        "truncated.avif": {
+          "bytes": 213,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: fixtures/truncated.avif: bad seek to 1024"
+          ],
+          "stderr_last": [
+            "heif: Invalid input: No 'meta' box: Cannot read full meta box (2.104)"
+          ],
+          "distinct_stderr_lines": 11,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "heif: Invalid input: No 'meta' box: Cannot read full meta box (2.104)"
+          ],
+          "fixture": "fixtures/truncated.avif",
+          "sha256": "102e09c273d24151bc26f47a8f8be63a9d4997b63c6bab8ed1153a7a2a5ae74e"
+        },
+        "truncated_ftyp.avif": {
+          "bytes": 10,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: VipsForeignLoad: \"outputs/truncated_ftyp.avif\" is not a known file format"
+          ],
+          "stderr_last": [
+            "vipsheader: VipsForeignLoad: \"outputs/truncated_ftyp.avif\" is not a known file format"
+          ],
+          "distinct_stderr_lines": 1,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "VipsForeignLoad: \"outputs/truncated_ftyp.avif\" is not a known file format"
+          ]
+        },
+        "ftyp_only.avif": {
+          "bytes": 28,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: outputs/ftyp_only.avif: bad seek to 1024"
+          ],
+          "stderr_last": [
+            "heif: Invalid input: Unspecified: File size too small. (2.0)"
+          ],
+          "distinct_stderr_lines": 9,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "heif: Invalid input: Unspecified: File size too small. (2.0)"
+          ]
+        },
+        "empty.avif": {
+          "bytes": 0,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: VipsForeignLoad: \"outputs/empty.avif\" is not a known file format"
+          ],
+          "stderr_last": [
+            "vipsheader: VipsForeignLoad: \"outputs/empty.avif\" is not a known file format"
+          ],
+          "distinct_stderr_lines": 1,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "VipsForeignLoad: \"outputs/empty.avif\" is not a known file format"
+          ]
+        },
+        "brand_avis.avif": {
+          "bytes": 355,
+          "exit": 0,
+          "vips_loader": "magickload",
+          "stderr_first": [],
+          "stderr_last": [],
+          "distinct_stderr_lines": 0,
+          "getpoint_1_0": [61, 97, 29],
+          "pixel_exit": 0,
+          "pixel_error": [],
+          "fixture": "fixtures/brand_avis.avif",
+          "sha256": "cbc5cf3cdcba531478282400e11dea95db4637511c7e6d113b443cbb57439c9e"
+        },
+        "brand_zzzz.avif": {
+          "bytes": 355,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: VipsForeignLoad: \"outputs/brand_zzzz.avif\" is not a known file format"
+          ],
+          "stderr_last": [
+            "vipsheader: VipsForeignLoad: \"outputs/brand_zzzz.avif\" is not a known file format"
+          ],
+          "distinct_stderr_lines": 1,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "VipsForeignLoad: \"outputs/brand_zzzz.avif\" is not a known file format"
+          ]
+        },
+        "ftyp_len_29.avif": {
+          "bytes": 355,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: magickload: Magick: Invalid input: Unspecified: Insufficient input data (2.0) `outputs/ftyp_len_29.avif' @ error/heic.c/IsHEIFSuccess/207 (null)"
+          ],
+          "stderr_last": [
+            "vipsheader: magickload: Magick: Invalid input: Unspecified: Insufficient input data (2.0) `outputs/ftyp_len_29.avif' @ error/heic.c/IsHEIFSuccess/207 (null)"
+          ],
+          "distinct_stderr_lines": 1,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "magickload: Magick: Invalid input: Unspecified: Insufficient input data (2.0) `outputs/ftyp_len_29.avif' @ error/heic.c/IsHEIFSuccess/207 (null)"
+          ]
+        },
+        "ftyp_len_4096.avif": {
+          "bytes": 355,
+          "exit": 1,
+          "vips_loader": null,
+          "stderr_first": [
+            "vipsheader: magickload: Magick: image type not supported `outputs/ftyp_len_4096.avif' @ error/heic.c/ReadHEICImage/1036 (null)"
+          ],
+          "stderr_last": [
+            "vipsheader: magickload: Magick: image type not supported `outputs/ftyp_len_4096.avif' @ error/heic.c/ReadHEICImage/1036 (null)"
+          ],
+          "distinct_stderr_lines": 1,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "magickload: Magick: image type not supported `outputs/ftyp_len_4096.avif' @ error/heic.c/ReadHEICImage/1036 (null)"
+          ]
+        },
+        "zeroed_mdat.avif": {
+          "bytes": 355,
+          "exit": 0,
+          "vips_loader": "heifload",
+          "stderr_first": [],
+          "stderr_last": [],
+          "distinct_stderr_lines": 0,
+          "getpoint_1_0": [],
+          "pixel_exit": 1,
+          "pixel_error": [
+            "heif: Invalid input: Unspecified: Corrupt frame detected (2.0)"
+          ]
+        }
+      }
+    },
+    "ftyp_brand_is_a_gate_not_a_codec_selector": {
+      "what": "The same AV1 payload behind each of the twelve brands below, and the answer splits in two. DECODING ignores the brand: all ten brands in heif_magic load through heifload and return pixel (1,0) identical to the untouched file, because the codec comes from the item's `infe` type (`av01`) and its av1C property. LABELLING is the brand and nothing else: heifload.c:733-741 sniffs 12 bytes, runs heif_main_brand over them, and sets `heif-compression` to av1 only for `avif` or `avis`, defaulting to `hevc` otherwise -- so nine of these ten AV1 files are labelled `hevc` while decoding perfectly. `heif-compression` is a brand echo, NOT codec detection, and a port must not believe it. The two brands outside the list fall through to another loader entirely.",
+      "reference_pixel_1_0": "the untouched fixtures/rgb8.avif reads 61 97 29 at (1,0)",
+      "cases": {
+        "heic": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_heic.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "heix": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_heix.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "hevc": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_hevc.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "heim": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_heim.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "heis": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_heis.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "hevm": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_hevm.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "hevs": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_hevs.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "mif1": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_mif1.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "msf1": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_msf1.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "hevc",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "avif": {
+          "in_heif_magic_list": true,
+          "vips_loader": "heifload",
+          "summary": "outputs/brand_avif.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "heif_compression": "av1",
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "avis": {
+          "in_heif_magic_list": false,
+          "vips_loader": "magickload",
+          "summary": "outputs/brand_avis.avif: 4x3 uchar, 3 bands, srgb, magickload",
+          "heif_compression": null,
+          "getpoint_1_0": [61, 97, 29]
+        },
+        "mif2": {
+          "in_heif_magic_list": false,
+          "vips_loader": null,
+          "summary": null,
+          "heif_compression": null,
+          "getpoint_1_0": []
+        }
+      }
+    },
+    "still_image_page_fields": {
+      "what": "An AVIF still reports `n-pages: 1` and `heif-primary: 0`, and `[n=-1]` is the same image rather than a toilet roll, so the page model #569 covers has nothing to do here. `[page=1]` is out of range and errors; `[thumbnail=true]` on a file with no thumbnail item falls back to the primary image rather than failing. Recorded so a port knows which of these have to be accepted and which have to be refused.",
+      "cases": {
+        "default": {
+          "summary": "fixtures/rgb8.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "n_pages": "1",
+          "heif_primary": "0",
+          "bits_per_sample": "8",
+          "error": null
+        },
+        "page=0": {
+          "summary": "fixtures/rgb8.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "n_pages": "1",
+          "heif_primary": "0",
+          "bits_per_sample": "8",
+          "error": null
+        },
+        "n=-1": {
+          "summary": "fixtures/rgb8.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "n_pages": "1",
+          "heif_primary": "0",
+          "bits_per_sample": "8",
+          "error": null
+        },
+        "n=2": {
+          "summary": null,
+          "n_pages": null,
+          "heif_primary": null,
+          "bits_per_sample": null,
+          "error": "heifload: bad page number"
+        },
+        "page=1": {
+          "summary": null,
+          "n_pages": null,
+          "heif_primary": null,
+          "bits_per_sample": null,
+          "error": "heifload: bad page number"
+        },
+        "thumbnail": {
+          "summary": "fixtures/rgb8.avif: 4x3 uchar, 3 bands, srgb, heifload",
+          "n_pages": "1",
+          "heif_primary": "0",
+          "bits_per_sample": "8",
+          "error": null
+        }
+      }
+    }
+  }
+}
