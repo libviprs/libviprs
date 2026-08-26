@@ -538,6 +538,18 @@ impl MemoryTracker {
     pub fn dealloc(&self, bytes: u64) {
         // `fetch_update` retries on contention (CAS loop) so the clamp is
         // applied atomically with respect to concurrent alloc/dealloc calls.
+        //
+        // The `allow` is for nightly only, and it is load-bearing rather than
+        // tidy-up: nightly has renamed this method to `try_update`, the crate
+        // sets `[lints.rust] deprecated = "deny"`, and Miri needs nightly. So
+        // without it `cargo +nightly miri test` fails to compile the lib and
+        // Miri does not run at all, while stable stays green and says nothing
+        // (issue #643). Renaming is not the fix: `try_update` exists on
+        // neither the 1.97 MSRV nor 1.98 stable, so it would break every
+        // toolchain except the one that currently works. Delete the `allow`
+        // and rename once `try_update` is stable and the MSRV has moved past
+        // it.
+        #[allow(deprecated)]
         let _ = self
             .current
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
