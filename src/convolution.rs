@@ -54,13 +54,18 @@
 //!   baked as `mask / scale`, accumulation is `f64`, and the result is a
 //!   32-bit float image regardless of the input depth (libvips promotes
 //!   int inputs to `float`; its `double` case has no libviprs depth).
-//!   [`Precision::Integer`] is the `vips_convi` C path: the mask is
-//!   converted to integers with `rint()` and the scale adjusted to keep
-//!   the input/output brightness ratio (`vips__image_intize`), the sum is
-//!   accumulated in `i64`, and `(sum + scale / 2) / scale` is written back
-//!   in the input format, clipped to its range. A float input under
-//!   integer precision keeps the float path of `vips_convi_gen`: `f64`
-//!   accumulation with the integer mask and no clipping.
+//!   [`Precision::Integer`] is the `vips_convi` C path: every coefficient
+//!   is `rint()`-ed (`vips__image_intize`), the sum is accumulated in
+//!   `i64`, and `(sum + scale / 2) / scale` is written back in the input
+//!   format, clipped to its range. That divisor is `rint()` of the mask's
+//!   **own** scale, not the brightness-corrected one `vips__image_intize`
+//!   computes alongside the coefficients: `vips_convi_gen` reads the
+//!   scale and the offset straight off the original mask
+//!   (`convolution/convi.c:757-760`) and never sees the intized copy's
+//!   metadata. Dividing by the corrected scale instead was issue #547.
+//!   A float input under integer precision keeps the float path of
+//!   `vips_convi_gen`: `f64` accumulation with the integer mask and no
+//!   clipping.
 //! * **Edges.** The input is notionally extended by replicating its edge
 //!   pixels (`vips_embed` with `VIPS_EXTEND_COPY`, exactly as
 //!   `vips_convi_build` / `vips_convf_build` / `vips_correlation_build`
@@ -167,13 +172,22 @@
 //!
 //! # Divergence from stock libvips
 //!
-//! Integer-precision convolution is where this module and a stock libvips
-//! knowingly disagree. Two gaps are open, neither is fixed here, and both
-//! reach every operation that runs an integer convolution:
+//! Three gaps are open between this module and a stock libvips. The first
+//! two are integer-precision arithmetic and neither is closable here. The
+//! third is not arithmetic at all: it is an argument vips accepts and this
+//! module deliberately refuses, and it applies at either precision.
+//!
+//! The first reaches every operation that runs an integer convolution:
 //! [`Raster::conv`] and [`Raster::convsep`] at [`Precision::Integer`],
 //! [`Raster::compass`], [`Raster::gaussblur`], [`Raster::sharpen`],
 //! [`Raster::canny`], and the uchar arm of [`Raster::sobel`],
-//! [`Raster::scharr`] and [`Raster::prewitt`].
+//! [`Raster::scharr`] and [`Raster::prewitt`]. The second reaches only
+//! the three that convolve with a mask the caller handed in,
+//! [`Raster::conv`], [`Raster::convsep`] and [`Raster::compass`], because
+//! it is about a scale libvips cannot hold and every mask this module
+//! builds for itself carries an integer one. The third reaches
+//! [`Raster::compass`] alone, and reaches it before `precision` is ever
+//! read.
 //!
 //! * **The two integer-convolution kernels, issue #558.** libviprs ports
 //!   `vips_convi_gen`, the portable C loop, which divides with C's `/`
@@ -242,10 +256,40 @@
 //!   integer-conv record on both libvips paths with a `paths_agree` flag
 //!   and asserts it.
 //!
-//! * **The intized scale, issue #547.** `vips_convi_gen` reads the scale
-//!   off the *original* mask where `vips__image_intize` computes a nudged
-//!   one; libviprs divides by the nudged scale. That also moves real
-//!   output bytes, and the `intize` helper documents the detail.
+//! * **A mask scale that rounds to zero, issue #547.**
+//!   `vips_convi_gen` holds the divisor in an `int`
+//!   (`convolution/convi.c:757-760`), so any `|scale| < 0.5` leaves it at
+//!   `0` and C divides by it. Measured on 8.18.4 at scale 0.4, the two
+//!   integer arms answer `0` (aarch64 `sdiv` returns zero rather than
+//!   trapping, which is not a defined result, and x86 would trap) and the
+//!   float-input arm prints `inf`. libviprs nudges a zero divisor to `1`
+//!   instead, the guard `vips__image_intize` writes for its own copy at
+//!   `convi.c:895-897` and the only total answer on offer, so the sums
+//!   are written back undivided. [`Precision::Integer`] carries the
+//!   contract and what to reach for instead. What #547 reported, a
+//!   division by the brightness-corrected scale `vips__image_intize`
+//!   derives instead of by the one `vips_convi_gen` reads off the mask,
+//!   is fixed and is not a divergence any more; the `intize` helper
+//!   documents the divisor that replaced it.
+//!
+//! * **An out-of-range `compass` `times`.** vips declares the bound on
+//!   the GObject property (`VIPS_ARG_INT(class, "times", 101, ..., 1,
+//!   1000, 2)` in `convolution/compass.c`), and GObject does not refuse
+//!   the call when you miss it. It writes
+//!   `value "N" of type 'gint' is invalid or out of range for property
+//!   'times'` to stderr, leaves the property at its default of `2`, and
+//!   runs. Measured on 8.18.4 with a 3x3 ones mask over a 4x4 black
+//!   image, `--times 0`, `--times 1001` and `--times 100000` all exit
+//!   `0` and write output byte-identical to `--times 2`.
+//!
+//!   [`Raster::try_compass`] returns [`ConvolutionError::TimesOutOfRange`]
+//!   instead, and [`Raster::compass`] panics. So a caller porting
+//!   `vips compass --times 1001` gets an error here where vips hands
+//!   back an image, and that is deliberate: silently convolving twice
+//!   when you asked for a thousand rounds is a wrong answer wearing a
+//!   warning, and the warning goes to stderr where a library caller
+//!   never sees it. The accepted range is identical to vips's, so
+//!   anything vips actually honours is honoured here too.
 
 use crate::colour::ColourError;
 use crate::conversion::{Angle45, ConversionError, Interpretation, cast_float_sample};
@@ -264,13 +308,32 @@ const SHARPEN_X1: f64 = 2.0;
 const SHARPEN_Y2: f64 = 10.0;
 const SHARPEN_Y3: f64 = 20.0;
 
+/// The range [`Raster::compass`] accepts for `times`, the bound libvips
+/// declares on the property in `convolution/compass.c`:
+/// `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)`. GObject refuses
+/// anything outside it before the operation is built, so it never reaches
+/// a convolution there either. Measured on 8.18.4 with a 3x3 ones mask
+/// over a 4x4 black image: `--times 1` and `--times 1000` run, while
+/// `--times 0`, `--times 1001` and `--times 100000` each draw
+/// `value "N" of type 'gint' is invalid or out of range for property
+/// 'times' of type 'gint'` out of GObject and then run at the property's
+/// default of 2, so the number asked for never reaches a convolution.
+///
+/// libviprs used to check the low end only, so `times` was effectively
+/// unbounded: `u32::MAX` reserved a `Vec` of 4.29 billion rasters, some
+/// 400 GB of address space, and then started that many convolutions.
+const COMPASS_TIMES_MIN: u32 = 1;
+/// Upper end of the [`COMPASS_TIMES_MIN`] range.
+const COMPASS_TIMES_MAX: u32 = 1000;
+
 /// Calculation accuracy for the convolution operations (libvips
 /// `VipsPrecision`; the `APPROXIMATE` variant is not ported).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Precision {
     /// Integer arithmetic: the mask is converted to integers with
-    /// `rint()` and the result stays in the input format.
+    /// `rint()`, each sum is divided by `rint()` of the mask's own scale,
+    /// and the result stays in the input format.
     ///
     /// # Parity contract (issue #558)
     ///
@@ -338,6 +401,54 @@ pub enum Precision {
     /// and every [`Precision::Float`] path are unaffected: `sharpen`
     /// convolves the `L` of `LabS`, which is 16-bit, and the vector path
     /// is gated on `BandFmt == VIPS_FORMAT_UCHAR` (`convi.c:1151`).
+    ///
+    /// # A mask scale that rounds to zero (issue #547)
+    ///
+    /// This is the second divergence, it is unrelated to the vector path,
+    /// and it is the only one libviprs chose rather than inherited.
+    ///
+    /// `vips_convi_gen` takes its divisor off the mask the caller handed
+    /// in and holds it in an `int` (`convolution/convi.c:757-760`):
+    ///
+    /// ```c
+    /// VipsImage *M = convolution->M;
+    /// int scale = rint(vips_image_get_scale(M));
+    /// int rounding = scale / 2;
+    /// ```
+    ///
+    /// libviprs divides by that same quantity, which is what #547 fixed.
+    /// So any `|scale| < 0.5` leaves libvips holding `0` and dividing by
+    /// it, and there is no libvips answer left to reproduce. Measured on
+    /// 8.18.4 with `Kernel { data: [[1.0, 1.0]], scale: 0.4 }` over a flat
+    /// field: the uchar and ushort arms print `0`, because aarch64 `sdiv`
+    /// answers zero on a zero divisor rather than trapping, which is not a
+    /// defined result and would trap on x86; the float-input arm of the
+    /// same generator prints `inf`.
+    ///
+    /// **libviprs nudges a divisor of zero to `1`.** That is the guard
+    /// `vips__image_intize` writes for its own copy at
+    /// `convi.c:895-897`, and it is the only total answer on offer: the
+    /// window sums are written back undivided, clipped to the input
+    /// format as usual. Nothing else about the mask changes, so the
+    /// coefficients are still `rint()`-ed and the offset still applies.
+    ///
+    /// It costs nothing on any mask this module builds at this precision.
+    /// [`Kernel::gaussmat`] rounds every coefficient to `rint(20 * v)` and
+    /// keeps a centre tap of 20, [`Kernel::logmat`] sums integers so its
+    /// scale is either an integer of magnitude 1 or more or exactly 0
+    /// (already [`ConvolutionError::ZeroScale`]), and the fixed masks
+    /// behind [`Raster::sobel`], [`Raster::scharr`], [`Raster::prewitt`]
+    /// and [`Raster::canny`] are integers over an integer scale. The nudge
+    /// therefore needs a scale that did not come from a generator at this
+    /// precision: one a caller wrote into [`Kernel`] by hand, or a
+    /// [`Kernel::logmat_with_precision`] float mask handed to
+    /// [`Raster::conv`], [`Raster::convsep`] or [`Raster::compass`] at
+    /// [`Precision::Integer`].
+    ///
+    /// A caller who wants a sub-unit scale has two ways to keep libvips
+    /// parity: scale the coefficients up instead and leave the divisor at
+    /// or above 1, or use [`Precision::Float`], which has no `int`
+    /// anywhere in the path and divides by the scale exactly as written.
     Integer,
     /// Floating-point arithmetic: the result is a 32-bit float image.
     ///
@@ -411,10 +522,22 @@ pub enum ConvolutionError {
     /// odd-sided square kernels only.
     #[error("compass needs an odd-sided square kernel, got {width}x{height}")]
     NotOddSquareKernel { width: u32, height: u32 },
-    /// `compass` must convolve at least once (libvips bounds `times` at
-    /// `1..1000`).
-    #[error("compass needs times >= 1")]
-    ZeroTimes,
+    /// A [`Raster::compass`] `times` outside the range libvips declares
+    /// on the property, `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000,
+    /// 2)` in `convolution/compass.c`. GObject refuses both ends before
+    /// the operation is built, so neither reaches a convolution in vips
+    /// and neither does here. `times` used to be checked against zero
+    /// only, which left the top open: `u32::MAX` reserved a result vector
+    /// of 4.29 billion rasters and then ran that many convolutions.
+    #[error("compass times must be between {min} and {max}, got {times}")]
+    TimesOutOfRange {
+        /// The `times` that was asked for.
+        times: u32,
+        /// The smallest `times` libvips accepts, `1`.
+        min: u32,
+        /// The largest `times` libvips accepts, `1000`.
+        max: u32,
+    },
     /// The correlation template must have the same band count as the
     /// image.
     #[error("correlation band count mismatch: image has {image} bands, template {template}")]
@@ -755,28 +878,59 @@ fn check_mask_param(
 // Shared pixel plumbing
 // ---------------------------------------------------------------------------
 
+/// An empty `Vec<T>` with room for `len` items, reserved fallibly.
+///
+/// `width` and `height` only name the raster in the error; `bytes` is the
+/// real size of the request, which for these intermediates is several
+/// times the raster's own byte length.
+///
+/// This is [`alloc_op_output`]'s contract for a buffer that is not an
+/// op's output: reserve with [`Vec::try_reserve_exact`] and report
+/// [`RasterError::AllocationFailed`], never reach `handle_alloc_error`
+/// and abort. Callers fill the returned `Vec` with `extend` or `resize`,
+/// neither of which reallocates while the reserved capacity holds.
+fn try_buffer<T>(width: u32, height: u32, len: usize) -> Result<Vec<T>, RasterError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes: len.saturating_mul(size_of::<T>()),
+        })?;
+    Ok(v)
+}
+
 /// Read every sample of `r` as `f64`, row-major with bands interleaved.
 /// Unsigned samples convert exactly; float samples widen exactly.
-fn samples_f64(r: &Raster) -> Vec<f64> {
+///
+/// Eight bytes per sample where the source carries one or two makes this
+/// the largest single allocation on the convolution path: measured
+/// post-#598 on a 4000x4000 `Rgb8` integer conv, 384 MB of a 486 MB peak
+/// for 48 MB of input. It is also the allocation every fallible entry
+/// point in this module sits on, so it is reserved through
+/// [`try_buffer`] and reports [`RasterError::AllocationFailed`]. It used
+/// to be a plain `.collect()`, which on failure reaches
+/// `handle_alloc_error` and **aborts the process**. A `try_` API that
+/// aborts is worse than an infallible one, because a caller reasonably
+/// reads the `Result` as covering allocation (issue #575).
+fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let fmt = r.format();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
     let data = r.data();
+    let mut out = try_buffer(r.width(), r.height(), n)?;
     match fmt.bytes_per_channel() {
-        1 => data.iter().map(|&b| b as f64).collect(),
-        2 => (0..n)
-            .map(|i| u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64)
-            .collect(),
-        _ => (0..n)
-            .map(|i| {
-                f32::from_ne_bytes([
-                    data[i * 4],
-                    data[i * 4 + 1],
-                    data[i * 4 + 2],
-                    data[i * 4 + 3],
-                ]) as f64
-            })
-            .collect(),
+        1 => out.extend(data.iter().map(|&b| b as f64)),
+        2 => out.extend((0..n).map(|i| u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64)),
+        _ => out.extend((0..n).map(|i| {
+            f32::from_ne_bytes([
+                data[i * 4],
+                data[i * 4 + 1],
+                data[i * 4 + 2],
+                data[i * 4 + 3],
+            ]) as f64
+        })),
     }
+    Ok(out)
 }
 
 /// The 32-bit float format with `channels` bands (the `vips_convf` output
@@ -845,8 +999,8 @@ fn clamp_coord(v: i64, size: u32) -> usize {
 // conv
 // ---------------------------------------------------------------------------
 
-/// The integer form of a mask, for the `vips_convi` path: the rounded
-/// coefficients, the brightness-corrected scale, and the rounded offset.
+/// The three things `vips_convi_gen` reads off a mask: the rounded
+/// coefficients, the divisor, and the rounded offset.
 ///
 /// Named fields rather than a tuple because the scale and the offset are
 /// both `i64` and mean entirely different things; transposing them in a
@@ -857,50 +1011,58 @@ struct IntKernel {
     offset: i64,
 }
 
-/// Convert a double mask to its integer form (`vips__image_intize`):
-/// `rint()` every element, then nudge the rounded scale so an all-ones
-/// input keeps the same input/output brightness ratio as the double mask.
+/// Build the integer mask the `vips_convi` generator convolves with.
 ///
-/// The offset is rounded, clamped into `int` range, and nothing more.
-/// `vips__image_intize` does compute an `out_offset` alongside the nudged
-/// scale (`convolution/convi.c:898`), but nothing downstream ever reads
-/// it: `vips_convi_build` keeps the intized mask in a local only to
-/// harvest the coefficients, and `vips_convi_gen` takes both the scale and
-/// the offset off the *original* mask (`convi.c:757`). For the offset that
-/// makes no difference, because `rint()` is idempotent and the summand is
-/// in output units either way. For the scale it does make a difference,
-/// and libviprs diverges from libvips there; that is issue #547, and it
-/// moves real output bytes, so it is deliberately not fixed here.
+/// The coefficients are `vips__image_intize`'s half of the job: `rint()`
+/// every element (`convolution/convi.c:890-893`).
 ///
-/// The clamp keeps the rounded offset inside the `int` that
+/// The scale and the offset are not. `vips_convi_gen` reads both off
+/// `convolution->M`, which is the mask the caller handed in
+/// (`convi.c:757-760`):
+///
+/// ```c
+/// VipsImage *M = convolution->M;
+/// int scale = rint(vips_image_get_scale(M));
+/// int rounding = scale / 2;
+/// int offset = rint(vips_image_get_offset(M));
+/// ```
+///
+/// `vips_convi_build` does shadow `M` with the intized copy, but only for
+/// as long as it takes to harvest the coefficients (`convi.c:1179-1181`),
+/// and it never writes that copy back onto the object. So the brightness
+/// nudge `vips__image_intize` computes into `out_scale`
+/// (`convi.c:911-913`) is dead code as far as `convi` is concerned. It is
+/// live only for the approximate paths, `conva` and `convasep`
+/// (`conva.c:1269`, `convasep.c:862`), and libviprs implements neither.
+///
+/// Dividing by the nudge instead was issue #547, and it was not a
+/// rounding nit: on `[[3.0, 0.4, 0.4, 0.4, 0.4]]` at scale `1.0` the
+/// nudge is `-1`, so a flat grey field came out black where vips answers
+/// white.
+///
+/// The offset needs no such care. `rint()` is idempotent, so rounding it
+/// here rather than off the original mask cannot move it.
+///
+/// A scale that rounds to zero is nudged to `1` here, the guard
+/// `vips__image_intize` writes for its own copy at `convi.c:895-897`. It
+/// is the one place libviprs cannot follow libvips, because there is
+/// nothing there to follow: `int scale` holds `0` and C divides by it.
+/// The measurements and the contract are on [`Precision::Integer`], where
+/// a caller can find them.
+///
+/// The offset clamp keeps the rounded offset inside the `int` that
 /// `vips_convi_gen` reads it into, which also keeps the `i64` add on the
-/// unsigned arm from overflowing on a large finite offset.
-/// [`conv_raster`] has already rejected a non-finite one.
+/// unsigned arm from overflowing on a large finite offset. [`Scan::new`]
+/// has already rejected a non-finite one.
 fn intize(dense: &DenseKernel) -> IntKernel {
-    let scale = dense.scale;
-    let sum_double: f64 = dense.coeff.iter().sum();
-    let double_result = sum_double / scale;
-
-    let imask: Vec<i64> = dense.coeff.iter().map(|&v| rint(v) as i64).collect();
-
-    let mut out_scale = rint(scale);
-    if out_scale == 0.0 {
-        out_scale = 1.0;
-    }
-
-    // `int_result /= out_scale` in C: double division truncated back into
-    // the int.
-    let int_sum: i64 = imask.iter().sum();
-    let int_result = (int_sum as f64 / out_scale).trunc();
-
-    let mut out_scale = rint(out_scale + (int_result - double_result));
-    if out_scale == 0.0 {
-        out_scale = 1.0;
+    let mut scale = rint(dense.scale);
+    if scale == 0.0 {
+        scale = 1.0;
     }
 
     IntKernel {
-        coeff: imask,
-        scale: out_scale as i64,
+        coeff: dense.coeff.iter().map(|&v| rint(v) as i64).collect(),
+        scale: scale as i64,
         offset: rint(dense.offset).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i64,
     }
 }
@@ -1049,7 +1211,7 @@ impl Scan {
             .map(|t| clamp_coord(t as i64 - ox as i64, src.width()) * channels)
             .collect();
         Ok(Scan {
-            samples: samples_f64(src),
+            samples: samples_f64(src)?,
             w,
             h,
             channels,
@@ -1533,8 +1695,9 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConvolutionError::NotOddSquareKernel`] unless the kernel is an
-    /// odd-sided square, [`ConvolutionError::ZeroTimes`] for `times == 0`,
-    /// plus the [`Raster::try_conv`] errors.
+    /// odd-sided square, [`ConvolutionError::TimesOutOfRange`] for a
+    /// `times` outside the `1..=1000` bound libvips declares on its
+    /// property, plus the [`Raster::try_conv`] errors.
     pub fn try_compass(
         &self,
         kernel: &Kernel,
@@ -1550,8 +1713,17 @@ impl Raster {
                 height: dense.h as u32,
             });
         }
-        if times == 0 {
-            return Err(ConvolutionError::ZeroTimes);
+        // vips bounds `times` at the GObject property, so an out-of-range
+        // value never builds an operation there; see `COMPASS_TIMES_MIN`.
+        // The upper end matters as much as the lower: the loop below
+        // reserves one result raster per round and convolves the whole
+        // image into each.
+        if !(COMPASS_TIMES_MIN..=COMPASS_TIMES_MAX).contains(&times) {
+            return Err(ConvolutionError::TimesOutOfRange {
+                times,
+                min: COMPASS_TIMES_MIN,
+                max: COMPASS_TIMES_MAX,
+            });
         }
 
         // vips_compass: convolve, rotate the mask by `angle`, repeat.
@@ -1569,9 +1741,13 @@ impl Raster {
         // format because they come from the same input and precision.
         let (w, h) = (self.width(), self.height());
         let channels = results[0].format().channels();
-        let planes: Vec<Vec<f64>> = results.iter().map(samples_f64).collect();
+        let planes: Vec<Vec<f64>> = results
+            .iter()
+            .map(samples_f64)
+            .collect::<Result<_, RasterError>>()?;
         let n = planes[0].len();
-        let mut combined = vec![0.0f64; n];
+        let mut combined = try_buffer::<f64>(w, h, n)?;
+        combined.resize(n, 0.0);
         for i in 0..n {
             let mut acc: f64 = planes[0][i].abs();
             for plane in &planes[1..] {
@@ -1597,7 +1773,8 @@ impl Raster {
                     .expect("validated channel count has a 16-bit format"),
             };
             let max = depth_max(out_fmt);
-            let vals: Vec<i64> = combined.iter().map(|&v| (v as i64).min(max)).collect();
+            let mut vals = try_buffer::<i64>(w, h, n)?;
+            vals.extend(combined.iter().map(|&v| (v as i64).min(max)));
             Ok(raster_from_i64(w, h, out_fmt, &vals)?)
         }
     }
@@ -1605,6 +1782,14 @@ impl Raster {
     /// Compass-direction convolution (libvips `vips_compass`): convolve
     /// `times` times, rotating `kernel` by `angle` between rounds, and
     /// combine the absolute results with `combine`.
+    ///
+    /// `times` must be in `1..=1000`, the range libvips declares on the
+    /// property (`VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` in
+    /// `convolution/compass.c`); anything outside it is
+    /// [`ConvolutionError::TimesOutOfRange`]. The upper end is not
+    /// decoration: every round convolves the whole image again and keeps
+    /// the result, so an unbounded `times` is an unbounded amount of work
+    /// and an unbounded amount of memory.
     ///
     /// # Panics
     ///
@@ -1628,7 +1813,10 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// The [`Kernel::try_gaussmat`] and [`Raster::try_convsep`] errors.
+    /// The [`Kernel::try_gaussmat`] and [`Raster::try_convsep`] errors,
+    /// plus [`ConvolutionError::Raster`] carrying
+    /// [`RasterError::AllocationFailed`] if the `sigma < 0.2` copy below
+    /// cannot be allocated.
     pub fn try_gaussblur(
         &self,
         sigma: f64,
@@ -1637,8 +1825,14 @@ impl Raster {
     ) -> Result<Raster, ConvolutionError> {
         // vips_gaussblur: gaussmat would make a 1x1 mask for anything
         // smaller than this, so just copy.
+        //
+        // Through `try_clone`, not `clone`: a plain clone is an
+        // image-sized allocation that aborts the process on failure, and
+        // this is the one path in the operation that does not otherwise
+        // touch a fallible allocator, so it was the whole of what stopped
+        // `try_gaussblur` being abort-free (issue #575).
         if sigma < 0.2 {
-            return Ok(self.clone());
+            return Ok(self.try_clone()?);
         }
         let mask = Kernel::try_gaussmat(sigma, min_ampl, true, precision)?;
         self.try_convsep(&mask, precision)
@@ -1664,6 +1858,15 @@ impl Raster {
     /// [`ConvolutionError::Colour`] when the image has no LabS colourspace
     /// route (for example a 2-band multiband image), plus the
     /// [`Kernel::try_gaussmat`] errors.
+    ///
+    /// Unlike the rest of the module's fallible entry points, this one is
+    /// **not** abort-free: it widens through [`Raster::f32_samples`], which
+    /// still collects infallibly, and it makes the LabS round trip through
+    /// `colour.rs` on top of that, where every intermediate is a plain
+    /// `vec![]`. An allocation failure inside either reaches
+    /// `handle_alloc_error` and ends the process instead of arriving here as
+    /// [`ConvolutionError::Raster`]. Removing that widening is #575's third
+    /// item, which is still open.
     pub fn try_sharpen(&self, sigma: f64, m1: f64, m2: f64) -> Result<Raster, ConvolutionError> {
         // vips_sharpen: remember the interpretation, work in LabS.
         let old_interpretation = self.interpretation();
@@ -1675,8 +1878,10 @@ impl Raster {
         // mask": a separable integer Gaussian at 10% amplitude.
         let mask = Kernel::try_gaussmat(sigma, 0.1, true, Precision::Integer)?;
         let mask1d: Vec<i64> = mask.data[0].iter().map(|&v| rint(v) as i64).collect();
-        // gaussmat integer masks carry integer sums, so the intize scale
-        // adjustment is exact and the divisor is simply the sum.
+        // The same divisor `vips_convi_gen` takes off the mask, which is
+        // what [`intize`] hands the 2D path (`convi.c:758-759`). A
+        // gaussmat integer mask has an integer scale anyway, so `rint`
+        // here is the sum of the elements unchanged.
         let iscale = rint(mask.scale) as i64;
 
         // vips_cast_short on the L band: the LabS codes from colourspace
@@ -1754,8 +1959,8 @@ impl Raster {
         let (w, h) = (self.width(), self.height());
         let (tw, th) = (template.width() as usize, template.height() as usize);
         let n_pels = (tw * th) as f64;
-        let input = samples_f64(self);
-        let refs = samples_f64(template);
+        let input = samples_f64(self)?;
+        let refs = samples_f64(template)?;
         let row_stride = w as usize * channels;
 
         // Pre-generate: per-band template mean and
@@ -1777,7 +1982,8 @@ impl Raster {
         }
 
         let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
-        let mut out = vec![0.0f64; input.len()];
+        let mut out = try_buffer::<f64>(w, h, input.len())?;
+        out.resize(input.len(), 0.0);
         for y in 0..h as i64 {
             for x in 0..w as i64 {
                 for b in 0..channels {
@@ -1843,8 +2049,8 @@ impl Raster {
         let channels = check_correlation_bands(self, template)?;
         let (w, h) = (self.width(), self.height());
         let (tw, th) = (template.width() as usize, template.height() as usize);
-        let input = samples_f64(self);
-        let refs = samples_f64(template);
+        let input = samples_f64(self)?;
+        let refs = samples_f64(template)?;
         let row_stride = w as usize * channels;
         let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
 
@@ -1854,7 +2060,8 @@ impl Raster {
         // CORR_INT).
         let float_path = self.format().is_float() || template.format().is_float();
 
-        let mut out = vec![0.0f64; input.len()];
+        let mut out = try_buffer::<f64>(w, h, input.len())?;
+        out.resize(input.len(), 0.0);
         for y in 0..h as i64 {
             for x in 0..w as i64 {
                 for b in 0..channels {
@@ -2517,21 +2724,23 @@ impl Raster {
             // interleaving (G, theta); a pair per sample is the same
             // layout without the doubled band count, and it is what the
             // thin stage reads back.
-            let polar: Vec<(u8, u8)> = gx
-                .data()
-                .iter()
-                .zip(gy.data())
-                .map(|(&a, &b)| canny_polar_uchar(i32::from(a) - 128, i32::from(b) - 128))
-                .collect();
+            let mut polar = try_buffer::<(u8, u8)>(w, h, gx.data().len())?;
+            polar.extend(
+                gx.data()
+                    .iter()
+                    .zip(gy.data())
+                    .map(|(&a, &b)| canny_polar_uchar(i32::from(a) - 128, i32::from(b) - 128)),
+            );
             canny_thin_uchar(&polar, uw, uh, bands, &mut data);
         } else {
             let sx = gx.f32_samples().expect("a float gradient has f32 samples");
             let sy = gy.f32_samples().expect("a float gradient has f32 samples");
-            let polar: Vec<(f32, f32)> = sx
-                .iter()
-                .zip(&sy)
-                .map(|(&a, &b)| canny_polar_float(f64::from(a), f64::from(b)))
-                .collect();
+            let mut polar = try_buffer::<(f32, f32)>(w, h, sx.len())?;
+            polar.extend(
+                sx.iter()
+                    .zip(&sy)
+                    .map(|(&a, &b)| canny_polar_float(f64::from(a), f64::from(b))),
+            );
             canny_thin_float(&polar, uw, uh, bands, &mut data);
         }
 
@@ -2941,14 +3150,18 @@ mod tests {
         }
     }
 
-    /// The intize scale adjustment: a fractional mask whose rounded scale
-    /// would skew brightness gets the libvips nudge. Mask [[0.4, 0.4]],
-    /// scale 0.8: double result 1.0; rint mask [0, 0], rint scale 1,
-    /// int result 0; adjusted scale rint(1 + (0 - 1)) = 0 -> 1. The offset
-    /// rides along rounded but never rescaled, as the mask
-    /// `vips_convi_gen` reads leaves it.
+    /// The three fields `vips_convi_gen` reads off a mask
+    /// (`convolution/convi.c:757-760`): `rint()`-ed coefficients from
+    /// `vips__image_intize`, `rint()` of the mask's **own** scale, and
+    /// the rounded offset.
+    ///
+    /// The scale is the half that moved in #547. Each mask below is one
+    /// whose `vips__image_intize` brightness nudge lands somewhere else,
+    /// so these assertions fail on the pre-#547 spelling rather than
+    /// holding either way; the nudge each one used to produce is named in
+    /// the comment beside it.
     #[test]
-    fn intize_matches_vips_image_intize() {
+    fn intize_matches_what_vips_convi_gen_reads() {
         let fractional = Kernel {
             data: vec![vec![0.4, 0.4]],
             scale: 0.8,
@@ -2958,13 +3171,73 @@ mod tests {
         assert_eq!(int.scale, 1);
         assert_eq!(int.offset, 0);
 
-        // The scale is nudged from 0.8 to 1 here, and the offset does not
-        // follow it: 127.6 rounds to 128 and stays there.
+        // rint(0.8) is 1, and the offset does not follow the rounding:
+        // 127.6 rounds to 128 and stays there.
         let int = intize(&DenseKernel::new(&fractional).unwrap().with_offset(127.6));
         assert_eq!(int.scale, 1);
         assert_eq!(int.offset, 128);
 
-        // The ported blur mask stays untouched: ints in, sum matches.
+        // The issue's own mask: sum 4.6 over scale 1, integer sum 3, so
+        // the nudge is rint(1 + (3 - 4.6)) = -1. Dividing by that is what
+        // turned a flat grey field black where vips answers white.
+        let inverted = Kernel {
+            data: vec![vec![3.0, 0.4, 0.4, 0.4, 0.4]],
+            scale: 1.0,
+        };
+        let int = intize(&DenseKernel::new(&inverted).unwrap());
+        assert_eq!(int.coeff, vec![3, 0, 0, 0, 0]);
+        assert_eq!(int.scale, 1);
+
+        // Rounding the coefficients up rather than away: nudge 2, not 1.
+        let up = Kernel {
+            data: vec![vec![2.0, 0.6, 0.6]],
+            scale: 1.0,
+        };
+        let int = intize(&DenseKernel::new(&up).unwrap());
+        assert_eq!(int.coeff, vec![2, 1, 1]);
+        assert_eq!(int.scale, 1);
+
+        // Negative coefficients reach it too: nudge 2, not 1.
+        let signed = Kernel {
+            data: vec![vec![-1.4, 3.6, -1.4]],
+            scale: 1.0,
+        };
+        let int = intize(&DenseKernel::new(&signed).unwrap());
+        assert_eq!(int.coeff, vec![-1, 4, -1]);
+        assert_eq!(int.scale, 1);
+
+        // A non-unit scale: nudge 3, not 2.
+        let box06 = Kernel {
+            data: vec![vec![0.6; 3]; 3],
+            scale: 2.0,
+        };
+        let int = intize(&DenseKernel::new(&box06).unwrap());
+        assert_eq!(int.coeff, vec![1; 9]);
+        assert_eq!(int.scale, 2);
+
+        // rint() is round-half-to-even on the scale as well: 2.5 is 2.
+        let ones = Kernel {
+            data: vec![vec![1.0; 3]; 3],
+            scale: 2.5,
+        };
+        assert_eq!(intize(&DenseKernel::new(&ones).unwrap()).scale, 2);
+
+        // A scale that rounds to zero is nudged to 1, the guard
+        // `vips__image_intize` writes for its own copy. Both signs of
+        // zero take it, and the pre-#547 nudge here was -2.
+        for scale in [0.4, -0.4, 0.49] {
+            let tiny = Kernel {
+                data: vec![vec![1.0, 1.0]],
+                scale,
+            };
+            assert_eq!(
+                intize(&DenseKernel::new(&tiny).unwrap()).scale,
+                1,
+                "a scale of {scale} rounds to zero and must be nudged to 1"
+            );
+        }
+
+        // The ported blur mask stays untouched: ints in, scale out.
         let int = intize(
             &DenseKernel::new(&ported_masks()[1])
                 .unwrap()
@@ -2997,6 +3270,160 @@ mod tests {
             intize(&int.with_offset(-9.3e18)).offset,
             i64::from(i32::MIN)
         );
+    }
+
+    /// A 5x1 flat field on each of the three carriers the integer
+    /// convolution arm has: clipped uchar, clipped ushort, and the
+    /// unclipped float-input path of `vips_convi_gen`.
+    fn flat_5x1() -> [Raster; 3] {
+        [
+            Raster::new(5, 1, PixelFormat::Gray8, vec![100u8; 5]).unwrap(),
+            Raster::new(
+                5,
+                1,
+                PixelFormat::Gray16,
+                (0..5).flat_map(|_| 1000u16.to_ne_bytes()).collect(),
+            )
+            .unwrap(),
+            Raster::from_f32_samples(5, 1, float_format(1), &[100.0f32; 5]).unwrap(),
+        ]
+    }
+
+    /// #547: the integer arm divides by `rint()` of the mask's own scale,
+    /// the way `vips_convi_gen` does, and not by the brightness-corrected
+    /// scale `vips__image_intize` computes and libvips never reads.
+    ///
+    /// Every expectation below was measured on vips 8.18.4 under
+    /// `VIPS_NOVECTOR=1`, the scalar `vips_convi_gen` arm this module
+    /// ports, and re-measured on the default HWY vector path with
+    /// `env -u VIPS_NOVECTOR`, which is the only way to unset it: an
+    /// empty `VIPS_NOVECTOR=` still counts as set, because
+    /// `iofuncs/vector.cpp:89` is a bare `g_getenv` and the empty string
+    /// is a non-`NULL` pointer. Six of the seven print the same bytes on
+    /// both paths. The seventh, `zeroed`, does not and is ordinary #558
+    /// territory: its coefficients round away to a zero mask on the
+    /// scalar arm, while the vector path requantises `0.4 / 0.8`
+    /// exactly and answers 100 on the uchar fixture. As everywhere else
+    /// in this module, the pin follows the scalar arm.
+    ///
+    /// The fixtures are flat, so one number describes the whole output.
+    /// The comment beside each row is what libviprs answered before the
+    /// fix, which is what makes the row worth pinning at all: the first
+    /// four move on at least one carrier, and the first one has the
+    /// divisor coming out negative, so it is black where vips is white.
+    #[test]
+    fn conv_integer_divides_by_the_original_mask_scale() {
+        // mask, scale, [uchar, ushort, float] from vips; `was` in the
+        // comment is the pre-#547 libviprs answer.
+        let cases = [
+            // nudge -1: was [0, 0, -300.0], black where vips is white.
+            (
+                "issue",
+                vec![vec![3.0, 0.4, 0.4, 0.4, 0.4]],
+                1.0,
+                [255.0, 3000.0, 300.0],
+            ),
+            // nudge 2: was [200, 2000, 200.0].
+            ("up", vec![vec![2.0, 0.6, 0.6]], 1.0, [255.0, 4000.0, 400.0]),
+            // nudge 2: was [100, 1000, 100.0].
+            (
+                "signed",
+                vec![vec![-1.4, 3.6, -1.4]],
+                1.0,
+                [200.0, 2000.0, 200.0],
+            ),
+            // nudge 3: was [255, 3000, 300.0]. The uchar cell clips
+            // either way, which is exactly how a mask like this hides on
+            // an 8-bit fixture.
+            ("box06", vec![vec![0.6; 3]; 3], 2.0, [255.0, 4500.0, 450.0]),
+            // Controls, where the nudge already agreed with rint(scale)
+            // and nothing moves.
+            ("ones", vec![vec![1.0; 3]; 3], 2.5, [255.0, 4500.0, 450.0]),
+            ("blur", vec![vec![1.0; 3]; 3], 9.0, [100.0, 1000.0, 100.0]),
+            // Every coefficient rounds away, so the mask is all zeros and
+            // the divisor cannot show.
+            ("zeroed", vec![vec![0.4, 0.4]], 0.8, [0.0, 0.0, 0.0]),
+        ];
+
+        for (name, data, scale, want) in cases {
+            let kernel = Kernel { data, scale };
+            for (im, &expected) in flat_5x1().iter().zip(&want) {
+                let out = im.try_conv(&kernel, Precision::Integer).unwrap();
+                for x in 0..5 {
+                    let got = out.getpoint(x, 0)[0];
+                    assert!(
+                        (got - expected).abs() < 1e-6,
+                        "{name} at ({x}, 0) on {:?}: got {got}, vips says {expected}",
+                        im.format()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A mask scale that rounds to zero has no libvips answer to match,
+    /// and libviprs does not pretend otherwise.
+    ///
+    /// `vips_convi_gen` reads `int scale = rint(...)`, so a scale under
+    /// 0.5 leaves it holding `0` and the generator divides by it.
+    /// Measured on 8.18.4 with `[[1.0, 1.0]]` at scale 0.4: the two
+    /// integer arms answer `0` (aarch64 `sdiv` returns zero rather than
+    /// trapping, which is not a defined result, and x86 would trap) and
+    /// the float-input arm prints `inf`. libviprs nudges the divisor to
+    /// `1` instead, which is the guard `vips__image_intize` writes for
+    /// its own copy at `convi.c:895-897`, and is the only total answer on
+    /// offer. That makes these three the deliberate divergence in this
+    /// change, so they are pinned rather than left to drift.
+    #[test]
+    fn conv_integer_scale_rounding_to_zero_divides_by_one() {
+        let kernel = Kernel {
+            data: vec![vec![1.0, 1.0]],
+            scale: 0.4,
+        };
+        // 2 * the flat value, undivided, rather than vips' 0 / 0 / inf.
+        for (im, expected) in flat_5x1().iter().zip([200.0, 2000.0, 200.0]) {
+            let out = im.try_conv(&kernel, Precision::Integer).unwrap();
+            let got = out.getpoint(0, 0)[0];
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "zero-rounding scale on {:?}: got {got}, want {expected}",
+                im.format()
+            );
+        }
+    }
+
+    /// #575: the `f64` widening buffer is reserved fallibly, so a request
+    /// the host cannot serve surfaces as
+    /// [`RasterError::AllocationFailed`] instead of reaching
+    /// `handle_alloc_error` and aborting the process.
+    ///
+    /// `samples_f64` is the biggest allocation on the convolution path,
+    /// eight bytes per sample where the source carries one, and every
+    /// `try_` entry point in this module goes through it, so the plain
+    /// `.collect()` it used to be made the whole fallible surface
+    /// abortable. Driving the widening itself to failure would need a
+    /// raster the machine cannot hold, so the reservation is exercised
+    /// directly at a length no allocator can serve; the widening is
+    /// covered by every other convolution test in this file.
+    #[test]
+    fn samples_f64_reserves_fallibly_rather_than_aborting() {
+        assert!(matches!(
+            try_buffer::<f64>(1, 1, usize::MAX / 4),
+            Err(RasterError::AllocationFailed { .. })
+        ));
+        // The byte count in the error is the size of the request, which
+        // is eight times the sample count, not the raster's own length.
+        assert!(matches!(
+            try_buffer::<f64>(3, 2, usize::MAX),
+            Err(RasterError::AllocationFailed {
+                width: 3,
+                height: 2,
+                bytes: usize::MAX
+            })
+        ));
+        // The ordinary path still widens every sample exactly.
+        let im = Raster::new(2, 1, PixelFormat::Gray8, vec![7, 9]).unwrap();
+        assert_eq!(samples_f64(&im).unwrap(), vec![7.0, 9.0]);
     }
 
     /// FNV-1a over a whole buffer, so a full `data()` comparison fits in
@@ -3445,6 +3872,36 @@ mod tests {
         assert_eq!(copy.format(), im.format());
     }
 
+    /// #575: the `sigma < 0.2` copy goes through
+    /// [`Raster::try_clone`], so it is fallible like the rest of the
+    /// operation, and it still carries the metadata a plain `.clone()`
+    /// carried.
+    ///
+    /// The copy is an image-sized allocation and it used to be a bare
+    /// `self.clone()`, which reaches `handle_alloc_error` and ends the
+    /// process rather than returning. It was the only such allocation left
+    /// on `try_gaussblur`, so it was the whole of what kept the operation
+    /// off the abort-free list. Reconstructing through `Raster::new`
+    /// instead would have compiled and silently dropped the header and the
+    /// attached fields, which is what this pins.
+    #[test]
+    fn gaussblur_short_circuit_copy_keeps_metadata() {
+        let mut im = noise_rgb(6, 4, 21);
+        im.set_field("hello", MetadataValue::Int(7));
+        let im = im.copy().xres(42.0).build();
+
+        let copy = im.try_gaussblur(0.1, 0.2, Precision::Integer).unwrap();
+        assert_eq!(copy.data(), im.data());
+        assert_eq!(copy.format(), im.format());
+        assert!(
+            (copy.xres() - 42.0).abs() < 1e-9,
+            "xres must survive the short-circuit copy, got {}",
+            copy.xres()
+        );
+        assert_eq!(copy.interpretation(), im.interpretation());
+        assert_eq!(copy.get_field("hello"), Some(MetadataValue::Int(7)));
+    }
+
     /// fastcor hand values: a 1x1 template subtracts and squares every
     /// pixel; unsigned inputs use the integer path.
     #[test]
@@ -3567,7 +4024,8 @@ mod tests {
     }
 
     /// Kernel shape errors are typed: empty, ragged, non-separable for
-    /// convsep, non-odd-square and zero times for compass.
+    /// convsep, and non-odd-square for compass. The `times` bound has its
+    /// own test below.
     #[test]
     fn kernel_shape_errors() {
         let im = noise_gray(6, 6, 51);
@@ -3606,14 +4064,53 @@ mod tests {
             im.try_compass(&square, 1, Angle45::D45, Combine::Max, Precision::Float),
             Err(ConvolutionError::NotOddSquareKernel { .. })
         ));
+    }
+
+    /// The libvips bound on `compass`'s `times`, the
+    /// `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` range
+    /// `convolution/compass.c:162-167` declares at v8.18.4. GObject
+    /// refuses both ends before the operation is built, measured on a 3x3
+    /// ones mask over a 4x4 black image: `vips compass a.v o.v m.mat
+    /// --times 1` and `--times 1000` run, while `--times 0`,
+    /// `--times 1001` and `--times 100000` each draw
+    /// `value "N" of type 'gint' is invalid or out of range for property
+    /// 'times' of type 'gint'` out of GObject and fall back to the
+    /// property's default of 2, so the number asked for never reaches a
+    /// convolution.
+    ///
+    /// libviprs used to check the low end only, so the high end was
+    /// unbounded: `u32::MAX` reserved a result vector of 4.29 billion
+    /// rasters, roughly 400 GB of address space, and then started that
+    /// many whole-image convolutions.
+    #[test]
+    fn compass_times_outside_the_vips_property_range_is_rejected() {
+        let im = noise_gray(4, 4, 51);
         let odd = Kernel {
             data: vec![vec![1.0]],
             scale: 1.0,
         };
-        assert!(matches!(
-            im.try_compass(&odd, 0, Angle45::D45, Combine::Max, Precision::Float),
-            Err(ConvolutionError::ZeroTimes)
-        ));
+        for times in [0u32, 1001, 100_000, u32::MAX] {
+            assert!(
+                matches!(
+                    im.try_compass(&odd, times, Angle45::D45, Combine::Max, Precision::Integer),
+                    Err(ConvolutionError::TimesOutOfRange {
+                        times: got,
+                        min: 1,
+                        max: 1000
+                    }) if got == times
+                ),
+                "times = {times} is outside 1..=1000 and must be refused"
+            );
+        }
+        // Both ends of the range are accepted. A 1x1 identity mask is its
+        // own rot45, so every round answers the input and the `Max`
+        // combine hands it straight back however many rounds run.
+        for times in [1u32, 1000] {
+            let out = im
+                .try_compass(&odd, times, Angle45::D45, Combine::Max, Precision::Integer)
+                .unwrap_or_else(|e| panic!("times = {times} is inside 1..=1000: {e}"));
+            assert_eq!(out.data(), im.data(), "times = {times} should be accepted");
+        }
     }
 
     /// gaussmat/logmat argument validation matches the libvips bounds.
