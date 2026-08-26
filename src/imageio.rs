@@ -35,7 +35,11 @@
 //! `encode_vips` writes the libvips native header (64 bytes: magic,
 //! geometry, band format, coding, interpretation, resolution, offsets)
 //! followed by the raw pixel data in the file's byte order, then a JSON
-//! trailer with the orientation tag and the attached metadata fields.
+//! trailer with the orientation tag and the attached metadata fields. The
+//! trailer is written only when it would carry something: a raster with the
+//! upright orientation and no attached fields writes the header and the
+//! pixels and stops, because an empty trailer costs a reader a warning and
+//! buys nobody anything (issue #546).
 //! libvips itself stores an XML trailer there, and a trailer that never
 //! claimed to be libviprs JSON is treated as absent (bar the orientation
 //! tag, which the reader recovers from the vips XML), so pixels and header
@@ -381,6 +385,13 @@ impl MetadataFields {
 
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(n, _)| n.as_str())
+    }
+
+    /// Whether the raster carries no attached field at all, interpretable
+    /// or not. A `.v` trailer with nothing in it is worse than no trailer
+    /// (issue #546), so the writer asks this before writing one.
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.unknown.is_empty()
     }
 
     /// The interpretable fields, in the order they were set.
@@ -939,7 +950,7 @@ impl Raster {
         push_i32(&mut out, self.yoffset());
         out.resize(VIPS_HEADER_LEN, 0); // reserved tail of the header
         out.extend_from_slice(self.data());
-        if keep_metadata {
+        if keep_metadata && self.has_v_trailer_content() {
             let trailer = VTrailer {
                 orientation: self.orientation(),
                 fields: VFields {
@@ -960,6 +971,21 @@ impl Raster {
             }
         }
         out
+    }
+
+    /// Whether a `.v` trailer would carry anything: an orientation other
+    /// than the upright default, or at least one attached field (readable
+    /// or carried opaquely).
+    ///
+    /// An empty trailer is not free. libvips parses that slot as XML, so the
+    /// 41 bytes of `{"orientation":1,"fields":{"entries":[]}}` that every
+    /// plain [`Raster::save`] used to append made `vipsheader -a` print
+    /// `VIPS-WARNING **: error reading vips image metadata: VipsImage: XML
+    /// parse error` and throw the whole metadata block away. A file with no
+    /// trailer at all reads silently (measured on vips 8.18.4, issue #546),
+    /// so writing nothing is strictly better than writing nothing useful.
+    fn has_v_trailer_content(&self) -> bool {
+        self.orientation() != 1 || !self.fields.is_empty()
     }
 }
 
@@ -2126,6 +2152,88 @@ mod tests {
         assert_eq!(
             parse_vips_xml_orientation(b"<field name=\"orientation-foo\">6</field>"),
             None
+        );
+    }
+
+    // -- .v trailer: nothing to say, nothing written (issue #546) ------------
+
+    /// A raster with no attached fields and the upright orientation has
+    /// nothing to put in the trailer, so nothing is written there.
+    ///
+    /// The 41 bytes it used to write, `{"orientation":1,"fields":{"entries":
+    /// []}}`, are the whole of issue #546 for the common case: libvips parses
+    /// that slot as XML, so every plain `save()` made `vipsheader -a` print
+    /// `VIPS-WARNING **: error reading vips image metadata: VipsImage: XML
+    /// parse error` and drop the metadata block. Measured on vips 8.18.4: the
+    /// same file with the trailer truncated off reads silently.
+    #[test]
+    fn v_trailer_is_absent_when_there_is_nothing_to_say() {
+        let im = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
+        let bytes = im.encode_vips().unwrap();
+        assert_eq!(
+            bytes.len(),
+            VIPS_HEADER_LEN + im.data().len(),
+            "a raster with no metadata must write header + pixels and stop, got \
+             {} trailer bytes: {:?}",
+            bytes.len() - VIPS_HEADER_LEN - im.data().len(),
+            String::from_utf8_lossy(&bytes[VIPS_HEADER_LEN + im.data().len()..])
+        );
+        // And it still reads back as the same image.
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.data(), im.data());
+        assert_eq!(back.orientation(), 1);
+        assert_eq!(
+            back.get_fields(),
+            im.get_fields(),
+            "no attached field may appear out of a trailer that was never written"
+        );
+    }
+
+    /// The other side of the same rule: anything the trailer would actually
+    /// carry brings it back. A non-default orientation, an attached field,
+    /// and a value carried opaquely from a newer build each count on their
+    /// own, because each of them is metadata that would otherwise be lost.
+    #[test]
+    fn v_trailer_is_written_whenever_it_carries_something() {
+        let plain = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
+        let body_len = VIPS_HEADER_LEN + plain.data().len();
+
+        let rotated = plain.copy().orientation(6).build();
+        let bytes = rotated.encode_vips().unwrap();
+        assert!(
+            bytes.len() > body_len,
+            "a non-default orientation must still be written"
+        );
+        assert_eq!(decode_bytes(&bytes).unwrap().orientation(), 6);
+
+        let mut noted = plain.clone();
+        noted.set_field("note", "hello".into());
+        let bytes = noted.encode_vips().unwrap();
+        assert!(
+            bytes.len() > body_len,
+            "an attached field must still be written"
+        );
+        assert_eq!(
+            decode_bytes(&bytes)
+                .unwrap()
+                .get_field("note")
+                .unwrap()
+                .as_str(),
+            "hello"
+        );
+
+        // A value this build cannot interpret is metadata too: it is the only
+        // thing left on this raster once the four readable fields are removed
+        // and the orientation is back to upright, and it must still be
+        // written (issue #565).
+        let mut carried = decode_bytes(&file_from_a_newer_build()).unwrap();
+        for name in ["note", "n-pages", "xres-hint", "icc-profile-data"] {
+            carried.set_typeof(name, 0);
+        }
+        let carried = carried.copy().orientation(1).build();
+        assert!(
+            carried.encode_vips().unwrap().len() > VIPS_HEADER_LEN + carried.data().len(),
+            "a value carried opaquely from a newer build must still be written"
         );
     }
 
