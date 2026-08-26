@@ -665,7 +665,8 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// from its extension, so this returns exactly what [`decode_bytes`] returns
 /// for the same bytes, and a misnamed file still decodes correctly. libvips
 /// resolves a loader the same way. Native `.v`, JPEG, PNG, TIFF, GIF,
-/// WebP, Radiance, and OpenEXR are recognised directly; anything else falls
+/// WebP, JPEG XL, Radiance, FITS and OpenEXR are recognised directly; anything
+/// else falls
 /// back to the `image` crate's own content guess.
 ///
 /// # Example usage
@@ -807,6 +808,15 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
 /// [`sniff`] did.
 const SNIFF_HEAD_LEN: usize = 16;
 
+/// The ISOBMFF signature box that opens a boxed JPEG XL file: a 12-byte box
+/// whose type is `JXL ` and whose payload is the `\r\n\x87\n` line-ending
+/// check (ISO/IEC 18181-2, and the first arm of libjxl's
+/// `JxlSignatureCheck`).
+///
+/// The other JPEG XL magic is the bare codestream's two bytes, `FF 0A`,
+/// which is short enough to inline at the one place it is tested.
+const JXL_CONTAINER_MAGIC: &[u8] = b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a";
+
 /// A container libviprs identifies from the leading magic bytes of a file
 /// or buffer.
 ///
@@ -829,6 +839,9 @@ pub(crate) enum SniffedFormat {
     Gif,
     /// WebP, `RIFF` + a 4-byte length + `WEBP`.
     WebP,
+    /// JPEG XL, in either of its two containers: the bare codestream,
+    /// `FF 0A`, or the ISOBMFF signature box.
+    Jxl,
     /// Radiance HDR, the first line `#?RADIANCE`.
     Radiance,
     /// FITS, the first card's `SIMPLE  =` keyword and fixed-format marker.
@@ -865,6 +878,10 @@ impl SniffedFormat {
     /// * WebP, because [`crate::webp::decode_webp`] reads the `ICCP`,
     ///   `EXIF` and `XMP ` chunks out of the RIFF directory as well as the
     ///   frame, and the frame is rarely the last chunk in the file.
+    /// * JPEG XL, because [`crate::jxl::decode_jxl`] feeds the decoder in
+    ///   two phases so the declared header geometry can be checked against
+    ///   [`DecodeLimits`] before the frame data is fed in at all, which
+    ///   needs the whole buffer addressable up front.
     /// * FITS, because [`crate::fits::decode_fits`] may walk past one or
     ///   more header units before it finds the one carrying the image, and
     ///   the sample array is band-planar and stored bottom row first, so
@@ -879,6 +896,7 @@ impl SniffedFormat {
                 | Self::Jpeg
                 | Self::Gif
                 | Self::WebP
+                | Self::Jxl
                 | Self::Radiance
                 | Self::Fits
                 | Self::OpenExr
@@ -886,12 +904,12 @@ impl SniffedFormat {
     }
 
     /// The `image` decoder for this container, or `None` for `.v`, GIF,
-    /// WebP and Radiance, which libviprs decodes itself.
+    /// WebP, JPEG XL and Radiance, which libviprs decodes itself.
     ///
     /// This is the entire route table, and it is an identity mapping on
     /// purpose: one sniffed container in, one decoder out, no per-format
     /// options. Save-side options live in the per-format modules
-    /// ([`crate::webp`], [`crate::gif`]); nothing about how a file is
+    /// ([`crate::webp`], [`crate::gif`], [`crate::jxl`]); nothing about how a file is
     /// decoded should ever need to be configured here.
     const fn image_format(self) -> Option<image::ImageFormat> {
         match self {
@@ -910,6 +928,10 @@ impl SniffedFormat {
             // count nor the XMP chunk, and [`crate::webp`] needs both, so
             // that module drives `image-webp` directly (issue #567).
             Self::WebP => None,
+            // `image` 0.25 has no JPEG XL decoder at all, so this row was
+            // never anything but `None`; [`crate::jxl`] drives `jxl-oxide`
+            // directly (issue #619).
+            Self::Jxl => None,
             // `image`'s Radiance route is behind its `hdr` feature, which
             // this build deliberately leaves off: the crate decodes RGBE as
             // `mantissa * 2^(e-136)` where vips uses the half-bit-centred
@@ -964,6 +986,14 @@ pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
     // file-specific, so the signature is split either side of it.
     if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
         return Some(SniffedFormat::WebP);
+    }
+    // The two JPEG XL containers, which is the only format in this table
+    // with two unrelated magics: `JxlSignatureCheck` (`jxlload.c:213-221`
+    // sniffs 12 bytes and asks libjxl) accepts the bare codestream's
+    // `FF 0A` and the ISOBMFF signature box alike, and a table that knew
+    // only one of them would silently drop half the format.
+    if head.starts_with(&[0xFF, 0x0A]) || head.starts_with(JXL_CONTAINER_MAGIC) {
+        return Some(SniffedFormat::Jxl);
     }
     // Radiance's magic is a whole *line*, not a prefix: `vips__rad_israd`
     // (`radiance.c:568-577`) reads the first line and compares it to
@@ -1110,6 +1140,13 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     }
     if sniffed == Some(SniffedFormat::WebP) {
         return crate::webp::decode_webp(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::Jxl) {
+        // Still routed here without the `jxl` feature, on purpose:
+        // `decode_jxl` reports "this build has no JPEG XL" and falling
+        // through to `reader_for` instead would report "these bytes are
+        // not an image", which is a different and wrong answer.
+        return crate::jxl::decode_jxl(bytes, limits);
     }
     if sniffed == Some(SniffedFormat::OpenExr) {
         return crate::exr::decode_exr(bytes, limits);
@@ -1798,7 +1835,7 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 27] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 32] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -1832,6 +1869,40 @@ mod tests {
                 Some(SniffedFormat::WebP),
             ),
             ("riff but not webp", b"RIFF\x00\x00\x00\x00WAVEfmt ", None),
+            // JPEG XL is the only format here with two unrelated magics.
+            // The bare codestream is two bytes, which is as short as any
+            // signature in the table gets, and the boxed form is the
+            // 12-byte ISOBMFF signature box.
+            (
+                "jxl codestream",
+                b"\xff\x0a\x10\x30\x10\x09\x08\x00",
+                Some(SniffedFormat::Jxl),
+            ),
+            (
+                "jxl container",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0aftyp",
+                Some(SniffedFormat::Jxl),
+            ),
+            // A JPEG starts `FF D8`, one byte away from the codestream
+            // magic, so the near-miss has to stay a JPEG.
+            (
+                "jpeg is not jxl",
+                b"\xff\xd8\xff\xdb",
+                Some(SniffedFormat::Jpeg),
+            ),
+            // The container magic decided from 11 bytes would be a guess.
+            (
+                "jxl container truncated",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87",
+                None,
+            ),
+            // An ISOBMFF file that is not JPEG XL: same box length, wrong
+            // box type.
+            (
+                "isobmff but not jxl",
+                b"\x00\x00\x00\x0cftypisom\x00\x00\x02\x00",
+                None,
+            ),
             // Truncated one byte short of the `WEBP` tag: a 12-byte magic
             // cannot be decided from 11 bytes.
             ("webp truncated", b"RIFF\x00\x00\x00\x00WEB", None),

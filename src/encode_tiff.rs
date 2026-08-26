@@ -139,8 +139,9 @@ use crate::source::DecodeLimits;
 // spine owns in `imageio.rs`. That type has no dedicated "unsupported
 // compression" variant and this lane must not widen it, so the deferred paths
 // reuse `SaveError::Encode(SinkError::Other(_))` with an accurate message
-// (the alternative, `SaveError::UnsupportedExtension`, carries a fixed tail
-// that would misreport what the pure-Rust build can save). The decode helpers
+// (the alternative, `SaveError::UnsupportedExtension`, carries a tail
+// enumerating the extensions this build can save, which would misreport a
+// compression problem as a missing encoder). The decode helpers
 // return `DecodeError` (an alias of `SourceError`) and wrap `tiff` crate
 // failures as an image decoding error tagged with the TIFF format hint.
 // ---------------------------------------------------------------------------

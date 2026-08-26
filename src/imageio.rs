@@ -20,16 +20,23 @@
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
 //! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
+//! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
 //! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
 //! [`SaveError::UnsupportedExtension`]; they arrive with the
-//! foreign-format batch. Structured EXIF tag writing (`exif-ifd0-*`
-//! fields into the TIFF directory of a JPEG APP1 segment) is also
-//! deferred to the foreign batch: those fields round-trip through `.v`
-//! and travel on the raster, but JPEG save only re-embeds the raw
-//! `exif-data` blob captured at decode time.
+//! foreign-format batch. `.jxl` joins them when the crate is built
+//! without the non-default `jxl` feature, and the refusal follows the
+//! build: it names the extensions this binary actually has an encoder
+//! behind rather than a fixed list, so neither cfg can advertise the
+//! other's.
+//!
+//! Structured EXIF tag writing (`exif-ifd0-*` fields into the TIFF
+//! directory of a JPEG APP1 segment) is also deferred to the foreign
+//! batch: those fields round-trip through `.v` and travel on the raster,
+//! but JPEG save only re-embeds the raw `exif-data` blob captured at
+//! decode time.
 //!
 //! # The `.v` container
 //!
@@ -961,12 +968,31 @@ pub enum SaveError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error(
-        "unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, gif, \
-         webp, fits/fit/fts, and v/vips"
+        "unsupported save extension {extension:?}; libviprs encodes {}",
+        saveable_extensions()
     )]
     UnsupportedExtension { extension: String },
     #[error("encode error: {0}")]
     Encode(#[from] SinkError),
+}
+
+/// The extensions [`Raster::save`] has an encoder behind, in the order the
+/// [module table](crate::imageio) lists them.
+///
+/// It is a function rather than a literal inside the `#[error]` string
+/// because `.jxl` is only a live arm when the non-default `jxl` feature is
+/// on. A fixed list would either promise a JPEG XL encoder to a build that
+/// has none, or hide one from a build that has it, and the message is the
+/// only thing a caller who guessed an extension ever sees. The
+/// `save_error_lists_exactly_the_wired_extensions` test walks this string
+/// back through [`Raster::save`], so a new arm that forgets to update it
+/// fails rather than drifting.
+fn saveable_extensions() -> &'static str {
+    if cfg!(feature = "jxl") {
+        "png, jpg/jpeg, gif, webp, jxl, and v/vips"
+    } else {
+        "png, jpg/jpeg, gif, webp, and v/vips"
+    }
 }
 
 /// JPEG quality used by extension-dispatched [`Raster::save`], matching
@@ -981,9 +1007,13 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// [`SaveError::UnsupportedExtension`] for extensions libviprs
-    /// cannot encode, [`SaveError::Encode`] if the encoder rejects the
-    /// pixel format, or [`SaveError::Io`] on write failure.
+    /// [`SaveError::UnsupportedExtension`] for extensions this build
+    /// cannot encode, which is everything outside the
+    /// [module table](crate::imageio) plus `.jxl` when the crate is built
+    /// without the `jxl` feature; the message enumerates the extensions
+    /// that are live in this build rather than a fixed set.
+    /// [`SaveError::Encode`] if the encoder rejects the pixel format, or
+    /// [`SaveError::Io`] on write failure.
     pub fn save(&self, path: &Path) -> Result<(), SaveError> {
         self.save_impl(path, true)
     }
@@ -1030,6 +1060,18 @@ impl Raster {
                     other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
                 })?,
             "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
+            // JPEG XL takes no `keep_metadata` because `zune-jpegxl` writes
+            // a bare codestream with no box container, so there is nowhere
+            // to put an ICC profile, an EXIF block or an XMP packet and
+            // nothing for the flag to drop. `vips jxlsave --keep none`
+            // writes the same form; `--keep all` has no encoder behind it
+            // here. See `crate::jxl` for the whole argument.
+            //
+            // Gated, so that without the `jxl` feature `.jxl` falls through
+            // to `UnsupportedExtension` like any other extension with no
+            // encoder, and `saveable_extensions()` above stops naming it.
+            #[cfg(feature = "jxl")]
+            "jxl" => crate::jxl::encode_jxl_for_save(self)?,
             // All three suffixes vips registers (`vips__fits_suffs`,
             // `fits.c:125`). `keep_metadata` has nothing to act on: the
             // records a FITS header carries are the geometry cfitsio
@@ -2554,6 +2596,114 @@ mod tests {
         let bare = decode_file(&stripped).unwrap();
         assert_eq!(bare.data(), im.data());
         assert_eq!(bare.icc_profile(), None);
+    }
+
+    /**
+     * Tests that `.jxl` is a live row in the extension route, that the
+     * lossless encoder behind it round-trips, and that `save_stripped`
+     * makes no difference here: the encoder writes a bare codestream with
+     * no box container, so there is nothing for the strip flag to drop and
+     * both files are byte-identical. That is the one place the `.jxl` row
+     * differs from the `.webp` one above, and it is worth pinning rather
+     * than leaving as an accident. Works by attaching an ICC blob, saving
+     * both ways, and reading each file back.
+     * Input: 2x2 Rgb8 with `icc-profile-data` -> Output: identical pixels
+     * from both files, identical bytes on disk, and the profile absent
+     * from both because nothing carried it.
+     */
+    #[test]
+    #[cfg(feature = "jxl")]
+    fn save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut im = rgb_2x2();
+        im.fields
+            .set("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3, 4]));
+
+        let kept = dir.path().join("kept.jxl");
+        im.save(&kept).unwrap();
+        let back = decode_file(&kept).unwrap();
+        assert_eq!(back.data(), im.data(), "the JPEG XL encoder is lossless");
+
+        let stripped = dir.path().join("stripped.jxl");
+        im.save_stripped(&stripped).unwrap();
+        assert_eq!(
+            std::fs::read(&kept).unwrap(),
+            std::fs::read(&stripped).unwrap(),
+            "there is no box container to strip, so both writes are the same bytes"
+        );
+        // The profile the raster carried is not in either file; what comes
+        // back is the one `jxlload` synthesises for the colour encoding,
+        // which is never the four bytes attached above.
+        assert_ne!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
+    }
+
+    /**
+     * Tests that the `UnsupportedExtension` message names exactly the
+     * extensions this build has an encoder behind, so the string and the
+     * match arms cannot drift apart. They already did once: the `.jxl` arm
+     * landed while the message still read "libviprs encodes png, jpg/jpeg,
+     * gif, webp, and v/vips", so `save("x.avif")` told the caller JPEG XL
+     * was unsupported at the moment it became supported. Works by parsing
+     * the extension list back out of a rendered message, saving under every
+     * name it holds, and then checking a name it does not hold is refused.
+     * Input: the message from `save("out.avif")` -> Output: every listed
+     * extension writes a file, `jxl` is listed exactly when the feature is
+     * on, and the unlisted extensions come back as
+     * `SaveError::UnsupportedExtension`.
+     */
+    #[test]
+    fn save_error_lists_exactly_the_wired_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let im = rgb_2x2();
+
+        let message = im
+            .save(&dir.path().join("out.avif"))
+            .unwrap_err()
+            .to_string();
+        let listed = message
+            .split_once("libviprs encodes ")
+            .expect("the refusal names the encodable set")
+            .1;
+        // "png, jpg/jpeg, gif, webp, and v/vips" -> the individual
+        // extensions, with the prose comma-and and the `/` alternatives
+        // taken apart.
+        let extensions: Vec<&str> = listed
+            .split(", ")
+            .map(|part| part.trim_start_matches("and "))
+            .flat_map(|part| part.split('/'))
+            .collect();
+        assert_eq!(
+            extensions.contains(&"jxl"),
+            cfg!(feature = "jxl"),
+            "the message follows the feature: {message}"
+        );
+
+        for extension in &extensions {
+            let path = dir.path().join(format!("listed.{extension}"));
+            im.save(&path)
+                .unwrap_or_else(|e| panic!("save(.{extension}) is a live arm, got {e}"));
+            assert!(path.exists(), ".{extension} wrote a file");
+        }
+
+        // The other direction, so the list cannot go stale by growing
+        // either: an extension it does not name has no arm behind it.
+        let mut unlisted = vec!["avif", "heic", "tif"];
+        if !cfg!(feature = "jxl") {
+            unlisted.push("jxl");
+        }
+        for extension in unlisted {
+            assert!(
+                !extensions.contains(&extension),
+                ".{extension} is not in {listed:?}"
+            );
+            let err = im
+                .save(&dir.path().join(format!("unlisted.{extension}")))
+                .unwrap_err();
+            assert!(
+                matches!(err, SaveError::UnsupportedExtension { .. }),
+                "{err}"
+            );
+        }
     }
 
     /**

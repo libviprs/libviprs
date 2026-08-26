@@ -88,6 +88,56 @@ image = { version = "0.25", default-features = false, features = [
 # same story: only the direct type reports `num_frames()`, which is what
 # libviprs attaches as `n-pages`.
 image-webp = "0.2.4"
+# Pure-Rust JPEG XL decoder (MIT OR Apache-2.0), the load half of issue #500.
+# It is the only maintained pure-Rust JXL decoder, it targets the same
+# JPEG XL conformance suite libjxl does, and the thirteen `jxl-*` crates it
+# pulls need nothing installed on the machine: no `-sys` crate, no `links =`
+# key, no C compiled anywhere in the added set.
+#
+# `default-features = false` drops `rayon`, which is the whole of the crate's
+# default feature set (`default = ["rayon"]`, forwarded to
+# `jxl-threadpool/rayon`). libviprs does its own scheduling in the engine, so
+# a second work-stealing pool inside the decoder would fight it. The
+# `image`, `lcms2` and `moxcms` integration features stay off too: `moxcms`
+# would let the decoder colour-manage internally, and colour management in
+# this crate belongs to `crate::colour`, not to a loader.
+#
+# The lower bound is a SECURITY FLOOR, not a taste. GHSA-66m8-c62j-h6v5:
+# `FrameBuffer::new` multiplies `width * height * channels` as unchecked
+# `usize`, so an overflow builds an undersized buffer whose safe grouped
+# accessors then hand out oversized slices. 0.12.6 is the fix and every
+# release at or below 0.12.5 is affected. Same kind of pin, and the same
+# reason, as `resvg` at 0.48.1 below.
+#
+# It is a floor and NOT an `=` pin, which is a decision worth the paragraph
+# because the obvious reading of the MSRV hazard says otherwise. jxl-oxide
+# declares no `rust-version`, so the MSRV-aware resolver (v3, set above)
+# cannot keep `cargo +1.97 check` honest for it: a patch release is free to
+# raise the real floor with nothing to declare it. But MEASURED, none of the
+# thirteen `jxl-*` crates declares one either, and jxl-oxide requires its
+# siblings by caret, so `=0.12.6` would freeze one crate out of thirteen
+# while `jxl-frame`, `jxl-render` and the rest kept floating. That is not
+# protection, it is the appearance of it, and it would additionally break
+# any consumer who separately depends on `jxl-oxide ^0.12.7`, because `=`
+# cannot unify upward.
+#
+# So the hazard is real and it is carried by the gate instead: `Cargo.lock`
+# is not committed here, so CI resolves fresh on every push and runs
+# `cargo +1.97 check --all-targets --features jxl`. A family-wide MSRV bump
+# therefore shows up as a red build within a day rather than in a consumer's
+# lockfile. The feature name in that command is load-bearing, because these
+# crates are optional: without it they are not in the graph and the job would
+# check nothing. The real fix, if a hard freeze is ever wanted, is a committed
+# lockfile, not an `=` on the root of the tree.
+jxl-oxide = { version = "0.12.6", default-features = false }
+# One type out of `jxl-oxide`'s own tree, named directly because it is the
+# only way to tell an allocation-budget refusal from a corrupt bitstream:
+# the `AllocTracker` `crate::jxl` hands the decoder reports a refusal as a
+# `jxl_grid::OutOfMemory`, boxed behind `jxl_render::Error::Buffer` or
+# `jxl_frame::Error::Buffer`, and `jxl-oxide` re-exports `AllocTracker` but
+# not the error. Costs no lock entry: `jxl-oxide` already depends on this
+# exact version, and the requirement here unifies with it.
+jxl-grid = "0.6.2"
 libfuzzer-sys = "0.4"
 libviprs = { path = "." }
 loom = "0.7"
@@ -211,6 +261,41 @@ tracing = "0.1"
 # the default build stays byte-identical.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 zip = "7.2.0"
+# Pure-Rust JPEG XL encoder (MIT OR Apache-2.0 OR Zlib), the save half of
+# issue #500, optional behind the `jxl` feature. It is
+# `#![forbid(unsafe_code)]` from its crate root down and brings exactly one
+# crate with it, `zune-core`, which the default build already has.
+#
+# It encodes ONE corner of the format: lossless modular, 8- or 16-bit, one to
+# four channels. There is no VarDCT path in it, so `jxlsave`'s `distance`,
+# `Q`, `tier` and `effort` have no backing here and therefore no spelling in
+# [`crate::jxl::SaveOptions`]; see that module for why an ignored quality
+# argument was the one option worth refusing outright.
+#
+# `default-features = false, features = ["std"]` drops `threads`, which is
+# the only other default. Dropping it keeps the encoder single-threaded, for
+# the same reason `jxl-oxide` drops `rayon`: the engine above owns the
+# scheduling. `std` is kept because libviprs is a std crate and the feature
+# is what gives the encoder `std::error::Error`.
+zune-jpegxl = { version = "0.5.2", default-features = false, features = [
+	"std",
+] }
+# `zune-jpegxl`'s own vocabulary types, named directly because that crate
+# re-exports none of them: `JxlSimpleEncoder::new` takes an
+# `EncoderOptions`, which carries a `ColorSpace` and a `BitDepth`, and all
+# three live here. It costs no lock entry, because `image`'s `jpeg` feature
+# already pulls `zune-jpeg`, which already pulls this exact crate.
+#
+# `default-features = false` is the crate's own default (its only feature
+# set is `std`, `log` and `serde`, none of them on by default). Leaving
+# `std` off keeps the dependency edge minimal; feature unification with
+# `zune-jpeg` decides what actually gets compiled, and both spellings of
+# `ZByteWriterTrait` accept the `&mut Vec<u8>` sink the encoder writes into.
+#
+# Optional only so `crate::jxl` can name it behind the `jxl` feature. It costs
+# nothing either way: `image` depends on it directly and `zune-jpeg` and `tiff`
+# reach it too, so it is in the graph of a default build with the feature off.
+zune-core = { version = "0.5.1", default-features = false }
 
 [package]
 name = "libviprs"
@@ -263,12 +348,49 @@ object-store-sink = []
 s3 = ["object-store-sink"]
 tracing = ["dep:tracing"]
 # Gates the SVG rasteriser in [`crate::svg`] and the real body of
-# `decode_svg`. Non-default because it is the only feature in the crate that
-# costs a meaningful number of dependencies: +29 lock entries for `resvg` and
-# its tree. Every one of them is pure Rust with no `build.rs` C compile and no
-# `-sys` crate, so enabling it does not put a C toolchain in the build, but
-# nobody who does not rasterise SVG should pay for the compile.
+# `decode_svg`. Non-default because it is one of the two features in the crate
+# that cost a meaningful number of dependencies (`jxl` below is the other):
+# +29 lock entries for `resvg` and its tree. Every one of them is pure Rust
+# with no `build.rs` C compile and no `-sys` crate, so enabling it does not put
+# a C toolchain in the build, but nobody who does not rasterise SVG should pay
+# for the compile.
 svg = ["dep:resvg"]
+# Gates the JPEG XL loader and encoder in [`crate::jxl`]: the real bodies of
+# `decode_jxl`, `Raster::encode_jxl` and `Raster::save_jxl`, the `.jxl` row in
+# `Raster::save`'s extension route, and the `"jxl"` row in
+# `Raster::encode_to_buffer`'s format route. With the feature off every one of
+# them still exists, still compiles and keeps its signature; each returns a
+# typed refusal the way `crate::svg` does without `svg`, so nothing about the
+# public API moves and a consumer compiles against either build.
+#
+# Non-default for the same reason as `svg` above, and the numbers are the same
+# order: +21 lock entries, measured, taking the normal dependency graph of this
+# crate from 115 to 136 (`cargo tree -p libviprs -e normal`). Thirteen of them
+# are the `jxl-*` family, three are `brotli-decompressor` and its two
+# `alloc-*` crates, one is `zune-jpegxl`, and four are `tracing` and its tail;
+# `zune-core` is free, because `image` and `zune-jpeg` already pull it either
+# way. A release binary reaching the whole codec surface goes from 2,381,616
+# to 4,781,648 bytes, +100.8%. Every one of the 21 is pure Rust with no
+# `build.rs` C compile and no `-sys` crate, so enabling it does not put a C
+# toolchain in the build, but nobody who does not read or write JPEG XL should
+# pay for the compile.
+#
+# There is a second reason `svg` did not have, and it is the sharper one.
+# `jxl-oxide` and `jxl-bitstream` both depend on `tracing` unconditionally, so
+# an unconditional `jxl-oxide` puts `tracing` in the DEFAULT graph of a crate
+# whose own `tracing = ["dep:tracing"]` feature is deliberately opt-in and
+# whose `default` is empty. A consumer who never enables `tracing`, and even
+# one who writes `default-features = false`, would compile and link it anyway,
+# which makes that feature declaration a false statement rather than a choice.
+# Behind `jxl` the opt-in holds again: `cargo tree -e normal -i tracing` prints
+# "nothing to print" in the default build and finds it only when this feature
+# is on.
+#
+# The MSRV hazard written up over `jxl-oxide` below is carried by the `msrv`
+# job in `.github/workflows/ci.yml`, which is why that job names this feature
+# explicitly. Without `--features jxl` the family is not in the graph at all
+# and `cargo +1.97 check` would say nothing about it.
+jxl = ["dep:jxl-oxide", "dep:jxl-grid", "dep:zune-jpegxl", "dep:zune-core"]
 packfile = ["dep:tar", "dep:zip"]
 # Gates public `Serialize` / `Deserialize` derives on the wire/config types
 # (`PyramidPlan`, `LevelPlan`, `TileCoord`, `TileRect`, `Layout`,
@@ -297,6 +419,8 @@ flate2 = { workspace = true }
 gif = { workspace = true }
 image = { workspace = true }
 image-webp = { workspace = true }
+jxl-grid = { workspace = true, optional = true }
+jxl-oxide = { workspace = true, optional = true }
 lopdf = { workspace = true }
 moxcms = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
@@ -310,6 +434,8 @@ thiserror = { workspace = true }
 tiff = { workspace = true }
 tracing = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
+zune-core = { workspace = true, optional = true }
+zune-jpegxl = { workspace = true, optional = true }
 
 [dev-dependencies]
 loom = { workspace = true }

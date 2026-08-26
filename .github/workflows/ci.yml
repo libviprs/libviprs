@@ -90,6 +90,10 @@ jobs:
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
       - run: cargo clippy --all-targets --features svg -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # And for JPEG XL: `jxl` is non-default because it costs 21 crates, one
+      # of which is `tracing`, so the default clippy job compiles neither
+      # `src/jxl.rs`'s real bodies nor its unit tests (issue #500).
+      - run: cargo clippy --all-targets --features jxl -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # `s3` is a deprecated alias for `object-store-sink`, retained for consumers
       # that pinned the old feature name. Nothing else in CI exercises it, so a
       # broken alias would go unnoticed; build it explicitly so it keeps resolving.
@@ -131,6 +135,15 @@ jobs:
           exit $rc
       - run: cargo check --all-targets
       - run: cargo check --all-targets --features pdfium
+      # The `jxl` tree is the one dependency family in the crate with no
+      # `rust-version` anywhere in it, so the MSRV-aware resolver cannot keep
+      # it honest and a patch release is free to raise the real floor with
+      # nothing to declare it. `Cargo.lock` is not committed, so this job
+      # resolves fresh on every push and a family-wide bump goes red here
+      # within a day. Without the explicit feature the JXL crates are not in
+      # the graph at all and this job would never look at them; see the `jxl`
+      # comment in Cargo.toml, which cites this line.
+      - run: cargo check --all-targets --features jxl
 
   docs:
     name: Docs (deny broken intra-doc links)
@@ -163,6 +176,11 @@ jobs:
       # none of them, and the lockdown is a security regression test, so it
       # needs to actually execute (issue #502).
       - run: cargo test --features svg
+      # Same for JPEG XL. Bare `cargo test` compiles `src/jxl.rs` with every
+      # real body cfg'd out, so the oracle pins, the fuzz-corpus sweep and the
+      # `tests/jxl_ported_surface.rs` round trips all run zero assertions
+      # against the codec unless the feature is named (issue #500).
+      - run: cargo test --features jxl
 
   integration-test:
     name: Integration Tests (libviprs-tests)
