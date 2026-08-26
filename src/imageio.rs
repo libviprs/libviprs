@@ -219,7 +219,23 @@ use crate::source::{DecodeLimits, SourceError};
 /// accessors mirror pyvips-style coercing reads: they panic with a
 /// descriptive message when the variant does not match, in line with the
 /// panicking convenience layer of the operation modules.
+///
+/// # Growing
+///
+/// `#[non_exhaustive]`, because four is not the number of types a vips
+/// metadata field can have (issue #609). `VipsArrayInt`, `VipsArrayDouble`
+/// and `gboolean` are all live in a `.v` trailer this crate reads today, and
+/// #573 needs an array variant for the per-frame GIF delays. Marking it now
+/// costs downstream a `_ =>` arm on an exhaustive `match`; marking it after
+/// the first of those variants lands would cost a major version instead, and
+/// `cargo semver-checks` would be right to demand one.
+///
+/// Only matching is affected. Every variant stays constructible from
+/// outside, so `MetadataValue::Int(3)` and the `From` impls are unchanged,
+/// and the `as_*` accessors are the reading path that never needed a match
+/// anyway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MetadataValue {
     /// A signed integer field (`width`, `orientation`, counts, flags).
     Int(i64),

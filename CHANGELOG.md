@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `MetadataValue` is `#[non_exhaustive]` (issue #609). An exhaustive `match`
+  on it downstream needs a `_ =>` arm now. Nothing else changes: the attribute
+  is on the enum rather than on its variants, so `MetadataValue::Int(3)`, the
+  `From` impls and the `as_*` accessors all keep working untouched.
+
+  Four is not the number of types a vips metadata field can have. A `.v`
+  trailer this crate reads today can carry `VipsArrayInt`, `VipsArrayDouble`
+  and `gboolean` fields, which it can only forward opaquely, and #573 needs an
+  array variant for the per-frame GIF delays. Adding that variant to an
+  exhaustive enum is a major bump, and it would be a major bump for a reason
+  nobody enjoys explaining. Doing it now, while the cost is one `_` arm, is
+  the cheap moment, and it puts the enum where every other growable public
+  enum in the crate already sits: `tests/non_exhaustive_enums.rs` registers 21
+  of them and this one had simply escaped the list.
+
+  Unlike the on-disk half of the same question (#565), this break is one
+  `cargo semver-checks` can see, which is exactly why it was safe to leave
+  until it was worth doing and why it is worth doing before the variant lands
+  rather than after.
+
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
   be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
