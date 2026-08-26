@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# tools/Dockerfile.ci — the image `tools/local-ci.sh` runs the CI job list in.
+#
+# This exists so a local gate and CI cannot disagree about the environment.
+# It is deliberately NOT a build image: no sources are copied in. `local-ci.sh`
+# bind-mounts the working tree (and the libviprs-tests sibling) at run time, so
+# one build serves every branch and the container never holds a stale copy.
+#
+# Toolchains match what `.github/workflows/ci.yml` asks for via
+# `dtolnay/rust-toolchain@<spec>`: stable for Check & Lint, Docs, Test and the
+# integration job, and 1.97 for the MSRV job. Nightly is here for
+# `merge-gate.yml`'s Miri job, which is the other workflow worth running
+# locally. If ci.yml starts asking for a toolchain this image does not carry,
+# `local-ci.sh` fails loudly rather than silently substituting one.
+#
+# One honest caveat: GitHub runs `ubuntu-latest` on x86_64 and this image runs
+# on the host architecture, which is arm64 on an Apple Silicon machine. That is
+# the right trade (emulating x86_64 makes the suite unusably slow) but it means
+# the local gate is not bit-identical to CI for anything architecture-sensitive.
+# The one known case in this repo is `f32::mul_add`, which lowers to a libm
+# `fmaf` call on baseline x86-64 and a single `fmadd` on aarch64 (issue #581).
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim AS pdfium
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# Same pinned, checksum-verified release CI and libviprs-tests consume. Keep
+# PDFIUM_RELEASE and the digests in lockstep with ci.yml and the tests image.
+ARG PDFIUM_RELEASE=pdfium-7881
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+        amd64) PDFIUM_ARCH="linux-x64";   PDFIUM_SHA256="653f24f074afe6c868f634ae0cc954a1a89821f33bc7795f16065a14022b662b" ;; \
+        arm64) PDFIUM_ARCH="linux-arm64"; PDFIUM_SHA256="3a8940ae414a54601f6bc0b25fb3d589025320ee91fff378e12708259da5702d" ;; \
+        *)     echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL -o /tmp/pdfium.tgz \
+        "https://github.com/libviprs/libviprs-dep/releases/download/${PDFIUM_RELEASE}/pdfium-${PDFIUM_ARCH}.tgz" && \
+    echo "${PDFIUM_SHA256}  /tmp/pdfium.tgz" | sha256sum -c - && \
+    mkdir -p /opt/pdfium && \
+    tar xzf /tmp/pdfium.tgz -C /opt/pdfium --strip-components=1 && \
+    rm /tmp/pdfium.tgz
+
+FROM rust:latest
+RUN apt-get update && apt-get install -y ca-certificates git && rm -rf /var/lib/apt/lists/*
+COPY --from=pdfium /opt/pdfium/lib/libpdfium.so /usr/local/lib/libpdfium.so
+RUN ldconfig
+
+# The toolchains ci.yml names, plus nightly + miri for merge-gate.yml.
+# Name the toolchain on every component add. A bare `rustup component add`
+# targets whatever is default AT THAT MOMENT, which after installing nightly
+# is nightly, so stable silently ended up with no clippy and no rustfmt and
+# `cargo fmt --check` failed with "not installed for the toolchain 'stable'".
+RUN rustup component add clippy rustfmt --toolchain stable \
+ && rustup toolchain install 1.97 --component clippy,rustfmt \
+ && rustup toolchain install nightly --component miri,clippy,rustfmt \
+ && rustup default stable
+
+# Cargo state lives on a named volume mounted here, so repeat runs are warm.
+ENV CARGO_HOME=/cargo
+ENV CARGO_TERM_COLOR=always
+WORKDIR /src/libviprs
