@@ -50,7 +50,7 @@
 //!   does expose an `effort` knob on its `EncoderOptions`, and it is
 //!   deliberately left at the crate default: it is not `jxlsave`'s speed
 //!   tier but a sampling radius for the prefix-code histograms
-//!   (`encoder.rs:1086-1148`), so it moves the compressed size and never
+//!   (`encoder.rs:1089` and `:1138`), so it moves the compressed size and never
 //!   the decoded pixels. Mapping `--effort 7` onto it would be a lie about
 //!   what the number means.
 //! * **16-bit is written, not refused.** This is where JPEG XL and WebP
@@ -76,7 +76,7 @@
 //!   [`decode_jxl`] matches that default exactly. Reading every frame is
 //!   issue #621 and waits on the page model in #564.
 //! * **`icc-profile-data` is the profile the pixels are in, and is always
-//!   present.** `jxlload.c:967-985` asks libjxl for
+//!   present.** `jxlload.c:955-985` asks libjxl for
 //!   `JXL_COLOR_PROFILE_TARGET_DATA`, which synthesises a profile when the
 //!   file embeds none, so a vips-loaded JXL always carries one.
 //!   [`decode_jxl`] uses `jxl_oxide::JxlImage::rendered_icc`, which has the
@@ -122,7 +122,7 @@
 //!   [`Raster::save_stripped`](crate::Raster::save_stripped) write
 //!   identical `.jxl` bytes.
 //! * **CMYK is refused rather than mislabelled.** libjxl counts a JPEG XL
-//!   `Black` channel as an extra channel, so `jxlload.c:700-737` switches
+//!   `Black` channel as an extra channel, so `jxlload.c:698-737` switches
 //!   on three colour channels and tags a CMYK file `srgb` with four bands,
 //!   which is not what those four bands are. `jxl-oxide` reports the
 //!   colour space honestly and cannot convert it without a colour
@@ -213,7 +213,7 @@ pub struct SaveOptions {
 /// Both container forms decode: the bare codestream, which starts `FF 0A`,
 /// and the ISOBMFF form, which starts with the 12-byte `JXL ` signature
 /// box. The sample carrier follows the file rather than a fixed choice,
-/// the way `jxlload.c:679-696` picks one: float samples give
+/// the way `jxlload.c:681-696` picks one: float samples give
 /// [`PixelFormat::FloatF32`], more than 8 bits per sample gives the 16-bit
 /// formats, and everything else gives the 8-bit ones. The band count is
 /// the colour channels plus alpha, so a greyscale file stays one band
@@ -292,7 +292,7 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
         )));
     }
 
-    // The sample carrier, chosen the way `jxlload.c:857-864` chooses one:
+    // The sample carrier, chosen the way `jxlload.c:936-942` chooses one:
     // any float anywhere in the samples makes the whole image float,
     // otherwise more than 8 declared bits makes it 16-bit.
     let metadata = &image.image_header().metadata;
@@ -374,7 +374,7 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // Tagged rather than inferred: `Interpretation::for_format` reads the
     // band count, and a two-band greyscale-plus-alpha JXL has one colour
     // channel while a four-band float one has three. Only the colour
-    // channel count decides the tag (`jxlload.c:697-737`).
+    // channel count decides the tag (`jxlload.c:698-737`).
     raster.meta.interpretation = Some(interpretation(jxl_format.is_grayscale(), format));
     // Upright already; see the module docs for why this is 1 rather than
     // the header's value.
@@ -560,7 +560,7 @@ fn truncated(what: &str) -> SourceError {
 }
 
 /// Whether a declared bit depth stores floating-point samples
-/// (`jxlload.c:857-860` asks libjxl the same question as
+/// (`jxlload.c:936-937` asks libjxl the same question as
 /// `exponent_bits_per_sample > 0`).
 fn is_float_sample(depth: jxl_oxide::image::BitDepth) -> bool {
     matches!(depth, jxl_oxide::image::BitDepth::FloatSample { .. })
@@ -599,7 +599,7 @@ fn carrier(bands: u32, is_float: bool, bits_per_sample: u32) -> Result<PixelForm
     })
 }
 
-/// The interpretation tag `jxlload.c:697-737` assigns, which reads the
+/// The interpretation tag `jxlload.c:698-737` assigns, which reads the
 /// *colour* channel count and the sample carrier and ignores the band
 /// count entirely.
 fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
@@ -620,7 +620,7 @@ fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
 /// The `exif-data` blob for an image, or `None` when there is no readable
 /// `Exif` box.
 ///
-/// The transform is `jxlload.c:650-660`: read the big-endian 4-byte
+/// The transform is `jxlload.c:650-658`: read the big-endian 4-byte
 /// tiff_header_offset, skip that many bytes of the payload, and put
 /// `Exif\0\0` back on the front. A box `jxl-oxide` refuses to parse costs
 /// the blob and not the image; see the module docs for the two shapes where
@@ -1519,7 +1519,6 @@ mod tests {
     fn write_oracle_inputs() {
         let dir =
             std::env::var("JXL_ORACLE_OUT").expect("JXL_ORACLE_OUT names an output directory");
-        let two = NonZeroU16::new(2).unwrap();
         let grey = Raster::new(
             4,
             3,
@@ -1527,7 +1526,6 @@ mod tests {
             RAMP_PIXELS.iter().map(|p| p[0]).collect::<Vec<u8>>(),
         )
         .unwrap();
-        let _ = two;
         for (name, raster) in [
             ("viprs_rgb", ramp_rgb()),
             ("viprs_rgba", ramp_rgba()),
