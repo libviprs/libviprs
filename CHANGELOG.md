@@ -175,6 +175,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Canny edge detection: `Raster::canny` and `Raster::try_canny`, matching
+  `vips_canny` (issues #511, #559 and #560). It takes `sigma` and `precision`
+  and nothing else, because libvips's canny **stops after non-maximum
+  suppression**: it blurs, takes a 2x2 `[-1 1; -1 1]` gradient, converts to
+  `(G, theta)`, thins along the gradient direction, and that is the whole
+  operation. There is no double-thresholding and no edge tracking by
+  connectivity, which is why there are no hysteresis thresholds to pass. Expect
+  the result to look thinner and greyer than a textbook Canny, because it is a
+  suppressed gradient magnitude rather than a binary edge map.
+
+  The output format is the surprising part, so it is worth stating before you
+  wire it into a pipeline: `precision` reaches only the blur, and the gradient
+  stage then picks its own arm from the format of the *blurred* image. On the
+  float arm the blur has already promoted a uchar input by then, so canny
+  answers a float raster whose values run past 500 and do not fit a byte. A
+  uchar input comes back uchar only at integer precision or below sigma 0.2,
+  where the blur short-circuits to a copy. Everything 16-bit or float comes
+  back float at every precision. Size, band count, interpretation, resolution
+  and the attached metadata always round-trip.
+
+  One deliberate divergence from the `vips` CLI: `vips canny --sigma 0` does
+  not fail. GObject refuses any value outside `0.01..1000`, silently leaves
+  sigma at its 1.4 default and still exits 0, so the CLI quietly runs a
+  different blur than the one asked for. `try_canny` honours what it is given,
+  as `try_gaussblur` already does, so a sigma below 0.2 is a no-blur request.
+
+  Pinned against `oracle-captures/convolution/canny/`, which captured 42 vips
+  8.18.4 outputs on both libvips paths. Where the two disagree libviprs is the
+  portable C one, as issue #558 settled, and the suite says so at sigma 0.8 and
+  1.6 rather than only at the 1.4 default, which is one of the few sigmas where
+  the two implementations happen to agree.
+
 - Still-image WebP load and lossless save (issues #567 and #568). `decode_webp`
   reads every WebP this build can meet — lossy `VP8`, lossless `VP8L`, alpha,
   and the extended `VP8X` container — and lifts the `ICCP`, `EXIF` and `XMP `
@@ -725,6 +757,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- A `.v` file written by a newer libviprs no longer loses every metadata field
+  when it is read by an older one (issue #565). The trailer was read as one
+  `serde_json::from_slice` onto a struct holding a plain externally tagged
+  `MetadataValue`, and serde errors on a variant it has never heard of, so the
+  first field a future version added would fail the whole parse. The `if let
+  Ok(..)` around it then swallowed the failure, and the image came back with
+  no ICC profile, no EXIF blob and an orientation of 1, with nothing said. It
+  is a data-loss break that `cargo semver-checks` cannot see, because it lives
+  in the file format rather than in the API, and it was blocking the animated
+  formats: a per-frame delay array is a new `MetadataValue` variant, so adding
+  one would have started corrupting metadata for everyone on the current
+  release.
+
+  The trailer is now read entry by entry. An entry this build cannot represent
+  is carried opaquely rather than dropped, so it survives being written back
+  out and an old build that opens a new file and re-saves it does not strip
+  what it could not read. Those fields stay out of `get_field` and
+  `get_fields`, because this build can say the field was there but not what it
+  means; setting or removing a field of the same name supersedes the carried
+  one, so stripping still strips. Unknown trailer keys are ignored and missing
+  ones default, so the shape can grow too, and the bytes written are unchanged,
+  which is what keeps every already-released reader working.
+
+  A trailer that opens with `{` and is not valid JSON is now reported as a
+  corrupt `.v` rather than ignored. That is the one case left where metadata is
+  genuinely unrecoverable, and it is narrow enough that no libviprs or libvips
+  writer can produce it: libvips writes XML in the same slot, and a trailer
+  that never claimed to be libviprs JSON is still read as absent, exactly as
+  before.
 
 - The TIFF page readers honour `DecodeLimits` instead of bypassing it (issue
   #540). `decode_tiff_page` and `tiff_page_count` took no limits at all and
