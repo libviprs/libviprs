@@ -115,6 +115,7 @@ pub mod engine_builder;
 pub mod error;
 pub mod extensions;
 pub mod extract;
+pub mod fits;
 pub mod foreign_stubs;
 pub mod freqfilt;
 pub mod geo;
@@ -257,6 +258,11 @@ pub use radiance::{RadianceError, decode_radiance};
 // already knows the bytes are a GIF and does not want to go through the
 // sniff route.
 pub use gif::{GifError, decode_gif};
+// `decode_fits` is re-exported for the reason `decode_radiance` is: it is
+// the direct entry point for a caller who already knows the bytes are FITS.
+// The parser's own ceilings stay behind `libviprs::fits::` rather than
+// crowding the crate root with three numeric constants.
+pub use fits::{FitsError, decode_fits};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
