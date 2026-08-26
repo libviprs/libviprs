@@ -831,10 +831,10 @@ pub(crate) enum SniffedFormat {
     WebP,
     /// Radiance HDR, the first line `#?RADIANCE`.
     Radiance,
-    /// OpenEXR, `76 2F 31 01`.
-    OpenExr,
     /// FITS, the first card's `SIMPLE  =` keyword and fixed-format marker.
     Fits,
+    /// OpenEXR, `76 2F 31 01`.
+    OpenExr,
 }
 
 impl SniffedFormat {
@@ -875,7 +875,13 @@ impl SniffedFormat {
     const fn decodes_from_memory(self) -> bool {
         matches!(
             self,
-            Self::Vips | Self::Jpeg | Self::Gif | Self::WebP | Self::Radiance | Self::OpenExr
+            Self::Vips
+                | Self::Jpeg
+                | Self::Gif
+                | Self::WebP
+                | Self::Radiance
+                | Self::Fits
+                | Self::OpenExr
         )
     }
 
@@ -1900,8 +1906,8 @@ mod tests {
             SniffedFormat::Gif,
             SniffedFormat::WebP,
             SniffedFormat::Radiance,
-            SniffedFormat::OpenExr,
             SniffedFormat::Fits,
+            SniffedFormat::OpenExr,
         ];
         // These are the containers libviprs decodes itself, so they are
         // the ones the route table maps to no `image` decoder.
@@ -1910,8 +1916,8 @@ mod tests {
             SniffedFormat::Radiance,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
-            SniffedFormat::OpenExr,
             SniffedFormat::Fits,
+            SniffedFormat::OpenExr,
         ];
 
         let buffered: Vec<SniffedFormat> = all
