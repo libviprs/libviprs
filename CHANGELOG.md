@@ -359,6 +359,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- OpenEXR load: `decode_exr`, plus the sniff route so `decode_bytes` and
+  `decode_file` reach it from the magic bytes rather than the extension
+  (issues #504, #614 and #615). An `.exr` decodes to `FloatF32(n)` holding the
+  file's own scene-linear samples, one band per selected channel, tagged
+  `ScRgb` for an R/G/B selection and `Multiband` otherwise.
+
+  **There is no save half and none is coming, because libvips has never
+  shipped an EXR writer.** `vips -l` registers `openexrload` and no saver at
+  all, and `vips copy src.png out.exr` answers `"out.exr" is not a known file
+  format`. Nothing is deferred here; there is nothing to be parity with. Both
+  facts are captured rather than asserted, in
+  `oracle-captures/foreign-exr/oracle.json`.
+
+  The load side goes further than vips does, and that is deliberate rather
+  than accidental. `openexr2vips.c` drives the OpenEXR **C RGBA wrapper**
+  (`ImfCRgbaFile.h`), which hands back four `half` samples per pixel and
+  nothing else, so vips flattens every EXR before it sees a float. The file's
+  own TODO block says so: "more of OpenEXR's pixel formats", "more than just
+  RGBA channels", "best redo with the C++ API now we support C++ operations".
+  Three measured consequences, all of which libviprs avoids:
+
+  * A **FLOAT** channel comes back from vips rounded to half. Measured on a
+    file holding `7/3`, vips reports `2.333984375`; libviprs returns the
+    stored `f32`.
+  * A file with **no R/G/B/Y channels**, a depth pass for instance, loads in
+    vips as four bands of `(0, 0, 0, 1)`: an entirely black image, with no
+    error and no warning. libviprs selects channels by name and returns the
+    depth.
+  * **Band count follows the file**, so an R/G/B file is three bands and a
+    luminance file is one, where vips is always four with a synthesised alpha.
+    The selected names come back as `exr-channels` so a band is never a guess.
+
+  Parity with vips is nonetheless **exact, with no tolerance anywhere**: project
+  a libviprs decode through that RGBA-half funnel and it reproduces the
+  `vips rawsave` payload byte for byte on all twenty fixtures, lossy B44 and
+  DWA codings included. The fixtures are written by the OpenEXR reference
+  implementation 3.4.15, so no capture is circular.
+
+  Known ceilings, stated at the entry point and not only here. **UINT channels
+  do not load**: they need the unsigned sample carrier from issue #517, and
+  `ExrError::UnsupportedSampleType` names it. vips does not refuse them, it
+  converts them to half, so an object ID above 65504 reads back there as
+  infinity. **Multi-part files decode their first part only**, which is also
+  all vips can reach; the real count comes back as `exr-parts`, deliberately
+  not the shared `n-pages`, because vips attaches no page count to an EXR and
+  an EXR part is a layer rather than a page a caller could ask `decode_exr`
+  for. **Deep EXR does not load** in either. Chroma-subsampled channels do not
+  load. And a `FloatF32(n)` raster is rejected by the pyramid engine, as a
+  loaded `.hdr` already is, so cast to an integer format first if you need
+  tiles.
+
+  The decode allocation budget, `DecodeLimits::max_alloc_bytes`, is priced
+  off the channels the header **declares** and not off the bands the
+  selection keeps. An EXR body is compressed and the decoder builds one
+  full-resolution buffer per declared channel before it decompresses
+  anything, so an ordinary compositing render declaring sixty-four channels
+  costs sixty-four buffers however few of them survive selection. Pricing off
+  the selection would under-count that by `declared / selected`, with nothing
+  bounding the ratio.
+
+  This costs **ten net-new lock entries**: `exr` 1.74.2 with
+  `default-features = false`, plus `bit_field`, `lebe`, `libm`, `paste`,
+  `pulp`, `pulp-wasm-simd-flag`, `raw-cpuid`, `reborrow` and `zune-inflate`.
+  BSD-3-Clause with MIT / Apache-2.0 / BSD-3 / Zlib transitives, no `links =`
+  key and no C source anywhere in the tree, and `exr` itself is
+  `#![forbid(unsafe_code)]`. `image` 0.25's `exr` feature is exactly
+  `dep:exr`, so naming the crate directly costs nothing extra and buys the
+  channel list, the per-channel sample type and the data window, none of which
+  survive `image::DynamicImage`.
 - FITS load and save, hand-rolled with no new dependency: `decode_fits`, the
   `FitsError` it fails with, and `Raster::encode_fits` / `Raster::save_fits`,
   matching `vips fitsload` and `vips fitssave` (issue #505). `.fits`, `.fit`

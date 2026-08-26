@@ -892,7 +892,11 @@ impl Raster {
     /// * [`crate::webp`] attaches it only when the file is animated, so a
     ///   still WebP carries no such field at all, which is what
     ///   `vipsheader -a` reports for one;
-    /// * the PDF loader does not attach it.
+    /// * the PDF loader does not attach it, and neither does
+    ///   [`crate::exr`], which reports its part count as `exr-parts`
+    ///   instead: `vipsheader -a` attaches no `n-pages` to an EXR either,
+    ///   and an EXR part is a layer rather than a page, so there is no
+    ///   part index [`crate::decode_exr`] could be asked for.
     ///
     /// A raster with no `n-pages` field reports `1` either way, matching the
     /// oracle (`n-pages = 1` for `sample.jpg`, `5` / `4` / `3` / `35` for the

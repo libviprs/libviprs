@@ -18,6 +18,31 @@ resolver = "3"
 ab_glyph = "0.2"
 arbitrary = { version = "1", features = ["derive"] }
 blake3 = "1.8.4"
+# Pure-Rust OpenEXR codec (BSD-3-Clause), used by `decode_exr` to stand in
+# for the OpenEXR C++ library vips loads `.exr` through. Named directly
+# rather than reached through `image`'s `exr` feature (which is exactly
+# `dep:exr`, so the crate cost is identical either way) for the same reason
+# `tiff` and `image-webp` are named directly: the facade flattens every file
+# to one of its fixed colour types, and an EXR is an arbitrary set of named
+# channels. The direct API reports the channel list, the per-channel sample
+# type, the data window and the display window, none of which survive
+# `image::DynamicImage`.
+#
+# `default-features = false` drops the single default feature, `rayon`, which
+# only enables `rayon-core` for parallel block decompression. libviprs does
+# its own scheduling in the engine and a codec that spawns a second thread
+# pool underneath it is not something this crate wants. It buys no lockfile
+# reduction: `rayon` is already in the graph through `lopdf`, so this is
+# purely about who owns the threads at decode time.
+#
+# `pulp` is not optional in `exr` and cannot be dropped. It is the SIMD
+# abstraction `faer` is built on, pure Rust with no `-sys` crate and no
+# `links =` key, but it is not `forbid(unsafe_code)` the way `exr` itself
+# is, and on x86_64 its `build.rs` generates a `core::arch::global_asm!`
+# block (it returns early on every other architecture). No C compiler and
+# no external system library are involved either way, which is the bar
+# stated in issue #606.
+exr = { version = "1.74.2", default-features = false }
 flate2 = "1"
 # The GIF codec, taken directly rather than only through the `image` facade
 # (issue #499). `image`'s `GifEncoder` exposes `new`, `new_with_speed`,
@@ -267,6 +292,7 @@ test-util = []
 [dependencies]
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
+exr = { workspace = true }
 flate2 = { workspace = true }
 gif = { workspace = true }
 image = { workspace = true }
