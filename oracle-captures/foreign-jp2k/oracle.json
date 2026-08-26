@@ -1,0 +1,2260 @@
+{
+  "meta": {
+    "area": "foreign-jp2k",
+    "issue": 637,
+    "vips_version": "vips-8.18.6",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "vips_config_jp2k": ["JPEG2000 load/save with libopenjp2: true"],
+    "opj_compress_binary": "/opt/homebrew/bin/opj_compress",
+    "opj_compress_version": ["It has been compiled against openjp2 library v2.5.4."],
+    "libopenjp2_linked_by_vips": ["/opt/homebrew/opt/openjpeg/lib/libopenjp2.7.dylib (compatibility version 7.0.0, current version 2.5.4)"],
+    "captured_by": "oracle-captures/foreign-jp2k/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a (/Users/rom/workspace/libvips at fe420cf3a) for the jp2kload.c and jp2ksave.c function names quoted in the records; that tree is AHEAD of the installed release recorded in vips_version above, so it is cited for names only and every number here came out of the binary"
+  },
+  "notes": ["Provenance: the vips version in meta is whatever `vips --version` said on the run that wrote this file, never a hardcoded string, because Homebrew moved this box from 8.18.4 to 8.18.6 mid-capture and deleted the old keg. Every number here came from the version recorded above. Both halves of the capture go through the SAME openjpeg build: vips links libopenjp2 2.5.4 and opj_compress was compiled against 2.5.4, so the fixtures opj_compress wrote and the decodes vips did agree by construction rather than by luck.", "jp2ksave always writes a JP2 container; the .j2k/.j2c/.jpc/.jpt suffixes it advertises change nothing about the bytes. Every bare codestream fixture here therefore had to come from opj_compress.", "A 4-byte libvips format goes to a 31-bit component, and 31 bits do not round-trip: signed comes back doubled, unsigned comes back doubled with 2^30 added. 8-bit and 16-bit are exact.", "The colr box's enumerated colour space, not the component count, decides the interpretation: 1 component + EnumCS 17 is b-w, but 1 component + EnumCS 12 is cmyk and 3 components + EnumCS 17 is b-w. A 1-component file tagged sRGB/sYCC/e-YCC reports 3 bands in the header and then fails on any pixel read with `decoded image does not match container`.", "jp2kload left-justifies: a prec-N component is shifted left by (element_bits - N). bits-per-sample carries the real depth. Only 8 and 16 are unshifted, so an 8-bit-only test cannot catch this.", "jp2kload's `page` is a resolution level and `n-pages` is the resolution count, not a frame count. jp2ksave's numresolution is max(1, log2(min(width, height)) - 5), so every fixture small enough to commit has exactly one resolution and hides this.", "jp2ksave writes no metadata whatsoever: --profile and --keep are inherited no-ops and change no byte of the output. jp2kload reads an ICC profile and nothing else.", "fail-on has no observable effect on jp2kload: every level, from none to warning, gives the same return code and the same message on every malformed fixture here."],
+  "records": {
+    "save_container_is_always_jp2": {
+      "what": "`jp2ksave` registers five suffixes (.j2k, .jp2, .jpt, .j2c, .jpc) and writes the SAME RFC 3745 JP2 container for all of them, byte for byte: it hardcodes OPJ_CODEC_JP2. So a port must not pick a carrier from the extension on save. The loader is the opposite: it sniffs the first 12 bytes and reads a bare codestream or a JP2, ignoring the name entirely.",
+      "suffixes": {
+        "jp2": {
+          "bytes": 262,
+          "sha256": "a040df435e94a2aefe1ccdbb4035c89465ae36bdd4442d3b8dc890c484de714e",
+          "magic": "0000000c6a5020200d0a870a",
+          "boxes": [
+            ["jP  ", 12, 0],
+            ["ftyp", 20, 12],
+            ["jp2h", 45, 32],
+            ["ihdr", 22, 40],
+            ["colr", 15, 62],
+            ["jp2c", 185, 77]
+          ]
+        },
+        "j2k": {
+          "bytes": 262,
+          "sha256": "a040df435e94a2aefe1ccdbb4035c89465ae36bdd4442d3b8dc890c484de714e",
+          "magic": "0000000c6a5020200d0a870a",
+          "boxes": [
+            ["jP  ", 12, 0],
+            ["ftyp", 20, 12],
+            ["jp2h", 45, 32],
+            ["ihdr", 22, 40],
+            ["colr", 15, 62],
+            ["jp2c", 185, 77]
+          ]
+        },
+        "jpt": {
+          "bytes": 262,
+          "sha256": "a040df435e94a2aefe1ccdbb4035c89465ae36bdd4442d3b8dc890c484de714e",
+          "magic": "0000000c6a5020200d0a870a",
+          "boxes": [
+            ["jP  ", 12, 0],
+            ["ftyp", 20, 12],
+            ["jp2h", 45, 32],
+            ["ihdr", 22, 40],
+            ["colr", 15, 62],
+            ["jp2c", 185, 77]
+          ]
+        },
+        "j2c": {
+          "bytes": 262,
+          "sha256": "a040df435e94a2aefe1ccdbb4035c89465ae36bdd4442d3b8dc890c484de714e",
+          "magic": "0000000c6a5020200d0a870a",
+          "boxes": [
+            ["jP  ", 12, 0],
+            ["ftyp", 20, 12],
+            ["jp2h", 45, 32],
+            ["ihdr", 22, 40],
+            ["colr", 15, 62],
+            ["jp2c", 185, 77]
+          ]
+        },
+        "jpc": {
+          "bytes": 262,
+          "sha256": "a040df435e94a2aefe1ccdbb4035c89465ae36bdd4442d3b8dc890c484de714e",
+          "magic": "0000000c6a5020200d0a870a",
+          "boxes": [
+            ["jP  ", 12, 0],
+            ["ftyp", 20, 12],
+            ["jp2h", 45, 32],
+            ["ihdr", 22, 40],
+            ["colr", 15, 62],
+            ["jp2c", 185, 77]
+          ]
+        }
+      },
+      "all_identical": true,
+      "load_ignores_the_name": {
+        "what": "One bare codestream (fixtures/depth8u.j2k) copied under five names, including a .png and one with no extension at all. jp2kload takes every one of them and decodes to the same raster, because vips picks the loader by sniffing the first 12 bytes (jp2kload.c, vips_foreign_load_jp2k_get_codec_format: the RFC 3745 signature, the short JP2 magic, or the SOC+SIZ pair of a raw codestream) and never consults the filename.",
+        "names": {
+          "copy.j2k": {
+            "header": {"summary": "outputs/copy.j2k: 5x1 uchar, 1 band, b-w, jp2kload"},
+            "decoded_raster": {
+              "bytes": 5,
+              "sha256": "30b441dd323b8fcc5d3d556c17db0d5cca3ed1ecf02c317b82a886431e9f66f3"
+            }
+          },
+          "copy.jp2": {
+            "header": {"summary": "outputs/copy.jp2: 5x1 uchar, 1 band, b-w, jp2kload"},
+            "decoded_raster": {
+              "bytes": 5,
+              "sha256": "30b441dd323b8fcc5d3d556c17db0d5cca3ed1ecf02c317b82a886431e9f66f3"
+            }
+          },
+          "copy.jpt": {
+            "header": {"summary": "outputs/copy.jpt: 5x1 uchar, 1 band, b-w, jp2kload"},
+            "decoded_raster": {
+              "bytes": 5,
+              "sha256": "30b441dd323b8fcc5d3d556c17db0d5cca3ed1ecf02c317b82a886431e9f66f3"
+            }
+          },
+          "copy.png": {
+            "header": {"summary": "outputs/copy.png: 5x1 uchar, 1 band, b-w, jp2kload"},
+            "decoded_raster": {
+              "bytes": 5,
+              "sha256": "30b441dd323b8fcc5d3d556c17db0d5cca3ed1ecf02c317b82a886431e9f66f3"
+            }
+          },
+          "copy": {
+            "header": {"summary": "outputs/copy: 5x1 uchar, 1 band, b-w, jp2kload"},
+            "decoded_raster": {
+              "bytes": 5,
+              "sha256": "30b441dd323b8fcc5d3d556c17db0d5cca3ed1ecf02c317b82a886431e9f66f3"
+            }
+          }
+        },
+        "all_decode_identically": true
+      }
+    },
+    "rgb_lossless": {
+      "what": "`vips jp2ksave --lossless` on an 4x3 3-band srgb ramp, then every pixel read back. The round trip is the identity: the bytes that went in are the bytes that come out, and the band count and interpretation survive. The reversible 5/3 wavelet is integer-specified, so a correct port reproduces this exactly rather than approximately.",
+      "fixture": "fixtures/rgb_lossless.jp2",
+      "bytes": 262,
+      "sha256": "a040df435e94a2aefe1ccdbb4035c89465ae36bdd4442d3b8dc890c484de714e",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 4,
+        "Ysiz": 3,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 3,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+      "header": {
+        "width": "4",
+        "height": "3",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/rgb_lossless.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 36,
+        "sha256": "c875696bdedeac8d1e24565c11a2eac3ba29bb7727596c1ed159983d9a21c21d"
+      },
+      "getpoint_all": [
+        [0, 0, 0],
+        [61, 97, 29],
+        [122, 194, 58],
+        [183, 35, 87],
+        [13, 151, 211],
+        [74, 248, 240],
+        [135, 89, 13],
+        [196, 186, 42],
+        [26, 46, 166],
+        [87, 143, 195],
+        [148, 240, 224],
+        [209, 81, 253]
+      ],
+      "source_bytes": [0, 0, 0, 61, 97, 29, 122, 194, 58, 183, 35, 87, 13, 151, 211, 74, 248, 240, 135, 89, 13, 196, 186, 42, 26, 46, 166, 87, 143, 195, 148, 240, 224, 209, 81, 253],
+      "identity": true
+    },
+    "rgba_lossless": {
+      "what": "`vips jp2ksave --lossless` on an 4x3 4-band srgb ramp, then every pixel read back. The round trip is the identity: the bytes that went in are the bytes that come out, and the band count and interpretation survive. The reversible 5/3 wavelet is integer-specified, so a correct port reproduces this exactly rather than approximately.",
+      "fixture": "fixtures/rgba_lossless.jp2",
+      "bytes": 317,
+      "sha256": "79b3b91037294604125921a7812ca92c0cd8b5fae2b9b72c835823662bd44f05",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 4,
+        "Ysiz": 3,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 4,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+      "header": {
+        "width": "4",
+        "height": "3",
+        "bands": "4",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/rgba_lossless.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 48,
+        "sha256": "542d0234c2a78b9c4cb603ccce5d1cf84866f4dc3730b7988583e7ed0b09b1e7"
+      },
+      "getpoint_all": [
+        [0, 0, 0, 0],
+        [61, 97, 29, 85],
+        [122, 194, 58, 170],
+        [183, 35, 87, 255],
+        [13, 151, 211, 40],
+        [74, 248, 240, 125],
+        [135, 89, 13, 210],
+        [196, 186, 42, 39],
+        [26, 46, 166, 80],
+        [87, 143, 195, 165],
+        [148, 240, 224, 250],
+        [209, 81, 253, 79]
+      ],
+      "source_bytes": [0, 0, 0, 0, 61, 97, 29, 85, 122, 194, 58, 170, 183, 35, 87, 255, 13, 151, 211, 40, 74, 248, 240, 125, 135, 89, 13, 210, 196, 186, 42, 39, 26, 46, 166, 80, 87, 143, 195, 165, 148, 240, 224, 250, 209, 81, 253, 79],
+      "identity": true
+    },
+    "cmyk_lossless": {
+      "what": "`vips jp2ksave --lossless` on an 4x3 4-band cmyk ramp, then every pixel read back. The round trip is the identity: the bytes that went in are the bytes that come out, and the band count and interpretation survive. The reversible 5/3 wavelet is integer-specified, so a correct port reproduces this exactly rather than approximately.",
+      "fixture": "fixtures/cmyk_lossless.jp2",
+      "bytes": 283,
+      "sha256": "16c6105d3d7ead0ed2cfb7df9df4b65282739e4b668b7d705fa7e3b5a44895db",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 4,
+        "Ysiz": 3,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 4,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 12},
+      "header": {
+        "width": "4",
+        "height": "3",
+        "bands": "4",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "cmyk",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/cmyk_lossless.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 48,
+        "sha256": "542d0234c2a78b9c4cb603ccce5d1cf84866f4dc3730b7988583e7ed0b09b1e7"
+      },
+      "getpoint_all": [
+        [0, 0, 0, 0],
+        [61, 97, 29, 85],
+        [122, 194, 58, 170],
+        [183, 35, 87, 255],
+        [13, 151, 211, 40],
+        [74, 248, 240, 125],
+        [135, 89, 13, 210],
+        [196, 186, 42, 39],
+        [26, 46, 166, 80],
+        [87, 143, 195, 165],
+        [148, 240, 224, 250],
+        [209, 81, 253, 79]
+      ],
+      "source_bytes": [0, 0, 0, 0, 61, 97, 29, 85, 122, 194, 58, 170, 183, 35, 87, 255, 13, 151, 211, 40, 74, 248, 240, 125, 135, 89, 13, 210, 196, 186, 42, 39, 26, 46, 166, 80, 87, 143, 195, 165, 148, 240, 224, 250, 209, 81, 253, 79],
+      "identity": true
+    },
+    "carrier_sweep": {
+      "what": "Every libvips band format handed to `jp2ksave --lossless` as a 1-band b-w 12x1 ramp, and what `jp2kload` gives back. uchar, char, ushort and short round-trip exactly. float and double are refused outright with `not an integer format`, so a port must reject rather than cast. uint and int are the trap: jp2ksave maps a 4-byte format to a precision of 31, not 32, because openjpeg cannot do more, and the result is NOT a round trip. See the thirty_one_bit record for what it does instead.",
+      "formats": {
+        "uchar": {
+          "in": [0, 21, 42, 63, 84, 105, 126, 147, 168, 189, 210, 231],
+          "saved": true,
+          "stderr": [],
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 12,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "outputs/carrier_uchar.jp2: 12x1 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "out": [0, 21, 42, 63, 84, 105, 126, 147, 168, 189, 210, 231],
+          "identity": true
+        },
+        "char": {
+          "in": [-64, -54, -44, -34, -24, -14, -4, 6, 16, 26, 36, 46],
+          "saved": true,
+          "stderr": [],
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 12,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": true, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "outputs/carrier_char.jp2: 12x1 char, 1 band, b-w, jp2kload",
+            "format": "char",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "out": [-64, -54, -44, -34, -24, -14, -4, 6, 16, 26, 36, 46],
+          "identity": true
+        },
+        "ushort": {
+          "in": [0, 5461, 10922, 16383, 21844, 27305, 32766, 38227, 43688, 49149, 54610, 60071],
+          "saved": true,
+          "stderr": [],
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 12,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 16, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "outputs/carrier_ushort.jp2: 12x1 ushort, 1 band, grey16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "out": [0, 5461, 10922, 16383, 21844, 27305, 32766, 38227, 43688, 49149, 54610, 60071],
+          "identity": true
+        },
+        "short": {
+          "in": [-16384, -13654, -10924, -8194, -5464, -2734, -4, 2726, 5456, 8186, 10916, 13646],
+          "saved": true,
+          "stderr": [],
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 12,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 16, "sgnd": true, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "outputs/carrier_short.jp2: 12x1 short, 1 band, grey16, jp2kload",
+            "format": "short",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "out": [-16384, -13654, -10924, -8194, -5464, -2734, -4, 2726, 5456, 8186, 10916, 13646],
+          "identity": true
+        },
+        "uint": {
+          "in": [0, 357913941, 715827882, 1073741823, 1431655764, 1789569705, 2147483646, 2505397587, 2863311528, 3221225469, 3579139410, 3937053351],
+          "saved": true,
+          "stderr": [],
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 12,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 31, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "outputs/carrier_uint.jp2: 12x1 uint, 1 band, grey16, jp2kload",
+            "format": "uint",
+            "bits-per-sample": "31",
+            "n-pages": "1"
+          },
+          "out": [2147483648, 2192222890, 2102744404, 2147483646, 2192222888, 2102744402, 2147483644, 2192222886, 2102744400, 2147483642, 2192222884, 2102744398],
+          "identity": false
+        },
+        "int": {
+          "in": [-1073741824, -894784854, -715827884, -536870914, -357913944, -178956974, -4, 178956966, 357913936, 536870906, 715827876, 894784846],
+          "saved": true,
+          "stderr": [],
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 12,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 31, "sgnd": true, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "outputs/carrier_int.jp2: 12x1 int, 1 band, grey16, jp2kload",
+            "format": "int",
+            "bits-per-sample": "31",
+            "n-pages": "1"
+          },
+          "out": [0, -44739244, 44739240, -4, -44739248, 44739236, -8, -44739252, 44739232, -12, -44739256, 44739228],
+          "identity": false
+        },
+        "float": {
+          "in": [0.0, 1.5, 3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0, 13.5, 15.0, 16.5],
+          "saved": false,
+          "stderr": ["jp2ksave: not an integer format"]
+        },
+        "double": {
+          "in": [0.0, 1.5, 3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0, 13.5, 15.0, 16.5],
+          "saved": false,
+          "stderr": ["jp2ksave: not an integer format"]
+        }
+      }
+    },
+    "thirty_one_bit_round_trip": {
+      "what": "`jp2ksave` gives a 4-byte libvips format a component precision of 31 (jp2ksave.c, vips_foreign_save_jp2k_new_image: 'OpenJPEG only supports up to 31'), and `jp2kload` then left-justifies a 31-bit component into a 32-bit element by shifting left 1. For a SIGNED int that is all that happens, so the values come back doubled. For an UNSIGNED uint the DC level shift does not cancel and 2^30 is added first. Either way a 32-bit image does not survive a JPEG 2000 round trip through vips, and the booleans below say which of the two shapes each one has. Measured, not derived: `in` went into the binary and `out` came out of it.",
+      "formats": {
+        "uint": {
+          "fixture": "fixtures/uint31.jp2",
+          "sha256": "3cea2a5608408a842bf01104087529cdd0c2358225d073dde10085136a4d1314",
+          "bytes": 219,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 31, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "width": "5",
+            "height": "1",
+            "bands": "1",
+            "format": "uint",
+            "coding": "none",
+            "interpretation": "grey16",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/uint31.jp2",
+            "vips-loader": "jp2kload",
+            "n-pages": "1",
+            "bits-per-sample": "31"
+          },
+          "in": [0, 1, 1000, 65535, 1048576],
+          "out": [2147483648, 2147483650, 2147485648, 2147614718, 2149580800],
+          "identity": false,
+          "is_left_shift_1": false,
+          "is_left_shift_1_plus_dc": true
+        },
+        "int": {
+          "fixture": "fixtures/int31.jp2",
+          "sha256": "29a67f1a4bdd3ac744935abf85b701c0e560bba0efaa26f1433da461c02bf978",
+          "bytes": 217,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 31, "sgnd": true, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "width": "5",
+            "height": "1",
+            "bands": "1",
+            "format": "int",
+            "coding": "none",
+            "interpretation": "grey16",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/int31.jp2",
+            "vips-loader": "jp2kload",
+            "n-pages": "1",
+            "bits-per-sample": "31"
+          },
+          "in": [-1000, -1, 0, 1, 1000],
+          "out": [-2000, -2, 0, 2, 2000],
+          "identity": false,
+          "is_left_shift_1": true,
+          "is_left_shift_1_plus_dc": false
+        }
+      }
+    },
+    "colour_space_to_interpretation": {
+      "what": "The same two codestreams re-tagged with every enumerated colour space openjpeg recognises. The mapping is not from the band count: a ONE-BAND file tagged sRGB (EnumCS 16) comes back as `1 band, srgb`, which is what libvips' own issue412.jp2 regression fixture is, and a THREE-BAND file tagged greyscale comes back as `3 bands, b-w`. The ELEMENT WIDTH picks between the two flavours of each: the same enum that gives b-w and srgb on an 8-bit file gives grey16 and rgb16 on a 16-bit one, so the sweep runs over both. sYCC and e-YCC also turn the inverse YCC transform on, so they change the pixels as well as the label. Anything openjpeg does not recognise falls through to UNSPECIFIED, where vips guesses from the band count instead (jp2kload.c, vips_foreign_load_jp2k_get_interpretation). A port that derives the interpretation from the component count alone gets the first two of these wrong. And one combination is outright BROKEN in this build, which is worth knowing before a port copies it: a ONE-component file tagged sRGB, sYCC or e-YCC has its header expanded to 3 bands by openjpeg while the tile decode still yields 1, so `vipsheader` cheerfully reports `3 bands, srgb` and any attempt to read a pixel fails with `decoded image does not match container`. The header is not a promise the pixels will arrive.",
+      "spaces": {
+        "1_component_8bit_enumcs12": {
+          "label": "CMYK",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_12.jp2: 4x3 uchar, 1 band, cmyk, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0],
+          "pixel_error": null
+        },
+        "1_component_8bit_enumcs14": {
+          "label": "CIELab",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_14.jp2: 4x3 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0],
+          "pixel_error": null
+        },
+        "1_component_8bit_enumcs16": {
+          "label": "sRGB",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_16.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": null,
+          "pixel_error": ["VIPS-WARNING: error in tile 0 x 0", "jp2kload: decoded image does not match container"]
+        },
+        "1_component_8bit_enumcs17": {
+          "label": "greyscale",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_17.jp2: 4x3 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0],
+          "pixel_error": null
+        },
+        "1_component_8bit_enumcs18": {
+          "label": "sYCC",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_18.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": null,
+          "pixel_error": ["VIPS-WARNING: error in tile 0 x 0", "jp2kload: decoded image does not match container"]
+        },
+        "1_component_8bit_enumcs24": {
+          "label": "e-YCC",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_24.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": null,
+          "pixel_error": ["VIPS-WARNING: error in tile 0 x 0", "jp2kload: decoded image does not match container"]
+        },
+        "1_component_8bit_enumcs99": {
+          "label": "not a defined value",
+          "header": {
+            "summary": "outputs/cs_1_component_8bit_99.jp2: 4x3 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs12": {
+          "label": "CMYK",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_12.jp2: 4x3 uchar, 3 bands, cmyk, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 0, 0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs14": {
+          "label": "CIELab",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_14.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 0, 0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs16": {
+          "label": "sRGB",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_16.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 0, 0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs17": {
+          "label": "greyscale",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_17.jp2: 4x3 uchar, 3 bands, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 0, 0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs18": {
+          "label": "sYCC",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_18.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 135, 0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs24": {
+          "label": "e-YCC",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_24.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 135, 0],
+          "pixel_error": null
+        },
+        "3_components_8bit_enumcs99": {
+          "label": "not a defined value",
+          "header": {
+            "summary": "outputs/cs_3_components_8bit_99.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 0, 0],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs12": {
+          "label": "CMYK",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_12.jp2: 4x3 ushort, 3 bands, cmyk, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 4369, 8738],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs14": {
+          "label": "CIELab",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_14.jp2: 4x3 ushort, 3 bands, rgb16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 4369, 8738],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs16": {
+          "label": "sRGB",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_16.jp2: 4x3 ushort, 3 bands, rgb16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 4369, 8738],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs17": {
+          "label": "greyscale",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_17.jp2: 4x3 ushort, 3 bands, grey16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 4369, 8738],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs18": {
+          "label": "sYCC",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_18.jp2: 4x3 ushort, 3 bands, rgb16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 26926, 0],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs24": {
+          "label": "e-YCC",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_24.jp2: 4x3 ushort, 3 bands, rgb16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 26926, 0],
+          "pixel_error": null
+        },
+        "3_components_16bit_enumcs99": {
+          "label": "not a defined value",
+          "header": {
+            "summary": "outputs/cs_3_components_16bit_99.jp2: 4x3 ushort, 3 bands, rgb16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "pixel_0_0": [0, 4369, 8738],
+          "pixel_error": null
+        }
+      }
+    },
+    "bit_depth_is_left_justified": {
+      "what": "Component precisions from 2 to 16 bits, written by openjpeg's own opj_compress because jp2ksave can only emit 8, 16 and 31. `jp2kload` picks uchar for prec <= 8 and ushort for prec <= 16, signed variants for a signed component, and then SHIFTS THE SAMPLE LEFT to fill the element (jp2kload.c, vips_foreign_load_jp2k_ljust: shift = sizeof(element) * 8 - prec). So a 12-bit sample of 4095 comes back as 65520, not 4095 and not 65535, and the true depth survives only in `bits-per-sample`. Depths 8 and 16 shift by zero and are the identity, which is exactly why a port that forgets the shift still passes an 8-bit test.",
+      "depths": {
+        "depth2u": {
+          "fixture": "fixtures/depth2u.j2k",
+          "sha256": "0d44836e60f60e517e247b4a8b8eb3a3d64d8e640a957b62d8fc091f39d3eb52",
+          "bytes": 125,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 2, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth2u.j2k: 5x1 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "2",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 1, 2, 3],
+          "out": [0, 64, 64, 128, 192],
+          "identity": false,
+          "is_left_justified": true
+        },
+        "depth4u": {
+          "fixture": "fixtures/depth4u.j2k",
+          "sha256": "cb3b87ed24d30b1ee80a2b349140c9f0c7303698cd3d44acbe66c6d835195475",
+          "bytes": 127,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 4, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth4u.j2k: 5x1 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "4",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 4, 14, 15],
+          "out": [0, 16, 64, 224, 240],
+          "identity": false,
+          "is_left_justified": true
+        },
+        "depth8u": {
+          "fixture": "fixtures/depth8u.j2k",
+          "sha256": "98513b15cc0ba619be679d6d20d52416e8251e5cad5f3a09873d28a31366e81d",
+          "bytes": 130,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth8u.j2k: 5x1 uchar, 1 band, b-w, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 64, 254, 255],
+          "out": [0, 1, 64, 254, 255],
+          "identity": true,
+          "is_left_justified": true
+        },
+        "depth10u": {
+          "fixture": "fixtures/depth10u.j2k",
+          "sha256": "4c70442785b165fddc97b4ff3d8b37588ae1ed315609461f7bffa14c93725064",
+          "bytes": 131,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 10, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth10u.j2k: 5x1 ushort, 1 band, grey16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "10",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 256, 1022, 1023],
+          "out": [0, 64, 16384, 65408, 65472],
+          "identity": false,
+          "is_left_justified": true
+        },
+        "depth12u": {
+          "fixture": "fixtures/depth12u.j2k",
+          "sha256": "0009f5ebe20e7b757cd4f8860516225c830c601a1165078a91840460828532d8",
+          "bytes": 132,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 12, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth12u.j2k: 5x1 ushort, 1 band, grey16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "12",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 1024, 4094, 4095],
+          "out": [0, 16, 16384, 65504, 65520],
+          "identity": false,
+          "is_left_justified": true
+        },
+        "depth12s": {
+          "fixture": "fixtures/depth12s.j2k",
+          "sha256": "b5fd4937e8b29ff6afcde301e63b6d6c6119cb754357b7a8f0bdfcfdaddb3792",
+          "bytes": 129,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 12, "sgnd": true, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth12s.j2k: 5x1 short, 1 band, grey16, jp2kload",
+            "format": "short",
+            "bits-per-sample": "12",
+            "n-pages": "1"
+          },
+          "in": [-2048, -1, 0, 1, 2047],
+          "out": [-32768, -16, 0, 16, 32752],
+          "identity": false,
+          "is_left_justified": true
+        },
+        "depth14u": {
+          "fixture": "fixtures/depth14u.j2k",
+          "sha256": "b0440c5e6455adb1ceeeec8bd5907a7dbe2327ca6b7fb5701be05b934b604bb6",
+          "bytes": 135,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 14, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth14u.j2k: 5x1 ushort, 1 band, grey16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "14",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 4096, 16382, 16383],
+          "out": [0, 4, 16384, 65528, 65532],
+          "identity": false,
+          "is_left_justified": true
+        },
+        "depth16u": {
+          "fixture": "fixtures/depth16u.j2k",
+          "sha256": "5802077770bb3dac97a8f983110b19d532af9d06f9ccbed809a35bc517b54b08",
+          "bytes": 136,
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 5,
+            "Ysiz": 1,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 5,
+            "YTsiz": 1,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 16, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "header": {
+            "summary": "fixtures/depth16u.j2k: 5x1 ushort, 1 band, grey16, jp2kload",
+            "format": "ushort",
+            "bits-per-sample": "16",
+            "n-pages": "1"
+          },
+          "in": [0, 1, 16384, 65534, 65535],
+          "out": [0, 1, 16384, 65534, 65535],
+          "identity": true,
+          "is_left_justified": true
+        }
+      }
+    },
+    "chroma_subsample_on_save": {
+      "what": "`--subsample-mode` across `off`, `on` and `auto` at Q 48 and Q 90, on a 16x16 image whose chroma varies along x. `off` leaves all three components at dx=dy=1. `on` halves components 1 and 2 and moves the colr box from EnumCS 16 (sRGB) to EnumCS 18 (sYCC), which is what makes the loader run the inverse YCC on the way back. `auto` subsamples only when Q < 90 AND the image is 3-band sRGB or RGB16, so auto at Q 90 is byte-identical to off at Q 90 and auto at Q 48 to on at Q 48; auto_gate_by_image_shape below measures the other half of that condition. A grey or 4-band fixture would show none of this, which is the point: the mode is only observable on 3-band colour.",
+      "modes": {
+        "off_Q48": {
+          "bytes": 669,
+          "sha256": "b1470b08a3b480aabc1390721e61c628bf72bca8c813c1552586a648c6edd9ad",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 16,
+            "Ysiz": 16,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 3,
+            "components": [
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+            ]
+          },
+          "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+          "row0": [
+            [0, 1, 254],
+            [19, 0, 240],
+            [35, 0, 221],
+            [53, 0, 204],
+            [66, 0, 188],
+            [87, 0, 171]
+          ],
+          "chroma_shared_in_pairs": false
+        },
+        "off_Q90": {
+          "bytes": 769,
+          "sha256": "e14d8bd14fdcd72b68901f1458158057f76e9fc663b81360da7bd72b632f00bd",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 16,
+            "Ysiz": 16,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 3,
+            "components": [
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+            ]
+          },
+          "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+          "row0": [
+            [0, 1, 255],
+            [17, 0, 239],
+            [36, 0, 221],
+            [51, 0, 204],
+            [68, 0, 188],
+            [85, 0, 169]
+          ],
+          "chroma_shared_in_pairs": false
+        },
+        "on_Q48": {
+          "bytes": 442,
+          "sha256": "c505c96757385db79dd075d1219c4d6471c3ac8db1e9d4f55b89f3b79bf464f7",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 16,
+            "Ysiz": 16,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 3,
+            "components": [
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+              {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+            ]
+          },
+          "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 18},
+          "row0": [
+            [4, 3, 240],
+            [4, 3, 240],
+            [34, 1, 205],
+            [38, 5, 209],
+            [71, 2, 171],
+            [71, 2, 171]
+          ],
+          "chroma_shared_in_pairs": false
+        },
+        "on_Q90": {
+          "bytes": 490,
+          "sha256": "9acccf5a87ef946a88ab05e80745e150250abdb463a4fb9270cd9cf3eaec827f",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 16,
+            "Ysiz": 16,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 3,
+            "components": [
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+              {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+            ]
+          },
+          "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 18},
+          "row0": [
+            [4, 1, 241],
+            [6, 3, 243],
+            [35, 2, 205],
+            [37, 4, 207],
+            [69, 2, 172],
+            [71, 4, 174]
+          ],
+          "chroma_shared_in_pairs": false
+        },
+        "auto_Q48": {
+          "bytes": 442,
+          "sha256": "c505c96757385db79dd075d1219c4d6471c3ac8db1e9d4f55b89f3b79bf464f7",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 16,
+            "Ysiz": 16,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 3,
+            "components": [
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+              {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+            ]
+          },
+          "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 18},
+          "row0": [
+            [4, 3, 240],
+            [4, 3, 240],
+            [34, 1, 205],
+            [38, 5, 209],
+            [71, 2, 171],
+            [71, 2, 171]
+          ],
+          "chroma_shared_in_pairs": false
+        },
+        "auto_Q90": {
+          "bytes": 769,
+          "sha256": "e14d8bd14fdcd72b68901f1458158057f76e9fc663b81360da7bd72b632f00bd",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 16,
+            "Ysiz": 16,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 3,
+            "components": [
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+              {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+            ]
+          },
+          "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+          "row0": [
+            [0, 1, 255],
+            [17, 0, 239],
+            [36, 0, 221],
+            [51, 0, 204],
+            [68, 0, 188],
+            [85, 0, 169]
+          ],
+          "chroma_shared_in_pairs": false
+        }
+      },
+      "auto_at_Q90_equals_off": true,
+      "auto_at_Q48_equals_on": true,
+      "lossless_forces_subsample_off": {
+        "what": "`--lossless --subsample-mode on` does NOT subsample: the build step overwrites the mode with OFF before it is read. So the flag combination is silently ignored rather than refused, and the file is identical to a plain lossless save.",
+        "siz": {
+          "Rsiz": 0,
+          "Xsiz": 16,
+          "Ysiz": 16,
+          "XOsiz": 0,
+          "YOsiz": 0,
+          "XTsiz": 512,
+          "YTsiz": 512,
+          "XTOsiz": 0,
+          "YTOsiz": 0,
+          "Csiz": 3,
+          "components": [
+            {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+            {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+            {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+          ]
+        },
+        "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+        "sha256": "0aa28a494b8eb7f437fd4c624e9823c153e8d20027d4518067d342b9bce98325",
+        "equals_plain_lossless": true
+      },
+      "auto_gate_by_image_shape": {
+        "what": "`auto` at Q 48 across five image shapes. Only 3-band sRGB or RGB16 subsamples: a 1-band b-w, a 4-band sRGB, a 4-band CMYK and even a 3-band multiband image all come out at dx=dy=1. So a port cannot implement auto as `Q < 90` alone.",
+        "shapes": {
+          "1_band_bw": {
+            "siz": {
+              "Rsiz": 0,
+              "Xsiz": 16,
+              "Ysiz": 16,
+              "XOsiz": 0,
+              "YOsiz": 0,
+              "XTsiz": 512,
+              "YTsiz": 512,
+              "XTOsiz": 0,
+              "YTOsiz": 0,
+              "Csiz": 1,
+              "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+            },
+            "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 17},
+            "subsampled": false
+          },
+          "3_band_srgb": {
+            "siz": {
+              "Rsiz": 0,
+              "Xsiz": 16,
+              "Ysiz": 16,
+              "XOsiz": 0,
+              "YOsiz": 0,
+              "XTsiz": 512,
+              "YTsiz": 512,
+              "XTOsiz": 0,
+              "YTOsiz": 0,
+              "Csiz": 3,
+              "components": [
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+                {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+              ]
+            },
+            "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 18},
+            "subsampled": true
+          },
+          "4_band_srgb": {
+            "siz": {
+              "Rsiz": 0,
+              "Xsiz": 16,
+              "Ysiz": 16,
+              "XOsiz": 0,
+              "YOsiz": 0,
+              "XTsiz": 512,
+              "YTsiz": 512,
+              "XTOsiz": 0,
+              "YTOsiz": 0,
+              "Csiz": 4,
+              "components": [
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+              ]
+            },
+            "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+            "subsampled": false
+          },
+          "3_band_multiband": {
+            "siz": {
+              "Rsiz": 0,
+              "Xsiz": 16,
+              "Ysiz": 16,
+              "XOsiz": 0,
+              "YOsiz": 0,
+              "XTsiz": 512,
+              "YTsiz": 512,
+              "XTOsiz": 0,
+              "YTOsiz": 0,
+              "Csiz": 3,
+              "components": [
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+              ]
+            },
+            "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 0},
+            "subsampled": false
+          },
+          "4_band_cmyk": {
+            "siz": {
+              "Rsiz": 0,
+              "Xsiz": 16,
+              "Ysiz": 16,
+              "XOsiz": 0,
+              "YOsiz": 0,
+              "XTsiz": 512,
+              "YTsiz": 512,
+              "XTOsiz": 0,
+              "YTOsiz": 0,
+              "Csiz": 4,
+              "components": [
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+                {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+              ]
+            },
+            "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 12},
+            "subsampled": false
+          }
+        }
+      }
+    },
+    "chroma_sub_off": {
+      "what": "The committed 16x16 pair the subsample records above are measured from, saved at Q 90 with the mode forced. Same source raster, different chroma geometry, so a port that ignores dx/dy decodes one of the two into visibly wrong colour.",
+      "fixture": "fixtures/chroma_sub_off.jp2",
+      "bytes": 769,
+      "sha256": "e14d8bd14fdcd72b68901f1458158057f76e9fc663b81360da7bd72b632f00bd",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 16,
+        "Ysiz": 16,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 3,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+      "header": {
+        "width": "16",
+        "height": "16",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/chroma_sub_off.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 768,
+        "sha256": "43bb34516256347c9d1be4189eed2c49ed8f5cb8ee9548a09fe9470785935797"
+      },
+      "getpoint": {
+        "0,0": [0, 1, 255],
+        "1,0": [17, 0, 239],
+        "2,0": [36, 0, 221],
+        "3,0": [51, 0, 204],
+        "0,1": [2, 17, 255],
+        "15,15": [255, 254, 0]
+      }
+    },
+    "chroma_sub_on": {
+      "what": "The committed 16x16 pair the subsample records above are measured from, saved at Q 90 with the mode forced. Same source raster, different chroma geometry, so a port that ignores dx/dy decodes one of the two into visibly wrong colour.",
+      "fixture": "fixtures/chroma_sub_on.jp2",
+      "bytes": 490,
+      "sha256": "9acccf5a87ef946a88ab05e80745e150250abdb463a4fb9270cd9cf3eaec827f",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 16,
+        "Ysiz": 16,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 3,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+          {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 18},
+      "header": {
+        "width": "16",
+        "height": "16",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/chroma_sub_on.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 768,
+        "sha256": "e75b9c59444f2dca463ce0902e9c5cac50120d48c1052baaf1b02e5c124a4657"
+      },
+      "getpoint": {
+        "0,0": [4, 1, 241],
+        "1,0": [6, 3, 243],
+        "2,0": [35, 2, 205],
+        "3,0": [37, 4, 207],
+        "0,1": [14, 11, 251],
+        "15,15": [253, 251, 16]
+      }
+    },
+    "chroma_tiny_sub_on": {
+      "what": "The same subsampling on a 4x2 image of saturated primaries. At this size the halved chroma components are 2x1 and the encode throws them away entirely, so every pixel comes back NEUTRAL GREY: red, green, blue and yellow all decode to r == g == b. The luma survives. This is not a decoder bug to reproduce so much as a boundary a port has to know exists, because a test that subsamples a tiny fixture and compares against the source will fail for a reason that has nothing to do with the code under test.",
+      "fixture": "fixtures/chroma_tiny_sub_on.jp2",
+      "bytes": 227,
+      "sha256": "74cb9360084b39af7d005d4788476e34af0fa106504bda3dcccc73fba69ac88f",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 4,
+        "Ysiz": 2,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 3,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+          {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 18},
+      "header": {
+        "width": "4",
+        "height": "2",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/chroma_tiny_sub_on.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 24,
+        "sha256": "6cb658b9f2891816ced56e1e8222b8505d9121f5651e44d71541b14e2d2ddb75"
+      },
+      "getpoint_all": [
+        [75, 75, 75],
+        [149, 149, 149],
+        [29, 29, 29],
+        [225, 225, 225],
+        [179, 179, 179],
+        [105, 105, 105],
+        [0, 0, 0],
+        [255, 255, 255]
+      ],
+      "all_pixels_neutral": true
+    },
+    "file_level_subsampling": {
+      "what": "An 8x4 bare codestream whose components 1 and 2 are halved in both axes, written by opj_compress with no MCT and no declared colour space. Two behaviours in one fixture. jp2kload treats UNSPECIFIED + 3 components + subsampling on bands 1 and 2 as YCC and runs an inverse YCC->RGB (jp2kload.c, vips_foreign_load_jp2k_get_ycc), so the samples in the file are not the pixels that come out. And it upsamples the halved components by PIXEL REPLICATION, planes[i][x / dx], rather than interpolating. The luma plane is flat at 128 precisely so the second one is provable: every 2x2 block decodes to a single solid colour, which an interpolating upsampler (libwebp's fancy upsampler, say) would turn into a gradient.",
+      "fixture": "fixtures/sub420.j2k",
+      "bytes": 151,
+      "sha256": "e0ba361deef561f4a82e1ed0bed92c8cfab6a7ea16272f1ac5dc37b6d79a9167",
+      "magic": "ff4fff51002f000000000008",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 8,
+        "Ysiz": 4,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 8,
+        "YTsiz": 4,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 3,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 2, "dy": 2},
+          {"prec": 8, "sgnd": false, "dx": 2, "dy": 2}
+        ]
+      },
+      "colr": null,
+      "header": {
+        "width": "8",
+        "height": "4",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/sub420.j2k",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 96,
+        "sha256": "5a59a2bd1b802c306be83997392db407de7cc46d8c1ec2da11fd98d48c4ce0b1"
+      },
+      "getpoint_all": [
+        [255, 87, 0],
+        [255, 87, 0],
+        [242, 98, 0],
+        [242, 98, 0],
+        [200, 109, 36],
+        [200, 109, 36],
+        [158, 120, 90],
+        [158, 120, 90],
+        [255, 87, 0],
+        [255, 87, 0],
+        [242, 98, 0],
+        [242, 98, 0],
+        [200, 109, 36],
+        [200, 109, 36],
+        [158, 120, 90],
+        [158, 120, 90],
+        [117, 130, 142],
+        [117, 130, 142],
+        [75, 142, 195],
+        [75, 142, 195],
+        [33, 153, 248],
+        [33, 153, 248],
+        [0, 164, 255],
+        [0, 164, 255],
+        [117, 130, 142],
+        [117, 130, 142],
+        [75, 142, 195],
+        [75, 142, 195],
+        [33, 153, 248],
+        [33, 153, 248],
+        [0, 164, 255],
+        [0, 164, 255]
+      ],
+      "source_planes": {
+        "Y": [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128],
+        "Cb": [16, 46, 76, 106, 136, 166, 196, 226],
+        "Cr": [240, 210, 180, 150, 120, 90, 60, 30]
+      },
+      "blocks_are_flat": true
+    },
+    "tiling": {
+      "what": "A 37x21 image, whose dimensions are a multiple of no tile size here, saved at four tile geometries. Two things to pin. First, `tile-width` and `tile-height` appear in the header ONLY when the image is more than one tile: at the default 512 the whole image is one tile and the fields are ABSENT, so a port that always sets them disagrees with vips on every small image. Second, the decoded raster is byte-identical at every tile geometry, so the partial tiles down the right and bottom edges carry no seam. Non-square tiles work too.",
+      "image": [37, 21],
+      "geometries": {
+        "512x512": {
+          "bytes": 857,
+          "sha256": "f719ce5eb73b614e8f2b5dc08e2e29e77e2951b34add491847b9dbc576fb6251",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 37,
+            "Ysiz": 21,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 512,
+            "YTsiz": 512,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "tile_grid": [1, 1],
+          "tile_width_field": null,
+          "tile_height_field": null,
+          "decoded_raster": {
+            "bytes": 777,
+            "sha256": "20c9ed48efcf557610597f53190568ce910d3e67ea8970a38b379fa7d6e97343"
+          }
+        },
+        "16x16": {
+          "bytes": 959,
+          "sha256": "8a8af211b94d7c21ca52d480894da511541e7de518547b247e791a5aa63ee367",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 37,
+            "Ysiz": 21,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 16,
+            "YTsiz": 16,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "tile_grid": [3, 2],
+          "tile_width_field": "16",
+          "tile_height_field": "16",
+          "decoded_raster": {
+            "bytes": 777,
+            "sha256": "20c9ed48efcf557610597f53190568ce910d3e67ea8970a38b379fa7d6e97343"
+          }
+        },
+        "8x8": {
+          "bytes": 1132,
+          "sha256": "046b62dc18924d0f516e013d2a985c9c25a745862a049742f203741b3d0b683e",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 37,
+            "Ysiz": 21,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 8,
+            "YTsiz": 8,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "tile_grid": [5, 3],
+          "tile_width_field": "8",
+          "tile_height_field": "8",
+          "decoded_raster": {
+            "bytes": 777,
+            "sha256": "20c9ed48efcf557610597f53190568ce910d3e67ea8970a38b379fa7d6e97343"
+          }
+        },
+        "16x7": {
+          "bytes": 1011,
+          "sha256": "ffd6545d13092945e7fa74f5bcc6e93d3889a1b6a1c37aa1f539efe73c1996f5",
+          "siz": {
+            "Rsiz": 0,
+            "Xsiz": 37,
+            "Ysiz": 21,
+            "XOsiz": 0,
+            "YOsiz": 0,
+            "XTsiz": 16,
+            "YTsiz": 7,
+            "XTOsiz": 0,
+            "YTOsiz": 0,
+            "Csiz": 1,
+            "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+          },
+          "tile_grid": [3, 3],
+          "tile_width_field": "16",
+          "tile_height_field": "7",
+          "decoded_raster": {
+            "bytes": 777,
+            "sha256": "20c9ed48efcf557610597f53190568ce910d3e67ea8970a38b379fa7d6e97343"
+          }
+        }
+      },
+      "all_decode_identically": true
+    },
+    "grey_tile8": {
+      "what": "The committed 37x21 fixture on an 8x8 tile grid: 5 by 3 tiles, with the right column 5 wide and the bottom row 5 tall. The pinned points sit on both sides of the first vertical tile boundary, on the last full column and in the partial corner.",
+      "fixture": "fixtures/grey_tile8.jp2",
+      "bytes": 1132,
+      "sha256": "046b62dc18924d0f516e013d2a985c9c25a745862a049742f203741b3d0b683e",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 37,
+        "Ysiz": 21,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 8,
+        "YTsiz": 8,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 1,
+        "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 17},
+      "header": {
+        "width": "37",
+        "height": "21",
+        "bands": "1",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "b-w",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/grey_tile8.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8",
+        "tile-width": "8",
+        "tile-height": "8"
+      },
+      "decoded_raster": {
+        "bytes": 777,
+        "sha256": "20c9ed48efcf557610597f53190568ce910d3e67ea8970a38b379fa7d6e97343"
+      },
+      "getpoint": {
+        "7,0": [49],
+        "8,0": [56],
+        "0,7": [91],
+        "0,8": [104],
+        "31,20": [226],
+        "36,20": [10],
+        "36,0": [1]
+      },
+      "source_bytes_sha256": "20c9ed48efcf557610597f53190568ce910d3e67ea8970a38b379fa7d6e97343",
+      "decoded_matches_source": true
+    },
+    "rgb_lossy_q48": {
+      "what": "The default save: no --lossless, so Q defaults to 48 and the irreversible 9/7 wavelet is used. Same 4x3 ramp as rgb_lossless.jp2, and the pixels differ from it. The 9/7 path is float-specified, so this is the one place a port may legitimately need a tolerance rather than exact equality, and pinning it is how that tolerance gets chosen from evidence instead of taste.",
+      "fixture": "fixtures/rgb_lossy_q48.jp2",
+      "bytes": 258,
+      "sha256": "2d7a1f8a764b5614ad0e3f7e4a98765efdcd5de7456c7eb136943642dc363207",
+      "magic": "0000000c6a5020200d0a870a",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 4,
+        "Ysiz": 3,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 512,
+        "YTsiz": 512,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 3,
+        "components": [
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+          {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+        ]
+      },
+      "colr": {"meth": 1, "prec": 0, "approx": 0, "enumcs": 16},
+      "header": {
+        "width": "4",
+        "height": "3",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/rgb_lossy_q48.jp2",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 36,
+        "sha256": "f1ce4d4f51a197a6d886a89dc0d08432615b076e47bd2dcaee369018645ecab5"
+      },
+      "getpoint_all": [
+        [0, 0, 0],
+        [59, 98, 31],
+        [120, 194, 59],
+        [184, 36, 86],
+        [13, 151, 210],
+        [75, 248, 240],
+        [137, 89, 15],
+        [198, 185, 43],
+        [28, 45, 165],
+        [85, 145, 195],
+        [146, 241, 223],
+        [209, 80, 254]
+      ],
+      "source_bytes": [0, 0, 0, 61, 97, 29, 122, 194, 58, 183, 35, 87, 13, 151, 211, 74, 248, 240, 135, 89, 13, 196, 186, 42, 26, 46, 166, 87, 143, 195, 148, 240, 224, 209, 81, 253],
+      "differs_from_source": true
+    },
+    "quality_sweep": {
+      "what": "Q from 1 to 100 on the 16x16 gradient. Q sets a distortion ratio per resolution (Q + 10 * i over 7 layers), not a quantiser, and on an image this small it saturates: 75, 90 and 100 are byte-identical. The default is 48, chosen upstream to land near JPEG Q 75 in size.",
+      "levels": {
+        "1": {
+          "bytes": 232,
+          "sha256": "23a466a6f47d04fd3f062f695441b3c794ce2111bc131f7c8ea58a0ddfc92281",
+          "getpoint": {
+            "0,0": [128, 95, 255],
+            "8,8": [128, 128, 128],
+            "15,15": [128, 161, 0]
+          }
+        },
+        "25": {
+          "bytes": 332,
+          "sha256": "37b4bb5c329b326d2008b919e6154141c62edf9859f7526dbe9b773c921cb4a6",
+          "getpoint": {
+            "0,0": [16, 0, 214],
+            "8,8": [128, 128, 128],
+            "15,15": [255, 255, 42]
+          }
+        },
+        "48": {
+          "bytes": 669,
+          "sha256": "b1470b08a3b480aabc1390721e61c628bf72bca8c813c1552586a648c6edd9ad",
+          "getpoint": {
+            "0,0": [0, 1, 254],
+            "8,8": [135, 138, 119],
+            "15,15": [255, 253, 0]
+          }
+        },
+        "75": {
+          "bytes": 769,
+          "sha256": "e14d8bd14fdcd72b68901f1458158057f76e9fc663b81360da7bd72b632f00bd",
+          "getpoint": {
+            "0,0": [0, 1, 255],
+            "8,8": [137, 136, 119],
+            "15,15": [255, 254, 0]
+          }
+        },
+        "90": {
+          "bytes": 769,
+          "sha256": "e14d8bd14fdcd72b68901f1458158057f76e9fc663b81360da7bd72b632f00bd",
+          "getpoint": {
+            "0,0": [0, 1, 255],
+            "8,8": [137, 136, 119],
+            "15,15": [255, 254, 0]
+          }
+        },
+        "100": {
+          "bytes": 769,
+          "sha256": "e14d8bd14fdcd72b68901f1458158057f76e9fc663b81360da7bd72b632f00bd",
+          "getpoint": {
+            "0,0": [0, 1, 255],
+            "8,8": [137, 136, 119],
+            "15,15": [255, 254, 0]
+          }
+        }
+      },
+      "top_three_identical": true
+    },
+    "page_is_a_resolution_level": {
+      "what": "A 32x24 codestream with three resolution levels. `n-pages` is 3, but there is only ONE image in this file: jp2kload maps numresolutions to n-pages (jp2kload.c, set_header) and `page` to opj's cp_reduce, so [page=1] is the same picture at half size and [page=2] at a quarter. A port that reads n-pages as a frame count, the way it means in GIF or WebP or a multi-page TIFF, is wrong here in a way that only shows up on a file with more than one resolution, which no default jp2ksave of a small image produces. Asking for a page past the end is an error, not a clamp.",
+      "fixture": "fixtures/res3.j2k",
+      "bytes": 422,
+      "sha256": "db22d17058f63fb92be5f6104fbc13a4d7c3d87ead744a35e8fff8a912aa6a01",
+      "magic": "ff4fff510029000000000020",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 32,
+        "Ysiz": 24,
+        "XOsiz": 0,
+        "YOsiz": 0,
+        "XTsiz": 32,
+        "YTsiz": 24,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 1,
+        "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+      },
+      "colr": null,
+      "header": {
+        "width": "32",
+        "height": "24",
+        "bands": "1",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "b-w",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/res3.j2k",
+        "vips-loader": "jp2kload",
+        "n-pages": "3",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 768,
+        "sha256": "2f7c22b8a227f529e1a1e65bc101471bff7f1e97a5098a3700532c12f486b375"
+      },
+      "getpoint": {
+        "0,0": [0],
+        "31,23": [214]
+      },
+      "pages": {
+        "0": {
+          "header": {"summary": "fixtures/res3.j2k: 32x24 uchar, 1 band, b-w, jp2kload"},
+          "header_all": {
+            "width": "32",
+            "height": "24",
+            "bands": "1",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "b-w",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/res3.j2k",
+            "vips-loader": "jp2kload",
+            "n-pages": "3",
+            "bits-per-sample": "8"
+          },
+          "decoded_raster": {
+            "bytes": 768,
+            "sha256": "2f7c22b8a227f529e1a1e65bc101471bff7f1e97a5098a3700532c12f486b375"
+          },
+          "getpoint_0_0": [0]
+        },
+        "1": {
+          "header": {"summary": "fixtures/res3.j2k: 16x12 uchar, 1 band, b-w, jp2kload"},
+          "header_all": {
+            "width": "16",
+            "height": "12",
+            "bands": "1",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "b-w",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/res3.j2k",
+            "vips-loader": "jp2kload",
+            "n-pages": "3",
+            "bits-per-sample": "8"
+          },
+          "decoded_raster": {
+            "bytes": 192,
+            "sha256": "2e939d9ff8c864bb1a0469e012c4fcf4f5bd3c327e37f875bfb00d574d1cf342"
+          },
+          "getpoint_0_0": [0]
+        },
+        "2": {
+          "header": {"summary": "fixtures/res3.j2k: 8x6 uchar, 1 band, b-w, jp2kload"},
+          "header_all": {
+            "width": "8",
+            "height": "6",
+            "bands": "1",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "b-w",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/res3.j2k",
+            "vips-loader": "jp2kload",
+            "n-pages": "3",
+            "bits-per-sample": "8"
+          },
+          "decoded_raster": {
+            "bytes": 48,
+            "sha256": "d2b197cfeb49c5a29e95e221ba720c4309cff66b1bfd5e55ea5b1cbc5bbb510d"
+          },
+          "getpoint_0_0": [0]
+        },
+        "3": {
+          "header": {
+            "error": ["vipsheader: jp2kload: Error decoding component 0.", "The number of resolutions to remove (3) is greater or equal than the number of resolutions of this component (3)", "Modify the cp_reduce parameter.", "jp2kload: Error reading COD marker", "jp2kload: Marker handler function failed to read the marker segment"]
+          }
+        }
+      }
+    },
+    "image_origin_offset": {
+      "what": "The same raster with the codestream's image origin at (5, 7). The JPEG 2000 grid lets the image start away from the origin; openjpeg reports x0/y0 and clips, so vips sees a 27x17 image and records the origin as a NEGATIVE Xoffset and Yoffset (jp2kload.c, set_header: Xoffset = -round(x0 / shrink)). The offset is in unshrunk coordinates and is divided by the page shrink, so it interacts with [page=N]. Nothing jp2ksave writes ever exercises this, since it always starts at 0.",
+      "fixture": "fixtures/origin57.j2k",
+      "bytes": 751,
+      "sha256": "184b2ae85761edfd9d8e192fc436955bb751040823a105f603c1a7a9af32cf45",
+      "magic": "ff4fff510029000000000025",
+      "siz": {
+        "Rsiz": 0,
+        "Xsiz": 37,
+        "Ysiz": 31,
+        "XOsiz": 5,
+        "YOsiz": 7,
+        "XTsiz": 37,
+        "YTsiz": 31,
+        "XTOsiz": 0,
+        "YTOsiz": 0,
+        "Csiz": 1,
+        "components": [{"prec": 8, "sgnd": false, "dx": 1, "dy": 1}]
+      },
+      "colr": null,
+      "header": {
+        "width": "27",
+        "height": "17",
+        "bands": "1",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "b-w",
+        "xoffset": "-5",
+        "yoffset": "-7",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/origin57.j2k",
+        "vips-loader": "jp2kload",
+        "n-pages": "1",
+        "bits-per-sample": "8"
+      },
+      "decoded_raster": {
+        "bytes": 459,
+        "sha256": "d4c1e2f8b0f763add13ededfa4881780428c177187c6302a0616719e34b81f76"
+      },
+      "getpoint": {
+        "0,0": [0],
+        "26,16": [102]
+      }
+    },
+    "metadata": {
+      "what": "What survives a JPEG 2000 round trip through vips: nothing on the way out, and an ICC profile on the way in. `jp2ksave` inherits `--profile` and `--keep` from VipsForeignSave and implements NEITHER: there is no icc, exif, xmp or iptc code in jp2ksave.c at all, and saving with a profile produces a file byte-identical to saving without one. So `--keep all` and `--keep none` are the same file too. `jp2kload` does read an ICC profile, out of a METH=2 colr box, and copies the payload verbatim into `icc-profile-data` without validating it. A uuid XMP box beside it is ignored.",
+      "save": {
+        "profile": {
+          "profile_used": "/Users/rom/workspace/libvips/test/test-suite/images/sRGB.icm",
+          "profile_bytes": 6922,
+          "boxes": [
+            ["jP  ", 12, 0],
+            ["ftyp", 20, 12],
+            ["jp2h", 45, 32],
+            ["ihdr", 22, 40],
+            ["colr", 15, 62],
+            ["jp2c", 697, 77]
+          ],
+          "header": {
+            "width": "16",
+            "height": "16",
+            "bands": "3",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "outputs/profile.jp2",
+            "vips-loader": "jp2kload",
+            "n-pages": "1",
+            "bits-per-sample": "8"
+          },
+          "identical_to_save_without_profile": true
+        },
+        "keep_all": {
+          "sha256": "0aa28a494b8eb7f437fd4c624e9823c153e8d20027d4518067d342b9bce98325",
+          "bytes": 774
+        },
+        "keep_none": {
+          "sha256": "0aa28a494b8eb7f437fd4c624e9823c153e8d20027d4518067d342b9bce98325",
+          "bytes": 774
+        },
+        "keep_icc": {
+          "sha256": "0aa28a494b8eb7f437fd4c624e9823c153e8d20027d4518067d342b9bce98325",
+          "bytes": 774
+        }
+      },
+      "load": {
+        "what": "A jp2ksave output whose colr box has been rewritten to METH=2 with a 24-byte payload, plus an appended uuid XMP box. vips reports icc-profile-data of exactly 24 bytes and no xmp-data.",
+        "fixture": "fixtures/icc_colr.jp2",
+        "bytes": 343,
+        "sha256": "426760ee482d52bea28c83af5a799dcacc20b8fbe0f7876265b57e95f3d518d2",
+        "magic": "0000000c6a5020200d0a870a",
+        "siz": {
+          "Rsiz": 0,
+          "Xsiz": 4,
+          "Ysiz": 3,
+          "XOsiz": 0,
+          "YOsiz": 0,
+          "XTsiz": 512,
+          "YTsiz": 512,
+          "XTOsiz": 0,
+          "YTOsiz": 0,
+          "Csiz": 3,
+          "components": [
+            {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+            {"prec": 8, "sgnd": false, "dx": 1, "dy": 1},
+            {"prec": 8, "sgnd": false, "dx": 1, "dy": 1}
+          ]
+        },
+        "colr": {"meth": 2, "prec": 0, "approx": 0, "profile_bytes": 24},
+        "header": {
+          "width": "4",
+          "height": "3",
+          "bands": "3",
+          "format": "uchar",
+          "coding": "none",
+          "interpretation": "srgb",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "fixtures/icc_colr.jp2",
+          "vips-loader": "jp2kload",
+          "icc-profile-data": "24 bytes of binary data",
+          "n-pages": "1",
+          "bits-per-sample": "8"
+        },
+        "decoded_raster": {
+          "bytes": 36,
+          "sha256": "c875696bdedeac8d1e24565c11a2eac3ba29bb7727596c1ed159983d9a21c21d"
+        },
+        "getpoint_all": [
+          [0, 0, 0],
+          [61, 97, 29],
+          [122, 194, 58],
+          [183, 35, 87],
+          [13, 151, 211],
+          [74, 248, 240],
+          [135, 89, 13],
+          [196, 186, 42],
+          [26, 46, 166],
+          [87, 143, 195],
+          [148, 240, 224],
+          [209, 81, 253]
+        ],
+        "icc_field": "24 bytes of binary data",
+        "xmp_field": null
+      },
+      "injected_profile": [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      "injected_xmp": [60, 120, 58, 120, 109, 112, 109, 101, 116, 97, 32, 120, 109, 108, 110, 115, 58, 120, 61, 34, 97, 100, 111, 98, 101, 58, 110, 115, 58, 109, 101, 116, 97, 47, 34, 47, 62]
+    },
+    "malformed_and_truncated": {
+      "what": "Six broken inputs, each cut at a structural boundary so the failure it reaches is reproducible. Three things to pin. First, the failures are DISTINCT and named: a missing codestream gives `Expected a SOC marker`, a cut inside SIZ gives `Stream too short`, a cut inside a box gives an `Invalid box size` message quoting both sizes, and total garbage never reaches jp2kload at all because the sniffer rejects it as `not a known file format`. Second, a file cut inside the tile data has a PERFECTLY READABLE HEADER and fails only when the pixels are pulled, so header success is not decode success. Third, and this is the trap: `fail-on` makes no difference to any of them. jp2kload never produces a partial image, so `fail-on=none` and `fail-on=warning` behave identically and a port must not wire that option up to anything.",
+      "cases": {
+        "truncated_at_codestream": {
+          "fixture": "fixtures/truncated_at_codestream.jp2",
+          "bytes": 85,
+          "sha256": "a9f42b7731418c4d0ae54dada3f9eb6c0c8163795bd522fd3aa2e25cc3aea2a5",
+          "header": {
+            "error": ["vipsheader: jp2kload: Expected a SOC marker"]
+          },
+          "fail_on": {"none": true, "truncated": true, "error": true, "warning": true},
+          "decode": {
+            "rc": 1,
+            "stdout": "",
+            "stderr": ["jp2kload: Expected a SOC marker"]
+          },
+          "fail_on_changes_nothing": true
+        },
+        "truncated_in_siz": {
+          "fixture": "fixtures/truncated_in_siz.jp2",
+          "bytes": 91,
+          "sha256": "feae7705073d2b3a977b9002c79916fdcfb8a2fdfb91ab8ac8c91f4b54b71180",
+          "header": {
+            "error": ["vipsheader: jp2kload: Stream too short"]
+          },
+          "fail_on": {"none": true, "truncated": true, "error": true, "warning": true},
+          "decode": {
+            "rc": 1,
+            "stdout": "",
+            "stderr": ["jp2kload: Stream too short"]
+          },
+          "fail_on_changes_nothing": true
+        },
+        "truncated_in_tile": {
+          "fixture": "fixtures/truncated_in_tile.jp2",
+          "bytes": 244,
+          "sha256": "4e7241026971e99daa22ae7fa7fd7834179645ebe625e0126daf87fe40b26064",
+          "header": {
+            "summary": "fixtures/truncated_in_tile.jp2: 4x3 uchar, 3 bands, srgb, jp2kload",
+            "format": "uchar",
+            "bits-per-sample": "8",
+            "n-pages": "1"
+          },
+          "fail_on": {"none": true, "truncated": true, "error": true, "warning": true},
+          "decode": {
+            "rc": 1,
+            "stdout": "",
+            "stderr": ["VIPS-WARNING: error in tile 0 x 0", "jp2kload: Tile part length size inconsistent with stream length", "jp2kload: Failed to decode the codestream in the JP2 file"]
+          },
+          "fail_on_changes_nothing": true
+        },
+        "truncated_in_boxes": {
+          "fixture": "fixtures/truncated_in_boxes.jp2",
+          "bytes": 73,
+          "sha256": "40364ef1dd7a8bec106231e88431477185dda08eb5226d689061f4e7ad69cb94",
+          "header": {
+            "error": ["vipsheader: jp2kload: Invalid box size 45 for box 'jp2h'. Need 37 bytes, 33 bytes remaining"]
+          },
+          "fail_on": {"none": true, "truncated": true, "error": true, "warning": true},
+          "decode": {
+            "rc": 1,
+            "stdout": "",
+            "stderr": ["jp2kload: Invalid box size 45 for box 'jp2h'. Need 37 bytes, 33 bytes remaining"]
+          },
+          "fail_on_changes_nothing": true
+        },
+        "zeroed_body": {
+          "fixture": "fixtures/zeroed_body.jp2",
+          "bytes": 262,
+          "sha256": "6ecc086efb76cee2c37621b817b1b059f4078b7b103030eb8e43ca4c85430b82",
+          "header": {
+            "error": ["vipsheader: jp2kload: Malformed JP2 file format: second box must be file type box"]
+          },
+          "fail_on": {"none": true, "truncated": true, "error": true, "warning": true},
+          "decode": {
+            "rc": 1,
+            "stdout": "",
+            "stderr": ["jp2kload: Malformed JP2 file format: second box must be file type box"]
+          },
+          "fail_on_changes_nothing": true
+        },
+        "not_jp2k": {
+          "fixture": "fixtures/not_jp2k.bin",
+          "bytes": 32,
+          "sha256": "58d1b58fc266cd39e458968154639d9a7a56cd77348a7776540235509106ed69",
+          "header": {
+            "error": ["vipsheader: VipsForeignLoad: \"fixtures/not_jp2k.bin\" is not a known file format"]
+          },
+          "fail_on": {"none": true, "truncated": true, "error": true, "warning": true},
+          "decode": {
+            "rc": 1,
+            "stdout": "",
+            "stderr": ["VipsForeignLoad: \"fixtures/not_jp2k.bin\" is not a known file format"]
+          },
+          "fail_on_changes_nothing": true
+        }
+      },
+      "fail_on_is_inert_everywhere": true
+    }
+  }
+}
