@@ -989,9 +989,9 @@ pub enum SaveError {
 /// fails rather than drifting.
 fn saveable_extensions() -> &'static str {
     if cfg!(feature = "jxl") {
-        "png, jpg/jpeg, gif, webp, jxl, and v/vips"
+        "png, jpg/jpeg, gif, webp, jxl, fits/fit/fts, and v/vips"
     } else {
-        "png, jpg/jpeg, gif, webp, and v/vips"
+        "png, jpg/jpeg, gif, webp, fits/fit/fts, and v/vips"
     }
 }
 
