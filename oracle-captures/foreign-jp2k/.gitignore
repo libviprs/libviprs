@@ -1,0 +1,9 @@
+# capture.py regenerates everything below from its own deterministic ramps,
+# the vips binary and opj_compress, so only capture.py, commands.sh,
+# oracle.json and the fixtures a port will embed are pinned.
+#
+# outputs/ holds the intermediate .v and .raw files, the decoded rasters the
+# oracle.json sha256s were taken from, and the probe images for the records
+# that need no committed fixture (the suffix sweep, the carrier sweep, the
+# colour-space retags, the quality sweep, the subsample matrix).
+outputs/
