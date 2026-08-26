@@ -348,6 +348,19 @@ fn assert_webp_compression_non_exhaustive(v: &libviprs::webp::Compression) {
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
+// Same shape and the same reason as the WebP one above: JPEG XL's only
+// pure-Rust encoder is lossless-only, so `Lossy { distance }` is the variant
+// this enum exists to leave room for.
+#[allow(clippy::single_match)]
+fn assert_jxl_compression_non_exhaustive(v: &libviprs::jxl::Compression) {
+    match v {
+        libviprs::jxl::Compression::Lossless => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
 fn assert_webp_keep_non_exhaustive(v: &libviprs::webp::Keep) {
     match v {
         libviprs::webp::Keep::All => {}
@@ -372,6 +385,7 @@ fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
     assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
     assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
+    assert_jxl_compression_non_exhaustive(&libviprs::jxl::Compression::Lossless);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);

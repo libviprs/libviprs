@@ -124,6 +124,7 @@ pub mod gif;
 pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
+pub mod jxl;
 pub(crate) mod level_walk;
 #[cfg(loom)]
 mod loom_checkpoint_dedupe;
@@ -308,6 +309,12 @@ pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
 // already know the bytes are WebP. The option types stay behind
 // `libviprs::webp::` so the crate root does not gain a second `SaveOptions`.
 pub use webp::decode_webp;
+// `decode_jxl` is re-exported for the reason `decode_webp` and
+// `decode_radiance` are: it is the format-specific decode entry point a
+// caller reaches for when they already know the bytes are JPEG XL. The
+// option types stay behind `libviprs::jxl::` so the crate root does not
+// gain a third `SaveOptions`.
+pub use jxl::decode_jxl;
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root
