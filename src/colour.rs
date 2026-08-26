@@ -59,10 +59,22 @@
 //! quantises, i.e. when a space is stored at 8 or 16 bits (`srgb`, `hsv`,
 //! `cmyk`, `b-w` at 8 bits; `rgb16`, `grey16` at 16 bits) and inside the
 //! XYZ -> HSV step, which passes through 8-bit sRGB exactly as the libvips
-//! route does. The individual conversions use the same published formulas
-//! and constants as libvips:
+//! route does. The one deliberate exception is the linear -> sRGB store,
+//! which is `f32` throughout because libvips' is (see below). The
+//! individual conversions use the same published formulas and constants
+//! as libvips:
 //!
-//! * sRGB gamma per IEC 61966-2-1 (linear below 0.04045 / 0.0031308);
+//! * sRGB gamma per IEC 61966-2-1 (linear below 0.04045 / 0.0031308), but
+//!   only the sRGB -> linear direction is EVALUATED. Going the other way,
+//!   libvips reads a precomputed integer table: `calcul_tables`
+//!   (`colour/LabQ2sRGB.c:126-146`) rounds `range` samples of the curve
+//!   to integer codes in `float`, and `vips_col_scRGB2sRGB` (`:282-353`)
+//!   interpolates linearly between two of those rounded entries and
+//!   finishes with `rintf`, which rounds halves to EVEN. That is three
+//!   quantisations, and evaluating the curve analytically instead missed
+//!   vips by a whole count on 16.6% of codes (issue #581), so the table
+//!   is ported rather than the formula. `b-w`, `grey16`, `srgb`, `rgb16`
+//!   and the sRGB step of `hsv` all read it;
 //! * the sRGB primaries matrix for scRGB <-> XYZ (4-decimal forward,
 //!   6-decimal inverse, both scaled to `Y` white = 100);
 //! * CIE Lab with the 7.787 shadow slope and D65 white
@@ -82,12 +94,16 @@
 //!   values match the libvips LabS codes;
 //! * Oklab / OkLCh per Ottosson's published matrices (the same constants
 //!   libvips uses);
-//! * Yxy chromaticity, HSV over 8-bit sRGB (hue circle mapped to 0..255),
-//!   and the libvips no-lcms CMYK approximation (naive ink model over
+//! * Yxy chromaticity, the HSV hue circle mapped to 0..255, and the
+//!   libvips no-lcms CMYK approximation (naive ink model over
 //!   D65-normalised XYZ);
-//! * mono (`b-w`, `grey16`) as gamma-encoded CIE linear luminance
-//!   (0.2126 R + 0.7152 G + 0.0722 B), and grey sources replicated to RGB
-//!   exactly like the libvips `BW2sRGB` route.
+//! * mono (`b-w`, `grey16`) as CIE linear luminance
+//!   (0.2126 R + 0.7152 G + 0.0722 B) taken through the same table, and
+//!   grey sources replicated to RGB exactly like the libvips `BW2sRGB`
+//!   route;
+//! * HSV over 8-bit sRGB with both the hue and the saturation code
+//!   TRUNCATED on the store, because `sRGB2HSV.c:113-117` writes them
+//!   into an `unsigned char`.
 //!
 //! Extra bands beyond the colour bands of the source space are carried
 //! through unchanged and plain-cast to the output depth (clip, no
@@ -166,6 +182,7 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use moxcms::{
     ColorProfile, DataColorSpace, Layout, RenderingIntent, ToneCurveEvaluator, TransformOptions,
@@ -365,13 +382,108 @@ fn srgb_decode(v: f64) -> f64 {
     }
 }
 
-/// sRGB opto-electrical transfer: linear 0..1 to encoded 0..1.
-fn srgb_encode(v: f64) -> f64 {
-    if v <= 0.0031308 {
-        12.92 * v
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+/// Number of codes in the 8-bit sRGB carrier, the `range` libvips hands
+/// `calcul_tables` from `calcul_tables_8` (`colour/LabQ2sRGB.c:153`).
+const SRGB_RANGE: usize = 256;
+
+/// Number of codes in the 16-bit `rgb16` / `grey16` carrier, the `range`
+/// from `calcul_tables_16` (`colour/LabQ2sRGB.c:174`).
+const RGB16_RANGE: usize = 65536;
+
+/// Build one libvips `Y2v` table: `range` samples of the sRGB
+/// opto-electrical transfer (IEC 61966-2-1, linear below 0.0031308) taken
+/// at `i / (range - 1)`, scaled to `range - 1` and rounded to an integer,
+/// plus a duplicated final element.
+///
+/// This is `calcul_tables` (`colour/LabQ2sRGB.c:126-146`) with its `v2Y`
+/// half left out. Nothing needs the reverse table: the sRGB -> linear
+/// direction stays analytic in `f64` ([`srgb_decode`]), and the only
+/// difference that makes is an `f32` rounding of a linear value, far
+/// under a code. The forward direction is a different story, which is
+/// what [`scrgb_to_code`] is about.
+///
+/// Everything is deliberately `f32`, the transfer function and the final
+/// `round_ties_even` (C `rintf`) alike, because the C is.
+///
+/// The `mul_add` is the one detail the C source does not show. The arm64
+/// Homebrew build of 8.18.4 contracts
+/// `(1.0F + 0.055F) * powf(f, 1.0F / 2.4F) - 0.055F` into a single
+/// `fmadd`, which `otool -tvV -p _calcul_tables` on `libvips.42.dylib`
+/// prints as `fmadd s0, s0, s9, s13`. Evaluating it unfused moves 45 of
+/// the 65536 16-bit entries by a count, so the fusion is pinned here
+/// rather than left to the optimiser, which is not allowed to introduce
+/// it on its own. The 256-entry table is identical either way.
+///
+/// The trailing duplicate is the C's: "Copy the final element. This is
+/// used in the piecewise linear interpolator below." (`:141-144`).
+fn calcul_tables(range: usize) -> Box<[i32]> {
+    let maxval = (range - 1) as f32;
+    let mut y2v: Vec<i32> = Vec::with_capacity(range + 1);
+    for i in 0..range {
+        let f = i as f32 / maxval;
+        // The C compares the promoted `float` against a `double`
+        // literal, so the branch point is not an `f32` constant.
+        let v = if f64::from(f) <= 0.0031308 {
+            12.92_f32 * f
+        } else {
+            f.powf(1.0_f32 / 2.4_f32).mul_add(1.055, -0.055)
+        };
+        y2v.push((maxval * v).round_ties_even() as i32);
     }
+    y2v.push(y2v[range - 1]);
+    y2v.into_boxed_slice()
+}
+
+/// The `Y2v` table for `range`, built once, standing in for the libvips
+/// `VIPS_ONCE` pair (`colour/LabQ2sRGB.c:150-170`).
+fn y2v_table(range: usize) -> &'static [i32] {
+    static Y2V_8: OnceLock<Box<[i32]>> = OnceLock::new();
+    static Y2V_16: OnceLock<Box<[i32]>> = OnceLock::new();
+    debug_assert!(range == SRGB_RANGE || range == RGB16_RANGE);
+    if range == SRGB_RANGE {
+        Y2V_8.get_or_init(|| calcul_tables(SRGB_RANGE))
+    } else {
+        Y2V_16.get_or_init(|| calcul_tables(RGB16_RANGE))
+    }
+}
+
+/// Linear scRGB (0..1) -> the integer sRGB code, through the
+/// interpolated `Y2v` lookup that `vips_col_scRGB2sRGB`
+/// (`colour/LabQ2sRGB.c:282-353`) and `vips_col_scRGB2BW` (`:385-428`)
+/// share.
+///
+/// vips never evaluates the transfer function per pixel, and the
+/// difference is not academic: three quantisations stack here, all of
+/// them the C's. [`calcul_tables`] samples the curve at `range` points
+/// and rounds each one to an integer; this lookup interpolates linearly
+/// between two of those already-rounded points; and the chord is
+/// finished with `rintf`, which rounds halves to EVEN rather than away
+/// from zero. Evaluating the curve analytically in `f64` and rounding
+/// once instead moved 5434 of the 32768 neutral LabS L codes by a count
+/// (issue #581).
+///
+/// The result is ALREADY QUANTISED, so this is the code that reaches the
+/// output buffer; `write_sample` rounds an integer and changes nothing.
+fn scrgb_to_code(range: usize, value: f64) -> f64 {
+    // "RGB can be NaN. Throw those values out, they will break our
+    // clipping." (`LabQ2sRGB.c:301-310`, `:404-409`.) vips answers 0
+    // rather than clipping. A NaN only reaches here from a NaN XYZ, and
+    // the scRGB matrix spreads that to all three channels, so answering
+    // per channel lands where the C's per-pixel test does.
+    if value.is_nan() {
+        return 0.0;
+    }
+    let lut = y2v_table(range);
+    let maxval = (range - 1) as f32;
+    let yf = (value as f32 * maxval).clamp(0.0, maxval);
+    let yi = yf as usize;
+    let lo = lut[yi];
+    // The `+ 1` is in bounds because `calcul_tables` duplicates the last
+    // entry for exactly this read.
+    let delta = (lut[yi + 1] - lo) as f32;
+    // Fused, like the `fmadd s0, s5, s0, s4` the build compiles
+    // `lut[Yi] + (lut[Yi + 1] - lut[Yi]) * (Yf - Yi)` into.
+    f64::from(delta.mul_add(yf - yi as f32, lo as f32).round_ties_even())
 }
 
 /// Linear scRGB (0..1) -> D65 XYZ (`Y` white = 100), the sRGB primaries
@@ -651,9 +763,17 @@ fn srgb8_to_hsv(rgb: [f64; 3]) -> [f64; 3] {
     let h = if delta == 0.0 {
         0.0
     } else {
-        42.5 * (secondary_diff / delta) + wrap_around_hue
+        // `secondary_diff` is a `float` and `delta` an `unsigned char`
+        // cast to one, so the RATIO is an f32 division; only the
+        // `42.5 *` promotes back to double (`sRGB2HSV.c:113-114`).
+        42.5 * f64::from(secondary_diff as f32 / delta as f32) + wrap_around_hue
     };
-    [h, delta * 255.0 / c_max, c_max]
+    // `q` is `unsigned char`, so the C TRUNCATES both codes on the store
+    // (`sRGB2HSV.c:113-117`); it does not round them. Both are
+    // non-negative here -- the hue arms pair a negative `secondary_diff`
+    // with a `wrap_around_hue` that more than covers it -- so truncating
+    // toward zero and flooring agree.
+    [h.trunc(), (delta * 255.0 / c_max).trunc(), c_max]
 }
 
 /// HSV (libvips 0..255 hue coding) -> 8-bit sRGB. Inputs are the integral
@@ -817,12 +937,16 @@ fn labs_to_cmc(labs: [f64; 3]) -> [f64; 3] {
     lch_to_cmc(lab_to_lch(labs_to_lab(labs)))
 }
 
-// --- Mono (gamma-encoded CIE linear luminance, libvips scRGB2BW) ---
+// --- Mono (CIE linear luminance, libvips scRGB2BW) ---
 
-/// scRGB -> the normalised (0..1) gamma-encoded grey value.
-fn scrgb_to_bw(rgb: [f64; 3]) -> f64 {
-    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-    srgb_encode(y.clamp(0.0, 1.0))
+/// scRGB -> the CIE linear luminance `vips_col_scRGB2BW` takes before
+/// the sRGB encode (`colour/LabQ2sRGB.c:400`).
+///
+/// Nothing is clamped here on purpose: the C clips the SCALED index
+/// inside the lookup, not the luminance, so the clip belongs to
+/// [`scrgb_to_code`].
+fn scrgb_luminance(rgb: [f64; 3]) -> f64 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,9 +1170,17 @@ fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
 }
 
 /// Convert one pixel from D65 XYZ to `space`, writing the
-/// `space_bands(space)` output samples into the front of `out` (in the
-/// space's numeric convention, unrounded; integer spaces quantise on
-/// write).
+/// `space_bands(space)` output samples into the front of `out`, in the
+/// space's numeric convention.
+///
+/// Most arms leave the sample unrounded and let the writer quantise, but
+/// the arms whose C counterpart quantises INSIDE the transform do it
+/// here instead, so the two cannot drift: `labs` truncates into the
+/// `signed short` (`Lab2LabS.c:66-68`), `hsv` truncates into the
+/// `unsigned char` (`sRGB2HSV.c:113-117`), and `srgb`, `rgb16`, `b-w`,
+/// `grey16` and the sRGB step of `hsv` come back already rounded out of
+/// the `Y2v` lookup ([`scrgb_to_code`]). Re-rounding an integer on write
+/// changes nothing, so those arms pass through it untouched.
 ///
 /// This is the allocation-free form the per-pixel conversion loop drives:
 /// the caller supplies one scratch array (`[f64; 4]` covers every space,
@@ -1070,25 +1202,28 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
         Interpretation::Labs => out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65))),
         Interpretation::ScRgb => out[..3].copy_from_slice(&xyz_to_scrgb(xyz)),
         Interpretation::Hsv => {
-            // The libvips HSV encode goes through 8-bit sRGB.
-            let rgb = xyz_to_scrgb(xyz).map(|c| (255.0 * srgb_encode(c.clamp(0.0, 1.0))).round());
+            // The libvips HSV encode goes through 8-bit sRGB
+            // (`colourspace.c:336` and the rest of the `{ *, HSV }`
+            // block), so it sees the LUT's codes, not an analytic
+            // encode rounded afterwards.
+            let rgb = xyz_to_scrgb(xyz).map(|c| scrgb_to_code(SRGB_RANGE, c));
             out[..3].copy_from_slice(&srgb8_to_hsv(rgb));
         }
         Interpretation::Srgb => {
-            out[..3].copy_from_slice(
-                &xyz_to_scrgb(xyz).map(|c| 255.0 * srgb_encode(c.clamp(0.0, 1.0))),
-            );
+            out[..3].copy_from_slice(&xyz_to_scrgb(xyz).map(|c| scrgb_to_code(SRGB_RANGE, c)));
         }
         Interpretation::Rgb16 => {
-            out[..3].copy_from_slice(
-                &xyz_to_scrgb(xyz).map(|c| 65535.0 * srgb_encode(c.clamp(0.0, 1.0))),
-            );
+            out[..3].copy_from_slice(&xyz_to_scrgb(xyz).map(|c| scrgb_to_code(RGB16_RANGE, c)));
         }
         Interpretation::Yxy => out[..3].copy_from_slice(&xyz_to_yxy(xyz)),
         Interpretation::OkLab => out[..3].copy_from_slice(&xyz_to_oklab(xyz)),
         Interpretation::OkLch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_oklab(xyz))),
-        Interpretation::Bw => out[0] = 255.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
-        Interpretation::Grey16 => out[0] = 65535.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
+        Interpretation::Bw => {
+            out[0] = scrgb_to_code(SRGB_RANGE, scrgb_luminance(xyz_to_scrgb(xyz)));
+        }
+        Interpretation::Grey16 => {
+            out[0] = scrgb_to_code(RGB16_RANGE, scrgb_luminance(xyz_to_scrgb(xyz)));
+        }
         Interpretation::Cmyk => out[..4].copy_from_slice(&xyz_to_cmyk(xyz)),
         other => unreachable!("no colourspace route for {other:?}"),
     }
@@ -4444,6 +4579,103 @@ mod tests {
                 "labs [491, 0, 0] -> hsv band {c}: vips says {exp}, got {}",
                 px[c]
             );
+        }
+    }
+
+    /**
+     * Tests that [`calcul_tables`] reproduces the libvips `Y2v` tables
+     * entry for entry, at both ranges.
+     *
+     * The table is the thing everything else in this mechanism is built
+     * on, so it is pinned directly rather than only through the codes it
+     * produces. Seven of the 16-bit entries here are ones the FUSED
+     * multiply-add decides: evaluate `1.055 * powf(f, 1/2.4) - 0.055`
+     * unfused and they each drop by a count, which is 45 of the 65536
+     * entries in total. The 256-entry table is the same either way, so
+     * the 8-bit rows pin the shape and the 16-bit rows pin the fusion.
+     *
+     * Input: the tables were read back out of vips 8.18.4 rather than
+     * recomputed. Feeding scRGB knots `i / (range - 1)` through
+     * `vips rawload knots.raw k.v <range> 1 3 --format float
+     * --interpretation scrgb` then `vips colourspace k.v out.v srgb`
+     * (and `rgb16`) makes the interpolation land on entry `i`, so the
+     * output code IS `Y2v[i]`.
+     */
+    #[test]
+    fn calcul_tables_matches_the_vips_y2v_tables() {
+        let y2v_8 = calcul_tables(SRGB_RANGE);
+        assert_eq!(y2v_8.len(), SRGB_RANGE + 1);
+        assert_eq!(&y2v_8[..10], &[0, 13, 22, 28, 34, 38, 42, 46, 50, 53]);
+        assert_eq!(&y2v_8[248..256], &[252, 252, 253, 253, 254, 254, 255, 255]);
+        // "Copy the final element" (`LabQ2sRGB.c:141-144`).
+        assert_eq!(y2v_8[SRGB_RANGE], y2v_8[SRGB_RANGE - 1]);
+
+        let y2v_16 = calcul_tables(RGB16_RANGE);
+        assert_eq!(y2v_16.len(), RGB16_RANGE + 1);
+        // (index, vips entry). Everything from 3696 to 25615 is an entry
+        // the unfused form gets one count too low.
+        let cases: [(usize, i32); 15] = [
+            (0, 0),
+            (1, 13),
+            (2, 26),
+            (3, 39),
+            (255, 3244),
+            (3696, 17261),
+            (3857, 17635),
+            (5925, 21795),
+            (8993, 26618),
+            (8998, 26625),
+            (9393, 27171),
+            (25615, 43141),
+            (64674, 65155),
+            (65534, 65535),
+            (65535, 65535),
+        ];
+        for (i, want) in cases {
+            assert_eq!(y2v_16[i], want, "Y2v_16[{i}]");
+        }
+        assert_eq!(y2v_16[RGB16_RANGE], y2v_16[RGB16_RANGE - 1]);
+    }
+
+    /**
+     * Tests that sRGB -> HSV TRUNCATES the hue and saturation codes on
+     * the store, and that the hue's ratio is an `f32` division.
+     *
+     * `sRGB2HSV.c:113-117` writes both into an `unsigned char`, which
+     * drops the fraction; libviprs used to hand them out unrounded and
+     * let the writer round, which missed vips on about a third of the
+     * two bands. It stayed invisible until #581, because the analytic
+     * sRGB encode produced flat greys where the LUT produces a real
+     * spread, and a flat grey has `delta == 0` and therefore no hue or
+     * saturation to get wrong.
+     *
+     * Works by pinning one case where both codes have a fraction over a
+     * half, so rounding and truncating disagree on BOTH, and one where
+     * the hue is exactly on the boundary between the two precisions:
+     * sRGB [5, 7, 22] puts `42.5 * (-2 / 17) + 170` a hair under 165 in
+     * `f32` and a hair over it in `f64`, and vips answers 164.
+     *
+     * Input: `vips rawload px.raw in.v N 1 3 --format uchar
+     * --interpretation srgb`, then `vips colourspace in.v out.v hsv`.
+     */
+    #[test]
+    fn srgb_to_hsv_truncates_hue_and_saturation() {
+        let cases: [([u8; 3], [f64; 3]); 3] = [
+            ([5, 7, 66], [168.0, 235.0, 66.0]),
+            ([5, 7, 88], [168.0, 240.0, 88.0]),
+            ([5, 7, 22], [164.0, 197.0, 22.0]),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Hsv).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-9,
+                    "srgb {rgb:?} -> hsv band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
         }
     }
 }

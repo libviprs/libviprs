@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Every conversion into `srgb`, `rgb16`, `b-w`, `grey16` and `hsv` now
+  produces different output bytes, because the linear -> sRGB store goes
+  through the libvips lookup table instead of evaluating the transfer
+  function (issue #581). This is a parity fix, not a change of intent: the
+  new bytes are the ones vips 8.18.4 produces.
+
+  libvips never evaluates the sRGB curve per pixel. `calcul_tables`
+  (`colour/LabQ2sRGB.c:126-146`) rounds `range` samples of it to integer
+  codes once, in `float`, and `vips_col_scRGB2sRGB` (`:282-353`) and
+  `vips_col_scRGB2BW` (`:385-428`) then interpolate linearly between two of
+  those already-rounded entries and finish the chord with `rintf`, which
+  rounds halves to even. Three quantisations, none of which an analytic
+  `f64` encode has. Sweeping the neutral LabS L codes against the binary,
+  `Labs -> b-w` used to differ on 5434 of 32768 and `Labs -> sRGB` on 16295
+  of 98304, always by exactly one count and in both directions; both are now
+  exact. On a 21x21x21 Lab grid `grey16` went from 1323 of 9261 to 0 and
+  `rgb16` from 3223 of 27783 to 25, the remainder being an unrelated
+  `f32`-versus-`f64` difference in the scRGB value itself, which only a
+  16-bit carrier is fine enough to see.
+
+  `sharpen` moves with it. It was carrying its own tolerance on the grounds
+  that it convolves 16-bit LabS, but the deviation was never in the
+  convolution: it was in the sRGB store the result comes back through. The
+  same goes for two `colourspace` cells that were pinned at one LSB. All
+  three are exact now and the tolerances are gone.
+
+  If you have committed reference images produced by an older libviprs, they
+  will need regenerating against vips rather than against the previous
+  output.
+
+- sRGB -> HSV truncates its hue and saturation codes instead of rounding
+  them (issue #581, found while fixing the above). `sRGB2HSV.c:113-117`
+  writes both into an `unsigned char`, and the C drops the fraction on that
+  store; libviprs was handing them out unrounded and letting the writer
+  round, which missed vips on about a third of the two bands (measured
+  45370 of 138528 codes over a 46176-pixel sRGB grid, now 0). The hue's
+  ratio is an `f32` division there too, which decides another 299 of them.
+  It stayed hidden until now because the analytic sRGB encode produced flat
+  greys where the table produces a real spread, and a flat grey has no hue
+  or saturation to get wrong.
+
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
   be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
