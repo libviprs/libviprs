@@ -1168,10 +1168,40 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
     let sigma =
         (((cw as f64 * hscale).powi(2) + (ch as f64 * vscale).powi(2)).sqrt() / 10.0).max(1.0);
 
+    // Drop the alpha band before the shrink, because libviprs' `resize`
+    // premultiplies where `vips_resize` does not (issue #603).
+    //
+    // `vips_smartcrop_build` premultiplies once into float and hands the
+    // result to `vips_resize`, which explicitly does NOT premultiply ("This
+    // operation does not premultiply alpha. If your image has an alpha
+    // channel, you should use premultiply on it first", `resize.c`). So in
+    // vips the analysis image is still premultiplied when the argmax is taken,
+    // and every transparent pixel is still at colour 0. libviprs' `resize`
+    // brackets its own premultiply / un-premultiply pair around the resample
+    // instead (a deliberate divergence, core #458), so handing it the
+    // already-premultiplied analysis image un-premultiplies it on the way out
+    // and the colour hiding behind transparent pixels comes back as bright
+    // garbage, which then dominates the edge and skin scores.
+    //
+    // vips drops the alpha band immediately after the resize anyway
+    // (`vips_colourspace` to XYZ, then `extract_band(0, "n", 3)`), and a
+    // resample that does not premultiply is per-band independent, so dropping
+    // it *before* the resize is exactly equivalent to what vips computes and
+    // leaves libviprs' bracket with nothing to do. `has_alpha` is only ever
+    // the four-band formats, so the band range always fits and the panicking
+    // form cannot fire.
+    let analysis_storage;
+    let analysis: &Raster = if im.format().has_alpha() {
+        analysis_storage = im.extract_bands(0, im.format().channels() as u32 - 1);
+        &analysis_storage
+    } else {
+        im
+    };
+
     // Shrink to the attention working size with the default lanczos3
     // `vips_resize`, matching libvips exactly. A box filter here shifts the
     // energy argmax, and thus the crop, off the libvips position.
-    let small = im.resize_with(
+    let small = analysis.resize_with(
         hscale,
         ResizeOptions {
             vscale: Some(vscale),
@@ -1954,6 +1984,77 @@ mod tests {
         let im = rgba(w as u32, h as u32, data);
         let (_, ax, _) = im.smartcrop_with_coords(16, 16, SmartcropInteresting::Attention);
         assert!(ax < 32, "attention_x {ax} should point at the opaque block");
+    }
+
+    /// Regression for #603: the attention analysis must stay in premultiplied
+    /// space all the way to the argmax, the way it does in vips.
+    ///
+    /// A 128x128 image split on the diagonal: a saturated skin-tone triangle
+    /// that is fully opaque, and a bright grey remainder that is fully
+    /// transparent. vips premultiplies once and then resizes *without*
+    /// un-premultiplying, so the transparent side is colour 0 by the time it is
+    /// scored, its luma fails the `Y > 5` mask, and the argmax has to land on
+    /// an opaque pixel. libviprs' `resize` premultiplies on its own, so before
+    /// the fix its bracket un-premultiplied the analysis image on the way out;
+    /// the lanczos ringing along the boundary came back divided by a near-zero
+    /// alpha, lit up a wide band on the transparent side, and the argmax landed
+    /// there.
+    ///
+    /// The assertion is the mechanism rather than the exact coordinate. This
+    /// fixture is symmetric about the diagonal, so the two ends of the ridge
+    /// score almost equally and the winner between them is a near tie — pinning
+    /// which end wins would pin a coincidence. What is not a tie is which
+    /// *side* of the transparency boundary wins, and that flips cleanly with
+    /// the bug. For the record, the oracle agrees with the fixed code on the
+    /// coordinate as well:
+    ///
+    /// ```text
+    /// vips smartcrop diag.png o.png 32 32 --interesting attention \
+    ///   --attention-x --attention-y   ->  100 then 0
+    /// ```
+    ///
+    /// and it stays 100/0 through `--premultiplied` on a pre-premultiplied
+    /// copy. Every threshold from 100 to 120 puts vips on the opaque side and
+    /// the pre-fix code on the transparent side.
+    #[test]
+    fn smartcrop_attention_cannot_land_on_a_transparent_pixel() {
+        const SPLIT: usize = 110;
+        let (w, h) = (128usize, 128usize);
+        let mut data = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let px: [u8; 4] = if x + y < SPLIT {
+                    [215, 150, 120, 255]
+                } else {
+                    [181, 184, 193, 0]
+                };
+                data[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        let im = rgba(w as u32, h as u32, data);
+
+        let (_, ax, ay) = im.smartcrop_with_coords(32, 32, SmartcropInteresting::Attention);
+        assert!(
+            (ax as usize) + (ay as usize) < SPLIT,
+            "attention ({ax}, {ay}) landed on a fully transparent pixel: the \
+             analysis image was un-premultiplied on the way out of resize (#603)"
+        );
+
+        // Same through the `premultiplied = true` door, which skips the
+        // smartcrop-level premultiply because the caller already did it. The
+        // resize must not undo it there either.
+        let (_, pax, pay) = im.premultiply().smartcrop_with_coords_premultiplied(
+            32,
+            32,
+            SmartcropInteresting::Attention,
+            true,
+        );
+        assert!(
+            (pax as usize) + (pay as usize) < SPLIT,
+            "attention ({pax}, {pay}) landed on a fully transparent pixel \
+             through the premultiplied door (#603)"
+        );
     }
 
     #[test]

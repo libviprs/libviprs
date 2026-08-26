@@ -296,6 +296,46 @@ fn write_f64(data: &mut [u8], bpc: usize, i: usize, v: f64, max: f64) {
     write_u32(data, bpc, i, v as u32);
 }
 
+/// Dead zone around zero alpha for the un-premultiply factor, the `0.01` of
+/// `factor = fabs(alpha) < 0.01 ? 0 : max_alpha / alpha` in the `FUNPRE_*`
+/// macros of `libvips/conversion/unpremultiply.c` (issue #604).
+///
+/// The literal is **absolute, in whatever units the alpha band carries**, and
+/// is deliberately not scaled by `max`: libvips applies the same `0.01`
+/// whatever `max_alpha` is. Measured on the 8.18.4 binary with a 1x1 float
+/// pixel `(100, 100, 100, alpha)`, `alpha = 0.02` unpremultiplies to `5000`
+/// under scRGB (`max_alpha` 1.0), `1275000` under the 255 default and
+/// `327675008` under RGB16 (`max_alpha` 65535), while `alpha = 0.005` gives
+/// `0` in all three. So the same absolute literal covers every libviprs
+/// carrier: `0.01 / 255` of full scale on the 8-bit and float rasters and
+/// `0.01 / 65535` on the 16-bit ones.
+///
+/// It only ever bites on a float carrier. libvips itself splits the two:
+/// `UNPRE_*` tests `alpha == 0` for the integer formats, `FUNPRE_*` tests the
+/// dead zone for float and double, and on an integer carrier the two agree
+/// because the smallest non-zero magnitude is `1`. The guard exists because a
+/// lanczos resample undershoots: an alpha that dips to `0.003`, or through
+/// zero to a small negative, is ordinary at a hard transparency edge, and
+/// dividing by it amplifies the colour by ~333 or flips its sign.
+pub(crate) const UNPREMULTIPLY_DEAD_ZONE: f64 = 0.01;
+
+/// The libvips un-premultiply factor for `alpha` against a `max` sample
+/// ceiling: `0` inside [`UNPREMULTIPLY_DEAD_ZONE`], `max / alpha` outside it.
+///
+/// The raw alpha is used, never a clipped one. That is the other half of the
+/// contract and libvips is explicit about it: "Don't use clip_alpha to
+/// calculate factor: we want over and undershoots on alpha and RGB to cancel"
+/// (`libvips/conversion/unpremultiply.c`). Only the alpha that is *stored*
+/// is clipped, to `0..=max`, and callers do that separately.
+#[inline]
+pub(crate) fn unpremultiply_factor(alpha: f64, max: f64) -> f64 {
+    if alpha.abs() < UNPREMULTIPLY_DEAD_ZONE {
+        0.0
+    } else {
+        max / alpha
+    }
+}
+
 /// Largest sample value representable at an unsigned depth, as `f64`.
 /// Unsigned depths only; see [`read_u32`].
 #[inline]
@@ -2701,12 +2741,26 @@ impl Raster {
     /// `v * alpha / max` (`max` is `255` or `65535` by depth), rounded to
     /// nearest. The alpha band and the format are unchanged.
     ///
+    /// There is no dead zone here to match [`Raster::try_unpremultiply`]'s,
+    /// and that asymmetry is libvips' rather than an omission (issue #604):
+    /// premultiply *multiplies* by the alpha, so a near-zero alpha damps the
+    /// colour instead of amplifying it, and there is no division to produce an
+    /// infinity. `libvips/conversion/premultiply.c` has one macro for every
+    /// band format, with no `fabs(alpha) < 0.01` float variant at all.
+    ///
+    /// What it does have is the mirror image of un-premultiply's clip: the
+    /// *factor* is built from `VIPS_CLIP(0, alpha, max_alpha)` while the alpha
+    /// that is *stored* is the raw one, exactly the other way round from
+    /// un-premultiply, so the pair cancels on a round trip. That clip is
+    /// applied here too, though on the unsigned 8- and 16-bit carriers this op
+    /// accepts it can never fire.
+    ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::NoAlphaBand`] if the image has fewer
     /// than two bands.
     pub fn try_premultiply(&self) -> Result<Raster, ArithmeticError> {
-        self.alpha_map(|v, a, max| v * a / max)
+        self.alpha_map(|v, a, max| v * a.clamp(0.0, max) / max)
     }
 
     /// Panicking form of [`Raster::try_premultiply`], matching the
@@ -2722,16 +2776,27 @@ impl Raster {
 
     /// Undo alpha premultiplication (libvips `unpremultiply`).
     ///
-    /// The last band is the alpha band; every other band becomes
-    /// `v * max / alpha` (saturated), or `0` where alpha is zero, matching
-    /// libvips. The alpha band and the format are unchanged.
+    /// The last band is the alpha band; every other band is multiplied by
+    /// the shared un-premultiply factor, so it becomes `v * max / alpha`
+    /// (saturated to the depth) outside the `0.01` dead zone around zero alpha
+    /// and `0` inside it. The alpha band and the format are unchanged.
+    ///
+    /// Both of the libvips guards are inert on the carriers this op accepts,
+    /// and that is worth saying rather than leaving to be re-derived: these
+    /// are unsigned 8- and 16-bit rasters, so the smallest non-zero alpha
+    /// magnitude is `1` and the dead zone collapses to `alpha == 0` (libvips
+    /// hits the `UNPRE_*` integer macros here for the same reason), while the
+    /// stored alpha is already inside `0..=max` by construction so the
+    /// `VIPS_CLIP(0, alpha, max_alpha)` on the way out has nothing to do. The
+    /// guards bite on the float path, [`crate::resample`]'s premultiply
+    /// bracket, where a resample undershoot can put alpha near or below zero.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::NoAlphaBand`] if the image has fewer
     /// than two bands.
     pub fn try_unpremultiply(&self) -> Result<Raster, ArithmeticError> {
-        self.alpha_map(|v, a, max| if a == 0.0 { 0.0 } else { v * max / a })
+        self.alpha_map(|v, a, max| v * unpremultiply_factor(a, max))
     }
 
     /// Panicking form of [`Raster::try_unpremultiply`], matching the
@@ -4857,6 +4922,33 @@ mod tests {
         let im16 = Raster::new(1, 1, PixelFormat::with_channels(2, 2).unwrap(), data).unwrap();
         let r16 = im16.premultiply();
         assert_eq!(r16.getpoint(0, 0), vec![20_000.0, 32_768.0]); // 40000*32768/65535 ~ 20000.3
+    }
+
+    /// The un-premultiply dead zone (#604) is an absolute `0.01` in sample
+    /// units, so on an unsigned carrier it can only ever catch `alpha == 0`.
+    /// Scaling it by `max` would be the natural-looking mistake and would
+    /// wrongly damp the smallest real alphas; this pins that it does not.
+    /// Measured on vips 8.18.4, a 3x1 uchar RGBA of `(1,1,1,alpha)`:
+    ///
+    /// ```text
+    /// vips unpremultiply tiny.png t.v ; vips getpoint t.v <x> 0
+    ///   alpha = 1  ->  255 255 255 1
+    ///   alpha = 3  ->   85  85  85 3
+    ///   alpha = 0  ->    0   0   0 0
+    /// ```
+    #[test]
+    fn unpremultiply_dead_zone_never_catches_a_real_integer_alpha() {
+        let im = Raster::new(
+            3,
+            1,
+            PixelFormat::Rgba8,
+            vec![1, 1, 1, 1, 1, 1, 1, 3, 1, 1, 1, 0],
+        )
+        .unwrap();
+        let out = im.unpremultiply();
+        assert_eq!(out.getpoint(0, 0), vec![255.0, 255.0, 255.0, 1.0]);
+        assert_eq!(out.getpoint(1, 0), vec![85.0, 85.0, 85.0, 3.0]);
+        assert_eq!(out.getpoint(2, 0), vec![0.0, 0.0, 0.0, 0.0]);
     }
 
     /// A single-band image has no alpha band: typed error.
