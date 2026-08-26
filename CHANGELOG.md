@@ -726,6 +726,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The TIFF page readers honour `DecodeLimits` instead of bypassing it (issue
+  #540). `decode_tiff_page` and `tiff_page_count` took no limits at all and
+  handed the decoded result straight to `Raster::new`, whose
+  `DEFAULT_MAX_ALLOC_BYTES` is 8 GiB, sixteen times looser than the 512 MiB
+  `DecodeLimits::max_alloc_bytes` the rest of the crate publishes and honours.
+  `src/source.rs` publishes a table of which decoder enforces which field, and
+  these two were not in it.
+
+  Four things on that path were sized by the file, not the one the issue
+  describes, because #566 added two more while sourcing `n-pages`:
+
+  * The whole-file `std::fs::read`, unbounded. It is now capped at
+    `max_alloc_bytes`, checked against the declared length before the read and
+    against what actually arrived after it, so a file that grows in between
+    cannot slip past.
+  * `normalize_multiband_photometric`, which clones the entire buffer when the
+    vips multiband relabel applies, doubling the peak footprint. The page
+    readers own their buffer, so they now patch it in place and never pay for
+    the copy.
+  * The IFD walk, which ran to the end of the chain with no ceiling on every
+    single page decode. `DecodeLimits` grows a `max_pages` field, default
+    `100_000`, and the walk stops there with `SourceError::PageLimitExceeded`
+    rather than counting on to find out how far past it the file goes. The
+    default is the ceiling libvips puts on both the page index and the page
+    count on every multi-page loader it has: measured against 8.18.4,
+    `vips tiffload x.tif o.v --page 100001` and `--n 100001` are both refused
+    before the loader runs.
+  * The pixel buffer, which now goes through `check_coord`, then
+    `check_pixels`, then an explicit
+    `width * height * bands * bytes_per_sample` budget, all on the declared
+    geometry and all before anything is reserved. That last one is the only
+    check that can see the band count and the sample depth, so it is the one
+    that catches a frame `max_pixels` waves through.
+
+  `decode_tiff_page_with_limits`, `tiff_page_count_with_limits` and
+  `Raster::tiff_load_with_limits` take the ceilings explicitly; the existing
+  three delegate to `DecodeLimits::default()`. `DecodeLimits` is
+  `#[non_exhaustive]` with `with_*` builder setters, so `max_pages` is
+  additive, and `SourceError` is `#[non_exhaustive]`, so the two new variants
+  (`AllocLimitExceeded` and `PageLimitExceeded`) are too. A file that was
+  already decoding keeps decoding: the new ceilings are all far above anything
+  a real TIFF carries, and the `tiff` crate's own 256 MiB decode buffer
+  default is only ever tightened by `max_alloc_bytes`, never loosened.
+
+  One thing the issue asserts that no longer holds, recorded so nobody chases
+  it: it argued this was "the template" the other format modules would copy,
+  and they did not. `gif.rs`'s `decode_gif` and `webp.rs`'s `decode_webp` both
+  take a `DecodeLimits` and apply `check_coord`, `check_pixels` and
+  `max_alloc_bytes` already. A cyclic IFD chain is not an unbounded loop
+  either: `tiff` 0.10.3 runs union-find over the IFD edges and returns
+  `CycleInOffsets` on a back edge. The ceiling is for the chain that is merely
+  very long, which nothing below it bounds.
+
 - A zero mask coefficient no longer poisons a non-finite sample (issue #574).
   libvips squeezes zero taps out of a mask before it convolves, in both cores
   (`convolution/convf.c:314-321` and `convolution/convi.c:1189-1197`), and
