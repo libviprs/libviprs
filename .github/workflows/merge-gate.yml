@@ -57,7 +57,19 @@ jobs:
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +nightly miri test
+      # `-Zmiri-disable-isolation` is what lets the fs-touching tests run at all.
+      # Without it Miri refuses `mkdir` and the whole run aborts on the first
+      # test that reaches for a `tempdir`, which is how this gate broke: nothing
+      # enforces the `#[cfg_attr(miri, ignore)]` convention below, so one new
+      # test using `tempfile` takes the job down and reports it as a Miri
+      # failure rather than as a missing annotation.
+      #
+      # It is not a coverage loss. The 48 annotated tests stay ignored exactly
+      # as before; this only stops *unannotated* fs tests from aborting the run,
+      # so the job now covers strictly more than it did. Removing those 48
+      # annotations so their tests run under Miri too is a bigger and separate
+      # question (issue #652).
+      - run: MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test
 
   loom:
     name: Loom
