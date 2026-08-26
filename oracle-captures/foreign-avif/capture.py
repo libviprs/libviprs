@@ -1185,6 +1185,13 @@ records["still_image_page_fields"] = {
 # libheif and the AV1 encoder do.
 # ---------------------------------------------------------------------------
 def keg(name):
+    """`vips --vips-config` prints `HEIC/AVIF load/save with libheif: true
+    (dynamic module: true)` and no version at all, for libheif or for the AV1
+    encoder behind it, so neither can be measured out of vips. These come
+    from the Homebrew keg each `opt` symlink resolves to, which is the
+    library vips is actually linked against. Recorded because they, not the
+    vips version, are what fixes the encoded bytes and the decoder that
+    produces the carrier this whole capture is about."""
     p = f"/opt/homebrew/opt/{name}"
     return os.path.basename(os.path.realpath(p)) if os.path.exists(p) else None
 
@@ -1192,16 +1199,32 @@ def keg(name):
 version = run([VIPS, "--version"]).stdout.strip()
 
 notes.append(
-    "This machine's vips moved from 8.18.4 to 8.18.6 DURING this capture, "
-    "under a `brew upgrade` I did not start, taking libheif from 1.23.1 to "
-    "1.23.2 with it. Everything here was re-measured on the version recorded "
-    "in meta. The one cross-version check I could still run before the 8.18.4 "
-    "keg stopped loading (its libultrahdr had gone) says the drift did not "
-    "move anything: the 10-bit lossless fixture came out byte-identical on "
-    "both, sha256 "
-    "053eadef26480dc8a24af96e654272d197157f5ddec68c490406a2c0392b2001. Every "
-    "other capture in oracle-captures/ cites 8.18.4, so treat that as the "
-    "version they were taken at, not as the version installed now."
+    "THE VERSION IN meta IS MEASURED, NOT INHERITED. This machine's vips "
+    "moved from 8.18.4 to 8.18.6 DURING this capture, under a `brew upgrade` "
+    "I did not start, taking libheif from 1.23.1 to 1.23.2 and x265 from 4.2 "
+    "to 4.3 with it, and deleting the 8.18.4 keg. Every fixture and every "
+    "number in this file was produced by a single clean re-run AFTER that "
+    "upgrade, on the version meta records. Earlier exploratory probes ran on "
+    "8.18.4 and none of them survive here."
+)
+notes.append(
+    "The upgrade did not move the answer, as far as I could check before the "
+    "8.18.4 keg stopped loading (its libultrahdr had gone too). The 10-bit "
+    "lossless fixture, the one this capture exists for, came out "
+    "BYTE-IDENTICAL on both versions: sha256 "
+    "053eadef26480dc8a24af96e654272d197157f5ddec68c490406a2c0392b2001. That "
+    "is one datum, not a proof, and it is the only cross-version comparison "
+    "I was able to run."
+)
+notes.append(
+    "So this area records 8.18.6 while every pre-existing area in "
+    "oracle-captures/ (convolution, foreign-radiance, foreign-webp, "
+    "foreign-gif) records 8.18.4, as do the FITS, EXR and JPEG XL captures "
+    "in flight alongside this one. Those numbers are still true of when "
+    "those areas were taken; they are simply no longer true of what is "
+    "installed. Reconciling that is tracked separately and deliberately not "
+    "done here: this file states the truth about itself rather than "
+    "inheriting a stale claim."
 )
 notes.append(
     "`vips heifsave --help` and `vips heifload --help` print the generic "
@@ -1251,6 +1274,16 @@ oracle = {
         "vips_binary": VIPS,
         "libheif": keg("libheif"),
         "av1_encoder": keg("aom"),
+        "version_provenance": "vips_version is `vips --version` at capture "
+                              "time. `vips --vips-config` reports libheif as "
+                              "`true (dynamic module: true)` with NO version "
+                              "number, so libheif and av1_encoder are the "
+                              "Homebrew kegs /opt/homebrew/opt/libheif and "
+                              "/opt/homebrew/opt/aom resolve to, which is "
+                              "what vips is linked against. See notes: this "
+                              "machine's vips moved mid-capture and the "
+                              "version here is measured, not inherited from "
+                              "any brief.",
         "captured_by": "oracle-captures/foreign-avif/capture.py",
         "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line "
                        "numbers quoted above; the binary every number here "
