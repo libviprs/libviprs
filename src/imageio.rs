@@ -1108,6 +1108,13 @@ impl Raster {
         xml.push_str(GTYPE_STRING);
         xml.push_str("\" name=\"Hist\"></field>\n  </header>\n  <meta>\n");
         for (name, value) in self.fields.known() {
+            // The orientation tag is written from the header below. An
+            // attached field of that name can only come from a hand-made
+            // trailer, is shadowed by the header everywhere it is read, and
+            // would put two `orientation` elements in one `<meta>` block.
+            if name == "orientation" {
+                continue;
+            }
             let (gtype, text) = xml_field_of(value);
             push_xml_field(&mut xml, gtype, name, &text, XmlText::Escape);
         }
@@ -1722,14 +1729,19 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     Ok(raster)
 }
 
-/// Whether `trailer` claims to be a libviprs JSON trailer: its first
-/// non-whitespace byte is `{`.
+/// Whether `trailer` claims to be the legacy libviprs JSON trailer: its
+/// first non-whitespace byte is `{`.
 ///
-/// This is what separates a trailer someone else wrote from one of ours
-/// that is broken. libvips puts XML in the same slot and other writers may
-/// put anything there, so silence is the right answer for those; it is not
-/// the right answer for a libviprs trailer whose metadata is genuinely
-/// unrecoverable (issue #565).
+/// This is what picks the reader, and it is also what lets a broken JSON
+/// trailer be reported where a broken XML one cannot be. Only libviprs ever
+/// wrote JSON into that slot, so a `{` that will not parse is corruption
+/// with a known author (issue #565). The XML slot is shared with libvips and
+/// with anything else that writes a `.v`, so silence is the honest answer
+/// there.
+///
+/// It is also the reason libviprs 0.4.0 cannot read the fields out of a `.v`
+/// written now: no byte sequence starts with `{` and is the XML libvips
+/// requires. See the [module docs](crate::imageio).
 fn is_json_trailer(trailer: &[u8]) -> bool {
     trailer
         .iter()
@@ -1737,7 +1749,7 @@ fn is_json_trailer(trailer: &[u8]) -> bool {
         .is_some_and(|&b| b == b'{')
 }
 
-/// Apply a libviprs JSON trailer to `raster`, one entry at a time.
+/// Apply a legacy libviprs JSON trailer to `raster`, one entry at a time.
 ///
 /// Total on purpose. Every part of the trailer is optional and every entry
 /// is read on its own, so a `.v` written by a newer libviprs costs this
