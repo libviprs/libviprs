@@ -51,6 +51,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coefficients instead, or use `Precision::Float`, which has no `int` in the
   path and divides exactly.
 
+- `Raster::compass` refuses a `times` outside `1..=1000` where it used to
+  accept anything above zero (issue #547, found in review). That is the range
+  libvips declares on the property,
+  `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` at
+  `convolution/compass.c:162-167`, and GObject refuses both ends before the
+  operation is built, so neither reaches a convolution there either. Measured
+  on 8.18.4 with a 3x3 ones mask over a 4x4 black image,
+  `vips compass a.v o.v m.mat --times 1` and `--times 1000` run, while
+  `--times 0`, `--times 1001` and `--times 100000` each draw
+  `value "N" of type 'gint' is invalid or out of range for property 'times'
+  of type 'gint'` out of GObject. The CLI carries on at the property's
+  default of 2 rather than exiting, so the out-of-range number never reaches
+  a convolution in vips at all.
+
+  Checking the low end only left the high end wide open, and `times` is a
+  `u32` on this surface. `u32::MAX` reserved a result vector of 4.29 billion
+  rasters, on the order of 400 GB of address space, and then started that many
+  whole-image convolutions: no error, no ceiling, and nothing back inside half
+  a minute. The refusal is the typed
+  `ConvolutionError::TimesOutOfRange { times, min, max }`, which replaces
+  `ConvolutionError::ZeroTimes` and covers both ends of the range at once.
+  `ZeroTimes` has never been in a release, and the enum is
+  `#[non_exhaustive]`.
+
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
   be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
@@ -782,10 +806,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConvolutionError::Raster(RasterError::AllocationFailed { .. })`, and so do
   the other image-sized intermediates in the same functions: the combine
   buffers in `compass` and the output planes in `spcor` and `fastcor`, whose
-  `# Errors` sections already promised the variant, and the polar buffers in
-  `canny`. `try_conv`, `try_convsep`, `try_compass`, `try_gaussblur`,
-  `try_spcor`, `try_fastcor`, `try_sobel`, `try_scharr` and `try_prewitt` are
-  abort-free end to end as a result, and `try_canny` is on its uchar arm.
+  `# Errors` sections already promised the variant, the polar buffers in
+  `canny`, and the whole-image copy `gaussblur` hands back for a `sigma` under
+  0.2. That last one was a bare `self.clone()`, an image-sized allocation on
+  the one branch of the operation that touches no other allocator, so it was
+  the whole of what kept `try_gaussblur` abortable, and `canny` inherited it
+  because `canny_gradient` blurs through `try_gaussblur` before it does
+  anything else. It goes through the new crate-internal `Raster::try_clone`,
+  which reserves with `try_reserve_exact` and carries the interpretation, the
+  resolution and the attached fields exactly as `Clone` does.
+
+  `try_conv`, `try_convsep`, `try_compass`, `try_gaussblur`, `try_spcor`,
+  `try_fastcor`, `try_sobel`, `try_scharr` and `try_prewitt` are abort-free end
+  to end as a result, and `try_canny` is on its uchar arm.
+
+  Two things are deliberately not on that list, so the claim is not read wider
+  than it goes. `try_canny`'s float arm and `try_sharpen` both widen through
+  `Raster::f32_samples`, which still collects infallibly, and `try_sharpen`
+  makes the LabS round trip through `colour.rs` on top of that, where every
+  intermediate is a plain `vec![]`. Neither is one allocation away from the
+  list, and pretending otherwise would be the same failure as a `try_` API
+  that aborts, so both stay off it until the widening itself goes.
+  `try_sharpen`'s `# Errors` now says so in as many words, so the exclusion
+  is where a caller reading the API docs will find it.
 
   It matters more than it reads: measured on a 4000x4000 `Rgb8` at integer
   precision, the widened buffer is 384 MB of a 486 MB peak for 48 MB of input,

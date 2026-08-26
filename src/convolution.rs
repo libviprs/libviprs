@@ -173,12 +173,17 @@
 //! # Divergence from stock libvips
 //!
 //! Integer-precision convolution is where this module and a stock libvips
-//! knowingly disagree. Two gaps are open, neither is fixed here, and both
-//! reach every operation that runs an integer convolution:
+//! knowingly disagree. Two gaps are open and neither is closable here.
+//!
+//! The first reaches every operation that runs an integer convolution:
 //! [`Raster::conv`] and [`Raster::convsep`] at [`Precision::Integer`],
 //! [`Raster::compass`], [`Raster::gaussblur`], [`Raster::sharpen`],
 //! [`Raster::canny`], and the uchar arm of [`Raster::sobel`],
-//! [`Raster::scharr`] and [`Raster::prewitt`].
+//! [`Raster::scharr`] and [`Raster::prewitt`]. The second reaches only
+//! the three that convolve with a mask the caller handed in,
+//! [`Raster::conv`], [`Raster::convsep`] and [`Raster::compass`], because
+//! it is about a scale libvips cannot hold and every mask this module
+//! builds for itself carries an integer one.
 //!
 //! * **The two integer-convolution kernels, issue #558.** libviprs ports
 //!   `vips_convi_gen`, the portable C loop, which divides with C's `/`
@@ -247,10 +252,21 @@
 //!   integer-conv record on both libvips paths with a `paths_agree` flag
 //!   and asserts it.
 //!
-//! * **The intized scale, issue #547.** `vips_convi_gen` reads the scale
-//!   off the *original* mask where `vips__image_intize` computes a nudged
-//!   one; libviprs divides by the nudged scale. That also moves real
-//!   output bytes, and the `intize` helper documents the detail.
+//! * **A mask scale that rounds to zero, issue #547.**
+//!   `vips_convi_gen` holds the divisor in an `int`
+//!   (`convolution/convi.c:757-760`), so any `|scale| < 0.5` leaves it at
+//!   `0` and C divides by it. Measured on 8.18.4 at scale 0.4, the two
+//!   integer arms answer `0` (aarch64 `sdiv` returns zero rather than
+//!   trapping, which is not a defined result, and x86 would trap) and the
+//!   float-input arm prints `inf`. libviprs nudges a zero divisor to `1`
+//!   instead, the guard `vips__image_intize` writes for its own copy at
+//!   `convi.c:895-897` and the only total answer on offer, so the sums
+//!   are written back undivided. [`Precision::Integer`] carries the
+//!   contract and what to reach for instead. What #547 reported, a
+//!   division by the brightness-corrected scale `vips__image_intize`
+//!   derives instead of by the one `vips_convi_gen` reads off the mask,
+//!   is fixed and is not a divergence any more; the `intize` helper
+//!   documents the divisor that replaced it.
 
 use crate::colour::ColourError;
 use crate::conversion::{Angle45, ConversionError, Interpretation, cast_float_sample};
@@ -269,13 +285,32 @@ const SHARPEN_X1: f64 = 2.0;
 const SHARPEN_Y2: f64 = 10.0;
 const SHARPEN_Y3: f64 = 20.0;
 
+/// The range [`Raster::compass`] accepts for `times`, the bound libvips
+/// declares on the property in `convolution/compass.c`:
+/// `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)`. GObject refuses
+/// anything outside it before the operation is built, so it never reaches
+/// a convolution there either. Measured on 8.18.4 with a 3x3 ones mask
+/// over a 4x4 black image: `--times 1` and `--times 1000` run, while
+/// `--times 0`, `--times 1001` and `--times 100000` each draw
+/// `value "N" of type 'gint' is invalid or out of range for property
+/// 'times' of type 'gint'` out of GObject and then run at the property's
+/// default of 2, so the number asked for never reaches a convolution.
+///
+/// libviprs used to check the low end only, so `times` was effectively
+/// unbounded: `u32::MAX` reserved a `Vec` of 4.29 billion rasters, some
+/// 400 GB of address space, and then started that many convolutions.
+const COMPASS_TIMES_MIN: u32 = 1;
+/// Upper end of the [`COMPASS_TIMES_MIN`] range.
+const COMPASS_TIMES_MAX: u32 = 1000;
+
 /// Calculation accuracy for the convolution operations (libvips
 /// `VipsPrecision`; the `APPROXIMATE` variant is not ported).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Precision {
     /// Integer arithmetic: the mask is converted to integers with
-    /// `rint()` and the result stays in the input format.
+    /// `rint()`, each sum is divided by `rint()` of the mask's own scale,
+    /// and the result stays in the input format.
     ///
     /// # Parity contract (issue #558)
     ///
@@ -343,6 +378,54 @@ pub enum Precision {
     /// and every [`Precision::Float`] path are unaffected: `sharpen`
     /// convolves the `L` of `LabS`, which is 16-bit, and the vector path
     /// is gated on `BandFmt == VIPS_FORMAT_UCHAR` (`convi.c:1151`).
+    ///
+    /// # A mask scale that rounds to zero (issue #547)
+    ///
+    /// This is the second divergence, it is unrelated to the vector path,
+    /// and it is the only one libviprs chose rather than inherited.
+    ///
+    /// `vips_convi_gen` takes its divisor off the mask the caller handed
+    /// in and holds it in an `int` (`convolution/convi.c:757-760`):
+    ///
+    /// ```c
+    /// VipsImage *M = convolution->M;
+    /// int scale = rint(vips_image_get_scale(M));
+    /// int rounding = scale / 2;
+    /// ```
+    ///
+    /// libviprs divides by that same quantity, which is what #547 fixed.
+    /// So any `|scale| < 0.5` leaves libvips holding `0` and dividing by
+    /// it, and there is no libvips answer left to reproduce. Measured on
+    /// 8.18.4 with `Kernel { data: [[1.0, 1.0]], scale: 0.4 }` over a flat
+    /// field: the uchar and ushort arms print `0`, because aarch64 `sdiv`
+    /// answers zero on a zero divisor rather than trapping, which is not a
+    /// defined result and would trap on x86; the float-input arm of the
+    /// same generator prints `inf`.
+    ///
+    /// **libviprs nudges a divisor of zero to `1`.** That is the guard
+    /// `vips__image_intize` writes for its own copy at
+    /// `convi.c:895-897`, and it is the only total answer on offer: the
+    /// window sums are written back undivided, clipped to the input
+    /// format as usual. Nothing else about the mask changes, so the
+    /// coefficients are still `rint()`-ed and the offset still applies.
+    ///
+    /// It costs nothing on any mask this module builds at this precision.
+    /// [`Kernel::gaussmat`] rounds every coefficient to `rint(20 * v)` and
+    /// keeps a centre tap of 20, [`Kernel::logmat`] sums integers so its
+    /// scale is either an integer of magnitude 1 or more or exactly 0
+    /// (already [`ConvolutionError::ZeroScale`]), and the fixed masks
+    /// behind [`Raster::sobel`], [`Raster::scharr`], [`Raster::prewitt`]
+    /// and [`Raster::canny`] are integers over an integer scale. The nudge
+    /// therefore needs a scale that did not come from a generator at this
+    /// precision: one a caller wrote into [`Kernel`] by hand, or a
+    /// [`Kernel::logmat_with_precision`] float mask handed to
+    /// [`Raster::conv`], [`Raster::convsep`] or [`Raster::compass`] at
+    /// [`Precision::Integer`].
+    ///
+    /// A caller who wants a sub-unit scale has two ways to keep libvips
+    /// parity: scale the coefficients up instead and leave the divisor at
+    /// or above 1, or use [`Precision::Float`], which has no `int`
+    /// anywhere in the path and divides by the scale exactly as written.
     Integer,
     /// Floating-point arithmetic: the result is a 32-bit float image.
     ///
@@ -416,10 +499,22 @@ pub enum ConvolutionError {
     /// odd-sided square kernels only.
     #[error("compass needs an odd-sided square kernel, got {width}x{height}")]
     NotOddSquareKernel { width: u32, height: u32 },
-    /// `compass` must convolve at least once (libvips bounds `times` at
-    /// `1..1000`).
-    #[error("compass needs times >= 1")]
-    ZeroTimes,
+    /// A [`Raster::compass`] `times` outside the range libvips declares
+    /// on the property, `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000,
+    /// 2)` in `convolution/compass.c`. GObject refuses both ends before
+    /// the operation is built, so neither reaches a convolution in vips
+    /// and neither does here. `times` used to be checked against zero
+    /// only, which left the top open: `u32::MAX` reserved a result vector
+    /// of 4.29 billion rasters and then ran that many convolutions.
+    #[error("compass times must be between {min} and {max}, got {times}")]
+    TimesOutOfRange {
+        /// The `times` that was asked for.
+        times: u32,
+        /// The smallest `times` libvips accepts, `1`.
+        min: u32,
+        /// The largest `times` libvips accepts, `1000`.
+        max: u32,
+    },
     /// The correlation template must have the same band count as the
     /// image.
     #[error("correlation band count mismatch: image has {image} bands, template {template}")]
@@ -925,13 +1020,12 @@ struct IntKernel {
 /// The offset needs no such care. `rint()` is idempotent, so rounding it
 /// here rather than off the original mask cannot move it.
 ///
-/// A scale that rounds to zero is the one place libviprs cannot follow
-/// libvips, because there is nothing there to follow: `int scale` is `0`
-/// and C divides by it. Measured on 8.18.4 at `scale 0.4`, aarch64 `sdiv`
-/// quietly answers `0` on the two integer arms and the float-input arm
-/// prints `inf`; x86 would trap instead. The scale is nudged to `1` here,
-/// which is the guard `vips__image_intize` writes for its own copy at
-/// `convi.c:895-897`, and the only total answer available.
+/// A scale that rounds to zero is nudged to `1` here, the guard
+/// `vips__image_intize` writes for its own copy at `convi.c:895-897`. It
+/// is the one place libviprs cannot follow libvips, because there is
+/// nothing there to follow: `int scale` holds `0` and C divides by it.
+/// The measurements and the contract are on [`Precision::Integer`], where
+/// a caller can find them.
 ///
 /// The offset clamp keeps the rounded offset inside the `int` that
 /// `vips_convi_gen` reads it into, which also keeps the `i64` add on the
@@ -1578,8 +1672,9 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConvolutionError::NotOddSquareKernel`] unless the kernel is an
-    /// odd-sided square, [`ConvolutionError::ZeroTimes`] for `times == 0`,
-    /// plus the [`Raster::try_conv`] errors.
+    /// odd-sided square, [`ConvolutionError::TimesOutOfRange`] for a
+    /// `times` outside the `1..=1000` bound libvips declares on its
+    /// property, plus the [`Raster::try_conv`] errors.
     pub fn try_compass(
         &self,
         kernel: &Kernel,
@@ -1595,8 +1690,17 @@ impl Raster {
                 height: dense.h as u32,
             });
         }
-        if times == 0 {
-            return Err(ConvolutionError::ZeroTimes);
+        // vips bounds `times` at the GObject property, so an out-of-range
+        // value never builds an operation there; see `COMPASS_TIMES_MIN`.
+        // The upper end matters as much as the lower: the loop below
+        // reserves one result raster per round and convolves the whole
+        // image into each.
+        if !(COMPASS_TIMES_MIN..=COMPASS_TIMES_MAX).contains(&times) {
+            return Err(ConvolutionError::TimesOutOfRange {
+                times,
+                min: COMPASS_TIMES_MIN,
+                max: COMPASS_TIMES_MAX,
+            });
         }
 
         // vips_compass: convolve, rotate the mask by `angle`, repeat.
@@ -1656,6 +1760,14 @@ impl Raster {
     /// `times` times, rotating `kernel` by `angle` between rounds, and
     /// combine the absolute results with `combine`.
     ///
+    /// `times` must be in `1..=1000`, the range libvips declares on the
+    /// property (`VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` in
+    /// `convolution/compass.c`); anything outside it is
+    /// [`ConvolutionError::TimesOutOfRange`]. The upper end is not
+    /// decoration: every round convolves the whole image again and keeps
+    /// the result, so an unbounded `times` is an unbounded amount of work
+    /// and an unbounded amount of memory.
+    ///
     /// # Panics
     ///
     /// Panics on any [`ConvolutionError`]; see [`Raster::try_compass`].
@@ -1678,7 +1790,10 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// The [`Kernel::try_gaussmat`] and [`Raster::try_convsep`] errors.
+    /// The [`Kernel::try_gaussmat`] and [`Raster::try_convsep`] errors,
+    /// plus [`ConvolutionError::Raster`] carrying
+    /// [`RasterError::AllocationFailed`] if the `sigma < 0.2` copy below
+    /// cannot be allocated.
     pub fn try_gaussblur(
         &self,
         sigma: f64,
@@ -1687,8 +1802,14 @@ impl Raster {
     ) -> Result<Raster, ConvolutionError> {
         // vips_gaussblur: gaussmat would make a 1x1 mask for anything
         // smaller than this, so just copy.
+        //
+        // Through `try_clone`, not `clone`: a plain clone is an
+        // image-sized allocation that aborts the process on failure, and
+        // this is the one path in the operation that does not otherwise
+        // touch a fallible allocator, so it was the whole of what stopped
+        // `try_gaussblur` being abort-free (issue #575).
         if sigma < 0.2 {
-            return Ok(self.clone());
+            return Ok(self.try_clone()?);
         }
         let mask = Kernel::try_gaussmat(sigma, min_ampl, true, precision)?;
         self.try_convsep(&mask, precision)
@@ -1714,6 +1835,15 @@ impl Raster {
     /// [`ConvolutionError::Colour`] when the image has no LabS colourspace
     /// route (for example a 2-band multiband image), plus the
     /// [`Kernel::try_gaussmat`] errors.
+    ///
+    /// Unlike the rest of the module's fallible entry points, this one is
+    /// **not** abort-free: it widens through [`Raster::f32_samples`], which
+    /// still collects infallibly, and it makes the LabS round trip through
+    /// `colour.rs` on top of that, where every intermediate is a plain
+    /// `vec![]`. An allocation failure inside either reaches
+    /// `handle_alloc_error` and ends the process instead of arriving here as
+    /// [`ConvolutionError::Raster`]. Removing that widening is #575's third
+    /// item, which is still open.
     pub fn try_sharpen(&self, sigma: f64, m1: f64, m2: f64) -> Result<Raster, ConvolutionError> {
         // vips_sharpen: remember the interpretation, work in LabS.
         let old_interpretation = self.interpretation();
@@ -3719,6 +3849,36 @@ mod tests {
         assert_eq!(copy.format(), im.format());
     }
 
+    /// #575: the `sigma < 0.2` copy goes through
+    /// [`Raster::try_clone`], so it is fallible like the rest of the
+    /// operation, and it still carries the metadata a plain `.clone()`
+    /// carried.
+    ///
+    /// The copy is an image-sized allocation and it used to be a bare
+    /// `self.clone()`, which reaches `handle_alloc_error` and ends the
+    /// process rather than returning. It was the only such allocation left
+    /// on `try_gaussblur`, so it was the whole of what kept the operation
+    /// off the abort-free list. Reconstructing through `Raster::new`
+    /// instead would have compiled and silently dropped the header and the
+    /// attached fields, which is what this pins.
+    #[test]
+    fn gaussblur_short_circuit_copy_keeps_metadata() {
+        let mut im = noise_rgb(6, 4, 21);
+        im.set_field("hello", MetadataValue::Int(7));
+        let im = im.copy().xres(42.0).build();
+
+        let copy = im.try_gaussblur(0.1, 0.2, Precision::Integer).unwrap();
+        assert_eq!(copy.data(), im.data());
+        assert_eq!(copy.format(), im.format());
+        assert!(
+            (copy.xres() - 42.0).abs() < 1e-9,
+            "xres must survive the short-circuit copy, got {}",
+            copy.xres()
+        );
+        assert_eq!(copy.interpretation(), im.interpretation());
+        assert_eq!(copy.get_field("hello"), Some(MetadataValue::Int(7)));
+    }
+
     /// fastcor hand values: a 1x1 template subtracts and squares every
     /// pixel; unsigned inputs use the integer path.
     #[test]
@@ -3841,7 +4001,8 @@ mod tests {
     }
 
     /// Kernel shape errors are typed: empty, ragged, non-separable for
-    /// convsep, non-odd-square and zero times for compass.
+    /// convsep, and non-odd-square for compass. The `times` bound has its
+    /// own test below.
     #[test]
     fn kernel_shape_errors() {
         let im = noise_gray(6, 6, 51);
@@ -3880,14 +4041,53 @@ mod tests {
             im.try_compass(&square, 1, Angle45::D45, Combine::Max, Precision::Float),
             Err(ConvolutionError::NotOddSquareKernel { .. })
         ));
+    }
+
+    /// The libvips bound on `compass`'s `times`, the
+    /// `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` range
+    /// `convolution/compass.c:162-167` declares at v8.18.4. GObject
+    /// refuses both ends before the operation is built, measured on a 3x3
+    /// ones mask over a 4x4 black image: `vips compass a.v o.v m.mat
+    /// --times 1` and `--times 1000` run, while `--times 0`,
+    /// `--times 1001` and `--times 100000` each draw
+    /// `value "N" of type 'gint' is invalid or out of range for property
+    /// 'times' of type 'gint'` out of GObject and fall back to the
+    /// property's default of 2, so the number asked for never reaches a
+    /// convolution.
+    ///
+    /// libviprs used to check the low end only, so the high end was
+    /// unbounded: `u32::MAX` reserved a result vector of 4.29 billion
+    /// rasters, roughly 400 GB of address space, and then started that
+    /// many whole-image convolutions.
+    #[test]
+    fn compass_times_outside_the_vips_property_range_is_rejected() {
+        let im = noise_gray(4, 4, 51);
         let odd = Kernel {
             data: vec![vec![1.0]],
             scale: 1.0,
         };
-        assert!(matches!(
-            im.try_compass(&odd, 0, Angle45::D45, Combine::Max, Precision::Float),
-            Err(ConvolutionError::ZeroTimes)
-        ));
+        for times in [0u32, 1001, 100_000, u32::MAX] {
+            assert!(
+                matches!(
+                    im.try_compass(&odd, times, Angle45::D45, Combine::Max, Precision::Integer),
+                    Err(ConvolutionError::TimesOutOfRange {
+                        times: got,
+                        min: 1,
+                        max: 1000
+                    }) if got == times
+                ),
+                "times = {times} is outside 1..=1000 and must be refused"
+            );
+        }
+        // Both ends of the range are accepted. A 1x1 identity mask is its
+        // own rot45, so every round answers the input and the `Max`
+        // combine hands it straight back however many rounds run.
+        for times in [1u32, 1000] {
+            let out = im
+                .try_compass(&odd, times, Angle45::D45, Combine::Max, Precision::Integer)
+                .unwrap_or_else(|e| panic!("times = {times} is inside 1..=1000: {e}"));
+            assert_eq!(out.data(), im.data(), "times = {times} should be accepted");
+        }
     }
 
     /// gaussmat/logmat argument validation matches the libvips bounds.
