@@ -155,6 +155,15 @@ def pixels(path, w, h):
     return out
 
 
+def measured_size(summary):
+    """The width and height vips itself reports, pulled out of a vipsheader
+    summary line. Every getpoint sweep here is driven by THIS rather than by
+    a size worked out in Python, so no expectation in oracle.json was
+    computed by hand."""
+    m = re.search(r": (\d+)x(\d+) ", summary)
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+
+
 def stat(path):
     """`vips avg`, which forces the whole `.img` through the pipeline. This
     is the call that fails when the header was fine and the pixels are not."""
@@ -345,21 +354,28 @@ records["datatype_to_carrier"] = {
 # 3. Rank, and how the higher axes are folded into the height.
 # ---------------------------------------------------------------------------
 rank = {}
-for r, dims, w, h in ((0, [0, 2, 2], None, None),
-                      (1, [1, 4], None, None),
-                      (2, [2, 3, 2], 3, 2),
-                      (3, [3, 3, 2, 2], 3, 4),
-                      (4, [4, 3, 2, 2, 2], 3, 8),
-                      (7, [7, 2, 2, 2, 1, 1, 1, 1], 2, 8),
-                      (8, [8, 2, 2, 1, 1, 1, 1, 1], None, None)):
+for r, dims in ((0, [0, 2, 2]),
+                (1, [1, 4]),
+                (2, [2, 3, 2]),
+                (3, [3, 3, 2, 2]),
+                (4, [4, 3, 2, 2, 2]),
+                (7, [7, 2, 2, 2, 1, 1, 1, 1]),
+                (8, [8, 2, 2, 1, 1, 1, 1, 1])):
     body = bytes((i * 7) % 256 for i in range(256))
+    dim = dims + [0] * (8 - len(dims))
     p = pair(f"rank{r}", dims, 2, 8, body)
-    entry = {"dim": dims + [0] * (8 - len(dims)),
-             "sniffed": header(p),
-             "direct": direct(p)}
-    if w:
-        entry["expected_width_is_dim1"] = w
-        entry["expected_height_is_product_of_dim2_up"] = h
+    entry = {"dim": dim, "sniffed": header(p), "direct": direct(p)}
+    if entry["sniffed"]["exit"] == 0:
+        w, h = measured_size(entry["sniffed"]["summary"])
+        entry["measured_width"] = w
+        entry["measured_height"] = h
+        # The C rule, restated in Python and CHECKED against the binary
+        # rather than written into the record as an expectation.
+        product = dim[2]
+        for i in range(3, dim[0] + 1):
+            product *= dim[i]
+        entry["width_equals_dim1"] = w == dim[1]
+        entry["height_equals_product_of_dim2_up"] = h == product
         entry["pixels"] = pixels(p, w, h)
     rank[str(r)] = entry
 records["rank_and_flattening"] = {
@@ -553,7 +569,9 @@ records["metadata"] = {
     "what": "attach_meta (analyze2vips.c:437-482) sets the whole 348-byte "
             "header as a blob named `dsr`, then walks the same 70-entry "
             "table again setting one field per struct member, named "
-            "`dsr-<section>.<member>`. Two traps in getstr "
+            "`dsr-<section>.<member>`; dsr_field_count below is how many "
+            "that turned out to be, counted off vipsheader rather than "
+            "off the C table. Two traps in getstr "
             "(analyze2vips.c:237-256): g_strlcpy is given the FIELD length "
             "as its buffer size, so it copies at most len-1 characters and "
             "an 80-byte descrip loses its last byte; and every byte failing "
@@ -568,8 +586,9 @@ records["metadata"] = {
     "header": header(meta, all_fields=True),
     "blob_field": "dsr",
     "blob_bytes": 348,
-    "field_count_in_c_table": 70,
 }
+records["metadata"]["dsr_field_count"] = sum(
+    1 for k in records["metadata"]["header"] if k.startswith("dsr-"))
 
 # ---------------------------------------------------------------------------
 # 8. A colour image, so the DT_RGB band layout is pinned rather than guessed.
@@ -592,6 +611,7 @@ records["dt_rgb_is_interleaved"] = {
 # ---------------------------------------------------------------------------
 # 9. The three-way version disagreement, recorded from the binary.
 # ---------------------------------------------------------------------------
+version = run([VIPS, "--version"]).stdout.strip()
 config = run([VIPS, "--vips-config"])
 config_line = [ln.strip() for ln in config.stdout.replace(",", "\n").splitlines()
                if "nalyze" in ln]
@@ -610,7 +630,8 @@ records["analyze6_vs_analyze7"] = {
             "try to act on it.",
     "vips_config_says": config_line,
     "vips_config_source": "meson.build:704, `'enable Analyze7 load'`",
-    "still_true_in_8_18_6": True,
+    "both_halves_re_read_on": version,
+    "discrepancy_survived_the_8_18_4_to_8_18_6_bump": True,
     "operator_says": op_line,
     "operator_source": "analyzeload.c:120, "
                        "`object_class->description = _(\"load an Analyze6 "
@@ -648,7 +669,6 @@ notes.append(
 )
 
 # ---------------------------------------------------------------------------
-version = run([VIPS, "--version"]).stdout.strip()
 fixture_bytes = sum(os.path.getsize(os.path.join(FIX, f))
                     for f in os.listdir(FIX))
 oracle = {
@@ -668,6 +688,35 @@ oracle = {
                        "vips_version above and is a DIFFERENT ARTEFACT "
                        "from that tree, which is not a formality: see the "
                        "oracle_binary_moved note.",
+        "oracle_binary": {
+            "version": "measured by `vips --version` at capture time and "
+                       "recorded in vips_version above; do not assume the "
+                       "8.18.4 the epic runbook names",
+            "config_line": "`vips --vips-config` prints booleans only and "
+                           "names no library versions, so there is no "
+                           "matio or Analyze version to read off it",
+            "upgraded_mid_capture": "Homebrew replaced libvips 8.18.4 with "
+                                    "8.18.6 on this machine at 08:10:03 on "
+                                    "2026-08-26 and deleted the old keg, so "
+                                    "only 8.18.6 remains and 8.18.4 cannot "
+                                    "be re-measured here",
+            "which_side_of_the_upgrade": "EVERY number in this file came "
+                                         "from 8.18.6. capture.py was first "
+                                         "run at 08:12 and has been re-run "
+                                         "since; the only 8.18.4 readings "
+                                         "taken in this lane were "
+                                         "exploratory probes between 08:06 "
+                                         "and 08:09 that reached no record "
+                                         "except the explicitly-labelled "
+                                         "before/after in foreign-mat's "
+                                         "sniff_predicate",
+            "not_reconciled": "the pre-existing capture areas "
+                              "(convolution, foreign-radiance, "
+                              "foreign-webp) and the in-flight FITS, EXR "
+                              "and JXL ones record 8.18.4. That difference "
+                              "is tracked by the epic orchestrator and is "
+                              "not resolved here.",
+        },
         "fixture_count": len(os.listdir(FIX)),
         "fixture_bytes": fixture_bytes,
     },

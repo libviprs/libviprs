@@ -149,7 +149,6 @@ set +e
 /opt/homebrew/bin/vips getpoint fixtures/rank7.hdr 1 2
 /opt/homebrew/bin/vips getpoint fixtures/rank7.hdr 0 3
 /opt/homebrew/bin/vips getpoint fixtures/rank7.hdr 1 3
-/opt/homebrew/bin/vips getpoint fixtures/rank7.hdr 0 4
 /opt/homebrew/bin/vipsheader fixtures/rank8.hdr
 /opt/homebrew/bin/vips analyzeload fixtures/rank8.hdr outputs/direct.v
 /opt/homebrew/bin/vipsheader fixtures/be_short.hdr
@@ -226,6 +225,6 @@ set +e
 /opt/homebrew/bin/vips getpoint fixtures/rgb_2d.hdr 0 1
 /opt/homebrew/bin/vips getpoint fixtures/rgb_2d.hdr 1 1
 /opt/homebrew/bin/vips getpoint fixtures/rgb_2d.hdr 2 1
+/opt/homebrew/bin/vips --version
 /opt/homebrew/bin/vips --vips-config
 /opt/homebrew/bin/vips -l
-/opt/homebrew/bin/vips --version

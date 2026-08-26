@@ -10,6 +10,13 @@
     "save_operation": null,
     "captured_by": "oracle-captures/foreign-analyze/capture.py",
     "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted here. The binary every measurement came out of is the installed release named in vips_version above and is a DIFFERENT ARTEFACT from that tree, which is not a formality: see the oracle_binary_moved note.",
+    "oracle_binary": {
+      "version": "measured by `vips --version` at capture time and recorded in vips_version above; do not assume the 8.18.4 the epic runbook names",
+      "config_line": "`vips --vips-config` prints booleans only and names no library versions, so there is no matio or Analyze version to read off it",
+      "upgraded_mid_capture": "Homebrew replaced libvips 8.18.4 with 8.18.6 on this machine at 08:10:03 on 2026-08-26 and deleted the old keg, so only 8.18.6 remains and 8.18.4 cannot be re-measured here",
+      "which_side_of_the_upgrade": "EVERY number in this file came from 8.18.6. capture.py was first run at 08:12 and has been re-run since; the only 8.18.4 readings taken in this lane were exploratory probes between 08:06 and 08:09 that reached no record except the explicitly-labelled before/after in foreign-mat's sniff_predicate",
+      "not_reconciled": "the pre-existing capture areas (convolution, foreign-radiance, foreign-webp) and the in-flight FITS, EXR and JXL ones record 8.18.4. That difference is tracked by the epic orchestrator and is not resolved here."
+    },
     "fixture_count": 82,
     "fixture_bytes": 16162
   },
@@ -588,8 +595,10 @@
             "stderr": "",
             "header": "outputs/direct.v: 3x2 uchar, 1 band, b-w, analyzeload"
           },
-          "expected_width_is_dim1": 3,
-          "expected_height_is_product_of_dim2_up": 2,
+          "measured_width": 3,
+          "measured_height": 2,
+          "width_equals_dim1": true,
+          "height_equals_product_of_dim2_up": true,
           "pixels": [
             [
               0.0
@@ -631,8 +640,10 @@
             "stderr": "",
             "header": "outputs/direct.v: 3x4 uchar, 1 band, b-w, analyzeload"
           },
-          "expected_width_is_dim1": 3,
-          "expected_height_is_product_of_dim2_up": 4,
+          "measured_width": 3,
+          "measured_height": 4,
+          "width_equals_dim1": true,
+          "height_equals_product_of_dim2_up": true,
           "pixels": [
             [
               0.0
@@ -692,8 +703,10 @@
             "stderr": "",
             "header": "outputs/direct.v: 3x8 uchar, 1 band, b-w, analyzeload"
           },
-          "expected_width_is_dim1": 3,
-          "expected_height_is_product_of_dim2_up": 8,
+          "measured_width": 3,
+          "measured_height": 8,
+          "width_equals_dim1": true,
+          "height_equals_product_of_dim2_up": true,
           "pixels": [
             [
               0.0
@@ -789,12 +802,36 @@
             "stderr": "",
             "header": "outputs/direct.v: 2x4 uchar, 1 band, b-w, analyzeload"
           },
-          "expected_width_is_dim1": 2,
-          "expected_height_is_product_of_dim2_up": 8,
-          "pixels": {
-            "exit": 1,
-            "stderr": "extract_area: bad extract area"
-          }
+          "measured_width": 2,
+          "measured_height": 4,
+          "width_equals_dim1": true,
+          "height_equals_product_of_dim2_up": true,
+          "pixels": [
+            [
+              0.0
+            ],
+            [
+              7.0
+            ],
+            [
+              14.0
+            ],
+            [
+              21.0
+            ],
+            [
+              28.0
+            ],
+            [
+              35.0
+            ],
+            [
+              42.0
+            ],
+            [
+              49.0
+            ]
+          ]
         },
         "8": {
           "dim": [
@@ -1141,7 +1178,7 @@
       }
     },
     "metadata": {
-      "what": "attach_meta (analyze2vips.c:437-482) sets the whole 348-byte header as a blob named `dsr`, then walks the same 70-entry table again setting one field per struct member, named `dsr-<section>.<member>`. Two traps in getstr (analyze2vips.c:237-256): g_strlcpy is given the FIELD length as its buffer size, so it copies at most len-1 characters and an 80-byte descrip loses its last byte; and every byte failing `isascii(c) || c >= 32` is rewritten to `@`, which is lossy and not reversible. Note what that test does NOT catch: 0x7f DEL is ascii and is >= 32, so it passes through untouched, while the two bytes of a UTF-8 `e-acute` both become `@`.",
+      "what": "attach_meta (analyze2vips.c:437-482) sets the whole 348-byte header as a blob named `dsr`, then walks the same 70-entry table again setting one field per struct member, named `dsr-<section>.<member>`; dsr_field_count below is how many that turned out to be, counted off vipsheader rather than off the C table. Two traps in getstr (analyze2vips.c:237-256): g_strlcpy is given the FIELD length as its buffer size, so it copies at most len-1 characters and an 80-byte descrip loses its last byte; and every byte failing `isascii(c) || c >= 32` is rewritten to `@`, which is lossy and not reversible. Note what that test does NOT catch: 0x7f DEL is ascii and is >= 32, so it passes through untouched, while the two bytes of a UTF-8 `e-acute` both become `@`.",
       "fixture": "fixtures/meta_strings.hdr",
       "descrip_written": "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZAB",
       "descrip_written_len": 80,
@@ -1238,7 +1275,7 @@
       },
       "blob_field": "dsr",
       "blob_bytes": 348,
-      "field_count_in_c_table": 70
+      "dsr_field_count": 63
     },
     "dt_rgb_is_interleaved": {
       "what": "DT_RGB gives bands = 3 and format uchar, and the pixels are read straight through vips_image_new_from_file_raw with a line size of bands * sizeof(fmt), so the .img is INTERLEAVED RGB, not three planes. The Analyze spec allows either and vips only reads the interleaved one.",
@@ -1306,7 +1343,8 @@
         "enable Analyze7 load: true"
       ],
       "vips_config_source": "meson.build:704, `'enable Analyze7 load'`",
-      "still_true_in_8_18_6": true,
+      "both_halves_re_read_on": "vips-8.18.6",
+      "discrepancy_survived_the_8_18_4_to_8_18_6_bump": true,
       "operator_says": [
         "VipsForeignLoadAnalyze (analyzeload), load an Analyze6 image (.img, .hdr), priority=-50, untrusted, is_a, get_flags, get_flags_filename, header, load"
       ],

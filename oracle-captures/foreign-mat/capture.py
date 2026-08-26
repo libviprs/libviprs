@@ -264,8 +264,13 @@ records["column_major_is_transposed"] = {
     "file_order_column_major": list(BASE),
     "header": header(base, all_fields=True),
     "pixels": pixels(base, 3, 2),
-    "expected_raster_order": [10, 20, 30, 40, 50, 60],
 }
+# The transpose rule, applied in Python to the input and CHECKED against the
+# binary, rather than a raster order typed into the record by hand.
+_rows, _cols = 2, 3
+_measured = [int(px[0]) for px in records["column_major_is_transposed"]["pixels"]]
+records["column_major_is_transposed"]["matches_transpose_of_input"] = (
+    _measured == [BASE[c * _rows + r] for r in range(_rows) for c in range(_cols)])
 
 # ---------------------------------------------------------------------------
 # 2. Magic, and the gap between is_a and the loader.
@@ -378,8 +383,10 @@ for label, text in (("MATLAB 5.1", b"MATLAB 5.1 MAT-file"),
 
 records["magic_and_dispatch"] = {
     "what": "The sniff is what decides whether a file reaches matload at "
-            "all, and the SHIPPED 8.18.4 BINARY DOES NOT DO WHAT THE C "
-            "SOURCE SAYS. See the sniff_predicate record below for the "
+            "all, and THE SHIPPED BINARY DOES NOT DO WHAT THE C SOURCE "
+            "SAYS. Worse, it changed under this capture: 8.18.4 agreed with "
+            "the source and the 8.18.6 that replaced it does not. See the "
+            "sniff_predicate record below for the "
             "measured rule and the disassembly it came from. The loader "
             "underneath is matio's Mat_Open, which is more permissive than "
             "the sniff in one direction (it reads MAT-4) and less in "
@@ -996,6 +1003,42 @@ oracle = {
                               "Mat_VarReadDataAll. Every error message that "
                               "is not one of matlab.c's own three comes "
                               "from there.",
+        "oracle_binary": {
+            "version": "measured by `vips --version` at capture time and "
+                       "recorded in vips_version above; do not assume the "
+                       "8.18.4 the epic runbook names",
+            "config_line": "`vips --vips-config` prints booleans only and "
+                           "names no library versions, so there is no "
+                           "matio or Analyze version to read off it",
+            "upgraded_mid_capture": "Homebrew replaced libvips 8.18.4 with "
+                                    "8.18.6 on this machine at 08:10:03 on "
+                                    "2026-08-26 and deleted the old keg, so "
+                                    "only 8.18.6 remains and 8.18.4 cannot "
+                                    "be re-measured here",
+            "which_side_of_the_upgrade": "EVERY number in this file came "
+                                         "from 8.18.6. capture.py was first "
+                                         "run at 08:12 and has been re-run "
+                                         "since; the only 8.18.4 readings "
+                                         "taken in this lane were "
+                                         "exploratory probes between 08:06 "
+                                         "and 08:09 that reached no record "
+                                         "except the explicitly-labelled "
+                                         "before/after in foreign-mat's "
+                                         "sniff_predicate",
+            "not_reconciled": "the pre-existing capture areas "
+                              "(convolution, foreign-radiance, "
+                              "foreign-webp) and the in-flight FITS, EXR "
+                              "and JXL ones record 8.18.4. That difference "
+                              "is tracked by the epic orchestrator and is "
+                              "not resolved here.",
+            "matio": "libmatio 1.5.30_1, from "
+                     "`otool -L /opt/homebrew/lib/libvips.42.dylib` "
+                     "(libmatio.14.dylib) resolved through "
+                     "/opt/homebrew/opt/libmatio. Not named by "
+                     "--vips-config, which prints booleans only.",
+            "hdf5": "hdf5 2.2.0, which is what prints the HDF5-DIAG block "
+                    "when matio is handed a MAT-7.3 file",
+        },
         "fixture_count": len(os.listdir(FIX)),
         "fixture_bytes": fixture_bytes,
     },

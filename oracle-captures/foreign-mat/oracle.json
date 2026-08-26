@@ -14,6 +14,15 @@
     "captured_by": "oracle-captures/foreign-mat/capture.py",
     "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted here. The binary every measurement came out of is the installed release named in vips_version above and is a DIFFERENT ARTEFACT from that tree, which is not a formality: see the oracle_binary_moved note.",
     "underlying_library": "matio, via Mat_Open / Mat_VarReadNextInfo / Mat_VarReadDataAll. Every error message that is not one of matlab.c's own three comes from there.",
+    "oracle_binary": {
+      "version": "measured by `vips --version` at capture time and recorded in vips_version above; do not assume the 8.18.4 the epic runbook names",
+      "config_line": "`vips --vips-config` prints booleans only and names no library versions, so there is no matio or Analyze version to read off it",
+      "upgraded_mid_capture": "Homebrew replaced libvips 8.18.4 with 8.18.6 on this machine at 08:10:03 on 2026-08-26 and deleted the old keg, so only 8.18.6 remains and 8.18.4 cannot be re-measured here",
+      "which_side_of_the_upgrade": "EVERY number in this file came from 8.18.6. capture.py was first run at 08:12 and has been re-run since; the only 8.18.4 readings taken in this lane were exploratory probes between 08:06 and 08:09 that reached no record except the explicitly-labelled before/after in foreign-mat's sniff_predicate",
+      "not_reconciled": "the pre-existing capture areas (convolution, foreign-radiance, foreign-webp) and the in-flight FITS, EXR and JXL ones record 8.18.4. That difference is tracked by the epic orchestrator and is not resolved here.",
+      "matio": "libmatio 1.5.30_1, from `otool -L /opt/homebrew/lib/libvips.42.dylib` (libmatio.14.dylib) resolved through /opt/homebrew/opt/libmatio. Not named by --vips-config, which prints booleans only.",
+      "hdf5": "hdf5 2.2.0, which is what prints the HDF5-DIAG block when matio is handed a MAT-7.3 file"
+    },
     "fixture_count": 48,
     "fixture_bytes": 9695
   },
@@ -78,17 +87,10 @@
           60.0
         ]
       ],
-      "expected_raster_order": [
-        10,
-        20,
-        30,
-        40,
-        50,
-        60
-      ]
+      "matches_transpose_of_input": true
     },
     "magic_and_dispatch": {
-      "what": "The sniff is what decides whether a file reaches matload at all, and the SHIPPED 8.18.4 BINARY DOES NOT DO WHAT THE C SOURCE SAYS. See the sniff_predicate record below for the measured rule and the disassembly it came from. The loader underneath is matio's Mat_Open, which is more permissive than the sniff in one direction (it reads MAT-4) and less in another (it hands MAT-7.3 to libhdf5 and fails noisily), and the cases where the two disagree are the ones a port has to decide about deliberately.",
+      "what": "The sniff is what decides whether a file reaches matload at all, and THE SHIPPED BINARY DOES NOT DO WHAT THE C SOURCE SAYS. Worse, it changed under this capture: 8.18.4 agreed with the source and the 8.18.6 that replaced it does not. See the sniff_predicate record below for the measured rule and the disassembly it came from. The loader underneath is matio's Mat_Open, which is more permissive than the sniff in one direction (it reads MAT-4) and less in another (it hands MAT-7.3 to libhdf5 and fails noisily), and the cases where the two disagree are the ones a port has to decide about deliberately.",
       "registered_suffixes": [
         ".mat"
       ],
@@ -1012,17 +1014,17 @@
       "getpoint_0_0_three_separate_runs": [
         {
           "exit": 0,
-          "stdout": "2.1629298174625986e-314",
+          "stdout": "2.165226171344066e-314",
           "stderr": ""
         },
         {
           "exit": 0,
-          "stdout": "2.1641543967148052e-314",
+          "stdout": "2.3480802162731361e-313",
           "stderr": ""
         },
         {
           "exit": 0,
-          "stdout": "2.6450702569360323e-313",
+          "stdout": "2.603625836120896e-313",
           "stderr": ""
         }
       ],
