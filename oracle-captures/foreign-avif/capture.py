@@ -50,6 +50,7 @@ script's own directory is written.
 import hashlib
 import json
 import os
+import re
 import struct
 import subprocess
 
@@ -81,9 +82,20 @@ SHELL_ALIASES = {
 }
 
 
+# `(vips:8819): VIPS-WARNING **: 08:41:28.888: msg` -> `VIPS-WARNING **: msg`.
+# The pid and the wall clock are the only two things in this capture that
+# change between runs, so stripping them makes `python3 capture.py` a byte
+# for byte no-op on an unchanged machine, which is what lets anyone else
+# check the capture rather than take it on trust.
+GLIB_PREFIX = re.compile(r"^\([^)]*:\d+\): (\S+ \*\*): "
+                         r"\d\d:\d\d:\d\d\.\d+: ", re.M)
+
+
 def scrub(text):
-    """Drop this directory's absolute path so a record is portable."""
-    return text.replace(ROOT + "/", "").replace(ROOT, "")
+    """Drop this directory's absolute path, and the pid and timestamp glib
+    stamps onto a warning, so a record is portable and reproducible."""
+    text = text.replace(ROOT + "/", "").replace(ROOT, "")
+    return GLIB_PREFIX.sub(r"\1: ", text)
 
 
 def run(args, allow_fail=False):

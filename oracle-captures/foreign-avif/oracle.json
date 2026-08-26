@@ -771,7 +771,7 @@
           "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
           "warned_not_found": true,
           "stderr": [
-            "(vips:8819): VIPS-WARNING **: 08:41:28.888: heifsave: could not find rav1e"
+            "VIPS-WARNING **: heifsave: could not find rav1e"
           ],
           "same_bytes_as_auto": true
         },
@@ -781,7 +781,7 @@
           "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
           "warned_not_found": true,
           "stderr": [
-            "(vips:8821): VIPS-WARNING **: 08:41:28.929: heifsave: could not find svt"
+            "VIPS-WARNING **: heifsave: could not find svt"
           ],
           "same_bytes_as_auto": true
         },
@@ -791,7 +791,7 @@
           "sha256": "c1f34aad25fee57ef139badd5c62b67d6e3187547251220a49557ab916b5832d",
           "warned_not_found": true,
           "stderr": [
-            "(vips:8823): VIPS-WARNING **: 08:41:28.972: heifsave: could not find x265"
+            "VIPS-WARNING **: heifsave: could not find x265"
           ],
           "same_bytes_as_auto": true
         }
@@ -803,7 +803,7 @@
         "7": {
           "exit": 0,
           "stderr": [
-            "(vips:8826): GLib-GObject-CRITICAL **: 08:41:29.013: value \"7\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
+            "GLib-GObject-CRITICAL **: value \"7\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
           ],
           "bits_per_sample_read_back": "12"
         },
@@ -839,14 +839,14 @@
         "13": {
           "exit": 0,
           "stderr": [
-            "(vips:8876): GLib-GObject-CRITICAL **: 08:41:29.421: value \"13\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
+            "GLib-GObject-CRITICAL **: value \"13\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
           ],
           "bits_per_sample_read_back": "12"
         },
         "16": {
           "exit": 0,
           "stderr": [
-            "(vips:8880): GLib-GObject-CRITICAL **: 08:41:29.503: value \"16\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
+            "GLib-GObject-CRITICAL **: value \"16\" of type 'gint' is invalid or out of range for property 'bitdepth' of type 'gint'"
           ],
           "bits_per_sample_read_back": "12"
         }
