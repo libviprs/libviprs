@@ -20,6 +20,7 @@
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
 //! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
+//! | `.jxl` | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
 //! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
@@ -891,6 +892,13 @@ impl Raster {
                     other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
                 })?,
             "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
+            // JPEG XL takes no `keep_metadata` because `zune-jpegxl` writes
+            // a bare codestream with no box container, so there is nowhere
+            // to put an ICC profile, an EXIF block or an XMP packet and
+            // nothing for the flag to drop. `vips jxlsave --keep none`
+            // writes the same form; `--keep all` has no encoder behind it
+            // here. See `crate::jxl` for the whole argument.
+            "jxl" => crate::jxl::encode_jxl_for_save(self)?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
             _ => return Err(SaveError::UnsupportedExtension { extension }),
         };
@@ -1917,6 +1925,44 @@ mod tests {
         let bare = decode_file(&stripped).unwrap();
         assert_eq!(bare.data(), im.data());
         assert_eq!(bare.icc_profile(), None);
+    }
+
+    /**
+     * Tests that `.jxl` is a live row in the extension route, that the
+     * lossless encoder behind it round-trips, and that `save_stripped`
+     * makes no difference here: the encoder writes a bare codestream with
+     * no box container, so there is nothing for the strip flag to drop and
+     * both files are byte-identical. That is the one place the `.jxl` row
+     * differs from the `.webp` one above, and it is worth pinning rather
+     * than leaving as an accident. Works by attaching an ICC blob, saving
+     * both ways, and reading each file back.
+     * Input: 2x2 Rgb8 with `icc-profile-data` -> Output: identical pixels
+     * from both files, identical bytes on disk, and the profile absent
+     * from both because nothing carried it.
+     */
+    #[test]
+    fn save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut im = rgb_2x2();
+        im.fields
+            .set("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3, 4]));
+
+        let kept = dir.path().join("kept.jxl");
+        im.save(&kept).unwrap();
+        let back = decode_file(&kept).unwrap();
+        assert_eq!(back.data(), im.data(), "the JPEG XL encoder is lossless");
+
+        let stripped = dir.path().join("stripped.jxl");
+        im.save_stripped(&stripped).unwrap();
+        assert_eq!(
+            std::fs::read(&kept).unwrap(),
+            std::fs::read(&stripped).unwrap(),
+            "there is no box container to strip, so both writes are the same bytes"
+        );
+        // The profile the raster carried is not in either file; what comes
+        // back is the one `jxlload` synthesises for the colour encoding,
+        // which is never the four bytes attached above.
+        assert_ne!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
     }
 
     /**

@@ -30,3 +30,8 @@ doc = false
 name = "fuzz_radiance"
 path = "fuzz_targets/fuzz_radiance.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_jxl"
+path = "fuzz_targets/fuzz_jxl.rs"
+doc = false

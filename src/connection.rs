@@ -231,12 +231,15 @@ impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
-    /// `"png"`, `"gif"`, `"webp"` and `"v"` / `"vips"` are wired; any other
-    /// format returns [`EncodeError::Unsupported`]. `"webp"` encodes
-    /// losslessly at [`crate::webp::SaveOptions::default`], keeping any
-    /// attached metadata, and `"gif"` at
-    /// [`crate::gif::SaveOptions::default`]; [`Raster::encode_webp`] and
-    /// [`Raster::encode_gif`] take the options explicitly.
+    /// `"png"`, `"gif"`, `"webp"`, `"jxl"` and `"v"` / `"vips"` are wired;
+    /// any other format returns [`EncodeError::Unsupported`]. `"webp"`
+    /// encodes losslessly at [`crate::webp::SaveOptions::default`], keeping
+    /// any attached metadata, `"gif"` at
+    /// [`crate::gif::SaveOptions::default`], and `"jxl"` losslessly at
+    /// [`crate::jxl::SaveOptions::default`], which carries no metadata
+    /// because the encoder writes no box container;
+    /// [`Raster::encode_webp`], [`Raster::encode_gif`] and
+    /// [`Raster::encode_jxl`] take the options explicitly.
     ///
     /// # Errors
     ///
@@ -261,6 +264,7 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
+        "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
         "v" | "vips" => raster.encode_vips().map_err(save_err_to_encode),
         _ => Err(EncodeError::unsupported(format.to_owned())),
     }
@@ -333,6 +337,25 @@ mod tests {
         assert_eq!(via_dispatch, direct);
         assert_eq!(&via_dispatch[..4], b"RIFF");
         assert_eq!(&via_dispatch[8..12], b"WEBP");
+        let back = crate::decode_bytes(&via_dispatch).unwrap();
+        assert_eq!(back.data(), raster.data());
+    }
+
+    /// `"jxl"` is a live row in the shared format dispatch, and the
+    /// bytes it returns are the same ones `Raster::encode_jxl` writes at
+    /// the default options, so the connection lane and the codec module
+    /// cannot drift apart. The leading `FF 0A` is the bare-codestream
+    /// magic, which is what the encoder writes and what
+    /// `vips jxlsave --keep none` writes too.
+    #[test]
+    fn encode_for_format_routes_jxl_to_the_lossless_encoder() {
+        let raster = sample_raster();
+        let via_dispatch = raster.encode_to_buffer("jxl").unwrap();
+        let direct = raster
+            .encode_jxl(crate::jxl::SaveOptions::default())
+            .unwrap();
+        assert_eq!(via_dispatch, direct);
+        assert_eq!(&via_dispatch[..2], b"\xff\x0a");
         let back = crate::decode_bytes(&via_dispatch).unwrap();
         assert_eq!(back.data(), raster.data());
     }

@@ -63,6 +63,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while looking like it did the same thing. Cast first and the narrowing is
   yours.
 
+- `Raster::encode_jxl` takes a `jxl::SaveOptions` carrying a `Compression`,
+  where it used to take a bare `lossless: bool` and always return
+  `EncodeError::Unsupported` (issue #620). It now encodes, and the argument it
+  used to take could only ever have meant one thing: there is no lossy JPEG XL
+  encoder reachable in pure Rust, because `zune-jpegxl` is a lossless modular
+  encoder with no VarDCT path anywhere in it. `encode_jxl(true)` becomes
+  `encode_jxl(jxl::SaveOptions::default())` and `encode_jxl(false)` has no
+  spelling at all, which is the point: `jxlsave`'s `distance`, `Q`, `tier` and
+  `effort` have nothing behind them here, so none of them is a field this crate
+  accepts and discards. `Compression` is `#[non_exhaustive]`, so
+  `Lossy { distance }` can join it as a minor bump the day there is an encoder
+  for it.
+
 - `decode_svg` takes a `SvgOptions` instead of a bare `Option<f64>` DPI
   (issue #502). It used to be `decode_svg(data, Some(144.0))`, and it is now
   `decode_svg(data, SvgOptions { dpi: 144.0, ..Default::default() })`. The old
@@ -140,6 +153,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all 2100 channels of the same grid.
 
 ### Added
+
+- JPEG XL load and lossless save (issues #500, #619, #620). `decode_jxl` reads
+  both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF one,
+  and `.jxl` is now a live row in the content sniffer, in `Raster::save`'s
+  extension route and in `Raster::encode_to_buffer`'s format route.
+  `Raster::encode_jxl` and `Raster::save_jxl` write the lossless modular form.
+  The `Raster::encode_jxl(lossless: bool)` typed-`Unsupported` stub is gone.
+
+  Decode goes to `jxl-oxide`, which targets the same JPEG XL conformance suite
+  libjxl does, so this is a parity port rather than an approximation, and the
+  two paths land in different places. The **lossless modular** path is a true
+  identity against vips 8.18.4 for all three carriers, 8-bit, 16-bit and float,
+  so its pins carry no tolerance at all. The **VarDCT** path agrees to within
+  one count per channel and is pinned with exactly that and no more. vips also
+  reads back what libviprs writes, at the same band counts and the same
+  interpretations: `oracle-captures/foreign-jxl/` records both directions.
+
+  The carrier follows the file rather than a fixed choice, the way
+  `jxlload.c:679-696` picks one, so a 16-bit file comes back `Rgb16` and a
+  float one comes back `FloatF32(3)` tagged `scrgb` instead of being quantised
+  on the way in. A greyscale file stays one band, which is where JPEG XL and
+  WebP part company: `webpsave` promotes `b-w` to three bands because the
+  format stores no greyscale and `jxlsave` does not, because it does.
+  `icc-profile-data`, `exif-data`, `xmp-data` and `bits-per-sample` come across
+  under the field names `jxlload` uses.
+
+  Two behaviours are worth knowing before you wire it in. The EXIF box needs a
+  fix-up, because JPEG XL stores the TIFF block behind a big-endian 4-byte
+  offset and without the `Exif\0\0` prefix a JPEG APP1 segment carries; the
+  loader skips the offset and puts the prefix back, which is what makes a JXL
+  `exif-data` blob compare equal to the JPEG one for the same image. And when
+  that box is malformed, libviprs drops the blob and keeps the image where vips
+  fails the whole load (measured: `vipsheader` exits 1 and prints nothing).
+  Refusing an otherwise-valid image over a metadata box is the wrong trade for
+  a decoder reading untrusted bytes.
+
+  Save is lossless and nothing else, and there is no `quality` or `distance` to
+  pass. `zune-jpegxl` is a lossless modular encoder with no VarDCT path
+  anywhere in it, so `jxl::SaveOptions` carries a `Compression` whose one
+  variant is `Lossless`, for the reason #568 gave for WebP: an argument the
+  encoder throws away inverts the contract now and changes behaviour silently
+  in a patch release later. `Compression` is `#[non_exhaustive]`, so
+  `Lossy { distance }` can join it as a minor bump.
+
+  16-bit encodes, unlike WebP, because the format and the encoder both hold
+  16-bit samples and there is no narrowing question to answer. Float is refused
+  with a message naming the remedy. There is one floor vips does not have:
+  `zune-jpegxl` rejects a single-pixel row or column outright, where
+  `vips jxlsave` writes an 18-byte 1x1 file happily, so `MIN_DIMENSION` is 2 on
+  each axis and the refusal says so.
+
+  No metadata is written on save. The encoder emits a bare codestream with no
+  box container, so there is nowhere for an ICC profile, an EXIF block or an
+  XMP packet to go, and `save` and `save_stripped` write identical `.jxl`
+  bytes. `vips jxlsave --keep none` writes the same bare form; `--keep all` has
+  no encoder behind it here. Animated JPEG XL loads frame 0 and reports
+  `n-pages`, which is what a default `vips jxlload` does; reading every frame
+  is #621 and waits on the page model in #564.
+
+  This costs +17 lock entries (260 to 277, measured), all pure Rust, none with
+  a `links =` key or a C compile. `jxl-oxide` is floored at 0.12.6 because
+  every release at or below 0.12.5 carries GHSA-66m8-c62j-h6v5, an unchecked
+  `usize` multiply in `FrameBuffer::new` that hands out oversized slices from
+  an undersized buffer. `fuzz/fuzz_targets/fuzz_jxl.rs` and a 26-seed corpus
+  ship with it.
 
 - Canny edge detection: `Raster::canny` and `Raster::try_canny`, matching
   `vips_canny` (issues #511, #559 and #560). It takes `sigma` and `precision`
