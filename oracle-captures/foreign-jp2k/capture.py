@@ -66,6 +66,10 @@ OUT = os.path.join(ROOT, "outputs")
 VIPS = "/opt/homebrew/bin/vips"
 VIPSHEADER = "/opt/homebrew/bin/vipsheader"
 OPJ = "/opt/homebrew/bin/opj_compress"
+# `vips --vips-config` names libopenjp2 but not its version, and the version
+# is the thing a future disagreement will turn on, so read it off the dylib
+# vips actually links rather than off whatever else is installed.
+VIPSLIB = "/opt/homebrew/lib/libvips.42.dylib"
 
 os.makedirs(FIX, exist_ok=True)
 os.makedirs(OUT, exist_ok=True)
@@ -466,6 +470,16 @@ records["save_container_is_always_jp2"] = {
     "all_identical": len({s["sha256"] for s in suffixes.values()}) == 1,
     "load_ignores_the_name": None,   # filled in once the .j2k fixtures exist
 }
+notes.append(
+    "Provenance: the vips version in meta is whatever `vips --version` said "
+    "on the run that wrote this file, never a hardcoded string, because "
+    "Homebrew moved this box from 8.18.4 to 8.18.6 mid-capture and deleted "
+    "the old keg. Every number here came from the version recorded above. "
+    "Both halves of the capture go through the SAME openjpeg build: vips "
+    "links libopenjp2 2.5.4 and opj_compress was compiled against 2.5.4, "
+    "so the fixtures opj_compress wrote and the decodes vips did agree by "
+    "construction rather than by luck."
+)
 notes.append(
     "jp2ksave always writes a JP2 container; the .j2k/.j2c/.jpc/.jpt "
     "suffixes it advertises change nothing about the bytes. Every bare "
@@ -1216,6 +1230,9 @@ jp2k_config = [part.strip() for part in config.replace("\n", ",").split(",")
 opj_version = [line for line in
                run([OPJ, "-h"], allow_fail=True).stdout.splitlines()
                if "openjp2 library" in line]
+linked = run(["otool", "-L", VIPSLIB], allow_fail=True)
+libopenjp2 = [line.strip() for line in linked.stdout.splitlines()
+              if "openjp" in line]
 
 oracle = {
     "meta": {
@@ -1226,6 +1243,7 @@ oracle = {
         "vips_config_jp2k": jp2k_config,
         "opj_compress_binary": OPJ,
         "opj_compress_version": opj_version,
+        "libopenjp2_linked_by_vips": libopenjp2,
         "captured_by": "oracle-captures/foreign-jp2k/capture.py",
         "reference_c": "libvips v8.18.0-95-gfe420cf3a "
                        "(/Users/rom/workspace/libvips at fe420cf3a) for the "

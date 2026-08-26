@@ -606,3 +606,4 @@ set -e
 /opt/homebrew/bin/vips --version
 /opt/homebrew/bin/vips --vips-config
 /opt/homebrew/bin/opj_compress -h
+otool -L /opt/homebrew/lib/libvips.42.dylib
