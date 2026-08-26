@@ -12,7 +12,7 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    Align, BandError, ColourError, Combine, DrawError, EngineEvent, GifError, Intent,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, FitsError, GifError, Intent,
     Interpretation, JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError,
     Precision, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
 };
@@ -25,6 +25,28 @@ fn assert_gif_error_non_exhaustive(v: &GifError) {
         GifError::NoFrames => {}
         GifError::AllocLimitExceeded { .. } => {}
         GifError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_fits_error_non_exhaustive(v: &FitsError) {
+    match v {
+        FitsError::BadMagic { .. } => {}
+        FitsError::TruncatedHeader { .. } => {}
+        FitsError::HeaderTooLong { .. } => {}
+        FitsError::NoImageUnit { .. } => {}
+        FitsError::BadHeaderCard { .. } => {}
+        FitsError::BadAxisCount { .. } => {}
+        FitsError::HighDimensionNotEmpty { .. } => {}
+        FitsError::DimensionOutOfBounds { .. } => {}
+        FitsError::AllocLimitExceeded { .. } => {}
+        FitsError::TruncatedData { .. } => {}
+        FitsError::UnsupportedBitpix { .. } => {}
+        FitsError::UnsupportedCarrier { .. } => {}
+        FitsError::UnsupportedScaling { .. } => {}
+        FitsError::Raster(_) => {}
         _ => {}
     }
 }

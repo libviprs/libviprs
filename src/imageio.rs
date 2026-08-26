@@ -20,6 +20,7 @@
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
 //! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
+//! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
 //! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
@@ -823,7 +824,7 @@ pub enum SaveError {
     Io(#[from] std::io::Error),
     #[error(
         "unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, gif, \
-         webp, and v/vips"
+         webp, fits/fit/fts, and v/vips"
     )]
     UnsupportedExtension { extension: String },
     #[error("encode error: {0}")]
@@ -891,6 +892,16 @@ impl Raster {
                     other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
                 })?,
             "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
+            // All three suffixes vips registers (`vips__fits_suffs`,
+            // `fits.c:125`). `keep_metadata` has nothing to act on: the
+            // records a FITS header carries are the geometry cfitsio
+            // regenerates anyway, and vips filters them out on the way
+            // back (`fits.c:596-613`), so a stripped save and a kept one
+            // write the same bytes.
+            "fits" | "fit" | "fts" => self.encode_fits().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
             _ => return Err(SaveError::UnsupportedExtension { extension }),
         };
