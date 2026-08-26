@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Integer-precision convolution divides by `rint(kernel.scale)`, the scale on
+  the mask that was passed in, where it used to divide by the
+  brightness-corrected scale `vips__image_intize` derives from it (issue #547).
+  `conv`, `convsep` and `compass` move output bytes wherever rounding the
+  coefficients changes the mask's overall gain, which takes at least one
+  coefficient that does not already round to itself, and they move on every
+  carrier: uchar, ushort and the float-input arm alike. `sobel`, `scharr`,
+  `prewitt`, `canny`, `gaussblur` and `sharpen` do not move at all, because
+  every mask they build has integer coefficients over an integer scale and the
+  correction is a no-op there.
+
+  The correction was never the divisor. `vips_convi_gen` reads the scale and
+  the offset off `convolution->M`, the mask the caller handed in
+  (`convolution/convi.c:757-760`); `vips_convi_build` shadows `M` with the
+  intized copy only for as long as it takes to harvest the integer
+  coefficients (`convi.c:1179-1181`) and never writes that copy back. So the
+  `out_scale` `vips__image_intize` computes is dead for `convi` and live only
+  for the approximate paths this crate does not implement, `conva` and
+  `convasep`. libviprs threaded it into the division, which is a different
+  operation from the one libvips performs.
+
+  It was not a rounding nit either. On `Kernel { data: [[3.0, 0.4, 0.4, 0.4,
+  0.4]], scale: 1.0 }` the correction lands on `-1`, so a 5x1 grey field of
+  100s came back `[0, 0, 0, 0, 0]` where vips 8.18.4 answers
+  `255 255 255 255 255`. Black where the reference is white, from a mask any
+  caller can build out of the public two-field `Kernel`. Measured over 126
+  fractional masks on four fixtures, 191 of 504 outputs disagreed with
+  `VIPS_NOVECTOR=1 vips conv --precision integer` before this change and 30 do
+  after, and all 30 are the corner below.
+
+  That corner is the one place the new divisor cannot follow libvips, because
+  there is nothing there to follow. `vips_convi_gen` holds the scale in an
+  `int`, so a mask scale below 0.5 leaves it at `0` and C divides by it:
+  measured on 8.18.4 at scale 0.4, the two integer arms answer `0` (aarch64
+  `sdiv` returns zero instead of trapping, which is not a defined result, and
+  x86 would trap) and the float-input arm prints `inf`. libviprs nudges a
+  divisor of zero to `1`, which is the guard `vips__image_intize` writes for
+  its own copy at `convi.c:895-897` and the only total answer available. A
+  caller who wants a sub-unit scale at integer precision should scale the
+  coefficients instead, or use `Precision::Float`, which has no `int` in the
+  path and divides exactly.
+
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
   be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
@@ -723,6 +765,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- A fallible convolution reports an allocation failure instead of aborting the
+  process (issue #575). `samples_f64` widens every sample to `f64` before the
+  traversal, eight bytes where the source carries one or two, and it did that
+  with a plain `.collect()`: on failure that reaches `handle_alloc_error` and
+  kills the process outright. Every `try_` entry point in the module sits on
+  top of it, so none of them could report the failure and no caller could
+  catch it. A `Result` that does not cover allocation is worse than no
+  `Result`, because callers reasonably assume it does, and the rest of the
+  crate had already settled the question the other way: `Raster` reserves with
+  `try_reserve_exact` and returns `RasterError::AllocationFailed`, documented
+  as never an abort.
+
+  The widening now reserves fallibly and surfaces
+  `ConvolutionError::Raster(RasterError::AllocationFailed { .. })`, and so do
+  the other image-sized intermediates in the same functions: the combine
+  buffers in `compass` and the output planes in `spcor` and `fastcor`, whose
+  `# Errors` sections already promised the variant, and the polar buffers in
+  `canny`. `try_conv`, `try_convsep`, `try_compass`, `try_gaussblur`,
+  `try_spcor`, `try_fastcor`, `try_sobel`, `try_scharr` and `try_prewitt` are
+  abort-free end to end as a result, and `try_canny` is on its uchar arm.
+
+  It matters more than it reads: measured on a 4000x4000 `Rgb8` at integer
+  precision, the widened buffer is 384 MB of a 486 MB peak for 48 MB of input,
+  so it is by some distance the request most likely to be the one that fails.
+  Removing the widening rather than making it fallible is the streaming work
+  in #575's third item, which stays open.
 
 - A `.v` file written by a newer libviprs no longer loses every metadata field
   when it is read by an older one (issue #565). The trailer was read as one
