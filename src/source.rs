@@ -291,6 +291,15 @@ pub enum SourceError {
     /// [`GifError`](crate::gif::GifError) rather than as an opaque string.
     #[error(transparent)]
     Gif(#[from] crate::gif::GifError),
+    /// A malformed or unreachable FITS file. libviprs decodes FITS itself
+    /// rather than through any crate (see [`crate::fits`]), so its failures
+    /// arrive as the codec's own typed
+    /// [`FitsError`](crate::fits::FitsError) rather than as an opaque
+    /// string. That matters more here than elsewhere, because a FITS file
+    /// can be perfectly well formed and still carry a sample type this
+    /// build has no pixel format for; the variant says which.
+    #[error(transparent)]
+    Fits(#[from] crate::fits::FitsError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -814,6 +823,8 @@ pub(crate) enum SniffedFormat {
     WebP,
     /// Radiance HDR, the first line `#?RADIANCE`.
     Radiance,
+    /// FITS, the first card's `SIMPLE  =` keyword and fixed-format marker.
+    Fits,
 }
 
 impl SniffedFormat {
@@ -840,13 +851,17 @@ impl SniffedFormat {
     /// * WebP, because [`crate::webp::decode_webp`] reads the `ICCP`,
     ///   `EXIF` and `XMP ` chunks out of the RIFF directory as well as the
     ///   frame, and the frame is rarely the last chunk in the file.
+    /// * FITS, because [`crate::fits::decode_fits`] may walk past one or
+    ///   more header units before it finds the one carrying the image, and
+    ///   the sample array is band-planar and stored bottom row first, so
+    ///   the decode reads it in an order no strip reader would.
     ///
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
     const fn decodes_from_memory(self) -> bool {
         matches!(
             self,
-            Self::Vips | Self::Jpeg | Self::Gif | Self::WebP | Self::Radiance
+            Self::Vips | Self::Jpeg | Self::Gif | Self::WebP | Self::Radiance | Self::Fits
         )
     }
 
@@ -881,6 +896,11 @@ impl SniffedFormat {
             // `(mantissa + 0.5) * 2^(e-136)`, a 100% error at mantissa 0.
             // [`crate::radiance`] hand-rolls the codec instead.
             Self::Radiance => None,
+            // `image` has no FITS route at all, and no FITS crate models
+            // the vips-side behaviour libviprs needs (the vertical flip,
+            // the `fits-N` records, cfitsio's equivalent-type table), so
+            // [`crate::fits`] hand-rolls the codec (issue #505).
+            Self::Fits => None,
         }
     }
 }
@@ -927,6 +947,14 @@ pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
         && matches!(head[magic.len()], b'\n' | b'\r')
     {
         return Some(SniffedFormat::Radiance);
+    }
+    // FITS has no signature to speak of: the standard fixes the primary
+    // header's first card as `SIMPLE` with a logical value, so the keyword
+    // field and the fixed-format `= ` in columns 9 and 10 are the only
+    // bytes every file shares. vips does not sniff at all here, it hands
+    // the file to `fits_open_diskfile` (`fits.c:526-548`).
+    if head.starts_with(crate::fits::MAGIC) {
+        return Some(SniffedFormat::Fits);
     }
     None
 }
@@ -1051,6 +1079,9 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     }
     if sniffed == Some(SniffedFormat::WebP) {
         return crate::webp::decode_webp(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::Fits) {
+        return crate::fits::decode_fits(bytes, limits);
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
@@ -1733,7 +1764,7 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 20] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 24] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -1786,6 +1817,18 @@ mod tests {
             ("radiance rgbe", b"#?RGBE\nFORMAT=", None),
             ("radiance longer first line", b"#?RADIANCEX\n", None),
             ("radiance with no newline", b"#?RADIANCE", None),
+            // FITS is a fixed-width prefix: the keyword field, the `=` in
+            // column 9 and the space after it. `SIMPLE=T` is a legal FITS
+            // value written in free format, but no conforming file opens
+            // that way, and cfitsio refuses it too.
+            (
+                "fits",
+                b"SIMPLE  =                    T",
+                Some(SniffedFormat::Fits),
+            ),
+            ("fits free format", b"SIMPLE=T", None),
+            ("fits without the keyword padding", b"SIMPLE = T", None),
+            ("fits truncated", b"SIMPLE  ", None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -1805,9 +1848,9 @@ mod tests {
      * container in, one decoder out, no options and no many-to-one
      * collapsing.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
-     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP` and `Radiance`, and
-     * distinct `image` formats for every container libviprs does not decode
-     * itself.
+     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Radiance` and
+     * `Fits`, and distinct `image` formats for every container libviprs
+     * does not decode itself.
      */
     #[test]
     fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
@@ -1819,6 +1862,7 @@ mod tests {
             SniffedFormat::Gif,
             SniffedFormat::WebP,
             SniffedFormat::Radiance,
+            SniffedFormat::Fits,
         ];
         // These are the containers libviprs decodes itself, so they are
         // the ones the route table maps to no `image` decoder.
@@ -1827,6 +1871,7 @@ mod tests {
             SniffedFormat::Radiance,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
+            SniffedFormat::Fits,
         ];
 
         let buffered: Vec<SniffedFormat> = all
@@ -1841,9 +1886,10 @@ mod tests {
                 SniffedFormat::Jpeg,
                 SniffedFormat::Gif,
                 SniffedFormat::WebP,
-                SniffedFormat::Radiance
+                SniffedFormat::Radiance,
+                SniffedFormat::Fits
             ],
-            "only .v, JPEG, GIF, WebP and Radiance may read the whole file into memory"
+            "only .v, JPEG, GIF, WebP, Radiance and FITS may read the whole file into memory"
         );
 
         for format in self_decoded {
@@ -1870,6 +1916,31 @@ mod tests {
             all.len() - self_decoded.len(),
             "the route table must be an identity mapping, not many-to-one"
         );
+    }
+
+    /**
+     * Verifies that a FITS file reaches the hand-rolled codec through both
+     * public decode entry points, and that neither consults the file name
+     * to get there. Works by writing one `.fits` under a misleading `.png`
+     * extension and decoding it from the path and from the bytes.
+     * Input: a 4x1 BITPIX 8 file named `misnamed.png` -> Output: the same
+     * `Gray8` raster from `decode_file` and `decode_bytes`, right way up.
+     */
+    #[test]
+    fn fits_reaches_its_codec_from_both_entry_points() {
+        let raster = Raster::new(4, 1, PixelFormat::Gray8, vec![3, 1, 4, 1]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("misnamed.png");
+        std::fs::write(&path, &file).unwrap();
+
+        let from_path = decode_file_with_limits(&path, DecodeLimits::default()).unwrap();
+        let from_bytes = decode_bytes(&file).unwrap();
+        for decoded in [&from_path, &from_bytes] {
+            assert_eq!((decoded.width(), decoded.height()), (4, 1));
+            assert_eq!(decoded.format(), PixelFormat::Gray8);
+            assert_eq!(decoded.data(), &[3, 1, 4, 1]);
+        }
     }
 
     /**
