@@ -785,8 +785,16 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     // reserved, the way `crate::gif` and `crate::webp` do it.
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    let needed =
-        u64::from(width) * u64::from(height) * u64::from(bands) * carrier.sample_bytes() as u64;
+    // Saturating, not wrapping. `max_coord` and `max_pixels` are both
+    // caller-settable, so a caller who lifts them can declare a geometry
+    // whose byte count does not fit a `u64`. A wrapped product would look
+    // small enough to pass the budget and then index a buffer sized from a
+    // different number; a saturated one is `u64::MAX`, which fails the
+    // truncation check below even when the budget itself is `u64::MAX`.
+    let needed = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(u64::from(bands))
+        .saturating_mul(carrier.sample_bytes() as u64);
     if needed > limits.max_alloc_bytes {
         return Err(FitsError::AllocLimitExceeded {
             width,
@@ -1471,6 +1479,39 @@ mod tests {
                 DecodeLimits::default().with_max_alloc_bytes(1_000)
             ),
             Err(SourceError::Fits(FitsError::AllocLimitExceeded { .. }))
+        ));
+    }
+
+    /**
+     * Tests that a byte count too large for a `u64` cannot wrap past the
+     * budget check.
+     * Works by lifting every `DecodeLimits` ceiling to its maximum, which
+     * a caller is free to do, and then declaring the largest geometry the
+     * axes can spell: `u32::MAX` on both axes with 65535 bands of float is
+     * about 4.8e24 bytes. A wrapping product would look small enough to
+     * pass and then index a buffer sized from a different number.
+     * Input: the largest declarable geometry with no ceiling in force ->
+     * Output: `TruncatedData`, reached without allocating anything.
+     */
+    #[test]
+    fn a_byte_count_past_u64_cannot_wrap_past_the_budget() {
+        let file = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                  -32",
+            "NAXIS   =                    3",
+            &format!("NAXIS1  = {:>20}", u32::MAX),
+            &format!("NAXIS2  = {:>20}", u32::MAX),
+            &format!("NAXIS3  = {:>20}", u16::MAX),
+        ]);
+        let unbounded = DecodeLimits::default()
+            .with_max_coord(u32::MAX)
+            .with_max_width(u32::MAX)
+            .with_max_height(u32::MAX)
+            .with_max_pixels(u64::MAX)
+            .with_max_alloc_bytes(u64::MAX);
+        assert!(matches!(
+            decode_fits(&file, unbounded),
+            Err(SourceError::Fits(FitsError::TruncatedData { .. }))
         ));
     }
 
