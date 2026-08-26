@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `MetadataValue` is `#[non_exhaustive]` (issue #609). An exhaustive `match`
+  on it downstream needs a `_ =>` arm now. Nothing else changes: the attribute
+  is on the enum rather than on its variants, so `MetadataValue::Int(3)`, the
+  `From` impls and the `as_*` accessors all keep working untouched.
+
+  Four is not the number of types a vips metadata field can have. A `.v`
+  trailer this crate reads today can carry `VipsArrayInt`, `VipsArrayDouble`
+  and `gboolean` fields, which it can only forward opaquely, and #573 needs an
+  array variant for the per-frame GIF delays. Adding that variant to an
+  exhaustive enum is a major bump, and it would be a major bump for a reason
+  nobody enjoys explaining. Doing it now, while the cost is one `_` arm, is
+  the cheap moment, and it puts the enum where every other growable public
+  enum in the crate already sits: `tests/non_exhaustive_enums.rs` registers 21
+  of them and this one had simply escaped the list.
+
+  Unlike the on-disk half of the same question (#565), this break is one
+  `cargo semver-checks` can see, which is exactly why it was safe to leave
+  until it was worth doing and why it is worth doing before the variant lands
+  rather than after.
 - Integer-precision convolution divides by `rint(kernel.scale)`, the scale on
   the mask that was passed in, where it used to divide by the
   brightness-corrected scale `vips__image_intize` derives from it (issue #547).
@@ -831,6 +850,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `.v` file libviprs writes is now readable by real vips, metadata and all,
+  and no longer makes it print a warning on every open (issue #546). The
+  trailer after the pixel data was libviprs's own JSON. libvips parses that
+  slot as XML, so `vipsheader -a` on any file the crate wrote answered
+
+      VIPS-WARNING **: error reading vips image metadata: VipsImage: XML parse error
+
+  and then threw the whole metadata block away. Since `.v` exists for vips
+  interop, and is the only format here that round-trips a float raster, that
+  hit exactly the people moving compute intermediates between the two tools:
+  they lost their ICC profile, their EXIF blob and their orientation, and got
+  a warning they could not act on.
+
+  The warning fired even for a raster with no metadata at all, because the
+  writer always appended the 41 bytes of
+  `{"orientation":1,"fields":{"entries":[]}}`. Nothing is written there now
+  when there is nothing to say, which fixes the common case on its own.
+
+  Everything else goes out as the XML document vips writes, `<root>` with a
+  `<header>` and a `<meta>` block of `<field type="..." name="...">` elements.
+  The four `MetadataValue` variants land on the four GTypes vips can
+  round-trip: `gint`, `gdouble`, `VipsRefString`, and `VipsBlob` as base64.
+  The reader takes both that and the old JSON form, so every `.v` already
+  written keeps its metadata, and a `.v` vips itself wrote now reads whole
+  rather than down to its orientation tag.
+
+  Two places where this deliberately does not copy vips byte for byte. It
+  escapes only what XML needs, so non-ASCII text survives: vips's own writer
+  tests `*p < 32` on a signed `char` (`libvips/iofuncs/target.c:821`), which
+  catches every byte of a multi-byte UTF-8 sequence, and `vips copy` over a
+  `.v` carrying `café ☃ 日本` rewrites it as `caf&#x23c3;&#x23a9; …`
+  irreversibly. And a field name containing a quote is escaped as `&quot;`
+  where vips writes a backslash and leaves the attribute unterminated.
+
+  **libviprs 0.4.0 reads a `.v` written now for its pixels, its geometry and
+  its orientation, and not for its attached fields.** Its reader only takes a
+  trailer as metadata when the first non-whitespace byte is `{`, and no byte
+  sequence is both that and the XML vips requires, so vips interop and full
+  field recovery on 0.4.0 cannot both hold. Nothing errors, and it runs one
+  way only: this build reads every older file completely.
+
+  Forward compatibility is kept and is better than it was. A `<field>` whose
+  `type` this build does not know is carried opaquely and written back byte
+  for byte, same as before, but now the carrier is vips's own encoding, so
+  vips reads the carried field too. The one thing that cannot survive the
+  format change is a value carried out of an *old JSON* trailer: spelling it
+  in XML would mean interpreting it, which is the one thing a carried value
+  does not allow, so a raster still holding one keeps the JSON trailer rather
+  than losing it.
 - A fallible convolution reports an allocation failure instead of aborting the
   process (issue #575). `samples_f64` widens every sample to `f64` before the
   traversal, eight bytes where the source carries one or two, and it did that

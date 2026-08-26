@@ -273,7 +273,7 @@ pub enum SourceError {
     /// A malformed or unsupported native `.v` file (bad magic, truncated
     /// header or pixel data, unsupported coding/band format, or a metadata
     /// trailer that opens with `{` and is not valid JSON, which is a
-    /// corrupt libviprs trailer rather than a foreign one; see the
+    /// corrupt legacy libviprs trailer rather than a foreign one; see the
     /// [`crate::imageio`] container contract).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
@@ -824,8 +824,8 @@ impl SniffedFormat {
     /// belong to the decoder rather than to the format:
     ///
     /// * `.v`, because [`crate::imageio::decode_vips_bytes`] parses the
-    ///   libvips header and the JSON metadata trailer itself and needs the
-    ///   buffer addressable end to end.
+    ///   libvips header and the metadata trailer itself and needs the buffer
+    ///   addressable end to end.
     /// * JPEG, because the metadata pass rescans the APP1/APP2 segments for
     ///   EXIF and ICC after the pixel decode.
     /// * Radiance, because [`crate::radiance::decode_radiance`] walks the
