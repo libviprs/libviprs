@@ -414,6 +414,15 @@ const RGB16_RANGE: usize = 65536;
 /// rather than left to the optimiser, which is not allowed to introduce
 /// it on its own. The 256-entry table is identical either way.
 ///
+/// This site keeps the `f32::mul_add` and [`scrgb_to_code`] does not,
+/// which is not an oversight. `f32::mul_add` becomes a libm `fmaf` call
+/// wherever `fma` is missing from the baseline ISA, x86-64 included, so
+/// it is worth routing around per channel per pixel and not worth it
+/// here, where it runs `range` times behind a `OnceLock`. What is
+/// written here is the C expression fused exactly as the shipped dylib
+/// fuses it, and it should keep reading that way. Do not propagate the
+/// other site's `f64` spelling back into this one.
+///
 /// The trailing duplicate is the C's: "Copy the final element. This is
 /// used in the piecewise linear interpolator below." (`:141-144`).
 fn calcul_tables(range: usize) -> Box<[i32]> {
@@ -464,6 +473,37 @@ fn y2v_table(range: usize) -> &'static [i32] {
 ///
 /// The result is ALREADY QUANTISED, so this is the code that reaches the
 /// output buffer; `write_sample` rounds an integer and changes nothing.
+///
+/// The chord is fused, the same way [`calcul_tables`] fuses its
+/// multiply-add, but it is deliberately NOT spelled as an
+/// `f32::mul_add`. `fma` is not in the x86-64 baseline, so rustc lowers
+/// `f32::mul_add` to a libm `fmaf` CALL there, and this runs once per
+/// channel per pixel on the route every `srgb`, `rgb16`, `b-w`,
+/// `grey16` and `hsv` conversion takes. Measured on rustc 1.98 at
+/// `-C opt-level=3`: for `x86_64-unknown-linux-musl` the `mul_add`
+/// spelling is `jmpq *fmaf@GOTPCREL(%rip)` and the `f64` one is
+/// `cvtss2sd` / `mulsd` / `addsd` / `cvtsd2ss`; add
+/// `-C target-feature=+fma` and the `mul_add` collapses to a single
+/// `vfmadd213ss`, which is exactly the point: the baseline does not
+/// have it. On aarch64 both stay call-free (`fmadd` against `fmul` and
+/// `fadd`), so the `f64` spelling costs an instruction or two there and
+/// saves a whole libm call on any target without a baseline `fma`.
+///
+/// The two are bit-identical rather than merely close, because the
+/// exact product-sum fits in an `f64` for every reachable input, so the
+/// one `as f32` IS the one rounding `fmaf` would do. The
+/// `f64_chord_matches_mul_add_*` tests check that rather than taking
+/// the argument on trust: two of them sample both LUTs at every
+/// structurally interesting point on each `cargo test`, and two more,
+/// `#[ignore]`d because they walk over a billion `f32` patterns apiece,
+/// sweep the whole reachable domain under
+/// `cargo test --release --lib -- --ignored f64_chord_matches_mul_add`.
+///
+/// [`calcul_tables`] keeps its `f32::mul_add`, which is why the two
+/// sites are spelled differently: it runs `range` times behind a
+/// `OnceLock`, so a libm call there costs nothing, and it is pinned
+/// against the shipped dylib's `fmadd` rather than against anything of
+/// ours. Do not unify them.
 fn scrgb_to_code(range: usize, value: f64) -> f64 {
     // "RGB can be NaN. Throw those values out, they will break our
     // clipping." (`LabQ2sRGB.c:301-310`, `:404-409`.) vips answers 0
@@ -481,9 +521,14 @@ fn scrgb_to_code(range: usize, value: f64) -> f64 {
     // The `+ 1` is in bounds because `calcul_tables` duplicates the last
     // entry for exactly this read.
     let delta = (lut[yi + 1] - lo) as f32;
+    let t = yf - yi as f32;
     // Fused, like the `fmadd s0, s5, s0, s4` the build compiles
-    // `lut[Yi] + (lut[Yi + 1] - lut[Yi]) * (Yf - Yi)` into.
-    f64::from(delta.mul_add(yf - yi as f32, lo as f32).round_ties_even())
+    // `lut[Yi] + (lut[Yi + 1] - lut[Yi]) * (Yf - Yi)` into, but reached
+    // through `f64` instead of `f32::mul_add` so that x86-64 does not
+    // pay a libm `fmaf` call per channel per pixel. Bit-identical; see
+    // the doc above.
+    let fused = (f64::from(delta) * f64::from(t) + f64::from(lo)) as f32;
+    f64::from(fused.round_ties_even())
 }
 
 /// Linear scRGB (0..1) -> D65 XYZ (`Y` white = 100), the sRGB primaries
@@ -4635,6 +4680,224 @@ mod tests {
             assert_eq!(y2v_16[i], want, "Y2v_16[{i}]");
         }
         assert_eq!(y2v_16[RGB16_RANGE], y2v_16[RGB16_RANGE - 1]);
+    }
+
+    /**
+     * One `f32` bit pattern's worth of the [`scrgb_to_code`] chord,
+     * evaluated both ways and compared as raw bits.
+     *
+     * [`scrgb_to_code`] finishes its chord with `f64` arithmetic rather
+     * than `f32::mul_add`, because `fma` is not in the x86-64 baseline
+     * and rustc lowers `f32::mul_add` to a libm `fmaf` call there, once
+     * per channel per pixel. The two spellings agree bit for bit
+     * because the exact product-sum is representable in an `f64` for
+     * every reachable input, so the single `as f32` is the single
+     * rounding `fmaf` performs:
+     *
+     * - `lo = lut[yi]` is an integer in `0..=range - 1`, exact in both
+     *   `f32` and `f64`.
+     * - `delta = lut[yi + 1] - lut[yi]` is an integer with
+     *   `|delta| <= 65535`, exact in both.
+     * - `t = yf - yi as f32` is exact: `yf < 2^24`, so subtracting its
+     *   truncated integer part cannot lose a bit, and `t` lands in
+     *   `[0, 1)`.
+     * - For `yi >= 1`, `yf >= 1` so `ulp(yf) >= 2^-23` and `t` is a
+     *   multiple of `2^-23`. Then `delta * t` is a multiple of `2^-23`
+     *   under `2^16`, and adding the integer `lo` keeps it a multiple
+     *   of `2^-23` under `2^17`: at most 40 significand bits, inside
+     *   `f64`'s 53.
+     * - For `yi == 0`, `lo == lut[0] == 0` (the linear arm gives `v = 0`
+     *   at `i = 0`), so the sum is a bare product of two `f32`s, exact
+     *   in `f64` at 24 + 24 = 48 bits.
+     *
+     * Works by taking `bits` as a raw `f32` pattern standing in for the
+     * clamped `yf`, so the caller owns the coverage and this owns only
+     * the comparison.
+     *
+     * Input: none. Nothing here is a parity claim against vips, it is a
+     * claim about two Rust expressions, so there is no oracle to read.
+     */
+    fn check_f64_chord_at(lut: &[i32], range: usize, bits: u32) {
+        let yf = f32::from_bits(bits);
+        let yi = yf as usize;
+        let lo = lut[yi];
+        let delta = (lut[yi + 1] - lo) as f32;
+        let t = yf - yi as f32;
+        let want = delta.mul_add(t, lo as f32);
+        let got = (f64::from(delta) * f64::from(t) + f64::from(lo)) as f32;
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "range {range}, yf bits {bits:#010x} ({yf:e}), yi {yi}, \
+             delta {delta}, lo {lo}: mul_add gives {want:e}, the f64 \
+             chord gives {got:e}"
+        );
+    }
+
+    /**
+     * The structural subset of the chord equivalence that runs on every
+     * `cargo test`, as against the exhaustive sweep in
+     * [`sweep_f64_chord_against_mul_add`], which does not.
+     *
+     * Works by checking, for one `range`:
+     *
+     * - `-0.0`, which survives the `clamp(0.0, maxval)` in
+     *   [`scrgb_to_code`] (it is neither below the low bound nor above
+     *   the high one) and so reaches the lookup;
+     * - every `f32` in `[1.0, 2.0)`, 8388608 patterns, which is where
+     *   the arithmetic is under the most pressure: `ulp(yf)` is at its
+     *   smallest of any `yi >= 1`, so `t` carries a full 23 fractional
+     *   bits, and `delta` is near its largest because the transfer
+     *   curve is steepest at the bottom of the table;
+     * - both ends of EVERY LUT cell, 64 patterns deep each way, so
+     *   `t == 0` and the largest `t` below 1 are covered at every `yi`,
+     *   including `yi == 0`, both knees of the piecewise curve, and the
+     *   `yi == range - 1` cell where the duplicated final entry makes
+     *   `delta` zero and the clamp allows only `t == 0`;
+     * - a stride of 4517 over the whole `+0.0..=maxval` bit range, so
+     *   every `f32` exponent is represented, denormals included. They
+     *   all land in `yi == 0`, which the per-cell walk only samples at
+     *   its two ends.
+     *
+     * That is a few tens of millions of patterns rather than the
+     * billion-odd the full sweep walks, and it runs in well under a
+     * second per range in a debug build.
+     *
+     * Input: none, see [`check_f64_chord_at`].
+     */
+    fn spot_check_f64_chord(range: usize) {
+        let lut = y2v_table(range);
+        let maxval = (range - 1) as f32;
+        let top = maxval.to_bits();
+
+        check_f64_chord_at(lut, range, 0x8000_0000);
+
+        for bits in 1.0_f32.to_bits()..2.0_f32.to_bits() {
+            check_f64_chord_at(lut, range, bits);
+        }
+
+        const BAND: u32 = 64;
+        for yi in 0..range {
+            let cell_lo = (yi as f32).to_bits();
+            let cell_hi = ((yi + 1) as f32).to_bits();
+            for bits in cell_lo..=(cell_lo + BAND).min(top) {
+                check_f64_chord_at(lut, range, bits);
+            }
+            for bits in cell_hi.saturating_sub(BAND)..cell_hi.min(top + 1) {
+                check_f64_chord_at(lut, range, bits);
+            }
+        }
+
+        const STRIDE: u32 = 4517;
+        let mut bits = 0;
+        while bits < top {
+            check_f64_chord_at(lut, range, bits);
+            bits += STRIDE;
+        }
+        check_f64_chord_at(lut, range, top);
+    }
+
+    /**
+     * The exhaustive sweep behind the two `#[ignore]`d
+     * `f64_chord_matches_mul_add_*` tests.
+     *
+     * Works by walking `yf` over EVERY `f32` bit pattern from `+0.0` to
+     * `maxval`, plus `-0.0`, which is a superset of what the clamp in
+     * [`scrgb_to_code`] can hand the lookup. That is 1132396546
+     * patterns at range 256 and 1199570690 at range 65536, so it is a
+     * real sweep of the index space rather than a sample of it, and it
+     * is why the two tests that call this are `#[ignore]`d rather than
+     * run on every `cargo test`. [`spot_check_f64_chord`] is what runs
+     * by default; it covers the structure but not the whole space.
+     *
+     * Input: none, see [`check_f64_chord_at`], whose doc carries the
+     * argument for why the two spellings must agree.
+     */
+    fn sweep_f64_chord_against_mul_add(range: usize) {
+        let lut = y2v_table(range);
+        let maxval = (range - 1) as f32;
+
+        let mut bits = 0x8000_0000_u32;
+        let top = maxval.to_bits();
+        loop {
+            check_f64_chord_at(lut, range, bits);
+            if bits == 0x8000_0000 {
+                bits = 0;
+            } else if bits == top {
+                break;
+            } else {
+                bits += 1;
+            }
+        }
+    }
+
+    /**
+     * Tests that the `f64` chord in [`scrgb_to_code`] is bit-identical
+     * to the `f32::mul_add` it replaced at every structurally
+     * interesting point of the 256-entry LUT.
+     *
+     * Works by [`spot_check_f64_chord`], whose doc lists exactly what
+     * that covers. The point of running it rather than only stating the
+     * argument is that the equivalence is what licenses dropping a
+     * per-pixel libm `fmaf` call on x86-64 without moving a single
+     * output code.
+     *
+     * Input: none, see the helper.
+     */
+    #[test]
+    fn f64_chord_matches_mul_add_over_the_srgb_lut_sample() {
+        spot_check_f64_chord(SRGB_RANGE);
+    }
+
+    /**
+     * Tests the same structural sample across the 65536-entry LUT.
+     *
+     * Input: none, see [`spot_check_f64_chord`].
+     */
+    #[test]
+    fn f64_chord_matches_mul_add_over_the_rgb16_lut_sample() {
+        spot_check_f64_chord(RGB16_RANGE);
+    }
+
+    /**
+     * Tests the same equivalence over EVERY `f32` the 256-entry lookup
+     * can be handed, not just the structural sample.
+     *
+     * `#[ignore]`d because it walks 1132396546 bit patterns. Measured
+     * on an M-series mac that is 10.64s in a debug build and about a
+     * second in release, and it will be worse on a target without `fma`
+     * in its baseline, where the `f32::mul_add` arm of the comparison
+     * is itself a libm call. Nothing in the default `cargo test` run
+     * covers the whole space; this is what does, and it is worth
+     * running whenever the LUT or the chord changes:
+     *
+     * ```text
+     * cargo test --release --lib -- --ignored f64_chord_matches_mul_add
+     * ```
+     *
+     * Input: none, see [`sweep_f64_chord_against_mul_add`].
+     */
+    #[test]
+    #[ignore = "walks every f32 bit pattern up to maxval; run with --ignored"]
+    fn f64_chord_matches_mul_add_over_the_whole_srgb_domain() {
+        sweep_f64_chord_against_mul_add(SRGB_RANGE);
+    }
+
+    /**
+     * Tests the same exhaustive equivalence across the whole
+     * 65536-entry LUT, 1199570690 bit patterns.
+     *
+     * Split from the 8-bit sweep so the two run on separate test
+     * threads; they have no state in common. `#[ignore]`d for the same
+     * reason, 10.30s in a debug build, and run by the same invocation
+     * as [`f64_chord_matches_mul_add_over_the_whole_srgb_domain`].
+     *
+     * Input: none, see [`sweep_f64_chord_against_mul_add`].
+     */
+    #[test]
+    #[ignore = "walks every f32 bit pattern up to maxval; run with --ignored"]
+    fn f64_chord_matches_mul_add_over_the_whole_rgb16_domain() {
+        sweep_f64_chord_against_mul_add(RGB16_RANGE);
     }
 
     /**
