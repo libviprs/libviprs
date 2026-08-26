@@ -305,6 +305,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Cmc -> Lch` output, this crate reproduces libvips' `Cmc -> Labs` codes on
   all 2100 channels of the same grid.
 
+- `smartcrop(Attention)` picks a different crop on any image that carries an
+  alpha band, and the pixels of `resize` / `reduce` / `shrink` / `affine` move
+  wherever an alpha lands near zero (issues #603, #604). Both are parity fixes
+  towards vips, so output that was wrong is now right, but output bytes for
+  shipped operations do move and a caller pinning them will see it.
+
+  `smartcrop` first. `vips_smartcrop_build` premultiplies once into float and
+  hands the result to `vips_resize`, which explicitly does **not** premultiply
+  ("This operation does not premultiply alpha. If your image has an alpha
+  channel, you should use premultiply on it first", `libvips/resample/resize.c`),
+  so the analysis image is still premultiplied when the argmax is taken and
+  every transparent pixel is still at colour 0. libviprs' `resize` premultiplies
+  on its own — a deliberate divergence from the C namesake, issue #458 — so it
+  was un-premultiplying the already-premultiplied analysis image on the way out,
+  the colour hiding behind transparent pixels came back amplified by
+  `max / alpha`, and those bright fake regions dominated the edge and skin
+  scores. On `rgba.png` at 80x60 that is the difference between (124, 84) and
+  vips' (20, 124), which is now what you get. The fix drops the alpha band
+  before the shrink, which is exactly what vips computes: it discards the band
+  immediately after the resize anyway (`extract_band(0, "n", 3)`), and a
+  resample that does not premultiply is per-band independent.
+
+  That asymmetry is the real trap and it is now written down in the
+  `resample` module docs, because it will catch the next operation that composes
+  on `resize`: **never hand `resize` an image you have already premultiplied.**
+
+  Second, the un-premultiply guards. libvips damps the factor to zero inside a
+  dead zone, `factor = fabs(alpha) < 0.01 ? 0 : max_alpha / alpha`, and clips
+  the alpha it stores with `VIPS_CLIP(0, alpha, max_alpha)`
+  (`libvips/conversion/unpremultiply.c`). libviprs tested only `alpha == 0.0`
+  and clipped neither end. That is not a theoretical gap: a lanczos resample
+  undershoots, so an alpha dipping to 0.003 or going slightly negative at a hard
+  transparency edge is ordinary, and dividing by it multiplies the colour by
+  ~333 or flips its sign into a saturated result. The literal `0.01` is absolute
+  in whatever units the alpha band carries and is deliberately not scaled by
+  `max` — measured on 8.18.4, `alpha = 0.02` on a `(100, 100, 100, alpha)` pixel
+  gives 5000 under scRGB, 1275000 under the 255 default and 327675008 under
+  RGB16 — so it works out to `0.01 / 255` of full scale on the 8-bit and float
+  carriers and `0.01 / 65535` on the 16-bit ones. The two guards stay separate,
+  as they are in C: the factor divides by the raw alpha so that an alpha
+  overshoot and the colour overshoot that came with it still cancel, and only
+  the stored alpha is clipped.
+
+  `premultiply` keeps no dead zone, and that asymmetry is libvips' rather than
+  an omission: premultiply multiplies by the alpha, so a near-zero one damps
+  instead of amplifying and there is no division to blow up. What it does have
+  is the mirror-image clip — the normalising factor is built from a clipped
+  alpha while the stored alpha stays raw, the other way round from
+  un-premultiply — and that is now ported too, so the bracket cancels on a round
+  trip. On the unsigned 8- and 16-bit carriers every one of these guards is
+  inert, which is why nothing but the float resample paths moved.
+
 ### Added
 
 - Canny edge detection: `Raster::canny` and `Raster::try_canny`, matching
