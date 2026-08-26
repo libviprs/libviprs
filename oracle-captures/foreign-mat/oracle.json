@@ -1,0 +1,1033 @@
+{
+  "meta": {
+    "area": "foreign-mat",
+    "issue": 640,
+    "parent_issue": 510,
+    "vips_version": "vips-8.18.6",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "operation": "matload",
+    "operation_listing": "VipsForeignLoadMat (matload), load mat from file (.mat), priority=0, untrusted, is_a, get_flags, get_flags_filename, header, load",
+    "vips_config": [
+      "Matlab load with matio: true"
+    ],
+    "save_operation": null,
+    "captured_by": "oracle-captures/foreign-mat/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted here. The binary every measurement came out of is the installed release named in vips_version above and is a DIFFERENT ARTEFACT from that tree, which is not a formality: see the oracle_binary_moved note.",
+    "underlying_library": "matio, via Mat_Open / Mat_VarReadNextInfo / Mat_VarReadDataAll. Every error message that is not one of matlab.c's own three comes from there.",
+    "fixture_count": 48,
+    "fixture_bytes": 9695
+  },
+  "notes": [
+    "matload is priority 0 and untrusted (matload.c:120-125). Unlike analyzeload it does not lower its priority, because the sniff is a fixed 128-byte read off the front of the file and costs nothing.",
+    "ORACLE BINARY MOVED. Homebrew replaced libvips 8.18.4 with 8.18.6 on this machine while this capture was being taken, so every number in this file came from 8.18.6 even though the epic runbook pins the oracle at 8.18.4. Only 8.18.6 is in the Cellar now, so 8.18.4 cannot be re-measured here.",
+    "The MAT sniff in 8.18.6 is STRICTER than both 8.18.4 and vips__mat_ismat in the v8.18.0-95-gfe420cf3a source tree: 128 bytes read rather than 10, plus a version and endian-indicator check. Follow the binary. The sniff_predicate record has the measured rule, the before/after and the disassembly. vips__isanalyze, disassembled the same way, DOES match its source.",
+    "The complex case is the sharpest reason to treat this loader as untrusted: it reads heap pointers out as pixel data, exits 0, and the documentation says the case cannot happen.",
+    "There is NO matsave. The format is load-only, so there is no round trip to pin and no save behaviour to match."
+  ],
+  "records": {
+    "column_major_is_transposed": {
+      "what": "mat2vips_get_header (matlab.c:190-205) reads height from dims[0] and width from dims[1], and mat2vips_get_data (matlab.c:276-300) walks the column-major buffer with a stride of es * Ysize to build each scanline. So a Matlab 2x3 (2 rows, 3 columns) becomes a vips 3x2 image, and element (r, c) of the array is pixel (c, r) of the image. That transpose is the single easiest thing to get backwards in a port, which is why every value below is asymmetric.",
+      "fixture": "fixtures/base_2x3_uint8.mat",
+      "sha256": "ac457d370a789c2a33a572937acf674d774b7f0df4ac51b7702856a4c3c8243f",
+      "bytes": 200,
+      "matlab_dims_rows_cols": [
+        2,
+        3
+      ],
+      "file_order_column_major": [
+        10,
+        40,
+        20,
+        50,
+        30,
+        60
+      ],
+      "header": {
+        "exit": 0,
+        "summary": "fixtures/base_2x3_uint8.mat: 3x2 uchar, 1 band, multiband, matload",
+        "width": "3",
+        "height": "2",
+        "bands": "1",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "multiband",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/base_2x3_uint8.mat",
+        "vips-loader": "matload"
+      },
+      "pixels": [
+        [
+          10.0
+        ],
+        [
+          20.0
+        ],
+        [
+          30.0
+        ],
+        [
+          40.0
+        ],
+        [
+          50.0
+        ],
+        [
+          60.0
+        ]
+      ],
+      "expected_raster_order": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60
+      ]
+    },
+    "magic_and_dispatch": {
+      "what": "The sniff is what decides whether a file reaches matload at all, and the SHIPPED 8.18.4 BINARY DOES NOT DO WHAT THE C SOURCE SAYS. See the sniff_predicate record below for the measured rule and the disassembly it came from. The loader underneath is matio's Mat_Open, which is more permissive than the sniff in one direction (it reads MAT-4) and less in another (it hands MAT-7.3 to libhdf5 and fails noisily), and the cases where the two disagree are the ones a port has to decide about deliberately.",
+      "registered_suffixes": [
+        ".mat"
+      ],
+      "priority": 0,
+      "cases": {
+        "mat_level_4": {
+          "first_10_bytes": [
+            0,
+            0,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0,
+            3,
+            0
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/level4.mat' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x2 double, 1 band, multiband, matload",
+            "pixels_available_at": "outputs/direct.v"
+          },
+          "direct_pixels": [
+            [
+              10.0
+            ],
+            [
+              20.0
+            ],
+            [
+              30.0
+            ],
+            [
+              40.0
+            ],
+            [
+              50.0
+            ],
+            [
+              60.0
+            ]
+          ],
+          "note": "matio reads MAT-4 and gives the SAME 3x2 image, as double rather than uchar because MAT-4 stores everything as double. vips will never reach it through new_from_file: the sniff rejects the file and the chain falls through to magickload, which reports a TGA error."
+        },
+        "mat_level_7_3": {
+          "first_10_bytes": "MATLAB 7.3",
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/level73_hdf5.mat\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: no matrix variables in \"fixtures/level73_hdf5.mat\""
+          },
+          "note": "the sniff says no twice over: the text header starts `MATLAB 7.3` rather than the literal `MATLAB 5.0`, and the version word is 0x0200 rather than 0x0100. A DIRECT matload gets as far as Mat_Open, which detects the HDF5 signature and hands the file to libhdf5; libhdf5 then prints a nine-line HDF5-DIAG block to stderr (stripped from the message below) before matio gives up. So matload's real-world failure on a modern `.mat` is noisy and comes from a library vips does not control. Since MATLAB has written 7.3 by default for large arrays since R2006b, this is the failure most users will actually hit."
+        },
+        "prefix_matches_rest_is_garbage": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_only.mat\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: unable to open \"fixtures/magic_only.mat\""
+          },
+          "note": "128 bytes and the right ten-byte prefix, and the sniff STILL refuses, because bytes 124..127 are not a valid version/endian-indicator pair. Compare `header_only_no_variables` below, which differs only in those four bytes and is accepted."
+        },
+        "header_only_no_variables": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: no matrix variables in \"fixtures/header_only.mat\""
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: no matrix variables in \"fixtures/header_only.mat\""
+          },
+          "note": "the sniff passes on the 128-byte header alone and the failure comes out of read_new's search loop. A port has to reproduce BOTH sides or it will disagree with vips about which loader owns a file."
+        },
+        "nine_bytes": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/nine_bytes.mat\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: unable to open \"fixtures/nine_bytes.mat\""
+          },
+          "note": "the shipped sniff asks for 128 bytes and requires all 128, so any file below that length is rejected before the prefix comparison runs. See sniff_predicate.length_floor."
+        },
+        "prefix_then_arbitrary_text": {
+          "text": "MATLAB 5.0 anything at all can follow here",
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/prefix_only.mat: 3x2 uchar, 1 band, multiband, matload"
+          },
+          "note": "bytes 10..123 are free text as far as the sniff is concerned, so anything may follow the ten-byte prefix as long as the version and endian indicator at 124..127 are right."
+        },
+        "MATLAB 5.1": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_MATLAB_51.mat\" is not a known file format"
+          },
+          "direct_exit": 0
+        },
+        "matlab 5.0": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_matlab_50.mat\" is not a known file format"
+          },
+          "direct_exit": 0
+        },
+        "MATLAB_5.0": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_MATLAB_50.mat\" is not a known file format"
+          },
+          "direct_exit": 0
+        }
+      }
+    },
+    "sniff_predicate": {
+      "what": "THE C SOURCE IN THE REFERENCE CHECKOUT IS NOT WHAT RUNS, AND THIS PARTICULAR RULE CHANGED UNDER US MID-CAPTURE. vips__mat_ismat at matlab.c:326-336 of v8.18.0-95-gfe420cf3a reads TEN bytes and compares them to `MATLAB 5.0`, and nothing else. The installed 8.18.6 dylib reads ONE HUNDRED AND TWENTY-EIGHT and also validates the version word and the endian indicator, and 8.18.4, which was the installed build when this capture started, did NOT. See measured_change_between_8_18_4_and_8_18_6 below. A port written from the checkout source would accept a large class of files 8.18.6 refuses, and would route them to itself instead of leaving them to the next loader. Everything here was measured from the binary and then confirmed against its disassembly.",
+      "measured_rule": [
+        "vips__get_bytes(filename, buf, 128) must return exactly 128, so a file shorter than 128 bytes is refused outright",
+        "vips_isprefix(\"MATLAB 5.0\", buf), i.e. bytes 0..9 are that exact case-sensitive string",
+        "bytes 126..127 are the endian indicator and must be `IM` or `MI`; anything else is refused",
+        "bytes 124..125 are the version, read in the order the indicator declares, and must equal 0x0100; 0x0200 (which is what a MAT-7.3 file carries) is refused",
+        "bytes 10..123, the free-text description and the subsystem data offset, are not looked at at all"
+      ],
+      "measured_change_between_8_18_4_and_8_18_6": {
+        "what": "Homebrew replaced libvips 8.18.4 with 8.18.6 on this machine part-way through this capture. The same 210-byte file, `MATLAB 5.0` followed by 200 bytes of 0xff, was measured under both.",
+        "under_8_18_4": "vipsheader printed `mat2vips: unable to open \"magic_only.mat\"`, i.e. the sniff ACCEPTED it, matload was selected, and Mat_Open then refused it",
+        "under_8_18_6": "vipsheader prints `VipsForeignLoad: \"...\" is not a known file format`, i.e. the sniff REFUSED it and no loader was selected at all",
+        "caveat": "8.18.4 is no longer installed (the Cellar holds only 8.18.6) so capture.py cannot re-derive the first half. It is recorded here as an observation, not as a reproducible measurement, and the 8.18.6 half is what the rest of this record pins.",
+        "why_it_matters": "the runbook pins this epic's oracle at 8.18.4. Any capture taken before the upgrade and any capture taken after it came from different binaries, and at least this one predicate differs between them."
+      },
+      "disassembly": {
+        "command": "otool -tvV -p _vips__mat_ismat /opt/homebrew/lib/libvips.42.dylib   # 8.18.6",
+        "shape": [
+          "bl _vips__get_bytes with w2 = #0x80",
+          "cmp x0, #0x80 / b.lt <fail>",
+          "bl _vips_isprefix on \"MATLAB 5.0\" / cbz <fail>",
+          "ldrb w11, [buf+126] ; ldrb w10, [buf+127]",
+          "cmp w11, #0x49 ('I') && cmp w10, #0x4d ('M') -> lo=buf[124], hi=buf[125]",
+          "else cmp w11, #0x4d ('M') && cmp w10, #0x49 ('I') -> lo=buf[125], hi=buf[124]",
+          "else return 0",
+          "orr w8, lo, hi, lsl #8 ; cmp w8, #0x100 ; b.ne <fail>",
+          "return 1"
+        ]
+      },
+      "byte_positions_that_change_the_answer": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        124,
+        125,
+        126,
+        127
+      ],
+      "version_and_indicator_pairs": {
+        "0001/'IM'": true,
+        "0100/'IM'": false,
+        "0100/'MI'": true,
+        "0001/'MI'": false,
+        "0002/'IM'": false,
+        "0200/'MI'": false,
+        "0001/'im'": false,
+        "0001/'MM'": false,
+        "0001/'\\x00\\x00'": false
+      },
+      "length_floor": {
+        "0": false,
+        "9": false,
+        "10": false,
+        "64": false,
+        "127": false,
+        "128": true,
+        "129": true,
+        "200": true
+      }
+    },
+    "rank_and_variable_selection": {
+      "what": "matload loads ONE variable and there is no option to choose which. read_new takes the first with rank in 1..=3 and every other variable in the file is invisible. The gtkdoc at matload.c:157-159 says `the first array variable with between 1 and 3 dimensions`, and matlab.c:49-50 has an open question in the source asking whether that is sensible behaviour. It is the behaviour, so a port has to match it.",
+      "cases": {
+        "1": {
+          "dims": [
+            4
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/rank1.mat: 1x4 uchar, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              11.0
+            ],
+            [
+              22.0
+            ],
+            [
+              33.0
+            ],
+            [
+              44.0
+            ]
+          ],
+          "note": "width stays at the 1 mat2vips_get_header initialised it to (matlab.c:188), height is dims[0]. A rank-1 variable is a 1-pixel-wide column. MATLAB itself never writes rank 1 (it pads everything to at least 2 dimensions), so this branch is reachable only from a hand-built or non-MATLAB writer, which is exactly the case an untrusted loader has to survive."
+        },
+        "2": {
+          "dims": [
+            2,
+            3
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/base_2x3_uint8.mat: 3x2 uchar, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              10.0
+            ],
+            [
+              20.0
+            ],
+            [
+              30.0
+            ],
+            [
+              40.0
+            ],
+            [
+              50.0
+            ],
+            [
+              60.0
+            ]
+          ]
+        },
+        "3": {
+          "dims": [
+            2,
+            3,
+            3
+          ],
+          "file_order": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/rank3_2x3x3.mat: 3x2 uchar, 3 bands, srgb, matload",
+            "width": "3",
+            "height": "2",
+            "bands": "3",
+            "format": "uchar",
+            "coding": "none",
+            "interpretation": "srgb",
+            "xoffset": "0",
+            "yoffset": "0",
+            "xres": "1",
+            "yres": "1",
+            "filename": "fixtures/rank3_2x3x3.mat",
+            "vips-loader": "matload"
+          },
+          "pixels": [
+            [
+              1.0,
+              11.0,
+              21.0
+            ],
+            [
+              3.0,
+              13.0,
+              23.0
+            ],
+            [
+              5.0,
+              15.0,
+              25.0
+            ],
+            [
+              2.0,
+              12.0,
+              22.0
+            ],
+            [
+              4.0,
+              14.0,
+              24.0
+            ],
+            [
+              6.0,
+              16.0,
+              26.0
+            ]
+          ],
+          "note": "dims[2] becomes the BAND count and the file holds the planes one after another, each one a full column-major 2x3. mat2vips_get_data reassembles them interleaved with an offset of b * es * N_PELS (matlab.c:286). The comment at matlab.c:258-259 calls this out: Matlab images are plane-separate and vips images are interleaved."
+        },
+        "4_alone": {
+          "dims": [
+            2,
+            2,
+            2,
+            2
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: no matrix variables in \"fixtures/rank4_only.mat\""
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: no matrix variables in \"fixtures/rank4_only.mat\""
+          },
+          "note": "read_new (matlab.c:118-140) loops over Mat_VarReadNextInfo and FREES any variable outside rank 1..=3, then keeps looking. With nothing else in the file it runs off the end and reports `no matrix variables`, which is a slightly misleading message for a file that does contain a matrix."
+        },
+        "4_then_2": {
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/rank4_then_rank2.mat: 2x2 uchar, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              7.0
+            ],
+            [
+              9.0
+            ],
+            [
+              8.0
+            ],
+            [
+              10.0
+            ]
+          ],
+          "note": "the rank-4 variable is skipped and the rank-2 one loads. Note that the SECOND variable's name is what ends up in the image and there is no way to ask for a particular variable: matload has exactly one argument, the filename."
+        }
+      }
+    },
+    "class_to_carrier": {
+      "what": "mat2vips_formats (matlab.c:147-156) is an eight-entry table and mat2vips_get_header refuses anything not in it with `unsupported class type %d`. The band format follows the Matlab class alone; the ARRAY FLAGS word is read only for the class byte, so the logical bit is ignored and a logical array loads as whatever its storage class is.",
+      "supported": {
+        "MAT_C_UINT8": {
+          "class_type": 9,
+          "values_column_major": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_uint8.mat: 2x2 uchar, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              1.0
+            ],
+            [
+              3.0
+            ],
+            [
+              2.0
+            ],
+            [
+              4.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_uint8.mat: 2x2 uchar, 3 bands, srgb, matload"
+        },
+        "MAT_C_INT8": {
+          "class_type": 8,
+          "values_column_major": [
+            -1,
+            2,
+            -3,
+            4
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_int8.mat: 2x2 char, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              -1.0
+            ],
+            [
+              -3.0
+            ],
+            [
+              2.0
+            ],
+            [
+              4.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_int8.mat: 2x2 char, 3 bands, srgb, matload"
+        },
+        "MAT_C_UINT16": {
+          "class_type": 11,
+          "values_column_major": [
+            1,
+            500,
+            3,
+            65535
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_uint16.mat: 2x2 ushort, 1 band, grey16, matload"
+          },
+          "pixels": [
+            [
+              1.0
+            ],
+            [
+              3.0
+            ],
+            [
+              500.0
+            ],
+            [
+              65535.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_uint16.mat: 2x2 ushort, 3 bands, rgb16, matload"
+        },
+        "MAT_C_INT16": {
+          "class_type": 10,
+          "values_column_major": [
+            -1,
+            500,
+            -3,
+            32767
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_int16.mat: 2x2 short, 1 band, grey16, matload"
+          },
+          "pixels": [
+            [
+              -1.0
+            ],
+            [
+              -3.0
+            ],
+            [
+              500.0
+            ],
+            [
+              32767.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_int16.mat: 2x2 short, 3 bands, rgb16, matload"
+        },
+        "MAT_C_UINT32": {
+          "class_type": 13,
+          "values_column_major": [
+            1,
+            70000,
+            3,
+            4294967295
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_uint32.mat: 2x2 uint, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              1.0
+            ],
+            [
+              3.0
+            ],
+            [
+              70000.0
+            ],
+            [
+              4294967295.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_uint32.mat: 2x2 uint, 3 bands, multiband, matload"
+        },
+        "MAT_C_INT32": {
+          "class_type": 12,
+          "values_column_major": [
+            -1,
+            70000,
+            -3,
+            2147483647
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_int32.mat: 2x2 int, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              -1.0
+            ],
+            [
+              -3.0
+            ],
+            [
+              70000.0
+            ],
+            [
+              2147483647.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_int32.mat: 2x2 int, 3 bands, multiband, matload"
+        },
+        "MAT_C_SINGLE": {
+          "class_type": 7,
+          "values_column_major": [
+            1.5,
+            -2.25,
+            3.125,
+            4.0
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_single.mat: 2x2 float, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              1.5
+            ],
+            [
+              3.125
+            ],
+            [
+              -2.25
+            ],
+            [
+              4.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_single.mat: 2x2 float, 3 bands, multiband, matload"
+        },
+        "MAT_C_DOUBLE": {
+          "class_type": 6,
+          "values_column_major": [
+            1.5,
+            -2.25,
+            3.125,
+            4.0
+          ],
+          "header": {
+            "exit": 0,
+            "summary": "fixtures/class_mat_c_double.mat: 2x2 double, 1 band, multiband, matload"
+          },
+          "pixels": [
+            [
+              1.5
+            ],
+            [
+              3.125
+            ],
+            [
+              -2.25
+            ],
+            [
+              4.0
+            ]
+          ],
+          "three_band_header": "fixtures/bands3_mat_c_double.mat: 2x2 double, 3 bands, multiband, matload"
+        }
+      },
+      "unsupported": {
+        "MAT_C_INT64": {
+          "class_type": 14,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: unsupported class type 14"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: unsupported class type 14"
+          }
+        },
+        "MAT_C_UINT64": {
+          "class_type": 15,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: unsupported class type 15"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: unsupported class type 15"
+          }
+        },
+        "MAT_C_CHAR": {
+          "class_type": 4,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: unsupported class type 4"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: unsupported class type 4"
+          }
+        },
+        "MAT_C_SPARSE": {
+          "class_type": 5,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: unsupported class type 5"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: unsupported class type 5"
+          }
+        }
+      },
+      "logical_flag_is_ignored": {
+        "fixture": "fixtures/logical_uint8.mat",
+        "flags_word_bit": "0x02 (logical), set",
+        "header": {
+          "exit": 0,
+          "summary": "fixtures/logical_uint8.mat: 2x2 uchar, 1 band, multiband, matload"
+        },
+        "pixels": [
+          [
+            0.0
+          ],
+          [
+            1.0
+          ],
+          [
+            1.0
+          ],
+          [
+            0.0
+          ]
+        ]
+      },
+      "rank_filter_runs_before_the_class_check": {
+        "what": "read_new's loop breaks out on the first variable with rank 1..=3 and the class check does not happen until mat2vips_get_header, by which point the loop is over. So a file whose first rank-2 variable is int64 FAILS OUTRIGHT even though a perfectly loadable uint8 variable follows it. Contrast the rank_4_then_2 case, where the skip does work. A port that filters on class inside the search loop would load this file and disagree with vips.",
+        "fixture": "fixtures/int64_then_uint8.mat",
+        "variables": [
+          "bad: 2x2 int64",
+          "good: 2x2 uint8"
+        ],
+        "sniffed": {
+          "exit": 1,
+          "stderr": "vipsheader: mat2vips: unsupported class type 14"
+        },
+        "direct": {
+          "exit": 1,
+          "stderr": "mat2vips: unsupported class type 14"
+        }
+      }
+    },
+    "interpretation": {
+      "what": "mat2vips_pick_interpretation (matlab.c:160-178) is four ifs and a default. Read them off the headers in class_to_carrier rather than from the source, because the last two branches are unreachable: `if (bands > 1) return MULTIBAND` and the final `return MULTIBAND` do the same thing. The consequence worth pinning is the ONE-BAND UCHAR case: it gets MULTIBAND, not b-w, so a greyscale uint8 array loads untagged. Analyze, the other loader in this pair, tags the same shape b-w.",
+      "rules": {
+        "bands == 3 and 8-bit (uchar or char)": "sRGB",
+        "bands == 3 and ushort or short": "RGB16",
+        "bands == 1 and ushort or short": "GREY16",
+        "everything else, including 1-band uchar": "MULTIBAND"
+      },
+      "note": "vips_band_format_is8bit is true for both UCHAR and CHAR, so a 3-band int8 array is tagged sRGB even though half its range is negative."
+    },
+    "byte_order": {
+      "what": "Unlike Analyze, MAT-5 declares its own byte order: the last two bytes of the 128-byte header are `IM` for little-endian and `MI` for big-endian, and every multi-byte field in the file follows. vips does not touch any of this; matio swaps where it needs to and hands vips native-order data. So there is no byteswap in matlab.c at all, and a port must delegate byte order to its MAT reader rather than applying one itself. The two files below hold the same four shorts in opposite orders and produce identical pixels.",
+      "shorts": [
+        1,
+        256,
+        -1,
+        4660
+      ],
+      "little_endian_IM": {
+        "fixture": "fixtures/endian_little.mat",
+        "sha256": "38f9ce7eb37f1a1f7439197bdf9b4da3652564e6dfdede9bead9693480c1a548",
+        "header": {
+          "exit": 0,
+          "summary": "fixtures/endian_little.mat: 2x2 short, 1 band, grey16, matload"
+        },
+        "pixels": [
+          [
+            1.0
+          ],
+          [
+            -1.0
+          ],
+          [
+            256.0
+          ],
+          [
+            4660.0
+          ]
+        ]
+      },
+      "big_endian_MI": {
+        "fixture": "fixtures/endian_big.mat",
+        "sha256": "9d64ccff81a553c7fab747e341235fc1a203bf9985a1f51f0fcdd6110171736c",
+        "header": {
+          "exit": 0,
+          "summary": "fixtures/endian_big.mat: 2x2 short, 1 band, grey16, matload"
+        },
+        "pixels": [
+          [
+            1.0
+          ],
+          [
+            -1.0
+          ],
+          [
+            256.0
+          ],
+          [
+            4660.0
+          ]
+        ]
+      },
+      "bogus_indicator_XY": {
+        "fixture": "fixtures/endian_bogus.mat",
+        "sniffed": {
+          "exit": 1,
+          "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/endian_bogus.mat' @ error/mat.c/ReadMATImage/1004 (null)"
+        },
+        "direct": {
+          "exit": 1,
+          "stderr": "mat2vips: unable to open \"fixtures/endian_bogus.mat\""
+        },
+        "note": "an otherwise-valid little-endian file with the two indicator bytes replaced. The sniff REFUSES it, and the chain falls through to magickload, which has a MAT reader of its own and reports from coders/mat.c rather than from vips. A direct matload gets to Mat_Open and fails there."
+      }
+    },
+    "compressed_elements": {
+      "what": "Every MATLAB release since 7 writes each variable inside a miCOMPRESSED (type 15) zlib stream by default, so a real-world `.mat` is compressed and a port that only reads bare elements will fail on almost every file it meets. matio inflates them transparently and vips never sees the difference: the two records here are the same 2x3 array as the base case.",
+      "valid": {
+        "fixture": "fixtures/compressed.mat",
+        "bytes": 184,
+        "header": {
+          "exit": 0,
+          "summary": "fixtures/compressed.mat: 3x2 uchar, 1 band, multiband, matload"
+        },
+        "pixels": [
+          [
+            10.0
+          ],
+          [
+            20.0
+          ],
+          [
+            30.0
+          ],
+          [
+            40.0
+          ],
+          [
+            50.0
+          ],
+          [
+            60.0
+          ]
+        ]
+      },
+      "corrupt_stream": {
+        "fixture": "fixtures/compressed_corrupt.mat",
+        "sniffed": {
+          "exit": 1,
+          "stderr": "vipsheader: mat2vips: no matrix variables in \"fixtures/compressed_corrupt.mat\""
+        },
+        "direct": {
+          "exit": 1,
+          "stderr": "mat2vips: no matrix variables in \"fixtures/compressed_corrupt.mat\""
+        }
+      }
+    },
+    "refusals": {
+      "what": "matload is registered UNTRUSTED (matload.c:120-123) with the comment `libmatio is fuzzed, but not by us`, so this is the half of its behaviour that matters most. vips itself has only three refusals, all in matlab.c: `unable to open` (Mat_Open failed, line 112), `no matrix variables` (the search ran off the end, line 120) and `unsupported class type` (line 211). Everything else comes out of matio, arrives as `Mat_VarReadDataAll failed` (line 264) with no detail, and arrives LATE, at first pixel rather than at header time.",
+      "cases": {
+        "no_variables_at_all": {
+          "fixture": "fixtures/header_only.mat",
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: no matrix variables in \"fixtures/header_only.mat\""
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: no matrix variables in \"fixtures/header_only.mat\""
+          },
+          "note": "a bare 128-byte header. read_new runs Mat_VarReadNextInfo once, gets NULL, and reports `no matrix variables`."
+        },
+        "element_length_overruns_the_file": {
+          "declared_element_bytes": 1048576,
+          "actual_bytes_after_tag": 16,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: mat2vips: no matrix variables in \"fixtures/tag_overruns_file.mat\""
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: no matrix variables in \"fixtures/tag_overruns_file.mat\""
+          }
+        },
+        "truncated_mid_data_element": {
+          "bytes_removed": 8,
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/truncated.mat: 3x2 uchar, 1 band, multiband, matload"
+          },
+          "avg": {
+            "exit": 1,
+            "stderr": "mat2vips: Mat_VarReadDataAll failed"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: Mat_VarReadDataAll failed"
+          },
+          "give_up_point": "the HEADER load succeeds and reports the full 3x2. mat2vips_get_header reads only the dims and class out of Mat_VarReadNextInfo, which is an info-only read; nothing checks that the data element is present until Mat_VarReadDataAll runs in mat2vips_get_data."
+        },
+        "dims_100x100_with_4_bytes_of_data": {
+          "declared_pixels": 10000,
+          "data_bytes": 4,
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dims_100x100_four_bytes.mat: 100x100 uchar, 1 band, multiband, matload"
+          },
+          "avg": {
+            "exit": 1,
+            "stderr": "mat2vips: Mat_VarReadDataAll failed"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: Mat_VarReadDataAll failed"
+          }
+        },
+        "dims_100000x100000": {
+          "declared_pixels": 10000000000,
+          "data_bytes": 8,
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dims_100000x100000.mat: 100000x100000 uchar, 1 band, multiband, matload"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "mat2vips: Mat_VarReadDataAll failed"
+          },
+          "note": "the header load reports a 10-gigapixel image without complaint. matio refuses the allocation when the data is actually asked for, so the process does not try to reserve 10 GB, but nothing in vips imposed that limit."
+        },
+        "zero_and_negative_dimensions_are_clamped_not_refused": {
+          "what": "Same defect as analyzeload's: a non-positive dimension reaches vips_image_init_fields, GObject's range check rejects it, prints a GLib-GObject-CRITICAL, LEAVES THE PROPERTY AT 1, and the load carries on and exits 0. A 0x3 array therefore loads as a 3x1 image reading data that is not there. A port should refuse, and should record that as a deliberate divergence.",
+          "dim0_zero": {
+            "fixture": "fixtures/dim_zero.mat",
+            "sniffed": {
+              "exit": 0,
+              "summary": "fixtures/dim_zero.mat: 3x1 uchar, 1 band, multiband, matload",
+              "stderr": "GLib-GObject-CRITICAL: value \"0\" of type 'gint' is invalid or out of range for property 'height' of type 'gint'"
+            },
+            "direct": {
+              "exit": 0,
+              "stderr": "GLib-GObject-CRITICAL: value \"0\" of type 'gint' is invalid or out of range for property 'height' of type 'gint'",
+              "header": "outputs/direct.v: 3x1 uchar, 1 band, multiband, matload",
+              "pixels_available_at": "outputs/direct.v"
+            }
+          },
+          "dim0_minus_2": {
+            "fixture": "fixtures/dim_negative.mat",
+            "sniffed": {
+              "exit": 0,
+              "summary": "fixtures/dim_negative.mat: 3x1 uchar, 1 band, multiband, matload",
+              "stderr": "GLib-GObject-CRITICAL: value \"-2\" of type 'gint' is invalid or out of range for property 'height' of type 'gint'"
+            },
+            "direct": {
+              "exit": 1,
+              "stderr": "GLib-GObject-CRITICAL: value \"-2\" of type 'gint' is invalid or out of range for property 'height' of type 'gint'\nmat2vips: Mat_VarReadDataAll failed"
+            }
+          },
+          "pixels_are_not_pinned": "the clamped images read past a zero-length or under-length allocation, so their values are not stable and are deliberately not recorded as expectations."
+        }
+      }
+    },
+    "complex_arrays_are_not_refused": {
+      "what": "matload.c:158 says `It will not handle complex images` and matlab.c:45 lists it as a remaining issue, but there is no check anywhere. The array flags' complex bit is never read: mat2vips_get_header maps MAT_C_DOUBLE to VIPS_FORMAT_DOUBLE and mat2vips_get_data memcpys out of var->data, which for a complex variable is a mat_complex_split_t holding two POINTERS. So the pixels are the raw bytes of two heap addresses. The load exits 0 and the values change from run to run under ASLR, which is why they are recorded below as evidence rather than pinned as an expectation. A port must refuse complex arrays outright, and should say so.",
+      "fixture": "fixtures/complex_double.mat",
+      "real_part": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "imaginary_part": [
+        9.0,
+        8.0,
+        7.0,
+        6.0
+      ],
+      "header": {
+        "exit": 0,
+        "summary": "fixtures/complex_double.mat: 2x2 double, 1 band, multiband, matload"
+      },
+      "getpoint_0_0_three_separate_runs": [
+        {
+          "exit": 0,
+          "stdout": "2.1629298174625986e-314",
+          "stderr": ""
+        },
+        {
+          "exit": 0,
+          "stdout": "2.1641543967148052e-314",
+          "stderr": ""
+        },
+        {
+          "exit": 0,
+          "stdout": "2.6450702569360323e-313",
+          "stderr": ""
+        }
+      ],
+      "values_are_stable_across_runs": false,
+      "expected_if_it_worked": "a 2x2 VIPS_FORMAT_DPCOMPLEX image, or a refusal. It produces neither."
+    }
+  }
+}

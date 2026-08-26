@@ -1,0 +1,1320 @@
+{
+  "meta": {
+    "area": "foreign-analyze",
+    "issue": 640,
+    "parent_issue": 510,
+    "vips_version": "vips-8.18.6",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "operation": "analyzeload",
+    "operation_listing": "VipsForeignLoadAnalyze (analyzeload), load an Analyze6 image (.img, .hdr), priority=-50, untrusted, is_a, get_flags, get_flags_filename, header, load",
+    "save_operation": null,
+    "captured_by": "oracle-captures/foreign-analyze/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted here. The binary every measurement came out of is the installed release named in vips_version above and is a DIFFERENT ARTEFACT from that tree, which is not a formality: see the oracle_binary_moved note.",
+    "fixture_count": 82,
+    "fixture_bytes": 16162
+  },
+  "notes": [
+    "analyzeload is registered at priority -50 with is_a = vips__isanalyze, and vips__isanalyze opens and fully parses the .hdr. When it says no, the sniffing chain falls through to magickload, which reports a TGA error. Every refusal here therefore records BOTH the sniffed message (useless) and the direct-operator message (the real one).",
+    "ORACLE BINARY MOVED. Homebrew replaced libvips 8.18.4 with 8.18.6 on this machine while this capture was being taken, so every number in this file came from 8.18.6 even though the epic runbook pins the oracle at 8.18.4. Only 8.18.6 is in the Cellar now, so 8.18.4 cannot be re-measured here. Nothing in THIS file is known to differ between the two: vips__isanalyze and read_header were disassembled out of the 8.18.6 dylib and match the checkout source instruction for instruction in shape. The companion foreign-mat capture found a predicate that DOES differ, so the warning is worth carrying.",
+    "There is NO analyzesave. The format is load-only in this build and in libvips generally, so there is no round trip to pin and no save behaviour to match.",
+    "priority is -50 (analyzeload.c:131), the lowest of any loader in this build, because is_a has to open and fully parse a second file. Any port that sniffs Analyze earlier than that will steal files from loaders that should have won."
+  ],
+  "records": {
+    "hdr_img_pairing": {
+      "what": "generate_filenames (analyze2vips.c:224-231) rewrites whatever you hand it into BOTH names via vips__change_suffix, stripping a trailing `.img` or `.hdr` first. So `.hdr`, `.img` and the bare stem all name the same image, and the pixels always come from the `.img` while the geometry always comes from the `.hdr`. The bare stem works only through a DIRECT `vips analyzeload` call: `vipsheader fred` fails first, in VipsForeignLoad's own existence check, before is_a ever runs. The gtkdoc at analyzeload.c:161-163 says you can load `fred` and that is true of the operator, not of new_from_file.",
+      "registered_suffixes": [
+        ".img",
+        ".hdr"
+      ],
+      "cases": {
+        "hdr": {
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/base_2d_uchar.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x2 uchar, 1 band, b-w, analyzeload"
+          }
+        },
+        "img": {
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/base_2d_uchar.img: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x2 uchar, 1 band, b-w, analyzeload"
+          }
+        },
+        "stem": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: file \"fixtures/base_2d_uchar\" does not exist"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x2 uchar, 1 band, b-w, analyzeload"
+          }
+        },
+        "hdr_without_img": {
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/no_img.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "avg": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/no_img.img\"\nsystem error: No such file or directory"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/no_img.img\"\nsystem error: No such file or directory"
+          }
+        },
+        "img_without_hdr": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/no_hdr.img\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "vips__file_open_read: unable to open file \"fixtures/no_hdr.hdr\" for reading\nsystem error: No such file or directory"
+          }
+        }
+      },
+      "give_up_point": "A missing or short `.img` is invisible to the header load: vips__analyze_read_header only reads the `.hdr`. The failure lands in vips__analyze_read, at vips_image_new_from_file_raw, i.e. on the first pixel fetch."
+    },
+    "datatype_to_carrier": {
+      "what": "get_vips_properties (analyze2vips.c:385-425) is the whole carrier table, and it is a closed switch on dime.datatype: everything else is `datatype %d not supported`. bitpix is attached as metadata and NEVER consulted, so a header claiming bitpix 1 for DT_UNSIGNED_CHAR still reads 8-bit pixels. Note DT_BINARY (1) is in dbh.h and is NOT implemented, and DT_RGB (128) is the only value that gives more than one band.",
+      "measured": {
+        "0": {
+          "constant": "unnamed (0)",
+          "bitpix_written": 0,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/dt0.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: datatype 0 not supported"
+          }
+        },
+        "1": {
+          "constant": "DT_BINARY",
+          "bitpix_written": 1,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/dt1.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: datatype 1 not supported"
+          }
+        },
+        "2": {
+          "constant": "DT_UNSIGNED_CHAR",
+          "bitpix_written": 8,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt2.hdr: 2x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              1.0
+            ],
+            [
+              2.0
+            ],
+            [
+              3.0
+            ],
+            [
+              4.0
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 2.5
+          }
+        },
+        "4": {
+          "constant": "DT_SIGNED_SHORT",
+          "bitpix_written": 16,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt4.hdr: 2x2 short, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 short, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              258.0
+            ],
+            [
+              772.0
+            ],
+            [
+              1286.0
+            ],
+            [
+              1800.0
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 1029.0
+          }
+        },
+        "8": {
+          "constant": "DT_SIGNED_INT",
+          "bitpix_written": 32,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt8.hdr: 2x2 int, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 int, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              16909060.0
+            ],
+            [
+              84281096.0
+            ],
+            [
+              151653132.0
+            ],
+            [
+              219025168.0
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 117967114.0
+          }
+        },
+        "16": {
+          "constant": "DT_FLOAT",
+          "bitpix_written": 32,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt16.hdr: 2x2 float, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 float, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              2.387939260590663e-38
+            ],
+            [
+              6.301941157072183e-36
+            ],
+            [
+              1.6616339986002605e-33
+            ],
+            [
+              4.377525916134508e-31
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 0.0
+          }
+        },
+        "32": {
+          "constant": "DT_COMPLEX",
+          "bitpix_written": 64,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt32.hdr: 2x2 complex, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 complex, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              2.387939260590663e-38
+            ],
+            [
+              1.6616339986002605e-33
+            ],
+            [
+              1.1523248117382014e-28
+            ],
+            [
+              7.967088090505125e-24
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 0.0
+          }
+        },
+        "64": {
+          "constant": "DT_DOUBLE",
+          "bitpix_written": 64,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt64.hdr: 2x2 double, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 double, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              8.20788039913184e-304
+            ],
+            [
+              4.0383818836028145e-265
+            ],
+            [
+              1.9074368412237584e-226
+            ],
+            [
+              9.374785652731001e-188
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 0.0
+          }
+        },
+        "128": {
+          "constant": "DT_RGB",
+          "bitpix_written": 24,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dt128.hdr: 2x2 uchar, 3 bands, srgb, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x2 uchar, 3 bands, srgb, analyzeload"
+          },
+          "pixels": [
+            [
+              1.0,
+              2.0,
+              3.0
+            ],
+            [
+              4.0,
+              5.0,
+              6.0
+            ],
+            [
+              7.0,
+              8.0,
+              9.0
+            ],
+            [
+              10.0,
+              11.0,
+              12.0
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 6.5
+          }
+        },
+        "256": {
+          "constant": "unnamed (256)",
+          "bitpix_written": 8,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/dt256.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: datatype 256 not supported"
+          }
+        },
+        "511": {
+          "constant": "unnamed (511)",
+          "bitpix_written": 8,
+          "img_bytes": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/dt511.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: datatype 511 not supported"
+          }
+        }
+      },
+      "getpoint_on_complex": "DT_COMPLEX gives a 1-band VIPS_FORMAT_COMPLEX image and `vips getpoint` prints only the REAL part, so the dt32 pixels below are the first float of each 8-byte pair and the imaginary halves are not pinned here.",
+      "interpretation_rule": "bands == 1 -> b-w, otherwise sRGB (analyze2vips.c:544-546). There is no 16-bit greyscale or RGB16 tag: a DT_SIGNED_SHORT image is tagged b-w, not grey16."
+    },
+    "rank_and_flattening": {
+      "what": "dim[0] is the rank and must be in 2..=7 (analyze2vips.c:368). width is dim[1]; height starts at dim[2] and is MULTIPLIED by every dim[i] up to dim[rank] (analyze2vips.c:377-381). So a 3x2x2 volume flattens to one 3x4 image with the slices stacked vertically, exactly like a vips toilet roll, but with no page-height tag written: nothing in the loaded image records that it was ever 3-D, beyond the dsr-image_dimension.dim[] metadata. Rank 1 is refused even though a 1-D array is a perfectly good image, and rank 8 is refused before dim[8] can be read, which is just as well since dim[] only has 8 slots.",
+      "measured": {
+        "0": {
+          "dim": [
+            0,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/rank0.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: 0-dimensional images not supported"
+          }
+        },
+        "1": {
+          "dim": [
+            1,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/rank1.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: 1-dimensional images not supported"
+          }
+        },
+        "2": {
+          "dim": [
+            2,
+            3,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/rank2.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "expected_width_is_dim1": 3,
+          "expected_height_is_product_of_dim2_up": 2,
+          "pixels": [
+            [
+              0.0
+            ],
+            [
+              7.0
+            ],
+            [
+              14.0
+            ],
+            [
+              21.0
+            ],
+            [
+              28.0
+            ],
+            [
+              35.0
+            ]
+          ]
+        },
+        "3": {
+          "dim": [
+            3,
+            3,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/rank3.hdr: 3x4 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x4 uchar, 1 band, b-w, analyzeload"
+          },
+          "expected_width_is_dim1": 3,
+          "expected_height_is_product_of_dim2_up": 4,
+          "pixels": [
+            [
+              0.0
+            ],
+            [
+              7.0
+            ],
+            [
+              14.0
+            ],
+            [
+              21.0
+            ],
+            [
+              28.0
+            ],
+            [
+              35.0
+            ],
+            [
+              42.0
+            ],
+            [
+              49.0
+            ],
+            [
+              56.0
+            ],
+            [
+              63.0
+            ],
+            [
+              70.0
+            ],
+            [
+              77.0
+            ]
+          ]
+        },
+        "4": {
+          "dim": [
+            4,
+            3,
+            2,
+            2,
+            2,
+            0,
+            0,
+            0
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/rank4.hdr: 3x8 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x8 uchar, 1 band, b-w, analyzeload"
+          },
+          "expected_width_is_dim1": 3,
+          "expected_height_is_product_of_dim2_up": 8,
+          "pixels": [
+            [
+              0.0
+            ],
+            [
+              7.0
+            ],
+            [
+              14.0
+            ],
+            [
+              21.0
+            ],
+            [
+              28.0
+            ],
+            [
+              35.0
+            ],
+            [
+              42.0
+            ],
+            [
+              49.0
+            ],
+            [
+              56.0
+            ],
+            [
+              63.0
+            ],
+            [
+              70.0
+            ],
+            [
+              77.0
+            ],
+            [
+              84.0
+            ],
+            [
+              91.0
+            ],
+            [
+              98.0
+            ],
+            [
+              105.0
+            ],
+            [
+              112.0
+            ],
+            [
+              119.0
+            ],
+            [
+              126.0
+            ],
+            [
+              133.0
+            ],
+            [
+              140.0
+            ],
+            [
+              147.0
+            ],
+            [
+              154.0
+            ],
+            [
+              161.0
+            ]
+          ]
+        },
+        "7": {
+          "dim": [
+            7,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1
+          ],
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/rank7.hdr: 2x4 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 2x4 uchar, 1 band, b-w, analyzeload"
+          },
+          "expected_width_is_dim1": 2,
+          "expected_height_is_product_of_dim2_up": 8,
+          "pixels": {
+            "exit": 1,
+            "stderr": "extract_area: bad extract area"
+          }
+        },
+        "8": {
+          "dim": [
+            8,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/rank8.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: 8-dimensional images not supported"
+          }
+        }
+      }
+    },
+    "byte_order": {
+      "what": "Both halves are big-endian, always. read_header (analyze2vips.c:317-348) byte-swaps every SHORT/INT/FLOAT field of the dsr when !vips_amiMSBfirst(), and vips__analyze_read (analyze2vips.c:589) runs vips__byteswap_bool over the PIXELS under the same condition. There is no flag, no sniff and no escape hatch: a little-endian `.hdr` is simply rejected, because its sizeof_hdr reads back as 0x5c010000 rather than 348, and little-endian pixels are silently read as big-endian garbage. This is the single most likely place for a port on a little-endian host to get it backwards.",
+      "shorts_written": [
+        1,
+        256,
+        -1,
+        4660
+      ],
+      "big_endian_pixels": {
+        "fixture": "fixtures/be_short.hdr",
+        "header": {
+          "exit": 0,
+          "summary": "fixtures/be_short.hdr: 2x2 short, 1 band, b-w, analyzeload"
+        },
+        "pixels": [
+          [
+            1.0
+          ],
+          [
+            256.0
+          ],
+          [
+            -1.0
+          ],
+          [
+            4660.0
+          ]
+        ]
+      },
+      "little_endian_pixels_are_read_as_big_endian": {
+        "fixture": "fixtures/le_short.hdr",
+        "header": {
+          "exit": 0,
+          "summary": "fixtures/le_short.hdr: 2x2 short, 1 band, b-w, analyzeload"
+        },
+        "pixels": [
+          [
+            256.0
+          ],
+          [
+            1.0
+          ],
+          [
+            -1.0
+          ],
+          [
+            13330.0
+          ]
+        ],
+        "note": "same four shorts, written the other way round. Every value comes back byte-swapped and no error is raised."
+      },
+      "little_endian_header_is_refused": {
+        "fixture": "fixtures/le_header.hdr",
+        "sniffed": {
+          "exit": 1,
+          "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/le_header.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+        },
+        "direct": {
+          "exit": 1,
+          "stderr": "analyze2vips: header size incorrect"
+        },
+        "sizeof_hdr_as_read": 1543569408
+      }
+    },
+    "vox_offset_is_ignored": {
+      "what": "dime.vox_offset is the format's own `skip this many bytes of the .img` field. vips parses it, attaches it as `dsr-image_dimension.vox_offset`, and then calls vips_image_new_from_file_raw(image, w, h, sizeof_line, 0) (analyze2vips.c:582-583) with a hard-coded offset of 0. So the pixels below are the FIRST six bytes of the .img, not the six at offset 64. A port that honours vox_offset would disagree with vips on every file that sets it.",
+      "fixture": "fixtures/vox_offset_64.hdr",
+      "vox_offset": 64.0,
+      "img_bytes": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        "0xff x 64"
+      ],
+      "header": {
+        "exit": 0,
+        "summary": "fixtures/vox_offset_64.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+      },
+      "pixels": [
+        [
+          10.0
+        ],
+        [
+          20.0
+        ],
+        [
+          30.0
+        ],
+        [
+          40.0
+        ],
+        [
+          50.0
+        ],
+        [
+          60.0
+        ]
+      ],
+      "avg": {
+        "exit": 0,
+        "avg": 35.0
+      }
+    },
+    "refusals": {
+      "what": "analyzeload is registered UNTRUSTED (analyzeload.c:125), so this is the half of its behaviour that matters most. There are exactly four ways it says no, and all four live in analyze2vips.c: `header file size incorrect` (the .hdr is not sizeof(struct dsr) == 348 bytes, line 306), `header size incorrect` (the sizeof_hdr FIELD disagrees with the real length, line 350), `%d-dimensional images not supported` (rank outside 2..=7, line 368) and `datatype %d not supported` (line 421). Everything else it accepts, including geometries the .img cannot satisfy and dimensions that are not positive.",
+      "cases": {
+        "hdr_349_bytes": {
+          "bytes": 349,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/hdr_349_bytes.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header file size incorrect"
+          }
+        },
+        "hdr_347_bytes": {
+          "bytes": 347,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/hdr_347_bytes.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header file size incorrect"
+          }
+        },
+        "hdr_0_bytes": {
+          "bytes": 0,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/hdr_0_bytes.hdr\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header file size incorrect"
+          }
+        },
+        "sizeof_hdr_200": {
+          "sizeof_hdr": 200,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/sizeof_hdr_200.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header size incorrect"
+          }
+        },
+        "sizeof_hdr_0": {
+          "sizeof_hdr": 0,
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/sizeof_hdr_0.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header size incorrect"
+          }
+        },
+        "sizeof_hdr_348": {
+          "sizeof_hdr": 348,
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/sizeof_hdr_348.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "direct": {
+            "exit": 0,
+            "stderr": "",
+            "header": "outputs/direct.v: 3x2 uchar, 1 band, b-w, analyzeload"
+          }
+        },
+        "dims_32767x32767_with_6_byte_img": {
+          "declared_pixels": 1073676289,
+          "img_bytes": 6,
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/dims_32767.hdr: 32767x32767 uchar, 1 band, b-w, analyzeload"
+          },
+          "avg": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/dims_32767.img\", file too short"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/dims_32767.img\", file too short"
+          },
+          "note": "the header load SUCCEEDS and reports a 1.07 gigapixel image. Nothing compares the .img against the header until the pipeline actually opens it."
+        },
+        "img_two_bytes_short_of_six": {
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/img_truncated.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "getpoint_0_0": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/img_truncated.img\", file too short"
+          },
+          "avg": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/img_truncated.img\", file too short"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "VipsImage: unable to open \"fixtures/img_truncated.img\", file too short"
+          }
+        },
+        "img_100_bytes_longer_than_needed": {
+          "sniffed": {
+            "exit": 0,
+            "summary": "fixtures/img_oversize.hdr: 3x2 uchar, 1 band, b-w, analyzeload"
+          },
+          "pixels": [
+            [
+              10.0
+            ],
+            [
+              20.0
+            ],
+            [
+              30.0
+            ],
+            [
+              40.0
+            ],
+            [
+              50.0
+            ],
+            [
+              60.0
+            ]
+          ],
+          "avg": {
+            "exit": 0,
+            "avg": 35.0
+          },
+          "note": "a trailing tail is accepted and ignored; only a SHORT .img is an error."
+        },
+        "negative_and_zero_dimensions_are_clamped_not_refused": {
+          "what": "dim[] is a signed short and nothing in get_vips_properties range-checks it. A negative or zero width reaches vips_image_init_fields, GObject's property range check rejects the value, prints a GLib-GObject-CRITICAL to stderr, LEAVES THE PROPERTY AT ITS DEFAULT OF 1, and the load carries on and SUCCEEDS with a silently wrong geometry. exit is 0. A port should refuse instead, and should say so as a deliberate divergence rather than reproducing this.",
+          "dim1_minus_3": {
+            "sniffed": {
+              "exit": 0,
+              "summary": "fixtures/dim1_negative.hdr: 1x2 uchar, 1 band, b-w, analyzeload"
+            },
+            "avg": {
+              "exit": 0,
+              "avg": 15.0
+            },
+            "direct": {
+              "exit": 0,
+              "stderr": "GLib-GObject-CRITICAL: value \"-3\" of type 'gint' is invalid or out of range for property 'width' of type 'gint'",
+              "header": "outputs/direct.v: 1x2 uchar, 1 band, b-w, analyzeload"
+            }
+          },
+          "dim2_minus_2": {
+            "sniffed": {
+              "exit": 0,
+              "summary": "fixtures/dim2_negative.hdr: 3x1 uchar, 1 band, b-w, analyzeload"
+            },
+            "avg": {
+              "exit": 0,
+              "avg": 20.0
+            },
+            "direct": {
+              "exit": 0,
+              "stderr": "GLib-GObject-CRITICAL: value \"-2\" of type 'gint' is invalid or out of range for property 'height' of type 'gint'",
+              "header": "outputs/direct.v: 3x1 uchar, 1 band, b-w, analyzeload"
+            }
+          },
+          "dim1_zero": {
+            "sniffed": {
+              "exit": 0,
+              "summary": "fixtures/dim1_zero.hdr: 1x2 uchar, 1 band, b-w, analyzeload"
+            },
+            "avg": {
+              "exit": 0,
+              "avg": 15.0
+            },
+            "direct": {
+              "exit": 0,
+              "stderr": "GLib-GObject-CRITICAL: value \"0\" of type 'gint' is invalid or out of range for property 'width' of type 'gint'",
+              "header": "outputs/direct.v: 1x2 uchar, 1 band, b-w, analyzeload"
+            }
+          }
+        },
+        "all_zero_348": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: magickload: Magick: improper image header `fixtures/all_zero_348.hdr' @ error/tga.c/ReadTGAImage/221 (null)"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header size incorrect"
+          }
+        },
+        "all_ff_348": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/all_ff_348.hdr\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header size incorrect"
+          }
+        },
+        "ascii_348": {
+          "sniffed": {
+            "exit": 1,
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/ascii_348.hdr\" is not a known file format"
+          },
+          "direct": {
+            "exit": 1,
+            "stderr": "analyze2vips: header size incorrect"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "what": "attach_meta (analyze2vips.c:437-482) sets the whole 348-byte header as a blob named `dsr`, then walks the same 70-entry table again setting one field per struct member, named `dsr-<section>.<member>`. Two traps in getstr (analyze2vips.c:237-256): g_strlcpy is given the FIELD length as its buffer size, so it copies at most len-1 characters and an 80-byte descrip loses its last byte; and every byte failing `isascii(c) || c >= 32` is rewritten to `@`, which is lossy and not reversible. Note what that test does NOT catch: 0x7f DEL is ascii and is >= 32, so it passes through untouched, while the two bytes of a UTF-8 `e-acute` both become `@`.",
+      "fixture": "fixtures/meta_strings.hdr",
+      "descrip_written": "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZAB",
+      "descrip_written_len": 80,
+      "patient_id_written": [
+        111,
+        107,
+        1,
+        2,
+        127,
+        195,
+        169,
+        101,
+        110,
+        100
+      ],
+      "header": {
+        "exit": 0,
+        "width": "3",
+        "height": "2",
+        "bands": "1",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "b-w",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/meta_strings.hdr",
+        "vips-loader": "analyzeload",
+        "dsr": "348 bytes of binary data",
+        "dsr-header_key.sizeof_hdr": "348",
+        "dsr-header_key.data_type": "",
+        "dsr-header_key.db_name": "",
+        "dsr-header_key.extents": "16384",
+        "dsr-header_key.session_error": "0",
+        "dsr-header_key.regular": "114",
+        "dsr-header_key.hkey_un0": "0",
+        "dsr-image_dimension.dim[0]": "2",
+        "dsr-image_dimension.dim[1]": "3",
+        "dsr-image_dimension.dim[2]": "2",
+        "dsr-image_dimension.dim[3]": "0",
+        "dsr-image_dimension.dim[4]": "0",
+        "dsr-image_dimension.dim[5]": "0",
+        "dsr-image_dimension.dim[6]": "0",
+        "dsr-image_dimension.dim[7]": "0",
+        "dsr-image_dimension.vox_units[0]": "0",
+        "dsr-image_dimension.vox_units[1]": "0",
+        "dsr-image_dimension.vox_units[2]": "0",
+        "dsr-image_dimension.vox_units[3]": "0",
+        "dsr-image_dimension.cal_units[0]": "0",
+        "dsr-image_dimension.cal_units[1]": "0",
+        "dsr-image_dimension.cal_units[2]": "0",
+        "dsr-image_dimension.cal_units[3]": "0",
+        "dsr-image_dimension.cal_units[4]": "0",
+        "dsr-image_dimension.cal_units[5]": "0",
+        "dsr-image_dimension.cal_units[6]": "0",
+        "dsr-image_dimension.cal_units[7]": "0",
+        "dsr-image_dimension.data_type": "2",
+        "dsr-image_dimension.bitpix": "8",
+        "dsr-image_dimension.dim_un0": "0",
+        "dsr-image_dimension.pixdim[0]": "0",
+        "dsr-image_dimension.pixdim[1]": "1",
+        "dsr-image_dimension.pixdim[2]": "1",
+        "dsr-image_dimension.pixdim[3]": "1",
+        "dsr-image_dimension.pixdim[4]": "0",
+        "dsr-image_dimension.pixdim[5]": "0",
+        "dsr-image_dimension.pixdim[6]": "0",
+        "dsr-image_dimension.pixdim[7]": "0",
+        "dsr-image_dimension.vox_offset": "0",
+        "dsr-image_dimension.cal_max": "0",
+        "dsr-image_dimension.cal_min": "0",
+        "dsr-image_dimension.compressed": "0",
+        "dsr-image_dimension.verified": "0",
+        "dsr-image_dimension.glmax": "255",
+        "dsr-image_dimension.glmin": "0",
+        "dsr-data_history.descrip": "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZA",
+        "dsr-data_history.aux_file": "",
+        "dsr-data_history.orient": "0",
+        "dsr-data_history.originator": "",
+        "dsr-data_history.generated": "",
+        "dsr-data_history.scannum": "",
+        "dsr-data_history.patient_id": "ok@@\u007f@@en",
+        "dsr-data_history.exp_date": "",
+        "dsr-data_history.exp_time": "",
+        "dsr-data_history.hist_un0": "",
+        "dsr-data_history.views": "0",
+        "dsr-data_history.vols_added": "0",
+        "dsr-data_history.start_field": "0",
+        "dsr-data_history.field_skip": "0",
+        "dsr-data_history.omax": "0",
+        "dsr-data_history.omin": "0",
+        "dsr-data_history.smax": "0",
+        "dsr-data_history.smin": "0"
+      },
+      "blob_field": "dsr",
+      "blob_bytes": 348,
+      "field_count_in_c_table": 70
+    },
+    "dt_rgb_is_interleaved": {
+      "what": "DT_RGB gives bands = 3 and format uchar, and the pixels are read straight through vips_image_new_from_file_raw with a line size of bands * sizeof(fmt), so the .img is INTERLEAVED RGB, not three planes. The Analyze spec allows either and vips only reads the interleaved one.",
+      "fixture": "fixtures/rgb_2d.hdr",
+      "img_bytes": [
+        10,
+        11,
+        12,
+        20,
+        21,
+        22,
+        30,
+        31,
+        32,
+        40,
+        41,
+        42,
+        50,
+        51,
+        52,
+        60,
+        61,
+        62
+      ],
+      "header": {
+        "exit": 0,
+        "summary": "fixtures/rgb_2d.hdr: 3x2 uchar, 3 bands, srgb, analyzeload"
+      },
+      "pixels": [
+        [
+          10.0,
+          11.0,
+          12.0
+        ],
+        [
+          20.0,
+          21.0,
+          22.0
+        ],
+        [
+          30.0,
+          31.0,
+          32.0
+        ],
+        [
+          40.0,
+          41.0,
+          42.0
+        ],
+        [
+          50.0,
+          51.0,
+          52.0
+        ],
+        [
+          60.0,
+          61.0,
+          62.0
+        ]
+      ]
+    },
+    "analyze6_vs_analyze7": {
+      "what": "libvips names this format three different ways and they do not agree. The operator is the one to follow, because it is what `vips -l` and every caller actually see, and because the implementation is a straight read of the Mayo `dbh.h` struct that both Analyze 6 and Analyze 7.5 share. Nothing in the loader distinguishes a 6.0 file from a 7.5 one: there is no version field in the 348-byte header to distinguish them with. So the version in the name is decoration, and a port should not try to act on it.",
+      "vips_config_says": [
+        "enable Analyze7 load: true"
+      ],
+      "vips_config_source": "meson.build:704, `'enable Analyze7 load'`",
+      "still_true_in_8_18_6": true,
+      "operator_says": [
+        "VipsForeignLoadAnalyze (analyzeload), load an Analyze6 image (.img, .hdr), priority=-50, untrusted, is_a, get_flags, get_flags_filename, header, load"
+      ],
+      "operator_source": "analyzeload.c:120, `object_class->description = _(\"load an Analyze6 image\")`",
+      "gtkdoc_says": "analyzeload.c:161, `Load an Analyze 6.0 file`",
+      "implementation_comment_says": "analyze2vips.c:1, `Read a Analyze file. Old-style header (so called 7.5 format)`",
+      "dbh_header_says": "dbh.h:15-21, `The previous-generation header for Analyze images ... a 348 byte header stored in a file with a .hdr suffix`",
+      "resolution": "follow the operator: analyzeload, .img/.hdr, priority -50, untrusted, load-only."
+    }
+  }
+}
