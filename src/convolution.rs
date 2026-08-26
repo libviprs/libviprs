@@ -3977,10 +3977,25 @@ mod tests {
         }
     }
 
-    /// sharpen keeps dimensions and format, changes pixels near an edge
-    /// when m2 is positive, and leaves the a/b chroma codes untouched.
+    /// sharpen keeps dimensions and format and reproduces vips's own
+    /// response to a hard vertical edge, byte for byte.
+    ///
+    /// This used to assert instead that the a/b chroma codes survive
+    /// sharpening within a count, on the reasoning that the unsharp mask
+    /// only touches L. That premise is false, and libvips does not hold
+    /// to it either: the mask lifts the bright side of the edge to
+    /// scRGB values that the per-channel `Y2v` lookup
+    /// (`colour/LabQ2sRGB.c:282-353`, issue #581) quantises to
+    /// [249, 249, 248] rather than a flat grey, which reads back as
+    /// LabS chroma [-43, 119]. vips 8.18.4 does exactly the same, so the
+    /// honest pin is the measurement, not a tolerance.
+    ///
+    /// Measured with `vips rawload edge.raw edge.v 20 10 3 --format
+    /// uchar --interpretation srgb`, then `vips sharpen edge.v out.v
+    /// --sigma 1 --m1 1 --m2 2` and `vips rawsave`. All ten rows of the
+    /// result are identical, so one row pins the whole image.
     #[test]
-    fn sharpen_sharpens_luminance_only() {
+    fn sharpen_sharpens_an_edge_like_vips() {
         // A hard vertical edge: flat halves at 40 and 220.
         let mut data = vec![0u8; 20 * 10 * 3];
         for y in 0..10 {
@@ -3999,16 +4014,32 @@ mod tests {
         assert_eq!(sharp.format(), im.format());
         assert_ne!(sharp.data(), im.data(), "sharpening an edge must change it");
 
-        // The chroma planes survive: a and b codes match before/after.
-        let labs_in = im.colourspace(Interpretation::Labs);
-        let labs_out = sharp.colourspace(Interpretation::Labs);
-        let a = labs_in.f32_samples().unwrap();
-        let b = labs_out.f32_samples().unwrap();
-        for p in 0..(20 * 10) {
-            // Allow the one-code wobble the sRGB re-quantisation can
-            // introduce on the chroma of a changed pixel.
-            assert!((a[p * 3 + 1] - b[p * 3 + 1]).abs() <= 1.0, "a band at {p}");
-            assert!((a[p * 3 + 2] - b[p * 3 + 2]).abs() <= 1.0, "b band at {p}");
+        // vips's row, repeated down the image.
+        let mut row = Vec::with_capacity(20 * 3);
+        for x in 0..20 {
+            let px: [u8; 3] = match x {
+                8 => [26, 26, 26],
+                9 => [0, 0, 0],
+                10 => [249, 249, 248],
+                11 => [239, 239, 239],
+                x if x < 10 => [40, 40, 40],
+                _ => [220, 220, 220],
+            };
+            row.extend_from_slice(&px);
+        }
+        let want: Vec<u8> = row.repeat(10);
+        assert_eq!(sharp.data(), &want[..], "sharpen must match vips 8.18.4");
+
+        // The chroma break at the edge pixel is real and vips shares it:
+        // `vips colourspace out.v labs` reads [32079, -43, 119] there.
+        let labs = sharp.colourspace(Interpretation::Labs);
+        let px = labs.f32_samples().unwrap();
+        for (c, want) in [32079.0f32, -43.0, 119.0].into_iter().enumerate() {
+            assert!(
+                (px[10 * 3 + c] - want).abs() < 1e-6,
+                "labs band {c} at the edge pixel: vips says {want}, got {}",
+                px[10 * 3 + c]
+            );
         }
     }
 
