@@ -94,6 +94,22 @@
 //!   pipeline (`premultiply | reduce/shrink | unpremultiply`). The single-tap
 //!   Nearest kernel is exempt: it does no averaging, so it stays an exact pick
 //!   with no premultiply round-trip.
+//! * **Do not hand an already-premultiplied image to `resize`.** This is the
+//!   trap the bullet above sets, and it has already been walked into once
+//!   (issue #603), so it is worth spelling out. `vips_resize` does *not*
+//!   premultiply — "This operation does not premultiply alpha. If your image
+//!   has an alpha channel, you should use premultiply on it first",
+//!   `libvips/resample/resize.c` — which means a vips caller that premultiplies
+//!   first, as `vips_smartcrop_build` does, gets an image that is *still*
+//!   premultiplied on the other side. libviprs' `resize` premultiplies on its
+//!   own, so the same call here un-premultiplies it instead, and the colour
+//!   sitting behind transparent pixels comes back out amplified by
+//!   `max / alpha`. Any op that ports a vips pipeline of the form
+//!   `premultiply | resize` must therefore either drop the alpha band before
+//!   the resize (what [`crate::extract`]'s attention smartcrop does, since vips
+//!   discards it right after the resize anyway) or not premultiply first.
+//!   The un-premultiply dead zone (issue #604) bounds the damage but does
+//!   not remove it.
 //! * **`similarity` / `rotate`.** `similarity(angle, scale)` builds the
 //!   matrix `a = scale*cos, b = -scale*sin, c = -b, d = a` and calls
 //!   `affine` with the default bilinear interpolator; `rotate(angle)` is
@@ -123,6 +139,7 @@
 //!
 //! * [ported_resample tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
 
+use crate::arithmetic::unpremultiply_factor;
 use crate::colour::{ColourError, Intent, Pcs};
 use crate::conversion::Interpretation;
 use crate::extract::{Extend, ExtractError};
@@ -854,6 +871,10 @@ impl TapFetch<'_> {
 
     /// Fetch the full pixel at `(x, y)` into `px`, applying the extend
     /// rule, and premultiply the colour bands when asked.
+    ///
+    /// The normalising alpha is clipped to `0..=max` and the alpha band itself
+    /// is left raw, the `vips_premultiply` guard; [`unpremultiply`] mirrors it
+    /// on the way back out (issue #604).
     fn fetch(&self, x: i64, y: i64, premultiply: bool, px: &mut [f64]) {
         match (self.resolve(x, self.w), self.resolve(y, self.h)) {
             (Some(x), Some(y)) => {
@@ -865,7 +886,7 @@ impl TapFetch<'_> {
             _ => px.fill(self.fill_value()),
         }
         if premultiply {
-            let alpha = px[self.bands - 1] / self.layout.max;
+            let alpha = px[self.bands - 1].clamp(0.0, self.layout.max) / self.layout.max;
             for v in px.iter_mut().take(self.bands - 1) {
                 *v *= alpha;
             }
@@ -1685,19 +1706,30 @@ impl NohaloStencil {
 }
 
 /// Unpremultiply an interpolated pixel in place (`vips_unpremultiply`):
-/// colour bands scale by `max / alpha`, zero alpha zeroes them.
+/// colour bands scale by [`unpremultiply_factor`] and the stored alpha clips
+/// to `0..=max`.
+///
+/// These are two separate guards and libvips keeps them separate on purpose
+/// (issue #604). The factor divides by the **raw** alpha, so an alpha
+/// overshoot and the colour overshoot that came with it cancel — "Don't use
+/// clip_alpha to calculate factor: we want over and undershoots on alpha and
+/// RGB to cancel", `libvips/conversion/unpremultiply.c` — while the alpha that
+/// is **stored** is clipped, `VIPS_CLIP(0, alpha, max_alpha)`. Applying the
+/// clip to the factor as well would quietly discard the cancellation; applying
+/// neither leaves a near-zero alpha to amplify the colour by `max / alpha`.
+///
+/// This is the float side of the pair, so the dead zone is live here: every
+/// caller runs on the [`premultiply_to_float`] working raster or on an
+/// interpolated accumulator, where a lanczos undershoot at a hard transparency
+/// edge routinely lands alpha in `(0, 0.01)` or just below zero.
 fn unpremultiply(px: &mut [f64], max: f64) {
     let bands = px.len();
     let alpha = px[bands - 1];
-    if alpha == 0.0 {
-        for v in px.iter_mut().take(bands - 1) {
-            *v = 0.0;
-        }
-    } else {
-        for v in px.iter_mut().take(bands - 1) {
-            *v *= max / alpha;
-        }
+    let factor = unpremultiply_factor(alpha, max);
+    for v in px.iter_mut().take(bands - 1) {
+        *v *= factor;
     }
+    px[bands - 1] = alpha.clamp(0.0, max);
 }
 
 /// Premultiply the colour bands of an alpha raster by `alpha / max` into a
@@ -1713,6 +1745,16 @@ fn unpremultiply(px: &mut [f64], max: f64) {
 /// intermediate, the float buffer does not requantise `round(c * a / max)` to a
 /// couple of bits for near-transparent pixels — quantisation that
 /// un-premultiply would then amplify by `max / a` into visible colour banding.
+///
+/// The normalising factor is built from a **clipped** alpha and the alpha band
+/// is copied through **raw**, which is `vips_premultiply`'s side of the guard
+/// pair and the exact mirror of [`unpremultiply`]'s (issue #604): there the
+/// factor takes the raw alpha and the stored alpha is clipped. Keeping the two
+/// mirrored is what makes the bracket cancel. There is no dead zone on this
+/// side, and that is deliberate rather than missing — premultiply multiplies by
+/// the alpha, so a near-zero one damps rather than amplifies and no division
+/// can blow up. `libvips/conversion/premultiply.c` has a single macro for every
+/// band format, with no float variant.
 fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError> {
     let in_layout = SampleLayout::of(src.format());
     let out_fmt = PixelFormat::RgbaF32;
@@ -1724,7 +1766,7 @@ fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError>
     for p in 0..count {
         let base = p * bands;
         let alpha = in_layout.read(data, base + bands - 1);
-        let a = alpha / max;
+        let a = alpha.clamp(0.0, max) / max;
         for b in 0..bands - 1 {
             out_layout.write(&mut out, base + b, in_layout.read(data, base + b) * a);
         }
@@ -3304,6 +3346,155 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Regression for #604: the float un-premultiply damps a near-zero alpha
+    /// to nothing instead of dividing by it. Pinned on the vips 8.18.4 binary
+    /// with a 1x1 float pixel `(100, 100, 100, alpha)` under the default
+    /// `max_alpha` of 255:
+    ///
+    /// ```text
+    /// vips linear b.v a.v "0 0 0 0" "100 100 100 <alpha>"
+    /// vips unpremultiply a.v u.v ; vips getpoint u.v 0 0
+    ///   alpha = 0.005  ->  0 0 0 0.005
+    ///   alpha = 0.02   ->  1275000 1275000 1275000 0.02
+    /// ```
+    #[test]
+    fn unpremultiply_dead_zone_damps_a_near_zero_alpha() {
+        for alpha in [0.0, 0.003, 0.005, -0.005, 0.009] {
+            let mut px = [100.0, 100.0, 100.0, alpha];
+            unpremultiply(&mut px, 255.0);
+            for (b, v) in px[..3].iter().enumerate() {
+                assert!(
+                    v.abs() < 1e-12,
+                    "alpha {alpha} is inside the dead zone: band {b} came out \
+                     {v}, want 0"
+                );
+            }
+        }
+        // Just outside the dead zone the full `max / alpha` factor applies,
+        // amplification and all: 100 * 255 / 0.02 = 1275000.
+        let mut px = [100.0, 100.0, 100.0, 0.02];
+        unpremultiply(&mut px, 255.0);
+        for (b, v) in px[..3].iter().enumerate() {
+            assert!(
+                (v - 1_275_000.0).abs() < 1e-3,
+                "band {b} came out {v}, want vips' 1275000"
+            );
+        }
+    }
+
+    /// Regression for #604: the dead zone is an absolute `0.01` in whatever
+    /// units the alpha band carries, never a fraction of `max`. Measured on the
+    /// binary, `alpha = 0.02` on the same `(100, 100, 100, alpha)` pixel gives
+    /// `5000` under scRGB (`max_alpha` 1), `1275000` under the 255 default and
+    /// `327675008` under RGB16 (`max_alpha` 65535), and `alpha = 0.005` gives 0
+    /// in all three. So the 16-bit carrier's dead zone is `0.01 / 65535` of
+    /// full scale, not `0.01`.
+    #[test]
+    fn unpremultiply_dead_zone_does_not_scale_with_max() {
+        for (max, want) in [
+            (1.0, 5000.0),
+            (255.0, 1_275_000.0),
+            (65535.0, 327_675_000.0),
+        ] {
+            let mut px = [100.0, 100.0, 100.0, 0.02];
+            unpremultiply(&mut px, max);
+            assert!(
+                (px[0] - want).abs() < want * 1e-9,
+                "max {max}: got {}, want {want}",
+                px[0]
+            );
+            let mut px = [100.0, 100.0, 100.0, 0.005];
+            unpremultiply(&mut px, max);
+            assert!(px[0].abs() < 1e-12, "max {max}: 0.005 must stay damped");
+        }
+    }
+
+    /// Regression for #604: the stored alpha is clipped to `0..=max`, and the
+    /// factor is deliberately *not*, so an alpha overshoot and the colour
+    /// overshoot that came with it still cancel. Both pinned on the binary:
+    ///
+    /// ```text
+    ///   alpha = -0.5  ->  -51000 -51000 -51000 0
+    ///   alpha = 300   ->  85 85 85 255
+    /// ```
+    #[test]
+    fn unpremultiply_clips_the_stored_alpha_but_not_the_factor() {
+        // Negative alpha outside the dead zone: factor 255 / -0.5 = -510, so
+        // the colour flips sign rather than being clamped, and only the alpha
+        // that is stored clips to 0.
+        let mut px = [100.0, 100.0, 100.0, -0.5];
+        unpremultiply(&mut px, 255.0);
+        for (b, v) in px[..3].iter().enumerate() {
+            assert!(
+                (v + 51_000.0).abs() < 1e-6,
+                "band {b} came out {v}, want vips' -51000"
+            );
+        }
+        assert_eq!(px[3], 0.0, "a negative alpha must store as 0");
+
+        // Alpha above max: factor 255 / 300, stored alpha clips to max.
+        let mut px = [100.0, 100.0, 100.0, 300.0];
+        unpremultiply(&mut px, 255.0);
+        for (b, v) in px[..3].iter().enumerate() {
+            assert!(
+                (v - 85.0).abs() < 1e-9,
+                "band {b} came out {v}, want vips' 85"
+            );
+        }
+        assert_eq!(px[3], 255.0, "an alpha above max must store as max");
+    }
+
+    /// Regression for #604 through the float carrier, where the clip is
+    /// observable end to end: `unpremultiply_from_float` writing back to
+    /// `RgbaF32` must store the clipped alpha, not the raw one. On the unsigned
+    /// carriers the sample store clamps anyway, which is why the guard has to
+    /// live in the un-premultiply rather than being left to the writer.
+    #[test]
+    fn unpremultiply_from_float_stores_the_clipped_alpha() {
+        let px: Vec<f32> = vec![
+            100.0, 100.0, 100.0, -0.5, // undershoot
+            100.0, 100.0, 100.0, 300.0, // overshoot
+            100.0, 100.0, 100.0, 0.005, // dead zone
+        ];
+        let data: Vec<u8> = px.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let src = Raster::new(3, 1, PixelFormat::RgbaF32, data).unwrap();
+        let out = unpremultiply_from_float(&src, PixelFormat::RgbaF32, 255.0).unwrap();
+        assert_eq!(out.getpoint(0, 0)[3], 0.0, "undershoot clips to 0");
+        assert_eq!(out.getpoint(1, 0)[3], 255.0, "overshoot clips to max");
+        let damped = out.getpoint(2, 0);
+        assert!(
+            damped[..3].iter().all(|v| v.abs() < 1e-12),
+            "dead-zone colour must be damped, got {damped:?}"
+        );
+    }
+
+    /// The premultiply half of the pair carries the mirror-image guard
+    /// (#604): the normalising factor is built from a **clipped** alpha while
+    /// the alpha band is copied through **raw**. A float source with alpha
+    /// above max therefore scales its colour by 1, not by `alpha / max`, and
+    /// still hands the raw alpha to the resample so the round trip cancels.
+    #[test]
+    fn premultiply_to_float_clips_the_factor_and_keeps_the_raw_alpha() {
+        let px: Vec<f32> = vec![100.0, 100.0, 100.0, 300.0, 100.0, 100.0, 100.0, -5.0];
+        let data: Vec<u8> = px.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let src = Raster::new(2, 1, PixelFormat::RgbaF32, data).unwrap();
+        let out = premultiply_to_float(&src, 255.0).unwrap();
+        let over = out.getpoint(0, 0);
+        assert!(
+            (over[0] - 100.0).abs() < 1e-9,
+            "an alpha above max must normalise to 1, got {}",
+            over[0]
+        );
+        assert_eq!(over[3], 300.0, "the stored alpha stays raw");
+        let under = out.getpoint(1, 0);
+        assert!(
+            under[0].abs() < 1e-12,
+            "a negative alpha must normalise to 0, got {}",
+            under[0]
+        );
+        assert_eq!(under[3], -5.0, "the stored alpha stays raw");
     }
 
     /// resize is honest about invalid scales.
