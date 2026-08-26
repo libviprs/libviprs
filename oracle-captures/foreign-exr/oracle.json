@@ -1,0 +1,937 @@
+{
+  "meta": {
+    "area": "foreign-exr",
+    "issue": 504,
+    "sub_issues": [
+      614,
+      615
+    ],
+    "vips_version": "vips-8.18.4",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "fixture_writer": "exrheader (OpenEXR) 3.4.15 https://openexr.com\nCopyright (c) Contributors to the OpenEXR Project\nLicense BSD-3-Clause",
+    "fixture_writer_source": "make_corpus.cpp in this directory",
+    "captured_by": "oracle-captures/foreign-exr/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for line numbers (libvips/foreign/openexr2vips.c, openexrload.c); the binary is the 8.18.4 release and is not the same tree"
+  },
+  "notes": [
+    "vips reads EXR through the OpenEXR C RGBA wrapper, ImfCRgbaFile.h, which returns four half samples per pixel and nothing else. Every divergence recorded here follows from that one fact.",
+    "openexr2vips.c:24-38 lists it as a known limitation in its own TODO block: 'more of OpenEXR's pixel formats', 'more than just RGBA channels', 'best redo with the C++ API now we support C++ operations'.",
+    "The fixtures are written by the OpenEXR reference implementation, not by libviprs and not by vips, so no capture here is circular."
+  ],
+  "findings": {
+    "lossless_codings_decode_identically": {
+      "what": "NONE, RLE, ZIPS, ZIP and PIZ are lossless for every sample type, and PXR24 is lossless for HALF specifically because its 24-bit truncation only bites f32. The tiled file is the same payload in 4x2 tiles. All seven decode to one payload, which is what makes the libviprs pins exact equality with no tolerance.",
+      "payload_sha256": {
+        "rgba_half_none": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "rgba_half_rle": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "rgba_half_zips": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "rgba_half_zip": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "rgba_half_piz": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "rgba_half_pxr24": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "rgba_half_tiled": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7"
+      },
+      "all_equal": true
+    },
+    "vips_always_emits_four_half_bands": {
+      "what": "openexr2vips.c drives the OpenEXR C RGBA wrapper (ImfCRgbaFile.h), so every file becomes four `half` samples per pixel before vips sees it. read_header passes a literal 4 for the band count (openexr2vips.c:222-224) and ImfHalfToFloatArray widens the samples again (:341-347, :411-412). Three consequences, all measured below.",
+      "missing_alpha_is_filled_with_one": {
+        "file": "fixtures/rgb_half_zip.exr",
+        "bands": "4",
+        "first_pixel": [
+          0.0,
+          3.5,
+          7.0,
+          1.0
+        ]
+      },
+      "luminance_is_replicated_across_rgb": {
+        "file": "fixtures/y_half_zip.exr",
+        "bands": "4",
+        "first_two_pixels": [
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.5,
+          0.5,
+          0.5,
+          1.0
+        ]
+      },
+      "unrecognised_channels_decode_to_black": {
+        "file": "fixtures/z_float_zip.exr",
+        "what": "A single FLOAT channel named Z. The RGBA wrapper recognises none of R/G/B/Y, so it returns its fill values and vips reports an entirely black image with NO error and NO warning. The file's depth data is unreachable through vips.",
+        "bands": "4",
+        "first_two_pixels": [
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "all_zero_except_alpha": true
+      }
+    },
+    "float_channels_are_rounded_to_half": {
+      "what": "The sharpest consequence of the RGBA wrapper. rgba_float_fine.exr holds FLOAT samples of (x + y*8 + b*7) * (1.0f/3.0f), which have no exact half spelling. vips reports the half rounding of each.",
+      "file": "fixtures/rgba_float_fine.exr",
+      "vips_first_pixel": [
+        0.0,
+        2.333984375,
+        4.66796875,
+        7.0
+      ],
+      "true_f32_first_pixel": [
+        0.0,
+        2.3333332538604736,
+        4.666666507720947,
+        7.0
+      ],
+      "note": "vips band 1 of pixel (0,0) is 2.333984375, which is exactly f16::from_f32 of the stored sample. libviprs returns the stored f32 instead; see src/exr.rs."
+    },
+    "uint_channels_are_funnelled_through_half": {
+      "what": "vips does not refuse UINT, it converts it to half. The fixture's values are small enough to survive, but anything above 65504 would saturate to infinity. libviprs refuses instead, pending the uint sample carrier in issue #517.",
+      "file": "fixtures/rgba_uint_zip.exr",
+      "vips_first_two_pixels": [
+        0.0,
+        7.0,
+        14.0,
+        21.0,
+        1.0,
+        8.0,
+        15.0,
+        22.0
+      ]
+    },
+    "geometry_comes_from_the_data_window": {
+      "what": "read_new sizes the image xmax-xmin+1 by ymax-ymin+1 (openexr2vips.c:186-191) and the frame buffer base pointer is backed off by the window origin (:401-403), so an offset data window decodes to the same pixels at (0,0). The display window does not size the image at all.",
+      "offset_data_window": {
+        "file": "fixtures/rgba_half_offset.exr",
+        "data_window_origin": [
+          5,
+          7
+        ],
+        "vips_size": [
+          "8",
+          "4"
+        ],
+        "payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+        "equals_origin_anchored_payload": true
+      },
+      "display_window_differs": {
+        "file": "fixtures/rgba_half_display.exr",
+        "display_window": [
+          0,
+          0,
+          15,
+          15
+        ],
+        "data_window": [
+          2,
+          3,
+          9,
+          6
+        ],
+        "vips_size": [
+          "8",
+          "4"
+        ]
+      }
+    },
+    "tiled_files_carry_tile_geometry": {
+      "what": "read_header sets VIPS_META_TILE_WIDTH / VIPS_META_TILE_HEIGHT for a tiled file (openexr2vips.c:229-232) and nothing for a scanline one, so the presence of the field is itself the signal.",
+      "tiled": {
+        "file": "fixtures/rgba_half_tiled.exr",
+        "tile_width": "4",
+        "tile_height": "2"
+      },
+      "scanline_has_no_tile_fields": true
+    },
+    "lossy_codings_differ": {
+      "what": "B44 and B44A quantise 4x4 blocks to a shared exponent, so they are lossy by construction and must NOT be pinned as equal to the lossless payload. DWAA and DWAB are lossy in general and happen to reproduce this small smooth ramp exactly; that is a property of the payload, not of the codec, so they are pinned by their own digest and not by equality.",
+      "b44_payload_sha256": "ae81530d4363c851bb11ed73a2ad7b84bae23004df039a587fed5ec3d90d325b",
+      "b44a_payload_sha256": "ae81530d4363c851bb11ed73a2ad7b84bae23004df039a587fed5ec3d90d325b",
+      "dwaa_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "dwab_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "b44_equals_lossless": false,
+      "dwaa_equals_lossless": true
+    },
+    "there_is_no_exr_saver": {
+      "what": "libvips has never shipped an EXR writer, so the save half of issue #504 was deleted rather than deferred.",
+      "vips_l_exr": "VipsForeignLoadOpenexr (openexrload), load an OpenEXR image (.exr), priority=200, untrusted, is_a, get_flags, get_flags_filename, header, load",
+      "save_attempt": {
+        "exit": 1,
+        "stderr": "VipsForeignSave: \"/var/folders/1k/g0rh1p_d4z9f6dz49jnh0jdw0000gn/T/tmpzxwlvf3v/out.exr\" is not a known file format"
+      }
+    }
+  },
+  "records": {
+    "deep_scanline": {
+      "file": "fixtures/deep_scanline.exr",
+      "sha256": "c52d310475c6ffba5ba4eaa834b45209479a9c022fda478f61605992bdd00e44",
+      "vipsheader": {
+        "error": "vipsheader: exr2vips: EXR error: Deep data provided to CompositeDeepScanLine is missing an alpha channel\nexr2vips: EXR error: Deep data provided to CompositeDeepScanLine is missing an alpha channel"
+      },
+      "vips_error": "exr2vips: EXR error: Deep data provided to CompositeDeepScanLine is missing an alpha channel\nexr2vips: EXR error: Deep data provided to CompositeDeepScanLine is missing an alpha channel"
+    },
+    "rgb_half_zip": {
+      "file": "fixtures/rgb_half_zip.exr",
+      "sha256": "b93c9d096c13434c79e875d45a134f1e256a75961d9a6cdf38dfb8de25dea6a3",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgb_half_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "86265b6a58ba9589c3d392c23487807c9b9472d639baed99f134bf06b13de2ff",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        1.0,
+        0.5,
+        4.0,
+        7.5,
+        1.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        1.0
+      ]
+    },
+    "rgba_float_fine": {
+      "file": "fixtures/rgba_float_fine.exr",
+      "sha256": "dfa56261a0c1699519882a203c26dbcf0448d3493e2cb51397779ccae631acc9",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_float_fine.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "3051352d60e56288f5729ad9ac39acff67317bd5f05f5bd863dc0ec914815419",
+      "vips_first_two_pixels": [
+        0.0,
+        2.333984375,
+        4.66796875,
+        7.0,
+        0.333251953125,
+        2.666015625,
+        5.0,
+        7.33203125
+      ],
+      "vips_last_pixel": [
+        10.3359375,
+        12.6640625,
+        15.0,
+        17.328125
+      ]
+    },
+    "rgba_float_zip": {
+      "file": "fixtures/rgba_float_zip.exr",
+      "sha256": "d3128130a0e188a7a6b1049aaf9757dfaeb6ef87ae76409921a3b4c1db74cce6",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_float_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_1x1": {
+      "file": "fixtures/rgba_half_1x1.exr",
+      "sha256": "a9ab5bd8a9d390153c007b8d457cb9d0a2deab7a0bf60130149a872a57463801",
+      "vipsheader": {
+        "width": "1",
+        "height": "1",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_1x1.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 4,
+      "vips_payload_sha256": "ebf864659dcb9186bc672338d297fa38d954c2a67e475e582a28a54c00ae0a5b",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5
+      ],
+      "vips_last_pixel": [
+        0.0,
+        3.5,
+        7.0,
+        10.5
+      ]
+    },
+    "rgba_half_b44": {
+      "file": "fixtures/rgba_half_b44.exr",
+      "sha256": "af1b2da259eea32c9916b15d14612dc937068f63d19fd4e77575afd27f47ead4",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_b44.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "ae81530d4363c851bb11ed73a2ad7b84bae23004df039a587fed5ec3d90d325b",
+      "vips_first_two_pixels": [
+        -1.901388168334961e-05,
+        3.5,
+        7.0,
+        10.5,
+        0.421875,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_b44a": {
+      "file": "fixtures/rgba_half_b44a.exr",
+      "sha256": "c5f2b38d085c3e4f1af7fc31c8bcf095248ba9f1efd9937ea73c79a85d60d59f",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_b44a.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "ae81530d4363c851bb11ed73a2ad7b84bae23004df039a587fed5ec3d90d325b",
+      "vips_first_two_pixels": [
+        -1.901388168334961e-05,
+        3.5,
+        7.0,
+        10.5,
+        0.421875,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_display": {
+      "file": "fixtures/rgba_half_display.exr",
+      "sha256": "4fc54a5e809e50af3cd6af13db9bc5235b37084e1ec31783ca07e9155dfecaf9",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_display.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_dwaa": {
+      "file": "fixtures/rgba_half_dwaa.exr",
+      "sha256": "7e364eb46b6f8802f37de4e02f7267d26de9d4cfc6c00c9401183d3d14607878",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_dwaa.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_dwab": {
+      "file": "fixtures/rgba_half_dwab.exr",
+      "sha256": "3d3c57ae4d6bdb209b9eef680f7f79cbc3a6ed93bd8c2b2fe6d225b59ef0f9b7",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_dwab.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_none": {
+      "file": "fixtures/rgba_half_none.exr",
+      "sha256": "b02c53ac66c57052efb4ab5ed83ae965c2aef93e035b14cf6e5d8eed63b5003a",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_none.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_offset": {
+      "file": "fixtures/rgba_half_offset.exr",
+      "sha256": "ed7ce75c587adc49dcce6c3a6bea6dba10313dec40a9fa49d5390202be2e6d84",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_offset.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_piz": {
+      "file": "fixtures/rgba_half_piz.exr",
+      "sha256": "9a318f6f751343f320c5a79f0acf5297233f0f184ac56efdf9f7903858b08eb7",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_piz.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_pxr24": {
+      "file": "fixtures/rgba_half_pxr24.exr",
+      "sha256": "328238b055d2761dd7cb2be20e18d9761f460ebbceffd819fec54ab96e3be87f",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_pxr24.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_rle": {
+      "file": "fixtures/rgba_half_rle.exr",
+      "sha256": "5759b20a56f112cbfb5f8ac1c5f47027fb396cc7086ce3c8953bfd8d790c3de3",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_rle.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_tiled": {
+      "file": "fixtures/rgba_half_tiled.exr",
+      "sha256": "b8406f060cf15f780bdd728fb15e65364d3b5f2945fbd5e17aaae2c010c94fc6",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_tiled.exr",
+        "vips-loader": "openexrload",
+        "tile-width": "4",
+        "tile-height": "2"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_tiled_ragged": {
+      "file": "fixtures/rgba_half_tiled_ragged.exr",
+      "sha256": "fc32c5ec69b0dfcf27f56dae6b787a02486423838cd6ba8d124f85e8988617e3",
+      "vipsheader": {
+        "width": "7",
+        "height": "5",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_tiled_ragged.exr",
+        "vips-loader": "openexrload",
+        "tile-width": "4",
+        "tile-height": "4"
+      },
+      "vips_sample_count": 140,
+      "vips_payload_sha256": "3a38f12ef1667460c681d4480a75ac06bc0ade95d78b2d8b80612752a4c59576",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        17.0,
+        20.5,
+        24.0,
+        27.5
+      ]
+    },
+    "rgba_half_zip": {
+      "file": "fixtures/rgba_half_zip.exr",
+      "sha256": "785165aac7d1948aa5beea9d5af88e5b1bfe573ca92f393dbd5707ed4354f27f",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_half_zips": {
+      "file": "fixtures/rgba_half_zips.exr",
+      "sha256": "5ef6a3b1fde4c711066ad0ee2cd20dfcf189f5ff9538d14260d6fc0d34d37ee9",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_half_zips.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "6aeb8bf8858b1fcbd4e99c752dd75fe3bbee77feaacb38fe5f25b31f4890afd7",
+      "vips_first_two_pixels": [
+        0.0,
+        3.5,
+        7.0,
+        10.5,
+        0.5,
+        4.0,
+        7.5,
+        11.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        19.0,
+        22.5,
+        26.0
+      ]
+    },
+    "rgba_uint_zip": {
+      "file": "fixtures/rgba_uint_zip.exr",
+      "sha256": "2b5ad4afb9466e416f7064c5beca614a94ee3b3d7f5eae17b7be60dbbb111caf",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/rgba_uint_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "f77c41671c66757ea1534afb074f3890aef4837d87a18643713ca5051a3c8f99",
+      "vips_first_two_pixels": [
+        0.0,
+        7.0,
+        14.0,
+        21.0,
+        1.0,
+        8.0,
+        15.0,
+        22.0
+      ],
+      "vips_last_pixel": [
+        31.0,
+        38.0,
+        45.0,
+        52.0
+      ]
+    },
+    "y_half_zip": {
+      "file": "fixtures/y_half_zip.exr",
+      "sha256": "0279227b5939510cfecbb6818ee769f356fb26f409d594fcb103635f4e64e4fc",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/y_half_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "e86796bead796bc30d8755bfcc5b8383bf771956780bf6128343e6a2109202a6",
+      "vips_first_two_pixels": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.5,
+        0.5,
+        0.5,
+        1.0
+      ],
+      "vips_last_pixel": [
+        15.5,
+        15.5,
+        15.5,
+        1.0
+      ]
+    },
+    "z_float_zip": {
+      "file": "fixtures/z_float_zip.exr",
+      "sha256": "1d704c41b18c574274cab2304c989ee88aa3ce07472e12f9dab91b92304ea3ad",
+      "vipsheader": {
+        "width": "8",
+        "height": "4",
+        "bands": "4",
+        "format": "float",
+        "coding": "none",
+        "interpretation": "scrgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libviprs/.epic520/_wt/504-exr/oracle-captures/foreign-exr/fixtures/z_float_zip.exr",
+        "vips-loader": "openexrload"
+      },
+      "vips_sample_count": 128,
+      "vips_payload_sha256": "c1538d4cd57a608431e67d7ed8be9460673d60751dfedc5d75a2c9bd5976ca68",
+      "vips_first_two_pixels": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "vips_last_pixel": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  }
+}

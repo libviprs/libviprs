@@ -113,6 +113,7 @@ pub mod encode_tiff;
 pub mod engine;
 pub mod engine_builder;
 pub mod error;
+pub mod exr;
 pub mod extensions;
 pub mod extract;
 pub mod foreign_stubs;
@@ -252,6 +253,11 @@ pub use radiance::{RadianceError, decode_radiance};
 // already knows the bytes are a GIF and does not want to go through the
 // sniff route.
 pub use gif::{GifError, decode_gif};
+// `decode_exr` is re-exported beside its error type for the same reason
+// `decode_radiance` is: it is the direct entry point for a caller who
+// already knows the bytes are an OpenEXR file. There is no encoder half
+// to pair it with, because libvips has never shipped an EXR writer.
+pub use exr::{ExrError, decode_exr};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,

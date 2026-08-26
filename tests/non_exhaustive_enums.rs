@@ -12,7 +12,7 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    Align, BandError, ColourError, Combine, DrawError, EngineEvent, GifError, Intent,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, GifError, Intent,
     Interpretation, JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError,
     Precision, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
 };
@@ -25,6 +25,26 @@ fn assert_gif_error_non_exhaustive(v: &GifError) {
         GifError::NoFrames => {}
         GifError::AllocLimitExceeded { .. } => {}
         GifError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_exr_error_non_exhaustive(v: &ExrError) {
+    match v {
+        ExrError::BadMagic { .. } => {}
+        ExrError::Decode { .. } => {}
+        ExrError::DeepData => {}
+        ExrError::UnsupportedSampleType { .. } => {}
+        ExrError::SubsampledChannel { .. } => {}
+        ExrError::NoChannels => {}
+        ExrError::DimensionOutOfBounds { .. } => {}
+        ExrError::TooManyChannels { .. } => {}
+        ExrError::AllocLimitExceeded { .. } => {}
+        ExrError::PartMismatch { .. } => {}
+        ExrError::ChannelSizeMismatch { .. } => {}
+        ExrError::Raster(_) => {}
         _ => {}
     }
 }

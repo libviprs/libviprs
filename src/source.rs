@@ -284,6 +284,14 @@ pub enum SourceError {
     /// opaque string.
     #[error(transparent)]
     Radiance(#[from] crate::radiance::RadianceError),
+    /// A malformed or unsupported OpenEXR file, raised by
+    /// [`crate::exr::decode_exr`]. libviprs decodes EXR through the `exr`
+    /// crate rather than through the `image` facade (see [`crate::exr`]),
+    /// so the failure arrives as a typed
+    /// [`ExrError`](crate::exr::ExrError) rather than as an
+    /// [`image::ImageError`].
+    #[error(transparent)]
+    Exr(#[from] crate::exr::ExrError),
     /// A malformed GIF. libviprs decodes GIF through the `gif` crate rather
     /// than the `image` facade (see [`crate::gif`]), because the facade
     /// hard-codes RGBA output and hides the transparent index, so its
@@ -542,8 +550,8 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// from its extension, so this returns exactly what [`decode_bytes`] returns
 /// for the same bytes, and a misnamed file still decodes correctly. libvips
 /// resolves a loader the same way. Native `.v`, JPEG, PNG, TIFF, GIF,
-/// WebP, and Radiance are recognised directly; anything else falls back to
-/// the `image` crate's own content guess.
+/// WebP, Radiance, and OpenEXR are recognised directly; anything else falls
+/// back to the `image` crate's own content guess.
 ///
 /// # Example usage
 ///
@@ -708,6 +716,8 @@ pub(crate) enum SniffedFormat {
     WebP,
     /// Radiance HDR, the first line `#?RADIANCE`.
     Radiance,
+    /// OpenEXR, `76 2F 31 01`.
+    OpenExr,
 }
 
 impl SniffedFormat {
@@ -731,6 +741,10 @@ impl SniffedFormat {
     ///   decode frame 0. vips does exactly the same thing, and with the same
     ///   consequence: `vips_foreign_load_nsgif_header` opens with
     ///   `vips_source_map(gif->source, &size)`, mapping the whole file.
+    /// * OpenEXR, because [`crate::exr::decode_exr`] parses the header
+    ///   twice, once to price the declared data window against the decode
+    ///   budget and once to decode, and the second pass has to start from
+    ///   the beginning of the same bytes.
     /// * WebP, because [`crate::webp::decode_webp`] reads the `ICCP`,
     ///   `EXIF` and `XMP ` chunks out of the RIFF directory as well as the
     ///   frame, and the frame is rarely the last chunk in the file.
@@ -740,7 +754,7 @@ impl SniffedFormat {
     const fn decodes_from_memory(self) -> bool {
         matches!(
             self,
-            Self::Vips | Self::Jpeg | Self::Gif | Self::WebP | Self::Radiance
+            Self::Vips | Self::Jpeg | Self::Gif | Self::WebP | Self::Radiance | Self::OpenExr
         )
     }
 
@@ -775,6 +789,14 @@ impl SniffedFormat {
             // `(mantissa + 0.5) * 2^(e-136)`, a 100% error at mantissa 0.
             // [`crate::radiance`] hand-rolls the codec instead.
             Self::Radiance => None,
+            // `image`'s EXR route is behind its `exr` feature, which is
+            // exactly `dep:exr`, so naming the crate directly costs nothing
+            // extra (issue #504). The reason to name it is that the facade
+            // flattens every file to one of its fixed colour types, where
+            // an EXR is an arbitrary set of named channels and
+            // [`crate::exr`] needs the names, the per-channel sample types
+            // and the data window.
+            Self::OpenExr => None,
         }
     }
 }
@@ -821,6 +843,9 @@ pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
         && matches!(head[magic.len()], b'\n' | b'\r')
     {
         return Some(SniffedFormat::Radiance);
+    }
+    if head.starts_with(&crate::exr::MAGIC) {
+        return Some(SniffedFormat::OpenExr);
     }
     None
 }
@@ -945,6 +970,9 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     }
     if sniffed == Some(SniffedFormat::WebP) {
         return crate::webp::decode_webp(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::OpenExr) {
+        return crate::exr::decode_exr(bytes, limits);
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
@@ -1627,7 +1655,7 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 20] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 23] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -1680,6 +1708,16 @@ mod tests {
             ("radiance rgbe", b"#?RGBE\nFORMAT=", None),
             ("radiance longer first line", b"#?RADIANCEX\n", None),
             ("radiance with no newline", b"#?RADIANCE", None),
+            // OpenEXR is a plain four-byte prefix, the same four bytes
+            // `vips__openexr_isexr` reads (`openexr2vips.c:105-115`). The
+            // two near-misses below share three of them.
+            (
+                "openexr",
+                b"\x76\x2f\x31\x01\x02\x00\x00\x00",
+                Some(SniffedFormat::OpenExr),
+            ),
+            ("openexr wrong version byte", b"\x76\x2f\x31\x02", None),
+            ("openexr truncated", b"\x76\x2f\x31", None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -1699,9 +1737,9 @@ mod tests {
      * container in, one decoder out, no options and no many-to-one
      * collapsing.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
-     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP` and `Radiance`, and
-     * distinct `image` formats for every container libviprs does not decode
-     * itself.
+     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Radiance` and
+     * `OpenExr`, and distinct `image` formats for every container libviprs
+     * does not decode itself.
      */
     #[test]
     fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
@@ -1713,6 +1751,7 @@ mod tests {
             SniffedFormat::Gif,
             SniffedFormat::WebP,
             SniffedFormat::Radiance,
+            SniffedFormat::OpenExr,
         ];
         // These are the containers libviprs decodes itself, so they are
         // the ones the route table maps to no `image` decoder.
@@ -1721,6 +1760,7 @@ mod tests {
             SniffedFormat::Radiance,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
+            SniffedFormat::OpenExr,
         ];
 
         let buffered: Vec<SniffedFormat> = all
@@ -1735,9 +1775,11 @@ mod tests {
                 SniffedFormat::Jpeg,
                 SniffedFormat::Gif,
                 SniffedFormat::WebP,
-                SniffedFormat::Radiance
+                SniffedFormat::Radiance,
+                SniffedFormat::OpenExr
             ],
-            "only .v, JPEG, GIF, WebP and Radiance may read the whole file into memory"
+            "only .v, JPEG, GIF, WebP, Radiance and OpenEXR may read the whole file \
+             into memory"
         );
 
         for format in self_decoded {
