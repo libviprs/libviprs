@@ -333,7 +333,7 @@ struct Selection {
 ///
 /// | field | value |
 /// |---|---|
-/// | `exr-channels` | the selected names, comma separated, in band order |
+/// | `exr-channels` | the selected names, comma separated, in band order. OpenEXR does not forbid a comma inside a channel name, so treat this as a label rather than as something to split on when the names are not the usual `R`/`G`/`B`/`A` |
 /// | `exr-compression` | the first part's compression method |
 /// | `exr-data-window-left` / `-top` | the data-window origin, which the pixels have been normalised away from |
 /// | `n-pages` | how many parts the file has; only the first is decoded |
@@ -383,7 +383,9 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(bytes), false)
         .map_err(ExrError::from)?;
     let part_count = meta.headers.len();
-    let header = meta.headers.first().ok_or(ExrError::NoChannels)?;
+    let header = meta.headers.first().ok_or(ExrError::Decode {
+        message: "the file declares no parts".to_owned(),
+    })?;
 
     if header.deep {
         return Err(ExrError::DeepData.into());
@@ -403,7 +405,13 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
                 max: usize::from(u16::MAX),
             })?;
 
-    let needed = u64::from(width) * u64::from(height) * (bands * SAMPLE_BYTES) as u64;
+    // Saturating rather than wrapping, because `max_coord`, `max_pixels`
+    // and `max_alloc_bytes` are all caller-settable: a caller who lifts
+    // every ceiling must still get a refusal here rather than a wrapped
+    // price that waves a huge allocation through.
+    let needed = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul((bands * SAMPLE_BYTES) as u64);
     if needed > limits.max_alloc_bytes {
         return Err(ExrError::AllocLimitExceeded {
             width,
