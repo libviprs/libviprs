@@ -35,43 +35,116 @@
 //!
 //! `encode_vips` writes the libvips native header (64 bytes: magic,
 //! geometry, band format, coding, interpretation, resolution, offsets)
-//! followed by the raw pixel data in the file's byte order, then a JSON
-//! trailer with the orientation tag and the attached metadata fields.
-//! libvips itself stores an XML trailer there, and a trailer that never
-//! claimed to be libviprs JSON is treated as absent (bar the orientation
-//! tag, which the reader recovers from the vips XML), so pixels and header
-//! survive either way. The reader accepts both byte orders (swapping
-//! 16-bit and float samples as needed), rejects band formats other than
-//! uchar, ushort, and float, and enforces the
-//! [`DecodeLimits::max_coord`] dimension ceiling on untrusted header
+//! followed by the raw pixel data in the file's byte order, then the
+//! metadata trailer libvips reads: the same small XML document real vips
+//! writes, `<root>` with a `<header>` and a `<meta>` block of
+//! `<field type="..." name="...">value</field>` elements
+//! (`libvips/iofuncs/vips.c:846-890` at `v8.18.0-95-gfe420cf3a`). The reader
+//! accepts both byte orders (swapping 16-bit and float samples as needed),
+//! rejects band formats other than uchar, ushort, and float, and enforces
+//! the [`DecodeLimits::max_coord`] dimension ceiling on untrusted header
 //! geometry.
+//!
+//! The trailer is written only when it would carry something: a raster with
+//! the upright orientation and no attached fields writes the header and the
+//! pixels and stops (issue #546). An empty trailer is not free, because the
+//! slot is not optional to libvips once a byte is in it.
+//!
+//! The four [`MetadataValue`] variants map one to one onto the four GTypes
+//! vips can round-trip through its `VIPS_TYPE_SAVE_STRING` transforms
+//! (`libvips/iofuncs/type.c:424-800`):
+//!
+//! | [`MetadataValue`] | `type=` | text |
+//! |---|---|---|
+//! | [`Int`](MetadataValue::Int) | `gint` | decimal |
+//! | [`Double`](MetadataValue::Double) | `gdouble` | shortest round-tripping decimal |
+//! | [`Str`](MetadataValue::Str) | `VipsRefString` | the string |
+//! | [`Blob`](MetadataValue::Blob) | `VipsBlob` | standard base64, padded, unwrapped |
+//!
+//! The orientation tag rides in `<meta>` as an ordinary
+//! `<field type="gint" name="orientation">`, which is where libvips keeps it
+//! and where the reader has always looked for it.
+//!
+//! Two places where this deliberately does *not* copy vips byte for byte:
+//!
+//! * **non-ASCII text survives.** `vips_target_write_amp`
+//!   (`libvips/iofuncs/target.c:821`) tests `*p < 32` on a plain `char`,
+//!   which is signed on this target, so every byte of a multi-byte UTF-8
+//!   sequence is treated as a control character and replaced by the
+//!   Unicode control picture at `0x2400 + *p`. Measured on vips 8.18.4:
+//!   `vips copy` over a `.v` carrying `café ☃ 日本` rewrites it as
+//!   `caf&#x23c3;&#x23a9; &#x23e2;&#x2398;&#x2383; …`, irreversibly. This
+//!   writer escapes only what XML actually needs, so vips reads libviprs's
+//!   UTF-8 back correctly (verified with `vipsheader -a`) even though vips
+//!   cannot rewrite its own;
+//! * **a field name containing `"` is escaped as `&quot;`,** where
+//!   `target_write_quotes` (`vips.c:790-804`) writes a backslash and leaves
+//!   the attribute unterminated for its own expat parser.
+//!
+//! A C0 control character inside a string field does *not* survive, in
+//! either direction: XML 1.0 cannot represent one at all, so the only
+//! spelling vips's parser accepts is the substitution above, and reading it
+//! back yields the control picture rather than the control character.
+//! Binary belongs in a [`Blob`](MetadataValue::Blob), which is base64 and
+//! exact. A carriage return is the exception and is written as `&#x000d;`,
+//! because a literal one would be folded into a newline by XML end-of-line
+//! normalisation.
 //!
 //! ## Trailer compatibility across versions
 //!
-//! The trailer is read entry by entry rather than as one `serde` value, so
-//! a `.v` written by a newer libviprs costs an older one only the entries
-//! it genuinely cannot represent (issue #565). One unknown
-//! [`MetadataValue`] variant used to fail the whole parse and take every
-//! other field on the image with it, silently, which made a new variant a
-//! data-loss break that `cargo semver-checks` could not see. The rules the
-//! format holds to now:
+//! The trailer is read field by field rather than as one `serde` value, so
+//! a `.v` written by a newer libviprs costs an older one only the fields it
+//! genuinely cannot represent (issue #565). One unknown [`MetadataValue`]
+//! variant used to fail the whole parse and take every other field on the
+//! image with it, silently, which made a new variant a data-loss break that
+//! `cargo semver-checks` could not see. The rules the format holds to:
 //!
-//! * an entry whose value matches no [`MetadataValue`] variant is carried
-//!   opaquely: invisible to [`Raster::get_field`] and [`Raster::get_fields`],
-//!   because this build cannot say what it means, but written back out
-//!   unchanged, so an old build that opens a new file and re-saves it does
-//!   not strip what it could not read. Setting or removing a field of the
-//!   same name supersedes it, so stripping still strips;
-//! * a trailer key this build does not know is ignored, and one it expects
-//!   but does not find falls back to the default (`orientation` to 1);
-//! * the wire shape is frozen at `{"orientation":N,"fields":{"entries":
-//!   [[name,value],...]}}` with values in [`MetadataValue`]'s externally
-//!   tagged form, so what this build writes still parses on every build
-//!   already released;
-//! * a trailer that opens with `{` and is not valid JSON is corruption
-//!   rather than a foreign format, and the reader reports it. That is the
-//!   one case where metadata is genuinely unrecoverable, and it is narrow
-//!   enough that no libviprs or libvips writer can produce it.
+//! * a field whose `type` is not one of the four above is carried opaquely
+//!   as that type name plus its character data exactly as it sat on disk:
+//!   invisible to [`Raster::get_field`] and [`Raster::get_fields`], because
+//!   this build cannot say what it means, but written back out byte for
+//!   byte, so an old build that opens a new file and re-saves it does not
+//!   strip what it could not read. Setting or removing a field of the same
+//!   name supersedes it, so stripping still strips. vips itself keeps
+//!   reading such a field, because the carrier *is* its own encoding: a
+//!   `delay` array from #573 goes out as `VipsArrayInt` and
+//!   `vipsheader -a` prints it;
+//! * a `type` name libvips does not know is skipped by vips silently, with
+//!   no warning and no error (measured on 8.18.4), which is what makes the
+//!   carrier safe to write;
+//! * an element this build expects and does not find falls back to the
+//!   default (`orientation` to 1);
+//! * a trailer that is not XML is treated as absent, as libvips treats a
+//!   trailer that is not XML. libviprs is not the only writer of that slot,
+//!   so silence there is the honest answer.
+//!
+//! ### The legacy JSON trailer
+//!
+//! libviprs 0.4.0 and earlier wrote their own JSON trailer,
+//! `{"orientation":N,"fields":{"entries":[[name,value],...]}}` with values
+//! in [`MetadataValue`]'s externally tagged form. The reader still accepts
+//! it, entry by entry and with the same opaque carry, so every `.v` already
+//! written keeps its metadata. A trailer that opens with `{` and is not
+//! valid JSON claimed to be that format and is genuinely unrecoverable, so
+//! the reader reports it rather than swallowing it.
+//!
+//! The writer no longer produces it, with one exception. A value carried
+//! opaquely out of a JSON trailer has **no XML spelling**, and cannot get
+//! one: the two formats encode the same value differently
+//! (`{"IntArray":[40,40,90]}` against `type="VipsArrayInt">40 40 90`), so
+//! translating between them means interpreting the value, which is the one
+//! thing a carried value is defined not to allow. Rather than drop it, a
+//! raster still carrying such a value keeps the JSON trailer. That costs
+//! the vips warning on exactly the files that were already unreadable to
+//! vips, and it loses nothing.
+//!
+//! The consequence of writing XML, stated plainly: libviprs 0.4.0 reads a
+//! `.v` written now for its pixels, its geometry and its orientation, and
+//! not for its attached fields, because its reader takes the trailer as
+//! metadata only when the first non-whitespace byte is `{`. No byte
+//! sequence can be both that and the XML vips requires, so full interop
+//! with vips and full field recovery on 0.4.0 cannot both hold. New reads
+//! old completely; old reads new down to the orientation.
 //!
 //! The interpretation word holds libvips' own `VipsInterpretation` codes,
 //! which since libvips 8.18 include `30` and `31` for OkLab and OkLch
@@ -123,6 +196,7 @@
 //! field mapping. There is no third process-global regime: the coordinate
 //! ceiling lives solely on `DecodeLimits`.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -146,7 +220,23 @@ use crate::source::{DecodeLimits, SourceError};
 /// accessors mirror pyvips-style coercing reads: they panic with a
 /// descriptive message when the variant does not match, in line with the
 /// panicking convenience layer of the operation modules.
+///
+/// # Growing
+///
+/// `#[non_exhaustive]`, because four is not the number of types a vips
+/// metadata field can have (issue #609). `VipsArrayInt`, `VipsArrayDouble`
+/// and `gboolean` are all live in a `.v` trailer this crate reads today, and
+/// #573 needs an array variant for the per-frame GIF delays. Marking it now
+/// costs downstream a `_ =>` arm on an exhaustive `match`; marking it after
+/// the first of those variants lands would cost a major version instead, and
+/// `cargo semver-checks` would be right to demand one.
+///
+/// Only matching is affected. Every variant stays constructible from
+/// outside, so `MetadataValue::Int(3)` and the `From` impls are unchanged,
+/// and the `as_*` accessors are the reading path that never needed a match
+/// anyway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MetadataValue {
     /// A signed integer field (`width`, `orientation`, counts, flags).
     Int(i64),
@@ -322,15 +412,42 @@ impl From<&[u8]> for MetadataValue {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct MetadataFields {
     entries: Vec<(String, MetadataValue)>,
-    /// Fields read from a `.v` trailer whose value matches no
-    /// [`MetadataValue`] variant this build has, kept as the raw JSON that
-    /// was on disk (issue #565).
+    /// Fields read from a `.v` trailer that this build cannot interpret,
+    /// kept in the trailer form they arrived in (issue #565).
     ///
     /// They stay out of the field API on purpose: this build can say that
     /// the field was there, not what it means, and a wrong answer is worse
     /// than none. Carrying them is what stops a rewrite by an older build
     /// from stripping what a newer one wrote.
-    unknown: Vec<(String, serde_json::Value)>,
+    unknown: Vec<(String, CarriedValue)>,
+}
+
+/// A `.v` trailer value this build cannot name, kept exactly as it was
+/// written so it can go back out unchanged (issue #565).
+///
+/// The form matters, because the two trailer formats spell the same value
+/// differently and converting between them would mean interpreting it. See
+/// the [module docs](crate::imageio) for what that costs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum CarriedValue {
+    /// From a libvips XML trailer: the `type` attribute and the element's
+    /// character data as it sat on disk, escapes and all.
+    ///
+    /// The JSON spelling is only reachable on a raster that also carries a
+    /// [`CarriedValue::Json`] value, which needs one trailer to hold both.
+    /// No `MetadataValue` matches this shape, so any libviprs build carries
+    /// it on rather than reading it as something it is not.
+    Xml {
+        /// The GType name from the `type` attribute, e.g. `VipsArrayInt`.
+        #[serde(rename = "vips-xml-type")]
+        gtype: String,
+        /// The character data between the tags, still XML-escaped.
+        #[serde(rename = "vips-xml-text")]
+        text: String,
+    },
+    /// From the legacy libviprs JSON trailer: the value exactly as it parsed.
+    Json(serde_json::Value),
 }
 
 impl MetadataFields {
@@ -367,7 +484,7 @@ impl MetadataFields {
 
     /// Record a field this build cannot interpret; see
     /// [`MetadataFields::unknown`].
-    fn set_unknown(&mut self, name: &str, value: serde_json::Value) {
+    fn set_unknown(&mut self, name: &str, value: CarriedValue) {
         self.entries.retain(|(n, _)| n != name);
         if let Some(slot) = self
             .unknown
@@ -384,14 +501,31 @@ impl MetadataFields {
         self.entries.iter().map(|(n, _)| n.as_str())
     }
 
+    /// Whether the raster carries no attached field at all, interpretable
+    /// or not. A `.v` trailer with nothing in it is worse than no trailer
+    /// (issue #546), so the writer asks this before writing one.
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.unknown.is_empty()
+    }
+
     /// The interpretable fields, in the order they were set.
     fn known(&self) -> impl Iterator<Item = (&str, &MetadataValue)> {
         self.entries.iter().map(|(n, v)| (n.as_str(), v))
     }
 
     /// The fields carried opaquely; see [`MetadataFields::unknown`].
-    fn unknown_fields(&self) -> impl Iterator<Item = (&str, &serde_json::Value)> {
+    fn unknown_fields(&self) -> impl Iterator<Item = (&str, &CarriedValue)> {
         self.unknown.iter().map(|(n, v)| (n.as_str(), v))
+    }
+
+    /// Whether anything here can only be written as the legacy JSON
+    /// trailer. See the [module docs](crate::imageio): a value carried out
+    /// of a JSON trailer has no XML spelling, so the writer keeps the old
+    /// format for that file rather than dropping it.
+    fn needs_legacy_json_trailer(&self) -> bool {
+        self.unknown
+            .iter()
+            .any(|(_, v)| matches!(v, CarriedValue::Json(_)))
     }
 }
 
@@ -950,27 +1084,109 @@ impl Raster {
         push_i32(&mut out, self.yoffset());
         out.resize(VIPS_HEADER_LEN, 0); // reserved tail of the header
         out.extend_from_slice(self.data());
-        if keep_metadata {
-            let trailer = VTrailer {
-                orientation: self.orientation(),
-                fields: VFields {
-                    entries: self
-                        .fields
-                        .known()
-                        .map(|(name, v)| (name, VFieldValue::Known(v)))
-                        .chain(
-                            self.fields
-                                .unknown_fields()
-                                .map(|(name, v)| (name, VFieldValue::Unknown(v))),
-                        )
-                        .collect(),
-                },
-            };
-            if let Ok(json) = serde_json::to_vec(&trailer) {
-                out.extend_from_slice(&json);
+        if keep_metadata && self.has_v_trailer_content() {
+            if self.fields.needs_legacy_json_trailer() {
+                self.append_legacy_json_trailer(&mut out);
+            } else {
+                self.append_vips_xml_trailer(&mut out);
             }
         }
         out
+    }
+
+    /// Append the metadata trailer libvips reads: `<root>`, a `<header>`
+    /// holding the (empty) history string, and a `<meta>` block of one
+    /// `<field>` per attached value plus the orientation tag.
+    ///
+    /// Mirrors `build_xml` (`libvips/iofuncs/vips.c:846-890` at
+    /// `v8.18.0-95-gfe420cf3a`) element for element, including the two-space
+    /// indent and the trailing newline, so a `.v` libviprs writes and a `.v`
+    /// vips writes for the same metadata differ only where this
+    /// deliberately fixes vips's escaping. See the
+    /// [module docs](crate::imageio) for the type mapping and for the two
+    /// divergences.
+    ///
+    /// The `<header>` block has to be there even though nothing reads it
+    /// back: vips's parser flips out of history mode on `<meta>`
+    /// (`vips.c:606-610`), and a document with a `<header>` and no `<meta>`
+    /// would leave every field looking like history.
+    fn append_vips_xml_trailer(&self, out: &mut Vec<u8>) {
+        let mut xml = String::new();
+        xml.push_str("<?xml version=\"1.0\"?>\n");
+        xml.push_str("<root xmlns=\"");
+        xml.push_str(VIPS_XML_NAMESPACE);
+        xml.push_str("\">\n  <header>\n    <field type=\"");
+        xml.push_str(GTYPE_STRING);
+        xml.push_str("\" name=\"Hist\"></field>\n  </header>\n  <meta>\n");
+        for (name, value) in self.fields.known() {
+            // The orientation tag is written from the header below. An
+            // attached field of that name can only come from a hand-made
+            // trailer, is shadowed by the header everywhere it is read, and
+            // would put two `orientation` elements in one `<meta>` block.
+            if name == "orientation" {
+                continue;
+            }
+            let (gtype, text) = xml_field_of(value);
+            push_xml_field(&mut xml, gtype, name, &text, XmlText::Escape);
+        }
+        for (name, carried) in self.fields.unknown_fields() {
+            // `needs_legacy_json_trailer` is false here, so every carried
+            // value is an XML one and goes back exactly as it arrived.
+            if let CarriedValue::Xml { gtype, text } = carried {
+                push_xml_field(&mut xml, gtype, name, text, XmlText::Verbatim);
+            }
+        }
+        push_xml_field(
+            &mut xml,
+            GTYPE_INT,
+            "orientation",
+            &self.orientation().to_string(),
+            XmlText::Escape,
+        );
+        xml.push_str("  </meta>\n</root>\n");
+        out.extend_from_slice(xml.as_bytes());
+    }
+
+    /// Append the trailer libviprs 0.4.0 wrote, byte for byte.
+    ///
+    /// Only reached for a raster carrying a value that has no XML spelling;
+    /// see the [module docs](crate::imageio). Keeping the exact bytes is the
+    /// point, because the whole reason to take this path is that some other
+    /// build has to be able to read the value back.
+    fn append_legacy_json_trailer(&self, out: &mut Vec<u8>) {
+        let trailer = VTrailer {
+            orientation: self.orientation(),
+            fields: VFields {
+                entries: self
+                    .fields
+                    .known()
+                    .map(|(name, v)| (name, VFieldValue::Known(v)))
+                    .chain(
+                        self.fields
+                            .unknown_fields()
+                            .map(|(name, v)| (name, VFieldValue::Carried(v))),
+                    )
+                    .collect(),
+            },
+        };
+        if let Ok(json) = serde_json::to_vec(&trailer) {
+            out.extend_from_slice(&json);
+        }
+    }
+
+    /// Whether a `.v` trailer would carry anything: an orientation other
+    /// than the upright default, or at least one attached field (readable
+    /// or carried opaquely).
+    ///
+    /// An empty trailer is not free. libvips parses that slot as XML, so the
+    /// 41 bytes of `{"orientation":1,"fields":{"entries":[]}}` that every
+    /// plain [`Raster::save`] used to append made `vipsheader -a` print
+    /// `VIPS-WARNING **: error reading vips image metadata: VipsImage: XML
+    /// parse error` and throw the whole metadata block away. A file with no
+    /// trailer at all reads silently (measured on vips 8.18.4, issue #546),
+    /// so writing nothing is strictly better than writing nothing useful.
+    fn has_v_trailer_content(&self) -> bool {
+        self.orientation() != 1 || !self.fields.is_empty()
     }
 }
 
@@ -992,18 +1208,397 @@ const VIPS_MAGIC_NATIVE: [u8; 4] = VIPS_MAGIC_LE;
 #[cfg(target_endian = "big")]
 const VIPS_MAGIC_NATIVE: [u8; 4] = VIPS_MAGIC_BE;
 
-/// The JSON trailer libviprs writes after the pixel data: the
-/// orientation tag plus the attached fields. libvips stores XML here.
+// --- the libvips XML metadata trailer ---------------------------------------
+
+/// The XML namespace real libvips stamps on a `.v` metadata trailer
+/// (`NAMESPACE_URI` at `libvips/iofuncs/vips.c:124`, joined with the writing
+/// version by `build_xml` at `vips.c:857-860`, `v8.18.0-95-gfe420cf3a`).
+///
+/// The version suffix names the release whose trailer layout this writes and
+/// was measured against, not the writer: vips's parser only checks that the
+/// namespace starts with `.../vips` and ignores the rest
+/// (`parser_element_start_handler`, `vips.c:614-621`), so a wrong version
+/// here would be silent rather than loud, and a right one is worth more as
+/// documentation than as a gate.
+const VIPS_XML_NAMESPACE: &str = "http://www.vips.ecs.soton.ac.uk/vips/8.18.4";
+
+/// GType name for [`MetadataValue::Int`] (`g_type_name(G_TYPE_INT)`).
+const GTYPE_INT: &str = "gint";
+/// GType name for [`MetadataValue::Double`].
+const GTYPE_DOUBLE: &str = "gdouble";
+/// GType name for [`MetadataValue::Str`] (vips's refcounted string).
+const GTYPE_STRING: &str = "VipsRefString";
+/// GType name for [`MetadataValue::Blob`], carried as base64
+/// (`transform_blob_save_string`, `libvips/iofuncs/type.c:745-758`).
+const GTYPE_BLOB: &str = "VipsBlob";
+
+/// The `type` attribute and character data for one [`MetadataValue`]; see
+/// the type table in the [module docs](crate::imageio).
+///
+/// The double goes out in Rust's shortest round-tripping form rather than
+/// vips's `g_ascii_dtostr` `%.17g` (`type.c:438-446`), because the two agree
+/// on every value that matters and the short one is what survives a
+/// `f64 -> text -> f64` trip here. `g_ascii_strtod` reads it either way:
+/// measured on 8.18.4, a `gdouble` field written `1e300` reads back as
+/// `1e+300`.
+fn xml_field_of(value: &MetadataValue) -> (&'static str, Cow<'_, str>) {
+    match value {
+        MetadataValue::Int(i) => (GTYPE_INT, Cow::Owned(i.to_string())),
+        MetadataValue::Double(d) => (GTYPE_DOUBLE, Cow::Owned(format!("{d:?}"))),
+        MetadataValue::Str(s) => (GTYPE_STRING, Cow::Borrowed(s.as_str())),
+        MetadataValue::Blob(b) => (GTYPE_BLOB, Cow::Owned(base64_encode(b))),
+    }
+}
+
+/// Whether [`push_xml_field`] escapes the text it is given or writes it out
+/// as-is.
+#[derive(Clone, Copy)]
+enum XmlText {
+    /// A value this build produced: escape it.
+    Escape,
+    /// Character data read off disk and carried opaquely: it is already
+    /// escaped, and re-escaping it would double every `&`.
+    Verbatim,
+}
+
+/// Append one `    <field type="..." name="...">text</field>` line, indented
+/// and newline-terminated exactly as `build_xml_meta` writes it
+/// (`libvips/iofuncs/vips.c:803-844`).
+fn push_xml_field(out: &mut String, gtype: &str, name: &str, text: &str, mode: XmlText) {
+    out.push_str("    <field type=\"");
+    push_xml_attr(out, gtype);
+    out.push_str("\" name=\"");
+    push_xml_attr(out, name);
+    out.push_str("\">");
+    match mode {
+        XmlText::Escape => push_xml_text(out, text),
+        XmlText::Verbatim => out.push_str(text),
+    }
+    out.push_str("</field>\n");
+}
+
+/// Escape `s` as XML character data.
+///
+/// `&`, `<` and `>` become entities. A C0 control character other than tab
+/// and newline is replaced by its Unicode control picture at `0x2400 + c`,
+/// which is what vips does (`vips_target_write_amp`,
+/// `libvips/iofuncs/target.c:821-845`) and the only thing an XML 1.0 parser
+/// will take, since a numeric reference to a control character is not a
+/// legal `Char`. That substitution does not reverse, so a control character
+/// in a string field does not survive the round trip in either library.
+///
+/// A carriage return goes out as `&#x000d;` rather than literally, because a
+/// literal one is folded into a newline by end-of-line normalisation
+/// (XML 1.0 section 2.11) while the reference is not.
+///
+/// Unlike vips, bytes above 0x7f are left alone. vips tests `*p < 32` on a
+/// signed `char`, so it mangles every multi-byte UTF-8 sequence it writes;
+/// see the [module docs](crate::imageio).
+fn push_xml_text(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#x000d;"),
+            '\n' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 => push_control_picture(out, c),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Escape `s` as an XML attribute value: [`push_xml_text`] plus the quote,
+/// and with the three whitespace characters written as references because an
+/// XML parser normalises literal ones to spaces (XML 1.0 section 3.3.3).
+fn push_xml_attr(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("&#x000a;"),
+            '\r' => out.push_str("&#x000d;"),
+            '\t' => out.push_str("&#x0009;"),
+            c if (c as u32) < 0x20 => push_control_picture(out, c),
+            c => out.push(c),
+        }
+    }
+}
+
+/// The `&#x24xx;` substitution for a C0 control character; see
+/// [`push_xml_text`].
+fn push_control_picture(out: &mut String, c: char) {
+    use std::fmt::Write as _;
+    // Infallible: writing into a String cannot fail.
+    let _ = write!(out, "&#x{:04x};", 0x2400 + c as u32);
+}
+
+/// Resolve XML entity and character references in `s`.
+///
+/// Anything it does not recognise is left standing, which keeps a stray `&`
+/// in a foreign trailer from eating the rest of the value.
+fn unescape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        let Some(semi) = tail.find(';') else {
+            out.push_str(tail);
+            return out;
+        };
+        match decode_xml_entity(&tail[1..semi]) {
+            Some(c) => out.push(c),
+            None => out.push_str(&tail[..=semi]),
+        }
+        rest = &tail[semi + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One entity body (between `&` and `;`) as a character, or `None` when it
+/// is not one of the five predefined entities or a numeric reference.
+fn decode_xml_entity(body: &str) -> Option<char> {
+    match body {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let digits = body.strip_prefix('#')?;
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse::<u32>().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
+}
+
+/// The slice of a `.v` XML trailer that holds the metadata fields.
+///
+/// Normally the inside of `<meta>`, which is where `build_xml` puts them.
+/// A trailer with no `<meta>` element falls back to everything after
+/// `</header>`, so the history block cannot be mistaken for metadata, and a
+/// bare fragment with neither is scanned whole.
+fn vips_xml_meta_region(text: &str) -> &str {
+    if let Some(open) = text.find("<meta>").or_else(|| text.find("<meta ")) {
+        let after = &text[open..];
+        let Some(gt) = after.find('>') else {
+            return "";
+        };
+        let inner = &after[gt + 1..];
+        let end = inner.find("</meta>").unwrap_or(inner.len());
+        &inner[..end]
+    } else if let Some(idx) = text.find("</header>") {
+        &text[idx + "</header>".len()..]
+    } else {
+        text
+    }
+}
+
+/// One `<field>` element of a `.v` XML trailer.
+struct VipsXmlField<'a> {
+    /// The `type` attribute: a GType name such as `gint`.
+    gtype: &'a str,
+    /// The `name` attribute, still escaped.
+    name: &'a str,
+    /// The character data between the tags, still escaped.
+    text: &'a str,
+}
+
+/// Scanner over the `<field>` elements of a `.v` XML trailer.
+///
+/// Deliberately not a general XML parser. The trailer is one small document
+/// with a shape libvips writes deterministically, this build has to read it
+/// without taking on an XML dependency, and a scanner that skips what it
+/// does not understand degrades the way the rest of the trailer path does:
+/// a field it cannot make sense of costs that field and nothing else.
+///
+/// A field missing either attribute is skipped rather than guessed at: vips
+/// writes both on every element, and a field with no type cannot be
+/// interpreted *or* carried faithfully.
+struct VipsXmlFields<'a> {
+    rest: &'a str,
+}
+
+impl<'a> VipsXmlFields<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { rest: text }
+    }
+}
+
+impl<'a> Iterator for VipsXmlFields<'a> {
+    type Item = VipsXmlField<'a>;
+
+    fn next(&mut self) -> Option<VipsXmlField<'a>> {
+        loop {
+            let start = self.rest.find("<field")?;
+            let after = &self.rest[start + "<field".len()..];
+            // `<fieldset>` is not a `<field>`.
+            if !after.starts_with([' ', '\t', '\r', '\n', '>', '/']) {
+                self.rest = after;
+                continue;
+            }
+            let Some(close) = after.find('>') else {
+                self.rest = "";
+                return None;
+            };
+            let attrs = &after[..close];
+            let body = &after[close + 1..];
+            let (text, rest) = if attrs.ends_with('/') {
+                ("", body)
+            } else if let Some(i) = body.find("</field>") {
+                (&body[..i], &body[i + "</field>".len()..])
+            } else {
+                self.rest = "";
+                return None;
+            };
+            self.rest = rest;
+            let attrs = attrs.strip_suffix('/').unwrap_or(attrs);
+            let mut gtype = None;
+            let mut name = None;
+            let pairs = XmlAttrs { rest: attrs };
+            for (key, value) in pairs {
+                match key {
+                    "type" => gtype = Some(value),
+                    "name" => name = Some(value),
+                    _ => {}
+                }
+            }
+            let (Some(gtype), Some(name)) = (gtype, name) else {
+                continue;
+            };
+            return Some(VipsXmlField { gtype, name, text });
+        }
+    }
+}
+
+/// Scanner over the `name="value"` pairs of one start tag.
+///
+/// Pair by pair rather than by searching for `name=`, so an attribute value
+/// that happens to contain another attribute's name cannot be picked up as
+/// that attribute.
+struct XmlAttrs<'a> {
+    rest: &'a str,
+}
+
+impl<'a> Iterator for XmlAttrs<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<(&'a str, &'a str)> {
+        let rest = self.rest.trim_start();
+        let eq = rest.find('=')?;
+        let key = rest[..eq].trim_end();
+        let after = rest[eq + 1..].trim_start();
+        let quote = after.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            self.rest = "";
+            return None;
+        }
+        let body = &after[quote.len_utf8()..];
+        let end = body.find(quote)?;
+        self.rest = &body[end + quote.len_utf8()..];
+        Some((key, &body[..end]))
+    }
+}
+
+/// The standard base64 alphabet (RFC 4648), which is what `g_base64_encode`
+/// uses for a `VipsBlob` save string.
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode `data` as padded, unwrapped base64, matching `g_base64_encode`
+/// (which never breaks lines) as used by `transform_blob_save_string`.
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b1 = u32::from(chunk[0]);
+        let b2 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b3 = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let n = (b1 << 16) | (b2 << 8) | b3;
+        out.push(BASE64_ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(BASE64_ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode padded base64, tolerating whitespace, or `None` when `text` is not
+/// base64 at all.
+///
+/// `None` is not a failure the caller reports: a `VipsBlob` field whose text
+/// will not decode is carried opaquely instead, so a value this build cannot
+/// read is still a value it does not destroy.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut padding = 0usize;
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return None; // data after the padding
+        }
+        acc = (acc << 6) | base64_value(byte)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    // A well-formed group leaves 0, 2 or 4 spare bits, and they are zero.
+    if padding > 2 || bits >= 6 || acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// One base64 digit's value, or `None` when the byte is not one.
+fn base64_value(byte: u8) -> Option<u32> {
+    Some(match byte {
+        b'A'..=b'Z' => u32::from(byte - b'A'),
+        b'a'..=b'z' => u32::from(byte - b'a') + 26,
+        b'0'..=b'9' => u32::from(byte - b'0') + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    })
+}
+
+/// The trailer libviprs 0.4.0 and earlier wrote after the pixel data: the
+/// orientation tag plus the attached fields, as JSON.
+///
+/// The writer produces this only for a raster carrying a value that has no
+/// XML spelling; everything else gets the libvips XML trailer now (issue
+/// #546). The shape stays frozen at what 0.4.0 wrote,
+/// `{"orientation":N,"fields":{"entries":[[name,value],...]}}` with values
+/// in [`MetadataValue`]'s externally tagged form, because the only reason to
+/// take this path is that some other build has to read the value back.
 ///
 /// Write-only. Reading goes through [`read_json_trailer`], which walks the
 /// JSON entry by entry rather than deserialising into this shape, because
 /// one `serde` value for the whole trailer is exactly what made a single
 /// unreadable field cost the image every other one (issue #565).
-///
-/// The wire shape is frozen at what libviprs 0.4 wrote,
-/// `{"orientation":N,"fields":{"entries":[[name,value],...]}}` with values
-/// in [`MetadataValue`]'s externally tagged form, so every build already
-/// released can still read what this one writes.
 #[derive(Serialize)]
 struct VTrailer<'a> {
     orientation: u8,
@@ -1026,8 +1621,8 @@ struct VFields<'a> {
 enum VFieldValue<'a> {
     /// A value this build understands, e.g. `{"Int":3}`.
     Known(&'a MetadataValue),
-    /// A value a newer build wrote, echoed verbatim.
-    Unknown(&'a serde_json::Value),
+    /// A value a newer build wrote, echoed back as it arrived.
+    Carried(&'a CarriedValue),
 }
 
 /// Whether `bytes` begin with a `.v` magic (either byte order).
@@ -1126,12 +1721,11 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     raster.meta.xoffset = xoffset;
     raster.meta.yoffset = yoffset;
     raster.meta.interpretation = interpretation_from_code(type_code);
-    // Trailer: libviprs JSON carries the orientation tag and every attached
-    // field. A `.v` written by real libvips instead carries an XML metadata
-    // block here; we still recover the orientation tag from it so `autorot`
-    // has the same cross-oracle vips does (the remaining XML fields are not
-    // parsed yet). A trailer that never claimed to be ours is treated as
-    // absent, as libvips treats ours.
+    // Trailer: the XML block libvips writes and libviprs now writes too,
+    // carrying the orientation tag and every attached field. A `.v` from
+    // libviprs 0.4.0 or earlier carries the old JSON trailer there instead
+    // and is still read. Anything else is treated as absent, as libvips
+    // treats a trailer that is not XML.
     if end < bytes.len() {
         let trailer = &bytes[end..];
         if is_json_trailer(trailer) {
@@ -1139,21 +1733,26 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
                 SourceError::VipsFormat(format!("corrupt .v metadata trailer: {err}"))
             })?;
             read_json_trailer(&json, &mut raster);
-        } else if let Some(orientation) = parse_vips_xml_orientation(trailer) {
-            raster.meta.orientation = orientation;
+        } else {
+            read_vips_xml_trailer(trailer, &mut raster);
         }
     }
     Ok(raster)
 }
 
-/// Whether `trailer` claims to be a libviprs JSON trailer: its first
-/// non-whitespace byte is `{`.
+/// Whether `trailer` claims to be the legacy libviprs JSON trailer: its
+/// first non-whitespace byte is `{`.
 ///
-/// This is what separates a trailer someone else wrote from one of ours
-/// that is broken. libvips puts XML in the same slot and other writers may
-/// put anything there, so silence is the right answer for those; it is not
-/// the right answer for a libviprs trailer whose metadata is genuinely
-/// unrecoverable (issue #565).
+/// This is what picks the reader, and it is also what lets a broken JSON
+/// trailer be reported where a broken XML one cannot be. Only libviprs ever
+/// wrote JSON into that slot, so a `{` that will not parse is corruption
+/// with a known author (issue #565). The XML slot is shared with libvips and
+/// with anything else that writes a `.v`, so silence is the honest answer
+/// there.
+///
+/// It is also the reason libviprs 0.4.0 cannot read the fields out of a `.v`
+/// written now: no byte sequence starts with `{` and is the XML libvips
+/// requires. See the [module docs](crate::imageio).
 fn is_json_trailer(trailer: &[u8]) -> bool {
     trailer
         .iter()
@@ -1161,7 +1760,7 @@ fn is_json_trailer(trailer: &[u8]) -> bool {
         .is_some_and(|&b| b == b'{')
 }
 
-/// Apply a libviprs JSON trailer to `raster`, one entry at a time.
+/// Apply a legacy libviprs JSON trailer to `raster`, one entry at a time.
 ///
 /// Total on purpose. Every part of the trailer is optional and every entry
 /// is read on its own, so a `.v` written by a newer libviprs costs this
@@ -1193,39 +1792,62 @@ fn read_json_trailer(json: &serde_json::Value, raster: &mut Raster) {
         };
         match serde_json::from_value::<MetadataValue>(value.clone()) {
             Ok(known) => raster.fields.set(name, known),
-            Err(_) => raster.fields.set_unknown(name, value.clone()),
+            Err(_) => raster
+                .fields
+                .set_unknown(name, CarriedValue::Json(value.clone())),
         }
     }
 }
 
-/// Recover the EXIF-style orientation tag from a real-libvips `.v` XML
-/// metadata trailer.
+/// Apply a libvips XML metadata trailer to `raster`, one `<field>` at a time.
 ///
-/// libvips serialises image metadata as an XML block after the pixel data,
-/// storing the orientation as `<field type="gint" name="orientation">N</field>`.
-/// This extracts that integer (1-8) so a `.v` file vips itself wrote decodes
-/// with the correct orientation for [`Raster::autorot`]; the distinct
-/// lowercase `name="orientation"` is not shared by the `exif-ifd0-Orientation`
-/// string field. The anchor requires the field element to close immediately
-/// (`name="orientation">`), matching vips's deterministic
-/// `<field type="gint" name="orientation">` serialization, so a longer
-/// field name (e.g. a hypothetical `name="orientation-foo"`) cannot
-/// false-match. Returns `None` when the trailer is not valid UTF-8, carries
-/// no such field, or the value is out of the 1-8 range.
+/// Total on purpose, like [`read_json_trailer`]: every element is read on its
+/// own, so a field this build cannot represent costs that field and nothing
+/// else. A field whose `type` is not one of the four GTypes
+/// [`MetadataValue`] covers, or whose text will not parse as the type it
+/// claims, is carried opaquely and written back byte for byte rather than
+/// dropped (issue #565).
 ///
-/// Only the orientation is recovered from a real-libvips XML trailer; the
-/// remaining fields (exif-data, icc-profile-data, resolution, n-pages, …) are
-/// not parsed — see issue #487. Core's own JSON trailer preserves them, so
-/// this partial affects only round-tripping a `.v` that vips itself wrote.
-fn parse_vips_xml_orientation(trailer: &[u8]) -> Option<u8> {
-    let text = std::str::from_utf8(trailer).ok()?;
-    let anchor = text.find(r#"name="orientation">"#)?;
-    let after = &text[anchor..];
-    let open = after.find('>')?;
-    let rest = &after[open + 1..];
-    let close = rest.find('<')?;
-    let value: u16 = rest[..close].trim().parse().ok()?;
-    (1..=8).contains(&value).then_some(value as u8)
+/// `orientation` is a header value here, not an attached field, so it is
+/// taken out of the stream: writing it back is the writer's job, and letting
+/// it through as well would put two of it in the next file. Out of the 1-8
+/// range it falls back to the upright default, which is how `vips autorot`
+/// treats a tag it cannot use.
+fn read_vips_xml_trailer(trailer: &[u8], raster: &mut Raster) {
+    let Ok(text) = std::str::from_utf8(trailer) else {
+        return;
+    };
+    for field in VipsXmlFields::new(vips_xml_meta_region(text)) {
+        let name = unescape_xml(field.name);
+        let gtype = unescape_xml(field.gtype);
+        let value = unescape_xml(field.text);
+        if name == "orientation" {
+            if gtype == GTYPE_INT
+                && let Ok(tag) = value.trim().parse::<u16>()
+                && (1..=8).contains(&tag)
+            {
+                raster.meta.orientation = tag as u8;
+            }
+            continue;
+        }
+        let known = match gtype.as_str() {
+            GTYPE_INT => value.trim().parse::<i64>().ok().map(MetadataValue::Int),
+            GTYPE_DOUBLE => value.trim().parse::<f64>().ok().map(MetadataValue::Double),
+            GTYPE_STRING => Some(MetadataValue::Str(value)),
+            GTYPE_BLOB => base64_decode(value.trim()).map(MetadataValue::Blob),
+            _ => None,
+        };
+        match known {
+            Some(known) => raster.fields.set(&name, known),
+            None => raster.fields.set_unknown(
+                &name,
+                CarriedValue::Xml {
+                    gtype,
+                    text: field.text.to_string(),
+                },
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2111,32 +2733,123 @@ mod tests {
         assert_eq!(rot.orientation(), 1);
     }
 
-    /// Unit-covers the XML orientation extractor: it finds the lowercase
-    /// `orientation` gint field, ignores the distinct `exif-ifd0-Orientation`
-    /// string field, and rejects malformed / out-of-range values.
+    /// Unit-covers the XML trailer reader on the shapes that used to be the
+    /// orientation extractor's whole job: it finds the lowercase
+    /// `orientation` gint field, ignores the distinct
+    /// `exif-ifd0-Orientation` string field, and leaves the upright default
+    /// standing for a value that is out of range, not a number, or on a
+    /// field with no type at all.
     #[test]
-    fn parse_vips_xml_orientation_cases() {
-        let good = b"<field type=\"gint\" name=\"orientation\">8</field>";
-        assert_eq!(parse_vips_xml_orientation(good), Some(8));
-        // The exif string field alone must not be mistaken for the tag.
-        let exif_only =
-            b"<field type=\"VipsRefString\" name=\"exif-ifd0-Orientation\">1 (Top-left)</field>";
-        assert_eq!(parse_vips_xml_orientation(exif_only), None);
-        // Out of range and non-numeric are rejected.
+    fn vips_xml_trailer_orientation_cases() {
+        fn orientation_of(fragment: &[u8]) -> u8 {
+            let mut im = rgb_2x2();
+            read_vips_xml_trailer(fragment, &mut im);
+            im.orientation()
+        }
+
         assert_eq!(
-            parse_vips_xml_orientation(b"<field name=\"orientation\">9</field>"),
-            None
+            orientation_of(b"<field type=\"gint\" name=\"orientation\">8</field>"),
+            8
+        );
+        for fragment in [
+            // The exif string field alone must not be mistaken for the tag.
+            &b"<field type=\"VipsRefString\" name=\"exif-ifd0-Orientation\">1 (Top-left)</field>"[..],
+            // Out of range, not a number, no type to read it as, and a
+            // longer name that merely starts with "orientation".
+            b"<field type=\"gint\" name=\"orientation\">9</field>",
+            b"<field type=\"gint\" name=\"orientation\">x</field>",
+            b"<field name=\"orientation\">6</field>",
+            b"<field type=\"gint\" name=\"orientation-foo\">6</field>",
+            b"no field here",
+        ] {
+            assert_eq!(
+                orientation_of(fragment),
+                1,
+                "fragment: {}",
+                String::from_utf8_lossy(fragment)
+            );
+        }
+    }
+
+    // -- .v trailer: nothing to say, nothing written (issue #546) ------------
+
+    /// A raster with no attached fields and the upright orientation has
+    /// nothing to put in the trailer, so nothing is written there.
+    ///
+    /// The 41 bytes it used to write, `{"orientation":1,"fields":{"entries":
+    /// []}}`, are the whole of issue #546 for the common case: libvips parses
+    /// that slot as XML, so every plain `save()` made `vipsheader -a` print
+    /// `VIPS-WARNING **: error reading vips image metadata: VipsImage: XML
+    /// parse error` and drop the metadata block. Measured on vips 8.18.4: the
+    /// same file with the trailer truncated off reads silently.
+    #[test]
+    fn v_trailer_is_absent_when_there_is_nothing_to_say() {
+        let im = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
+        let bytes = im.encode_vips().unwrap();
+        assert_eq!(
+            bytes.len(),
+            VIPS_HEADER_LEN + im.data().len(),
+            "a raster with no metadata must write header + pixels and stop, got \
+             {} trailer bytes: {:?}",
+            bytes.len() - VIPS_HEADER_LEN - im.data().len(),
+            String::from_utf8_lossy(&bytes[VIPS_HEADER_LEN + im.data().len()..])
+        );
+        // And it still reads back as the same image.
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.data(), im.data());
+        assert_eq!(back.orientation(), 1);
+        assert_eq!(
+            back.get_fields(),
+            im.get_fields(),
+            "no attached field may appear out of a trailer that was never written"
+        );
+    }
+
+    /// The other side of the same rule: anything the trailer would actually
+    /// carry brings it back. A non-default orientation, an attached field,
+    /// and a value carried opaquely from a newer build each count on their
+    /// own, because each of them is metadata that would otherwise be lost.
+    #[test]
+    fn v_trailer_is_written_whenever_it_carries_something() {
+        let plain = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
+        let body_len = VIPS_HEADER_LEN + plain.data().len();
+
+        let rotated = plain.copy().orientation(6).build();
+        let bytes = rotated.encode_vips().unwrap();
+        assert!(
+            bytes.len() > body_len,
+            "a non-default orientation must still be written"
+        );
+        assert_eq!(decode_bytes(&bytes).unwrap().orientation(), 6);
+
+        let mut noted = plain.clone();
+        noted.set_field("note", "hello".into());
+        let bytes = noted.encode_vips().unwrap();
+        assert!(
+            bytes.len() > body_len,
+            "an attached field must still be written"
         );
         assert_eq!(
-            parse_vips_xml_orientation(b"<field name=\"orientation\">x</field>"),
-            None
+            decode_bytes(&bytes)
+                .unwrap()
+                .get_field("note")
+                .unwrap()
+                .as_str(),
+            "hello"
         );
-        assert_eq!(parse_vips_xml_orientation(b"no field here"), None);
-        // A longer field name that merely starts with "orientation" must not
-        // false-match: the anchor requires the closing quote + '>'.
-        assert_eq!(
-            parse_vips_xml_orientation(b"<field name=\"orientation-foo\">6</field>"),
-            None
+
+        // A value this build cannot interpret is metadata too: it is the only
+        // thing left on this raster once the four readable fields are removed
+        // and the orientation is back to upright, and it must still be
+        // written (issue #565).
+        let mut carried = decode_bytes(&file_from_a_newer_build()).unwrap();
+        for name in ["note", "n-pages", "xres-hint", "icc-profile-data"] {
+            carried.set_typeof(name, 0);
+        }
+        let carried = carried.copy().orientation(1).build();
+        assert!(
+            carried.encode_vips().unwrap().len() > VIPS_HEADER_LEN + carried.data().len(),
+            "a value carried opaquely from a newer build must still be written"
         );
     }
 
@@ -2204,6 +2917,83 @@ mod tests {
             .unwrap()
             .encode_vips_impl(false)
     }
+
+    /// libviprs 0.4.0's trailer reader, verbatim: try the JSON trailer as one
+    /// `serde` value, and on failure fall back to scratching the orientation
+    /// tag out of an XML block. Reproduced rather than described so
+    /// "what an already-released build gets out of a file written now" is an
+    /// executed assertion.
+    fn released_reader(trailer: &[u8]) -> (Option<u8>, Vec<(String, MetadataValue)>) {
+        match serde_json::from_slice::<ReleasedTrailer>(trailer) {
+            Ok(parsed) => (Some(parsed.orientation), parsed.fields.entries),
+            Err(_) => (released_xml_orientation(trailer), Vec::new()),
+        }
+    }
+
+    /// libviprs 0.4.0's `parse_vips_xml_orientation`, verbatim; see
+    /// [`released_reader`].
+    fn released_xml_orientation(trailer: &[u8]) -> Option<u8> {
+        let text = std::str::from_utf8(trailer).ok()?;
+        let anchor = text.find(r#"name="orientation">"#)?;
+        let after = &text[anchor..];
+        let open = after.find('>')?;
+        let rest = &after[open + 1..];
+        let close = rest.find('<')?;
+        let value: u16 = rest[..close].trim().parse().ok()?;
+        (1..=8).contains(&value).then_some(value as u8)
+    }
+
+    /// The `(name, type, text)` of every `<field>` in the trailer of a `.v`
+    /// encoded from a 2x2 RGB raster, in file order.
+    fn trailer_fields(bytes: &[u8]) -> Vec<(String, String, String)> {
+        let trailer =
+            std::str::from_utf8(&bytes[v_body().len()..]).expect("the trailer must be UTF-8");
+        VipsXmlFields::new(vips_xml_meta_region(trailer))
+            .map(|f| {
+                (
+                    unescape_xml(f.name),
+                    unescape_xml(f.gtype),
+                    f.text.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The metadata trailer of a `.v` written by the real thing, captured
+    /// byte for byte from vips 8.18.4 (`/opt/homebrew/bin/vips`) with
+    ///
+    /// ```text
+    /// vips black plain.v 2 2 --bands 1
+    /// ```
+    ///
+    /// The EXIF blob is vips's own doing: `vips_foreign_save_build` runs
+    /// `vips__exif_update` on every save, so a file that started with no
+    /// metadata still ends up with one, which makes this a fair sample of
+    /// what the reader meets in the wild. Frozen here so the reader is pinned
+    /// against a file libviprs did not write.
+    const VIPS_8184_TRAILER: &str = r#"<?xml version="1.0"?>
+<root xmlns="http://www.vips.ecs.soton.ac.uk/vips/8.18.4">
+  <header>
+    <field type="VipsRefString" name="Hist"></field>
+  </header>
+  <meta>
+    <field type="VipsBlob" name="exif-data">RXhpZgAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAABMCAwABAAAAAQAAAGmHBAABAAAAZgAAAAAAAAA4YwAA6AMAADhjAADoAwAABgAAkAcABAAAADAyMTABkQcABAAAAAECAwAAoAcABAAAADAxMDABoAMAAQAAAP//AAACoAQAAQAAAAIAAAADoAQAAQAAAAIAAAAAAAAA</field>
+    <field type="VipsRefString" name="resolution-unit">in</field>
+    <field type="VipsRefString" name="exif-ifd0-Orientation">1 (Top-left, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-XResolution">25400/1000 (25.400, Rational, 1 components, 8 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-YResolution">25400/1000 (25.400, Rational, 1 components, 8 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-ResolutionUnit">2 (Inch, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-YCbCrPositioning">1 (Centred, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-ExifVersion">Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-ComponentsConfiguration">Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-FlashpixVersion">FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-ColorSpace">65535 (Uncalibrated, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-PixelXDimension">2 (2, Long, 1 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-PixelYDimension">2 (2, Long, 1 components, 4 bytes)</field>
+    <field type="gint" name="orientation">1</field>
+  </meta>
+</root>
+"#;
 
     /// A `.v` file as a newer libviprs would write it: a real header and real
     /// pixels, followed by a trailer carrying one field of every variant this
@@ -2300,47 +3090,53 @@ mod tests {
     /// A field the caller sets by hand supersedes an unknown field of the same
     /// name, and removing it removes it for good. Otherwise a stripped raster
     /// would leak the old opaque value back into the file.
+    ///
+    /// Naming the value is also what releases the file from the legacy JSON
+    /// trailer: with nothing left that only JSON can hold, the rewrite comes
+    /// back out as the XML vips reads.
     #[test]
     fn setting_or_removing_a_field_supersedes_the_unknown_one() {
         let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
         back.set_field("delay", MetadataValue::Int(4));
-        let rewritten = back.encode_vips().unwrap();
-        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..]).unwrap();
-        let delays: Vec<_> = trailer
-            .fields
-            .entries
-            .iter()
-            .filter(|(n, _)| n == "delay")
-            .collect();
+        let fields = trailer_fields(&back.encode_vips().unwrap());
+        let delays: Vec<_> = fields.iter().filter(|(n, _, _)| n == "delay").collect();
         assert_eq!(delays.len(), 1, "the field must not be written twice");
-        assert_eq!(delays[0].1, FutureMetadataValue::Int(4));
+        assert_eq!(delays[0].1, GTYPE_INT);
+        assert_eq!(delays[0].2, "4");
         assert_eq!(
-            trailer.fields.entries.len(),
-            5,
-            "overwriting one field must not disturb the other four"
+            fields.len(),
+            6,
+            "overwriting one field must not disturb the other four, or the \
+             orientation tag: {fields:?}"
         );
 
         let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
         back.set_typeof("delay", 0);
-        let rewritten = back.encode_vips().unwrap();
-        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..]).unwrap();
+        let fields = trailer_fields(&back.encode_vips().unwrap());
         assert!(
-            !trailer.fields.entries.iter().any(|(n, _)| n == "delay"),
+            !fields.iter().any(|(n, _, _)| n == "delay"),
             "a removed field must not come back from the opaque carrier"
         );
         assert_eq!(
-            trailer.fields.entries.len(),
-            4,
-            "removing one field must not remove the other four"
+            fields.len(),
+            5,
+            "removing one field must not remove the other four: {fields:?}"
         );
     }
 
-    /// The other direction: what this build writes must still parse on a build
-    /// that shipped before this change, or the fix would break every reader
-    /// already in the wild. The released reader is reproduced verbatim as
-    /// [`ReleasedTrailer`], so this runs it rather than asserting about it.
+    /// The other direction: what this build writes still has to reach a build
+    /// that shipped before this change. It cannot reach it whole, and that is
+    /// the price of the fix rather than an accident, so it is pinned here.
+    ///
+    /// The released reader is reproduced verbatim as [`released_reader`], so
+    /// this runs it rather than asserting about it. It takes the pixels, the
+    /// geometry and the orientation off a `.v` written now, and not the
+    /// attached fields, because it only reads a trailer whose first
+    /// non-whitespace byte is `{` and no byte sequence is both that and the
+    /// XML libvips requires. Nothing errors, which is the part that matters:
+    /// an old build opening a new file is not a failure, it is a partial read.
     #[test]
-    fn v_trailer_written_now_still_parses_on_the_released_build() {
+    fn v_trailer_written_now_reads_as_far_as_the_released_build_can_read_it() {
         let mut im = Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
             .unwrap()
             .copy()
@@ -2352,25 +3148,28 @@ mod tests {
         im.set_icc_profile(&[5, 5, 5]);
 
         let bytes = im.encode_vips().unwrap();
-        let trailer = &bytes[v_body().len()..];
-        let parsed: ReleasedTrailer =
-            serde_json::from_slice(trailer).expect("the released reader must still parse this");
-        assert_eq!(parsed.orientation, 6);
+        let (orientation, fields) = released_reader(&bytes[v_body().len()..]);
         assert_eq!(
-            parsed.fields.entries,
-            vec![
-                ("note".to_string(), MetadataValue::Str("hello".into())),
-                ("n-pages".to_string(), MetadataValue::Int(3)),
-                ("xres-hint".to_string(), MetadataValue::Double(1.5)),
-                (
-                    "icc-profile-data".to_string(),
-                    MetadataValue::Blob(vec![5, 5, 5])
-                ),
-            ]
+            orientation,
+            Some(6),
+            "the released build must still get the orientation tag"
         );
-        // The wire bytes are unchanged from the released encoder, which is what
-        // makes the guarantee above hold for every field, not just these four.
-        assert_eq!(trailer, RELEASED_TRAILER);
+        assert!(
+            fields.is_empty(),
+            "the released build reads no attached fields out of an XML trailer, \
+             and pretending otherwise would hide the cost: {fields:?}"
+        );
+
+        // The same file read here is whole, so the loss runs one way only.
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.orientation(), 6);
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(
+            back.get_field("xres-hint"),
+            Some(MetadataValue::Double(1.5))
+        );
+        assert_eq!(back.icc_profile(), Some(&[5u8, 5, 5][..]));
     }
 
     /// And a file the released build wrote still reads here, checked against
@@ -2434,6 +3233,324 @@ mod tests {
             let back = decode_bytes(&bytes).unwrap();
             assert_eq!(back.data(), &[7u8; 12]);
             assert_eq!(back.get_field("note"), None);
+        }
+    }
+
+    // -- .v trailer: the XML libvips reads (issue #546) -----------------------
+
+    /// The trailer written for a raster carrying one field of every variant,
+    /// frozen byte for byte.
+    ///
+    /// This is the wire format, so it is pinned against a literal rather than
+    /// against the reader, which would agree with the writer no matter what
+    /// either of them did. The shape is `build_xml`'s
+    /// (`libvips/iofuncs/vips.c:846-890` at `v8.18.0-95-gfe420cf3a`) down to
+    /// the four-space field indent, and the fields come out in the order they
+    /// were set with the orientation tag last.
+    #[test]
+    fn v_trailer_is_the_xml_libvips_reads() {
+        let mut im = Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
+            .unwrap()
+            .copy()
+            .orientation(6)
+            .build();
+        im.set_field("note", "hello".into());
+        im.set_field("n-pages", MetadataValue::Int(3));
+        im.set_field("xres-hint", MetadataValue::Double(1.5));
+        im.set_icc_profile(&[5, 5, 5]);
+
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert_eq!(
+            trailer,
+            "<?xml version=\"1.0\"?>\n\
+             <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n\
+             \x20 <header>\n\
+             \x20   <field type=\"VipsRefString\" name=\"Hist\"></field>\n\
+             \x20 </header>\n\
+             \x20 <meta>\n\
+             \x20   <field type=\"VipsRefString\" name=\"note\">hello</field>\n\
+             \x20   <field type=\"gint\" name=\"n-pages\">3</field>\n\
+             \x20   <field type=\"gdouble\" name=\"xres-hint\">1.5</field>\n\
+             \x20   <field type=\"VipsBlob\" name=\"icc-profile-data\">BQUF</field>\n\
+             \x20   <field type=\"gint\" name=\"orientation\">6</field>\n\
+             \x20 </meta>\n\
+             </root>\n"
+        );
+    }
+
+    /// Every [`MetadataValue`] variant survives the XML round trip, including
+    /// the awkward numbers: a negative and a 64-bit integer, a double that
+    /// has no short decimal, one that needs an exponent, a negative zero, and
+    /// a blob holding all 256 byte values.
+    ///
+    /// The doubles are compared exactly on purpose. A tolerance would pass on
+    /// a writer that threw away digits, and throwing away digits is the whole
+    /// failure mode a text encoding of a float has.
+    #[test]
+    fn v_trailer_xml_round_trips_every_metadata_variant() {
+        let mut im = rgb_2x2().copy().orientation(8).build();
+        im.set_field("neg", MetadataValue::Int(-42));
+        im.set_field("big", MetadataValue::Int(i64::from(i32::MAX) + 1));
+        im.set_field("tenth", MetadataValue::Double(0.1));
+        im.set_field("huge", MetadataValue::Double(1e300));
+        im.set_field("negzero", MetadataValue::Double(-0.0));
+        im.set_field("text", MetadataValue::Str("café ☃ 日本".to_string()));
+        im.set_field(
+            "bytes",
+            MetadataValue::Blob((0..=255u8).collect::<Vec<_>>()),
+        );
+
+        let back = decode_bytes(&im.encode_vips().unwrap()).unwrap();
+        assert_eq!(back.orientation(), 8);
+        assert_eq!(back.get_field("neg"), Some(MetadataValue::Int(-42)));
+        assert_eq!(
+            back.get_field("big"),
+            Some(MetadataValue::Int(i64::from(i32::MAX) + 1))
+        );
+        assert_eq!(back.get_field("tenth"), Some(MetadataValue::Double(0.1)));
+        assert_eq!(back.get_field("huge"), Some(MetadataValue::Double(1e300)));
+        assert!(
+            back.get_field("negzero")
+                .is_some_and(|v| v.as_f64().is_sign_negative() && v.as_f64() == 0.0),
+            "a negative zero must not come back positive"
+        );
+        assert_eq!(back.get_field("text").unwrap().as_str(), "café ☃ 日本");
+        assert_eq!(
+            back.get_field("bytes").unwrap().as_blob(),
+            (0..=255u8).collect::<Vec<_>>()
+        );
+        // The blob went out as base64 rather than as anything binary.
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsBlob\" name=\"bytes\">AAECAwQFBgcICQ"),
+            "got: {trailer}"
+        );
+    }
+
+    /// A `.v` real vips wrote reads whole now, not just down to its
+    /// orientation tag. [`VIPS_8184_TRAILER`] is the capture; the body under
+    /// it is this build's, because the body is not what is being tested.
+    ///
+    /// The `Hist` field in the `<header>` block must *not* arrive as an
+    /// attached field: it is vips's command history, it lives outside
+    /// `<meta>`, and letting it through would invent a field on every vips
+    /// file libviprs opens.
+    #[test]
+    fn v_trailer_reads_a_file_real_vips_wrote() {
+        let body = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
+        let mut bytes = body.encode_vips().unwrap();
+        assert_eq!(
+            bytes.len(),
+            VIPS_HEADER_LEN + 4,
+            "the body carries no trailer"
+        );
+        bytes.extend_from_slice(VIPS_8184_TRAILER.as_bytes());
+
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.orientation(), 1);
+        assert_eq!(back.get_field("resolution-unit").unwrap().as_str(), "in");
+        assert_eq!(
+            back.get_field("exif-ifd0-XResolution").unwrap().as_str(),
+            "25400/1000 (25.400, Rational, 1 components, 8 bytes)"
+        );
+        let exif = back.get_field("exif-data").unwrap();
+        assert_eq!(exif.len(), 186, "the base64 blob must decode to its bytes");
+        assert_eq!(&exif.as_blob()[..6], b"Exif\0\0");
+        assert_eq!(
+            back.get_typeof("Hist"),
+            0,
+            "the history block is not metadata"
+        );
+        assert_eq!(
+            back.get_fields().len() - BUILTIN_FIELDS.len(),
+            13,
+            "every <meta> field but the orientation tag, and nothing else: {:?}",
+            back.get_fields()
+        );
+
+        // And it survives a rewrite here: this is the round trip the `.v`
+        // container exists for.
+        let again = decode_bytes(&back.encode_vips().unwrap()).unwrap();
+        assert_eq!(again.get_field("exif-data"), back.get_field("exif-data"));
+        assert_eq!(again.get_fields(), back.get_fields());
+    }
+
+    /// XML metacharacters in a field name and in a value survive, and
+    /// non-ASCII text is written as itself rather than mangled.
+    ///
+    /// vips gets the second one wrong in its own writer: `*p < 32` on a
+    /// signed `char` (`libvips/iofuncs/target.c:821`) catches every
+    /// continuation byte, so `vips copy` over a `.v` carrying `café ☃ 日本`
+    /// rewrites it as `caf&#x23c3;&#x23a9; …` (measured on 8.18.4). Reading
+    /// it is fine, which is why writing real UTF-8 is the right call.
+    #[test]
+    fn v_trailer_xml_escaping_round_trips() {
+        let mut im = rgb_2x2();
+        im.set_field("a\"b&c<d>e", "x < y & z > w \"q\" 'r'".into());
+        im.set_field("tabbed", "one\ttwo\nthree".into());
+        im.set_field("unicode", "café ☃ 日本".into());
+
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("name=\"a&quot;b&amp;c&lt;d&gt;e\""),
+            "the name must be escaped for an attribute: {trailer}"
+        );
+        assert!(
+            trailer.contains(">x &lt; y &amp; z &gt; w \"q\" 'r'<"),
+            "character data escapes the three that matter and nothing else: {trailer}"
+        );
+        assert!(
+            trailer.contains(">café ☃ 日本<"),
+            "UTF-8 goes out as itself: {trailer}"
+        );
+
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(
+            back.get_field("a\"b&c<d>e").unwrap().as_str(),
+            "x < y & z > w \"q\" 'r'"
+        );
+        assert_eq!(
+            back.get_field("tabbed").unwrap().as_str(),
+            "one\ttwo\nthree"
+        );
+        assert_eq!(back.get_field("unicode").unwrap().as_str(), "café ☃ 日本");
+    }
+
+    /// The XML form of a carried unknown value: a `type` this build does not
+    /// know keeps its type name and its character data, byte for byte, and
+    /// goes back out that way (issue #565).
+    ///
+    /// This is where the XML trailer beats the JSON one it replaces. The
+    /// carrier *is* vips's own encoding, so the value is not merely preserved
+    /// for the build that wrote it: vips reads it too. Measured on 8.18.4,
+    /// `vipsheader -a` on a file with this exact element prints
+    /// `delay: 40 40 90`, and a `type` name libvips does not know is skipped
+    /// with no warning at all, which is what makes the carrier safe to write.
+    #[test]
+    fn v_trailer_unknown_xml_type_is_carried_verbatim() {
+        let body = rgb_2x2();
+        let mut bytes = body.encode_vips_impl(false);
+        bytes.extend_from_slice(
+            b"<?xml version=\"1.0\"?>\n\
+              <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n  <meta>\n\
+              \x20   <field type=\"VipsRefString\" name=\"note\">hi</field>\n\
+              \x20   <field type=\"VipsArrayInt\" name=\"delay\">40 40 90</field>\n\
+              \x20   <field type=\"nosuchtype\" name=\"mystery\">a &amp; b</field>\n\
+              \x20   <field type=\"gint\" name=\"orientation\">6</field>\n\
+              \x20 </meta>\n</root>\n",
+        );
+
+        let back = decode_bytes(&bytes).unwrap();
+        // Readable things stay readable.
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
+        assert_eq!(back.orientation(), 6);
+        // The two this build cannot name read as absent rather than as a
+        // wrong value.
+        for name in ["delay", "mystery"] {
+            assert_eq!(back.get_field(name), None);
+            assert_eq!(back.get_typeof(name), 0);
+            assert!(!back.get_fields().iter().any(|n| n == name));
+        }
+
+        // And both go back out unchanged, escapes included.
+        let rewritten = back.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 40 90</field>"),
+            "got: {trailer}"
+        );
+        assert!(
+            trailer.contains("<field type=\"nosuchtype\" name=\"mystery\">a &amp; b</field>"),
+            "the character data must not be re-escaped into `a &amp;amp; b`: {trailer}"
+        );
+        // Still XML, so vips still reads the rest of the file.
+        assert!(!is_json_trailer(&rewritten[v_body().len()..]));
+    }
+
+    /// A value carried out of a *legacy JSON* trailer has no XML spelling, so
+    /// the file keeps the JSON trailer rather than losing it.
+    ///
+    /// Translating it would mean interpreting it: the two formats encode the
+    /// same value differently (`{"IntArray":[40,40,90]}` against
+    /// `type="VipsArrayInt">40 40 90`), and a build that cannot name the
+    /// variant cannot convert between the encodings. Dropping it would be the
+    /// #565 data loss one step later, so the writer stays on the old format
+    /// for exactly the files that need it, and flips to XML the moment
+    /// nothing needs it any more.
+    #[test]
+    fn v_trailer_keeps_the_json_form_for_a_value_with_no_xml_spelling() {
+        let carried = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let rewritten = carried.encode_vips().unwrap();
+        assert!(
+            is_json_trailer(&rewritten[v_body().len()..]),
+            "a JSON-only carried value keeps the JSON trailer"
+        );
+        // Which is the only format that can still hold it: everything comes
+        // back, twice over, and the released reader gets nothing at all,
+        // because an unknown value fails its whole-trailer parse. That is the
+        // #565 bug it shipped with, not something this change added.
+        let twice =
+            decode_bytes(&decode_bytes(&rewritten).unwrap().encode_vips().unwrap()).unwrap();
+        assert_eq!(twice.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(twice.icc_profile(), Some(&[5u8, 5, 5][..]));
+        assert_eq!(
+            released_reader(&rewritten[v_body().len()..]),
+            (None, vec![])
+        );
+
+        // Drop the value that forced it and the format flips.
+        let mut named = decode_bytes(&file_from_a_newer_build()).unwrap();
+        named.set_typeof("delay", 0);
+        let rewritten = named.encode_vips().unwrap();
+        assert!(
+            !is_json_trailer(&rewritten[v_body().len()..]),
+            "with nothing JSON-only left, the trailer must be the XML vips reads"
+        );
+        assert_eq!(
+            decode_bytes(&rewritten).unwrap().icc_profile(),
+            Some(&[5u8, 5, 5][..])
+        );
+    }
+
+    /// The base64 codec used for a `VipsBlob` field: the RFC 4648 section 10
+    /// vectors, which is the specification `g_base64_encode` implements, plus
+    /// an all-bytes round trip and the rejections that send a malformed field
+    /// to the opaque carrier instead of to a wrong value.
+    #[test]
+    fn base64_matches_the_reference_vectors() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(plain.as_bytes()), encoded);
+            assert_eq!(
+                base64_decode(encoded).as_deref(),
+                Some(plain.as_bytes()),
+                "decoding {encoded:?}"
+            );
+        }
+
+        let all: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(base64_decode(&base64_encode(&all)), Some(all));
+        // Whitespace and a missing pad are tolerated, the way
+        // `g_base64_decode` tolerates them; junk is not.
+        assert_eq!(base64_decode(" Zm9v \n"), Some(b"foo".to_vec()));
+        assert_eq!(base64_decode("Zg"), Some(b"f".to_vec()));
+        for bad in [
+            "Zm9*",       // not in the alphabet
+            "Zm==9v",     // data after the padding
+            "Zm9vYg====", // more padding than a group can hold
+            "Zh==",       // trailing bits that are not zero
+        ] {
+            assert_eq!(base64_decode(bad), None, "must reject {bad:?}");
         }
     }
 

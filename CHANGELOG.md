@@ -9,6 +9,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Every conversion into `srgb`, `rgb16`, `b-w`, `grey16` and `hsv` now
+  produces different output bytes, because the linear -> sRGB store goes
+  through the libvips lookup table instead of evaluating the transfer
+  function (issue #581). This is a parity fix, not a change of intent: the
+  new bytes are the ones vips 8.18.4 produces.
+
+  libvips never evaluates the sRGB curve per pixel. `calcul_tables`
+  (`colour/LabQ2sRGB.c:126-146`) rounds `range` samples of it to integer
+  codes once, in `float`, and `vips_col_scRGB2sRGB` (`:282-353`) and
+  `vips_col_scRGB2BW` (`:385-428`) then interpolate linearly between two of
+  those already-rounded entries and finish the chord with `rintf`, which
+  rounds halves to even. Three quantisations, none of which an analytic
+  `f64` encode has. Sweeping the neutral LabS L codes against the binary,
+  `Labs -> b-w` used to differ on 5434 of 32768 and `Labs -> sRGB` on 16295
+  of 98304, always by exactly one count and in both directions; both are now
+  exact. On a 21x21x21 Lab grid `grey16` went from 1323 of 9261 to 0 and
+  `rgb16` from 3223 of 27783 to 25, the remainder being an unrelated
+  `f32`-versus-`f64` difference in the scRGB value itself, which only a
+  16-bit carrier is fine enough to see.
+
+  `sharpen` moves with it. It was carrying its own tolerance on the grounds
+  that it convolves 16-bit LabS, but the deviation was never in the
+  convolution: it was in the sRGB store the result comes back through. The
+  same goes for two `colourspace` cells that were pinned at one LSB. All
+  three are exact now and the tolerances are gone.
+
+  If you have committed reference images produced by an older libviprs, they
+  will need regenerating against vips rather than against the previous
+  output.
+
+- sRGB -> HSV truncates its hue and saturation codes instead of rounding
+  them (issue #581, found while fixing the above). `sRGB2HSV.c:113-117`
+  writes both into an `unsigned char`, and the C drops the fraction on that
+  store; libviprs was handing them out unrounded and letting the writer
+  round, which missed vips on about a third of the two bands (measured
+  45370 of 138528 codes over a 46176-pixel sRGB grid, now 0). The hue's
+  ratio is an `f32` division there too, which decides another 299 of them.
+  It stayed hidden until now because the analytic sRGB encode produced flat
+  greys where the table produces a real spread, and a flat grey has no hue
+  or saturation to get wrong.
+- `MetadataValue` is `#[non_exhaustive]` (issue #609). An exhaustive `match`
+  on it downstream needs a `_ =>` arm now. Nothing else changes: the attribute
+  is on the enum rather than on its variants, so `MetadataValue::Int(3)`, the
+  `From` impls and the `as_*` accessors all keep working untouched.
+
+  Four is not the number of types a vips metadata field can have. A `.v`
+  trailer this crate reads today can carry `VipsArrayInt`, `VipsArrayDouble`
+  and `gboolean` fields, which it can only forward opaquely, and #573 needs an
+  array variant for the per-frame GIF delays. Adding that variant to an
+  exhaustive enum is a major bump, and it would be a major bump for a reason
+  nobody enjoys explaining. Doing it now, while the cost is one `_` arm, is
+  the cheap moment, and it puts the enum where every other growable public
+  enum in the crate already sits: `tests/non_exhaustive_enums.rs` registers 21
+  of them and this one had simply escaped the list.
+
+  Unlike the on-disk half of the same question (#565), this break is one
+  `cargo semver-checks` can see, which is exactly why it was safe to leave
+  until it was worth doing and why it is worth doing before the variant lands
+  rather than after.
+- Integer-precision convolution divides by `rint(kernel.scale)`, the scale on
+  the mask that was passed in, where it used to divide by the
+  brightness-corrected scale `vips__image_intize` derives from it (issue #547).
+  `conv`, `convsep` and `compass` move output bytes wherever rounding the
+  coefficients changes the mask's overall gain, which takes at least one
+  coefficient that does not already round to itself, and they move on every
+  carrier: uchar, ushort and the float-input arm alike. `sobel`, `scharr`,
+  `prewitt`, `canny`, `gaussblur` and `sharpen` do not move at all, because
+  every mask they build has integer coefficients over an integer scale and the
+  correction is a no-op there.
+
+  The correction was never the divisor. `vips_convi_gen` reads the scale and
+  the offset off `convolution->M`, the mask the caller handed in
+  (`convolution/convi.c:757-760`); `vips_convi_build` shadows `M` with the
+  intized copy only for as long as it takes to harvest the integer
+  coefficients (`convi.c:1179-1181`) and never writes that copy back. So the
+  `out_scale` `vips__image_intize` computes is dead for `convi` and live only
+  for the approximate paths this crate does not implement, `conva` and
+  `convasep`. libviprs threaded it into the division, which is a different
+  operation from the one libvips performs.
+
+  It was not a rounding nit either. On `Kernel { data: [[3.0, 0.4, 0.4, 0.4,
+  0.4]], scale: 1.0 }` the correction lands on `-1`, so a 5x1 grey field of
+  100s came back `[0, 0, 0, 0, 0]` where vips 8.18.4 answers
+  `255 255 255 255 255`. Black where the reference is white, from a mask any
+  caller can build out of the public two-field `Kernel`. Measured over 126
+  fractional masks on four fixtures, 191 of 504 outputs disagreed with
+  `VIPS_NOVECTOR=1 vips conv --precision integer` before this change and 30 do
+  after, and all 30 are the corner below.
+
+  That corner is the one place the new divisor cannot follow libvips, because
+  there is nothing there to follow. `vips_convi_gen` holds the scale in an
+  `int`, so a mask scale below 0.5 leaves it at `0` and C divides by it:
+  measured on 8.18.4 at scale 0.4, the two integer arms answer `0` (aarch64
+  `sdiv` returns zero instead of trapping, which is not a defined result, and
+  x86 would trap) and the float-input arm prints `inf`. libviprs nudges a
+  divisor of zero to `1`, which is the guard `vips__image_intize` writes for
+  its own copy at `convi.c:895-897` and the only total answer available. A
+  caller who wants a sub-unit scale at integer precision should scale the
+  coefficients instead, or use `Precision::Float`, which has no `int` in the
+  path and divides exactly.
+
+- `Raster::compass` refuses a `times` outside `1..=1000` where it used to
+  accept anything above zero (issue #547, found in review). That is the range
+  libvips declares on the property,
+  `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` at
+  `convolution/compass.c:162-167`. GObject refuses to *set* an out-of-range
+  value, which is not the same as refusing the call. Measured on 8.18.4 with
+  a 3x3 ones mask over a 4x4 black image,
+  `vips compass a.v o.v m.mat --times 1` and `--times 1000` run, while
+  `--times 0`, `--times 1001` and `--times 100000` each draw
+  `value "N" of type 'gint' is invalid or out of range for property 'times'
+  of type 'gint'` out of GObject. The CLI carries on at the property's
+  default of 2 rather than exiting, so the out-of-range number never reaches
+  a convolution in vips at all.
+
+  Checking the low end only left the high end wide open, and `times` is a
+  `u32` on this surface. `u32::MAX` reserved a result vector of 4.29 billion
+  rasters, on the order of 400 GB of address space, and then started that many
+  whole-image convolutions: no error, no ceiling, and nothing back inside half
+  a minute. The refusal is the typed
+  `ConvolutionError::TimesOutOfRange { times, min, max }`, which replaces
+  `ConvolutionError::ZeroTimes` and covers both ends of the range at once.
+  `ZeroTimes` has never been in a release, and the enum is
+  `#[non_exhaustive]`.
+
+  Worth being explicit that this is a divergence rather than a match, because
+  the accepted range is identical and that makes it easy to skim past: vips
+  hands back an image for `--times 1001`, computed at 2, and libviprs hands
+  back an error. Convolving twice when a thousand rounds were asked for is a
+  wrong answer wearing a warning, and the warning goes to stderr where a
+  library caller never sees it. The `# Divergence from stock libvips` section
+  in `crate::convolution` carries the measurement and the reasoning.
+- `Raster::arrayjoin` no longer clamps `across` to the number of images
+  (issue #577). A value larger than the list used to collapse into one full
+  row; it now lays out that many cells wide and leaves the trailing ones
+  background, which is what vips does. Anyone passing an `across` above their
+  image count gets different output geometry out of the same call, with no
+  error to notice it by, so it is worth grepping for.
+
+  Measured against vips 8.18.4 on two inputs whose sizes differ, a 3x2 and a
+  2x3, so the grid cell is 3x3 (`vips black a.v 3 2; vips black b.v 2 3;
+  vips arrayjoin "a.v b.v" o.v --across N`):
+
+  | `across` | vips | libviprs before | libviprs now |
+  |---|---|---|---|
+  | 1 | 3x6 | 3x6 | 3x6 |
+  | 2 | 6x3 | 6x3 | 6x3 |
+  | 3 | 9x3 | 6x3 | 9x3 |
+  | 5 | 15x3 | 6x3 | 15x3 |
+  | 10 | 30x3 | 6x3 | 30x3 |
+
+  `shim` follows `across` rather than the image count with it, since
+  `arrayjoin.c:259-260` sizes the row as `hspacing * across + shim *
+  (across - 1)`: the same pair with `--across 4 --shim 2` is 18x3, where the
+  clamp gave 8x3.
+
+  An explicit `across` outside `1..=1000000` is now the typed
+  `ConversionError::AcrossOutOfRange` instead of being silently clamped.
+  That is the range libvips declares on the property
+  (`VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)` in
+  `arrayjoin.c:400-406`), and GObject refuses both ends before the operation
+  is built, so `--across 0` and `--across 1000001` never produce a grid there
+  either. The default is unchanged and is not range checked, because vips
+  assigns `join->across = n` straight to the struct field and bypasses its own
+  property check the same way.
+
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
   be an error; `decode_tiff_page(p, 1)` is now the *second* image and used to be
@@ -138,6 +304,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predates this change and is unrelated to the routing: handed libvips' own
   `Cmc -> Lch` output, this crate reproduces libvips' `Cmc -> Labs` codes on
   all 2100 channels of the same grid.
+
+- `smartcrop(Attention)` picks a different crop on any image that carries an
+  alpha band, and the pixels of `resize` / `reduce` / `shrink` / `affine` move
+  wherever an alpha lands near zero (issues #603, #604). Both are parity fixes
+  towards vips, so output that was wrong is now right, but output bytes for
+  shipped operations do move and a caller pinning them will see it.
+
+  `smartcrop` first. `vips_smartcrop_build` premultiplies once into float and
+  hands the result to `vips_resize`, which explicitly does **not** premultiply
+  ("This operation does not premultiply alpha. If your image has an alpha
+  channel, you should use premultiply on it first", `libvips/resample/resize.c`),
+  so the analysis image is still premultiplied when the argmax is taken and
+  every transparent pixel is still at colour 0. libviprs' `resize` premultiplies
+  on its own — a deliberate divergence from the C namesake, issue #458 — so it
+  was un-premultiplying the already-premultiplied analysis image on the way out,
+  the colour hiding behind transparent pixels came back amplified by
+  `max / alpha`, and those bright fake regions dominated the edge and skin
+  scores. On `rgba.png` at 80x60 that is the difference between (124, 84) and
+  vips' (20, 124), which is now what you get. The fix drops the alpha band
+  before the shrink, which is exactly what vips computes: it discards the band
+  immediately after the resize anyway (`extract_band(0, "n", 3)`), and a
+  resample that does not premultiply is per-band independent.
+
+  That asymmetry is the real trap and it is now written down in the
+  `resample` module docs, because it will catch the next operation that composes
+  on `resize`: **never hand `resize` an image you have already premultiplied.**
+
+  Second, the un-premultiply guards. libvips damps the factor to zero inside a
+  dead zone, `factor = fabs(alpha) < 0.01 ? 0 : max_alpha / alpha`, and clips
+  the alpha it stores with `VIPS_CLIP(0, alpha, max_alpha)`
+  (`libvips/conversion/unpremultiply.c`). libviprs tested only `alpha == 0.0`
+  and clipped neither end. That is not a theoretical gap: a lanczos resample
+  undershoots, so an alpha dipping to 0.003 or going slightly negative at a hard
+  transparency edge is ordinary, and dividing by it multiplies the colour by
+  ~333 or flips its sign into a saturated result. The literal `0.01` is absolute
+  in whatever units the alpha band carries and is deliberately not scaled by
+  `max` — measured on 8.18.4, `alpha = 0.02` on a `(100, 100, 100, alpha)` pixel
+  gives 5000 under scRGB, 1275000 under the 255 default and 327675008 under
+  RGB16 — so it works out to `0.01 / 255` of full scale on the 8-bit and float
+  carriers and `0.01 / 65535` on the 16-bit ones. The two guards stay separate,
+  as they are in C: the factor divides by the raw alpha so that an alpha
+  overshoot and the colour overshoot that came with it still cancel, and only
+  the stored alpha is clipped.
+
+  `premultiply` keeps no dead zone, and that asymmetry is libvips' rather than
+  an omission: premultiply multiplies by the alpha, so a near-zero one damps
+  instead of amplifying and there is no division to blow up. What it does have
+  is the mirror-image clip — the normalising factor is built from a clipped
+  alpha while the stored alpha stays raw, the other way round from
+  un-premultiply — and that is now ported too, so the bracket cancels on a round
+  trip. On the unsigned 8- and 16-bit carriers every one of these guards is
+  inert, which is why nothing but the float resample paths moved.
 
 ### Added
 
@@ -776,6 +994,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `.v` file libviprs writes is now readable by real vips, metadata and all,
+  and no longer makes it print a warning on every open (issue #546). The
+  trailer after the pixel data was libviprs's own JSON. libvips parses that
+  slot as XML, so `vipsheader -a` on any file the crate wrote answered
+
+      VIPS-WARNING **: error reading vips image metadata: VipsImage: XML parse error
+
+  and then threw the whole metadata block away. Since `.v` exists for vips
+  interop, and is the only format here that round-trips a float raster, that
+  hit exactly the people moving compute intermediates between the two tools:
+  they lost their ICC profile, their EXIF blob and their orientation, and got
+  a warning they could not act on.
+
+  The warning fired even for a raster with no metadata at all, because the
+  writer always appended the 41 bytes of
+  `{"orientation":1,"fields":{"entries":[]}}`. Nothing is written there now
+  when there is nothing to say, which fixes the common case on its own.
+
+  Everything else goes out as the XML document vips writes, `<root>` with a
+  `<header>` and a `<meta>` block of `<field type="..." name="...">` elements.
+  The four `MetadataValue` variants land on the four GTypes vips can
+  round-trip: `gint`, `gdouble`, `VipsRefString`, and `VipsBlob` as base64.
+  The reader takes both that and the old JSON form, so every `.v` already
+  written keeps its metadata, and a `.v` vips itself wrote now reads whole
+  rather than down to its orientation tag.
+
+  Two places where this deliberately does not copy vips byte for byte. It
+  escapes only what XML needs, so non-ASCII text survives: vips's own writer
+  tests `*p < 32` on a signed `char` (`libvips/iofuncs/target.c:821`), which
+  catches every byte of a multi-byte UTF-8 sequence, and `vips copy` over a
+  `.v` carrying `café ☃ 日本` rewrites it as `caf&#x23c3;&#x23a9; …`
+  irreversibly. And a field name containing a quote is escaped as `&quot;`
+  where vips writes a backslash and leaves the attribute unterminated.
+
+  **libviprs 0.4.0 reads a `.v` written now for its pixels, its geometry and
+  its orientation, and not for its attached fields.** Its reader only takes a
+  trailer as metadata when the first non-whitespace byte is `{`, and no byte
+  sequence is both that and the XML vips requires, so vips interop and full
+  field recovery on 0.4.0 cannot both hold. Nothing errors, and it runs one
+  way only: this build reads every older file completely.
+
+  Forward compatibility is kept and is better than it was. A `<field>` whose
+  `type` this build does not know is carried opaquely and written back byte
+  for byte, same as before, but now the carrier is vips's own encoding, so
+  vips reads the carried field too. The one thing that cannot survive the
+  format change is a value carried out of an *old JSON* trailer: spelling it
+  in XML would mean interpreting it, which is the one thing a carried value
+  does not allow, so a raster still holding one keeps the JSON trailer rather
+  than losing it.
+- A fallible convolution reports an allocation failure instead of aborting the
+  process (issue #575). `samples_f64` widens every sample to `f64` before the
+  traversal, eight bytes where the source carries one or two, and it did that
+  with a plain `.collect()`: on failure that reaches `handle_alloc_error` and
+  kills the process outright. Every `try_` entry point in the module sits on
+  top of it, so none of them could report the failure and no caller could
+  catch it. A `Result` that does not cover allocation is worse than no
+  `Result`, because callers reasonably assume it does, and the rest of the
+  crate had already settled the question the other way: `Raster` reserves with
+  `try_reserve_exact` and returns `RasterError::AllocationFailed`, documented
+  as never an abort.
+
+  The widening now reserves fallibly and surfaces
+  `ConvolutionError::Raster(RasterError::AllocationFailed { .. })`, and so do
+  the other image-sized intermediates in the same functions: the combine
+  buffers in `compass` and the output planes in `spcor` and `fastcor`, whose
+  `# Errors` sections already promised the variant, the polar buffers in
+  `canny`, and the whole-image copy `gaussblur` hands back for a `sigma` under
+  0.2. That last one was a bare `self.clone()`, an image-sized allocation on
+  the one branch of the operation that touches no other allocator, so it was
+  the whole of what kept `try_gaussblur` abortable, and `canny` inherited it
+  because `canny_gradient` blurs through `try_gaussblur` before it does
+  anything else. It goes through the new crate-internal `Raster::try_clone`,
+  which reserves with `try_reserve_exact` and carries the interpretation, the
+  resolution and the attached fields exactly as `Clone` does.
+
+  `try_conv`, `try_convsep`, `try_compass`, `try_gaussblur`, `try_spcor`,
+  `try_fastcor`, `try_sobel`, `try_scharr` and `try_prewitt` are abort-free end
+  to end as a result, and `try_canny` is on its uchar arm.
+
+  Two things are deliberately not on that list, so the claim is not read wider
+  than it goes. `try_canny`'s float arm and `try_sharpen` both widen through
+  `Raster::f32_samples`, which still collects infallibly, and `try_sharpen`
+  makes the LabS round trip through `colour.rs` on top of that, where every
+  intermediate is a plain `vec![]`. Neither is one allocation away from the
+  list, and pretending otherwise would be the same failure as a `try_` API
+  that aborts, so both stay off it until the widening itself goes.
+  `try_sharpen`'s `# Errors` now says so in as many words, so the exclusion
+  is where a caller reading the API docs will find it.
+
+  It matters more than it reads: measured on a 4000x4000 `Rgb8` at integer
+  precision, the widened buffer is 384 MB of a 486 MB peak for 48 MB of input,
+  so it is by some distance the request most likely to be the one that fails.
+  Removing the widening rather than making it fallible is the streaming work
+  in #575's third item, which stays open.
+
 - A `.v` file written by a newer libviprs no longer loses every metadata field
   when it is read by an older one (issue #565). The trailer was read as one
   `serde_json::from_slice` onto a struct holding a plain externally tagged
@@ -805,6 +1118,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writer can produce it: libvips writes XML in the same slot, and a trailer
   that never claimed to be libviprs JSON is still read as absent, exactly as
   before.
+
+- The TIFF page readers honour `DecodeLimits` instead of bypassing it (issue
+  #540). `decode_tiff_page` and `tiff_page_count` took no limits at all and
+  handed the decoded result straight to `Raster::new`, whose
+  `DEFAULT_MAX_ALLOC_BYTES` is 8 GiB, sixteen times looser than the 512 MiB
+  `DecodeLimits::max_alloc_bytes` the rest of the crate publishes and honours.
+  `src/source.rs` publishes a table of which decoder enforces which field, and
+  these two were not in it.
+
+  Four things on that path were sized by the file, not the one the issue
+  describes, because #566 added two more while sourcing `n-pages`:
+
+  * The whole-file `std::fs::read`, unbounded. It is now capped at
+    `max_alloc_bytes`, checked against the declared length before the read and
+    against what actually arrived after it, so a file that grows in between
+    cannot slip past.
+  * `normalize_multiband_photometric`, which clones the entire buffer when the
+    vips multiband relabel applies, doubling the peak footprint. The page
+    readers own their buffer, so they now patch it in place and never pay for
+    the copy.
+  * The IFD walk, which ran to the end of the chain with no ceiling on every
+    single page decode. `DecodeLimits` grows a `max_pages` field, default
+    `100_000`, and the walk stops there with `SourceError::PageLimitExceeded`
+    rather than counting on to find out how far past it the file goes. The
+    default is the ceiling libvips puts on both the page index and the page
+    count on every multi-page loader it has: measured against 8.18.4,
+    `vips tiffload x.tif o.v --page 100001` and `--n 100001` are both refused
+    before the loader runs.
+  * The pixel buffer, which now goes through `check_coord`, then
+    `check_pixels`, then an explicit
+    `width * height * bands * bytes_per_sample` budget, all on the declared
+    geometry and all before anything is reserved. That last one is the only
+    check that can see the band count and the sample depth, so it is the one
+    that catches a frame `max_pixels` waves through.
+
+  `decode_tiff_page_with_limits`, `tiff_page_count_with_limits` and
+  `Raster::tiff_load_with_limits` take the ceilings explicitly; the existing
+  three delegate to `DecodeLimits::default()`. `DecodeLimits` is
+  `#[non_exhaustive]` with `with_*` builder setters, so `max_pages` is
+  additive, and `SourceError` is `#[non_exhaustive]`, so the two new variants
+  (`AllocLimitExceeded` and `PageLimitExceeded`) are too. A file that was
+  already decoding keeps decoding: the new ceilings are all far above anything
+  a real TIFF carries, and the `tiff` crate's own 256 MiB decode buffer
+  default is only ever tightened by `max_alloc_bytes`, never loosened.
+
+  One thing the issue asserts that no longer holds, recorded so nobody chases
+  it: it argued this was "the template" the other format modules would copy,
+  and they did not. `gif.rs`'s `decode_gif` and `webp.rs`'s `decode_webp` both
+  take a `DecodeLimits` and apply `check_coord`, `check_pixels` and
+  `max_alloc_bytes` already. A cyclic IFD chain is not an unbounded loop
+  either: `tiff` 0.10.3 runs union-find over the IFD edges and returns
+  `CycleInOffsets` on a back edge. The ceiling is for the chain that is merely
+  very long, which nothing below it bounds.
 
 - A zero mask coefficient no longer poisons a non-finite sample (issue #574).
   libvips squeezes zero taps out of a mask before it convolves, in both cores

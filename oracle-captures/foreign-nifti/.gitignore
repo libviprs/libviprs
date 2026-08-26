@@ -1,0 +1,13 @@
+# capture.py regenerates everything here from nifti_clib plus a C compiler,
+# so `python3 capture.py` reproduces oracle.json and commands.sh byte for
+# byte with no Rust toolchain and no libvips NIfTI support (there is none).
+#
+# fixtures/ IS pinned. nifti_clib is not a dependency of this crate and will
+# not be on a CI machine, so a port has no way to produce these inputs for
+# itself and needs them checked in. They are 104 tiny files, about 36K in
+# total, and capture.py rewrites all of them on every run.
+#
+# outputs/ is pure scratch: the compiled probe binary and the intermediate
+# datasets nifti_tool writes with -prefix.
+outputs/
+__pycache__/

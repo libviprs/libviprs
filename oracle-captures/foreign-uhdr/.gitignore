@@ -1,0 +1,14 @@
+# capture.py regenerates everything below from its own deterministic rasters
+# and the vips binary, so only capture.py, commands.sh, oracle.json and the
+# JPEG fixtures are pinned.
+#
+# fixtures/uhdr.jpg is the anchor and cannot be regenerated exactly on a
+# machine with a different libultrahdr: the version string libuhdr stamps into
+# the gainmap's COM segment goes into the file. Every other JPEG under
+# fixtures/ is cut from it, or from fixtures/plain.jpg, by capture.py.
+#
+# outputs/ holds the .v intermediates, including the 64x64 scRGB source, the
+# synthetic gainmap-carrying probes vipsedit builds, and every uhdr2scRGB
+# result. It runs to about 100 MB.
+fixtures/*.raw
+outputs/
