@@ -345,6 +345,50 @@ impl Raster {
         })
     }
 
+    /// A fallible [`Clone`], for the operation paths that must not abort.
+    ///
+    /// `Raster` derives `Clone` and cloning copies the whole pixel buffer,
+    /// which on a full-resolution image is the largest single allocation an
+    /// operation makes. `Clone::clone` reaches `handle_alloc_error` and
+    /// **ends the process** when that allocation fails, so a `try_` operation
+    /// that copies its input with `.clone()` is not actually fallible however
+    /// its signature reads. This reserves with [`Vec::try_reserve_exact`] and
+    /// reports [`RasterError::AllocationFailed`] instead, the same contract
+    /// [`alloc_op_output`] and [`Raster::zeroed`] already publish.
+    ///
+    /// The metadata rides along exactly as `Clone` carries it: interpretation,
+    /// resolution, orientation and every attached field. That is the reason a
+    /// copy is not spelled as `Raster::new` over a fresh buffer, which would
+    /// silently reset all of it.
+    ///
+    /// No budget is applied. The source raster is already held in memory and
+    /// already passed whatever budget built it, so a copy of it is by
+    /// definition in budget; the fallibility here is against the allocator,
+    /// not against a declared size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::AllocationFailed`] if the allocator cannot
+    /// satisfy a buffer the same size as this one.
+    pub(crate) fn try_clone(&self) -> Result<Self, RasterError> {
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve_exact(self.data.len())
+            .map_err(|_| RasterError::AllocationFailed {
+                width: self.width,
+                height: self.height,
+                bytes: self.data.len(),
+            })?;
+        data.extend_from_slice(&self.data);
+        Ok(Self {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            data,
+            meta: self.meta,
+            fields: self.fields.clone(),
+        })
+    }
+
     /// Create a raster filled with zeros.
     ///
     /// Allocates a buffer of the correct size and fills it with `0u8`. Useful
@@ -728,6 +772,7 @@ impl<'a> RegionView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imageio::MetadataValue;
 
     fn make_rgb_raster(w: u32, h: u32) -> Raster {
         let bpp = PixelFormat::Rgb8.bytes_per_pixel();
@@ -1054,6 +1099,41 @@ mod tests {
         let buf = alloc_op_output(4, 4, PixelFormat::Gray8).unwrap();
         assert_eq!(buf.len(), 16);
         assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    /**
+     * Tests that `try_clone` is a faithful stand-in for `Clone::clone`
+     * (issue #575): the operation paths reach for it precisely because
+     * `Clone` reaches handle_alloc_error and ends the process on an
+     * image-sized allocation, so it has to carry everything `Clone` does or
+     * it is not a substitute. Reconstructing through `Raster::new` over a
+     * fresh buffer would compile and would silently drop the interpretation,
+     * the resolution and every attached field, which is exactly the failure
+     * this pins.
+     * Works by giving a raster non-default metadata on both sides (a header
+     * field through `copy()`, an attached field through `set_field`), then
+     * comparing the fallible copy against the derived one field for field.
+     * Input: a 2x2 Rgb8 with xres 42 and a "hello" field → both copies agree
+     * on pixels, geometry, format, xres and the attachment.
+     */
+    #[test]
+    fn try_clone_carries_everything_clone_does() {
+        let mut im = Raster::new(2, 2, PixelFormat::Rgb8, (0..12).collect()).unwrap();
+        im.set_field("hello", MetadataValue::Int(7));
+        let im = im.copy().xres(42.0).build();
+
+        let copy = im.try_clone().unwrap();
+        assert_eq!(copy.data(), im.data());
+        assert_eq!((copy.width(), copy.height()), (im.width(), im.height()));
+        assert_eq!(copy.format(), im.format());
+        assert!(
+            (copy.xres() - 42.0).abs() < 1e-9,
+            "xres must survive the copy, got {}",
+            copy.xres()
+        );
+        assert_eq!(copy.interpretation(), im.interpretation());
+        assert_eq!(copy.get_fields(), im.get_fields());
+        assert_eq!(copy.get_field("hello"), Some(MetadataValue::Int(7)));
     }
 
     /**
