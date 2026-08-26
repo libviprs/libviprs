@@ -231,11 +231,11 @@ impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
-    /// `"png"`, `"gif"`, `"webp"`, `"jxl"` and `"v"` / `"vips"` are wired;
-    /// any other format returns [`EncodeError::Unsupported`]. `"webp"`
-    /// encodes losslessly at [`crate::webp::SaveOptions::default`], keeping
-    /// any attached metadata, `"gif"` at
-    /// [`crate::gif::SaveOptions::default`], and `"jxl"` losslessly at
+    /// `"png"`, `"gif"`, `"webp"`, `"jxl"`, `"fits"` / `"fit"` / `"fts"` and
+    /// `"v"` / `"vips"` are wired; any other format returns
+    /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
+    /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
+    /// `"gif"` at [`crate::gif::SaveOptions::default`], and `"jxl"` losslessly at
     /// [`crate::jxl::SaveOptions::default`], which carries no metadata
     /// because the encoder writes no box container;
     /// [`Raster::encode_webp`], [`Raster::encode_gif`] and
@@ -247,13 +247,6 @@ impl Raster {
     /// variant an unrecognised format name gets, so the dispatch has one
     /// answer for "this build cannot write that" however the caller
     /// arrived at it.
-    /// `"png"`, `"gif"`, `"webp"`, `"fits"` / `"fit"` / `"fts"` and
-    /// `"v"` / `"vips"` are wired; any other
-    /// format returns [`EncodeError::Unsupported`]. `"webp"` encodes
-    /// losslessly at [`crate::webp::SaveOptions::default`], keeping any
-    /// attached metadata, and `"gif"` at
-    /// [`crate::gif::SaveOptions::default`]; [`Raster::encode_webp`] and
-    /// [`Raster::encode_gif`] take the options explicitly.
     ///
     /// # Errors
     ///

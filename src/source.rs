@@ -1964,7 +1964,7 @@ mod tests {
      * collapsing.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
      * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Radiance` and
-     * `OpenExr`, and distinct `image` formats for every container libviprs
+     * `Fits`, `OpenExr`, and distinct `image` formats for every container libviprs
      * does not decode itself.
      */
     #[test]
