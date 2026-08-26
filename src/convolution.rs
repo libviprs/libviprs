@@ -267,6 +267,25 @@
 //!   derives instead of by the one `vips_convi_gen` reads off the mask,
 //!   is fixed and is not a divergence any more; the `intize` helper
 //!   documents the divisor that replaced it.
+//!
+//! * **An out-of-range `compass` `times`.** vips declares the bound on
+//!   the GObject property (`VIPS_ARG_INT(class, "times", 101, ..., 1,
+//!   1000, 2)` in `convolution/compass.c`), and GObject does not refuse
+//!   the call when you miss it. It writes
+//!   `value "N" of type 'gint' is invalid or out of range for property
+//!   'times'` to stderr, leaves the property at its default of `2`, and
+//!   runs. Measured on 8.18.4 with a 3x3 ones mask over a 4x4 black
+//!   image, `--times 0`, `--times 1001` and `--times 100000` all exit
+//!   `0` and write output byte-identical to `--times 2`.
+//!
+//!   [`Raster::try_compass`] returns [`ConvolutionError::TimesOutOfRange`]
+//!   instead, and [`Raster::compass`] panics. So a caller porting
+//!   `vips compass --times 1001` gets an error here where vips hands
+//!   back an image, and that is deliberate: silently convolving twice
+//!   when you asked for a thousand rounds is a wrong answer wearing a
+//!   warning, and the warning goes to stderr where a library caller
+//!   never sees it. The accepted range is identical to vips's, so
+//!   anything vips actually honours is honoured here too.
 
 use crate::colour::ColourError;
 use crate::conversion::{Angle45, ConversionError, Interpretation, cast_float_sample};

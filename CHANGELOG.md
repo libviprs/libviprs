@@ -55,9 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accept anything above zero (issue #547, found in review). That is the range
   libvips declares on the property,
   `VIPS_ARG_INT(class, "times", 101, ..., 1, 1000, 2)` at
-  `convolution/compass.c:162-167`, and GObject refuses both ends before the
-  operation is built, so neither reaches a convolution there either. Measured
-  on 8.18.4 with a 3x3 ones mask over a 4x4 black image,
+  `convolution/compass.c:162-167`. GObject refuses to *set* an out-of-range
+  value, which is not the same as refusing the call. Measured on 8.18.4 with
+  a 3x3 ones mask over a 4x4 black image,
   `vips compass a.v o.v m.mat --times 1` and `--times 1000` run, while
   `--times 0`, `--times 1001` and `--times 100000` each draw
   `value "N" of type 'gint' is invalid or out of range for property 'times'
@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConvolutionError::ZeroTimes` and covers both ends of the range at once.
   `ZeroTimes` has never been in a release, and the enum is
   `#[non_exhaustive]`.
+
+  Worth being explicit that this is a divergence rather than a match, because
+  the accepted range is identical and that makes it easy to skim past: vips
+  hands back an image for `--times 1001`, computed at 2, and libviprs hands
+  back an error. Convolving twice when a thousand rounds were asked for is a
+  wrong answer wearing a warning, and the warning goes to stderr where a
+  library caller never sees it. The `# Divergence from stock libvips` section
+  in `crate::convolution` carries the measurement and the reasoning.
 
 - `decode_tiff_page` indexes pages from **zero**, where it used to index from
   one (issue #566). `decode_tiff_page(p, 0)` is now the first image and used to
