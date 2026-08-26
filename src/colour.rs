@@ -59,10 +59,22 @@
 //! quantises, i.e. when a space is stored at 8 or 16 bits (`srgb`, `hsv`,
 //! `cmyk`, `b-w` at 8 bits; `rgb16`, `grey16` at 16 bits) and inside the
 //! XYZ -> HSV step, which passes through 8-bit sRGB exactly as the libvips
-//! route does. The individual conversions use the same published formulas
-//! and constants as libvips:
+//! route does. The one deliberate exception is the linear -> sRGB store,
+//! which is `f32` throughout because libvips' is (see below). The
+//! individual conversions use the same published formulas and constants
+//! as libvips:
 //!
-//! * sRGB gamma per IEC 61966-2-1 (linear below 0.04045 / 0.0031308);
+//! * sRGB gamma per IEC 61966-2-1 (linear below 0.04045 / 0.0031308), but
+//!   only the sRGB -> linear direction is EVALUATED. Going the other way,
+//!   libvips reads a precomputed integer table: `calcul_tables`
+//!   (`colour/LabQ2sRGB.c:126-146`) rounds `range` samples of the curve
+//!   to integer codes in `float`, and `vips_col_scRGB2sRGB` (`:282-353`)
+//!   interpolates linearly between two of those rounded entries and
+//!   finishes with `rintf`, which rounds halves to EVEN. That is three
+//!   quantisations, and evaluating the curve analytically instead missed
+//!   vips by a whole count on 16.6% of codes (issue #581), so the table
+//!   is ported rather than the formula. `b-w`, `grey16`, `srgb`, `rgb16`
+//!   and the sRGB step of `hsv` all read it;
 //! * the sRGB primaries matrix for scRGB <-> XYZ (4-decimal forward,
 //!   6-decimal inverse, both scaled to `Y` white = 100);
 //! * CIE Lab with the 7.787 shadow slope and D65 white
@@ -82,12 +94,16 @@
 //!   values match the libvips LabS codes;
 //! * Oklab / OkLCh per Ottosson's published matrices (the same constants
 //!   libvips uses);
-//! * Yxy chromaticity, HSV over 8-bit sRGB (hue circle mapped to 0..255),
-//!   and the libvips no-lcms CMYK approximation (naive ink model over
+//! * Yxy chromaticity, the HSV hue circle mapped to 0..255, and the
+//!   libvips no-lcms CMYK approximation (naive ink model over
 //!   D65-normalised XYZ);
-//! * mono (`b-w`, `grey16`) as gamma-encoded CIE linear luminance
-//!   (0.2126 R + 0.7152 G + 0.0722 B), and grey sources replicated to RGB
-//!   exactly like the libvips `BW2sRGB` route.
+//! * mono (`b-w`, `grey16`) as CIE linear luminance
+//!   (0.2126 R + 0.7152 G + 0.0722 B) taken through the same table, and
+//!   grey sources replicated to RGB exactly like the libvips `BW2sRGB`
+//!   route;
+//! * HSV over 8-bit sRGB with both the hue and the saturation code
+//!   TRUNCATED on the store, because `sRGB2HSV.c:113-117` writes them
+//!   into an `unsigned char`.
 //!
 //! Extra bands beyond the colour bands of the source space are carried
 //! through unchanged and plain-cast to the output depth (clip, no
@@ -166,6 +182,7 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use moxcms::{
     ColorProfile, DataColorSpace, Layout, RenderingIntent, ToneCurveEvaluator, TransformOptions,
@@ -365,13 +382,153 @@ fn srgb_decode(v: f64) -> f64 {
     }
 }
 
-/// sRGB opto-electrical transfer: linear 0..1 to encoded 0..1.
-fn srgb_encode(v: f64) -> f64 {
-    if v <= 0.0031308 {
-        12.92 * v
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+/// Number of codes in the 8-bit sRGB carrier, the `range` libvips hands
+/// `calcul_tables` from `calcul_tables_8` (`colour/LabQ2sRGB.c:153`).
+const SRGB_RANGE: usize = 256;
+
+/// Number of codes in the 16-bit `rgb16` / `grey16` carrier, the `range`
+/// from `calcul_tables_16` (`colour/LabQ2sRGB.c:174`).
+const RGB16_RANGE: usize = 65536;
+
+/// Build one libvips `Y2v` table: `range` samples of the sRGB
+/// opto-electrical transfer (IEC 61966-2-1, linear below 0.0031308) taken
+/// at `i / (range - 1)`, scaled to `range - 1` and rounded to an integer,
+/// plus a duplicated final element.
+///
+/// This is `calcul_tables` (`colour/LabQ2sRGB.c:126-146`) with its `v2Y`
+/// half left out. Nothing needs the reverse table: the sRGB -> linear
+/// direction stays analytic in `f64` ([`srgb_decode`]), and the only
+/// difference that makes is an `f32` rounding of a linear value, far
+/// under a code. The forward direction is a different story, which is
+/// what [`scrgb_to_code`] is about.
+///
+/// Everything is deliberately `f32`, the transfer function and the final
+/// `round_ties_even` (C `rintf`) alike, because the C is.
+///
+/// The `mul_add` is the one detail the C source does not show. The arm64
+/// Homebrew build of 8.18.4 contracts
+/// `(1.0F + 0.055F) * powf(f, 1.0F / 2.4F) - 0.055F` into a single
+/// `fmadd`, which `otool -tvV -p _calcul_tables` on `libvips.42.dylib`
+/// prints as `fmadd s0, s0, s9, s13`. Evaluating it unfused moves 45 of
+/// the 65536 16-bit entries by a count, so the fusion is pinned here
+/// rather than left to the optimiser, which is not allowed to introduce
+/// it on its own. The 256-entry table is identical either way.
+///
+/// This site keeps the `f32::mul_add` and [`scrgb_to_code`] does not,
+/// which is not an oversight. `f32::mul_add` becomes a libm `fmaf` call
+/// wherever `fma` is missing from the baseline ISA, x86-64 included, so
+/// it is worth routing around per channel per pixel and not worth it
+/// here, where it runs `range` times behind a `OnceLock`. What is
+/// written here is the C expression fused exactly as the shipped dylib
+/// fuses it, and it should keep reading that way. Do not propagate the
+/// other site's `f64` spelling back into this one.
+///
+/// The trailing duplicate is the C's: "Copy the final element. This is
+/// used in the piecewise linear interpolator below." (`:141-144`).
+fn calcul_tables(range: usize) -> Box<[i32]> {
+    let maxval = (range - 1) as f32;
+    let mut y2v: Vec<i32> = Vec::with_capacity(range + 1);
+    for i in 0..range {
+        let f = i as f32 / maxval;
+        // The C compares the promoted `float` against a `double`
+        // literal, so the branch point is not an `f32` constant.
+        let v = if f64::from(f) <= 0.0031308 {
+            12.92_f32 * f
+        } else {
+            f.powf(1.0_f32 / 2.4_f32).mul_add(1.055, -0.055)
+        };
+        y2v.push((maxval * v).round_ties_even() as i32);
     }
+    y2v.push(y2v[range - 1]);
+    y2v.into_boxed_slice()
+}
+
+/// The `Y2v` table for `range`, built once, standing in for the libvips
+/// `VIPS_ONCE` pair (`colour/LabQ2sRGB.c:150-170`).
+fn y2v_table(range: usize) -> &'static [i32] {
+    static Y2V_8: OnceLock<Box<[i32]>> = OnceLock::new();
+    static Y2V_16: OnceLock<Box<[i32]>> = OnceLock::new();
+    debug_assert!(range == SRGB_RANGE || range == RGB16_RANGE);
+    if range == SRGB_RANGE {
+        Y2V_8.get_or_init(|| calcul_tables(SRGB_RANGE))
+    } else {
+        Y2V_16.get_or_init(|| calcul_tables(RGB16_RANGE))
+    }
+}
+
+/// Linear scRGB (0..1) -> the integer sRGB code, through the
+/// interpolated `Y2v` lookup that `vips_col_scRGB2sRGB`
+/// (`colour/LabQ2sRGB.c:282-353`) and `vips_col_scRGB2BW` (`:385-428`)
+/// share.
+///
+/// vips never evaluates the transfer function per pixel, and the
+/// difference is not academic: three quantisations stack here, all of
+/// them the C's. [`calcul_tables`] samples the curve at `range` points
+/// and rounds each one to an integer; this lookup interpolates linearly
+/// between two of those already-rounded points; and the chord is
+/// finished with `rintf`, which rounds halves to EVEN rather than away
+/// from zero. Evaluating the curve analytically in `f64` and rounding
+/// once instead moved 5434 of the 32768 neutral LabS L codes by a count
+/// (issue #581).
+///
+/// The result is ALREADY QUANTISED, so this is the code that reaches the
+/// output buffer; `write_sample` rounds an integer and changes nothing.
+///
+/// The chord is fused, the same way [`calcul_tables`] fuses its
+/// multiply-add, but it is deliberately NOT spelled as an
+/// `f32::mul_add`. `fma` is not in the x86-64 baseline, so rustc lowers
+/// `f32::mul_add` to a libm `fmaf` CALL there, and this runs once per
+/// channel per pixel on the route every `srgb`, `rgb16`, `b-w`,
+/// `grey16` and `hsv` conversion takes. Measured on rustc 1.98 at
+/// `-C opt-level=3`: for `x86_64-unknown-linux-musl` the `mul_add`
+/// spelling is `jmpq *fmaf@GOTPCREL(%rip)` and the `f64` one is
+/// `cvtss2sd` / `mulsd` / `addsd` / `cvtsd2ss`; add
+/// `-C target-feature=+fma` and the `mul_add` collapses to a single
+/// `vfmadd213ss`, which is exactly the point: the baseline does not
+/// have it. On aarch64 both stay call-free (`fmadd` against `fmul` and
+/// `fadd`), so the `f64` spelling costs an instruction or two there and
+/// saves a whole libm call on any target without a baseline `fma`.
+///
+/// The two are bit-identical rather than merely close, because the
+/// exact product-sum fits in an `f64` for every reachable input, so the
+/// one `as f32` IS the one rounding `fmaf` would do. The
+/// `f64_chord_matches_mul_add_*` tests check that rather than taking
+/// the argument on trust: two of them sample both LUTs at every
+/// structurally interesting point on each `cargo test`, and two more,
+/// `#[ignore]`d because they walk over a billion `f32` patterns apiece,
+/// sweep the whole reachable domain under
+/// `cargo test --release --lib -- --ignored f64_chord_matches_mul_add`.
+///
+/// [`calcul_tables`] keeps its `f32::mul_add`, which is why the two
+/// sites are spelled differently: it runs `range` times behind a
+/// `OnceLock`, so a libm call there costs nothing, and it is pinned
+/// against the shipped dylib's `fmadd` rather than against anything of
+/// ours. Do not unify them.
+fn scrgb_to_code(range: usize, value: f64) -> f64 {
+    // "RGB can be NaN. Throw those values out, they will break our
+    // clipping." (`LabQ2sRGB.c:301-310`, `:404-409`.) vips answers 0
+    // rather than clipping. A NaN only reaches here from a NaN XYZ, and
+    // the scRGB matrix spreads that to all three channels, so answering
+    // per channel lands where the C's per-pixel test does.
+    if value.is_nan() {
+        return 0.0;
+    }
+    let lut = y2v_table(range);
+    let maxval = (range - 1) as f32;
+    let yf = (value as f32 * maxval).clamp(0.0, maxval);
+    let yi = yf as usize;
+    let lo = lut[yi];
+    // The `+ 1` is in bounds because `calcul_tables` duplicates the last
+    // entry for exactly this read.
+    let delta = (lut[yi + 1] - lo) as f32;
+    let t = yf - yi as f32;
+    // Fused, like the `fmadd s0, s5, s0, s4` the build compiles
+    // `lut[Yi] + (lut[Yi + 1] - lut[Yi]) * (Yf - Yi)` into, but reached
+    // through `f64` instead of `f32::mul_add` so that x86-64 does not
+    // pay a libm `fmaf` call per channel per pixel. Bit-identical; see
+    // the doc above.
+    let fused = (f64::from(delta) * f64::from(t) + f64::from(lo)) as f32;
+    f64::from(fused.round_ties_even())
 }
 
 /// Linear scRGB (0..1) -> D65 XYZ (`Y` white = 100), the sRGB primaries
@@ -651,9 +808,17 @@ fn srgb8_to_hsv(rgb: [f64; 3]) -> [f64; 3] {
     let h = if delta == 0.0 {
         0.0
     } else {
-        42.5 * (secondary_diff / delta) + wrap_around_hue
+        // `secondary_diff` is a `float` and `delta` an `unsigned char`
+        // cast to one, so the RATIO is an f32 division; only the
+        // `42.5 *` promotes back to double (`sRGB2HSV.c:113-114`).
+        42.5 * f64::from(secondary_diff as f32 / delta as f32) + wrap_around_hue
     };
-    [h, delta * 255.0 / c_max, c_max]
+    // `q` is `unsigned char`, so the C TRUNCATES both codes on the store
+    // (`sRGB2HSV.c:113-117`); it does not round them. Both are
+    // non-negative here -- the hue arms pair a negative `secondary_diff`
+    // with a `wrap_around_hue` that more than covers it -- so truncating
+    // toward zero and flooring agree.
+    [h.trunc(), (delta * 255.0 / c_max).trunc(), c_max]
 }
 
 /// HSV (libvips 0..255 hue coding) -> 8-bit sRGB. Inputs are the integral
@@ -817,12 +982,16 @@ fn labs_to_cmc(labs: [f64; 3]) -> [f64; 3] {
     lch_to_cmc(lab_to_lch(labs_to_lab(labs)))
 }
 
-// --- Mono (gamma-encoded CIE linear luminance, libvips scRGB2BW) ---
+// --- Mono (CIE linear luminance, libvips scRGB2BW) ---
 
-/// scRGB -> the normalised (0..1) gamma-encoded grey value.
-fn scrgb_to_bw(rgb: [f64; 3]) -> f64 {
-    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-    srgb_encode(y.clamp(0.0, 1.0))
+/// scRGB -> the CIE linear luminance `vips_col_scRGB2BW` takes before
+/// the sRGB encode (`colour/LabQ2sRGB.c:400`).
+///
+/// Nothing is clamped here on purpose: the C clips the SCALED index
+/// inside the lookup, not the luminance, so the clip belongs to
+/// [`scrgb_to_code`].
+fn scrgb_luminance(rgb: [f64; 3]) -> f64 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,9 +1215,17 @@ fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
 }
 
 /// Convert one pixel from D65 XYZ to `space`, writing the
-/// `space_bands(space)` output samples into the front of `out` (in the
-/// space's numeric convention, unrounded; integer spaces quantise on
-/// write).
+/// `space_bands(space)` output samples into the front of `out`, in the
+/// space's numeric convention.
+///
+/// Most arms leave the sample unrounded and let the writer quantise, but
+/// the arms whose C counterpart quantises INSIDE the transform do it
+/// here instead, so the two cannot drift: `labs` truncates into the
+/// `signed short` (`Lab2LabS.c:66-68`), `hsv` truncates into the
+/// `unsigned char` (`sRGB2HSV.c:113-117`), and `srgb`, `rgb16`, `b-w`,
+/// `grey16` and the sRGB step of `hsv` come back already rounded out of
+/// the `Y2v` lookup ([`scrgb_to_code`]). Re-rounding an integer on write
+/// changes nothing, so those arms pass through it untouched.
 ///
 /// This is the allocation-free form the per-pixel conversion loop drives:
 /// the caller supplies one scratch array (`[f64; 4]` covers every space,
@@ -1070,25 +1247,28 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
         Interpretation::Labs => out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65))),
         Interpretation::ScRgb => out[..3].copy_from_slice(&xyz_to_scrgb(xyz)),
         Interpretation::Hsv => {
-            // The libvips HSV encode goes through 8-bit sRGB.
-            let rgb = xyz_to_scrgb(xyz).map(|c| (255.0 * srgb_encode(c.clamp(0.0, 1.0))).round());
+            // The libvips HSV encode goes through 8-bit sRGB
+            // (`colourspace.c:336` and the rest of the `{ *, HSV }`
+            // block), so it sees the LUT's codes, not an analytic
+            // encode rounded afterwards.
+            let rgb = xyz_to_scrgb(xyz).map(|c| scrgb_to_code(SRGB_RANGE, c));
             out[..3].copy_from_slice(&srgb8_to_hsv(rgb));
         }
         Interpretation::Srgb => {
-            out[..3].copy_from_slice(
-                &xyz_to_scrgb(xyz).map(|c| 255.0 * srgb_encode(c.clamp(0.0, 1.0))),
-            );
+            out[..3].copy_from_slice(&xyz_to_scrgb(xyz).map(|c| scrgb_to_code(SRGB_RANGE, c)));
         }
         Interpretation::Rgb16 => {
-            out[..3].copy_from_slice(
-                &xyz_to_scrgb(xyz).map(|c| 65535.0 * srgb_encode(c.clamp(0.0, 1.0))),
-            );
+            out[..3].copy_from_slice(&xyz_to_scrgb(xyz).map(|c| scrgb_to_code(RGB16_RANGE, c)));
         }
         Interpretation::Yxy => out[..3].copy_from_slice(&xyz_to_yxy(xyz)),
         Interpretation::OkLab => out[..3].copy_from_slice(&xyz_to_oklab(xyz)),
         Interpretation::OkLch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_oklab(xyz))),
-        Interpretation::Bw => out[0] = 255.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
-        Interpretation::Grey16 => out[0] = 65535.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
+        Interpretation::Bw => {
+            out[0] = scrgb_to_code(SRGB_RANGE, scrgb_luminance(xyz_to_scrgb(xyz)));
+        }
+        Interpretation::Grey16 => {
+            out[0] = scrgb_to_code(RGB16_RANGE, scrgb_luminance(xyz_to_scrgb(xyz)));
+        }
         Interpretation::Cmyk => out[..4].copy_from_slice(&xyz_to_cmyk(xyz)),
         other => unreachable!("no colourspace route for {other:?}"),
     }
@@ -4282,6 +4462,480 @@ mod tests {
                 assert!(
                     (px[c] - exp).abs() < 1e-4,
                     "srgb {rgb:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // scRGB -> sRGB goes through the interpolated libvips LUT (#581)
+    // -----------------------------------------------------------------
+
+    /// One LabS pixel converted to `target`, as integer codes.
+    fn labs_to(labs_l: f64, target: Interpretation) -> Vec<f64> {
+        labs_px([labs_l, 0.0, 0.0])
+            .colourspace(target)
+            .getpoint(0, 0)
+    }
+
+    /**
+     * Tests that the linear -> sRGB encode is the libvips 256-entry
+     * integer LUT read with a piecewise-linear interpolation, not the
+     * analytic IEC 61966-2-1 curve.
+     *
+     * vips never evaluates the transfer function per pixel.
+     * `LabQ2sRGB.c:126-146` builds `Y2v[i] = rintf(255 * encode(i/255))`
+     * once, in `float`, and `vips_col_scRGB2sRGB` (`:282-353`) then
+     * interpolates between two ALREADY-ROUNDED integer entries and
+     * `rintf`s the chord. That stacks three quantisations the analytic
+     * form has none of, and it moves the answer by a whole count on
+     * 5434 of the 32768 neutral LabS L codes.
+     *
+     * Works by driving the measured `Labs -> b-w` and `Labs -> sRGB`
+     * codes at L values where the two disagree, plus controls where they
+     * agree so the test cannot pass by shifting everything.
+     *
+     * Input: `vips rawload labs.raw in.v 32768 1 3 --format short
+     * --interpretation labs`, then `vips colourspace in.v out.v b-w`
+     * (and `srgb`) and `vips rawsave out.v out.raw`, on 8.18.4.
+     */
+    #[test]
+    fn scrgb_to_srgb_reads_the_interpolated_vips_lut() {
+        // (LabS L, vips b-w, vips sRGB). The first five are codes where
+        // the analytic curve answers one LESS than vips; the last three
+        // are controls the two already agreed on.
+        let cases: [(f64, f64, f64); 8] = [
+            (134.0, 2.0, 2.0),
+            (224.0, 3.0, 3.0),
+            (313.0, 4.0, 4.0),
+            (402.0, 5.0, 5.0),
+            (20000.0, 148.0, 148.0),
+            (0.0, 0.0, 0.0),
+            (1000.0, 11.0, 11.0),
+            (32767.0, 255.0, 255.0),
+        ];
+
+        for (l, want_bw, want_srgb) in cases {
+            let bw = labs_to(l, Interpretation::Bw);
+            assert!(
+                (bw[0] - want_bw).abs() < 1e-9,
+                "labs [{l}, 0, 0] -> b-w: vips says {want_bw}, got {}",
+                bw[0]
+            );
+            let srgb = labs_to(l, Interpretation::Srgb);
+            for (c, got) in srgb.iter().enumerate().take(3) {
+                assert!(
+                    (got - want_srgb).abs() < 1e-9,
+                    "labs [{l}, 0, 0] -> srgb band {c}: vips says \
+                     {want_srgb}, got {got}"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the chord is finished with `rintf`, which is round half
+     * to EVEN, and not with a half-away-from-zero round.
+     *
+     * `LabQ2sRGB.c:337` / `:422` end the interpolation with `rintf(v)`,
+     * and the Homebrew arm64 8.18.4 build compiles that to `frintx`,
+     * i.e. the default round-to-nearest-ties-to-even mode. The 16-bit
+     * table is where that is observable: the chord lands on an exact
+     * `.5` for 70 of the 32768 neutral LabS L codes, and the two rules
+     * disagree on half of them.
+     *
+     * Works by pinning one tie that resolves DOWN and one that resolves
+     * UP, so neither `floor` nor `ceil` nor half-away can pass both.
+     * L = 4746 puts the chord at exactly 9404.5 and vips answers 9404
+     * (half-away would say 9405); L = 5505 puts it at exactly 10651.5
+     * and vips answers 10652.
+     *
+     * Input: as above, then `vips colourspace in.v out.v grey16`.
+     */
+    #[test]
+    fn scrgb_to_srgb_rounds_ties_to_even() {
+        for (l, want) in [(4746.0, 9404.0), (5505.0, 10652.0)] {
+            let grey = labs_to(l, Interpretation::Grey16);
+            assert!(
+                (grey[0] - want).abs() < 1e-9,
+                "labs [{l}, 0, 0] -> grey16: vips says {want}, got {}",
+                grey[0]
+            );
+        }
+    }
+
+    /**
+     * Tests that the 16-bit spaces take their own 65536-entry table
+     * rather than scaling the 8-bit one, and that the table really is
+     * sampled at 65536 points.
+     *
+     * `calcul_tables_16` (`LabQ2sRGB.c:174`) builds `vips_Y2v_16` at the
+     * full 16-bit range, so `rgb16` and `grey16` resolve detail the
+     * 8-bit table cannot: L = 491 and L = 4746 both quantise to a flat
+     * neutral in sRGB but come out with a per-channel spread at 16 bits.
+     *
+     * Input: as above, with `vips colourspace in.v out.v rgb16`.
+     */
+    #[test]
+    fn rgb16_takes_the_65536_entry_table() {
+        let cases: [(f64, [f64; 3]); 4] = [
+            (491.0, [1405.0, 1404.0, 1404.0]),
+            (4746.0, [9404.0, 9405.0, 9404.0]),
+            (6923.0, [13040.0, 13041.0, 13039.0]),
+            (20000.0, [37845.0, 37846.0, 37843.0]),
+        ];
+
+        for (l, want) in cases {
+            let px = labs_to(l, Interpretation::Rgb16);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-9,
+                    "labs [{l}, 0, 0] -> rgb16 band {c}: vips says {exp}, \
+                     got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the HSV arm quantises through the SAME LUT, because
+     * `{ *, HSV }` reaches HSV via `vips_scRGB2sRGB` then
+     * `vips_sRGB2HSV` (`colourspace.c:336`, `:355` onward) and so sees
+     * the LUT's 8-bit codes, not an analytic encode rounded afterwards.
+     *
+     * Works by picking L = 491, the one neutral LabS code in this set
+     * where the LUT breaks the grey: it gives sRGB [6, 5, 5], so HSV
+     * reports a real saturation of 42, while the analytic encode gives a
+     * flat [5, 5, 5] and therefore saturation 0. That makes the case
+     * discriminating on the HSV arm specifically rather than on the sRGB
+     * codes it is built from.
+     *
+     * Input: as above, with `vips colourspace in.v out.v hsv`.
+     */
+    #[test]
+    fn hsv_quantises_through_the_lut_sampled_srgb() {
+        let px = labs_to(491.0, Interpretation::Hsv);
+        let want = [0.0, 42.0, 6.0];
+        for (c, &exp) in want.iter().enumerate() {
+            assert!(
+                (px[c] - exp).abs() < 1e-9,
+                "labs [491, 0, 0] -> hsv band {c}: vips says {exp}, got {}",
+                px[c]
+            );
+        }
+    }
+
+    /**
+     * Tests that [`calcul_tables`] reproduces the libvips `Y2v` tables
+     * entry for entry, at both ranges.
+     *
+     * The table is the thing everything else in this mechanism is built
+     * on, so it is pinned directly rather than only through the codes it
+     * produces. Seven of the 16-bit entries here are ones the FUSED
+     * multiply-add decides: evaluate `1.055 * powf(f, 1/2.4) - 0.055`
+     * unfused and they each drop by a count, which is 45 of the 65536
+     * entries in total. The 256-entry table is the same either way, so
+     * the 8-bit rows pin the shape and the 16-bit rows pin the fusion.
+     *
+     * Input: the tables were read back out of vips 8.18.4 rather than
+     * recomputed. Feeding scRGB knots `i / (range - 1)` through
+     * `vips rawload knots.raw k.v <range> 1 3 --format float
+     * --interpretation scrgb` then `vips colourspace k.v out.v srgb`
+     * (and `rgb16`) makes the interpolation land on entry `i`, so the
+     * output code IS `Y2v[i]`.
+     */
+    #[test]
+    fn calcul_tables_matches_the_vips_y2v_tables() {
+        let y2v_8 = calcul_tables(SRGB_RANGE);
+        assert_eq!(y2v_8.len(), SRGB_RANGE + 1);
+        assert_eq!(&y2v_8[..10], &[0, 13, 22, 28, 34, 38, 42, 46, 50, 53]);
+        assert_eq!(&y2v_8[248..256], &[252, 252, 253, 253, 254, 254, 255, 255]);
+        // "Copy the final element" (`LabQ2sRGB.c:141-144`).
+        assert_eq!(y2v_8[SRGB_RANGE], y2v_8[SRGB_RANGE - 1]);
+
+        let y2v_16 = calcul_tables(RGB16_RANGE);
+        assert_eq!(y2v_16.len(), RGB16_RANGE + 1);
+        // (index, vips entry). Everything from 3696 to 25615 is an entry
+        // the unfused form gets one count too low.
+        let cases: [(usize, i32); 15] = [
+            (0, 0),
+            (1, 13),
+            (2, 26),
+            (3, 39),
+            (255, 3244),
+            (3696, 17261),
+            (3857, 17635),
+            (5925, 21795),
+            (8993, 26618),
+            (8998, 26625),
+            (9393, 27171),
+            (25615, 43141),
+            (64674, 65155),
+            (65534, 65535),
+            (65535, 65535),
+        ];
+        for (i, want) in cases {
+            assert_eq!(y2v_16[i], want, "Y2v_16[{i}]");
+        }
+        assert_eq!(y2v_16[RGB16_RANGE], y2v_16[RGB16_RANGE - 1]);
+    }
+
+    /**
+     * One `f32` bit pattern's worth of the [`scrgb_to_code`] chord,
+     * evaluated both ways and compared as raw bits.
+     *
+     * [`scrgb_to_code`] finishes its chord with `f64` arithmetic rather
+     * than `f32::mul_add`, because `fma` is not in the x86-64 baseline
+     * and rustc lowers `f32::mul_add` to a libm `fmaf` call there, once
+     * per channel per pixel. The two spellings agree bit for bit
+     * because the exact product-sum is representable in an `f64` for
+     * every reachable input, so the single `as f32` is the single
+     * rounding `fmaf` performs:
+     *
+     * - `lo = lut[yi]` is an integer in `0..=range - 1`, exact in both
+     *   `f32` and `f64`.
+     * - `delta = lut[yi + 1] - lut[yi]` is an integer with
+     *   `|delta| <= 65535`, exact in both.
+     * - `t = yf - yi as f32` is exact: `yf < 2^24`, so subtracting its
+     *   truncated integer part cannot lose a bit, and `t` lands in
+     *   `[0, 1)`.
+     * - For `yi >= 1`, `yf >= 1` so `ulp(yf) >= 2^-23` and `t` is a
+     *   multiple of `2^-23`. Then `delta * t` is a multiple of `2^-23`
+     *   under `2^16`, and adding the integer `lo` keeps it a multiple
+     *   of `2^-23` under `2^17`: at most 40 significand bits, inside
+     *   `f64`'s 53.
+     * - For `yi == 0`, `lo == lut[0] == 0` (the linear arm gives `v = 0`
+     *   at `i = 0`), so the sum is a bare product of two `f32`s, exact
+     *   in `f64` at 24 + 24 = 48 bits.
+     *
+     * Works by taking `bits` as a raw `f32` pattern standing in for the
+     * clamped `yf`, so the caller owns the coverage and this owns only
+     * the comparison.
+     *
+     * Input: none. Nothing here is a parity claim against vips, it is a
+     * claim about two Rust expressions, so there is no oracle to read.
+     */
+    fn check_f64_chord_at(lut: &[i32], range: usize, bits: u32) {
+        let yf = f32::from_bits(bits);
+        let yi = yf as usize;
+        let lo = lut[yi];
+        let delta = (lut[yi + 1] - lo) as f32;
+        let t = yf - yi as f32;
+        let want = delta.mul_add(t, lo as f32);
+        let got = (f64::from(delta) * f64::from(t) + f64::from(lo)) as f32;
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "range {range}, yf bits {bits:#010x} ({yf:e}), yi {yi}, \
+             delta {delta}, lo {lo}: mul_add gives {want:e}, the f64 \
+             chord gives {got:e}"
+        );
+    }
+
+    /**
+     * The structural subset of the chord equivalence that runs on every
+     * `cargo test`, as against the exhaustive sweep in
+     * [`sweep_f64_chord_against_mul_add`], which does not.
+     *
+     * Works by checking, for one `range`:
+     *
+     * - `-0.0`, which survives the `clamp(0.0, maxval)` in
+     *   [`scrgb_to_code`] (it is neither below the low bound nor above
+     *   the high one) and so reaches the lookup;
+     * - every `f32` in `[1.0, 2.0)`, 8388608 patterns, which is where
+     *   the arithmetic is under the most pressure: `ulp(yf)` is at its
+     *   smallest of any `yi >= 1`, so `t` carries a full 23 fractional
+     *   bits, and `delta` is near its largest because the transfer
+     *   curve is steepest at the bottom of the table;
+     * - both ends of EVERY LUT cell, 64 patterns deep each way, so
+     *   `t == 0` and the largest `t` below 1 are covered at every `yi`,
+     *   including `yi == 0`, both knees of the piecewise curve, and the
+     *   `yi == range - 1` cell where the duplicated final entry makes
+     *   `delta` zero and the clamp allows only `t == 0`;
+     * - a stride of 4517 over the whole `+0.0..=maxval` bit range, so
+     *   every `f32` exponent is represented, denormals included. They
+     *   all land in `yi == 0`, which the per-cell walk only samples at
+     *   its two ends.
+     *
+     * That is a few tens of millions of patterns rather than the
+     * billion-odd the full sweep walks, and it runs in well under a
+     * second per range in a debug build.
+     *
+     * Input: none, see [`check_f64_chord_at`].
+     */
+    fn spot_check_f64_chord(range: usize) {
+        let lut = y2v_table(range);
+        let maxval = (range - 1) as f32;
+        let top = maxval.to_bits();
+
+        check_f64_chord_at(lut, range, 0x8000_0000);
+
+        for bits in 1.0_f32.to_bits()..2.0_f32.to_bits() {
+            check_f64_chord_at(lut, range, bits);
+        }
+
+        const BAND: u32 = 64;
+        for yi in 0..range {
+            let cell_lo = (yi as f32).to_bits();
+            let cell_hi = ((yi + 1) as f32).to_bits();
+            for bits in cell_lo..=(cell_lo + BAND).min(top) {
+                check_f64_chord_at(lut, range, bits);
+            }
+            for bits in cell_hi.saturating_sub(BAND)..cell_hi.min(top + 1) {
+                check_f64_chord_at(lut, range, bits);
+            }
+        }
+
+        const STRIDE: u32 = 4517;
+        let mut bits = 0;
+        while bits < top {
+            check_f64_chord_at(lut, range, bits);
+            bits += STRIDE;
+        }
+        check_f64_chord_at(lut, range, top);
+    }
+
+    /**
+     * The exhaustive sweep behind the two `#[ignore]`d
+     * `f64_chord_matches_mul_add_*` tests.
+     *
+     * Works by walking `yf` over EVERY `f32` bit pattern from `+0.0` to
+     * `maxval`, plus `-0.0`, which is a superset of what the clamp in
+     * [`scrgb_to_code`] can hand the lookup. That is 1132396546
+     * patterns at range 256 and 1199570690 at range 65536, so it is a
+     * real sweep of the index space rather than a sample of it, and it
+     * is why the two tests that call this are `#[ignore]`d rather than
+     * run on every `cargo test`. [`spot_check_f64_chord`] is what runs
+     * by default; it covers the structure but not the whole space.
+     *
+     * Input: none, see [`check_f64_chord_at`], whose doc carries the
+     * argument for why the two spellings must agree.
+     */
+    fn sweep_f64_chord_against_mul_add(range: usize) {
+        let lut = y2v_table(range);
+        let maxval = (range - 1) as f32;
+
+        let mut bits = 0x8000_0000_u32;
+        let top = maxval.to_bits();
+        loop {
+            check_f64_chord_at(lut, range, bits);
+            if bits == 0x8000_0000 {
+                bits = 0;
+            } else if bits == top {
+                break;
+            } else {
+                bits += 1;
+            }
+        }
+    }
+
+    /**
+     * Tests that the `f64` chord in [`scrgb_to_code`] is bit-identical
+     * to the `f32::mul_add` it replaced at every structurally
+     * interesting point of the 256-entry LUT.
+     *
+     * Works by [`spot_check_f64_chord`], whose doc lists exactly what
+     * that covers. The point of running it rather than only stating the
+     * argument is that the equivalence is what licenses dropping a
+     * per-pixel libm `fmaf` call on x86-64 without moving a single
+     * output code.
+     *
+     * Input: none, see the helper.
+     */
+    #[test]
+    fn f64_chord_matches_mul_add_over_the_srgb_lut_sample() {
+        spot_check_f64_chord(SRGB_RANGE);
+    }
+
+    /**
+     * Tests the same structural sample across the 65536-entry LUT.
+     *
+     * Input: none, see [`spot_check_f64_chord`].
+     */
+    #[test]
+    fn f64_chord_matches_mul_add_over_the_rgb16_lut_sample() {
+        spot_check_f64_chord(RGB16_RANGE);
+    }
+
+    /**
+     * Tests the same equivalence over EVERY `f32` the 256-entry lookup
+     * can be handed, not just the structural sample.
+     *
+     * `#[ignore]`d because it walks 1132396546 bit patterns. Measured
+     * on an M-series mac that is 10.64s in a debug build and about a
+     * second in release, and it will be worse on a target without `fma`
+     * in its baseline, where the `f32::mul_add` arm of the comparison
+     * is itself a libm call. Nothing in the default `cargo test` run
+     * covers the whole space; this is what does, and it is worth
+     * running whenever the LUT or the chord changes:
+     *
+     * ```text
+     * cargo test --release --lib -- --ignored f64_chord_matches_mul_add
+     * ```
+     *
+     * Input: none, see [`sweep_f64_chord_against_mul_add`].
+     */
+    #[test]
+    #[ignore = "walks every f32 bit pattern up to maxval; run with --ignored"]
+    fn f64_chord_matches_mul_add_over_the_whole_srgb_domain() {
+        sweep_f64_chord_against_mul_add(SRGB_RANGE);
+    }
+
+    /**
+     * Tests the same exhaustive equivalence across the whole
+     * 65536-entry LUT, 1199570690 bit patterns.
+     *
+     * Split from the 8-bit sweep so the two run on separate test
+     * threads; they have no state in common. `#[ignore]`d for the same
+     * reason, 10.30s in a debug build, and run by the same invocation
+     * as [`f64_chord_matches_mul_add_over_the_whole_srgb_domain`].
+     *
+     * Input: none, see [`sweep_f64_chord_against_mul_add`].
+     */
+    #[test]
+    #[ignore = "walks every f32 bit pattern up to maxval; run with --ignored"]
+    fn f64_chord_matches_mul_add_over_the_whole_rgb16_domain() {
+        sweep_f64_chord_against_mul_add(RGB16_RANGE);
+    }
+
+    /**
+     * Tests that sRGB -> HSV TRUNCATES the hue and saturation codes on
+     * the store, and that the hue's ratio is an `f32` division.
+     *
+     * `sRGB2HSV.c:113-117` writes both into an `unsigned char`, which
+     * drops the fraction; libviprs used to hand them out unrounded and
+     * let the writer round, which missed vips on about a third of the
+     * two bands. It stayed invisible until #581, because the analytic
+     * sRGB encode produced flat greys where the LUT produces a real
+     * spread, and a flat grey has `delta == 0` and therefore no hue or
+     * saturation to get wrong.
+     *
+     * Works by pinning one case where both codes have a fraction over a
+     * half, so rounding and truncating disagree on BOTH, and one where
+     * the hue is exactly on the boundary between the two precisions:
+     * sRGB [5, 7, 22] puts `42.5 * (-2 / 17) + 170` a hair under 165 in
+     * `f32` and a hair over it in `f64`, and vips answers 164.
+     *
+     * Input: `vips rawload px.raw in.v N 1 3 --format uchar
+     * --interpretation srgb`, then `vips colourspace in.v out.v hsv`.
+     */
+    #[test]
+    fn srgb_to_hsv_truncates_hue_and_saturation() {
+        let cases: [([u8; 3], [f64; 3]); 3] = [
+            ([5, 7, 66], [168.0, 235.0, 66.0]),
+            ([5, 7, 88], [168.0, 240.0, 88.0]),
+            ([5, 7, 22], [164.0, 197.0, 22.0]),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Hsv).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-9,
+                    "srgb {rgb:?} -> hsv band {c}: vips says {exp}, got {}",
                     px[c]
                 );
             }

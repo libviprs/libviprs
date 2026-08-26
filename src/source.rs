@@ -273,7 +273,7 @@ pub enum SourceError {
     /// A malformed or unsupported native `.v` file (bad magic, truncated
     /// header or pixel data, unsupported coding/band format, or a metadata
     /// trailer that opens with `{` and is not valid JSON, which is a
-    /// corrupt libviprs trailer rather than a foreign one; see the
+    /// corrupt legacy libviprs trailer rather than a foreign one; see the
     /// [`crate::imageio`] container contract).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
@@ -299,6 +299,15 @@ pub enum SourceError {
     /// [`GifError`](crate::gif::GifError) rather than as an opaque string.
     #[error(transparent)]
     Gif(#[from] crate::gif::GifError),
+    /// A malformed or unreachable FITS file. libviprs decodes FITS itself
+    /// rather than through any crate (see [`crate::fits`]), so its failures
+    /// arrive as the codec's own typed
+    /// [`FitsError`](crate::fits::FitsError) rather than as an opaque
+    /// string. That matters more here than elsewhere, because a FITS file
+    /// can be perfectly well formed and still carry a sample type this
+    /// build has no pixel format for; the variant says which.
+    #[error(transparent)]
+    Fits(#[from] crate::fits::FitsError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -336,6 +345,42 @@ pub enum SourceError {
         /// The rounded output height, in pixels.
         height: u32,
     },
+    /// A single buffer a decoder is about to reserve would be larger than
+    /// [`DecodeLimits::max_alloc_bytes`]. Raised before the allocation
+    /// happens, from the size the file *declares*, so a decompression bomb
+    /// is refused rather than served. Distinct from
+    /// [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded),
+    /// which counts pixels and so cannot see the band count or the sample
+    /// depth: a 1-gigapixel `max_pixels` still permits a 4 GiB `Rgba8`
+    /// frame. Used by the TIFF page readers for both the file body they
+    /// read in and the pixel buffer a page decodes into; the equivalent GIF
+    /// check has its own
+    /// [`GifError::AllocLimitExceeded`](crate::gif::GifError::AllocLimitExceeded).
+    #[error(
+        "{what} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
+         allocation ceiling; raise DecodeLimits::max_alloc_bytes"
+    )]
+    AllocLimitExceeded {
+        /// What the allocation was for, e.g. `"TIFF file body"`.
+        what: &'static str,
+        /// The number of bytes that single buffer would have taken.
+        needed_bytes: u64,
+        /// The ceiling in force, [`DecodeLimits::max_alloc_bytes`].
+        max_alloc_bytes: u64,
+    },
+    /// A multi-page file whose page chain runs past
+    /// [`DecodeLimits::max_pages`]. The TIFF IFD chain is a linked list with
+    /// no count in the header, so the only way to know how long it is, is to
+    /// walk it; this variant is what stops that walk turning into unbounded
+    /// work on a hostile file.
+    #[error("image declares more than {max_pages} pages; raise DecodeLimits::max_pages")]
+    PageLimitExceeded {
+        /// The ceiling in force, [`DecodeLimits::max_pages`]. The real page
+        /// count is deliberately not reported: the walk stops at the ceiling
+        /// rather than running to the end of the chain to count it, which is
+        /// the whole point of the ceiling.
+        max_pages: u32,
+    },
 }
 
 /// Resource limits applied to a single image decode.
@@ -352,21 +397,40 @@ pub enum SourceError {
 ///
 /// # Which decoder enforces which field
 ///
-/// The two decode paths — the `image`-crate raster path (PNG/JPEG/TIFF)
-/// and the native `.v` reader — bound untrusted geometry with different
-/// mechanisms, so not every field is consulted by both:
+/// The decode paths bound untrusted geometry with different mechanisms, so
+/// not every field is consulted by all of them. The `image`-crate raster
+/// path covers PNG and JPEG; TIFF reaches it too through
+/// [`decode_file`]/[`decode_bytes`], but the page-aware TIFF readers
+/// ([`crate::tiff_page_count`], [`crate::decode_tiff_page`] and their
+/// `_with_limits` twins) go straight to the `tiff` crate and enforce the
+/// ceilings themselves.
 ///
-/// | Field | `image` raster path | native `.v` reader |
-/// |---|---|---|
-/// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation |
-/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation |
-/// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) |
-/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`] | — (`.v` is an uncompressed body sized by its header, gated by `max_coord`/`max_pixels`) |
+/// | Field | `image` raster path | native `.v` reader | TIFF page readers |
+/// |---|---|---|---|
+/// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
+/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
+/// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`] | — (`.v` is an uncompressed body sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
+/// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
 ///
 /// The single-axis [`max_coord`](Self::max_coord) and total
-/// [`max_pixels`](Self::max_pixels) ceilings are the two universally
-/// honoured knobs; `max_width`/`max_height`/`max_alloc_bytes` shape only
-/// the `image`-crate decoders they are pushed into.
+/// [`max_pixels`](Self::max_pixels) ceilings are the universally honoured
+/// knobs; `max_width`/`max_height` shape only the `image`-crate decoders
+/// they are pushed into.
+///
+/// The format decoders libviprs owns outright take the same
+/// [`DecodeLimits`] and apply `max_coord`, `max_pixels` and
+/// `max_alloc_bytes` in that order before reserving a frame:
+/// [`crate::gif::decode_gif`], [`crate::webp::decode_webp`], and the TIFF
+/// page readers. [`max_alloc_bytes`](Self::max_alloc_bytes) is the one that
+/// catches a frame `max_pixels` waves through, since a pixel count sees
+/// neither the band count nor the sample depth.
+///
+/// Raising [`max_alloc_bytes`](Self::max_alloc_bytes) above 256 MiB does
+/// **not** raise the effective ceiling on the TIFF page readers: the `tiff`
+/// crate's own `decoding_buffer_size` default is 256 MiB and libviprs only
+/// ever tightens it, never loosens it, so the effective bound there is the
+/// smaller of the two.
 ///
 /// Note the [`max_width`](Self::max_width) / [`max_height`](Self::max_height)
 /// ceilings and [`max_coord`](Self::max_coord) surface *different* errors on
@@ -413,6 +477,23 @@ pub struct DecodeLimits {
     pub max_pixels: u64,
     /// Maximum number of bytes the decoder may allocate at one time.
     pub max_alloc_bytes: u64,
+    /// Maximum number of pages (frames, IFDs) a multi-page file may declare
+    /// before it is refused, default `100_000`. A TIFF's IFD chain is a
+    /// linked list with no count anywhere in the header, so reporting
+    /// `n-pages` means walking it; this bounds that walk. Enforced by the
+    /// TIFF page readers ([`crate::tiff_page_count`],
+    /// [`crate::decode_tiff_page`]) as
+    /// [`SourceError::PageLimitExceeded`], raised as soon as the walk
+    /// reaches the ceiling rather than after counting to the end.
+    ///
+    /// The default is the ceiling libvips puts on both the page index and
+    /// the page count on every multi-page loader it has
+    /// (`VIPS_ARG_INT(class, "page", 20, ..., 0, 100000, 0)` in
+    /// `tiffload.c:195-200` at `fe420cf3a`, and `-1, 100000, 1` for `n`).
+    /// Measured against 8.18.4: `vips tiffload x.tif o.v --page 100001` and
+    /// `--n 100001` are both refused by GObject before the loader runs, so a
+    /// chain longer than this is past anything vips will address in one go.
+    pub max_pages: u32,
 }
 
 impl Default for DecodeLimits {
@@ -431,6 +512,9 @@ impl Default for DecodeLimits {
             max_pixels: 1u64 << 30,
             // Mirrors the `image` crate default allocation budget.
             max_alloc_bytes: 512 * 1024 * 1024,
+            // The libvips `page` / `n` property ceiling on every multi-page
+            // loader; see the field doc.
+            max_pages: 100_000,
         }
     }
 }
@@ -477,6 +561,14 @@ impl DecodeLimits {
         self
     }
 
+    /// Set the maximum number of pages a multi-page file may declare,
+    /// returning the updated limits.
+    #[must_use]
+    pub fn with_max_pages(mut self, max_pages: u32) -> Self {
+        self.max_pages = max_pages;
+        self
+    }
+
     /// Translate into the `image` crate's strict/non-strict limit set.
     fn to_image_limits(self) -> Limits {
         let mut limits = Limits::no_limits();
@@ -517,6 +609,29 @@ impl DecodeLimits {
                 width,
                 height,
                 max_pixels: self.max_pixels,
+            });
+        }
+        Ok(())
+    }
+
+    /// Enforce [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) on a
+    /// single buffer a decoder is about to reserve, named by `what` so the
+    /// error says which one. `check_pixels` cannot stand in for this: it
+    /// counts pixels and so sees neither the band count nor the sample
+    /// depth, and the default 1-gigapixel ceiling still permits a 4 GiB
+    /// `Rgba8` frame. Crate-visible so the format decoders that do their own
+    /// reads (the TIFF page readers) apply the published budget rather than
+    /// falling back to [`crate::raster::Raster::new`]'s much looser one.
+    pub(crate) fn check_alloc(
+        self,
+        what: &'static str,
+        needed_bytes: u64,
+    ) -> Result<(), SourceError> {
+        if needed_bytes > self.max_alloc_bytes {
+            return Err(SourceError::AllocLimitExceeded {
+                what,
+                needed_bytes,
+                max_alloc_bytes: self.max_alloc_bytes,
             });
         }
         Ok(())
@@ -718,6 +833,8 @@ pub(crate) enum SniffedFormat {
     Radiance,
     /// OpenEXR, `76 2F 31 01`.
     OpenExr,
+    /// FITS, the first card's `SIMPLE  =` keyword and fixed-format marker.
+    Fits,
 }
 
 impl SniffedFormat {
@@ -728,8 +845,8 @@ impl SniffedFormat {
     /// belong to the decoder rather than to the format:
     ///
     /// * `.v`, because [`crate::imageio::decode_vips_bytes`] parses the
-    ///   libvips header and the JSON metadata trailer itself and needs the
-    ///   buffer addressable end to end.
+    ///   libvips header and the metadata trailer itself and needs the buffer
+    ///   addressable end to end.
     /// * JPEG, because the metadata pass rescans the APP1/APP2 segments for
     ///   EXIF and ICC after the pixel decode.
     /// * Radiance, because [`crate::radiance::decode_radiance`] walks the
@@ -748,6 +865,10 @@ impl SniffedFormat {
     /// * WebP, because [`crate::webp::decode_webp`] reads the `ICCP`,
     ///   `EXIF` and `XMP ` chunks out of the RIFF directory as well as the
     ///   frame, and the frame is rarely the last chunk in the file.
+    /// * FITS, because [`crate::fits::decode_fits`] may walk past one or
+    ///   more header units before it finds the one carrying the image, and
+    ///   the sample array is band-planar and stored bottom row first, so
+    ///   the decode reads it in an order no strip reader would.
     ///
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
@@ -797,6 +918,11 @@ impl SniffedFormat {
             // [`crate::exr`] needs the names, the per-channel sample types
             // and the data window.
             Self::OpenExr => None,
+            // `image` has no FITS route at all, and no FITS crate models
+            // the vips-side behaviour libviprs needs (the vertical flip,
+            // the `fits-N` records, cfitsio's equivalent-type table), so
+            // [`crate::fits`] hand-rolls the codec (issue #505).
+            Self::Fits => None,
         }
     }
 }
@@ -846,6 +972,14 @@ pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
     }
     if head.starts_with(&crate::exr::MAGIC) {
         return Some(SniffedFormat::OpenExr);
+    }
+    // FITS has no signature to speak of: the standard fixes the primary
+    // header's first card as `SIMPLE` with a logical value, so the keyword
+    // field and the fixed-format `= ` in columns 9 and 10 are the only
+    // bytes every file shares. vips does not sniff at all here, it hands
+    // the file to `fits_open_diskfile` (`fits.c:526-548`).
+    if head.starts_with(crate::fits::MAGIC) {
+        return Some(SniffedFormat::Fits);
     }
     None
 }
@@ -973,6 +1107,9 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     }
     if sniffed == Some(SniffedFormat::OpenExr) {
         return crate::exr::decode_exr(bytes, limits);
+    }
+    if sniffed == Some(SniffedFormat::Fits) {
+        return crate::fits::decode_fits(bytes, limits);
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
@@ -1655,7 +1792,7 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 23] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 27] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -1718,6 +1855,18 @@ mod tests {
             ),
             ("openexr wrong version byte", b"\x76\x2f\x31\x02", None),
             ("openexr truncated", b"\x76\x2f\x31", None),
+            // FITS is a fixed-width prefix: the keyword field, the `=` in
+            // column 9 and the space after it. `SIMPLE=T` is a legal FITS
+            // value written in free format, but no conforming file opens
+            // that way, and cfitsio refuses it too.
+            (
+                "fits",
+                b"SIMPLE  =                    T",
+                Some(SniffedFormat::Fits),
+            ),
+            ("fits free format", b"SIMPLE=T", None),
+            ("fits without the keyword padding", b"SIMPLE = T", None),
+            ("fits truncated", b"SIMPLE  ", None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -1752,6 +1901,7 @@ mod tests {
             SniffedFormat::WebP,
             SniffedFormat::Radiance,
             SniffedFormat::OpenExr,
+            SniffedFormat::Fits,
         ];
         // These are the containers libviprs decodes itself, so they are
         // the ones the route table maps to no `image` decoder.
@@ -1761,6 +1911,7 @@ mod tests {
             SniffedFormat::Gif,
             SniffedFormat::WebP,
             SniffedFormat::OpenExr,
+            SniffedFormat::Fits,
         ];
 
         let buffered: Vec<SniffedFormat> = all
@@ -1776,10 +1927,11 @@ mod tests {
                 SniffedFormat::Gif,
                 SniffedFormat::WebP,
                 SniffedFormat::Radiance,
+                SniffedFormat::Fits,
                 SniffedFormat::OpenExr
             ],
-            "only .v, JPEG, GIF, WebP, Radiance and OpenEXR may read the whole file \
-             into memory"
+            "only .v, JPEG, GIF, WebP, Radiance, FITS and OpenEXR may read the \
+             whole file into memory"
         );
 
         for format in self_decoded {
@@ -1806,6 +1958,31 @@ mod tests {
             all.len() - self_decoded.len(),
             "the route table must be an identity mapping, not many-to-one"
         );
+    }
+
+    /**
+     * Verifies that a FITS file reaches the hand-rolled codec through both
+     * public decode entry points, and that neither consults the file name
+     * to get there. Works by writing one `.fits` under a misleading `.png`
+     * extension and decoding it from the path and from the bytes.
+     * Input: a 4x1 BITPIX 8 file named `misnamed.png` -> Output: the same
+     * `Gray8` raster from `decode_file` and `decode_bytes`, right way up.
+     */
+    #[test]
+    fn fits_reaches_its_codec_from_both_entry_points() {
+        let raster = Raster::new(4, 1, PixelFormat::Gray8, vec![3, 1, 4, 1]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("misnamed.png");
+        std::fs::write(&path, &file).unwrap();
+
+        let from_path = decode_file_with_limits(&path, DecodeLimits::default()).unwrap();
+        let from_bytes = decode_bytes(&file).unwrap();
+        for decoded in [&from_path, &from_bytes] {
+            assert_eq!((decoded.width(), decoded.height()), (4, 1));
+            assert_eq!(decoded.format(), PixelFormat::Gray8);
+            assert_eq!(decoded.data(), &[3, 1, 4, 1]);
+        }
     }
 
     /**

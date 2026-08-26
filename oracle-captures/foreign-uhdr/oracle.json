@@ -1,0 +1,1143 @@
+{
+  "meta": {
+    "area": "foreign-uhdr",
+    "issue": 639,
+    "vips_version": "vips-8.18.6",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "libuhdr": {
+      "linked": [
+        "/opt/homebrew/opt/libultrahdr/lib/libuhdr.2.dylib (compatibility version 2.0.0, current version 2.0.2)"
+      ],
+      "com_segment": "Source: google libuhdr v2.0.2, Coder: libjpeg v80, Attrib: GainMap Image",
+      "note": "the codec is a third-party library and the container it writes is its output, not libvips's, so its version is part of this capture's provenance in a way no other area's is"
+    },
+    "captured_by": "oracle-captures/foreign-uhdr/capture.py",
+    "reference_c": "libvips v8.18.0-95-gfe420cf3a for the file and line numbers quoted here (libvips/foreign/uhdrload.c, libvips/foreign/uhdrsave.c, libvips/colour/uhdr2scRGB.c, libvips/iofuncs/header.c, libvips/foreign/jpegsave.c); the binary every number came out of is the 8.18.6 release and is not the same artefact"
+  },
+  "notes": [
+    "The MPF APP2 marker gates only the fast `is_a`. fixtures/no-mpf.jpg is accepted by `vips uhdrload` and rejected by the loader chooser, which hands it to jpegload instead.",
+    "vips 8.18.4 is what every other directory under oracle-captures/ was measured against and it is NOT what this one used. A brew upgrade running on the host mid-capture replaced vips 8.18.4 with 8.18.6 and libultrahdr 1.5.1 with 2.0.2, and deleted both older kegs, so 8.18.4 cannot be re-run here. The only difference I could measure across the two libuhdr majors is the version string in the gainmap's JPEG COM segment; the uhdr2scRGB values and the container layout were identical before and after.",
+    "This build's libheif module fails to dlopen (it wants a libx265 that is not installed), so every vips invocation prints a multi-line VIPS-WARNING. It is unrelated to UltraHDR and is filtered out of every captured stderr here.",
+    "`vips <op> --help` prints generic driver usage and exits 0 for these operations, so it is not an existence test. Everything in operator_surface came from `vips -l`.",
+    "uhdrsave_buffer, uhdrsave_target, uhdrload_buffer and uhdrload_source are registered but are not reachable from the vips CLI: the target and buffer arguments cannot be spelled as a filename. uhdrload_source IS reachable, as `vips copy stdin out.v`, and that is captured in operator_surface via the priority record."
+  ],
+  "records": {
+    "operator_surface": {
+      "what": "The registered UltraHDR operations, verbatim from `vips -l`. uhdrsave declares NO suffixes (uhdrsave.c:58, `vips__uhdr_suffs = { NULL }`, commented `we don't want to trigger directly for jpeg save`), so a save to `.jpg` picks jpegsave and jpegsave hands over. uhdrload declares the four ordinary JPEG suffixes, so load is decided by content.",
+      "vips_config_line": [
+        "UHDR load/save with libuhdr: true"
+      ],
+      "uhdr_operations": [
+        "VipsForeignLoadUhdr (uhdrload_base), load a UHDR image, priority=100",
+        "VipsForeignLoadUhdrFile (uhdrload), load a UHDR image (.jpg, .jpeg, .jpe, .jfif), priority=100, is_a, get_flags, header, load",
+        "VipsForeignLoadUhdrBuffer (uhdrload_buffer), load a UHDR image, priority=100, is_a_buffer, get_flags, header, load",
+        "VipsForeignLoadUhdrSource (uhdrload_source), load a UHDR image, nocache, priority=100, is_a_source, get_flags, header, load",
+        "VipsForeignSaveUhdr (uhdrsave_base), save image in UltraHDR format, priority=0,",
+        "VipsForeignSaveUhdrFile (uhdrsave), save image in UltraHDR format, nocache (), priority=0,",
+        "VipsForeignSaveUhdrBuffer (uhdrsave_buffer), save image in UltraHDR format, nocache (), priority=0,",
+        "VipsForeignSaveUhdrTarget (uhdrsave_target), save image in UltraHDR format, nocache (), priority=0,",
+        "VipsUhdr2scRGB (uhdr2scRGB), transform uhdr to scRGB"
+      ],
+      "jpeg_operations_for_comparison": [
+        "VipsForeignLoadJpeg (jpegload_base), load jpeg, priority=50",
+        "VipsForeignLoadJpegFile (jpegload), load jpeg from file (.jpg, .jpeg, .jpe, .jfif), priority=50, is_a, get_flags, get_flags_filename, header, load",
+        "VipsForeignLoadJpegBuffer (jpegload_buffer), load jpeg from buffer, priority=50, is_a_buffer, get_flags, get_flags_filename, header, load",
+        "VipsForeignLoadJpegSource (jpegload_source), load image from jpeg source, nocache, priority=50, is_a_source, get_flags, get_flags_filename, header, load",
+        "VipsForeignSaveJpeg (jpegsave_base), save as jpeg (.jpg, .jpeg, .jpe, .jfif), priority=0,"
+      ],
+      "uhdrload_priority": 100,
+      "jpegload_priority": 50,
+      "shared_suffixes": [
+        ".jpg",
+        ".jpeg",
+        ".jpe",
+        ".jfif"
+      ],
+      "uhdrsave_suffixes": []
+    },
+    "uhdrsave_writes_this_container": {
+      "what": "`vips uhdrsave` on a 64x64 scRGB float raster. The scRGB branch (uhdrsave.c:474-500) forces the image through vips_colourspace to scRGB, adds an alpha band if there is none because libuhdr wants RGBA, converts every sample to a half float with the round-to-nearest-even helper at uhdrsave.c:104-140, and hands the raw HDR image to libuhdr to tonemap. libuhdr, not libvips, chooses the gainmap and its metadata.",
+      "fixture": "fixtures/uhdr.jpg",
+      "sha256": "45de61eadf8a3cbbf12c4976041abbc180d89c06db9358499cad114d49d355ef",
+      "bytes": 3089,
+      "segments": [
+        [
+          "0xd8",
+          0,
+          2,
+          ""
+        ],
+        [
+          "0xe0",
+          2,
+          18,
+          "JFIF..............Exif..II*."
+        ],
+        [
+          "0xe1",
+          20,
+          190,
+          "Exif..II*..................."
+        ],
+        [
+          "0xe2",
+          210,
+          618,
+          "ICC_PROFILE......X.....0..mn"
+        ],
+        [
+          "0xe2",
+          828,
+          36,
+          "urn:iso:std:iso:ts:21496:-1."
+        ],
+        [
+          "0xdb",
+          864,
+          69,
+          "............................"
+        ],
+        [
+          "0xdb",
+          933,
+          69,
+          "...........2!.!2222222222222"
+        ],
+        [
+          "0xc0",
+          1002,
+          19,
+          "..@.@......................."
+        ],
+        [
+          "0xc4",
+          1021,
+          33,
+          "............................"
+        ],
+        [
+          "0xc4",
+          1054,
+          183,
+          "................}........!1A"
+        ],
+        [
+          "0xc4",
+          1237,
+          33,
+          "............................"
+        ],
+        [
+          "0xc4",
+          1270,
+          183,
+          "................w.......!1.."
+        ],
+        [
+          "0xe2",
+          1453,
+          90,
+          "MPF.MM.*..............0100.."
+        ],
+        [
+          "0xda",
+          1543,
+          14,
+          "........?...4......{..>....%"
+        ],
+        [
+          "0xd9",
+          1989,
+          2,
+          ""
+        ],
+        [
+          "0xd8",
+          1991,
+          2,
+          ""
+        ],
+        [
+          "0xe2",
+          1993,
+          93,
+          "urn:iso:std:iso:ts:21496:-1."
+        ],
+        [
+          "0xe0",
+          2086,
+          18,
+          "JFIF.............0ICC_PROFIL"
+        ],
+        [
+          "0xe2",
+          2104,
+          562,
+          "ICC_PROFILE...... .....@..mn"
+        ],
+        [
+          "0xfe",
+          2666,
+          76,
+          "Source: google libuhdr v2.0."
+        ],
+        [
+          "0xdb",
+          2742,
+          69,
+          "............................"
+        ],
+        [
+          "0xc0",
+          2811,
+          13,
+          ".. . ......................."
+        ],
+        [
+          "0xc4",
+          2824,
+          33,
+          "............................"
+        ],
+        [
+          "0xc4",
+          2857,
+          183,
+          "................}........!1A"
+        ],
+        [
+          "0xda",
+          3040,
+          10,
+          "....?....:..{.x'.NU.j.ui*..G"
+        ],
+        [
+          "0xd9",
+          3087,
+          2,
+          ""
+        ]
+      ],
+      "structure": "Two concatenated JPEGs. The base runs SOI..EOI and carries APP0 JFIF, APP1 Exif, APP2 ICC_PROFILE, APP2 `urn:iso:std:iso:ts:21496:-1` and, immediately before SOS, APP2 MPF. The gainmap is a second complete JPEG appended after that EOI, mono, half the base's size, carrying its own ISO 21496-1 APP2 and a COM segment naming the libuhdr build.",
+      "header": {
+        "width": "64",
+        "height": "64",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "fixtures/uhdr.jpg",
+        "vips-loader": "uhdrload",
+        "exif-data": "186 bytes of binary data",
+        "resolution-unit": "in",
+        "exif-ifd0-Orientation": "1 (Top-left, Short, 1 components, 2 bytes)",
+        "exif-ifd0-XResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+        "exif-ifd0-YResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+        "exif-ifd0-ResolutionUnit": "2 (Inch, Short, 1 components, 2 bytes)",
+        "exif-ifd0-YCbCrPositioning": "1 (Centred, Short, 1 components, 2 bytes)",
+        "exif-ifd2-ExifVersion": "Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-ComponentsConfiguration": "Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-FlashpixVersion": "FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-ColorSpace": "65535 (Uncalibrated, Short, 1 components, 2 bytes)",
+        "exif-ifd2-PixelXDimension": "64 (64, Long, 1 components, 4 bytes)",
+        "exif-ifd2-PixelYDimension": "64 (64, Long, 1 components, 4 bytes)",
+        "orientation": "1",
+        "icc-profile-data": "600 bytes of binary data",
+        "gainmap-data": "1098 bytes of binary data",
+        "gainmap-max-content-boost": "49.2611 49.2611 49.2611",
+        "gainmap-min-content-boost": "1 1 1",
+        "gainmap-gamma": "1 1 1",
+        "gainmap-offset-sdr": "0 0 0",
+        "gainmap-offset-hdr": "0 0 0",
+        "gainmap-hdr-capacity-min": "1",
+        "gainmap-hdr-capacity-max": "49.2611",
+        "gainmap-use-base-cg": "1",
+        "gainmap-scale-factor": "2"
+      },
+      "deterministic": "uhdrsave is byte-for-byte reproducible across runs of one build. It is NOT reproducible across libuhdr versions: 1.5.1 and 2.0.2 differ in exactly the three bytes of the version string in the gainmap's COM segment, and in nothing else."
+    },
+    "detection_two_stage_gate": {
+      "what": "What makes a JPEG an UltraHDR file, measured by cutting one marker at a time out of fixtures/uhdr.jpg. The result that matters: the MPF APP2 marker is ONLY a fast pre-filter for `is_a`. Remove it and libuhdr still accepts the file, so `vips uhdrload` succeeds and returns the gainmap, while the loader chooser falls through to jpegload and silently drops it. The marker libuhdr genuinely needs is the ISO 21496-1 APP2 on the GAINMAP image; removing the base image's copy of it changes nothing, removing the gainmap's makes the file stop being UltraHDR entirely.",
+      "gate": {
+        "is_a": "vips__isjpeg_source, then jpeg_read_header with APP2 markers saved, then `p->data_length > 4 && vips_isprefix(\"MPF\", p->data)`, and only if that hits, is_uhdr_image() over the whole file mapped into memory (uhdrload.c:95-160)",
+        "header": "is_uhdr_image() alone, with no MPF check (uhdrload.c:499-503)",
+        "consequence": "the two halves disagree on no-mpf.jpg"
+      },
+      "files": {
+        "uhdr.jpg": {
+          "bytes": 3089,
+          "sha256": "45de61eadf8a3cbbf12c4976041abbc180d89c06db9358499cad114d49d355ef",
+          "chosen_loader": "uhdrload",
+          "uhdrload_exit": 0,
+          "uhdrload_stderr": "",
+          "uhdrload_header": "64x64 uchar, 3 bands, srgb, uhdrload",
+          "has_gainmap_data": true
+        },
+        "plain.jpg": {
+          "bytes": 955,
+          "sha256": "dbc9a87f836a9ecf874f8fce73eac651529f18411db35c66bac25df485e7bd6b",
+          "chosen_loader": "jpegload",
+          "uhdrload_exit": 1,
+          "uhdrload_stderr": "uhdrload: not an UltraHDR image"
+        },
+        "no-mpf.jpg": {
+          "bytes": 2999,
+          "sha256": "5517a3fb1a8dcd7731e8626f7cebae9be2ce3b35e843ca355277df517a5df9af",
+          "chosen_loader": "jpegload",
+          "uhdrload_exit": 0,
+          "uhdrload_stderr": "",
+          "uhdrload_header": "64x64 uchar, 3 bands, srgb, uhdrload",
+          "has_gainmap_data": true
+        },
+        "no-iso-base.jpg": {
+          "bytes": 3053,
+          "sha256": "36cfca6205314f4fa534f9cb50779b988e9dbdb442d9057d1c4a31272b1376a7",
+          "chosen_loader": "uhdrload",
+          "uhdrload_exit": 0,
+          "uhdrload_stderr": "",
+          "uhdrload_header": "64x64 uchar, 3 bands, srgb, uhdrload",
+          "has_gainmap_data": true
+        },
+        "no-iso-gainmap.jpg": {
+          "bytes": 2996,
+          "sha256": "51141f2d34a2cf1890b369143d578cc345d8c972fbc0cf6c71eaa152210d5340",
+          "chosen_loader": "jpegload",
+          "uhdrload_exit": 1,
+          "uhdrload_stderr": "uhdrload: not an UltraHDR image"
+        },
+        "base-only.jpg": {
+          "bytes": 1991,
+          "sha256": "69b2397f013624ff755dbc421fc5bd9f997996cdec6325db58d770cbc7b0e5f3",
+          "chosen_loader": "jpegload",
+          "uhdrload_exit": 1,
+          "uhdrload_stderr": "uhdrload: not an UltraHDR image"
+        },
+        "truncated-gainmap.jpg": {
+          "bytes": 2591,
+          "sha256": "321f8531a8cd59a89b5b43dd90200ae2c9abc25c43694c624acb86a4b6e28749",
+          "chosen_loader": "jpegload",
+          "uhdrload_exit": 1,
+          "uhdrload_stderr": "uhdrload: not an UltraHDR image"
+        },
+        "truncated-base.jpg": {
+          "bytes": 1544,
+          "sha256": "0310b24ec19ca7c16821c9c5ea2d751ede2f45f3e45c5388e635b19fd6256db4",
+          "chosen_loader": {
+            "error": "VipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nvipsheader: VipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker"
+          },
+          "uhdrload_exit": 1,
+          "uhdrload_stderr": "uhdrload: not an UltraHDR image"
+        },
+        "mpf-graft.jpg": {
+          "bytes": 1045,
+          "sha256": "f56c47899041f556160f6d5e41ae801e213701034703980f55ec2318d9fd9113",
+          "chosen_loader": "jpegload",
+          "uhdrload_exit": 1,
+          "uhdrload_stderr": "uhdrload: not an UltraHDR image"
+        }
+      }
+    },
+    "priority_over_jpegload": {
+      "what": "uhdrload is priority=100 and jpegload is priority=50, and they declare the same four suffixes, so for a file that passes uhdrload's is_a the chooser picks uhdrload. Naming jpegload explicitly still works and gives a visibly different image: no gainmap fields, the JPEG's own resolution instead of the 1x1 uhdrload hard-codes at uhdrload.c:541, plus the jpeg-* and xmp-data fields uhdrload never attaches.",
+      "same_file_via_uhdrload": "see records.uhdrsave_writes_this_container.header, which is this file's `vipsheader -a`",
+      "same_file_via_jpegload": {
+        "width": "64",
+        "height": "64",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "outputs/via-jpegload.v",
+        "vips-loader": "jpegload",
+        "jpeg-multiscan": "0",
+        "jpeg-chroma-subsample": "4:4:4",
+        "icc-profile-data": "600 bytes of binary data",
+        "exif-data": "186 bytes of binary data",
+        "resolution-unit": "in",
+        "exif-ifd0-Orientation": "1 (Top-left, Short, 1 components, 2 bytes)",
+        "exif-ifd0-XResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+        "exif-ifd0-YResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+        "exif-ifd0-ResolutionUnit": "2 (Inch, Short, 1 components, 2 bytes)",
+        "exif-ifd0-YCbCrPositioning": "1 (Centred, Short, 1 components, 2 bytes)",
+        "exif-ifd2-ExifVersion": "Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-ComponentsConfiguration": "Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-FlashpixVersion": "FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)",
+        "exif-ifd2-ColorSpace": "65535 (Uncalibrated, Short, 1 components, 2 bytes)",
+        "exif-ifd2-PixelXDimension": "64 (64, Long, 1 components, 4 bytes)",
+        "exif-ifd2-PixelYDimension": "64 (64, Long, 1 components, 4 bytes)",
+        "orientation": "1"
+      },
+      "source_variant": {
+        "what": "`cat fixtures/uhdr.jpg | vips copy stdin out.v` goes through the same chooser over a VipsSource. uhdrload_source wins there too, so detection is not a filename thing at any level. This is the only one of the four buffer and target variants the CLI can reach.",
+        "exit": 0,
+        "header": "64x64 uchar, 3 bands, srgb, uhdrload_source"
+      }
+    },
+    "uhdrload_carriers": {
+      "what": "uhdrload never returns HDR pixels. It decodes the BASE image with the ordinary libjpeg path (uhdrload.c:553-577) and hands back 3-band uchar sRGB, with the gainmap attached as metadata for uhdr2scRGB or for a re-save to pick up. The gainmap arrives as `gainmap-data`, a compressed JPEG blob, and is decompressed into a real image only when shrink != 1.",
+      "output_carrier": "3 bands, uchar, VIPS_INTERPRETATION_sRGB, VIPS_CODING_NONE, xres = yres = 1.0 (vips_image_init_fields at uhdrload.c:541)",
+      "get_flags": "VIPS_FOREIGN_PARTIAL, because the whole thing is decoded to memory anyway (uhdrload.c:236-241)",
+      "metadata_names": [
+        "gainmap-data",
+        "gainmap-max-content-boost",
+        "gainmap-min-content-boost",
+        "gainmap-gamma",
+        "gainmap-offset-sdr",
+        "gainmap-offset-hdr",
+        "gainmap-hdr-capacity-min",
+        "gainmap-hdr-capacity-max",
+        "gainmap-use-base-cg",
+        "gainmap-scale-factor",
+        "exif-data",
+        "icc-profile-data"
+      ],
+      "gainmap_data_is_a_jpeg": {
+        "bytes": 1098,
+        "sha256": "5c1799647db016549e5912e54fdf990bf22f1d990a729d821b06a409b00266ab",
+        "header": "32x32 uchar, 1 band, b-w, jpegload",
+        "com_segment": "Source: google libuhdr v2.0.2, Coder: libjpeg v80, Attrib: GainMap Image",
+        "segments": [
+          [
+            "0xd8",
+            0,
+            2,
+            ""
+          ],
+          [
+            "0xe2",
+            2,
+            93,
+            "urn:iso:std:iso:ts:21496:-1."
+          ],
+          [
+            "0xe0",
+            95,
+            18,
+            "JFIF.............0ICC_PROFIL"
+          ],
+          [
+            "0xe2",
+            113,
+            562,
+            "ICC_PROFILE...... .....@..mn"
+          ],
+          [
+            "0xfe",
+            675,
+            76,
+            "Source: google libuhdr v2.0."
+          ],
+          [
+            "0xdb",
+            751,
+            69,
+            "............................"
+          ],
+          [
+            "0xc0",
+            820,
+            13,
+            ".. . ......................."
+          ],
+          [
+            "0xc4",
+            833,
+            33,
+            "............................"
+          ],
+          [
+            "0xc4",
+            866,
+            183,
+            "................}........!1A"
+          ],
+          [
+            "0xda",
+            1049,
+            10,
+            "....?....:..{.x'.NU.j.ui*..G"
+          ],
+          [
+            "0xd9",
+            1096,
+            2,
+            ""
+          ]
+        ]
+      },
+      "gainmap_scale_factor": "VIPS_MAX(1, image_width / gainmap_width) with INTEGER division (uhdrload.c:473-478), so it is a derived field, not something read out of the file.",
+      "icc_prefix_is_stripped": "uhdrload.c:399-411 drops `ICC_PROFILE` plus three more bytes when the blob libuhdr returns starts with that string, so icc-profile-data is 14 bytes shorter than the APP2 payload.",
+      "shrink": {
+        "1": {
+          "exit": 0,
+          "stderr": "",
+          "size": "64x64",
+          "gainmap_image": null,
+          "gainmap_data_still_present": true,
+          "gainmap_scale_factor": "2",
+          "survives_write_to_v": false
+        },
+        "2": {
+          "exit": 0,
+          "stderr": "",
+          "size": "32x32",
+          "gainmap_image": "16x16 uchar, 1 band, b-w, jpegload_buffer",
+          "gainmap_data_still_present": true,
+          "gainmap_scale_factor": "2",
+          "survives_write_to_v": false
+        },
+        "3": {
+          "exit": 1,
+          "stderr": "VipsFormatLoadJpeg: bad shrink factor 3"
+        },
+        "4": {
+          "exit": 0,
+          "stderr": "",
+          "size": "16x16",
+          "gainmap_image": "8x8 uchar, 1 band, b-w, jpegload_buffer",
+          "gainmap_data_still_present": true,
+          "gainmap_scale_factor": "2",
+          "survives_write_to_v": false
+        },
+        "8": {
+          "exit": 0,
+          "stderr": "",
+          "size": "8x8",
+          "gainmap_image": "4x4 uchar, 1 band, b-w, jpegload_buffer",
+          "gainmap_data_still_present": true,
+          "gainmap_scale_factor": "2",
+          "survives_write_to_v": false
+        },
+        "9": {
+          "exit": 0,
+          "stderr": "(vips): GLib-GObject-CRITICAL **: value \"9\" of type 'gint' is invalid or out of range for property 'shrink' of type 'gint'",
+          "size": "64x64",
+          "gainmap_image": null,
+          "gainmap_data_still_present": true,
+          "gainmap_scale_factor": "2",
+          "survives_write_to_v": false
+        }
+      },
+      "shrink_notes": "shrink is declared 1..8 but goes straight to libjpeg's scale denominator, which only accepts 1, 2, 4 and 8; 3 fails outright. Out of range, GObject refuses the property with a CRITICAL on stderr, the load SUCCEEDS, and shrink stays 1. When shrink != 1 the loader also decompresses the gainmap at the same shrink and attaches it as the IMAGE `gainmap` (uhdrload.c:418-432), so both carriers are present at once and vips_image_get_gainmap prefers the image. That carrier is a VipsImage with no representation in a .v trailer, so it is dropped by a write to disk while `gainmap-data` survives: `survives_write_to_v` below is false everywhere."
+    },
+    "reference_image": {
+      "what": "libvips's own UltraHDR test image, 3840x2160. Recorded by path and digest rather than checked in. This is the file libvips's test_foreign.py asserts against, so it is the one place where this capture and upstream's suite can be compared directly.",
+      "path": "/Users/rom/workspace/libvips/test/test-suite/images/ultra-hdr.jpg",
+      "sha256": "e647d3a151a23270ebc2ac2aee34d8ac259c396d0f167d858824794ffe54f86c",
+      "bytes": 1190669,
+      "header": {
+        "width": "3840",
+        "height": "2160",
+        "bands": "3",
+        "format": "uchar",
+        "coding": "none",
+        "interpretation": "srgb",
+        "xoffset": "0",
+        "yoffset": "0",
+        "xres": "1",
+        "yres": "1",
+        "filename": "/Users/rom/workspace/libvips/test/test-suite/images/ultra-hdr.jpg",
+        "vips-loader": "uhdrload",
+        "icc-profile-data": "588 bytes of binary data",
+        "gainmap-data": "31738 bytes of binary data",
+        "gainmap-max-content-boost": "100 100 100",
+        "gainmap-min-content-boost": "1 1 1",
+        "gainmap-gamma": "1 1 1",
+        "gainmap-offset-sdr": "0 0 0",
+        "gainmap-offset-hdr": "0 0 0",
+        "gainmap-hdr-capacity-min": "1",
+        "gainmap-hdr-capacity-max": "100",
+        "gainmap-use-base-cg": "1",
+        "gainmap-scale-factor": "4"
+      },
+      "uses_adobe_xmp_not_iso": "This file carries the Adobe `hdrgm` XMP packet in APP1 rather than the ISO 21496-1 APP2 that libuhdr 2.0.2 writes, and libuhdr accepts both. Detection is not tied to either spelling.",
+      "uhdr2scRGB": {
+        "max": 15.085532,
+        "min": 0.0,
+        "avg": 1.334562
+      }
+    },
+    "uhdr2scRGB_carrier": {
+      "what": "uhdr2scRGB takes exactly one image and reads everything else out of its metadata. The input must be 3-band uchar; the gainmap it finds must be 1 or 3 bands. Output is always 3-band float tagged scRGB (uhdr2scRGB.c:277-285), whatever the input was.",
+      "input": "3 bands, uchar. vips_check_bands(nickname, in, 3) and an explicit BandFmt test at uhdr2scRGB.c:204-209.",
+      "output": "3 bands, VIPS_FORMAT_FLOAT, VIPS_INTERPRETATION_scRGB",
+      "gainmap_source": "vips_image_get_gainmap (header.c:1077): the attached image `gainmap` if there is one, otherwise jpegload_buffer over the `gainmap-data` blob. Nothing else is looked at.",
+      "alpha_is_not_detached": "colour->input_bands = 0 at uhdr2scRGB.c:196 turns off VipsColour's automatic alpha detach/reattach, because a 1-band gainmap against a 3-band image would otherwise be read as an alpha band. A 4-band input is refused rather than unpacked.",
+      "rejections": {
+        "one_band": {
+          "exit": 1,
+          "stderr": "uhdr2scRGB: image must have 3 bands"
+        },
+        "four_band": {
+          "exit": 1,
+          "stderr": "uhdr2scRGB: image must have 3 bands"
+        },
+        "ushort": {
+          "exit": 1,
+          "stderr": "uhdr2scRGB: image must be uchar"
+        },
+        "no_gainmap": {
+          "exit": 1,
+          "stderr": ""
+        },
+        "no_metadata": {
+          "exit": 1,
+          "stderr": "vips_image_get: field \"gainmap-max-content-boost\" not found"
+        }
+      },
+      "no_gainmap_fails_silently": "With the metadata present and no gainmap at all, vips_image_get_gainmap returns NULL without calling vips_error, so the operation exits 1 having printed NOTHING. A port should raise a real error there."
+    },
+    "uhdr2scRGB_base_linearisation": {
+      "what": "The base image is linearised through vips_v2Y_8, the same 256-entry LUT sRGB2scRGB uses (uhdr2scRGB.c:83-85 and sRGB2scRGB.c:81-83). With min_content_boost == max_content_boost == 1 and both offsets zero, the whole transform collapses to that lookup, and the result is identical to sRGB2scRGB byte for byte over all 256 codes.",
+      "lut": "vips_v2Y_8, built by calcul_tables in LabQ2sRGB.c:130-159: f = i / 255; v2Y[i] = f <= 0.04045 ? f / 12.92f : powf((f + 0.055f) / 1.055f, 2.4f). LANE_RUNBOOK section 14 applies: the shipped dylib fuses multiply-adds this source does not show, so transcribe against these values, not against the expression.",
+      "identical_to_sRGB2scRGB": true,
+      "compared_bytes": 3072,
+      "v2Y_8_sha256": "2fbf34ca57414934e9974b60551441daed354d69330dfe655800b360db38ef23",
+      "v2Y_8_le_f32_hex": "00000000 b4229f39 b4221f3a 0eb46e3a b4229f3a 61ebc63a 0eb4ee3a 5d3e0b3b b4221f3b 0b07333b 61eb463b 8d515b3b 8df1703b c6e1833b 16e68f3b fd879c3b b7c9a93b 6fadb73b 4935c63b 6163d53b c139e53b 70baf53b b573033c 52610c3c 03a7153c be451f3c 6b3e293c f791333c 49413e3c 434d493c c7b6543c b17e603c dfa56c3c 222d793c a80a833c 9faf893c db85903c c58d973c c2c79e3c 3334a63c 7dd3ad3c 01a6b53c 20acbd3c 39e6c53c ab54ce3c d5f7d63c 10d0df3c b9dde83c 2c21f23c c19afb3c 69a5023d dc98073d e6a70c3d afd2113d 6319173d 2e7c1c3d 3cfb213d b296273d bb4e2d3d 8023333d 2b15393d e3233f3d d14f453d 1c994b3d efff513d 6a84583d b7265f3d fee6653d 64c56c3d 0fc2733d 29dd7a3d 680b813d 95b7843d 3073883d 4a3e8c3d f618903d 4503943d 4afd973d 16079c3d bb20a03d 4b4aa43d d783a83d 70cdac3d 2827b13d 1291b53d 3b0bba3d b595be3d 9230c33d e2dbc73d b697cc3d 1f64d13d 2c41d63d ef2edb3d 772de03d d53ce53d 195dea3d 528eef3d 91d0f43d e823fa3d 6188ff3d 077f023e 8042053e a30e083e 78e30a3e 05c10d3e 54a7103e 6b96133e 528e163e 108f193e ad981c3e 30ab1f3e a3c6223e 09eb253e 6c18293e d04e2c3e 418e2f3e c4d6323e 6128363e 1e83393e 03e73c3e 1654403e 5fca433e e449473e aed24a3e c2644e3e 2700523e e6a4553e 0353593e 8b0a5d3e 7ccb603e e095643e bf69683e 20476c3e 0c2e703e 841e743e 9018783e 381c7c3e c214803e 3c20823e 8d30843e ba45863e c55f883e b27e8a3e 83a28c3e 3dcb8e3e e1f8903e 742b933e f862953e 719f973e e2e0993e 4e279c3e b7729e3e 22c3a03e 9218a33e 0873a53e 89d2a73e 1837aa3e b7a0ac3e 690faf3e 3383b13e 18fcb33e 187ab63e 37fdb83e 7985bb3e e112be3e 71a5c03e 2d3dc33e 17dac53e 337cc83e 8323cb3e 0bd0cd3e cd81d03e cc38d33e 0bf5d53e 8db6d83e 547ddb3e 6549de3e c11ae13e 6bf1e33e 67cde63e b7aee93e 5d95ec3e 5d81ef3e ba72f23e 7669f53e 9465f83e 1767fb3e 026efe3e 2dbd003f 0e46023f a7d1033f f95f053f 06f1063f cf84083f 561b0a3f 9bb40b3f a0500d3f 67ef0e3f f190103f 3e35123f 51dc133f 2b86153f cd32173f 39e2183f 6f941a3f 71491c3f 41011e3f dfbb1f3f 4e79213f 8e39233f a0fc243f 86c2263f 418b283f d3562a3f 3d252c3f 80f62d3f 9eca2f3f 97a1313f 6c7b333f 2058353f b337373f 261a393f 7cff3a3f b5e73c3f d2d23e3f d4c0403f beb1423f 90a5443f 4b9c463f f195483f 82924a3f 01924c3f 6e944e3f cb99503f 18a2523f 57ad543f 8abb563f b0cc583f cde05a3f e0f75c3f ec115f3f ee2e613f ef4e633f e971653f e397673f d6c0693f cdec6b3f bf1b6e3f b84d703f af82723f aeba743f aef5763f b933793f c6747b3f e0b87d3f 0000803f",
+      "v2Y_8_spot_values": {
+        "0": "0.0",
+        "1": "0.0003035269910469651",
+        "10": "0.0030352699104696512",
+        "11": "0.003346535610035062",
+        "12": "0.0036765069235116243",
+        "63": "0.04970656335353851",
+        "128": "0.2158605307340622",
+        "254": "0.9911022186279297",
+        "255": "1.0"
+      },
+      "knee_index": "12 is the last index on the linear segment: 12/255 = 0.047058... is above 0.04045, so the knee falls between 10 and 11 and index 11 already uses the power branch."
+    },
+    "uhdr2scRGB_mono_gainmap": {
+      "what": "The one-band gainmap path (uhdr2scRGB.c:74-105), which is the common case because that is what libuhdr writes. Per output pixel, with p1 the base and p2 the gainmap:\n    r,g,b  = vips_v2Y_8[p1[0..2]]\n    gg     = p2[0] / 255.0\n    if gamma[1] != 1: gg = pow(gg, 1.0f / gamma[1])\n    boost  = log2(min_content_boost[1]) * (1.0f - gg)\n           + log2(max_content_boost[1]) * gg\n    gain   = exp2(boost)\n    q[i]   = ((rgb[i] + offset_sdr[1]) * gain) - offset_hdr[1]\nlog2, exp2 and pow are the DOUBLE forms; gg, boost and gain are float locals, so each one rounds to float in between.",
+      "the_index_trap": "Every metadata term the mono path uses is read at index [1], the GREEN entry, and applied to all three output channels. Indices [0] and [2] are never read. The `red_and_blue_are_ignored` record sets them to 999 and gets a result identical to `canonical`.",
+      "base_sRGB_bytes": [
+        "00ff00",
+        "11ee25",
+        "22dd4a",
+        "33cc6f",
+        "44bb94",
+        "55aab9",
+        "6699de",
+        "778803",
+        "887728",
+        "99664d",
+        "aa5572",
+        "bb4497",
+        "cc33bc",
+        "dd22e1",
+        "ee1106",
+        "ff002b"
+      ],
+      "gainmap_fixture": "fixtures/gainmap-mono16.jpg",
+      "gainmap_decoded_values": [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255],
+      "gainmap_is_NOT_linearised": "gg is p2[0] / 255.0, a plain scale. The comment at uhdr2scRGB.c:88 is `the gainmap is not gamma corrected in libultrahdr, confusingly`. The three-band path in the next record does linearise it, and the two therefore disagree on identical bytes.",
+      "metadata": {
+        "canonical": {
+          "max-content-boost": [8, 8, 8],
+          "min-content-boost": [1, 1, 1],
+          "gamma": [1, 1, 1],
+          "offset-sdr": [0, 0, 0],
+          "offset-hdr": [0, 0, 0]
+        },
+        "gamma_2_2": {
+          "gamma": [1, 2.2, 1]
+        },
+        "min_boost_half": {
+          "min-content-boost": [1, 0.5, 1]
+        },
+        "offsets": {
+          "offset-sdr": [0, 0.015625, 0],
+          "offset-hdr": [0, 0.03125, 0]
+        },
+        "red_and_blue_are_ignored": "[0] and [2] set to 999"
+      },
+      "results": {
+        "canonical": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [0.0, 1.0, 0.0],
+            [0.006438903976231813, 0.9821286797523499, 0.021251169964671135],
+            [0.021107234060764313, 0.9540771245956421, 0.09035750478506088],
+            [0.0501774363219738, 0.9152312278747559, 0.24093961715698242],
+            [0.10064511746168137, 0.865210771560669, 0.5156068205833435],
+            [0.1816834658384323, 0.8039557337760925, 0.9702999591827393],
+            [0.3052513003349304, 0.731828510761261, 1.6781585216522217],
+            [0.4868323802947998, 0.6497293710708618, 0.002403037389740348],
+            [0.7463431358337402, 0.5592236518859863, 0.06432401388883591],
+            [1.1092445850372314, 0.46267443895339966, 0.2584267258644104],
+            [1.607911467552185, 0.3633669316768646, 0.6730775833129883],
+            [2.2833049297332764, 0.26560404896736145, 1.4219460487365723],
+            [3.1870203018188477, 0.17472799122333527, 2.6542513370513916],
+            [4.383786678314209, 0.09698337316513062, 4.564988136291504],
+            [5.954514503479004, 0.03903821110725403, 0.012683307752013206],
+            [8.0, 0.0, 0.1932610422372818]
+          ]
+        },
+        "gamma_2_2": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [0.0, 1.0, 0.0],
+            [0.010287896730005741, 1.5692170858383179, 0.03395451232790947],
+            [0.03676285222172737, 1.6617333889007568, 0.15737730264663696],
+            [0.09003639966249466, 1.6422545909881592, 0.43233248591423035],
+            [0.18080046772956848, 1.5542782545089722, 0.9262441992759705],
+            [0.32090967893600464, 1.4200366735458374, 1.7138524055480957],
+            [0.5234520435333252, 1.2549564838409424, 2.8777453899383545],
+            [0.8028085231781006, 1.0714329481124878, 0.003962717019021511],
+            [1.1747100353240967, 0.8801925182342529, 0.10124306380748749],
+            [1.6562904119491577, 0.6908514499664307, 0.3858749270439148],
+            [2.266146421432495, 0.5121194124221802, 0.9486171007156372],
+            [3.0243914127349854, 0.351810485124588, 1.8834635019302368],
+            [3.952716827392578, 0.21670719981193542, 3.291947603225708],
+            [5.07444953918457, 0.1122630313038826, 5.284198760986328],
+            [6.414614677429199, 0.042054664343595505, 0.013663336634635925],
+            [8.0, 0.0, 0.1932610422372818]
+          ]
+        },
+        "min_boost_half": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [0.0, 0.5, 0.0],
+            [0.0033717132173478603, 0.5142887830734253, 0.01112811267375946],
+            [0.011575471609830856, 0.5232278108596802, 0.04955318570137024],
+            [0.0288193691521883, 0.5256623029708862, 0.13838347792625427],
+            [0.06053929030895233, 0.5204350352287292, 0.31014391779899597],
+            [0.11445341259241104, 0.5064603686332703, 0.6112506985664368],
+            [0.20139072835445404, 0.48282670974731445, 1.107171654701233],
+            [0.3363800048828125, 0.4489347040653229, 0.001660394249483943],
+            [0.5400797724723816, 0.40467360615730286, 0.04654708504676819],
+            [0.8406501412391663, 0.3506416380405426, 0.19585081934928894],
+            [1.276200294494629, 0.28840455412864685, 0.5342220664024353],
+            [1.8979694843292236, 0.220780149102211, 1.1819753646850586],
+            [2.7744624614715576, 0.1521095633506775, 2.3106601238250732],
+            [3.996797561645508, 0.08842193335294724, 4.162003040313721],
+            [5.685618877410889, 0.03727531433105469, 0.01211055088788271],
+            [8.0, 0.0, 0.1932610422372818]
+          ]
+        },
+        "offsets": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [-0.015625, 0.984375, -0.015625],
+            [-0.006862684153020382, 0.9688270688056946, 0.007949578575789928],
+            [0.010474546812474728, 0.9434444308280945, 0.07972481846809387],
+            [0.04261050745844841, 0.9076642990112305, 0.23337268829345703],
+            [0.09659982472658157, 0.861165463924408, 0.5115615129470825],
+            [0.1816834658384323, 0.8039557337760925, 0.9702999591827393],
+            [0.30989813804626465, 0.7364753484725952, 1.6828054189682007],
+            [0.496817022562027, 0.6597139835357666, 0.012387655675411224],
+            [0.7624592781066895, 0.5753397941589355, 0.08044015616178513],
+            [1.1324039697647095, 0.4858338534832001, 0.2815861403942108],
+            [1.639161467552185, 0.3946169316768646, 0.7043275833129883],
+            [2.3238484859466553, 0.3061476945877075, 1.4624897241592407],
+            [3.2382395267486572, 0.22594723105430603, 2.7054708003997803],
+            [4.447268962860107, 0.16046564280986786, 4.628470420837402],
+            [6.032083511352539, 0.11660703271627426, 0.09025212377309799],
+            [8.09375, 0.09375, 0.2870110273361206]
+          ]
+        },
+        "red_and_blue_are_ignored": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [0.0, 1.0, 0.0],
+            [0.006438903976231813, 0.9821286797523499, 0.021251169964671135],
+            [0.021107234060764313, 0.9540771245956421, 0.09035750478506088],
+            [0.0501774363219738, 0.9152312278747559, 0.24093961715698242],
+            [0.10064511746168137, 0.865210771560669, 0.5156068205833435],
+            [0.1816834658384323, 0.8039557337760925, 0.9702999591827393],
+            [0.3052513003349304, 0.731828510761261, 1.6781585216522217],
+            [0.4868323802947998, 0.6497293710708618, 0.002403037389740348],
+            [0.7463431358337402, 0.5592236518859863, 0.06432401388883591],
+            [1.1092445850372314, 0.46267443895339966, 0.2584267258644104],
+            [1.607911467552185, 0.3633669316768646, 0.6730775833129883],
+            [2.2833049297332764, 0.26560404896736145, 1.4219460487365723],
+            [3.1870203018188477, 0.17472799122333527, 2.6542513370513916],
+            [4.383786678314209, 0.09698337316513062, 4.564988136291504],
+            [5.954514503479004, 0.03903821110725403, 0.012683307752013206],
+            [8.0, 0.0, 0.1932610422372818]
+          ]
+        }
+      },
+      "identical_to_canonical": true
+    },
+    "uhdr2scRGB_rgb_gainmap": {
+      "what": "The three-band gainmap path (uhdr2scRGB.c:109-150), chosen purely on `uhdr->gainmap->Bands == 1` at uhdr2scRGB.c:160. It differs from the mono path in one line and that line changes every value: the gainmap samples go through vips_v2Y_8, the sRGB-to-linear LUT, instead of a plain divide by 255. It also uses metadata index [0], [1] and [2] for the three channels rather than [1] for all of them.",
+      "the_divergence": "This fixture's gainmap holds the same byte values as fixtures/gainmap-mono16.jpg, replicated into three bands, and is run with identical metadata. The results below do not match the mono ones anywhere except where the LUT is exact (0 and 255). A port that implements one path and reuses it per channel for the other is wrong, and no header check will show it.",
+      "gainmap_fixture": "fixtures/gainmap-rgb16.jpg",
+      "gainmap_decoded_values": [
+        [0, 0, 0],
+        [17, 17, 17],
+        [34, 34, 34],
+        [51, 51, 51],
+        [68, 68, 68],
+        [85, 85, 85],
+        [102, 102, 102],
+        [119, 119, 119],
+        [136, 136, 136],
+        [153, 153, 153],
+        [170, 170, 170],
+        [187, 187, 187],
+        [204, 204, 204],
+        [221, 221, 221],
+        [238, 238, 238],
+        [255, 255, 255]
+      ],
+      "metadata": {
+        "max-content-boost": [8, 8, 8],
+        "min-content-boost": [1, 1, 1],
+        "gamma": [1, 1, 1],
+        "offset-sdr": [0, 0, 0],
+        "offset-hdr": [0, 0, 0]
+      },
+      "results": {
+        "exit": 0,
+        "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+        "scRGB": [
+          [0.0, 1.0, 0.0],
+          [0.0056711104698479176, 0.8650168180465698, 0.018717119470238686],
+          [0.01653733104467392, 0.7475109696388245, 0.07079430669546127],
+          [0.03546394407749176, 0.6468586921691895, 0.1702890694141388],
+          [0.06518867611885071, 0.5604041814804077, 0.3339627981185913],
+          [0.10972956568002701, 0.4855571687221527, 0.5860224366188049],
+          [0.17515137791633606, 0.41991883516311646, 0.9629173874855042],
+          [0.270729124546051, 0.3613166809082031, 0.001336337300017476],
+          [0.4108019769191742, 0.30780771374702454, 0.03540520742535591],
+          [0.617802619934082, 0.2576902210712433, 0.14393281936645508],
+          [0.9273086786270142, 0.2095596194267273, 0.38817477226257324],
+          [1.3966035842895508, 0.16245906054973602, 0.8697458505630493],
+          [2.119450569152832, 0.11619861423969269, 1.7651456594467163],
+          [3.2520363330841064, 0.0719454362988472, 3.3864574432373047],
+          [5.059385299682617, 0.03316968306899071, 0.01077665388584137],
+          [8.0, 0.0, 0.1932610422372818]
+        ]
+      },
+      "differs_from_mono_at": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    },
+    "uhdr2scRGB_gainmap_resize": {
+      "what": "A gainmap is almost always smaller than its base image, and uhdr2scRGB scales it to 1:1 with vips_resize BEFORE the per-pixel transform (uhdr2scRGB.c:233-240): separate hscale and vscale, both a plain ratio of the two sizes, and VIPS_KERNEL_LINEAR. Anything else, nearest included, gives different pixels everywhere the gainmap is not flat.",
+      "call": "vips_resize(gainmap, &out, (double) in->Xsize / gainmap->Xsize, \"vscale\", (double) in->Ysize / gainmap->Ysize, \"kernel\", VIPS_KERNEL_LINEAR, NULL)",
+      "gainmap_fixture": "fixtures/gainmap-mono8.jpg",
+      "gainmap_decoded_values": [0, 36, 72, 108, 144, 180, 216, 252],
+      "resized_to_16_wide": [0, 0, 18, 36, 54, 72, 90, 108, 126, 144, 162, 180, 198, 216, 234, 252],
+      "metadata": {
+        "max-content-boost": [8, 8, 8],
+        "min-content-boost": [1, 1, 1],
+        "gamma": [1, 1, 1],
+        "offset-sdr": [0, 0, 0],
+        "offset-hdr": [0, 0, 0]
+      },
+      "results": {
+        "exit": 0,
+        "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+        "scRGB": [
+          [0.0, 1.0, 0.0],
+          [0.005605391692370176, 0.854992687702179, 0.01850021816790104],
+          [0.018525369465351105, 0.8373731374740601, 0.07930485159158707],
+          [0.04440025985240936, 0.809856116771698, 0.21319904923439026],
+          [0.08978654444217682, 0.7718634009361267, 0.4599781334400177],
+          [0.16340883076190948, 0.723089873790741, 0.8727023601531982],
+          [0.2767955958843231, 0.6636070013046265, 1.5217195749282837],
+          [0.4450642466545105, 0.5939853191375732, 0.0021968670189380646],
+          [0.687896728515625, 0.5154306292533875, 0.059286776930093765],
+          [1.0307505130767822, 0.42993396520614624, 0.24013952910900116],
+          [1.506363868713379, 0.3404185175895691, 0.6305693984031677],
+          [2.1566178798675537, 0.2508672773838043, 1.3430507183074951],
+          [3.034838914871216, 0.16638466715812683, 2.527509927749634],
+          [4.2086405754089355, 0.09310857951641083, 4.382602214813232],
+          [5.7634196281433105, 0.03778538107872009, 0.012276269495487213],
+          [7.806662559509277, 0.0, 0.18859046697616577]
+        ]
+      },
+      "scale_1_is_the_identity": "The other records all use a gainmap the same size as the base, where the scale is exactly 1.0 and the resize is a no-op. Their pinned values therefore isolate the transform from the resample."
+    },
+    "uhdr2scRGB_degenerate_metadata": {
+      "what": "Nothing validates the gainmap metadata, so log2(0) reaches the boost expression as -inf and the C spelling decides what happens. `log2(min) * (1.0f - gg)` with min == 0 and gg == 1 is -inf * 0, which is NaN; at gg == 0 it is -inf, so exp2 gives 0 and the pixel goes black. An inverted pair (min > max) is accepted and simply runs the interpolation backwards. All three exit 0.",
+      "results": {
+        "min_boost_zero": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [NaN, NaN, NaN]
+          ]
+        },
+        "max_boost_zero": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [NaN, NaN, NaN],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0]
+          ]
+        },
+        "min_above_max": {
+          "exit": 0,
+          "header": "16x1 float, 3 bands, scrgb, jpegload_buffer",
+          "scRGB": [
+            [0.0, 4.0, 0.0],
+            [0.0214090459048748, 3.265530586242676, 0.07065911591053009],
+            [0.05833671614527702, 2.6369028091430664, 0.2497323900461197],
+            [0.1152774840593338, 2.102649450302124, 0.5535339117050171],
+            [0.19220027327537537, 1.6522783041000366, 0.9846456050872803],
+            [0.28840452432632446, 1.2762001752853394, 1.5402551889419556],
+            [0.4027814567089081, 0.9656534194946289, 2.214343309402466],
+            [0.5339699387550354, 0.7126393914222717, 0.002635711571201682],
+            [0.6804577708244324, 0.5098567605018616, 0.05864564701914787],
+            [0.8406500816345215, 0.3506416082382202, 0.19585080444812775],
+            [1.012920618057251, 0.2289068102836609, 0.42401227355003357],
+            [1.1956456899642944, 0.13908275961875916, 0.7445977926254272],
+            [1.3872312307357788, 0.07605478167533875, 1.1553300619125366],
+            [1.586130142211914, 0.03509026765823364, 1.6516919136047363],
+            [1.7908574342727661, 0.01174098625779152, 0.0038145841099321842],
+            [2.0, 0.0, 0.04831526055932045]
+          ]
+        }
+      },
+      "why_it_matters": "A port that reorders the boost expression, or that special-cases min == max before taking the logs, will not reproduce the NaN, and a differential test over random metadata will disagree without saying why."
+    },
+    "uhdrsave": {
+      "sdr_without_gainmap_metadata": {
+        "exit": 1,
+        "stderr": "vips_image_get: field \"gainmap-max-content-boost\" not found",
+        "note": "saveable is VIPS_FOREIGN_SAVEABLE_ANY (uhdrsave.c:539), so uhdrsave accepts any image the type system can offer, and then fails inside vips_foreign_save_uhdr_set_compressed_gainmap because the metadata is not there. The failure is a vips_image_get miss, not a saveable check."
+      },
+      "sdr_with_gainmap_metadata": {
+        "exit": 0,
+        "bytes": 3002,
+        "sha256": "0e093f124eb25ff62ad6ffecc567d2d79dea4c6ca998ffb90e19eaad33fe4705",
+        "header": {
+          "width": "64",
+          "height": "64",
+          "bands": "3",
+          "format": "uchar",
+          "coding": "none",
+          "interpretation": "srgb",
+          "xoffset": "0",
+          "yoffset": "0",
+          "xres": "1",
+          "yres": "1",
+          "filename": "outputs/resaved.jpg",
+          "vips-loader": "uhdrload",
+          "exif-data": "186 bytes of binary data",
+          "resolution-unit": "in",
+          "exif-ifd0-Orientation": "1 (Top-left, Short, 1 components, 2 bytes)",
+          "exif-ifd0-XResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+          "exif-ifd0-YResolution": "25400/1000 (25.400, Rational, 1 components, 8 bytes)",
+          "exif-ifd0-ResolutionUnit": "2 (Inch, Short, 1 components, 2 bytes)",
+          "exif-ifd0-YCbCrPositioning": "1 (Centred, Short, 1 components, 2 bytes)",
+          "exif-ifd2-ExifVersion": "Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)",
+          "exif-ifd2-ComponentsConfiguration": "Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)",
+          "exif-ifd2-FlashpixVersion": "FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)",
+          "exif-ifd2-ColorSpace": "65535 (Uncalibrated, Short, 1 components, 2 bytes)",
+          "exif-ifd2-PixelXDimension": "64 (64, Long, 1 components, 4 bytes)",
+          "exif-ifd2-PixelYDimension": "64 (64, Long, 1 components, 4 bytes)",
+          "orientation": "1",
+          "icc-profile-data": "600 bytes of binary data",
+          "gainmap-data": "1191 bytes of binary data",
+          "gainmap-max-content-boost": "49.2611 49.2611 49.2611",
+          "gainmap-min-content-boost": "1 1 1",
+          "gainmap-gamma": "1 1 1",
+          "gainmap-offset-sdr": "0 0 0",
+          "gainmap-offset-hdr": "0 0 0",
+          "gainmap-hdr-capacity-min": "1",
+          "gainmap-hdr-capacity-max": "49.2611",
+          "gainmap-use-base-cg": "1",
+          "gainmap-scale-factor": "2"
+        },
+        "note": "the SDR branch (uhdrsave.c:377-393) re-compresses the base with jpegsave_target at Q and passes the ORIGINAL compressed gainmap through untouched, so a load/save cycle re-encodes the base and not the gainmap."
+      },
+      "Q": {
+        "default": 75,
+        "range": [1, 100],
+        "results": {
+          "1": {
+            "bytes": 2755,
+            "sha256": "ad89739a657d1d24960b31c1ee635c9a4a83f2a14c32592c34a44fda294db9b0"
+          },
+          "50": {
+            "bytes": 2969,
+            "sha256": "08f6da3b4aa1fea597452218b65e9f21927b25569c70ae939973fde041e444ae"
+          },
+          "75": {
+            "bytes": 3089,
+            "sha256": "45de61eadf8a3cbbf12c4976041abbc180d89c06db9358499cad114d49d355ef"
+          },
+          "100": {
+            "bytes": 5599,
+            "sha256": "6a04050645969bc57dffe10f5f03602b600b3d249f4ba2c2adae5ca99cf154fd"
+          }
+        },
+        "note": "Q is set on BOTH the base and the gainmap (uhdrsave.c:459-471)."
+      },
+      "gainmap_scale_factor": {
+        "default": 2,
+        "range": [1, 128],
+        "results": {
+          "1": {
+            "exit": 0,
+            "stderr": "",
+            "bytes": 3165,
+            "gainmap_scale_factor_read_back": "1",
+            "gainmap_size": null
+          },
+          "2": {
+            "exit": 0,
+            "stderr": "",
+            "bytes": 3089,
+            "gainmap_scale_factor_read_back": "2",
+            "gainmap_size": null
+          },
+          "4": {
+            "exit": 0,
+            "stderr": "",
+            "bytes": 3087,
+            "gainmap_scale_factor_read_back": "4",
+            "gainmap_size": null
+          },
+          "8": {
+            "exit": 0,
+            "stderr": "",
+            "bytes": 3073,
+            "gainmap_scale_factor_read_back": "8",
+            "gainmap_size": null
+          },
+          "128": {
+            "exit": 0,
+            "stderr": "",
+            "bytes": 3073,
+            "gainmap_scale_factor_read_back": "8",
+            "gainmap_size": null
+          },
+          "129": {
+            "exit": 0,
+            "stderr": "(vips): GLib-GObject-CRITICAL **: value \"129\" of type 'gint' is invalid or out of range for property 'gainmap-scale-factor' of type 'gint'",
+            "bytes": 3089,
+            "gainmap_scale_factor_read_back": "2",
+            "gainmap_size": null
+          }
+        },
+        "note": "only consulted on the scRGB branch (uhdrsave.c:361), because the SDR branch reuses the gainmap it was handed."
+      },
+      "jpegsave_routes_here": {
+        "what": "jpegsave_build (jpegsave.c:151-158) checks for a `gainmap-data` field OR an scRGB interpretation and, on either, calls vips_uhdrsave_target and returns. That is why uhdrsave declares no suffixes: saving an scRGB image to `.jpg` produces UltraHDR without anybody asking for it.",
+        "scRGB_via_jpegsave_sha256": "45de61eadf8a3cbbf12c4976041abbc180d89c06db9358499cad114d49d355ef",
+        "scRGB_via_uhdrsave_sha256": "45de61eadf8a3cbbf12c4976041abbc180d89c06db9358499cad114d49d355ef",
+        "byte_identical": true,
+        "sdr_with_gainmap_via_jpegsave": "64x64 uchar, 3 bands, srgb, uhdrload",
+        "Q_is_forwarded_but_nothing_else": "only Q crosses the handover; every other jpegsave option (interlace, subsample_mode, quant_table, the profile) is dropped."
+      }
+    },
+    "round_trip": {
+      "what": "Neither direction is lossless, and the numbers are worth having because they set the tolerance any differential test can use.",
+      "hdr_path": {
+        "steps": "uhdr2scRGB -> uhdrsave -> uhdr2scRGB",
+        "source_max": 7.677497,
+        "round_tripped_max": 7.840913,
+        "mean_abs_error": 0.06397,
+        "max_abs_error": 2.212808,
+        "note": "libuhdr re-tonemaps from scratch on every save, so the gainmap that comes back is not the one that went in and the highlight ceiling moves. libvips's own test_uhdrsave_roundtrip_hdr allows a mean absolute error of 0.05."
+      },
+      "sdr_path": {
+        "steps": "uhdrload -> uhdrsave -> uhdrload, base pixels only",
+        "mean_abs_error": 1.258626,
+        "max_abs_error": 20.0,
+        "note": "the base is re-encoded as a Q=75 JPEG, so this is ordinary JPEG generation loss on uchar samples. The gainmap blob itself is passed through and does not degrade."
+      }
+    },
+    "malformed": {
+      "what": "Truncated and dismembered files, and what each entry point says about them. Nothing here crashes and nothing silently produces pixels; the interesting part is which layer reports the error.",
+      "files": {
+        "truncated-base.jpg": {
+          "bytes": 1544,
+          "uhdrload": {
+            "exit": 1,
+            "stderr": "uhdrload: not an UltraHDR image"
+          },
+          "uhdr2scRGB": {
+            "exit": 1,
+            "stderr": "VipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker"
+          },
+          "vipsheader": {
+            "error": "VipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nvipsheader: VipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Invalid JPEG file structure: missing SOS marker"
+          }
+        },
+        "truncated-gainmap.jpg": {
+          "bytes": 2591,
+          "uhdrload": {
+            "exit": 1,
+            "stderr": "uhdrload: not an UltraHDR image"
+          },
+          "uhdr2scRGB": {
+            "exit": 1,
+            "stderr": "vips_image_get: field \"gainmap-max-content-boost\" not found"
+          },
+          "vipsheader": {
+            "summary": "fixtures/truncated-gainmap.jpg: 64x64 uchar, 3 bands, srgb, jpegload"
+          }
+        },
+        "base-only.jpg": {
+          "bytes": 1991,
+          "uhdrload": {
+            "exit": 1,
+            "stderr": "uhdrload: not an UltraHDR image"
+          },
+          "uhdr2scRGB": {
+            "exit": 1,
+            "stderr": "vips_image_get: field \"gainmap-max-content-boost\" not found"
+          },
+          "vipsheader": {
+            "summary": "fixtures/base-only.jpg: 64x64 uchar, 3 bands, srgb, jpegload"
+          }
+        },
+        "gainmap-truncated.jpg": {
+          "bytes": 120,
+          "uhdr2scRGB": {
+            "exit": 1,
+            "stderr": "VipsJpeg: Bogus Huffman table definition\nVipsJpeg: premature end of JPEG image\nVipsJpeg: Bogus Huffman table definition"
+          },
+          "note": "the failure surfaces from libjpeg through jpegload_buffer, not from uhdr2scRGB, so the message names VipsJpeg."
+        }
+      }
+    }
+  }
+}

@@ -12,9 +12,10 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, GifError, Intent,
-    Interpretation, JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError,
-    Precision, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError, GifError,
+    Intent, Interpretation, JoinDirection, Layout, ManifestError, MetadataValue, Pcs, PdfError,
+    PixelFormat, PlannerError, Precision, RadianceError, RasterError, ResumeError, SourceError,
+    VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -45,6 +46,28 @@ fn assert_exr_error_non_exhaustive(v: &ExrError) {
         ExrError::PartMismatch { .. } => {}
         ExrError::ChannelSizeMismatch { .. } => {}
         ExrError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_fits_error_non_exhaustive(v: &FitsError) {
+    match v {
+        FitsError::BadMagic { .. } => {}
+        FitsError::TruncatedHeader { .. } => {}
+        FitsError::HeaderTooLong { .. } => {}
+        FitsError::NoImageUnit { .. } => {}
+        FitsError::BadHeaderCard { .. } => {}
+        FitsError::BadAxisCount { .. } => {}
+        FitsError::HighDimensionNotEmpty { .. } => {}
+        FitsError::DimensionOutOfBounds { .. } => {}
+        FitsError::AllocLimitExceeded { .. } => {}
+        FitsError::TruncatedData { .. } => {}
+        FitsError::UnsupportedBitpix { .. } => {}
+        FitsError::UnsupportedCarrier { .. } => {}
+        FitsError::UnsupportedScaling { .. } => {}
+        FitsError::Raster(_) => {}
         _ => {}
     }
 }
@@ -353,6 +376,7 @@ fn non_exhaustive_checks_compile() {
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);
     assert_pcs_non_exhaustive(&Pcs::Lab);
+    assert_metadata_value_non_exhaustive(&MetadataValue::Int(1));
 }
 
 #[deny(unreachable_patterns)]
@@ -361,6 +385,23 @@ fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
     match v {
         JoinDirection::Horizontal => {}
         JoinDirection::Vertical => {}
+        _ => {}
+    }
+}
+
+/// `MetadataValue` grows with the vips GType set it covers: a `.v` trailer
+/// already carries `VipsArrayInt` and `VipsArrayDouble` fields this crate
+/// only forwards opaquely, and #573 wants a `delay` array variant. Marking
+/// it before that lands costs a `_ =>` arm here; marking it after would cost
+/// a major version (issue #609).
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_metadata_value_non_exhaustive(v: &MetadataValue) {
+    match v {
+        MetadataValue::Int(_) => {}
+        MetadataValue::Double(_) => {}
+        MetadataValue::Str(_) => {}
+        MetadataValue::Blob(_) => {}
         _ => {}
     }
 }
