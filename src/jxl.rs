@@ -10,6 +10,16 @@
 //! shape of this module and the reason [`SaveOptions`] looks nothing like
 //! `jxlsave`'s ten options.
 //!
+//! Both crates and their trees sit behind the non-default **`jxl`**
+//! feature, the way `resvg` sits behind `svg` and for the same reason:
+//! they cost more lock entries than the rest of the codec surface put
+//! together, and one of them is `tracing`, which this crate otherwise
+//! keeps opt-in. The `Cargo.toml` comment on the feature carries the
+//! measured numbers. Without it every entry point below still exists,
+//! still compiles and still has the same signature; each one returns a
+//! typed refusal naming the feature instead of doing the work, so a
+//! caller's code does not change shape with the build.
+//!
 //! # Operations
 //!
 //! | libviprs method | libvips equivalent | result |
@@ -125,10 +135,24 @@
 //!   `Black` channel as an extra channel, so `jxlload.c:698-737` switches
 //!   on three colour channels and tags a CMYK file `srgb` with four bands,
 //!   which is not what those four bands are. `jxl-oxide` reports the
-//!   colour space honestly and cannot convert it without a colour
-//!   management system compiled in, so [`decode_jxl`] returns a typed
-//!   error naming the space. Nothing in this build can produce such a
-//!   file: `vips jxlsave` converts a `cmyk` image to sRGB on the way in.
+//!   colour space honestly, so [`decode_jxl`] can see the black channel
+//!   and refuses by name. Neither of the two ways out is wired. Converting
+//!   the inks means an ICC transform through the file's own profile, and
+//!   `jxl-oxide` only runs one when a `ColorManagementSystem` has been
+//!   handed to `JxlImage::set_cms`; this build hands it none, so the
+//!   default `jxl_color::NullCms` refuses every transform
+//!   (`jxl-color-0.11.0/src/cms.rs:47-57`, reached through
+//!   `jxl-render-0.12.4/src/lib.rs:184`), and jxl-oxide's own `lcms2` and
+//!   `moxcms` integrations are optional and both off here. Carrying the
+//!   inks through untouched means a CMYK route into
+//!   [`crate::colour`], which does hold a black channel
+//!   ([`Interpretation::Cmyk`](crate::conversion::Interpretation::Cmyk),
+//!   the naive ink model and profiled CMYK through
+//!   [`Raster::icc_import`](crate::Raster::icc_import)) but has no edge
+//!   from this loader. So the refusal is a wiring gap and not a
+//!   capability the crate lacks. Nothing in this build can produce such a
+//!   file to test it against either: `vips jxlsave` converts a `cmyk`
+//!   image to sRGB on the way in.
 //!
 //! Every number this module is pinned against was measured on the real
 //! vips 8.18.4 binary and is recorded, with the commands that produced it,
@@ -140,18 +164,29 @@
 //! failures come from untrusted bytes, so a panicking spelling would have
 //! no honest caller.
 
-use std::num::NonZeroU16;
 use std::path::Path;
 
+#[cfg(feature = "jxl")]
+use std::num::NonZeroU16;
+
+#[cfg(feature = "jxl")]
 use jxl_oxide::{AllocTracker, AuxBoxData, InitializeResult, JxlImage};
+#[cfg(feature = "jxl")]
 use zune_core::bit_depth::BitDepth;
+#[cfg(feature = "jxl")]
 use zune_core::colorspace::ColorSpace;
+#[cfg(feature = "jxl")]
 use zune_core::options::EncoderOptions;
+#[cfg(feature = "jxl")]
 use zune_jpegxl::JxlSimpleEncoder;
 
 use crate::codec::EncodeError;
+#[cfg(feature = "jxl")]
 use crate::conversion::Interpretation;
-use crate::imageio::{MetadataValue, SaveError};
+#[cfg(feature = "jxl")]
+use crate::imageio::MetadataValue;
+use crate::imageio::SaveError;
+#[cfg(feature = "jxl")]
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::source::{DecodeLimits, SourceError};
@@ -171,6 +206,7 @@ pub const MIN_DIMENSION: u32 = 2;
 ///
 /// Putting it back is what makes a JXL `exif-data` blob compare equal to
 /// the JPEG one for the same image.
+#[cfg(feature = "jxl")]
 const EXIF_PREFIX: &[u8] = b"Exif\0\0";
 
 /// How the JPEG XL encoder compresses pixels (libvips `jxlsave`'s
@@ -237,6 +273,10 @@ pub struct SaveOptions {
 ///
 /// # Errors
 ///
+/// * [`SourceError::Io`] with [`std::io::ErrorKind::Unsupported`] when the
+///   crate was built without the `jxl` feature, which is the shape
+///   [`crate::svg`] uses for the same situation. Every bullet below needs
+///   the feature to be reachable at all.
 /// * [`SourceError::Decode`] wrapping the codec's own error for a
 ///   malformed or truncated bitstream, for a CMYK colour space this build
 ///   cannot convert, or `image`'s
@@ -249,6 +289,12 @@ pub struct SaveOptions {
 /// * [`SourceError::Raster`] when the decoded frame cannot be wrapped
 ///   (a zero-sized canvas).
 pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+    decode(bytes, limits)
+}
+
+/// The `jxl`-feature-on body of [`decode_jxl`].
+#[cfg(feature = "jxl")]
+fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // The decoder's own budget, which is what stops a bomb before the
     // header geometry is even readable. `jxl-oxide` documents it as
     // advisory rather than strict, so the frame buffer is checked against
@@ -284,9 +330,11 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
             image::error::DecodingError::new(
                 format_hint(),
                 format!(
-                    "this build cannot convert a {jxl_format:?} JPEG XL: colour management is \
-                     `crate::colour`'s job, so the decoder has no CMS compiled into it and \
-                     nothing else in the crate holds a black channel"
+                    "this build cannot decode a {jxl_format:?} JPEG XL: converting the inks \
+                     needs an ICC transform and no ColorManagementSystem is installed on \
+                     jxl-oxide, so its default NullCms refuses one; carrying them through \
+                     untouched needs a CMYK route into `crate::colour`, which this loader \
+                     does not have yet"
                 ),
             ),
         )));
@@ -400,6 +448,19 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     Ok(raster)
 }
 
+/// The `jxl`-feature-off body of [`decode_jxl`]: the same typed
+/// `Unsupported` [`crate::svg`] reports without `svg`, so a caller
+/// compiled either way sees one signature and one error type and can tell
+/// "this build has no JPEG XL" from "these bytes are not JPEG XL".
+#[cfg(not(feature = "jxl"))]
+fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+    let _ = (bytes, limits);
+    Err(SourceError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "JPEG XL decoding is not available in this build (enable the `jxl` feature)",
+    )))
+}
+
 impl Raster {
     /// Encode as lossless JPEG XL bytes (libvips `jxlsave_buffer
     /// --lossless --keep none`).
@@ -419,45 +480,15 @@ impl Raster {
     ///
     /// # Errors
     ///
+    /// [`EncodeError::Unsupported`] naming `"jxl"` when the crate was
+    /// built without the `jxl` feature, which is the variant every
+    /// format without an encoder in this build reports; otherwise
     /// [`EncodeError::Encode`] when the raster is float or has a band count
     /// the format has no spelling for (cast first; the message says so),
     /// when either axis is below [`MIN_DIMENSION`], or when the codec
     /// rejects the frame.
     pub fn encode_jxl(&self, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
-        let SaveOptions { compression } = options;
-        // One arm today. The `match` is deliberate: when `Lossy` lands it
-        // will fail to compile here rather than silently encode losslessly.
-        let Compression::Lossless = compression;
-
-        let (colorspace, depth) = encoder_colorspace(self.format())?;
-        let (width, height) = (self.width(), self.height());
-        if width < MIN_DIMENSION || height < MIN_DIMENSION {
-            return Err(EncodeError::encode(format!(
-                "zune-jpegxl cannot encode a {width}x{height} image; its floor is \
-                 {MIN_DIMENSION} pixels on each axis, where vips jxlsave goes down to 1x1"
-            )));
-        }
-
-        // `Raster` guarantees `data().len() == width * height * bpp` by
-        // construction, which is exactly what `calculate_expected_input`
-        // recomputes; the debug assertion says so out loud rather than
-        // leaving a `LengthMismatch` to the dependency. The floor above
-        // also keeps the zero-height assertion inside `EncoderOptions`
-        // unreachable.
-        debug_assert_eq!(
-            self.data().len(),
-            self.stride() * height as usize,
-            "a Raster's buffer is exactly its geometry"
-        );
-        let encoder = JxlSimpleEncoder::new(
-            self.data(),
-            EncoderOptions::new(width as usize, height as usize, colorspace, depth),
-        );
-        let mut out = Vec::new();
-        encoder
-            .encode(&mut out)
-            .map_err(|e| EncodeError::encode(e.to_string().trim_end().to_owned()))?;
-        Ok(out)
+        encode(self, options)
     }
 
     /// Save the raster to `path` as lossless JPEG XL (libvips `jxlsave`).
@@ -477,6 +508,55 @@ impl Raster {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// The `jxl`-feature-on body of [`Raster::encode_jxl`].
+#[cfg(feature = "jxl")]
+fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
+    let SaveOptions { compression } = options;
+    // One arm today. The `match` is deliberate: when `Lossy` lands it
+    // will fail to compile here rather than silently encode losslessly.
+    let Compression::Lossless = compression;
+
+    let (colorspace, depth) = encoder_colorspace(raster.format())?;
+    let (width, height) = (raster.width(), raster.height());
+    if width < MIN_DIMENSION || height < MIN_DIMENSION {
+        return Err(EncodeError::encode(format!(
+            "zune-jpegxl cannot encode a {width}x{height} image; its floor is \
+             {MIN_DIMENSION} pixels on each axis, where vips jxlsave goes down to 1x1"
+        )));
+    }
+
+    // `Raster` guarantees `data().len() == width * height * bpp` by
+    // construction, which is exactly what `calculate_expected_input`
+    // recomputes; the debug assertion says so out loud rather than
+    // leaving a `LengthMismatch` to the dependency. The floor above
+    // also keeps the zero-height assertion inside `EncoderOptions`
+    // unreachable.
+    debug_assert_eq!(
+        raster.data().len(),
+        raster.stride() * height as usize,
+        "a Raster's buffer is exactly its geometry"
+    );
+    let encoder = JxlSimpleEncoder::new(
+        raster.data(),
+        EncoderOptions::new(width as usize, height as usize, colorspace, depth),
+    );
+    let mut out = Vec::new();
+    encoder
+        .encode(&mut out)
+        .map_err(|e| EncodeError::encode(e.to_string().trim_end().to_owned()))?;
+    Ok(out)
+}
+
+/// The `jxl`-feature-off body of [`Raster::encode_jxl`]: the same
+/// [`EncodeError::Unsupported`] every format without an encoder in this
+/// build reports, carrying the format name so a caller matching on the
+/// variant learns which one it asked for.
+#[cfg(not(feature = "jxl"))]
+fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
+    let _ = (raster, options);
+    Err(EncodeError::unsupported("jxl"))
+}
+
 /// The `.jxl` row of [`Raster::save`]'s extension route
 /// (`crate::imageio::save_impl`).
 ///
@@ -485,6 +565,7 @@ impl Raster {
 /// no `keep_metadata` parameter because the encoder writes no metadata at
 /// all: `save` and `save_stripped` produce identical bytes here, which is
 /// stated in the module docs rather than hidden behind an ignored flag.
+#[cfg(feature = "jxl")]
 pub(crate) fn encode_jxl_for_save(raster: &Raster) -> Result<Vec<u8>, SaveError> {
     raster
         .encode_jxl(SaveOptions::default())
@@ -502,6 +583,7 @@ fn encode_to_save(err: EncodeError) -> SaveError {
 
 /// The format hint every decode error carries. `image` 0.25 has no JPEG XL
 /// variant, so the name is spelled out rather than faked as another format.
+#[cfg(feature = "jxl")]
 fn format_hint() -> image::error::ImageFormatHint {
     image::error::ImageFormatHint::Name("JPEG XL".to_owned())
 }
@@ -524,6 +606,7 @@ fn format_hint() -> image::error::ImageFormatHint {
 /// semver-incompatible `jxl-grid` the two copies stop unifying and the
 /// downcast quietly stops matching, which is why
 /// `decode_limits_are_enforced_on_the_declared_geometry` pins the mapping.
+#[cfg(feature = "jxl")]
 fn decode_error(err: Box<dyn std::error::Error + Send + Sync + 'static>) -> SourceError {
     if is_out_of_memory(err.as_ref()) {
         return SourceError::Decode(image::ImageError::Limits(
@@ -537,6 +620,7 @@ fn decode_error(err: Box<dyn std::error::Error + Send + Sync + 'static>) -> Sour
 
 /// Whether an error, or anything in its source chain, is the allocation
 /// tracker refusing a request.
+#[cfg(feature = "jxl")]
 fn is_out_of_memory(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut cause = Some(err);
     while let Some(e) = cause {
@@ -550,6 +634,7 @@ fn is_out_of_memory(err: &(dyn std::error::Error + 'static)) -> bool {
 
 /// A decode error for a bitstream that ended early, named by what was still
 /// missing.
+#[cfg(feature = "jxl")]
 fn truncated(what: &str) -> SourceError {
     SourceError::Decode(image::ImageError::Decoding(
         image::error::DecodingError::new(
@@ -562,6 +647,7 @@ fn truncated(what: &str) -> SourceError {
 /// Whether a declared bit depth stores floating-point samples
 /// (`jxlload.c:936-937` asks libjxl the same question as
 /// `exponent_bits_per_sample > 0`).
+#[cfg(feature = "jxl")]
 fn is_float_sample(depth: jxl_oxide::image::BitDepth) -> bool {
     matches!(depth, jxl_oxide::image::BitDepth::FloatSample { .. })
 }
@@ -573,6 +659,7 @@ fn is_float_sample(depth: jxl_oxide::image::BitDepth) -> bool {
 /// the multiband carriers, which is what `PixelFormat::canonical` does; the
 /// float arm is spelled separately because a four-band float canonicalises
 /// to [`PixelFormat::RgbaF32`] rather than to `FloatF32(4)`.
+#[cfg(feature = "jxl")]
 fn carrier(bands: u32, is_float: bool, bits_per_sample: u32) -> Result<PixelFormat, SourceError> {
     let n = u16::try_from(bands)
         .ok()
@@ -602,6 +689,7 @@ fn carrier(bands: u32, is_float: bool, bits_per_sample: u32) -> Result<PixelForm
 /// The interpretation tag `jxlload.c:698-737` assigns, which reads the
 /// *colour* channel count and the sample carrier and ignores the band
 /// count entirely.
+#[cfg(feature = "jxl")]
 fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
     let bytes = format.bytes_per_channel();
     match (is_grayscale, bytes) {
@@ -625,6 +713,7 @@ fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
 /// `Exif\0\0` back on the front. A box `jxl-oxide` refuses to parse costs
 /// the blob and not the image; see the module docs for the two shapes where
 /// that diverges from vips.
+#[cfg(feature = "jxl")]
 fn exif_blob(image: &JxlImage) -> Option<Vec<u8>> {
     let AuxBoxData::Data(exif) = image.aux_boxes().first_exif().ok()? else {
         return None;
@@ -646,6 +735,7 @@ fn exif_blob(image: &JxlImage) -> Option<Vec<u8>> {
 /// every integer carrier libviprs has below five bands. Float is refused
 /// rather than quantised, matching [`crate::sink::encode_png`] and
 /// [`Raster::encode_radiance`].
+#[cfg(feature = "jxl")]
 fn encoder_colorspace(format: PixelFormat) -> Result<(ColorSpace, BitDepth), EncodeError> {
     let two = NonZeroU16::new(2).expect("2 is non-zero");
     match format {
@@ -672,6 +762,10 @@ fn encoder_colorspace(format: PixelFormat) -> Result<(ColorSpace, BitDepth), Enc
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named explicitly rather than taken from the glob: the parent's
+    // import is behind the feature and `ramp_rgb` is not.
+    use crate::pixel::PixelFormat;
+    #[cfg(feature = "jxl")]
     use crate::source::decode_bytes_with_limits;
 
     // -----------------------------------------------------------------
@@ -693,6 +787,7 @@ mod tests {
 
     /// The same 4x3 raster with an alpha ramp, `vips jxlsave --lossless
     /// --keep none`. 91 bytes.
+    #[cfg(feature = "jxl")]
     const LOSSLESS_RGBA: [u8; 91] = [
         0xff, 0x0a, 0x10, 0x30, 0xb0, 0x12, 0x08, 0x00, 0x10, 0x00, 0x3c, 0x01, 0x4b, 0x18, 0x8b,
         0x15, 0x52, 0x5c, 0xd6, 0x6f, 0xf7, 0x26, 0x91, 0x2f, 0xd4, 0xda, 0xd2, 0xba, 0x9f, 0xcd,
@@ -705,6 +800,7 @@ mod tests {
 
     /// The luminance band of the same ramp as a `b-w` image, `vips jxlsave
     /// --lossless --keep none`. 34 bytes, and it stays one band.
+    #[cfg(feature = "jxl")]
     const LOSSLESS_GREY: [u8; 34] = [
         0xff, 0x0a, 0x10, 0x30, 0x10, 0x14, 0x37, 0x02, 0x08, 0x00, 0x01, 0x00, 0x50, 0x00, 0x4b,
         0x18, 0x8b, 0x15, 0x42, 0x19, 0x36, 0x6e, 0x53, 0xcd, 0xd2, 0xd3, 0xd3, 0xc9, 0x67, 0x51,
@@ -713,6 +809,7 @@ mod tests {
 
     /// A 4x3 `rgb16` ramp, `vips jxlsave --lossless --keep none`. 138
     /// bytes, and the samples come back at their full 16-bit range.
+    #[cfg(feature = "jxl")]
     const LOSSLESS_RGB16: [u8; 138] = [
         0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00,
         0x14, 0x66, 0x74, 0x79, 0x70, 0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x78,
@@ -728,6 +825,7 @@ mod tests {
 
     /// A 4x3 `scrgb` float ramp, `vips jxlsave --lossless --keep none`.
     /// 192 bytes, and every dyadic value survives exactly.
+    #[cfg(feature = "jxl")]
     const LOSSLESS_F32: [u8; 192] = [
         0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00,
         0x14, 0x66, 0x74, 0x79, 0x70, 0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x78,
@@ -746,6 +844,7 @@ mod tests {
 
     /// `vips jxlsave` at the default distance on the same 4x3 ramp: the
     /// VarDCT float path, which libviprs decodes but cannot write.
+    #[cfg(feature = "jxl")]
     const LOSSY_RGB: [u8; 103] = [
         0xff, 0x0a, 0x10, 0xb0, 0x01, 0x00, 0x1c, 0x48, 0x00, 0x70, 0x01, 0xf3, 0x43, 0x13, 0x00,
         0x80, 0x0a, 0x95, 0x51, 0xc6, 0x0d, 0x5e, 0xce, 0xf5, 0x7c, 0xf9, 0xa1, 0xc3, 0x62, 0xda,
@@ -759,6 +858,7 @@ mod tests {
     /// `vips jxlsave --lossless --page-height 3` on a 4x9 toilet roll: three
     /// 4x3 frames whose frame 0 is the [`LOSSLESS_RGB`] image. vips reports
     /// `n-pages: 3` and loads 4x3 by default.
+    #[cfg(feature = "jxl")]
     const ANIM3: [u8; 237] = [
         0xff, 0x0a, 0x10, 0x30, 0xc1, 0x00, 0x62, 0x02, 0x08, 0x00, 0xff, 0xff, 0xff, 0xff, 0x03,
         0x00, 0xec, 0x00, 0x4b, 0x18, 0x8b, 0x15, 0xc2, 0x09, 0x32, 0x37, 0x38, 0xa6, 0xeb, 0x02,
@@ -781,6 +881,7 @@ mod tests {
     /// A hand-built container: the [`LOSSLESS_RGB`] codestream plus an
     /// `Exif` box at tiff_header_offset 0 and an `xml ` box. vips reports
     /// a 16-byte `exif-data` and a 37-byte `xmp-data` for it.
+    #[cfg(feature = "jxl")]
     const META_OFF0: [u8; 178] = [
         0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00,
         0x14, 0x66, 0x74, 0x79, 0x70, 0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x78,
@@ -798,6 +899,7 @@ mod tests {
 
     /// The same TIFF block behind a tiff_header_offset of 6, with six bytes
     /// of padding in front of it. vips reports the identical 16-byte blob.
+    #[cfg(feature = "jxl")]
     const META_OFF6: [u8; 139] = [
         0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00,
         0x14, 0x66, 0x74, 0x79, 0x70, 0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x78,
@@ -814,6 +916,7 @@ mod tests {
     /// An `Exif` box whose tiff_header_offset (999) runs past its 10-byte
     /// payload. vips fails the whole load on this file; libviprs drops the
     /// blob and keeps the pixels.
+    #[cfg(feature = "jxl")]
     const META_BAD_OFFSET: [u8; 133] = [
         0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00,
         0x14, 0x66, 0x74, 0x79, 0x70, 0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x78,
@@ -829,6 +932,7 @@ mod tests {
     /// The twelve RGB triples `vips getpoint` prints for every fixture that
     /// carries the lossless 8-bit ramp. Identical to the WebP capture's,
     /// because both areas are built from the same generator.
+    #[cfg(feature = "jxl")]
     const RAMP_PIXELS: [[u8; 3]; 12] = [
         [0, 0, 0],
         [61, 97, 29],
@@ -845,10 +949,12 @@ mod tests {
     ];
 
     /// The alpha band `vips getpoint` prints for [`LOSSLESS_RGBA`].
+    #[cfg(feature = "jxl")]
     const RAMP_ALPHA: [u8; 12] = [0, 85, 170, 255, 40, 125, 210, 39, 80, 165, 250, 79];
 
     /// The twelve 16-bit triples `vips getpoint` prints for
     /// [`LOSSLESS_RGB16`].
+    #[cfg(feature = "jxl")]
     const RAMP16_PIXELS: [[u16; 3]; 12] = [
         [0, 0, 0],
         [1013, 4099, 7919],
@@ -867,10 +973,12 @@ mod tests {
     /// The `Exif\0\0` blob vips reports for [`META_OFF0`] and
     /// [`META_OFF6`] alike: the prefix plus a ten-byte little-endian TIFF
     /// header with an empty IFD.
+    #[cfg(feature = "jxl")]
     const EXIF_BLOB: &[u8] = b"Exif\x00\x00II*\x00\x08\x00\x00\x00\x00\x00";
 
     /// The XMP packet vips reports for [`META_OFF0`], verbatim from the
     /// `xml ` box.
+    #[cfg(feature = "jxl")]
     const XMP_PACKET: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>";
 
     /// The 4x3 sRGB ramp every 8-bit fixture above was written from.
@@ -887,6 +995,7 @@ mod tests {
     }
 
     /// The same ramp with a fourth, independent alpha channel.
+    #[cfg(feature = "jxl")]
     fn ramp_rgba() -> Raster {
         let mut data = Vec::with_capacity(4 * 3 * 4);
         for y in 0..3u32 {
@@ -902,6 +1011,7 @@ mod tests {
 
     /// The 16-bit ramp the `rgb16` fixture was written from, as
     /// native-endian `u16` samples.
+    #[cfg(feature = "jxl")]
     fn ramp_rgb16() -> Raster {
         let mut data = Vec::with_capacity(4 * 3 * 3 * 2);
         for y in 0..3u32 {
@@ -916,6 +1026,7 @@ mod tests {
     }
 
     /// Read every pixel of `raster` in raster order as bytes.
+    #[cfg(feature = "jxl")]
     fn pixels(raster: &Raster) -> Vec<Vec<u8>> {
         (0..raster.height())
             .flat_map(|y| (0..raster.width()).map(move |x| (x, y)))
@@ -930,6 +1041,7 @@ mod tests {
     }
 
     /// Read every sample of `raster` in raster order as `f64`.
+    #[cfg(feature = "jxl")]
     fn samples(raster: &Raster) -> Vec<Vec<f64>> {
         (0..raster.height())
             .flat_map(|y| (0..raster.width()).map(move |x| (x, y)))
@@ -939,6 +1051,7 @@ mod tests {
 
     /// The blob attached under `name`, or a panic naming what was there
     /// instead.
+    #[cfg(feature = "jxl")]
     fn blob(raster: &Raster, name: &str) -> Vec<u8> {
         match raster.get_field(name) {
             Some(MetadataValue::Blob(b)) => b.clone(),
@@ -958,6 +1071,7 @@ mod tests {
      * interpretation `srgb`, and no `n-pages` field, which is what
      * `vipsheader -a` reports for the same file.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn lossless_decode_matches_vips_getpoint() {
         let raster = decode_bytes_with_limits(&LOSSLESS_RGB, DecodeLimits::default())
@@ -994,6 +1108,7 @@ mod tests {
      * Input: `LOSSLESS_RGBA` -> Output: 4x3 `Rgba8` whose bytes equal the
      * source raster's.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn lossless_alpha_decodes_as_four_bands() {
         let raster = decode_bytes_with_limits(&LOSSLESS_RGBA, DecodeLimits::default())
@@ -1016,6 +1131,7 @@ mod tests {
      * Input: `LOSSLESS_GREY` -> Output: 4x3 `Gray8` tagged `b-w`, pixels
      * equal to the luminance band of `RAMP_PIXELS`.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn greyscale_stays_one_band_unlike_webp() {
         let raster = decode_bytes_with_limits(&LOSSLESS_GREY, DecodeLimits::default())
@@ -1035,6 +1151,7 @@ mod tests {
      * Input: `LOSSLESS_RGB16` -> Output: 4x3 `Rgb16` tagged `rgb16`,
      * samples equal to `RAMP16_PIXELS`, `bits-per-sample` 16.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn sixteen_bit_decodes_at_full_range() {
         let raster = decode_bytes_with_limits(&LOSSLESS_RGB16, DecodeLimits::default())
@@ -1063,6 +1180,7 @@ mod tests {
      * Input: `LOSSLESS_F32` -> Output: 4x3 `FloatF32(3)` tagged `scrgb`,
      * samples equal to the `vips getpoint` values, `bits-per-sample` 32.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn float_decodes_as_scrgb_without_quantising() {
         let raster = decode_bytes_with_limits(&LOSSLESS_F32, DecodeLimits::default())
@@ -1107,6 +1225,7 @@ mod tests {
      * everywhere, and not equal to the original ramp, because the encode
      * was lossy.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn vardct_decode_is_within_one_count_of_libjxl() {
         let raster = decode_bytes_with_limits(&LOSSY_RGB, DecodeLimits::default())
@@ -1155,6 +1274,7 @@ mod tests {
      * Input: `ANIM3` -> Output: 4x3 (not 4x9), pixels equal to frame 0,
      * `get_n_pages() == 3`.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn animated_jxl_loads_frame_zero_and_reports_the_page_count() {
         let raster = decode_bytes_with_limits(&ANIM3, DecodeLimits::default())
@@ -1181,6 +1301,7 @@ mod tests {
      * `EXIF_BLOB` from both, `xmp-data` equal to `XMP_PACKET` from the
      * first, and the ramp pixels unchanged in both.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn exif_box_gets_the_prefix_back_and_the_offset_skipped() {
         for (name, bytes) in [
@@ -1215,6 +1336,7 @@ mod tests {
      * Input: `META_BAD_OFFSET` -> Output: 4x3 `Rgb8` with the ramp pixels
      * and no `exif-data` field.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn a_malformed_exif_box_costs_the_blob_and_not_the_image() {
         let raster = decode_bytes_with_limits(&META_BAD_OFFSET, DecodeLimits::default())
@@ -1236,6 +1358,7 @@ mod tests {
      * ramps -> Output: identical dimensions, identical pixel format,
      * byte-identical data.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn lossless_encode_decode_is_the_identity() {
         let two = NonZeroU16::new(2).unwrap();
@@ -1288,6 +1411,7 @@ mod tests {
      * Input: 4x3 float rasters -> Output: `EncodeError::Encode` naming the
      * format and saying to cast.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn float_is_refused_rather_than_quantised() {
         for format in [
@@ -1316,6 +1440,7 @@ mod tests {
      * naming the geometry and the floor for the first two, and bytes for
      * the third.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn a_one_pixel_axis_is_refused_with_the_floor_named() {
         for (w, h) in [(1u32, 3u32), (3, 1)] {
@@ -1346,6 +1471,7 @@ mod tests {
      * `DimensionLimitExceeded` naming 4x3, and `InsufficientMemory` for the
      * frame buffer.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn decode_limits_are_enforced_on_the_declared_geometry() {
         let tight = DecodeLimits::default().with_max_coord(2);
@@ -1391,6 +1517,7 @@ mod tests {
      * Input: five malformed buffers -> Output: an `Err` from each, and
      * never a raster.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn malformed_input_is_refused_with_a_typed_error() {
         for (name, bytes) in [
@@ -1417,6 +1544,7 @@ mod tests {
      * Output: both decode to 4x3 rasters through `decode_bytes_with_limits`,
      * with the carrier each file declares.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn both_container_forms_reach_the_decoder_through_the_sniff_route() {
         assert_eq!(&LOSSLESS_RGB[..2], b"\xff\x0a");
@@ -1454,6 +1582,54 @@ mod tests {
     }
 
     /**
+     * Tests that a build without the `jxl` feature still exposes every
+     * entry point at its real signature and still reports a typed error
+     * naming the capability, so a caller compiled either way gets one
+     * shape and can match on the failure instead of hitting a missing
+     * symbol. It also pins which error each entry point reports, because
+     * they are deliberately not the same one: the decoder reports the
+     * `Unsupported` I/O error `crate::svg` reports without `svg`, and the
+     * encoders report the `EncodeError::Unsupported` every format with no
+     * encoder in this build reports, so a caller matching on the encode
+     * spine does not have to learn a second variant.
+     * Input: the 71-byte `LOSSLESS_RGB` capture and the 4x3 ramp ->
+     * Output: `SourceError::Io` with `ErrorKind::Unsupported` naming JPEG
+     * XL, `EncodeError::Unsupported { format: "jxl" }`, and a `SaveError`
+     * carrying the same wording.
+     */
+    #[test]
+    #[cfg(not(feature = "jxl"))]
+    fn without_the_feature_every_entry_point_is_a_typed_refusal() {
+        let err = decode_jxl(&LOSSLESS_RGB, DecodeLimits::default()).unwrap_err();
+        match err {
+            SourceError::Io(ref io) => {
+                assert_eq!(io.kind(), std::io::ErrorKind::Unsupported);
+                assert!(
+                    err.to_string().contains("JPEG XL") && err.to_string().contains("`jxl`"),
+                    "the refusal names the format and the feature, got {err}"
+                );
+            }
+            other => panic!("expected a typed Io(Unsupported), got {other:?}"),
+        }
+
+        let raster = ramp_rgb();
+        let err = raster.encode_jxl(SaveOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::Unsupported { ref format } if format == "jxl"),
+            "{err:?}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = raster
+            .save_jxl(&dir.path().join("out.jxl"), SaveOptions::default())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("jxl"),
+            "save_jxl carries the encoder's wording, got {err}"
+        );
+    }
+
+    /**
      * Sweeps the seeded fuzz corpus through the decoder, so every
      * malformation it holds is a `cargo test` regression rather than
      * something only a fuzz run would notice. The naming carries the
@@ -1471,6 +1647,7 @@ mod tests {
      * from each `valid-` seed, an `Err` from each `rejected-` one, and no
      * panic from any of them.
      */
+    #[cfg(feature = "jxl")]
     #[test]
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1514,6 +1691,7 @@ mod tests {
     /// assertion. Run it as
     /// `JXL_ORACLE_OUT=oracle-captures/foreign-jxl/outputs cargo test
     /// --lib jxl::tests::write_oracle_inputs -- --ignored`.
+    #[cfg(feature = "jxl")]
     #[test]
     #[ignore = "capture step: writes fixtures for capture.py --viprs, needs JXL_ORACLE_OUT"]
     fn write_oracle_inputs() {

@@ -15,9 +15,19 @@
 //! a caller writes against is the `Compression` axis, and the point of
 //! pinning it from outside is that `Compression::Lossy { .. }` can be added
 //! later without breaking any of the code below.
+//!
+//! The codec itself is behind the non-default `jxl` feature, so the tests
+//! that move pixels carry `#[cfg(feature = "jxl")]` and CI runs this file
+//! twice. What runs under both is the shape: the options struct is still
+//! constructible and every entry point is still callable and still typed,
+//! which is the half a caller's code depends on either way.
 
+#[cfg(not(feature = "jxl"))]
+use libviprs::EncodeError;
+#[cfg(feature = "jxl")]
+use libviprs::decode_bytes;
 use libviprs::source::DecodeLimits;
-use libviprs::{PixelFormat, Raster, decode_bytes, decode_jxl, jxl};
+use libviprs::{PixelFormat, Raster, decode_jxl, jxl};
 
 /// A 4x3 sRGB ramp, the same one `oracle-captures/foreign-jxl` is built
 /// from, so a failure here and a failure in the unit tests point at the
@@ -36,6 +46,7 @@ fn ramp() -> Raster {
 
 /// The same ramp with 16-bit samples, which JPEG XL holds natively and
 /// WebP does not.
+#[cfg(feature = "jxl")]
 fn ramp16() -> Raster {
     let mut data = Vec::with_capacity(4 * 3 * 3 * 2);
     for y in 0..3u32 {
@@ -52,6 +63,7 @@ fn ramp16() -> Raster {
 /// The free decode entry point resolves from the crate root and reports the
 /// carrier the file declares rather than a fixed one.
 #[test]
+#[cfg(feature = "jxl")]
 fn decode_jxl_is_public_and_follows_the_files_carrier() {
     let bytes = ramp().encode_jxl(jxl::SaveOptions::default()).unwrap();
     let raster = decode_jxl(&bytes, DecodeLimits::default()).unwrap();
@@ -84,6 +96,7 @@ fn save_options_are_constructible_downstream() {
 /// through both the buffer entry point and the file one, and at both
 /// integer carriers.
 #[test]
+#[cfg(feature = "jxl")]
 fn encode_and_save_round_trip_exactly() {
     let dir = tempfile::tempdir().unwrap();
     for (name, original) in [("eight", ramp()), ("sixteen", ramp16())] {
@@ -106,6 +119,7 @@ fn encode_and_save_round_trip_exactly() {
 /// `.jxl` is a live row in both shared dispatchers, and the content sniffer
 /// routes the bytes back without help from the filename.
 #[test]
+#[cfg(feature = "jxl")]
 fn the_shared_dispatchers_carry_jxl() {
     let original = ramp();
     let dir = tempfile::tempdir().unwrap();
@@ -133,6 +147,7 @@ fn the_shared_dispatchers_carry_jxl() {
 /// the caller what to do about it. vips writes float samples natively; the
 /// module docs record that divergence.
 #[test]
+#[cfg(feature = "jxl")]
 fn float_is_refused_from_outside_the_crate() {
     let wide = Raster::zeroed(4, 3, PixelFormat::RgbaF32).unwrap();
     let err = wide
@@ -147,6 +162,7 @@ fn float_is_refused_from_outside_the_crate() {
 /// encoder behind it, and the refusal names the floor rather than leaking
 /// the dependency's own wording.
 #[test]
+#[cfg(feature = "jxl")]
 fn a_single_pixel_axis_is_refused_from_outside_the_crate() {
     let thin = Raster::zeroed(1, 4, PixelFormat::Rgb8).unwrap();
     let err = thin
@@ -155,4 +171,44 @@ fn a_single_pixel_axis_is_refused_from_outside_the_crate() {
         .to_string();
     assert!(err.contains("1x4"), "{err}");
     assert!(err.contains("2 pixels on each axis"), "{err}");
+}
+
+/// Without the feature the surface does not move: the free decoder, both
+/// encoders and the two shared dispatchers are all still callable at the
+/// same signatures from outside the crate, and every one of them reports a
+/// typed refusal rather than a missing symbol or a panic. This is the pin
+/// that a consumer's code compiles against either build.
+#[test]
+#[cfg(not(feature = "jxl"))]
+fn without_the_feature_the_surface_is_unchanged_and_typed() {
+    let raster = ramp();
+
+    let err = decode_jxl(&[0xff, 0x0a], DecodeLimits::default()).unwrap_err();
+    assert!(err.to_string().contains("JPEG XL"), "{err}");
+
+    let err = raster.encode_jxl(jxl::SaveOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, EncodeError::Unsupported { ref format } if format == "jxl"),
+        "{err:?}"
+    );
+
+    let err = raster.encode_to_buffer("jxl").unwrap_err();
+    assert!(
+        matches!(err, EncodeError::Unsupported { ref format } if format == "jxl"),
+        "{err:?}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        raster
+            .save_jxl(&dir.path().join("a.jxl"), jxl::SaveOptions::default())
+            .is_err()
+    );
+    // `.jxl` leaves the extension route entirely without an encoder behind
+    // it, so it reads as an unsupported extension rather than an encode
+    // failure, and the refusal names the set this build really can write.
+    let err = raster.save(&dir.path().join("b.jxl")).unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("unsupported save extension"), "{message}");
+    assert!(!message.contains("webp, jxl"), "{message}");
 }

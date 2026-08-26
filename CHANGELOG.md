@@ -154,12 +154,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- JPEG XL load and lossless save (issues #500, #619, #620). `decode_jxl` reads
-  both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF one,
-  and `.jxl` is now a live row in the content sniffer, in `Raster::save`'s
-  extension route and in `Raster::encode_to_buffer`'s format route.
+- JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
+  (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
+  reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
+  one, `.jxl` becomes a live row in the content sniffer, in `Raster::save`'s
+  extension route and in `Raster::encode_to_buffer`'s format route, and
   `Raster::encode_jxl` and `Raster::save_jxl` write the lossless modular form.
   The `Raster::encode_jxl(lossless: bool)` typed-`Unsupported` stub is gone.
+
+  Without the feature nothing about the surface moves: every one of those entry
+  points still exists at the same signature and returns a typed refusal naming
+  the feature, the way `crate::svg` does without `svg`. `decode_jxl` reports an
+  `Unsupported` I/O error, both encoders report
+  `EncodeError::Unsupported { format: "jxl" }`, and `.jxl` leaves the extension
+  route entirely, so `save("x.jxl")` reports an unsupported extension like any
+  other format with no encoder behind it. Consumer code compiles against either
+  build.
 
   Decode goes to `jxl-oxide`, which targets the same JPEG XL conformance suite
   libjxl does, so this is a parity port rather than an approximation, and the
@@ -212,12 +222,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `n-pages`, which is what a default `vips jxlload` does; reading every frame
   is #621 and waits on the page model in #564.
 
-  This costs +17 lock entries (260 to 277, measured), all pure Rust, none with
-  a `links =` key or a C compile. `jxl-oxide` is floored at 0.12.6 because
-  every release at or below 0.12.5 carries GHSA-66m8-c62j-h6v5, an unchecked
-  `usize` multiply in `FrameBuffer::new` that hands out oversized slices from
-  an undersized buffer. `fuzz/fuzz_targets/fuzz_jxl.rs` and a 26-seed corpus
-  ship with it.
+  The feature gate is there because of what the codec costs, and the two
+  numbers that matter disagree, which is why it is worth spelling both out.
+  `Cargo.lock` grows by 17 entries (260 to 277, measured), but a consumer's
+  *compiled* graph grows by 21: `tracing`, `tracing-core`, `once_cell` and
+  `pin-project-lite` were already in the lock through the `tracing-subscriber`
+  dev-dependency and were not in anybody's build. Counting the lock is what
+  undercounts it. Measured on `cargo tree -p libviprs -e normal`, a default
+  build stays at 115 crates and `--features jxl` takes it to 136, and a release
+  binary reaching the whole codec surface goes from 2,381,616 to 4,781,648
+  bytes, +100.8%.
+
+  One of the 21 is `tracing`, which `jxl-oxide` and `jxl-bitstream` both depend
+  on unconditionally. Unconditional JXL therefore put `tracing` in the default
+  graph of a crate whose own `tracing = ["dep:tracing"]` feature is deliberately
+  opt-in and whose `default` is empty, and `default-features = false` could not
+  get it back out. Behind `jxl` the opt-in holds again:
+  `cargo tree -e normal -i tracing` finds nothing in a default build.
+
+  All 21 are pure Rust, none with a `links =` key or a C compile. `jxl-oxide`
+  is floored at 0.12.6 because every release at or below 0.12.5 carries
+  GHSA-66m8-c62j-h6v5, an unchecked `usize` multiply in `FrameBuffer::new` that
+  hands out oversized slices from an undersized buffer.
+  `fuzz/fuzz_targets/fuzz_jxl.rs` and a 26-seed corpus ship with it.
 
 - Canny edge detection: `Raster::canny` and `Raster::try_canny`, matching
   `vips_canny` (issues #511, #559 and #560). It takes `sigma` and `precision`
@@ -583,6 +610,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- `SaveError::UnsupportedExtension`'s message names the extensions the build
+  in front of you can actually write, instead of a fixed list (issue #500).
+  It used to end "libviprs encodes png, jpg/jpeg, gif, webp, and v/vips",
+  which stopped being true the moment `.jxl` became a live save arm:
+  `save("x.avif")` told you JPEG XL was unsupported at the moment it became
+  supported. The tail is now computed from the same set the extension route
+  dispatches on, so `jxl` appears exactly when the `jxl` feature is on, and a
+  test parses the list back out of a rendered message and saves under every
+  name in it, so a future arm that forgets the message fails rather than
+  drifting. Anything matching on the exact string will need to stop; the
+  variant and its `extension` field are unchanged.
 
 - The edge detectors answer both gradients in one traversal instead of two,
   and combine them without materialising either (issue #562). `sobel`,

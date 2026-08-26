@@ -975,6 +975,10 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
         return crate::webp::decode_webp(bytes, limits);
     }
     if sniffed == Some(SniffedFormat::Jxl) {
+        // Still routed here without the `jxl` feature, on purpose:
+        // `decode_jxl` reports "this build has no JPEG XL" and falling
+        // through to `reader_for` instead would report "these bytes are
+        // not an image", which is a different and wrong answer.
         return crate::jxl::decode_jxl(bytes, limits);
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;

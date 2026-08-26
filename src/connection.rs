@@ -241,6 +241,13 @@ impl Raster {
     /// [`Raster::encode_webp`], [`Raster::encode_gif`] and
     /// [`Raster::encode_jxl`] take the options explicitly.
     ///
+    /// `"jxl"` needs the non-default `jxl` feature to produce bytes. It
+    /// stays a live row without it and reports
+    /// [`EncodeError::Unsupported`] carrying `"jxl"`, which is the same
+    /// variant an unrecognised format name gets, so the dispatch has one
+    /// answer for "this build cannot write that" however the caller
+    /// arrived at it.
+    ///
     /// # Errors
     ///
     /// As [`encode_to_target`], minus the I/O case (there is no external
@@ -348,6 +355,7 @@ mod tests {
     /// magic, which is what the encoder writes and what
     /// `vips jxlsave --keep none` writes too.
     #[test]
+    #[cfg(feature = "jxl")]
     fn encode_for_format_routes_jxl_to_the_lossless_encoder() {
         let raster = sample_raster();
         let via_dispatch = raster.encode_to_buffer("jxl").unwrap();
@@ -358,6 +366,22 @@ mod tests {
         assert_eq!(&via_dispatch[..2], b"\xff\x0a");
         let back = crate::decode_bytes(&via_dispatch).unwrap();
         assert_eq!(back.data(), raster.data());
+    }
+
+    /// Without the `jxl` feature the row is still there and still typed:
+    /// it reports `Unsupported` carrying the name the caller asked for,
+    /// which is what the dispatch promises for any format this build has
+    /// no encoder behind. Pinned so the row cannot quietly become a
+    /// fall-through to the catch-all arm, which would lose the name.
+    #[test]
+    #[cfg(not(feature = "jxl"))]
+    fn encode_for_format_refuses_jxl_by_name_without_the_feature() {
+        let raster = sample_raster();
+        let err = raster.encode_to_buffer("jxl").unwrap_err();
+        assert!(
+            matches!(err, EncodeError::Unsupported { ref format } if format == "jxl"),
+            "{err:?}"
+        );
     }
 
     /// Oracle `stdin-load-pixel-parity-jpeg`: the same JPEG bytes decode
