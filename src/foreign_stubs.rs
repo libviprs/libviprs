@@ -3,7 +3,7 @@
 //!
 //! The ported foreign and connection cells reference a set of encoders and
 //! decoders for formats that have no mature pure-Rust implementation yet
-//! (HEIF/AVIF, JPEG 2000, JPEG XL, Ultra HDR, the ImageMagick delegate,
+//! (HEIF/AVIF, JPEG 2000, Ultra HDR, the ImageMagick delegate,
 //! OpenSlide, and the libvips `fail_on` strictness knob). This
 //! module supplies those symbols so the cells compile and pin the typed error
 //! path:
@@ -155,17 +155,6 @@ impl Raster {
     ) -> Result<Vec<u8>, EncodeError> {
         let _ = (quality, lossless, subsample);
         Err(EncodeError::unsupported("jp2k"))
-    }
-
-    /// Encode as JPEG XL (libvips `jxlsave`), lossy or lossless.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`]: JPEG XL encoding needs an
-    /// external `libjxl` path.
-    pub fn encode_jxl(&self, lossless: bool) -> Result<Vec<u8>, EncodeError> {
-        let _ = lossless;
-        Err(EncodeError::unsupported("jxl"))
     }
 
     /// Encode as Ultra HDR (gain-map JPEG; libvips `uhdrsave`).
@@ -441,7 +430,6 @@ mod tests {
             (im.encode_heif_tune(50, "av1", "ssim").unwrap_err(), "heif"),
             (im.encode_jp2k(50, false).unwrap_err(), "jp2k"),
             (im.encode_jp2k_chroma(50, false, true).unwrap_err(), "jp2k"),
-            (im.encode_jxl(true).unwrap_err(), "jxl"),
             (im.encode_uhdr(75).unwrap_err(), "uhdr"),
             (im.encode_uhdr_gainmap_scale(75, 4).unwrap_err(), "uhdr"),
         ] {

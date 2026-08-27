@@ -12,9 +12,10 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    Align, BandError, ColourError, Combine, DrawError, EngineEvent, GifError, Intent,
-    Interpretation, JoinDirection, Layout, ManifestError, Pcs, PdfError, PixelFormat, PlannerError,
-    Precision, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
+    Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError, GifError,
+    Intent, Interpretation, JoinDirection, Layout, ManifestError, MetadataValue, Pcs, PdfError,
+    PixelFormat, PlannerError, Precision, RadianceError, RasterError, ResumeError, SourceError,
+    VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -25,6 +26,48 @@ fn assert_gif_error_non_exhaustive(v: &GifError) {
         GifError::NoFrames => {}
         GifError::AllocLimitExceeded { .. } => {}
         GifError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_exr_error_non_exhaustive(v: &ExrError) {
+    match v {
+        ExrError::BadMagic { .. } => {}
+        ExrError::Decode { .. } => {}
+        ExrError::DeepData => {}
+        ExrError::UnsupportedSampleType { .. } => {}
+        ExrError::SubsampledChannel { .. } => {}
+        ExrError::NoChannels => {}
+        ExrError::DimensionOutOfBounds { .. } => {}
+        ExrError::TooManyChannels { .. } => {}
+        ExrError::AllocLimitExceeded { .. } => {}
+        ExrError::PartMismatch { .. } => {}
+        ExrError::ChannelSizeMismatch { .. } => {}
+        ExrError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_fits_error_non_exhaustive(v: &FitsError) {
+    match v {
+        FitsError::BadMagic { .. } => {}
+        FitsError::TruncatedHeader { .. } => {}
+        FitsError::HeaderTooLong { .. } => {}
+        FitsError::NoImageUnit { .. } => {}
+        FitsError::BadHeaderCard { .. } => {}
+        FitsError::BadAxisCount { .. } => {}
+        FitsError::HighDimensionNotEmpty { .. } => {}
+        FitsError::DimensionOutOfBounds { .. } => {}
+        FitsError::AllocLimitExceeded { .. } => {}
+        FitsError::TruncatedData { .. } => {}
+        FitsError::UnsupportedBitpix { .. } => {}
+        FitsError::UnsupportedCarrier { .. } => {}
+        FitsError::UnsupportedScaling { .. } => {}
+        FitsError::Raster(_) => {}
         _ => {}
     }
 }
@@ -305,6 +348,19 @@ fn assert_webp_compression_non_exhaustive(v: &libviprs::webp::Compression) {
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
+// Same shape and the same reason as the WebP one above: JPEG XL's only
+// pure-Rust encoder is lossless-only, so `Lossy { distance }` is the variant
+// this enum exists to leave room for.
+#[allow(clippy::single_match)]
+fn assert_jxl_compression_non_exhaustive(v: &libviprs::jxl::Compression) {
+    match v {
+        libviprs::jxl::Compression::Lossless => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
 fn assert_webp_keep_non_exhaustive(v: &libviprs::webp::Keep) {
     match v {
         libviprs::webp::Keep::All => {}
@@ -329,10 +385,12 @@ fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
     assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
     assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
+    assert_jxl_compression_non_exhaustive(&libviprs::jxl::Compression::Lossless);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);
     assert_pcs_non_exhaustive(&Pcs::Lab);
+    assert_metadata_value_non_exhaustive(&MetadataValue::Int(1));
 }
 
 #[deny(unreachable_patterns)]
@@ -341,6 +399,23 @@ fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
     match v {
         JoinDirection::Horizontal => {}
         JoinDirection::Vertical => {}
+        _ => {}
+    }
+}
+
+/// `MetadataValue` grows with the vips GType set it covers: a `.v` trailer
+/// already carries `VipsArrayInt` and `VipsArrayDouble` fields this crate
+/// only forwards opaquely, and #573 wants a `delay` array variant. Marking
+/// it before that lands costs a `_ =>` arm here; marking it after would cost
+/// a major version (issue #609).
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_metadata_value_non_exhaustive(v: &MetadataValue) {
+    match v {
+        MetadataValue::Int(_) => {}
+        MetadataValue::Double(_) => {}
+        MetadataValue::Str(_) => {}
+        MetadataValue::Blob(_) => {}
         _ => {}
     }
 }

@@ -53,6 +53,41 @@
 //! users on those terms. The rule across the crate is that a document's own
 //! page number is 1-based and a position in a sequence of frames is 0-based.
 //!
+//! ## Resource limits
+//!
+//! Every entry point that reads untrusted bytes here takes a
+//! [`DecodeLimits`], and the no-argument forms delegate to
+//! [`DecodeLimits::default`] rather than running unbounded:
+//! [`tiff_page_count_with_limits`], [`decode_tiff_page_with_limits`] and
+//! [`Raster::tiff_load_with_limits`], behind [`tiff_page_count`],
+//! [`decode_tiff_page`] and [`Raster::tiff_load`]. Four things on this path
+//! are sized by the file and all four are bounded (issue #540):
+//!
+//! * The **file body**. `decode_tiff_page` reads the whole file rather than
+//!   streaming it, because the vips multiband relabel below patches the bytes
+//!   before the decoder sees them. That read is capped at
+//!   [`DecodeLimits::max_alloc_bytes`], checked against the declared length
+//!   first and again against what was actually read.
+//! * The **relabel**. It patches the buffer the reader already owns instead of
+//!   cloning it (`normalize_multiband_photometric_in_place`), so the peak
+//!   footprint is one copy of the file, not two.
+//! * The **IFD walk** that sources `n-pages`, capped at
+//!   [`DecodeLimits::max_pages`] and stopped there rather than counted to the
+//!   end. `tiff_page_count` streams and never reads the body at all. A *cyclic*
+//!   chain is caught below this, by `tiff` 0.10.3's own union-find over the IFD
+//!   edges; the ceiling is for the chain that is merely very long.
+//! * The **pixel buffer**, through [`DecodeLimits::max_coord`] then
+//!   [`DecodeLimits::max_pixels`] then an explicit
+//!   `width * height * bands * bytes_per_sample` budget, all on the declared
+//!   geometry and all before the buffer is reserved. Before #540 the result
+//!   went straight to [`Raster::new`] and its 8 GiB
+//!   `DEFAULT_MAX_ALLOC_BYTES`, sixteen times looser than the 512 MiB the
+//!   crate publishes.
+//!
+//! The `tiff` crate's own `decoding_buffer_size` is tightened from
+//! `max_alloc_bytes` too, and never loosened past its 256 MiB default, so the
+//! effective ceiling on a page decode is the smaller of the two.
+//!
 //! ## Pixel formats
 //!
 //! The encoder handles the 8- and 16-bit gray, RGB, and RGBA formats, plus the
@@ -95,6 +130,7 @@ use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::sink::SinkError;
+use crate::source::DecodeLimits;
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -103,8 +139,9 @@ use crate::sink::SinkError;
 // spine owns in `imageio.rs`. That type has no dedicated "unsupported
 // compression" variant and this lane must not widen it, so the deferred paths
 // reuse `SaveError::Encode(SinkError::Other(_))` with an accurate message
-// (the alternative, `SaveError::UnsupportedExtension`, carries a fixed tail
-// that would misreport what the pure-Rust build can save). The decode helpers
+// (the alternative, `SaveError::UnsupportedExtension`, carries a tail
+// enumerating the extensions this build can save, which would misreport a
+// compression problem as a missing encoder). The decode helpers
 // return `DecodeError` (an alias of `SourceError`) and wrap `tiff` crate
 // failures as an image decoding error tagged with the TIFF format hint.
 // ---------------------------------------------------------------------------
@@ -361,7 +398,8 @@ fn interpret(
     }
 }
 
-/// Resolve the channel count of the current image.
+/// Resolve the channel count and the per-sample bit depth of the current
+/// image.
 ///
 /// `colortype()` maps the common photometrics and the `BlackIsZero`-with-extra
 /// Multiband case. A vips-written `>= 5`-band raster is an RGB photometric with
@@ -371,12 +409,22 @@ fn interpret(
 /// residual colour type the decoder still refuses (e.g. CMYK-with-extra, which
 /// vips does not write for these rasters) surfaces as a typed error rather than
 /// a silent, wrong channel count.
-fn resolve_channels<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<usize, DecodeError> {
+///
+/// The depth rides along out of the same `colortype()` call because the
+/// pre-decode allocation budget needs the product: a pixel count on its own
+/// sees neither the band count nor the sample depth, so `max_pixels` alone
+/// cannot bound the buffer a page decodes into.
+fn resolve_channels_and_depth<R: Read + Seek>(
+    decoder: &mut Decoder<R>,
+) -> Result<(usize, u8), DecodeError> {
     match decoder.colortype().map_err(tiff_decode_err)? {
-        ColorType::Gray(_) => Ok(1),
-        ColorType::RGB(_) => Ok(3),
-        ColorType::RGBA(_) => Ok(4),
-        ColorType::Multiband { num_samples, .. } => Ok(num_samples as usize),
+        ColorType::Gray(bits) => Ok((1, bits)),
+        ColorType::RGB(bits) => Ok((3, bits)),
+        ColorType::RGBA(bits) => Ok((4, bits)),
+        ColorType::Multiband {
+            num_samples,
+            bit_depth,
+        } => Ok((num_samples as usize, bit_depth)),
         other => Err(decode_err(format!(
             "unsupported TIFF color type {other:?} \
              (gray, RGB, RGBA, and multiband uchar/ushort are decoded here)"
@@ -491,19 +539,39 @@ fn normalize_multiband_photometric(bytes: &[u8]) -> Cow<'_, [u8]> {
     if offsets.is_empty() {
         return Cow::Borrowed(bytes);
     }
-    let little_endian = bytes.first() == Some(&b'I');
     let mut owned = bytes.to_vec();
+    apply_photometric_patches(&mut owned, &offsets);
+    Cow::Owned(owned)
+}
+
+/// As [`normalize_multiband_photometric`], but rewriting a buffer the caller
+/// already owns. The `Cow` form has to clone the whole file to patch it, which
+/// doubles the peak footprint of a decode; a caller holding its own `Vec` (the
+/// page readers, which read the file in themselves) patches it where it lies
+/// and never pays that.
+fn normalize_multiband_photometric_in_place(bytes: &mut [u8]) {
+    let offsets = photometric_patch_offsets(bytes);
+    apply_photometric_patches(bytes, &offsets);
+}
+
+/// Write `BlackIsZero` (1) into each `PhotometricInterpretation` value slot
+/// [`photometric_patch_offsets`] found. Every write is bounds-checked, so a
+/// truncated file is left alone rather than panicking.
+fn apply_photometric_patches(bytes: &mut [u8], offsets: &[usize]) {
+    if offsets.is_empty() {
+        return;
+    }
+    let little_endian = bytes.first() == Some(&b'I');
     let value = if little_endian {
         1u16.to_le_bytes()
     } else {
         1u16.to_be_bytes()
     };
-    for off in offsets {
-        if let Some(slot) = owned.get_mut(off..off + 2) {
+    for &off in offsets {
+        if let Some(slot) = bytes.get_mut(off..off + 2) {
             slot.copy_from_slice(&value);
         }
     }
-    Cow::Owned(owned)
 }
 
 /// Read the EXIF-style orientation from the TIFF `Orientation` tag (274),
@@ -516,10 +584,85 @@ fn read_tiff_orientation<R: Read + Seek>(decoder: &mut Decoder<R>) -> u8 {
     }
 }
 
-/// Read the decoder's currently-selected image into a [`Raster`].
-fn decode_current_image<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<Raster, DecodeError> {
+/// The `tiff` crate's own default ceiling on a single `DecodingResult`, from
+/// `tiff::decoder::Limits::default()`. libviprs only ever tightens it from
+/// [`DecodeLimits::max_alloc_bytes`], never loosens it, so the effective bound
+/// on a page decode is the smaller of the two. Raising `max_alloc_bytes` above
+/// this therefore does not raise the effective ceiling here; lowering it below
+/// does lower it.
+const TIFF_DECODING_BUFFER_DEFAULT: u64 = 256 * 1024 * 1024;
+
+/// Open a decoder over `reader` with libviprs's allocation budget pushed into
+/// the `tiff` crate, so the crate refuses an oversized internal buffer itself
+/// rather than relying on the caller's own pre-decode check alone.
+fn open_decoder<R: Read + Seek>(
+    reader: R,
+    limits: DecodeLimits,
+) -> Result<Decoder<R>, DecodeError> {
+    let budget = limits.max_alloc_bytes.min(TIFF_DECODING_BUFFER_DEFAULT);
+    let budget = usize::try_from(budget).unwrap_or(usize::MAX);
+    let mut tiff_limits = tiff::decoder::Limits::default();
+    tiff_limits.decoding_buffer_size = budget;
+    tiff_limits.intermediate_buffer_size = tiff_limits.intermediate_buffer_size.min(budget);
+    tiff_limits.ifd_value_size = tiff_limits.ifd_value_size.min(budget);
+    Ok(Decoder::new(reader)
+        .map_err(tiff_decode_err)?
+        .with_limits(tiff_limits))
+}
+
+/// Read the whole of `path` into memory, refusing a file larger than
+/// [`DecodeLimits::max_alloc_bytes`].
+///
+/// The page readers need the bytes in memory rather than streamed, because the
+/// vips multiband relabel patches them before the decoder ever sees them. A
+/// plain `std::fs::read` sizes that buffer from the file, which is exactly the
+/// unbounded allocation the limits exist to prevent. The declared length is
+/// checked first so a huge file costs one `stat` rather than a huge read, and
+/// the read is capped as well so a file that grows between the two cannot slip
+/// past.
+fn read_file_bounded(path: &Path, limits: DecodeLimits) -> Result<Vec<u8>, DecodeError> {
+    let file = std::fs::File::open(path)?;
+    let declared = file.metadata()?.len();
+    limits.check_alloc("TIFF file body", declared)?;
+
+    let cap = limits.max_alloc_bytes;
+    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let mut reader = std::io::BufReader::new(&file).take(cap.saturating_add(1));
+    reader.read_to_end(&mut bytes)?;
+    let read = bytes.len() as u64;
+    if read > cap {
+        return Err(DecodeError::AllocLimitExceeded {
+            what: "TIFF file body",
+            needed_bytes: read,
+            max_alloc_bytes: cap,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Read the decoder's currently-selected image into a [`Raster`], applying
+/// `limits` to the declared geometry before anything is allocated for it.
+///
+/// The order is the one the rest of the crate uses:
+/// [`DecodeLimits::max_coord`] on each axis, then
+/// [`DecodeLimits::max_pixels`] on the product, then the explicit
+/// `width * height * bands * bytes_per_sample` allocation budget, which is the
+/// only one of the three that can see the band count and the sample depth.
+/// All three run on what the IFD *declares*, so a decompression bomb is
+/// refused before its buffer is reserved rather than after.
+fn decode_current_image<R: Read + Seek>(
+    decoder: &mut Decoder<R>,
+    limits: DecodeLimits,
+) -> Result<Raster, DecodeError> {
     let (width, height) = decoder.dimensions().map_err(tiff_decode_err)?;
-    let channels = resolve_channels(decoder)?;
+    limits.check_coord(width, height)?;
+    limits.check_pixels(width, height)?;
+    let (channels, bit_depth) = resolve_channels_and_depth(decoder)?;
+    let needed = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(channels as u64)
+        .saturating_mul(u64::from(bit_depth).div_ceil(8));
+    limits.check_alloc("TIFF page pixel buffer", needed)?;
     let orientation = read_tiff_orientation(decoder);
     let result = decoder.read_image().map_err(tiff_decode_err)?;
     let (format, data) = interpret(channels, result)?;
@@ -528,25 +671,65 @@ fn decode_current_image<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<Rast
     Ok(raster)
 }
 
-/// Count the pages (IFDs) in a multi-page TIFF file.
+/// Count the pages (IFDs) in a multi-page TIFF file, under the default
+/// [`DecodeLimits`].
+///
+/// Equivalent to [`tiff_page_count_with_limits`] with
+/// [`DecodeLimits::default`], whose [`DecodeLimits::max_pages`] is `100_000`.
 ///
 /// # Errors
 ///
 /// Returns [`DecodeError`] if the file cannot be opened or the TIFF header or
-/// its IFD chain is malformed.
+/// its IFD chain is malformed, or [`DecodeError::PageLimitExceeded`] if the
+/// chain runs past the default page ceiling.
 pub fn tiff_page_count(path: &Path) -> Result<u32, DecodeError> {
-    let file = std::fs::File::open(path)?;
-    let mut decoder = Decoder::new(std::io::BufReader::new(file)).map_err(tiff_decode_err)?;
-    count_images(&mut decoder)
+    tiff_page_count_with_limits(path, DecodeLimits::default())
 }
 
-/// Walk a decoder's IFD chain to the end and report how many images it holds.
+/// Count the pages (IFDs) in a multi-page TIFF file, bounding the IFD walk
+/// with [`DecodeLimits::max_pages`].
 ///
-/// The decoder is left positioned on the last image, so a caller that also
-/// wants pixels needs a second decoder over the same bytes.
-fn count_images<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<u32, DecodeError> {
+/// A TIFF's pages are a linked list with no count in the header, so the only
+/// way to report one is to walk the chain. `max_pages` is what keeps that walk
+/// from being unbounded work on a hostile file: it stops and reports
+/// [`DecodeError::PageLimitExceeded`] the moment it reaches the ceiling,
+/// rather than running to the end to find out how far past it the file goes.
+/// The file is streamed rather than read into memory, so nothing here is sized
+/// by the input.
+///
+/// # Errors
+///
+/// Returns [`DecodeError::Io`] if the file cannot be opened,
+/// [`DecodeError::PageLimitExceeded`] if the chain declares more than
+/// [`DecodeLimits::max_pages`] pages, or [`DecodeError`] if the TIFF header or
+/// its IFD chain is malformed.
+pub fn tiff_page_count_with_limits(path: &Path, limits: DecodeLimits) -> Result<u32, DecodeError> {
+    let file = std::fs::File::open(path)?;
+    let mut decoder = open_decoder(std::io::BufReader::new(file), limits)?;
+    count_images(&mut decoder, limits.max_pages)
+}
+
+/// Walk a decoder's IFD chain and report how many images it holds, giving up
+/// with [`DecodeError::PageLimitExceeded`] once `max_pages` is reached.
+///
+/// The decoder is left positioned on the last image it read. Seeking back with
+/// `seek_to_image` afterwards is cheap, because the walk fills the decoder's
+/// own IFD offset table, so a caller that wants both the count and one page's
+/// pixels does not need a second decoder over the same bytes.
+///
+/// A *cyclic* chain is caught underneath rather than here: `tiff` 0.10.3 runs
+/// union-find over the IFD edges (`decoder::cycles::IfdCycles`) and returns
+/// `CycleInOffsets` on a back edge. The ceiling is for the chain that is
+/// merely very long, which nothing below bounds.
+fn count_images<R: Read + Seek>(
+    decoder: &mut Decoder<R>,
+    max_pages: u32,
+) -> Result<u32, DecodeError> {
     let mut count = 1u32;
     while decoder.more_images() {
+        if count >= max_pages {
+            return Err(DecodeError::PageLimitExceeded { max_pages });
+        }
         decoder.next_image().map_err(tiff_decode_err)?;
         count = count.saturating_add(1);
     }
@@ -573,16 +756,63 @@ fn count_images<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<u32, DecodeE
 ///
 /// Returns [`DecodeError`] if the file cannot be opened, `page` is at or past
 /// the file's page count, the TIFF is malformed, or the page uses a color or
-/// sample type this lane does not decode.
+/// sample type this lane does not decode. Under the default
+/// [`DecodeLimits`] it also returns the limit variants
+/// [`decode_tiff_page_with_limits`] documents.
 pub fn decode_tiff_page(path: &Path, page: u32) -> Result<Raster, DecodeError> {
-    let bytes = std::fs::read(path)?;
-    let bytes = normalize_multiband_photometric(&bytes);
+    decode_tiff_page_with_limits(path, page, DecodeLimits::default())
+}
+
+/// As [`decode_tiff_page`], with the resource ceilings the decode runs under
+/// given explicitly instead of taken from [`DecodeLimits::default`].
+///
+/// Everything sized by the file is bounded here, in this order:
+///
+/// 1. The file body, read in whole because the vips multiband relabel patches
+///    the bytes before the decoder sees them, is capped at
+///    [`DecodeLimits::max_alloc_bytes`] and patched in place rather than
+///    cloned.
+/// 2. The IFD walk that sources `n-pages` is capped at
+///    [`DecodeLimits::max_pages`], and stops there rather than counting to the
+///    end of the chain.
+/// 3. The page's declared geometry goes through
+///    [`DecodeLimits::max_coord`], then [`DecodeLimits::max_pixels`], then an
+///    explicit `width * height * bands * bytes_per_sample` check against
+///    [`DecodeLimits::max_alloc_bytes`], all before the pixel buffer is
+///    reserved.
+///
+/// The `tiff` crate's own `decoding_buffer_size` is tightened from
+/// `max_alloc_bytes` too, never loosened past its 256 MiB default.
+///
+/// # Errors
+///
+/// * [`DecodeError::Io`] if the file cannot be opened or read.
+/// * [`DecodeError::AllocLimitExceeded`] if the file body or the page's pixel
+///   buffer would be larger than [`DecodeLimits::max_alloc_bytes`].
+/// * [`DecodeError::PageLimitExceeded`] if the IFD chain declares more than
+///   [`DecodeLimits::max_pages`] pages.
+/// * [`DecodeError::CoordLimitExceeded`] if either declared axis exceeds
+///   [`DecodeLimits::max_coord`], or
+///   [`DecodeError::DimensionLimitExceeded`] if `width * height` exceeds
+///   [`DecodeLimits::max_pixels`].
+/// * [`DecodeError`] if `page` is at or past the file's page count, the TIFF
+///   is malformed, or the page uses a color or sample type this lane does not
+///   decode.
+pub fn decode_tiff_page_with_limits(
+    path: &Path,
+    page: u32,
+    limits: DecodeLimits,
+) -> Result<Raster, DecodeError> {
+    let mut bytes = read_file_bounded(path, limits)?;
+    normalize_multiband_photometric_in_place(&mut bytes);
 
     // Counting first buys two things: an out-of-range index reports the bound
     // it missed instead of whatever the `tiff` crate's seek happens to say,
-    // and the count can ride back out on the raster as `n-pages`.
-    let mut counter = Decoder::new(Cursor::new(bytes.as_ref())).map_err(tiff_decode_err)?;
-    let n_pages = count_images(&mut counter)?;
+    // and the count can ride back out on the raster as `n-pages`. The walk
+    // fills the decoder's IFD offset table, so seeking back to `page` on the
+    // same decoder is one directory read rather than a second walk.
+    let mut decoder = open_decoder(Cursor::new(bytes.as_slice()), limits)?;
+    let n_pages = count_images(&mut decoder, limits.max_pages)?;
     if page >= n_pages {
         return Err(decode_err(format!(
             "TIFF page {page} is out of range: pages are indexed from 0 and \
@@ -590,11 +820,10 @@ pub fn decode_tiff_page(path: &Path, page: u32) -> Result<Raster, DecodeError> {
         )));
     }
 
-    let mut decoder = Decoder::new(Cursor::new(bytes.as_ref())).map_err(tiff_decode_err)?;
     decoder
         .seek_to_image(page as usize)
         .map_err(tiff_decode_err)?;
-    let mut raster = decode_current_image(&mut decoder)?;
+    let mut raster = decode_current_image(&mut decoder, limits)?;
     raster
         .fields
         .set("n-pages", MetadataValue::Int(i64::from(n_pages)));
@@ -683,14 +912,42 @@ impl Raster {
     /// Decode a raster from in-memory TIFF bytes (the inverse of
     /// [`Raster::tiff_save`]); reads the first page.
     ///
+    /// Equivalent to [`Raster::tiff_load_with_limits`] with
+    /// [`DecodeLimits::default`]. The caller already holds the bytes, so
+    /// nothing here reads a file, but the *decoded* geometry is bounded the
+    /// same way [`decode_tiff_page`] bounds it.
+    ///
     /// # Errors
     ///
     /// Returns [`DecodeError`] if the bytes are not a valid TIFF, or the
-    /// first page uses a color or sample type this lane does not decode.
+    /// first page uses a color or sample type this lane does not decode, plus
+    /// the limit variants [`Raster::tiff_load_with_limits`] documents.
     pub fn tiff_load(data: &[u8]) -> Result<Raster, DecodeError> {
+        Self::tiff_load_with_limits(data, DecodeLimits::default())
+    }
+
+    /// As [`Raster::tiff_load`], with the resource ceilings given explicitly.
+    ///
+    /// The first page's declared geometry goes through
+    /// [`DecodeLimits::max_coord`], [`DecodeLimits::max_pixels`] and the
+    /// explicit `max_alloc_bytes` buffer budget before the pixel buffer is
+    /// reserved. There is no page walk (only page 0 is read) and no file read,
+    /// so [`DecodeLimits::max_pages`] does not apply.
+    ///
+    /// # Errors
+    ///
+    /// * [`DecodeError::CoordLimitExceeded`] if either declared axis exceeds
+    ///   [`DecodeLimits::max_coord`].
+    /// * [`DecodeError::DimensionLimitExceeded`] if `width * height` exceeds
+    ///   [`DecodeLimits::max_pixels`].
+    /// * [`DecodeError::AllocLimitExceeded`] if the pixel buffer would be
+    ///   larger than [`DecodeLimits::max_alloc_bytes`].
+    /// * [`DecodeError`] if the bytes are not a valid TIFF, or the first page
+    ///   uses a color or sample type this lane does not decode.
+    pub fn tiff_load_with_limits(data: &[u8], limits: DecodeLimits) -> Result<Raster, DecodeError> {
         let data = normalize_multiband_photometric(data);
-        let mut decoder = Decoder::new(Cursor::new(data.as_ref())).map_err(tiff_decode_err)?;
-        decode_current_image(&mut decoder)
+        let mut decoder = open_decoder(Cursor::new(data.as_ref()), limits)?;
+        decode_current_image(&mut decoder, limits)
     }
 }
 
@@ -981,6 +1238,309 @@ mod tests {
             );
         }
         assert_eq!(decode_tiff_page(&single, 0).unwrap().get_n_pages(), 1);
+    }
+
+    /// Rewrite one tag's value in the first IFD of a little-endian classic
+    /// TIFF, as a LONG/count-1 entry so any `u32` fits inline in the entry's
+    /// own value slot. Used to make a fixture *declare* geometry it does not
+    /// carry, which is the shape of a decompression bomb: the header lies and
+    /// the decoder is asked to trust it.
+    fn patch_first_ifd_tag(bytes: &mut [u8], tag: u16, value: u32) -> bool {
+        assert_eq!(&bytes[0..2], b"II", "the tiff encoder writes little-endian");
+        let ifd = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let entries = u16::from_le_bytes(bytes[ifd..ifd + 2].try_into().unwrap()) as usize;
+        for i in 0..entries {
+            let e = ifd + 2 + i * 12;
+            if u16::from_le_bytes(bytes[e..e + 2].try_into().unwrap()) == tag {
+                bytes[e + 2..e + 4].copy_from_slice(&4u16.to_le_bytes());
+                bytes[e + 4..e + 8].copy_from_slice(&1u32.to_le_bytes());
+                bytes[e + 8..e + 12].copy_from_slice(&value.to_le_bytes());
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A fixture that declares `w` x `h` while carrying a 4x4 gray8 strip.
+    /// `RowsPerStrip` moves with the height so the single strip the encoder
+    /// wrote still satisfies the `tiff` crate's own strip-count consistency
+    /// check, leaving the declared geometry as the only thing wrong with it.
+    fn lying_geometry_fixture(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = multipage_gray8_fixture(1);
+        assert!(patch_first_ifd_tag(&mut bytes, 256, w), "ImageWidth");
+        assert!(patch_first_ifd_tag(&mut bytes, 257, h), "ImageLength");
+        assert!(patch_first_ifd_tag(&mut bytes, 278, h), "RowsPerStrip");
+        bytes
+    }
+
+    /// Byte offset of the next-IFD pointer that closes each IFD in a
+    /// little-endian classic TIFF, in chain order.
+    fn ifd_next_pointer_offsets(bytes: &[u8]) -> Vec<usize> {
+        assert_eq!(&bytes[0..2], b"II", "the tiff encoder writes little-endian");
+        let mut offsets = Vec::new();
+        let mut ifd = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        while ifd != 0 {
+            let entries = u16::from_le_bytes(bytes[ifd..ifd + 2].try_into().unwrap()) as usize;
+            let next = ifd + 2 + entries * 12;
+            offsets.push(next);
+            ifd = u32::from_le_bytes(bytes[next..next + 4].try_into().unwrap()) as usize;
+        }
+        offsets
+    }
+
+    /**
+     * Tests that a TIFF whose header declares 100000x100000 is refused from
+     * the declared geometry, before any pixel buffer is reserved. Until #540
+     * this path never consulted `DecodeLimits` at all: it handed whatever came
+     * back to `Raster::new`, whose `DEFAULT_MAX_ALLOC_BYTES` is 8 GiB, sixteen
+     * times looser than the 512 MiB `DecodeLimits::max_alloc_bytes` the rest
+     * of the crate publishes.
+     * Works by patching the width, height and rows-per-strip tags of a real
+     * 4x4 fixture so the file is structurally valid and only its declared size
+     * is a lie, then asserting the typed variant with its field values.
+     * Input: a 4x4 gray8 TIFF relabelled 100000x100000, default limits.
+     */
+    #[test]
+    fn decode_tiff_page_rejects_declared_geometry_over_the_pixel_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.tif");
+        std::fs::write(&path, lying_geometry_fixture(100_000, 100_000)).unwrap();
+        assert!(matches!(
+            decode_tiff_page(&path, 0),
+            Err(DecodeError::DimensionLimitExceeded {
+                width: 100_000,
+                height: 100_000,
+                max_pixels: 1_073_741_824
+            })
+        ));
+    }
+
+    /**
+     * Tests the single-axis ceiling on the same path, which fires before the
+     * pixel-count one and is the check the native `.v` reader and the
+     * `image`-crate path already applied.
+     * Works by declaring one axis past the default `max_coord` (10,000,000,
+     * the libvips `VIPS_MAX_COORD`) while leaving the other small, so only
+     * `check_coord` can catch it.
+     * Input: a 4x4 gray8 TIFF relabelled 100000000x4, default limits.
+     */
+    #[test]
+    fn decode_tiff_page_rejects_an_axis_over_the_coord_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.tif");
+        std::fs::write(&path, lying_geometry_fixture(100_000_000, 4)).unwrap();
+        assert!(matches!(
+            decode_tiff_page(&path, 0),
+            Err(DecodeError::CoordLimitExceeded {
+                width: 100_000_000,
+                height: 4,
+                max_coord: 10_000_000
+            })
+        ));
+    }
+
+    /**
+     * Tests the allocation budget, which neither of the other two ceilings
+     * implies: a pixel count sees neither the band count nor the sample depth,
+     * so the default 1-gigapixel `max_pixels` still waves through a 4 GiB
+     * RGBA frame.
+     * Works by choosing a ceiling above the compressed file on disk but below
+     * the 4096-byte buffer a 64x64 gray8 page decodes into, so the file read
+     * passes and only the pixel buffer trips; the test asserts the file really
+     * is the smaller of the two rather than assuming it.
+     * Input: a 64x64 gray8 Deflate TIFF with max_alloc_bytes just over the
+     * file size.
+     */
+    #[test]
+    fn decode_tiff_page_bounds_the_pixel_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("budget.tif");
+        ramp_gray8(64, 64)
+            .save_tiff(&path, TiffCompression::Deflate)
+            .unwrap();
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            file_len < 4096,
+            "the deflate fixture must compress below its 4096-byte pixel buffer, got {file_len}"
+        );
+        let limits = DecodeLimits::default().with_max_alloc_bytes(file_len);
+        assert!(matches!(
+            decode_tiff_page_with_limits(&path, 0, limits),
+            Err(DecodeError::AllocLimitExceeded {
+                what: "TIFF page pixel buffer",
+                needed_bytes: 4096,
+                ..
+            })
+        ));
+        // The same file decodes once the budget clears the buffer.
+        let ok = DecodeLimits::default().with_max_alloc_bytes(4096);
+        assert_eq!(
+            decode_tiff_page_with_limits(&path, 0, ok).unwrap().data(),
+            ramp_gray8(64, 64).data()
+        );
+    }
+
+    /**
+     * Tests that the whole-file read is bounded too. `decode_tiff_page` reads
+     * the file into memory rather than streaming it, because the vips
+     * multiband relabel patches the bytes before the decoder sees them, and a
+     * plain `std::fs::read` sizes that buffer from the file with no ceiling at
+     * all. That was the largest of the three unbounded reads #566 left on this
+     * path.
+     * Works by setting a ceiling below the file size and asserting the failure
+     * names the file body rather than the pixel buffer, so it is clear the
+     * read never happened.
+     * Input: a 64x64 gray8 TIFF with max_alloc_bytes = 8.
+     */
+    #[test]
+    fn decode_tiff_page_bounds_the_file_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("body.tif");
+        ramp_gray8(64, 64)
+            .save_tiff(&path, TiffCompression::Deflate)
+            .unwrap();
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        let limits = DecodeLimits::default().with_max_alloc_bytes(8);
+        match decode_tiff_page_with_limits(&path, 0, limits) {
+            Err(DecodeError::AllocLimitExceeded {
+                what,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "TIFF file body");
+                assert_eq!(needed_bytes, file_len);
+                assert_eq!(max_alloc_bytes, 8);
+            }
+            other => panic!("expected the file body to be refused, got {other:?}"),
+        }
+    }
+
+    /**
+     * Tests that the IFD walk stops at `DecodeLimits::max_pages` instead of
+     * running to the end of the chain. #566 put this walk on the hot path:
+     * `decode_tiff_page` calls it on every single page decode to source
+     * `n-pages`, and nothing bounded it.
+     * Works by pointing the last IFD's next-pointer at an offset past the end
+     * of the file, so a walk that ran past the ceiling would fail with the
+     * `tiff` crate's own malformed-chain error instead. Getting
+     * `PageLimitExceeded` out of the low ceiling and a different error out of
+     * the high one is the proof the low one never touched the bad link.
+     * Input: a three-page 4x4 gray8 file with a fourth, unreadable link,
+     * max_pages 2 then 100.
+     */
+    #[test]
+    fn tiff_page_count_stops_at_the_page_ceiling() {
+        let mut bytes = multipage_gray8_fixture(3);
+        let nexts = ifd_next_pointer_offsets(&bytes);
+        assert_eq!(nexts.len(), 3, "fixture must have three IFDs");
+        let bogus = (bytes.len() as u32).saturating_add(4096);
+        let last = *nexts.last().unwrap();
+        bytes[last..last + 4].copy_from_slice(&bogus.to_le_bytes());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.tif");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let stopped = tiff_page_count_with_limits(&path, DecodeLimits::default().with_max_pages(2));
+        assert!(
+            matches!(
+                stopped,
+                Err(DecodeError::PageLimitExceeded { max_pages: 2 })
+            ),
+            "expected the ceiling to stop the walk, got {stopped:?}"
+        );
+        let walked =
+            tiff_page_count_with_limits(&path, DecodeLimits::default().with_max_pages(100));
+        assert!(
+            !matches!(walked, Err(DecodeError::PageLimitExceeded { .. })),
+            "a high ceiling must reach the broken link instead, got {walked:?}"
+        );
+        assert!(walked.is_err(), "the broken link must still be an error");
+    }
+
+    /**
+     * Tests that the ceiling is inclusive, so a file with exactly `max_pages`
+     * pages still reads. The bound has to be usable, not just safe: a
+     * three-page file under a ceiling of three is not a bomb.
+     * Input: a three-page 4x4 gray8 file, max_pages 3 then 2, through both the
+     * count and the page decode.
+     */
+    #[test]
+    fn the_page_ceiling_is_inclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("three.tif");
+        std::fs::write(&path, multipage_gray8_fixture(3)).unwrap();
+        let at = DecodeLimits::default().with_max_pages(3);
+        assert_eq!(tiff_page_count_with_limits(&path, at).unwrap(), 3);
+        assert_eq!(
+            decode_tiff_page_with_limits(&path, 2, at)
+                .unwrap()
+                .get_n_pages(),
+            3
+        );
+        let under = DecodeLimits::default().with_max_pages(2);
+        assert!(matches!(
+            decode_tiff_page_with_limits(&path, 0, under),
+            Err(DecodeError::PageLimitExceeded { max_pages: 2 })
+        ));
+    }
+
+    /**
+     * Tests that the in-memory round-trip honours the same ceilings. It shares
+     * the decode path with the page readers, so leaving it on the old
+     * `Raster::new` budget would have left half the hole open.
+     * Works by handing `tiff_load_with_limits` a pixel ceiling of one, which
+     * only the declared geometry can trip.
+     * Input: a 4x4 gray8 TIFF in memory, max_pixels 1.
+     */
+    #[test]
+    fn tiff_load_honours_the_decode_limits() {
+        let bytes = multipage_gray8_fixture(1);
+        let limits = DecodeLimits::default().with_max_pixels(1);
+        assert!(matches!(
+            Raster::tiff_load_with_limits(&bytes, limits),
+            Err(DecodeError::DimensionLimitExceeded {
+                width: 4,
+                height: 4,
+                max_pixels: 1
+            })
+        ));
+        // The default form is unchanged for anything that fits.
+        assert_eq!(Raster::tiff_load(&bytes).unwrap().width(), 4);
+    }
+
+    /**
+     * Tests that the no-limits entry points really do delegate to the default
+     * limits rather than keeping a second, looser path alive. Whether they do
+     * is the entire subject of #540, and a delegation that silently stopped
+     * delegating would be invisible from the outside otherwise.
+     * Works by comparing each pair on a file that decodes, then on one that
+     * the default ceilings refuse, and requiring the same outcome from both.
+     * Input: a three-page fixture and a 100000x100000 liar.
+     */
+    #[test]
+    fn the_default_entry_points_delegate_to_the_default_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.tif");
+        std::fs::write(&good, multipage_gray8_fixture(3)).unwrap();
+        let d = DecodeLimits::default();
+        assert_eq!(
+            tiff_page_count(&good).unwrap(),
+            tiff_page_count_with_limits(&good, d).unwrap()
+        );
+        assert_eq!(
+            decode_tiff_page(&good, 1).unwrap().data(),
+            decode_tiff_page_with_limits(&good, 1, d).unwrap().data()
+        );
+
+        let bad = dir.path().join("bad.tif");
+        std::fs::write(&bad, lying_geometry_fixture(100_000, 100_000)).unwrap();
+        assert_eq!(
+            decode_tiff_page(&bad, 0).unwrap_err().to_string(),
+            decode_tiff_page_with_limits(&bad, 0, d)
+                .unwrap_err()
+                .to_string()
+        );
     }
 
     #[test]

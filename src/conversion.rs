@@ -205,6 +205,24 @@ pub enum ConversionError {
         /// The largest `shim` libvips accepts, `1000000`.
         max: u32,
     },
+    /// An explicit `across` outside the range libvips declares on
+    /// [`Raster::arrayjoin`]'s property,
+    /// `VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)`. GObject
+    /// refuses `--across 0` and `--across 1000001` before the operation is
+    /// built at all, so neither reaches a grid layout in vips and neither
+    /// does here. `across` used to be clamped into `1..=n` instead, which
+    /// silently accepted both. The default (`None`, meaning one row of every
+    /// image) is not checked against this range: vips assigns it directly to
+    /// the struct field and bypasses its own property check the same way.
+    #[error("across must be between {min} and {max}, got {across}")]
+    AcrossOutOfRange {
+        /// The `across` that was asked for.
+        across: u32,
+        /// The smallest `across` libvips accepts, `1`.
+        min: u32,
+        /// The largest `across` libvips accepts, `1000000`.
+        max: u32,
+    },
     /// The offset [`Raster::join`] computed for the second image does not
     /// fit the signed 32-bit range images are placed at (`join.c` does
     /// this arithmetic in `int`, and [`Raster::try_insert`] takes `i32`
@@ -728,6 +746,19 @@ fn remap(
 /// `vips join --shim 1000001` and `vips arrayjoin --shim 1000001` both fail
 /// with the same CRITICAL.
 const SHIM_MAX: u32 = 1_000_000;
+
+/// The range [`Raster::arrayjoin`] accepts for an explicit `across`,
+/// matching the libvips property bound `arrayjoin.c:400-406` declares at
+/// `fe420cf3a`: `VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)`.
+/// GObject refuses anything outside it before the operation is built, so
+/// `vips arrayjoin "a.v b.v" z.v --across 0` and `--across 1000001` both
+/// fail with a CRITICAL rather than producing a grid. The default (all the
+/// images in one row) is not range checked, because vips assigns it
+/// straight to the struct field in `vips_arrayjoin_build`
+/// (`arrayjoin.c:250-251`) and so bypasses the property check the same way.
+const ACROSS_MIN: u32 = 1;
+/// Upper end of the [`ACROSS_MIN`] range.
+const ACROSS_MAX: u32 = 1_000_000;
 
 /// Where the second image sits relative to the first, in pixels from the
 /// first image's origin (`join.c:109-156`).
@@ -1624,6 +1655,8 @@ impl Raster {
     /// raster (the sample copy is unsigned-only),
     /// [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`, the
     /// bound libvips declares on the property,
+    /// [`ConversionError::AcrossOutOfRange`] for an explicit `across`
+    /// outside the `1..=1000000` bound libvips declares on its property,
     /// [`ConversionError::BandCountMismatch`] if band counts differ and
     /// the smaller is not 1, [`ConversionError::SizeOverflow`] if the
     /// grid exceeds `u32` dimensions, or [`ConversionError::Raster`] on
@@ -1646,7 +1679,20 @@ impl Raster {
             return Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" });
         }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
-        let across = across.unwrap_or(n).clamp(1, n);
+        // vips does not clamp `across` to the image count: it lays out a grid
+        // that many cells wide and leaves the trailing cells background
+        // (`arrayjoin.c:255-268`). It refuses an out-of-range value at the
+        // GObject property boundary instead; see `ACROSS_MIN`.
+        if let Some(across) = across
+            && !(ACROSS_MIN..=ACROSS_MAX).contains(&across)
+        {
+            return Err(ConversionError::AcrossOutOfRange {
+                across,
+                min: ACROSS_MIN,
+                max: ACROSS_MAX,
+            });
+        }
+        let across = across.unwrap_or(n);
         let down = n.div_ceil(across);
         let shim = shim.unwrap_or(0);
         // `arrayjoin` declares the same 0..=1000000 property range `join`
@@ -1738,7 +1784,13 @@ impl Raster {
     ///
     /// `across` is the number of images per row (default: all of them in
     /// one row); `shim` is the gap in pixels between cells (default 0,
-    /// maximum `1000000` as in libvips). Every cell is the size of the
+    /// maximum `1000000` as in libvips). `across` is **not** clamped to the
+    /// number of images: a value larger than the list lays out that many
+    /// cells wide and leaves the trailing ones background, so two images
+    /// with `across = 5` give a 5-cell row, not a 2-cell one. An explicit
+    /// `across` outside `1..=1000000` is refused
+    /// ([`ConversionError::AcrossOutOfRange`]), which is the range libvips
+    /// declares on the property. Every cell is the size of the
     /// largest input; smaller images sit at the top-left of their cell and
     /// the remainder (and any trailing empty cells and shim gaps) is
     /// filled with black, libvips' default background. Band counts are
@@ -1750,15 +1802,6 @@ impl Raster {
     /// narrower band count. Float rasters are not supported yet on any
     /// input. Panicking form of [`Raster::try_arrayjoin`], matching the
     /// ported-test call surface.
-    ///
-    /// Known divergence: `across` is clamped to the number of images here,
-    /// so a value larger than the list gives one full row. Real vips does
-    /// not clamp, and lays the empty trailing cells out: `vips arrayjoin
-    /// "a.v c.v" out.v --across 5` on a 3x2 and a 2x3 gives 15x3 where
-    /// libviprs gives 6x3, and `--across 3` gives 9x3 where libviprs gives
-    /// 6x3. vips also refuses `--across 0` and `--across 1000001` at the
-    /// property boundary (`VIPS_ARG_INT(..., 1, 1000000, 1)`), which
-    /// libviprs clamps instead.
     ///
     /// # Panics
     ///
@@ -3520,25 +3563,120 @@ mod tests {
     }
 
     /**
-     * Tests the current `across` clamp, which is a KNOWN DIVERGENCE and not
-     * libvips parity, contrary to what this test used to claim. Measured
-     * against vips 8.18.4 on the 3x2 / 2x3 pair, `across` is not clamped to
-     * the image count at all: `--across 3` gives 9x3 and `--across 5` gives
-     * 15x3, laying out the empty trailing cells, where libviprs gives 6x3
-     * for both. vips also refuses `--across 0` and `--across 1000001` at
-     * the property boundary (`VIPS_ARG_INT(..., 1, 1000000, 1)`) rather
-     * than clamping them. This test pins what libviprs does today so the
-     * divergence is visible and a fix has something to change; it is not a
-     * statement about what vips does.
-     * Input: Some(0) behaves as 1 (stack), Some(99) as n (row).
+     * Tests that `across` is NOT clamped to the image count: a value larger
+     * than the list lays out that many cells wide and leaves the trailing
+     * ones background, which is what `arrayjoin.c:255-268` does at
+     * `fe420cf3a` (`down` is `ROUND_UP(n, across) / across` and the output
+     * width is `hspacing * across + shim * (across - 1)`, neither of them
+     * capped at `n`). libviprs used to clamp into `1..=n`, so every
+     * `across > n` collapsed to one full row.
+     * Works by sweeping the whole `across` range vips was measured over on
+     * the two inputs whose sizes differ, so the cell-size rule (the cell is
+     * the largest input on each axis, here 3x3 out of a 3x2 and a 2x3) is
+     * exercised at the same time as the layout.
+     * Input: 3x2 and 2x3 gray8. Measured with vips 8.18.4 as
+     * `vips black a.v 3 2; vips black b.v 2 3;
+     * vips arrayjoin "a.v b.v" o.v --across N`:
+     * 1 -> 3x6, 2 -> 6x3, 3 -> 9x3, 4 -> 12x3, 5 -> 15x3, 7 -> 21x3,
+     * 10 -> 30x3.
      */
     #[test]
-    fn arrayjoin_across_clamped() {
+    fn arrayjoin_across_is_not_clamped_to_the_image_count() {
+        let a = gray8(3, 2, vec![0; 6]);
+        let b = gray8(2, 3, vec![0; 6]);
+        for (across, want) in [
+            (1u32, (3u32, 6u32)),
+            (2, (6, 3)),
+            (3, (9, 3)),
+            (4, (12, 3)),
+            (5, (15, 3)),
+            (7, (21, 3)),
+            (10, (30, 3)),
+        ] {
+            let out = Raster::arrayjoin(&[&a, &b], Some(across), None);
+            assert_eq!(
+                (out.width(), out.height()),
+                want,
+                "across = {across} should give {want:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests that the trailing cells an over-wide `across` opens up are
+     * background rather than a wrapped repeat of the inputs, the pixel
+     * complement of the geometry sweep above.
+     * Works by giving the two 1x1 inputs distinct values so a wrap would be
+     * visible, then reading every cell of the row back.
+     * Input: 1x1 [5] and 1x1 [9], across 3. Measured as
+     * `vips arrayjoin "p1.v p2.v" t3.v --across 3` -> 3x1 reading 5, 9, 0.
+     */
+    #[test]
+    fn arrayjoin_across_past_the_end_leaves_background_cells() {
+        let a = gray8(1, 1, vec![5]);
+        let b = gray8(1, 1, vec![9]);
+        let out = Raster::arrayjoin(&[&a, &b], Some(3), None);
+        assert_eq!((out.width(), out.height()), (3, 1));
+        assert_eq!(out.data(), &[5, 9, 0]);
+    }
+
+    /**
+     * Tests that `shim` still spaces the empty trailing cells, so the shim
+     * count follows `across` and not the image count. `arrayjoin.c:259-260`
+     * sizes the output as `hspacing * across + shim * (across - 1)`, which
+     * is 3 * 4 + 2 * 3 = 18 here; the old clamp would have made it 6 + 2.
+     * Input: the 3x2 / 2x3 pair, across 4, shim 2. Measured as
+     * `vips arrayjoin "a.v b.v" s4.v --across 4 --shim 2` -> 18x3.
+     */
+    #[test]
+    fn arrayjoin_shim_spaces_the_trailing_cells_too() {
+        let a = gray8(3, 2, vec![0; 6]);
+        let b = gray8(2, 3, vec![0; 6]);
+        let out = Raster::arrayjoin(&[&a, &b], Some(4), Some(2));
+        assert_eq!((out.width(), out.height()), (18, 3));
+    }
+
+    /**
+     * Tests the libvips bound on `arrayjoin`'s `across`, the
+     * `VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)` range
+     * `arrayjoin.c:400-406` declares at `fe420cf3a`. Both ends are refused
+     * by GObject before the operation is built, measured on the 3x2 / 2x3
+     * pair: `--across 0` and `--across 1000001` each fail with
+     * `value "N" of type 'gint' is invalid or out of range for property
+     * 'across'`. libviprs used to clamp both silently, 0 into a vertical
+     * stack and anything large into one row.
+     * Works by asserting the typed variant with its field values, then
+     * checking the default is still accepted for a list longer than the
+     * range would allow if it were checked, the way vips assigns
+     * `join->across = n` past its own property check.
+     * Input: two 1x1 images with across 0, 1000001, and u32::MAX.
+     */
+    #[test]
+    fn try_arrayjoin_across_outside_the_vips_property_range_is_rejected() {
         let a = gray8(1, 1, vec![1]);
         let b = gray8(1, 1, vec![2]);
-        let stacked = Raster::arrayjoin(&[&a, &b], Some(0), None);
-        assert_eq!((stacked.width(), stacked.height()), (1, 2));
-        let row = Raster::arrayjoin(&[&a, &b], Some(99), None);
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], Some(0), None),
+            Err(ConversionError::AcrossOutOfRange {
+                across: 0,
+                min: 1,
+                max: 1_000_000
+            })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], Some(1_000_001), None),
+            Err(ConversionError::AcrossOutOfRange {
+                across: 1_000_001,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], Some(u32::MAX), None),
+            Err(ConversionError::AcrossOutOfRange { .. })
+        ));
+        // The bound applies to an explicit value only; the default is still
+        // whatever the list length is.
+        let row = Raster::arrayjoin(&[&a, &b], None, None);
         assert_eq!((row.width(), row.height()), (2, 1));
     }
 

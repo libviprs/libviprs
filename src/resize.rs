@@ -93,18 +93,27 @@ fn downscale_half_noalpha(src: &Raster) -> Result<Raster, RasterError> {
 
 /// Downscale with alpha-weighted averaging for color channels.
 ///
-/// Matches libvips `SHRINK_ALPHA_TYPE` from `region.c`:
+/// Takes its shape from libvips `SHRINK_ALPHA_TYPE` in
+/// `libvips/iofuncs/region.c`:
 /// - Alpha channel (last band) is averaged normally: `(a1+a2+a3+a4) / 4`
 /// - Color channels are weighted by their pixel's alpha:
 ///   `(a1*c1 + a2*c2 + a3*c3 + a4*c4) / (a1 + a2 + a3 + a4)`
 /// - If the summed alpha is zero, all channels are set to zero
 ///
 /// This prevents transparent pixels from darkening opaque neighbors
-/// when averaged together. Every sum is accumulated in `u64` and the final
-/// divides round half-up (colour `(w + alpha_sum/2)/alpha_sum`, alpha
-/// `(alpha_sum + count/2)/count`), matching [`downscale_to`] and the no-alpha
-/// box filter so a fully-opaque RGBA image downscales bit-identically to its
-/// RGB twin instead of carrying a systematic -0.5 LSB truncation bias.
+/// when averaged together.
+///
+/// The **rounding deliberately diverges** from `SHRINK_ALPHA_TYPE`, which is
+/// worth stating plainly because the shape above matches so closely.
+/// `SHRINK_ALPHA_TYPE` accumulates in `double` and stores through a C cast to
+/// the sample type, so it **truncates toward zero** — it carries a systematic
+/// -0.5 LSB bias, and it does not agree with its own no-alpha sibling
+/// `SHRINK_TYPE_MEAN_INT`, which rounds half up with `(tot + 2) >> 2`. Core
+/// #458 fixed that: here every sum is accumulated in `u64` and the final
+/// divides round half up (colour `(w + alpha_sum/2)/alpha_sum`, alpha
+/// `(alpha_sum + count/2)/count`), matching [`downscale_to`] and
+/// [`downscale_half_noalpha`] so a fully-opaque RGBA image downscales
+/// bit-identically to its RGB twin.
 fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
     let dst_w = src.width().div_ceil(2);
     let dst_h = src.height().div_ceil(2);

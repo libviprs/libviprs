@@ -231,12 +231,22 @@ impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
-    /// `"png"`, `"gif"`, `"webp"` and `"v"` / `"vips"` are wired; any other
-    /// format returns [`EncodeError::Unsupported`]. `"webp"` encodes
-    /// losslessly at [`crate::webp::SaveOptions::default`], keeping any
-    /// attached metadata, and `"gif"` at
-    /// [`crate::gif::SaveOptions::default`]; [`Raster::encode_webp`] and
-    /// [`Raster::encode_gif`] take the options explicitly.
+    /// `"png"`, `"gif"`, `"webp"`, `"jxl"`, `"fits"` / `"fit"` / `"fts"` and
+    /// `"v"` / `"vips"` are wired; any other format returns
+    /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
+    /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
+    /// `"gif"` at [`crate::gif::SaveOptions::default`], and `"jxl"` losslessly at
+    /// [`crate::jxl::SaveOptions::default`], which carries no metadata
+    /// because the encoder writes no box container;
+    /// [`Raster::encode_webp`], [`Raster::encode_gif`] and
+    /// [`Raster::encode_jxl`] take the options explicitly.
+    ///
+    /// `"jxl"` needs the non-default `jxl` feature to produce bytes. It
+    /// stays a live row without it and reports
+    /// [`EncodeError::Unsupported`] carrying `"jxl"`, which is the same
+    /// variant an unrecognised format name gets, so the dispatch has one
+    /// answer for "this build cannot write that" however the caller
+    /// arrived at it.
     ///
     /// # Errors
     ///
@@ -261,6 +271,11 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
+        "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
+        // The three suffixes vips registers for FITS (`vips__fits_suffs`,
+        // `fits.c:125`). `fitssave` takes no options, so there is nothing
+        // to default here.
+        "fits" | "fit" | "fts" => raster.encode_fits(),
         "v" | "vips" => raster.encode_vips().map_err(save_err_to_encode),
         _ => Err(EncodeError::unsupported(format.to_owned())),
     }
@@ -335,6 +350,42 @@ mod tests {
         assert_eq!(&via_dispatch[8..12], b"WEBP");
         let back = crate::decode_bytes(&via_dispatch).unwrap();
         assert_eq!(back.data(), raster.data());
+    }
+
+    /// `"jxl"` is a live row in the shared format dispatch, and the
+    /// bytes it returns are the same ones `Raster::encode_jxl` writes at
+    /// the default options, so the connection lane and the codec module
+    /// cannot drift apart. The leading `FF 0A` is the bare-codestream
+    /// magic, which is what the encoder writes and what
+    /// `vips jxlsave --keep none` writes too.
+    #[test]
+    #[cfg(feature = "jxl")]
+    fn encode_for_format_routes_jxl_to_the_lossless_encoder() {
+        let raster = sample_raster();
+        let via_dispatch = raster.encode_to_buffer("jxl").unwrap();
+        let direct = raster
+            .encode_jxl(crate::jxl::SaveOptions::default())
+            .unwrap();
+        assert_eq!(via_dispatch, direct);
+        assert_eq!(&via_dispatch[..2], b"\xff\x0a");
+        let back = crate::decode_bytes(&via_dispatch).unwrap();
+        assert_eq!(back.data(), raster.data());
+    }
+
+    /// Without the `jxl` feature the row is still there and still typed:
+    /// it reports `Unsupported` carrying the name the caller asked for,
+    /// which is what the dispatch promises for any format this build has
+    /// no encoder behind. Pinned so the row cannot quietly become a
+    /// fall-through to the catch-all arm, which would lose the name.
+    #[test]
+    #[cfg(not(feature = "jxl"))]
+    fn encode_for_format_refuses_jxl_by_name_without_the_feature() {
+        let raster = sample_raster();
+        let err = raster.encode_to_buffer("jxl").unwrap_err();
+        assert!(
+            matches!(err, EncodeError::Unsupported { ref format } if format == "jxl"),
+            "{err:?}"
+        );
     }
 
     /// Oracle `stdin-load-pixel-parity-jpeg`: the same JPEG bytes decode

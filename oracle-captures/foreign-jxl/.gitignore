@@ -1,0 +1,9 @@
+# capture.py regenerates everything below from its own deterministic ramps
+# and the vips binary, so only capture.py, commands.sh, oracle.json and the
+# .jxl files src/jxl.rs embeds verbatim are pinned.
+#
+# outputs/ holds the intermediate .v files, the tiny-geometry probes, the
+# nonconforming EXIF box vips tolerates and libviprs does not, and the files
+# libviprs itself wrote for the `--viprs` pass.
+fixtures/*.raw
+outputs/
