@@ -1212,9 +1212,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewritten.
 
   Both ops keep the input format, so an unsigned raster still comes back
-  unsigned, rounded and saturated. Nothing on that path changed. vips itself
-  always writes `FLOAT` output here, and that divergence is unchanged and now
-  written down on both methods.
+  unsigned, rounded and saturated, and the arithmetic on that path is
+  untouched. vips itself always writes `FLOAT` output here, and that
+  divergence is unchanged and now written down on both methods.
+
+  One thing on the unsigned path *did* change, and it is worth stating rather
+  than filing under "nothing": both ops now copy the input's interpretation
+  onto the output. An `Rgba16` explicitly tagged `Srgb` used to come back
+  resolving to `Rgb16`, because the result was left untagged and a 4-band
+  16-bit buffer resolves to the genuine 16-bit space. It comes back `Srgb`
+  now. That is the correct answer and it is what vips does: measured on
+  8.18.6, `vips premultiply` and `vips unpremultiply` both hand a `1x1 ushort,
+  4 bands, srgb` input straight back as `srgb`, and a `multiband` one as
+  `multiband`, because `vips_premultiply` copies the header. The tag matters
+  downstream, since `composite2` keys its 0..255 against 0..65535 scale on the
+  resolved interpretation, so this is a behaviour change rather than
+  bookkeeping.
+
+- `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
+  `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
+  (issue #631). They reached the same `depth_max` panic the alpha pair did, on
+  the same input: an OpenEXR or FITS load is a float raster, so
+  `decode_file("x.exr")?.try_recomb(&m)` took the process down. If you were
+  matching on the error you get one now; if you were relying on the panic, you
+  were relying on a bug.
+
+  These five refuse rather than compute, where the alpha pair computes, and
+  the reason is that vips gives no float answer to port for four of them. I
+  measured all three families on 8.18.6 rather than assuming: `vips_boolean`
+  casts a float operand to `int` before the bitwise op and never operates on
+  float at all (`(100.5, 100.5, 100.5, 0.5)` AND itself comes back as an
+  `int` image of `100 100 100 0`), and `vips stdif` refuses anything that is
+  not `uchar`, `ushort` included. `recomb` is the exception: vips does compute
+  it on float and keeps it float, so libviprs is deliberately narrower there,
+  because this port writes into the input depth and a float carrier has no
+  unsigned spelling of that. It is written up on the method.
+
+  What closes this properly is not the five fixes but the test behind them: a
+  property test now calls every `try_*` method in `arithmetic.rs` on an
+  `RgbaF32` raster and fails if any of them unwinds, with a companion check
+  that reads the module's own source and fails if a `try_` method exists that
+  the sweep does not call. A sixth one cannot arrive quietly.
 
 - A `.v` file libviprs writes is now readable by real vips, metadata and all,
   and no longer makes it print a warning on every open (issue #546). The
