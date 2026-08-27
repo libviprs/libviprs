@@ -269,7 +269,13 @@ mod pixel_format_serde {
         // and float compute intermediates (never produced by the pyramid
         // pipeline, but the serializer must be total) round-trip as
         // "multi8:N"/"multi16:N"/"floatf32:N".
-        let name = match v {
+        //
+        // Canonicalised first, so one pixel layout has one tag. The tuple
+        // variants are public, so `FloatF32(4)` is constructible and used to
+        // write "floatf32:4", which the reader below turns back into
+        // `RgbaF32` -- a persisted value that did not equal the one written
+        // (issue #531). The reader still accepts those older tags.
+        let name = match v.canonical() {
             PixelFormat::Gray8 => "gray8".to_string(),
             PixelFormat::Gray16 => "gray16".to_string(),
             PixelFormat::Rgb8 => "rgb8".to_string(),
@@ -981,10 +987,7 @@ mod tests {
             v1.source.pixel_format = alias;
             let m = v1.into_manifest();
             let s = m.to_json_string().unwrap();
-            assert!(
-                s.contains(tag),
-                "{alias:?} must persist as {tag}, got {s}"
-            );
+            assert!(s.contains(tag), "{alias:?} must persist as {tag}, got {s}");
         }
     }
 
@@ -1025,11 +1028,18 @@ mod tests {
             ("multi16:3", PixelFormat::Rgb16),
             ("multi16:4", PixelFormat::Rgba16),
             ("floatf32:4", PixelFormat::RgbaF32),
-            ("multi8:7", PixelFormat::Multi8(core::num::NonZeroU16::new(7).unwrap())),
-            ("floatf32:3", PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap())),
+            (
+                "multi8:7",
+                PixelFormat::Multi8(core::num::NonZeroU16::new(7).unwrap()),
+            ),
+            (
+                "floatf32:3",
+                PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap()),
+            ),
         ] {
             let m = sample_manifest().into_manifest();
-            let mut v: serde_json::Value = serde_json::from_str(&m.to_json_string().unwrap()).unwrap();
+            let mut v: serde_json::Value =
+                serde_json::from_str(&m.to_json_string().unwrap()).unwrap();
             v["source"]["pixel_format"] = serde_json::Value::String(tag.to_string());
             let bumped = serde_json::to_string(&v).unwrap();
             let parsed: Manifest = serde_json::from_str(&bumped).unwrap();

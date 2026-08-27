@@ -231,6 +231,15 @@ impl Raster {
     /// and that neither dimension is zero. This is the primary constructor used
     /// when pixel data has already been produced by a decoder or renderer.
     ///
+    /// The format is stored in its canonical spelling. `PixelFormat`'s tuple
+    /// variants are public, so a caller can declare `FloatF32(4)` where
+    /// `RgbaF32` names the same pixel layout; both are accepted and the
+    /// raster reports the named one. That is what lets every `match` on
+    /// [`Raster::format`] and every [`PixelFormat::has_alpha`] decision
+    /// downstream of it read the layout rather than the caller's choice of
+    /// spelling (issue #531). It cannot change what validates here: the two
+    /// spellings agree on `bytes_per_pixel`.
+    ///
     /// # Errors
     ///
     /// Returns [`RasterError::ZeroDimension`] if width or height is 0, or
@@ -266,6 +275,7 @@ impl Raster {
         data: Vec<u8>,
         max_bytes: u64,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -322,6 +332,7 @@ impl Raster {
         format: PixelFormat,
         data: Vec<u8>,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -393,7 +404,8 @@ impl Raster {
     ///
     /// Allocates a buffer of the correct size and fills it with `0u8`. Useful
     /// for creating blank tiles or output buffers that will be written into
-    /// later (e.g., compositing or scaling operations).
+    /// later (e.g., compositing or scaling operations). The format is stored
+    /// in its canonical spelling, as in [`Raster::new`].
     ///
     /// # Errors
     ///
@@ -423,6 +435,7 @@ impl Raster {
         format: PixelFormat,
         max_bytes: u64,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -1425,5 +1438,4 @@ mod proptests {
             }
         }
     }
-
 }

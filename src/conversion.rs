@@ -437,8 +437,12 @@ impl Interpretation {
     /// [`Interpretation::Srgb`] (libvips' guess for non-ushort colour),
     /// and the multiband and float intermediates as
     /// [`Interpretation::Multiband`].
+    ///
+    /// Read off [`PixelFormat::canonical`], so both spellings of a layout
+    /// get the same answer: `FloatF32(4)` reads as sRGB exactly as
+    /// `RgbaF32` does (issue #531).
     pub fn for_format(format: PixelFormat) -> Self {
-        match format {
+        match format.canonical() {
             PixelFormat::Gray8 => Self::Bw,
             PixelFormat::Gray16 => Self::Grey16,
             PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::RgbaF32 => Self::Srgb,

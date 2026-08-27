@@ -1,4 +1,4 @@
-//! OpenEXR (`.exr`) load: scene-linear samples in, `FloatF32(n)` out.
+//! OpenEXR (`.exr`) load: scene-linear samples in, float bands out.
 //!
 //! Ported from libvips `foreign/openexrload.c` and
 //! `foreign/openexr2vips.c`, which drive the OpenEXR C++ library through
@@ -18,7 +18,7 @@
 //!
 //! | libviprs method | libvips equivalent | result |
 //! |---|---|---|
-//! | [`decode_exr`] | `openexrload` | [`PixelFormat::FloatF32`]`(n)` raster, tagged [`Interpretation::ScRgb`] for an RGB selection and [`Interpretation::Multiband`] otherwise |
+//! | [`decode_exr`] | `openexrload` | float raster with one band per selected channel ([`PixelFormat::RgbaF32`] at four bands, [`PixelFormat::FloatF32`]`(n)` otherwise), tagged [`Interpretation::ScRgb`] for an RGB selection and [`Interpretation::Multiband`] otherwise |
 //! | *(none)* | *(none)* | libvips has never shipped an EXR writer |
 //!
 //! # Semantics
@@ -314,10 +314,13 @@ struct Selection {
 
 /// Decode OpenEXR bytes into a float [`Raster`] (libvips `openexrload`).
 ///
-/// The result is [`PixelFormat::FloatF32`]`(n)` holding the file's own
-/// scene-linear samples. HALF widens to `f32` exactly and FLOAT is copied
-/// through; neither is quantised, which is where this parts company with
-/// vips (see the [module docs](self)).
+/// The result is a float raster with one band per selected channel,
+/// holding the file's own scene-linear samples. The format is the canonical
+/// spelling of that band count, so an RGBA selection comes back as
+/// [`PixelFormat::RgbaF32`] and every other count as
+/// [`PixelFormat::FloatF32`]`(n)` (issue #531). HALF widens to `f32`
+/// exactly and FLOAT is copied through; neither is quantised, which is
+/// where this parts company with vips (see the [module docs](self)).
 ///
 /// # Channel selection
 ///
@@ -369,7 +372,7 @@ struct Selection {
 ///   in vips.
 /// * **Chroma-subsampled channels do not load**
 ///   ([`ExrError::SubsampledChannel`]).
-/// * **A `FloatF32(n)` raster is rejected by the pyramid engine.**
+/// * **A float raster is rejected by the pyramid engine.**
 ///   [`crate::resize::downscale_half`] and `downscale_to` both return
 ///   [`RasterError::FloatUnsupported`] for a float format, so a loaded
 ///   `.exr` cannot be fed to [`crate::EngineBuilder`]. The resampling
@@ -513,7 +516,13 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
         write_channel(&mut data, &channel.sample_data, name, band, bands, pixels)?;
     }
 
-    let format = PixelFormat::FloatF32(band_count);
+    // The canonical spelling of the layout: a four-channel selection is
+    // `RgbaF32`, not `FloatF32(4)`, which is the same pixel layout under a
+    // second name that disagrees with the first about `has_alpha` (issue
+    // #531). `Raster::new` would canonicalise it anyway; saying so here
+    // keeps the line honest about what it produces.
+    let format = PixelFormat::with_channels(usize::from(band_count.get()), SAMPLE_BYTES)
+        .expect("a non-zero band count at the 4-byte float depth is a valid format");
     let mut raster = Raster::new(width, height, format, data).map_err(ExrError::Raster)?;
     raster.meta.interpretation = Some(selection.interpretation);
     attach_fields(&mut raster, header, &selection, part_count);
@@ -770,7 +779,7 @@ mod tests {
      * Works by rebuilding the generator's ramp and comparing every
      * sample with `assert_eq!` on the bit pattern, which is legitimate
      * here only because half widens to f32 exactly.
-     * Input: `rgba_half_zip.exr`, 8x4 RGBA half -> Output: `FloatF32(4)`,
+     * Input: `rgba_half_zip.exr`, 8x4 RGBA half -> Output: `RgbaF32`,
      * 128 samples, `(0.0, 3.5, 7.0, 10.5)` at pixel (0, 0).
      */
     #[test]
@@ -853,7 +862,7 @@ mod tests {
      * tiles decodes its ragged edge correctly.
      * Works by rebuilding the ramp for a 7x5 image, which 4x4 tiles
      * cover with a 1-pixel right column and a 1-pixel bottom row.
-     * Input: `rgba_half_tiled_ragged.exr` -> Output: 7x5 `FloatF32(4)`
+     * Input: `rgba_half_tiled_ragged.exr` -> Output: 7x5 `RgbaF32`
      * matching the ramp at every pixel including the partial tiles.
      */
     #[test]
@@ -1204,7 +1213,7 @@ mod tests {
     /**
      * Tests that the smallest legal image, a single pixel, decodes.
      * Works by decoding the 1x1 fixture and reading its four samples.
-     * Input: `rgba_half_1x1.exr` -> Output: `FloatF32(4)`, one pixel
+     * Input: `rgba_half_1x1.exr` -> Output: `RgbaF32`, one pixel
      * `(0.0, 3.5, 7.0, 10.5)`.
      */
     #[test]
