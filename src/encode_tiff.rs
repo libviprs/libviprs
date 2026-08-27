@@ -39,12 +39,23 @@
 //! no page numbers of its own: the IFD chain is a linked list, so there is
 //! nothing in the file to number from one.
 //!
-//! `n-pages` (readable through [`Raster::get_n_pages`]) is the matching
-//! **count**, not an index, so the last page of a file is
-//! `get_n_pages() - 1`. [`decode_tiff_page`] attaches it to every raster it
-//! returns, single-page files included, which is what vips's `tiffload` does
-//! (`vipsheader -f n-pages` reports 3 for a three-page file and 1 for a
-//! one-page one).
+//! `n-pages` is the matching **count**, not an index, so the last page of a
+//! file is one less than the count. [`decode_tiff_page`] attaches it to every
+//! raster it returns, single-page files included, which is what vips's
+//! `tiffload` does (`vipsheader -f n-pages` reports 3 for a three-page file
+//! and 1 for a one-page one).
+//!
+//! The uncapped way to read that count back is [`tiff_page_count`], **not**
+//! [`Raster::get_n_pages`]. The accessor ports `vips_image_get_n_pages`
+//! whole, sanity ceiling included, so it reports `1` for any stored count of
+//! 10,000 or more no matter what the field really holds (issue #635). That is
+//! reachable on this path rather than theoretical: [`DecodeLimits::max_pages`]
+//! defaults to `100_000`, so a chain of 10,000 to 100,000 IFDs decodes
+//! normally, attaches its real length, and reads back as a single page. The
+//! stored value is untouched and still comes out of [`Raster::get_field`],
+//! and [`tiff_page_count`] walks the chain itself and answers with the real
+//! number. A `0..n` sweep stays in range either way, because the capped
+//! answer is 1 rather than something longer than the file.
 //!
 //! The crate's PDF readers ([`crate::extract_page_image`] and friends) are
 //! **1-based**, and that is deliberate rather than an oversight left behind
@@ -65,9 +76,11 @@
 //!
 //! * The **file body**. `decode_tiff_page` reads the whole file rather than
 //!   streaming it, because the vips multiband relabel below patches the bytes
-//!   before the decoder sees them. That read is capped at
+//!   before the decoder sees them. That read goes through the crate's shared
+//!   `read_file_bounded`, so it is capped at
 //!   [`DecodeLimits::max_alloc_bytes`], checked against the declared length
-//!   first and again against what was actually read.
+//!   first and again against what was actually read. The same helper now
+//!   backs [`crate::decode_file`]'s whole-file read (issue #629).
 //! * The **relabel**. It patches the buffer the reader already owns instead of
 //!   cloning it (`normalize_multiband_photometric_in_place`), so the peak
 //!   footprint is one copy of the file, not two.
@@ -126,11 +139,11 @@ use tiff::encoder::{
 use tiff::tags::Tag;
 
 use crate::codec::{DecodeError, TiffCompression};
-use crate::imageio::{MetadataValue, SaveError};
+use crate::imageio::SaveError;
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::sink::SinkError;
-use crate::source::DecodeLimits;
+use crate::source::{DecodeLimits, read_file_bounded};
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -610,36 +623,6 @@ fn open_decoder<R: Read + Seek>(
         .with_limits(tiff_limits))
 }
 
-/// Read the whole of `path` into memory, refusing a file larger than
-/// [`DecodeLimits::max_alloc_bytes`].
-///
-/// The page readers need the bytes in memory rather than streamed, because the
-/// vips multiband relabel patches them before the decoder ever sees them. A
-/// plain `std::fs::read` sizes that buffer from the file, which is exactly the
-/// unbounded allocation the limits exist to prevent. The declared length is
-/// checked first so a huge file costs one `stat` rather than a huge read, and
-/// the read is capped as well so a file that grows between the two cannot slip
-/// past.
-fn read_file_bounded(path: &Path, limits: DecodeLimits) -> Result<Vec<u8>, DecodeError> {
-    let file = std::fs::File::open(path)?;
-    let declared = file.metadata()?.len();
-    limits.check_alloc("TIFF file body", declared)?;
-
-    let cap = limits.max_alloc_bytes;
-    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
-    let mut reader = std::io::BufReader::new(&file).take(cap.saturating_add(1));
-    reader.read_to_end(&mut bytes)?;
-    let read = bytes.len() as u64;
-    if read > cap {
-        return Err(DecodeError::AllocLimitExceeded {
-            what: "TIFF file body",
-            needed_bytes: read,
-            max_alloc_bytes: cap,
-        });
-    }
-    Ok(bytes)
-}
-
 /// Read the decoder's currently-selected image into a [`Raster`], applying
 /// `limits` to the declared geometry before anything is allocated for it.
 ///
@@ -744,9 +727,17 @@ fn count_images<R: Read + Seek>(
 /// other multi-page loader vips has.
 ///
 /// The returned raster carries `n-pages` set to the file's page count, so the
-/// bound `page` has to stay under travels back with the pixels and is readable
-/// through [`Raster::get_n_pages`]. `n-pages` is a count and `page` is an
-/// index, which makes the last page of a file `get_n_pages() - 1`.
+/// bound `page` has to stay under travels back with the pixels. It is a count
+/// and `page` is an index, so the last page of a file is one less than it.
+///
+/// Read it back with [`tiff_page_count`] rather than with
+/// [`Raster::get_n_pages`] if the chain may be long. The accessor ports
+/// `vips_image_get_n_pages`'s sanity check, which reports a single page for
+/// any stored count of 10,000 or more (issue #635), while
+/// [`DecodeLimits::max_pages`] lets a chain run to `100_000`. The attached
+/// field keeps the real number and [`Raster::get_field`] still hands it over;
+/// only the accessor caps. Sweeping `0..get_n_pages()` never runs off the
+/// end, because the capped answer is 1.
 ///
 /// PDF page numbers in this crate are 1-based instead
 /// ([`crate::extract_page_image`] and friends); see the module docs for why
@@ -803,7 +794,7 @@ pub fn decode_tiff_page_with_limits(
     page: u32,
     limits: DecodeLimits,
 ) -> Result<Raster, DecodeError> {
-    let mut bytes = read_file_bounded(path, limits)?;
+    let mut bytes = read_file_bounded(path, limits, "TIFF file body")?;
     normalize_multiband_photometric_in_place(&mut bytes);
 
     // Counting first buys two things: an out-of-range index reports the bound
@@ -824,9 +815,7 @@ pub fn decode_tiff_page_with_limits(
         .seek_to_image(page as usize)
         .map_err(tiff_decode_err)?;
     let mut raster = decode_current_image(&mut decoder, limits)?;
-    raster
-        .fields
-        .set("n-pages", MetadataValue::Int(i64::from(n_pages)));
+    raster.set_n_pages(n_pages);
     Ok(raster)
 }
 
@@ -1238,6 +1227,21 @@ mod tests {
             );
         }
         assert_eq!(decode_tiff_page(&single, 0).unwrap().get_n_pages(), 1);
+
+        // Three pages and one page share a geometry, so the pair already
+        // shows the count tracks the IFD chain rather than the picture. A
+        // third point makes it a line, and five collides with nothing this
+        // fixture carries: issue #635 is exactly the case where a plausible
+        // number under this key turned out to be counting something else.
+        let five = dir.path().join("five.tif");
+        std::fs::write(&five, multipage_gray8_fixture(5)).unwrap();
+        for p in 0..5u32 {
+            assert_eq!(
+                decode_tiff_page(&five, p).unwrap().get_n_pages(),
+                5,
+                "page {p} of a five-page file must report n-pages = 5"
+            );
+        }
     }
 
     /// Rewrite one tag's value in the first IFD of a little-endian classic

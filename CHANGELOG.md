@@ -447,12 +447,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Without the feature nothing about the surface moves: every one of those entry
   points still exists at the same signature and returns a typed refusal naming
-  the feature, the way `crate::svg` does without `svg`. `decode_jxl` reports an
-  `Unsupported` I/O error, both encoders report
-  `EncodeError::Unsupported { format: "jxl" }`, and `.jxl` leaves the extension
-  route entirely, so `save("x.jxl")` reports an unsupported extension like any
-  other format with no encoder behind it. Consumer code compiles against either
-  build.
+  the feature. `decode_jxl` reports `JxlError::FeatureNotEnabled`, both encoders
+  report `EncodeError::Unsupported { format: "jxl" }`, and `.jxl` leaves the
+  extension route entirely, so `save("x.jxl")` reports an unsupported extension
+  like any other format with no encoder behind it. Consumer code compiles
+  against either build.
 
   Decode goes to `jxl-oxide`, which targets the same JPEG XL conformance suite
   libjxl does, so this is a parity port rather than an approximation, and the
@@ -528,6 +527,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GHSA-66m8-c62j-h6v5, an unchecked `usize` multiply in `FrameBuffer::new` that
   hands out oversized slices from an undersized buffer.
   `fuzz/fuzz_targets/fuzz_jxl.rs` and a 26-seed corpus ship with it.
+- `JxlError`, the JPEG XL loader's own error type, reached through a new
+  `SourceError::Jxl` variant (issue #634). JPEG XL was the only one of the three
+  codecs in this release with no typed error of its own, so its refusals came
+  back as `SourceError::Decode` wrapping an `image::ImageError` with a
+  hand-spelled `"JPEG XL"` format hint, and telling a CMYK refusal from a
+  truncated file from an over-budget one meant matching on the message text.
+  That is exactly what `ExrError`, `FitsError`, `GifError` and `RadianceError`
+  exist to avoid, and `JxlError` is the same shape: `#[non_exhaustive]`, struct
+  variants with named fields, and an `#[error(transparent)] Raster(RasterError)`
+  tail.
+
+  Nine variants. `FeatureNotEnabled` for a build without the `jxl` feature,
+  `Decode` for a bitstream `jxl-oxide` refuses, `Truncated` for one that simply
+  runs out (the two-phase feed makes those different answers, and the variant
+  names which of the header and the first frame was still missing),
+  `CmykNotSupported` for a file with a black ink channel,
+  `UnsupportedChannelCount` and `ChannelCountMismatch` for the two defensive
+  channel checks, and `Raster` for a frame that cannot be wrapped.
+
+  The two allocation refusals stayed separate rather than collapsing into one,
+  and that is the change with teeth. `AllocLimitExceeded` is the crate's own
+  ceiling, priced from the declared header geometry before the decoder reserves
+  a thing, and it reports the geometry, the bytes needed and the budget.
+  `DecoderAllocLimitExceeded` is `jxl-oxide`'s `AllocTracker` refusing an
+  internal buffer part-way through, where the size is the decoder's business and
+  never reaches us. Both used to arrive as the same
+  `image::ImageError::Limits(InsufficientMemory)`, so the test covering them
+  passed whichever one fired. Measured now that they are distinguishable: a
+  4x3 file under an 8-byte budget answers with the tracker, because even a
+  header's working buffers are over 8 bytes, while a 512x512 one under 256 KiB
+  answers with the pre-check. Both are pinned, one per test.
+
+  `JxlError` and `SourceError::Jxl` are declared whether or not the feature is
+  on, so a caller's `match` has the same arms in either build and none of them
+  names a type that is not there. Without the feature `FeatureNotEnabled` is
+  the only reachable variant, and with it it is the only unreachable one, which
+  is what lets a caller tell "this build has no JPEG XL" from "these bytes are
+  not JPEG XL" without reading a message. `decode_jxl` used to report the
+  feature-off case as an `Unsupported` I/O error, the way `crate::svg` still
+  does; that is the one behaviour change here and it only affects a build
+  without `jxl`.
+
+  The encoder is deliberately not on this enum. `Raster::encode_jxl` and
+  `Raster::save_jxl` stay on the shared `EncodeError` spine, which is where
+  `gif`, `radiance` and `fits` leave their save refusals too, so JPEG XL does
+  not become the one codec with a third convention.
 - OpenEXR load: `decode_exr`, plus the sniff route so `decode_bytes` and
   `decode_file` reach it from the magic bytes rather than the extension
   (issues #504, #614 and #615). An `.exr` decodes to `FloatF32(n)` holding the
@@ -1014,6 +1059,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `n-pages` has one documented meaning, and `Raster::get_n_pages` now ports the
+  whole of the libvips sanity check that guards it (issue #635). The panel that
+  filed the issue counted four meanings behind the one accessor. Re-measured
+  after #626 moved the OpenEXR multi-part count out to `exr-parts`, there is one
+  meaning left and four loaders honouring it: `n-pages` is how many pages the
+  original **file** holds, where a page is something a zero-based `page`
+  argument can select. GIF counts frames, TIFF counts IFDs, WebP and JPEG XL
+  count frames in the original, and every one of them agrees with the vips
+  loader it ports, on the value and on whether the field is attached at all.
+  `vipsheader -a` on 8.18.6 reports `n-pages: 1` for a still GIF and a one-page
+  TIFF and nothing at all for a still WebP or a single-frame JPEG XL, which is
+  exactly what libviprs does. So the answer is one shared key rather than
+  per-format ones, and a count that no page index can reach keeps getting its
+  own name the way `exr-parts` did.
+
+  What actually changes for a caller is the accessor. `vips_image_get_n_pages`
+  (`iofuncs/header.c:917-928`) reports a single page unless the stored field is
+  an int strictly between 1 and 10000; libviprs only had half of that, accepting
+  anything positive and additionally parsing a string-typed field. Measured
+  against the C on 8.18.6, a stored `9999` reads back as `9999` while `10000`,
+  `65536` and `2000000000` all read back as `1`, and a `gchararray` `"3"` reads
+  back as `1` because `vips_image_get_int` does not coerce one. `get_n_pages`
+  now matches on all of those. The ceiling is reachable rather than theoretical:
+  `DecodeLimits::max_pages` defaults to 100000, so a TIFF with 12000 IFDs
+  decodes fine here and used to report 12000 where vips reports 1, and the same
+  goes for a GIF or an animation with that many frames. Nothing is lost, only
+  moved: the field itself is never rewritten, so `get_field("n-pages")` still
+  hands back the real number and `tiff_page_count` still walks the chain. The
+  string arm has no producer in the crate at all, since every loader stores an
+  int and the `.v` trailer round trip preserves the `gint` type.
+
+  The PDF readers still attach no `n-pages`, and that is now written down with
+  its reason rather than left as a silence: vips's `pdfload` does attach one
+  (measured: 3 for a three-page document), but its `page` is zero-based where
+  this crate's PDF page numbers are deliberately one-based, so a caller sweeping
+  `0..get_n_pages()` would be off by one. `PdfInfo::page_count` is the count for
+  a PDF.
+
+  Two doc blocks in `encode_tiff` that promised the count travels back on the
+  raster and reads out of `get_n_pages` are corrected rather than left to
+  describe the old behaviour. They now point at `tiff_page_count` as the
+  uncapped page count for a TIFF and say where the accessor caps, and the
+  matching promises in the WebP and JPEG XL loader docs say the same. A `0..n`
+  sweep is still safe on a long chain, because the capped answer is 1 rather
+  than something longer than the file.
+
+  `get_n_pages` and `get_int` also stopped deep-copying to read a number.
+  Both resolved through `get_field`, which hands back an **owned**
+  `MetadataValue` cloned out of the field list, and any name can hold a
+  `Blob`: `try_set_field` stores whatever type it is given outside the
+  built-ins, and the `.v` trailer restores arbitrary named fields with
+  arbitrary types out of an untrusted file. Measured in release with 64 MiB
+  under the key, `get_n_pages` cost 1.296 ms and a 64 MiB alloc-and-free per
+  call, against 2 ns now; with an ordinary `Int` under it the same call went
+  from 18 ns to 2 ns. Both accessors borrow the stored value now, and a
+  counting global allocator in `tests/n_pages_meaning.rs` asserts zero
+  allocations across each call so a regression fails on the mechanism rather
+  than on a timing threshold.
+
 - `SaveError::UnsupportedExtension`'s message names the extensions the build
   in front of you can actually write, instead of a fixed list (issue #500).
   It used to end "libviprs encodes png, jpg/jpeg, gif, webp, and v/vips",
@@ -1244,6 +1348,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `try_premultiply` and `try_unpremultiply` handle float rasters instead of
+  panicking on them (issue #631). They used to fall into `depth_max`'s "the
+  arithmetic operations do not support float rasters yet" panic from inside
+  the fallible form, which is the one thing a `try_` method is not allowed to
+  do, and the panicking twins then panicked with a reason that had nothing to
+  do with their own contract.
+
+  The panic was always reachable, but this release made it easy: OpenEXR and
+  FITS both hand back float pixel data straight out of a file, so loading an
+  EXR and calling a premultiply helper now hits it on ordinary input rather
+  than on a raster you built on purpose.
+
+  I implemented the float carriers rather than refusing them with a typed
+  error, because there was nothing left to guess at. libvips defines both ops
+  on float and this build runs them, `unpremultiply_factor` already carried
+  the dead-zone and alpha-clip rules from #611, and the resize path has been
+  doing the same arithmetic internally since #604. All of it checks against
+  the binary, so I pinned it there rather than inventing a refusal.
+
+  Three things about the float arm are worth knowing. Its `max_alpha` comes
+  from the raster's `Interpretation` and not from the sample depth, the way
+  `vips_interpretation_max_alpha` supplies it, so an scRGB raster (what an RGB
+  OpenEXR load is tagged) divides by `1.0` where an untagged one divides by
+  `255` and an `Rgb16`-tagged one by `65535`. Get that wrong and an EXR's 0..1
+  samples premultiply to roughly black. The arithmetic runs in `f32` rather
+  than `f64`, because the C macros land the multiplier in a `float` before the
+  colour multiply, so the result rounds twice: `(100, 100, 100, 0.5)` comes
+  out `0.19607845` through the float intermediate and `0.19607843` without it.
+  And NaN and the infinities propagate the way `VIPS_CLIP`'s plain ternaries
+  make them, so a NaN alpha gives a NaN pixel instead of being quietly
+  rewritten.
+
+  Both ops keep the input format, so an unsigned raster still comes back
+  unsigned, rounded and saturated, and the arithmetic on that path is
+  untouched. vips itself always writes `FLOAT` output here, and that
+  divergence is unchanged and now written down on both methods.
+
+  One thing on the unsigned path *did* change, and it is worth stating rather
+  than filing under "nothing": both ops now copy the input's interpretation
+  onto the output. An `Rgba16` explicitly tagged `Srgb` used to come back
+  resolving to `Rgb16`, because the result was left untagged and a 4-band
+  16-bit buffer resolves to the genuine 16-bit space. It comes back `Srgb`
+  now. That is the correct answer and it is what vips does: measured on
+  8.18.6, `vips premultiply` and `vips unpremultiply` both hand a `1x1 ushort,
+  4 bands, srgb` input straight back as `srgb`, and a `multiband` one as
+  `multiband`, because `vips_premultiply` copies the header. The tag matters
+  downstream, since `composite2` keys its 0..255 against 0..65535 scale on the
+  resolved interpretation, so this is a behaviour change rather than
+  bookkeeping.
+
+- `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
+  `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
+  (issue #631). They reached the same `depth_max` panic the alpha pair did, on
+  the same input: an OpenEXR or FITS load is a float raster, so
+  `decode_file("x.exr")?.try_recomb(&m)` took the process down. If you were
+  matching on the error you get one now; if you were relying on the panic, you
+  were relying on a bug.
+
+  These five refuse rather than compute, where the alpha pair computes, and
+  the reason is that vips gives no float answer to port for four of them. I
+  measured all three families on 8.18.6 rather than assuming: `vips_boolean`
+  casts a float operand to `int` before the bitwise op and never operates on
+  float at all (`(100.5, 100.5, 100.5, 0.5)` AND itself comes back as an
+  `int` image of `100 100 100 0`), and `vips stdif` refuses anything that is
+  not `uchar`, `ushort` included. `recomb` is the exception: vips does compute
+  it on float and keeps it float, so libviprs is deliberately narrower there,
+  because this port writes into the input depth and a float carrier has no
+  unsigned spelling of that. It is written up on the method.
+
+  What closes this properly is not the five fixes but the test behind them: a
+  property test now calls every `try_*` method in `arithmetic.rs` on an
+  `RgbaF32` raster and fails if any of them unwinds, with a companion check
+  that reads the module's own source and fails if a `try_` method exists that
+  the sweep does not call. A sixth one cannot arrive quietly.
+
+- `decode_file` bounds the whole-file read it does for the formats that are
+  decoded from memory, so `DecodeLimits::max_alloc_bytes` is now in the path
+  of that read instead of being consulted after it (issue #629). `.v`, JPEG,
+  GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR all need the bytes
+  addressable end to end rather than streamed, and the read that got them was
+  a plain `std::fs::read`. That sizes its buffer from the file and then grows
+  infallibly, so `max_coord`, `max_pixels` and `max_alloc_bytes` were every
+  one of them consulted after the whole file was already resident, and on a
+  constrained host the failure was a process abort rather than a returned
+  error.
+
+  So the read had no ceiling at all, and a file could name any size it liked.
+  A 3 GiB FITS declaring a 4x3 image decoded successfully at 3.01 GiB
+  resident under the default 512 MiB ceiling; the same file is now refused at
+  6 MiB resident with `AllocLimitExceeded { needed_bytes: 3221225472,
+  max_alloc_bytes: 536870912 }`. That is the whole of what changed: the worst
+  case went from unbounded to `max_alloc_bytes`, and the failure went from an
+  abort on a constrained host to a returned error everywhere.
+
+  The read now stats first and refuses anything longer than
+  `max_alloc_bytes`, then caps the read as well, so a source that yields more
+  bytes than its `stat` declared is refused rather than silently truncated
+  and handed to the decoder as a whole file. It is the same
+  `read_file_bounded` the TIFF page readers have used since #612, lifted into
+  `source` so both call sites share one implementation rather than drifting
+  apart.
+
+  **What this does not do is make a cheap file cheap to decode.** The ceiling
+  is a byte count, not a ratio between what a file costs to store and what it
+  costs to decode, so anything under it is untouched. Measured on APFS, where
+  a file grown with `set_len` leaves the tail as a hole, so it declares 400
+  MiB and occupies 8 KiB: it decodes to a 4x3 image at 406 MiB resident, and
+  that number is the same before and after this change. At exactly the
+  ceiling it is 518 MiB resident from the same 8 KiB on disk. If you serve
+  untrusted files, `max_alloc_bytes` is now the number that bounds what one
+  decode can cost you, and the default 512 MiB is a lot to hand a file you
+  did not write.
+
+  **This can refuse a file that used to decode.** A file longer than
+  `max_alloc_bytes` in one of the formats above is now
+  `SourceError::AllocLimitExceeded { what: "image file body", .. }`, which
+  is the same variant the declared-geometry checks already raised, so
+  nothing has to tell "too big by header" from "too big by file length".
+  Raise the ceiling with `DecodeLimits::with_max_alloc_bytes` if you
+  legitimately load files bigger than that. The ceiling is inclusive, so a
+  file of exactly `max_alloc_bytes` still decodes. The streaming decoders are
+  untouched: they never read the whole file, so bounding them by its length
+  would refuse work that costs nothing.
+
+- `MemoryTracker::alloc` saturates at `u64::MAX` instead of overflowing (the
+  `alloc` half of issue #114, which fixed the same thing on `dealloc`). It read
+  `self.current.fetch_add(bytes, Relaxed) + bytes`, and that `+ bytes` panics
+  with "attempt to add with overflow" in debug builds and under Miri once the
+  counter is high enough, which is not a thing an observability counter should
+  do to a run. Saturating the local sum alone would have been worse than the
+  bug: `fetch_add` wraps the stored counter, so `current` would come back small
+  while `peak` ratcheted to `u64::MAX` permanently, which is exactly the
+  corruption #114 removed from the other side. The counter now clamps through
+  the same saturating `fetch_update` `dealloc` uses, so the two ends match and
+  `current` and `peak` stay consistent. In-tree call sites never get near the
+  ceiling, but the type is `pub` with a `Clone`-able `Arc` inside, so a caller
+  can put it there.
 - A `.v` file libviprs writes is now readable by real vips, metadata and all,
   and no longer makes it print a warning on every open (issue #546). The
   trailer after the pixel data was libviprs's own JSON. libvips parses that

@@ -16,6 +16,12 @@
 //! pinning it from outside is that `Compression::Lossy { .. }` can be added
 //! later without breaking any of the code below.
 //!
+//! The loader's refusals are `JxlError`, reached through `SourceError::Jxl`,
+//! and both are declared in either build (issue #634), so the arms a caller
+//! writes do not change with the feature. The encoder's refusals stay on the
+//! shared `EncodeError` spine, which is where `gif`, `radiance` and `fits`
+//! leave theirs too.
+//!
 //! The codec itself is behind the non-default `jxl` feature, so the tests
 //! that move pixels carry `#[cfg(feature = "jxl")]` and CI runs this file
 //! twice. What runs under both is the shape: the options struct is still
@@ -26,8 +32,8 @@
 use libviprs::EncodeError;
 #[cfg(feature = "jxl")]
 use libviprs::decode_bytes;
-use libviprs::source::DecodeLimits;
-use libviprs::{PixelFormat, Raster, decode_jxl, jxl};
+use libviprs::source::{DecodeLimits, SourceError};
+use libviprs::{JxlError, PixelFormat, Raster, decode_jxl, jxl};
 
 /// A 4x3 sRGB ramp, the same one `oracle-captures/foreign-jxl` is built
 /// from, so a failure here and a failure in the unit tests point at the
@@ -143,6 +149,45 @@ fn the_shared_dispatchers_carry_jxl() {
     );
 }
 
+/// The loader's refusals resolve as `SourceError::Jxl` carrying a `JxlError`
+/// from outside the crate, which is the half of issue #634 a caller sees:
+/// the variant is reachable and matchable without the `libviprs` internals
+/// and without reading a message. Both the codec's own refusal and the
+/// shared decode ceilings are pinned, because they are deliberately
+/// different variants.
+#[test]
+#[cfg(feature = "jxl")]
+fn decode_refusals_are_typed_from_outside_the_crate() {
+    let bytes = ramp().encode_jxl(jxl::SaveOptions::default()).unwrap();
+
+    let err = decode_jxl(&bytes[..6], DecodeLimits::default()).unwrap_err();
+    assert!(
+        matches!(err, SourceError::Jxl(JxlError::Truncated { .. })),
+        "{err:?}"
+    );
+
+    let err = decode_jxl(b"not a jxl at all", DecodeLimits::default()).unwrap_err();
+    assert!(
+        matches!(err, SourceError::Jxl(JxlError::Decode { .. })),
+        "{err:?}"
+    );
+
+    // The shared geometry ceilings stay on `SourceError` itself, the way
+    // every other codec in the crate reports them.
+    let err = decode_jxl(&bytes, DecodeLimits::default().with_max_coord(2)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SourceError::CoordLimitExceeded {
+                width: 4,
+                height: 3,
+                max_coord: 2
+            }
+        ),
+        "{err:?}"
+    );
+}
+
 /// A float raster is refused rather than quantised, and the message tells
 /// the caller what to do about it. vips writes float samples natively; the
 /// module docs record that divergence.
@@ -183,7 +228,14 @@ fn a_single_pixel_axis_is_refused_from_outside_the_crate() {
 fn without_the_feature_the_surface_is_unchanged_and_typed() {
     let raster = ramp();
 
+    // The variant, not the message: this is the one `JxlError` a build
+    // with the feature never produces, so it is what tells a caller that
+    // the build has no JPEG XL rather than that the bytes are bad.
     let err = decode_jxl(&[0xff, 0x0a], DecodeLimits::default()).unwrap_err();
+    assert!(
+        matches!(err, SourceError::Jxl(JxlError::FeatureNotEnabled)),
+        "{err:?}"
+    );
     assert!(err.to_string().contains("JPEG XL"), "{err}");
 
     let err = raster.encode_jxl(jxl::SaveOptions::default()).unwrap_err();
