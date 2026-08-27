@@ -28,14 +28,25 @@
 //! # Why `cargo tree` and not `cargo metadata`
 //!
 //! `cargo metadata`'s resolve graph lists optional dependencies that nothing
-//! enabled, so reading it directly finds `defmt` (an unused optional of
-//! `chrono`, `jiff` and `tinyvec`, and a `links = "defmt"` declarer) in the
-//! default build, where `cargo tree` correctly prints nothing for it.
-//! `--filter-platform` does not help: it filters by target cfg, not by
-//! feature. So the package set comes from `cargo tree`, which is
-//! feature-aware, and `cargo metadata` is used only as a lookup table for the
-//! manifest facts (`links`, build script, source directory) of the packages
-//! `cargo tree` named.
+//! enabled, so a package can sit in it while no build ever compiles it.
+//! `--filter-platform` does not fix that: it filters by target cfg, not by
+//! feature. Measured while writing this, the `aarch64-apple-darwin` filter
+//! took the resolve from 193 packages to 163, and all 30 it dropped were
+//! target-gated (`wasm-bindgen` and its tail, the `windows-*` family,
+//! `linux-raw-sys`, `js-sys`); the unenabled optionals came through it
+//! untouched. So the package set here comes from `cargo tree`, which is
+//! feature-aware, and `cargo metadata` is only a lookup table for the manifest
+//! facts (`links`, build script, source directory) of the packages `cargo
+//! tree` named.
+//!
+//! The example on that resolution was `defmt`, an unenabled optional of
+//! `chrono`, `jiff` and `tinyvec` that declares `links = "defmt"`. Do not
+//! expect to reproduce that particular name. `Cargo.lock` is not committed, so
+//! two checkouts a day apart resolve differently, and on an older one (`jiff`
+//! 0.2.23 rather than 0.2.35) `defmt` is not in the graph at all. This test
+//! does not depend on it either way: it never reads the metadata resolve
+//! graph, so an unenabled optional is invisible to it by construction. It
+//! passes unchanged on both of those lockfiles and on a fresh CI resolve.
 //!
 //! `--target` matters just as much in the other direction: without it,
 //! `cargo metadata` reports every target's dependencies at once and an audit

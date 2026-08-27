@@ -60,14 +60,45 @@ that actually matters.
 Everything below comes from
 `cargo tree -p libviprs -e normal,build --target <triple>` plus
 `cargo metadata`, on cargo 1.98, and the test re-derives it rather than trusting
-this table. Note the `--target` flag: `cargo metadata` without
-`--filter-platform` reports every target's dependencies at once, so an audit
-that skips it will flag `wasm-bindgen-shared` on a mac. Note also that
-`cargo metadata`'s resolve graph includes optional dependencies that nothing
-enabled, which is why `defmt` (an unused optional of `chrono`, `jiff` and
-`tinyvec`, and a `links = "defmt"` declarer) looks like it is in the default
-build and is not. `cargo tree` is feature-aware and does not have that problem,
-which is why the test drives it.
+this table.
+
+Two ways to get this wrong, both of which cost me time. The first is skipping
+`--target`: `cargo metadata` without `--filter-platform` reports every target's
+dependencies at once, so an audit run on a mac will flag `wasm-bindgen-shared`
+and the windows crates. The second is trusting `--filter-platform` to be enough.
+It filters by target cfg and not by feature, so `cargo metadata`'s resolve graph
+still lists optional dependencies that nothing turned on. Measured here, the mac
+filter takes the resolve from 193 packages to 163 and every one of the 30 it
+drops is target-gated (`wasm-bindgen` and its tail, the `windows-*` family,
+`linux-raw-sys`, `js-sys`). An unenabled optional survives it untouched.
+`cargo tree` is feature-aware and has neither problem, which is why the test
+drives it and reads `cargo metadata` only for manifest facts.
+
+Whatever you use to check that, do not expect to reproduce a specific crate
+name: `Cargo.lock` is not committed, so two checkouts a day apart resolve
+differently. On mine, `defmt` is the example, an unenabled optional of `chrono`,
+`jiff` and `tinyvec` that declares `links = "defmt"` and that survives the mac
+filter while `cargo tree` prints nothing for it. On a lockfile a fortnight older
+(`jiff` 0.2.23 rather than 0.2.35) it is not in the graph at all. The two cases
+are easy to tell apart, and worth telling apart: `cargo tree -i <crate>` warns
+"nothing to print" when the crate is in the lockfile but no enabled feature
+reaches it, and errors "did not match any packages" when it is not in the
+lockfile at all. Reach for the general form instead of a name:
+
+```sh
+target="$(rustc -vV | sed -n 's/^host: //p')"
+comm -13 \
+  <(cargo tree -p libviprs -e normal,build --target "$target" --prefix none --format '{p}' \
+      | awk '{print $1}' | sort -u) \
+  <(cargo metadata --format-version 1 --filter-platform "$target" \
+      | python3 -c 'import json,sys; [print(n["id"].split("#")[-1].split("@")[0]) for n in json.load(sys.stdin)["resolve"]["nodes"]]' \
+      | sort -u)
+```
+
+Everything that prints is in the filtered resolve and is not in this build.
+Expect dev-dependencies and the `fuzz` member's tree in there too, since the
+metadata side covers the whole workspace while the tree side is one package and
+`normal,build` edges. `defmt` sitting in that output on a mac is the point.
 
 **Vendored native code.** Two crates, and only two, ship compilable C or
 assembly *and* a build script that can compile it:
@@ -97,7 +128,9 @@ than required. Either way, `cc` runs.
 | `x86_64-pc-windows-msvc` | `rayon-core` | `rayon-core`, `zstd-sys` | `rayon-core`, `zstd-sys` |
 | `wasm32-unknown-unknown` | `rayon-core` | `rayon-core`, `wasm-bindgen-shared`, `zstd-sys` | `rayon-core`, `wasm-bindgen-shared`, `zstd-sys` |
 
-`wasm-bindgen-shared` is real on wasm32 rather than a metadata artifact.
+`wasm-bindgen-shared` is real on wasm32 rather than a metadata artifact, and
+note where it sits in that table: not in the default wasm32 build, which is the
+easy thing to miss if you only check default and `--all-features`.
 `packfile` is what puts it there: `zip` turns on `getrandom`'s `wasm_js`
 backend and pulls `time`'s wasm clock through `js-sys`, and both land on
 `wasm-bindgen`. `--features pdfium` reaches it a second way, directly. It
