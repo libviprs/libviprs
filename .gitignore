@@ -33,3 +33,9 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+
+# Lane PR-body drafts. `.epic520/_docs/LANE_RUNBOOK.md` §4b tells lanes to write
+# these into their own worktree rather than the shared scratchpad, so two
+# concurrent lanes cannot clobber each other's. The worktree IS the repo, so
+# without this they get swept in by `git add -A` and shipped.
+.pr-*.md
