@@ -740,17 +740,18 @@ impl Raster {
 
     /// Read a metadata field as an `i32` (libvips `vips_image_get_int`).
     ///
-    /// Resolves `name` through [`Raster::get_field`] and returns the value
-    /// when it is an integer that fits in an `i32` (for example the built-in
-    /// `width`/`height`/`bands` header fields, or an attached field such as
-    /// `bits-per-sample`, `tile-width`, or `page-height` set by a loader).
-    /// Returns `None` for an absent field, a non-integer value, or an integer
-    /// outside the `i32` range.
+    /// Answers the same names [`Raster::get_field`] does and returns the
+    /// value when it is an integer that fits in an `i32` (for example the
+    /// built-in `width`/`height`/`bands` header fields, or an attached field
+    /// such as `bits-per-sample`, `tile-width`, or `page-height` set by a
+    /// loader). Returns `None` for an absent field, a non-integer value, or
+    /// an integer outside the `i32` range.
+    ///
+    /// It borrows the stored value rather than cloning one out, so reading an
+    /// int costs nothing even when the name happens to hold a large
+    /// [`MetadataValue::Blob`] (issue #635).
     pub fn get_int(&self, name: &str) -> Option<i32> {
-        match self.get_field(name)? {
-            MetadataValue::Int(value) => i32::try_from(value).ok(),
-            _ => None,
-        }
+        i32::try_from(self.field_i64(name)?).ok()
     }
 
     /// Fallible form of [`Raster::set_field`].
@@ -954,17 +955,71 @@ impl Raster {
     /// coerce one. The stored value is untouched either way and stays
     /// readable through [`Raster::get_field`], and a TIFF's real chain
     /// length is [`tiff_page_count`](crate::tiff_page_count) regardless of
-    /// what this reports.
+    /// what this reports. Reading costs no allocation whatever type is
+    /// sitting under the name.
     pub fn get_n_pages(&self) -> u32 {
         // `iofuncs/header.c:921-926`: the field has to be an int and it has
         // to sit strictly between 1 and this ceiling, or vips calls the
         // value crazy and reports a single page.
         const CEILING: i64 = 10_000;
-        match self.get_field("n-pages") {
-            Some(MetadataValue::Int(n)) if (2..CEILING).contains(&n) => {
-                u32::try_from(n).unwrap_or(1)
-            }
+        match self.field_i64("n-pages") {
+            Some(n) if (2..CEILING).contains(&n) => u32::try_from(n).unwrap_or(1),
             _ => 1,
+        }
+    }
+
+    /// Attach `n-pages`: the one place in the crate that names the key
+    /// (issue #635).
+    ///
+    /// `count` is how many pages the **file** holds, where a page is
+    /// something a loader's zero-based `page` argument can select. That is
+    /// the whole of the contract [`Raster::get_n_pages`] documents, and
+    /// routing every writer through one function is what stops a fifth
+    /// meaning arriving under the same name: a count no page index can reach
+    /// gets a key of its own instead, the way the OpenEXR part count became
+    /// `exr-parts` (issue #626).
+    ///
+    /// `tests/n_pages_meaning.rs` asserts that the literal key appears in
+    /// exactly one source file, so a new writer either comes through here or
+    /// fails that guard.
+    pub(crate) fn set_n_pages(&mut self, count: u32) {
+        self.fields
+            .set("n-pages", MetadataValue::Int(i64::from(count)));
+    }
+
+    /// The integer under `name`, borrowed rather than materialised.
+    ///
+    /// [`Raster::get_field`] hands back an **owned** [`MetadataValue`], so
+    /// every reader that goes through it deep-copies whatever sits under the
+    /// name before looking at it. For a [`MetadataValue::Blob`] that copy is
+    /// bounded only by the file that wrote it: any name can hold any type
+    /// ([`Raster::try_set_field`] stores what it is given outside the
+    /// built-ins) and a `.v` trailer restores arbitrary named fields with
+    /// arbitrary types from an untrusted file (issue #565). Reading a `u32`
+    /// out of `n-pages` should not depend on what else got stored there, so
+    /// the readers borrow through here instead (issue #635).
+    ///
+    /// The built-in header fields answer exactly as [`Raster::get_field`]
+    /// would: the six int-valued ones report their value out of the header,
+    /// the string and double ones report `None` because they are not ints
+    /// there either, and `filename` goes to the field list because that is
+    /// where `get_field` reads it from.
+    fn field_i64(&self, name: &str) -> Option<i64> {
+        match name {
+            "width" => Some(i64::from(self.width())),
+            "height" => Some(i64::from(self.height())),
+            "bands" => Some(self.format().channels() as i64),
+            "xoffset" => Some(i64::from(self.xoffset())),
+            "yoffset" => Some(i64::from(self.yoffset())),
+            "orientation" => Some(i64::from(self.orientation())),
+            "format" | "coding" | "interpretation" | "xres" | "yres" => None,
+            // `filename` is the one built-in [`Raster::get_field`] answers
+            // out of the field list rather than the header, so it takes the
+            // same route here and reports an int if that is what is stored.
+            other => match self.fields.get(other) {
+                Some(&MetadataValue::Int(n)) => Some(n),
+                _ => None,
+            },
         }
     }
 
@@ -2492,6 +2547,45 @@ mod tests {
         assert_eq!(im.get_int("note"), None);
         im.set_field("huge", MetadataValue::Int(i64::from(i32::MAX) + 1));
         assert_eq!(im.get_int("huge"), None);
+    }
+
+    /**
+     * Tests that `get_int` answers exactly what resolving through
+     * `get_field` answers, on every readable name. It used to *be* that
+     * resolution and now borrows through `field_i64` instead, so this is
+     * what pins the refactor: the built-in header fields, the ones that are
+     * strings or doubles there, `filename` (the one built-in `get_field`
+     * reads out of the field list rather than the header), attached ints,
+     * an attached blob, an attached string and a name that is not set at
+     * all. Works by asking both accessors for every name `get_fields`
+     * reports and comparing them (issue #635).
+     */
+    #[test]
+    fn get_int_agrees_with_get_field_on_every_readable_name() {
+        let mut im = rgb_2x2();
+        im.set_field("orientation", MetadataValue::Int(6));
+        im.set_field("xoffset", MetadataValue::Int(-4));
+        im.set_field("yres", MetadataValue::Double(1.5));
+        im.set_field("filename", MetadataValue::Int(11));
+        im.set_field("bits-per-sample", MetadataValue::Int(8));
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        im.set_field("note", MetadataValue::Str("hello".to_string()));
+        im.set_field("huge", MetadataValue::Int(i64::from(i32::MAX) + 1));
+
+        let names = im.get_fields();
+        assert!(names.len() > 12, "the sweep has to reach the attachments");
+        for name in names {
+            let through_get_field = match im.get_field(&name) {
+                Some(MetadataValue::Int(v)) => i32::try_from(v).ok(),
+                _ => None,
+            };
+            assert_eq!(
+                im.get_int(&name),
+                through_get_field,
+                "get_int and get_field disagree on {name}"
+            );
+        }
+        assert_eq!(im.get_int("no-such-field"), None);
     }
 
     // -- save / .v ----------------------------------------------------------

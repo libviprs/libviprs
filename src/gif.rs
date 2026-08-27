@@ -358,7 +358,7 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     };
     let mut raster = Raster::new(width, height, format, data).map_err(GifError::Raster)?;
     raster.meta.interpretation = Some(crate::conversion::Interpretation::Srgb);
-    raster.set_field("n-pages", MetadataValue::Int(i64::from(scan.frames)));
+    raster.set_n_pages(scan.frames);
     raster.set_field("loop", MetadataValue::Int(scan.loop_count));
     raster.set_field("palette", MetadataValue::Int(1));
     if scan.colours > 0 {

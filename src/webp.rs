@@ -196,10 +196,16 @@ pub struct SaveOptions {
 ///
 /// An animated file decodes to **frame 0 only**, at one frame's size, and
 /// carries `n-pages` set to the number of frames the original had — which
-/// is what a default `vips webpload` does (`webp2vips.c:505-508`), and is
-/// readable through [`Raster::get_n_pages`]. Reading every frame is issue
-/// #569 and needs the page model from #564; until then `n-pages` is the
-/// signal that frames were left behind.
+/// is what a default `vips webpload` does (`webp2vips.c:505-508`). Reading
+/// every frame is issue #569 and needs the page model from #564; until then
+/// `n-pages` is the signal that frames were left behind.
+///
+/// [`Raster::get_n_pages`] reads it back for anything under 10,000 frames.
+/// At or above that it reports `1`, because it ports
+/// `vips_image_get_n_pages`'s sanity ceiling whole (issue #635). Nothing
+/// here caps the count on the way in, so an animation that long attaches
+/// its real length and the raw value stays readable through
+/// [`Raster::get_field`].
 ///
 /// # Errors
 ///
@@ -277,9 +283,7 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
         }
     }
     if let Some(frames) = frames {
-        raster
-            .fields
-            .set("n-pages", MetadataValue::Int(i64::from(frames)));
+        raster.set_n_pages(frames);
     }
     Ok(raster)
 }

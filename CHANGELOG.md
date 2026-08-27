@@ -987,6 +987,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0..get_n_pages()` would be off by one. `PdfInfo::page_count` is the count for
   a PDF.
 
+  Two doc blocks in `encode_tiff` that promised the count travels back on the
+  raster and reads out of `get_n_pages` are corrected rather than left to
+  describe the old behaviour. They now point at `tiff_page_count` as the
+  uncapped page count for a TIFF and say where the accessor caps, and the
+  matching promises in the WebP and JPEG XL loader docs say the same. A `0..n`
+  sweep is still safe on a long chain, because the capped answer is 1 rather
+  than something longer than the file.
+
+  `get_n_pages` and `get_int` also stopped deep-copying to read a number.
+  Both resolved through `get_field`, which hands back an **owned**
+  `MetadataValue` cloned out of the field list, and any name can hold a
+  `Blob`: `try_set_field` stores whatever type it is given outside the
+  built-ins, and the `.v` trailer restores arbitrary named fields with
+  arbitrary types out of an untrusted file. Measured in release with 64 MiB
+  under the key, `get_n_pages` cost 1.296 ms and a 64 MiB alloc-and-free per
+  call, against 2 ns now; with an ordinary `Int` under it the same call went
+  from 18 ns to 2 ns. Both accessors borrow the stored value now, and a
+  counting global allocator in `tests/n_pages_meaning.rs` asserts zero
+  allocations across each call so a regression fails on the mechanism rather
+  than on a timing threshold.
+
 - `SaveError::UnsupportedExtension`'s message names the extensions the build
   in front of you can actually write, instead of a fixed list (issue #500).
   It used to end "libviprs encodes png, jpg/jpeg, gif, webp, and v/vips",
