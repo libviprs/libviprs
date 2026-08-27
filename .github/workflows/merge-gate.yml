@@ -51,17 +51,52 @@ jobs:
   miri:
     name: Miri
     runs-on: ubuntu-latest
+    # A hang has to report as a failure, not as a cancellation. Miri on this
+    # crate has run past 1h27m, been cancelled at 1h41m, and gone 4h without
+    # finishing, and with no ceiling the only signal was "cancelled", which
+    # reads like someone pressed stop rather than like the gate breaking.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
+      # `-Zmiri-disable-isolation` is what lets the fs-touching tests run at all.
+      # Without it Miri refuses `mkdir` and the whole run aborts on the first
+      # test that reaches for a `tempdir`, which is how this gate broke: nothing
+      # enforces the `#[cfg_attr(miri, ignore)]` convention below, so one new
+      # test using `tempfile` takes the job down and reports it as a Miri
+      # failure rather than as a missing annotation.
+      #
+      # It is not a coverage loss. The 48 annotated tests stay ignored exactly
+      # as before; this only stops *unannotated* fs tests from aborting the run,
+      # so the job now covers strictly more than it did. Removing those 48
+      # annotations so their tests run under Miri too is a bigger and separate
+      # question (issue #652).
+      #
+      # `RUSTFLAGS: -A deprecated` is the nightly-only half of #643. Nightly std
+      # has renamed `AtomicU64::fetch_update` to `try_update` and deprecated the
+      # old name, and the crate sets `[lints.rust] deprecated = "deny"`, so the
+      # lib does not compile under nightly at all and Miri never runs. It lives
+      # here rather than as an `#[allow(deprecated)]` in `src/observe.rs`
+      # because the attribute has no `cfg` to hang the "nightly only" claim on:
+      # it would disarm the deny on stable too, at the exact call site the deny
+      # was added to watch, for every expression inside that statement. This is
+      # scoped to the one job that needs it.
+      #
+      # Cargo appends `RUSTFLAGS` after the `[lints]` table's own `--deny=...`,
+      # and rustc takes the last lint-level flag on the command line, so this
+      # does win. Verified with `cargo build -v`.
       - run: cargo +nightly miri test
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+          RUSTFLAGS: -A deprecated
 
   loom:
     name: Loom
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,6 +114,7 @@ jobs:
   pdfium-source:
     name: pdfium-render source audit (#149)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

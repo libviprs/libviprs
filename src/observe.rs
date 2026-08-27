@@ -520,9 +520,36 @@ impl MemoryTracker {
     }
 
     /// Record an allocation of `bytes`.
+    ///
+    /// Uses saturating semantics, mirroring [`dealloc`](Self::dealloc): if
+    /// `current + bytes` exceeds `u64::MAX`, `current` clamps to `u64::MAX`
+    /// rather than wrapping. A plain `fetch_add` wraps the counter, and the
+    /// `+ bytes` that recomputed the new total then panicked on overflow in
+    /// debug builds and under Miri, which is not a thing an observability
+    /// counter should do. In-tree call sites never get near the ceiling, but
+    /// the type is `pub` with a `Clone`-able `Arc` interior, so a caller can
+    /// drive `current` there; saturating keeps `current` and `peak` agreeing
+    /// with each other instead of leaving a wrapped `current` under a
+    /// `u64::MAX` `peak`.
     pub fn alloc(&self, bytes: u64) {
-        let new = self.current.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        self.peak.fetch_max(new, Ordering::Relaxed);
+        // `fetch_update` retries on contention (CAS loop) so the clamp is
+        // applied atomically with respect to concurrent alloc/dealloc calls,
+        // the same way `dealloc` does it.
+        //
+        // The closure never returns `None`, so the update cannot fail and both
+        // the `Ok` and `Err` payloads are the previous value.
+        //
+        // Nightly deprecates `fetch_update` in favour of `try_update`; see the
+        // note on `dealloc` for why that is handled on the Miri job rather
+        // than with an `allow` here.
+        let previous = self
+            .current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(bytes))
+            })
+            .unwrap_or_else(|previous| previous);
+        self.peak
+            .fetch_max(previous.saturating_add(bytes), Ordering::Relaxed);
     }
 
     /// Record a deallocation of `bytes`.
@@ -538,6 +565,22 @@ impl MemoryTracker {
     pub fn dealloc(&self, bytes: u64) {
         // `fetch_update` retries on contention (CAS loop) so the clamp is
         // applied atomically with respect to concurrent alloc/dealloc calls.
+        //
+        // Nightly has renamed this method to `try_update` and deprecated the
+        // old name, so `cargo +nightly miri test` used to fail to compile the
+        // lib against `[lints.rust] deprecated = "deny"` and Miri did not run
+        // at all (issue #643). Renaming is not the fix: `try_update` exists on
+        // neither the 1.97 MSRV nor 1.98 stable, so it would break every
+        // toolchain except the one that currently works.
+        //
+        // There is deliberately no `#[allow(deprecated)]` here. An attribute
+        // is unconditional, so it would also disarm the deny on stable, at the
+        // one call site the deny exists to watch, for the whole statement. The
+        // suppression lives on the Miri job instead, as
+        // `RUSTFLAGS: -A deprecated` in `.github/workflows/merge-gate.yml`,
+        // which is scoped to the toolchain that actually needs it. Drop that
+        // env once `try_update` is stable and the MSRV has moved past it, then
+        // rename.
         let _ = self
             .current
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -857,6 +900,47 @@ mod tests {
         assert!(
             t.peak_bytes() < u64::MAX / 2,
             "peak must never be ratcheted to a wrapped garbage value"
+        );
+    }
+
+    /**
+     * Mirror of `dealloc_saturates_and_does_not_corrupt_peak` on the other
+     * side of the counter: an `alloc` that would take `current` past
+     * `u64::MAX` must clamp, not wrap.
+     *
+     * With the old `fetch_add(bytes) + bytes` the atomic wrapped and the
+     * recomputed total then overflowed, which panics in debug builds and
+     * under Miri (RED, as an arithmetic overflow rather than an assertion).
+     * With the saturating `fetch_update` both `current` and `peak` clamp to
+     * `u64::MAX` and stay consistent with each other (GREEN).
+     *
+     * Input: alloc(u64::MAX - 10), alloc(100) →
+     * Output: current = u64::MAX, peak = u64::MAX, no panic.
+     */
+    #[test]
+    fn alloc_saturates_and_does_not_overflow() {
+        let t = MemoryTracker::new();
+        t.alloc(u64::MAX - 10);
+        assert_eq!(t.current_bytes(), u64::MAX - 10);
+
+        // Allocating past the ceiling must clamp rather than wrap or panic.
+        t.alloc(100);
+        assert_eq!(
+            t.current_bytes(),
+            u64::MAX,
+            "alloc must saturate at u64::MAX rather than wrap"
+        );
+        assert_eq!(
+            t.peak_bytes(),
+            u64::MAX,
+            "peak must agree with the saturated current, not with a wrapped one"
+        );
+
+        // A wrapped `current` would be a small number here, which is the
+        // symptom this pins: the counter must not silently restart from zero.
+        assert!(
+            t.current_bytes() > u64::MAX / 2,
+            "current must never wrap back around to a small value"
         );
     }
 
