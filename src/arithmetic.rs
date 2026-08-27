@@ -134,6 +134,7 @@
 #[cfg(test)]
 use std::cell::Cell;
 
+use crate::conversion::Interpretation;
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError, alloc_op_output};
 use thiserror::Error;
@@ -333,6 +334,44 @@ pub(crate) fn unpremultiply_factor(alpha: f64, max: f64) -> f64 {
         0.0
     } else {
         max / alpha
+    }
+}
+
+/// The alpha ceiling an interpretation implies, transcribed from
+/// `vips_interpretation_max_alpha` (`libvips/iofuncs/header.c:195`): 65535
+/// for RGB16 and GREY16, 1.0 for scRGB, 255 for everything else.
+///
+/// This is where `vips_premultiply` and `vips_unpremultiply` get their
+/// default `max_alpha` (`premultiply.c:227`, `unpremultiply.c:284`), and
+/// through them `vips_affine` (`affine.c:553`) and `vips_thumbnail`
+/// (`thumbnail.c:835`), which is every place libvips brackets a resample in
+/// a premultiply. So it is a property of the *interpretation*, never of the
+/// sample depth.
+///
+/// On the unsigned carriers the two agree, which is why a depth-derived
+/// ceiling has served: an untagged `Gray8` / `Rgb8` / `Rgba8` resolves to
+/// `Bw` / `Srgb` (255) and an untagged `Gray16` / `Rgb16` / `Rgba16` to
+/// `Grey16` / `Rgb16` (65535). A float carrier has no depth-implied ceiling
+/// at all, so the tag is the only thing that can say what "fully opaque"
+/// means, and getting it wrong is not a rounding difference:
+/// [`crate::colour`] hands back an `RgbaF32` tagged
+/// [`Interpretation::ScRgb`] from `colourspace(ScRgb)` and [`crate::exr`]
+/// tags an RGB OpenEXR load the same way, and those samples are
+/// scene-linear around 0..1. Measured on vips 8.18.6, a `(100, 100, 100,
+/// 0.5)` float pixel premultiplies to `50` under scRGB and `0.19607845`
+/// under the 255 default.
+///
+/// Callers keep the unsigned carriers on their depth ceiling deliberately
+/// (see `bracket_max_alpha` in [`crate::resample`]): routing those through
+/// the tag as well would let a mis-tagged raster premultiply against a
+/// ceiling its bytes cannot reach, and an untagged `Multi16` resolves to
+/// `Multiband`, which would move it from 65535 to 255.
+#[inline]
+pub(crate) fn interpretation_max_alpha(interpretation: Interpretation) -> f64 {
+    match interpretation {
+        Interpretation::Rgb16 | Interpretation::Grey16 => 65535.0,
+        Interpretation::ScRgb => 1.0,
+        _ => 255.0,
     }
 }
 

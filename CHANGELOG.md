@@ -1179,6 +1179,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `resize`, `shrink`, `reduce` and `affine` take the premultiply bracket's
+  alpha ceiling from the raster's interpretation instead of from its storage
+  depth, so a float raster tagged `ScRgb` brackets against `1.0` and one tagged
+  `Rgb16` against `65535` (issue #664). Only float carriers move. An untagged
+  raster resolves to the same ceiling it always had, and the unsigned carriers
+  stay on the depth rule deliberately, so an 8-bit buffer someone labelled
+  `Rgb16` still premultiplies against 255 rather than coming back black.
+
+  `max_alpha` was derived from the depth, which is right for the unsigned
+  carriers by accident: an untagged `Rgba8` resolves to `Srgb` and 255, an
+  untagged `Rgba16` to `Rgb16` and 65535. A float carrier has no depth-implied
+  ceiling at all, so the tag is the only thing that can say what "fully opaque"
+  means, and `colourspace(Interpretation::ScRgb)` hands back exactly that
+  combination: an `RgbaF32` of scene-linear 0..1 samples, which the old rule
+  bracketed against 255.
+
+  `vips_resize` premultiplies nothing of its own, and the binary confirms it —
+  the same float RGBA resizes to identical bytes under `multiband`, `b-w`,
+  `srgb`, `scrgb` and `rgb16`. The bracket lives in `vips_affine`
+  (`affine.c:553`) and `vips_thumbnail` (`thumbnail.c:835`), both of which
+  reach it through `vips_premultiply` / `vips_unpremultiply`, and those default
+  `max_alpha` from `vips_interpretation_max_alpha` (`header.c:195`). Measured
+  on vips 8.18.6, an 8x8 constant float RGBA `(100, 20, 3, 1.5)` through
+  `premultiply | resize 0.5 | unpremultiply` comes back `100 20 3 1.5` untagged
+  and `66.666671752929688 13.333333969116211 2 1` under scRGB.
+
+  You do not need an out-of-range alpha to see it. lanczos3 rings, so resizing
+  a hard transparency edge pushes the resampled alpha above the source's
+  maximum, and the stored alpha is clipped to the ceiling on the way out: a
+  16x2 edge fixture puts `1.0152533054351807` in the output untagged and
+  exactly `1` under scRGB. So committed reference images of a resized float
+  scRGB raster with alpha will need regenerating.
+
+- The premultiply bracket rounds through `f32` where it used to compute in
+  `f64` and round once at the store (issue #664, found while measuring the
+  above). `vips_premultiply` writes `OUT nalpha = (OUT) clip_alpha /
+  max_alpha` with `OUT` = float for every carrier this crate has (only a
+  DOUBLE input widens to DOUBLE, `premultiply.c:229-232`), and multiplies the
+  colour by that already-rounded value; `vips_unpremultiply` mirrors it with
+  `OUT factor`. So the bracket rounds twice, the same shape #631 found in the
+  standalone pair, and it decides 6 of the 27 samples in the table this was
+  pinned on: `100 * f32(0.5 / 255)` un-premultiplied by `f32(255 / 0.5)` is
+  `100.00000762939453`, where the single-rounded form gives exactly `100`.
+  Float output moves by an ulp; the unsigned carriers requantise to integers
+  either way and do not.
+
 - A `.v` file libviprs writes is now readable by real vips, metadata and all,
   and no longer makes it print a warning on every open (issue #546). The
   trailer after the pixel data was libviprs's own JSON. libvips parses that

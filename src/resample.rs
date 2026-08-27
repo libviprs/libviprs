@@ -79,8 +79,16 @@
 //! * **Premultiplied alpha.** Like `vips_affine`, images with an alpha band
 //!   are premultiplied before interpolation and unpremultiplied afterwards
 //!   unless [`AffineOptions::premultiplied`] says the input already is. The
-//!   alpha ceiling is 255 for 8-bit and float samples and 65535 for 16-bit
-//!   samples, the `vips_premultiply` defaults. The averaging resamplers —
+//!   alpha ceiling is the one `vips_premultiply` defaults to, and that is a
+//!   property of the **interpretation** rather than of the sample depth
+//!   (`vips_interpretation_max_alpha`, issue #664): 65535 for
+//!   [`Interpretation::Rgb16`] / [`Interpretation::Grey16`], 1.0 for
+//!   [`Interpretation::ScRgb`], 255 otherwise. The unsigned carriers keep the
+//!   depth ceiling, where an untagged raster gives the same answer either way;
+//!   only a float carrier, which has no depth-implied ceiling at all, reads the
+//!   tag. Both halves round through `f32` exactly as the C macros do, because
+//!   `OUT nalpha` and `OUT factor` are `float` for float output, so the
+//!   multiplier is rounded before the colour multiply. The averaging resamplers —
 //!   `reduce` / `reduceh` / `reducev`, `shrink` / `shrinkh` / `shrinkv`, and
 //!   `resize` — do the same: an alpha image is premultiplied once into a float
 //!   working buffer, the separable box / kernel / affine passes all run in that
@@ -139,7 +147,7 @@
 //!
 //! * [ported_resample tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/ported_resample.rs)
 
-use crate::arithmetic::unpremultiply_factor;
+use crate::arithmetic::{interpretation_max_alpha, unpremultiply_factor};
 use crate::colour::{ColourError, Intent, Pcs};
 use crate::conversion::Interpretation;
 use crate::extract::{Extend, ExtractError};
@@ -533,9 +541,16 @@ fn round_int(v: f64) -> i64 {
 struct SampleLayout {
     bpc: usize,
     is_float: bool,
-    /// Sample ceiling for rounding and for the premultiply denominator
-    /// (255 for 8-bit and float, 65535 for 16-bit, the `vips_premultiply`
-    /// defaults).
+    /// Sample ceiling for the **storage** arithmetic: what [`write`] rounds
+    /// and clamps an unsigned sample into, and what [`Extend::White`] paints.
+    /// 255 for 8-bit and float, 65535 for 16-bit.
+    ///
+    /// Not the premultiply denominator, which is a property of the
+    /// interpretation rather than of the depth and comes from
+    /// [`bracket_max_alpha`] instead (issue #664). The two agree on the
+    /// unsigned carriers and cannot on a float one.
+    ///
+    /// [`write`]: SampleLayout::write
     max: f64,
 }
 
@@ -584,6 +599,37 @@ impl SampleLayout {
                 data[o] = r as u8;
             }
         }
+    }
+}
+
+/// The alpha ceiling the premultiply bracket divides by, the default
+/// `vips_premultiply` / `vips_unpremultiply` read from
+/// `vips_interpretation_max_alpha` (issue #664).
+///
+/// `vips_resize` premultiplies nothing of its own — "This operation does not
+/// premultiply alpha. If your image has an alpha channel, you should use
+/// premultiply on it first", `libvips/resample/resize.c`, and the binary
+/// agrees: a float RGBA raster resized on 8.18.6 comes back byte-identical
+/// under `multiband`, `b-w`, `srgb`, `scrgb` and `rgb16`. The bracket lives in
+/// the callers, `vips_affine` (`affine.c:553`) and `vips_thumbnail`
+/// (`thumbnail.c:835`), and both reach it through the premultiply pair. So the
+/// oracle for the bracket this module wraps around its own resamplers is
+/// `premultiply | resize | unpremultiply`, and it takes the interpretation.
+///
+/// Float carriers read [`interpretation_max_alpha`]; the unsigned ones keep
+/// [`SampleLayout::max`], mirroring what #631 did for the standalone pair. On
+/// an untagged raster the two answers are the same, so the only thing routing
+/// the unsigned carriers through the tag would change is a raster whose tag
+/// disagrees with its bytes — and
+/// [`RasterCopyBuilder::interpretation`](crate::conversion::RasterCopyBuilder::interpretation)
+/// accepts any tag without checking the depth, so an 8-bit buffer labelled
+/// `Rgb16` would premultiply against 65535 and come back black. [`crate::composite`]
+/// navigates the same trap for its own normalisation.
+fn bracket_max_alpha(src: &Raster) -> f64 {
+    if src.format().is_float() {
+        interpretation_max_alpha(src.interpretation())
+    } else {
+        SampleLayout::of(src.format()).max
     }
 }
 
@@ -826,6 +872,9 @@ struct TapFetch<'a> {
     h: i64,
     bands: usize,
     layout: SampleLayout,
+    /// The premultiply denominator, from [`bracket_max_alpha`]; deliberately
+    /// not [`SampleLayout::max`], which stays the storage ceiling (#664).
+    alpha_max: f64,
     extend: Extend,
     background: f64,
 }
@@ -838,6 +887,7 @@ impl TapFetch<'_> {
             h: i64::from(src.height()),
             bands: src.format().channels(),
             layout: SampleLayout::of(src.format()),
+            alpha_max: bracket_max_alpha(src),
             extend,
             background,
         }
@@ -886,7 +936,7 @@ impl TapFetch<'_> {
             _ => px.fill(self.fill_value()),
         }
         if premultiply {
-            let alpha = px[self.bands - 1].clamp(0.0, self.layout.max) / self.layout.max;
+            let alpha = px[self.bands - 1].clamp(0.0, self.alpha_max) / self.alpha_max;
             for v in px.iter_mut().take(self.bands - 1) {
                 *v *= alpha;
             }
@@ -1734,7 +1784,9 @@ fn unpremultiply(px: &mut [f64], max: f64) {
 
 /// Premultiply the colour bands of an alpha raster by `alpha / max` into a
 /// four-band **float** working raster (`RgbaF32`); the alpha band is copied
-/// unchanged. `max` is the source sample ceiling.
+/// unchanged. `max` is the alpha ceiling from [`bracket_max_alpha`], which
+/// reads the interpretation on a float carrier and the depth on an unsigned
+/// one (issue #664).
 ///
 /// Premultiplying into float — the way `vips_resize` premultiplies once into a
 /// float buffer — is what lets [`with_premultiply`] bracket the whole separable
@@ -1755,6 +1807,17 @@ fn unpremultiply(px: &mut [f64], max: f64) {
 /// the alpha, so a near-zero one damps rather than amplifies and no division
 /// can blow up. `libvips/conversion/premultiply.c` has a single macro for every
 /// band format, with no float variant.
+///
+/// The arithmetic rounds **twice**, which is not an accident of this port but
+/// what the C macro does: `OUT nalpha = (OUT) clip_alpha / max_alpha`, and
+/// `OUT` is `float` for every carrier this crate has. `vips_premultiply`
+/// widens only a DOUBLE input to DOUBLE output (`premultiply.c:229-232`) and
+/// writes FLOAT for everything else, so the multiplier is quantised to `f32`
+/// before the colour multiply even when the input is 8-bit, and an `f64`
+/// expression rounded once at the store is a different number. Measured on
+/// 8.18.6: `100 * f32(0.5 / 255)` un-premultiplied by `f32(255 / 0.5)` comes
+/// back `100.00000762939453`, where the single-rounded form gives exactly
+/// `100`. Same shape as the finding in #631.
 fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError> {
     let in_layout = SampleLayout::of(src.format());
     let out_fmt = PixelFormat::RgbaF32;
@@ -1766,9 +1829,13 @@ fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError>
     for p in 0..count {
         let base = p * bands;
         let alpha = in_layout.read(data, base + bands - 1);
-        let a = alpha.clamp(0.0, max) / max;
+        // `OUT nalpha = (OUT) clip_alpha / max_alpha` with `OUT` = float, so
+        // the multiplier is rounded to `f32` *before* the colour multiply and
+        // the whole thing rounds twice; see the note above.
+        let nalpha = (alpha.clamp(0.0, max) / max) as f32;
         for b in 0..bands - 1 {
-            out_layout.write(&mut out, base + b, in_layout.read(data, base + b) * a);
+            let v = in_layout.read(data, base + b) as f32;
+            out_layout.write(&mut out, base + b, f64::from(v * nalpha));
         }
         out_layout.write(&mut out, base + bands - 1, alpha);
     }
@@ -1777,8 +1844,19 @@ fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError>
 
 /// Un-premultiply the float working raster produced by [`premultiply_to_float`]
 /// back into `dst_fmt` (the original source format), dividing each colour band
-/// by the alpha and requantising exactly once. `max` is the source sample
-/// ceiling used for the premultiply, so the round-trip cancels.
+/// by the alpha and requantising exactly once. `max` is the same ceiling the
+/// premultiply used, so the round-trip cancels.
+///
+/// The guard pair is [`unpremultiply`]'s: the factor takes the **raw** alpha so
+/// over- and undershoots cancel, and the alpha that is **stored** is clipped to
+/// `0..=max`. That clip is where the ceiling shows up on ordinary data rather
+/// than only on out-of-range alpha, because lanczos3 rings: resampling a hard
+/// transparency edge pushes the alpha above the source's maximum, and an scRGB
+/// raster clips it back to `1.0` where the 255 default leaves it (issue #664).
+///
+/// Rounds through `f32` for the same reason [`premultiply_to_float`] does:
+/// `OUT factor` is a `float` in `unpremultiply.c`, so the reciprocal is
+/// quantised before the colour multiply.
 fn unpremultiply_from_float(
     src: &Raster,
     dst_fmt: PixelFormat,
@@ -1790,16 +1868,19 @@ fn unpremultiply_from_float(
     let data = src.data();
     let count = src.width() as usize * src.height() as usize;
     let mut out = vec![0u8; count * dst_fmt.bytes_per_pixel()];
-    let mut px = vec![0.0f64; bands];
     for p in 0..count {
         let base = p * bands;
-        for (b, v) in px.iter_mut().enumerate() {
-            *v = in_layout.read(data, base + b);
+        let alpha = in_layout.read(data, base + bands - 1);
+        // The mirror of [`premultiply_to_float`]'s rounding: `OUT factor` is a
+        // `float` too, so the reciprocal lands in `f32` before the colour
+        // multiply. [`unpremultiply`] keeps the `f64` spelling for the affine
+        // accumulator, which is not a stored `f32` buffer.
+        let factor = unpremultiply_factor(alpha, max) as f32;
+        for b in 0..bands - 1 {
+            let v = in_layout.read(data, base + b) as f32;
+            out_layout.write(&mut out, base + b, f64::from(v * factor));
         }
-        unpremultiply(&mut px, max);
-        for (b, &v) in px.iter().enumerate() {
-            out_layout.write(&mut out, base + b, v);
-        }
+        out_layout.write(&mut out, base + bands - 1, alpha.clamp(0.0, max));
     }
     Ok(Raster::new(src.width(), src.height(), dst_fmt, out)?)
 }
@@ -1828,7 +1909,7 @@ where
     if !bracket || !src.format().has_alpha() {
         return pipeline(src);
     }
-    let max = SampleLayout::of(src.format()).max;
+    let max = bracket_max_alpha(src);
     let work = premultiply_to_float(src, max)?;
     let reduced = pipeline(&work)?;
     unpremultiply_from_float(&reduced, src.format(), max)
@@ -2337,7 +2418,7 @@ impl Raster {
                 if fx >= -1.0 && fx <= (w - 1) as f64 && fy >= -1.0 && fy <= (h - 1) as f64 {
                     interpolate_at(&fetch, interpolate, ix, iy, premultiply, &mut px, &mut acc);
                     if premultiply {
-                        unpremultiply(&mut acc, layout.max);
+                        unpremultiply(&mut acc, fetch.alpha_max);
                     }
                     for (bi, v) in acc.iter().enumerate() {
                         layout.write(buf, oi + bi, *v);
@@ -3977,7 +4058,8 @@ mod tests {
         assert_eq!(out.height(), 4, "resize(0.5) of an 8x8 is 4 high");
         assert_eq!(out.format(), PixelFormat::RgbaF32, "the carrier survives");
         let s = out.f32_samples().expect("float carrier");
-        let base = (1 * 4 + 1) * 4;
+        // Pixel (1, 1) of the 4x4 output, the one vips was read at.
+        let base = (4 + 1) * 4;
         [s[base], s[base + 1], s[base + 2], s[base + 3]]
     }
 
@@ -4003,6 +4085,10 @@ mod tests {
     /// 300    85 17 2.5500001907348633 255                   0.3333333432674408 0.066666670143604279 0.0099999997764825821 1   99.999992370605469 20 3 300
     /// ```
     ///
+    /// The literals below are the shortest `f32` spelling of each of those
+    /// prints, which is the same bit pattern (`clippy::excessive_precision`
+    /// rejects the full decimal expansion vips writes).
+    ///
     /// The alpha `0.5` row is the regression guard the untagged case needs: an
     /// alpha inside every candidate ceiling makes the bracket cancel, so all
     /// three agree to within an ulp and nothing may move there. `1.5` and `300`
@@ -4026,12 +4112,12 @@ mod tests {
             (
                 300.0,
                 Some(Interpretation::ScRgb),
-                [0.333_333_34, 0.066_666_67, 0.009_999_999_8, 1.0],
+                [0.333_333_34, 0.066_666_67, 0.01, 1.0],
             ),
             (
                 300.0,
                 Some(Interpretation::Rgb16),
-                [99.999_992, 20.0, 3.0, 300.0],
+                [99.999_99, 20.0, 3.0, 300.0],
             ),
         ];
         for (alpha, tag, want) in cases {
