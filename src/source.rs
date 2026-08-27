@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Seek};
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -352,9 +352,11 @@ pub enum SourceError {
     /// [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded),
     /// which counts pixels and so cannot see the band count or the sample
     /// depth: a 1-gigapixel `max_pixels` still permits a 4 GiB `Rgba8`
-    /// frame. Used by the TIFF page readers for both the file body they
-    /// read in and the pixel buffer a page decodes into; the equivalent GIF
-    /// check has its own
+    /// frame. Raised for the whole-file read every memory-decoded container
+    /// needs, with `what = "image file body"` (issue #629), and by the TIFF
+    /// page readers for both their own file body and
+    /// the pixel buffer a page decodes into; the equivalent GIF check has
+    /// its own
     /// [`GifError::AllocLimitExceeded`](crate::gif::GifError::AllocLimitExceeded).
     #[error(
         "{what} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
@@ -410,7 +412,7 @@ pub enum SourceError {
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
 /// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
-/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`] | — (`.v` is an uncompressed body sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read (`.v`'s own uncompressed body is sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
 ///
 /// The single-axis [`max_coord`](Self::max_coord) and total
@@ -889,6 +891,12 @@ impl SniffedFormat {
     ///
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
+    ///
+    /// That read goes through [`read_file_bounded`], so a container joining
+    /// this list gets [`DecodeLimits::max_alloc_bytes`] applied to the file
+    /// length before a byte of it is read. It used to be a plain
+    /// `std::fs::read`, which meant every ceiling was checked after the whole
+    /// file was already resident (issue #629).
     const fn decodes_from_memory(self) -> bool {
         matches!(
             self,
@@ -1038,6 +1046,56 @@ fn read_head<R: std::io::Read>(mut source: R) -> std::io::Result<([u8; SNIFF_HEA
     Ok((head, filled))
 }
 
+/// Read the whole of `path` into memory, refusing a file whose length is
+/// past [`DecodeLimits::max_alloc_bytes`].
+///
+/// This is the crate's one bounded whole-file read. Some decoders genuinely
+/// need the bytes addressable end to end rather than streamed (see
+/// [`SniffedFormat::decodes_from_memory`], and the TIFF page readers, which
+/// patch the multiband photometric tag before the decoder ever sees it), and
+/// `std::fs::read` is the wrong way to get them: it sizes the buffer from the
+/// file and then grows it infallibly, so every ceiling in [`DecodeLimits`] is
+/// consulted after the allocation has already happened, and on a constrained
+/// host the failure is an abort rather than a returned error (issue #629).
+///
+/// The declared length is checked first, so an oversized file costs one
+/// `stat` rather than a full read, and the read itself is capped as well so a
+/// file that grows between the two cannot slip past. `what` names the buffer
+/// in the error, because a caller reading
+/// [`SourceError::AllocLimitExceeded`] needs to know whether it was the file
+/// or a pixel buffer that blew the budget.
+///
+/// # Errors
+///
+/// * [`SourceError::Io`] if the file cannot be opened, stat'd or read.
+/// * [`SourceError::AllocLimitExceeded`] if the file is longer than
+///   [`DecodeLimits::max_alloc_bytes`], which is the same variant the
+///   declared-geometry checks raise, so a caller does not have to tell "too
+///   big by header" from "too big by file length".
+pub(crate) fn read_file_bounded(
+    path: &Path,
+    limits: DecodeLimits,
+    what: &'static str,
+) -> Result<Vec<u8>, SourceError> {
+    let file = std::fs::File::open(path)?;
+    let declared = file.metadata()?.len();
+    limits.check_alloc(what, declared)?;
+
+    let cap = limits.max_alloc_bytes;
+    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let mut reader = std::io::BufReader::new(&file).take(cap.saturating_add(1));
+    reader.read_to_end(&mut bytes)?;
+    let read = bytes.len() as u64;
+    if read > cap {
+        return Err(SourceError::AllocLimitExceeded {
+            what,
+            needed_bytes: read,
+            max_alloc_bytes: cap,
+        });
+    }
+    Ok(bytes)
+}
+
 /// Configure an [`ImageReader`] over an already-opened source for a sniffed
 /// container.
 ///
@@ -1074,10 +1132,19 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
 ///
+/// The containers libviprs decodes from memory rather than streaming (`.v`,
+/// JPEG, GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR) go through one
+/// bounded whole-file read, so [`DecodeLimits::max_alloc_bytes`] bounds the
+/// read itself rather than only what the decoder does with the bytes
+/// afterwards. Everything else streams and never holds more than the
+/// decoder asks for.
+///
 /// # Errors
 ///
 /// As [`decode_file`], plus [`SourceError::DimensionLimitExceeded`] when
-/// the decoded `width * height` exceeds the supplied budget.
+/// the decoded `width * height` exceeds the supplied budget, and
+/// [`SourceError::AllocLimitExceeded`] when a memory-decoded container's
+/// file is longer than [`DecodeLimits::max_alloc_bytes`].
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
     // Identify the container from its leading magic, never from the path
     // extension: `decode_bytes_with_limits` has no filename to consult, so
@@ -1087,7 +1154,7 @@ pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Rast
     let (head, filled) = read_head(&mut file)?;
     let sniffed = sniff(&head[..filled]);
     let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
-        decode_bytes_with_limits(&std::fs::read(path)?, limits)?
+        decode_bytes_with_limits(&read_file_bounded(path, limits, "image file body")?, limits)?
     } else {
         // Rewind past the sniff and keep reading from the same handle, so
         // every streaming format's memory profile is unchanged.
@@ -1963,9 +2030,9 @@ mod tests {
      * container in, one decoder out, no options and no many-to-one
      * collapsing.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
-     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Radiance` and
-     * `Fits`, `OpenExr`, and distinct `image` formats for every container libviprs
-     * does not decode itself.
+     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Jxl`, `Radiance`,
+     * `Fits` and `OpenExr`, and distinct `image` formats for every container
+     * libviprs does not decode itself.
      */
     #[test]
     fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
@@ -1976,6 +2043,7 @@ mod tests {
             SniffedFormat::Tiff,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
+            SniffedFormat::Jxl,
             SniffedFormat::Radiance,
             SniffedFormat::Fits,
             SniffedFormat::OpenExr,
@@ -1987,6 +2055,7 @@ mod tests {
             SniffedFormat::Radiance,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
+            SniffedFormat::Jxl,
             SniffedFormat::Fits,
             SniffedFormat::OpenExr,
         ];
@@ -2003,12 +2072,13 @@ mod tests {
                 SniffedFormat::Jpeg,
                 SniffedFormat::Gif,
                 SniffedFormat::WebP,
+                SniffedFormat::Jxl,
                 SniffedFormat::Radiance,
                 SniffedFormat::Fits,
                 SniffedFormat::OpenExr
             ],
-            "only .v, JPEG, GIF, WebP, Radiance, FITS and OpenEXR may read the \
-             whole file into memory"
+            "only .v, JPEG, GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR may \
+             read the whole file into memory"
         );
 
         for format in self_decoded {
