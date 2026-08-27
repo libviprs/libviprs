@@ -74,7 +74,24 @@ jobs:
       # so the job now covers strictly more than it did. Removing those 48
       # annotations so their tests run under Miri too is a bigger and separate
       # question (issue #652).
-      - run: MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test
+      #
+      # `RUSTFLAGS: -A deprecated` is the nightly-only half of #643. Nightly std
+      # has renamed `AtomicU64::fetch_update` to `try_update` and deprecated the
+      # old name, and the crate sets `[lints.rust] deprecated = "deny"`, so the
+      # lib does not compile under nightly at all and Miri never runs. It lives
+      # here rather than as an `#[allow(deprecated)]` in `src/observe.rs`
+      # because the attribute has no `cfg` to hang the "nightly only" claim on:
+      # it would disarm the deny on stable too, at the exact call site the deny
+      # was added to watch, for every expression inside that statement. This is
+      # scoped to the one job that needs it.
+      #
+      # Cargo appends `RUSTFLAGS` after the `[lints]` table's own `--deny=...`,
+      # and rustc takes the last lint-level flag on the command line, so this
+      # does win. Verified with `cargo build -v`.
+      - run: cargo +nightly miri test
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+          RUSTFLAGS: -A deprecated
 
   loom:
     name: Loom
