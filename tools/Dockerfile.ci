@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
-# tools/Dockerfile.ci — the image `tools/local-ci.sh` runs the CI job list in.
+# tools/Dockerfile.ci — the image `tools/local-ci.py` runs the CI job list in.
 #
 # This exists so a local gate and CI cannot disagree about the environment.
-# It is deliberately NOT a build image: no sources are copied in. `local-ci.sh`
+# It is deliberately NOT a build image: no sources are copied in. `local-ci.py`
 # bind-mounts the working tree (and the libviprs-tests sibling) at run time, so
 # one build serves every branch and the container never holds a stale copy.
 #
@@ -11,14 +11,21 @@
 # integration job, and 1.97 for the MSRV job. Nightly is here for
 # `merge-gate.yml`'s Miri job, which is the other workflow worth running
 # locally. If ci.yml starts asking for a toolchain this image does not carry,
-# `local-ci.sh` fails loudly rather than silently substituting one.
+# `local-ci.py` fails loudly rather than silently substituting one.
 #
-# One honest caveat: GitHub runs `ubuntu-latest` on x86_64 and this image runs
-# on the host architecture, which is arm64 on an Apple Silicon machine. That is
-# the right trade (emulating x86_64 makes the suite unusably slow) but it means
-# the local gate is not bit-identical to CI for anything architecture-sensitive.
-# The one known case in this repo is `f32::mul_add`, which lowers to a libm
-# `fmaf` call on baseline x86-64 and a single `fmadd` on aarch64 (issue #581).
+# Architecture: `local-ci.py` pins `--platform linux/amd64` so this matches
+# GitHub's `ubuntu-latest`, which means Docker emulates it on Apple Silicon.
+# That is deliberate. The differences worth catching here are
+# architecture-sensitive: `f32::mul_add` lowers to a libm `fmaf` call on
+# baseline x86-64 and to a single `fmadd` on aarch64 (issue #581), so a native
+# arm64 gate would not see the x86 cost at all.
+#
+# `--native` runs on the host architecture instead. Use it for the
+# fallible-allocation tests, which ask for an allocation Rosetta cannot reserve
+# and so SIGTRAP under emulation rather than failing cleanly. `local-ci.py`
+# recognises that message and says so rather than reporting a phantom failure.
+#
+# `TARGETARCH` still selects the pdfium build, so both platforms work.
 # ---------------------------------------------------------------------------
 
 FROM debian:bookworm-slim AS pdfium
