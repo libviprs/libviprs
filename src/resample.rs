@@ -75,7 +75,11 @@
 //!   interpolated; positions whose floor falls outside `[-1, dim - 1]` are
 //!   painted with the background, and interpolation taps outside the image
 //!   read the [`Extend`] mode (background 0 by default), reproducing the
-//!   one-pixel anti-aliased border of `vips_affine_gen`.
+//!   one-pixel anti-aliased border of `vips_affine_gen`. `vips_affine` grows
+//!   that border by embedding the input with the caller's extend mode before
+//!   it resamples (`affine.c:534`), so an [`Extend::White`] tap is inked the
+//!   way `vips_embed` inks one, from the interpretation
+//!   (`white_ink`, issue #667), and not from the sample depth.
 //! * **Premultiplied alpha.** Like `vips_affine`, images with an alpha band
 //!   are premultiplied before interpolation and unpremultiplied afterwards
 //!   unless [`AffineOptions::premultiplied`] says the input already is. The
@@ -188,7 +192,7 @@
 use crate::arithmetic::{interpretation_max_alpha, unpremultiply_factor};
 use crate::colour::{ColourError, Intent, Pcs};
 use crate::conversion::Interpretation;
-use crate::extract::{Extend, ExtractError};
+use crate::extract::{Extend, ExtractError, white_ink};
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
 use crate::source::SourceError;
@@ -580,12 +584,14 @@ struct SampleLayout {
     bpc: usize,
     is_float: bool,
     /// Sample ceiling for the **storage** arithmetic: what [`write`] rounds
-    /// and clamps an unsigned sample into, and what [`Extend::White`] paints.
-    /// 255 for 8-bit and float, 65535 for 16-bit.
+    /// and clamps an unsigned sample into. 255 for 8-bit and float, 65535 for
+    /// 16-bit.
     ///
     /// Not the premultiply denominator, which is a property of the
     /// interpretation rather than of the depth and comes from
-    /// [`bracket_max_alpha`] instead (issue #664). The two agree on the
+    /// [`bracket_max_alpha`] instead (issue #664), and not the
+    /// [`Extend::White`] ink either, which is a property of the interpretation
+    /// too and comes from [`white_ink`] (issue #667). The three agree on the
     /// unsigned carriers and cannot on a float one.
     ///
     /// [`write`]: SampleLayout::write
@@ -913,6 +919,9 @@ struct TapFetch<'a> {
     /// The premultiply denominator, from [`bracket_max_alpha`]; deliberately
     /// not [`SampleLayout::max`], which stays the storage ceiling (#664).
     alpha_max: f64,
+    /// The sample an [`Extend::White`] tap reads, from [`white_ink`]; also a
+    /// property of the interpretation and not of the depth (#667).
+    white: f64,
     extend: Extend,
     background: f64,
 }
@@ -926,6 +935,7 @@ impl TapFetch<'_> {
             bands: src.format().channels(),
             layout: SampleLayout::of(src.format()),
             alpha_max: bracket_max_alpha(src),
+            white: white_ink(src.format(), src.interpretation()),
             extend,
             background,
         }
@@ -951,7 +961,7 @@ impl TapFetch<'_> {
 
     fn fill_value(&self) -> f64 {
         match self.extend {
-            Extend::White => self.layout.max,
+            Extend::White => self.white,
             Extend::Background => self.background,
             _ => 0.0,
         }
@@ -4608,6 +4618,82 @@ mod tests {
                 i / 4,
                 i % 4
             );
+        }
+    }
+
+    /// Issue #667. `vips_affine` builds the border it interpolates against by
+    /// embedding the input with the caller's extend mode before it resamples
+    /// (`"extend", affine->extend` in the `vips_embed` call at
+    /// `libvips/resample/affine.c:534`), so a white tap is inked exactly the
+    /// way `vips_embed` inks one: [`white_ink`], the interpretation's max
+    /// alpha laid down by whichever paint mechanism the carrier picks.
+    ///
+    /// Measured on 8.18.6 with `vips affine in.v out.v "1 0 0 1" --extend
+    /// white --oarea "-1 -1 4 4" --interpolate nearest`, reading the corner.
+    /// It is the same twelve values `vips embed --extend white` gives, which
+    /// is the point:
+    ///
+    /// ```text
+    /// carrier  multiband/b-w  srgb   rgb16  scrgb
+    /// uchar    255            255    255    1
+    /// ushort   65535          65535  65535  257
+    /// float    255            255    65535  1
+    /// ```
+    ///
+    /// Nearest on the `-1` ring reads one tap and nothing else, so the corner
+    /// is the ink itself rather than a blend of it, and none of the carriers
+    /// here has an alpha band, so no premultiply round-trip stands between the
+    /// ink and the assertion.
+    #[test]
+    fn affine_white_taps_ink_from_the_interpretation() {
+        use Interpretation as I;
+        // (tag, uchar corner, ushort corner, float corner)
+        let cases = [
+            (None, 255.0, 65535.0, 255.0),
+            (Some(I::Srgb), 255.0, 65535.0, 255.0),
+            (Some(I::Rgb16), 255.0, 65535.0, 65535.0),
+            (Some(I::ScRgb), 1.0, 257.0, 1.0),
+        ];
+        let float1 = PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap());
+        for (tag, want8, want16, wantf) in cases {
+            let carriers = [
+                (
+                    Raster::new(2, 2, PixelFormat::Gray8, vec![7; 4]).unwrap(),
+                    want8,
+                ),
+                (
+                    Raster::new(2, 2, PixelFormat::Gray16, 7u16.to_ne_bytes().repeat(4)).unwrap(),
+                    want16,
+                ),
+                (
+                    Raster::from_f32_samples(2, 2, float1, &[7.0; 4]).unwrap(),
+                    wantf,
+                ),
+            ];
+            for (im, want) in carriers {
+                let fmt = im.format();
+                let im = match tag {
+                    Some(t) => im.copy().interpretation(t).build(),
+                    None => im,
+                };
+                let out = im
+                    .try_affine_with(
+                        [1.0, 0.0, 0.0, 1.0],
+                        Interpolator::Nearest,
+                        AffineOptions {
+                            oarea: Some([-1, -1, 4, 4]),
+                            extend: Extend::White,
+                            ..AffineOptions::default()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(out.getpoint(0, 0), vec![want], "{fmt:?} tagged {tag:?}");
+                assert_eq!(
+                    out.getpoint(1, 1),
+                    vec![7.0],
+                    "the image itself resamples unchanged"
+                );
+            }
         }
     }
 }
