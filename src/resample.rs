@@ -3952,4 +3952,216 @@ mod tests {
         assert!(fit.width() <= 40 && fit.height() <= 40);
         assert!(fit.width() == 40 || fit.height() == 40);
     }
+
+    /// An 8x8 constant `RgbaF32` raster of `(100, 20, 3, alpha)`, optionally
+    /// tagged. A constant survives every reduce kernel exactly (unit-sum mask,
+    /// replicated edges), so a `resize(0.5)` on one isolates the premultiply
+    /// bracket: whatever comes out is `premultiply(max) -> unpremultiply(max)`
+    /// and nothing else.
+    fn const_rgba_f32(alpha: f32, tag: Option<Interpretation>) -> Raster {
+        let mut samples = Vec::with_capacity(8 * 8 * 4);
+        for _ in 0..8 * 8 {
+            samples.extend_from_slice(&[100.0, 20.0, 3.0, alpha]);
+        }
+        let im = Raster::from_f32_samples(8, 8, PixelFormat::RgbaF32, &samples).unwrap();
+        match tag {
+            Some(t) => im.copy().interpretation(t).build(),
+            None => im,
+        }
+    }
+
+    /// The interior sample of `const_rgba_f32(alpha, tag).resize(0.5)`.
+    fn resized_const_pixel(alpha: f32, tag: Option<Interpretation>) -> [f32; 4] {
+        let out = const_rgba_f32(alpha, tag).resize(0.5);
+        assert_eq!(out.width(), 4, "resize(0.5) of an 8x8 is 4 wide");
+        assert_eq!(out.height(), 4, "resize(0.5) of an 8x8 is 4 high");
+        assert_eq!(out.format(), PixelFormat::RgbaF32, "the carrier survives");
+        let s = out.f32_samples().expect("float carrier");
+        let base = (1 * 4 + 1) * 4;
+        [s[base], s[base + 1], s[base + 2], s[base + 3]]
+    }
+
+    /// Issue #664. The premultiply bracket's `max_alpha` is a property of the
+    /// **interpretation**, not of the storage depth, so a float carrier tagged
+    /// scRGB brackets against `1.0` and one tagged RGB16 against `65535`, where
+    /// an untagged one keeps the `255` default.
+    ///
+    /// `vips_resize` premultiplies nothing of its own — "This operation does
+    /// not premultiply alpha", `libvips/resample/resize.c`, and measured: the
+    /// same float RGBA resizes to identical bytes under every interpretation
+    /// tag. The bracket libviprs runs around it is `vips_premultiply` /
+    /// `vips_unpremultiply`, which default `max_alpha` from
+    /// `vips_interpretation_max_alpha` (`libvips/iofuncs/header.c:195`), so
+    /// that pair is the oracle. Measured on vips 8.18.6, an 8x8 constant float
+    /// RGBA `(100, 20, 3, alpha)` through
+    /// `premultiply | resize 0.5 | unpremultiply`, read at pixel (1, 1):
+    ///
+    /// ```text
+    /// alpha  untagged (255)                        scrgb (1.0)                                rgb16 (65535)
+    /// 0.5    100.00000762939453 20 3.0000002384185791 0.5   100 20 3 0.5                       100 20 3 0.5
+    /// 1.5    100.00000762939453 20 3.0000002384185791 1.5   66.666671752929688 13.333333969116211 2 1   100 20 3 1.5
+    /// 300    85 17 2.5500001907348633 255                   0.3333333432674408 0.066666670143604279 0.0099999997764825821 1   99.999992370605469 20 3 300
+    /// ```
+    ///
+    /// The alpha `0.5` row is the regression guard the untagged case needs: an
+    /// alpha inside every candidate ceiling makes the bracket cancel, so all
+    /// three agree to within an ulp and nothing may move there. `1.5` and `300`
+    /// are the discriminating rows, because they sit above one ceiling and
+    /// below another: the premultiply clip and the stored-alpha clip both bite,
+    /// and the three interpretations separate by a factor of 300.
+    #[test]
+    fn resize_float_bracket_takes_max_alpha_from_the_interpretation() {
+        let cases: [(f32, Option<Interpretation>, [f32; 4]); 9] = [
+            (0.5, None, [100.000_01, 20.0, 3.000_000_2, 0.5]),
+            (0.5, Some(Interpretation::ScRgb), [100.0, 20.0, 3.0, 0.5]),
+            (0.5, Some(Interpretation::Rgb16), [100.0, 20.0, 3.0, 0.5]),
+            (1.5, None, [100.000_01, 20.0, 3.000_000_2, 1.5]),
+            (
+                1.5,
+                Some(Interpretation::ScRgb),
+                [66.666_67, 13.333_334, 2.0, 1.0],
+            ),
+            (1.5, Some(Interpretation::Rgb16), [100.0, 20.0, 3.0, 1.5]),
+            (300.0, None, [85.0, 17.0, 2.550_000_2, 255.0]),
+            (
+                300.0,
+                Some(Interpretation::ScRgb),
+                [0.333_333_34, 0.066_666_67, 0.009_999_999_8, 1.0],
+            ),
+            (
+                300.0,
+                Some(Interpretation::Rgb16),
+                [99.999_992, 20.0, 3.0, 300.0],
+            ),
+        ];
+        for (alpha, tag, want) in cases {
+            let got = resized_const_pixel(alpha, tag);
+            for (band, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (f64::from(*g) - f64::from(*w)).abs() <= f64::from(w.abs()) * 1e-6,
+                    "alpha {alpha}, tag {tag:?}, band {band}: got {g}, want vips' {w}"
+                );
+            }
+        }
+    }
+
+    /// Issue #664, the bit-exact half. `vips_premultiply` lands the multiplier
+    /// in a `float` before the colour multiply (`OUT nalpha = (OUT) clip_alpha
+    /// / max_alpha` with `OUT` = float, then `q[i] = p[i] * nalpha`), and
+    /// `vips_unpremultiply` mirrors it with `OUT factor`. So the bracket rounds
+    /// **twice**, exactly as #631 found for the standalone operations, and an
+    /// `f64` expression rounded once at the store is a different number.
+    ///
+    /// The fingerprint is visible in the measured table above and it is what
+    /// this pins: `100 * f32(0.5 / 255) * f32(255 / 0.5)` is
+    /// `100.00000762939453`, not `100`, and `100 * f32(1.5 / 1) * f32(1 / 1.5)`
+    /// is `66.666671752929688`, not `66.66666412353516`. Both are one ulp, and
+    /// both are the difference between a value pinned on the binary and a value
+    /// pinned on a model of it.
+    #[test]
+    fn resize_float_bracket_rounds_through_f32_like_the_c_macros() {
+        // The untagged carrier: an f64 round trip returns exactly 100.0 here,
+        // the C's double rounding does not.
+        let got = resized_const_pixel(0.5, None);
+        assert_eq!(
+            got[0].to_bits(),
+            100.000_01f32.to_bits(),
+            "band 0 came out {}, want vips' 100.00000762939453 (f64 single-rounded \
+             gives exactly 100)",
+            got[0]
+        );
+        // scRGB with an alpha above its ceiling: the clip makes the premultiply
+        // exact, so the surviving ulp comes from `f32(1.0 / 1.5)`.
+        let got = resized_const_pixel(1.5, Some(Interpretation::ScRgb));
+        assert_eq!(
+            got[0].to_bits(),
+            66.666_67f32.to_bits(),
+            "band 0 came out {}, want vips' 66.666671752929688 (f64 single-rounded \
+             gives 66.66666412353516)",
+            got[0]
+        );
+    }
+
+    /// Issue #664, the reachable case. Nothing has to be out of range for the
+    /// ceiling to show: lanczos3 rings, so resizing a hard transparency edge
+    /// pushes the resampled alpha above the source's maximum, and the stored
+    /// alpha is clipped to `VIPS_CLIP(0, alpha, max_alpha)` on the way out.
+    ///
+    /// Measured on vips 8.18.6 with a 16x2 float RGBA of `(100, 20, 3, a)`,
+    /// `a = 0` for the left half and `1` for the right, through
+    /// `premultiply | resize 0.5 | unpremultiply`: the alpha at x = 5 comes
+    /// back `1.0152533054351807` untagged and exactly `1` under scrgb. So an
+    /// ordinary 0..1 scRGB raster with no overshoot in it at all still moves
+    /// bytes, which is what makes this worth fixing rather than documenting.
+    #[test]
+    fn resize_clips_the_stored_alpha_to_the_interpretation_ceiling() {
+        let mut samples = Vec::with_capacity(16 * 2 * 4);
+        for _ in 0..2 {
+            for x in 0..16 {
+                samples.extend_from_slice(&[100.0, 20.0, 3.0, if x < 8 { 0.0 } else { 1.0 }]);
+            }
+        }
+        let im = Raster::from_f32_samples(16, 2, PixelFormat::RgbaF32, &samples).unwrap();
+
+        let plain = im.resize(0.5);
+        let scrgb = im
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build()
+            .resize(0.5);
+        let (a, b) = (
+            plain.f32_samples().expect("float carrier"),
+            scrgb.f32_samples().expect("float carrier"),
+        );
+        let alphas: Vec<f32> = (0..plain.width() as usize).map(|x| a[x * 4 + 3]).collect();
+        let overshoot = alphas
+            .iter()
+            .position(|v| *v > 1.0)
+            .unwrap_or_else(|| panic!("lanczos3 must ring above 1.0 here, got {alphas:?}"));
+
+        assert!(
+            a[overshoot * 4 + 3] > 1.0,
+            "untagged: alpha {} must keep the ringing overshoot",
+            a[overshoot * 4 + 3]
+        );
+        assert_eq!(
+            b[overshoot * 4 + 3].to_bits(),
+            1.0f32.to_bits(),
+            "scRGB: alpha {} must clip to exactly 1.0, the scRGB max_alpha",
+            b[overshoot * 4 + 3]
+        );
+    }
+
+    /// Issue #664. The unsigned carriers stay on the depth-derived ceiling and
+    /// do **not** route through the interpretation, mirroring what #631 did for
+    /// the standalone premultiply pair. On an untagged raster the two agree
+    /// anyway (`Rgba8` resolves to `Srgb` and 255, `Rgba16` to `Rgb16` and
+    /// 65535), so the only thing routing them through the tag would change is a
+    /// raster whose tag disagrees with its bytes, and there it would be
+    /// destructive: an 8-bit buffer mislabelled `Rgb16` would premultiply
+    /// against 65535 and come back black. `RasterCopyBuilder::interpretation`
+    /// accepts any tag without checking the depth, so that is reachable.
+    #[test]
+    fn resize_unsigned_carriers_keep_the_depth_ceiling() {
+        let mut data = Vec::with_capacity(8 * 8 * 4);
+        for _ in 0..8 * 8 {
+            data.extend_from_slice(&[200u8, 100, 50, 128]);
+        }
+        let im = Raster::new(8, 8, PixelFormat::Rgba8, data).unwrap();
+        let plain = im.resize(0.5);
+        for tag in [
+            Interpretation::ScRgb,
+            Interpretation::Rgb16,
+            Interpretation::Grey16,
+        ] {
+            let tagged = im.copy().interpretation(tag).build().resize(0.5);
+            assert_eq!(
+                tagged.data(),
+                plain.data(),
+                "an 8-bit carrier tagged {tag:?} must still bracket against 255"
+            );
+        }
+        // And the value itself: a constant survives the bracket unchanged.
+        assert_eq!(&plain.data()[..4], &[200u8, 100, 50, 128]);
+    }
 }
