@@ -415,4 +415,157 @@ mod tests {
         assert_eq!(f3.without_alpha(), f3);
         assert_eq!(f2.without_alpha(), f2);
     }
+
+    /// Every `(band count, byte depth)` pair that has both a tuple spelling
+    /// and a named one, paired with the named variant `with_channels`
+    /// produces for it. Direct construction of the left-hand column is what
+    /// issue #531 is about: the tuple variants are public, so both spellings
+    /// of one pixel layout are constructible.
+    fn alias_table() -> [(PixelFormat, PixelFormat); 7] {
+        let nz = |n: u16| NonZeroU16::new(n).expect("the table holds no zeroes");
+        [
+            (PixelFormat::Multi8(nz(1)), PixelFormat::Gray8),
+            (PixelFormat::Multi8(nz(3)), PixelFormat::Rgb8),
+            (PixelFormat::Multi8(nz(4)), PixelFormat::Rgba8),
+            (PixelFormat::Multi16(nz(1)), PixelFormat::Gray16),
+            (PixelFormat::Multi16(nz(3)), PixelFormat::Rgb16),
+            (PixelFormat::Multi16(nz(4)), PixelFormat::Rgba16),
+            (PixelFormat::FloatF32(nz(4)), PixelFormat::RgbaF32),
+        ]
+    }
+
+    /**
+     * Tests the exact disagreement issue #531 reproduces: FloatF32(4) is a
+     * constructible second spelling of the layout RgbaF32 names, and the two
+     * must not answer differently about that layout.
+     * Works by asking both spellings every question PixelFormat can be
+     * asked and comparing the answers pairwise, so a future accessor that
+     * forgets the alias fails here rather than at a call site.
+     * Input: FloatF32(4) vs RgbaF32 -> Output: 4 channels, 4 bytes each,
+     * 16 bytes per pixel, float, has_alpha true, with_alpha RgbaF32,
+     * without_alpha FloatF32(3), for both.
+     */
+    #[test]
+    fn floatf32_4_and_rgbaf32_answer_alike() {
+        let alias = PixelFormat::FloatF32(NonZeroU16::new(4).expect("4 is non-zero"));
+        let named = PixelFormat::RgbaF32;
+
+        assert_eq!(alias.channels(), named.channels(), "channels disagree");
+        assert_eq!(
+            alias.bytes_per_channel(),
+            named.bytes_per_channel(),
+            "bytes_per_channel disagree"
+        );
+        assert_eq!(
+            alias.bytes_per_pixel(),
+            named.bytes_per_pixel(),
+            "bytes_per_pixel disagree"
+        );
+        assert_eq!(alias.is_float(), named.is_float(), "is_float disagrees");
+        assert_eq!(
+            alias.has_alpha(),
+            named.has_alpha(),
+            "has_alpha disagrees: FloatF32(4) says {} and RgbaF32 says {}",
+            alias.has_alpha(),
+            named.has_alpha()
+        );
+        assert_eq!(
+            alias.with_alpha(),
+            named.with_alpha(),
+            "with_alpha disagrees"
+        );
+        assert_eq!(
+            alias.without_alpha(),
+            named.without_alpha(),
+            "without_alpha disagrees"
+        );
+    }
+
+    /**
+     * Tests that no tuple spelling of a layout behaves differently from the
+     * named variant with_channels canonicalizes it to, for any band count
+     * a named variant exists for.
+     * Works by sweeping band counts 1 to 8 across all three byte depths,
+     * building the tuple variant directly and the canonical one through
+     * with_channels, and comparing every accessor. Counts with no named
+     * variant (2, 5, 6, 7, 8, and 1/3 at the float depth) compare a value
+     * against itself and hold trivially, which is what makes the sweep safe
+     * to state over the whole range.
+     * Input: Multi8(4) vs Rgba8, Multi16(1) vs Gray16, FloatF32(4) vs
+     * RgbaF32, ... -> Output: identical answers in every row.
+     */
+    #[test]
+    fn every_tuple_spelling_behaves_like_its_canonical_form() {
+        for n in 1..=8u16 {
+            let nz = NonZeroU16::new(n).expect("n starts at 1");
+            for (tuple, depth) in [
+                (PixelFormat::Multi8(nz), 1usize),
+                (PixelFormat::Multi16(nz), 2),
+                (PixelFormat::FloatF32(nz), 4),
+            ] {
+                let named = PixelFormat::with_channels(usize::from(n), depth)
+                    .expect("1..=8 bands at depth 1/2/4 is a valid format");
+                assert_eq!(
+                    tuple.channels(),
+                    named.channels(),
+                    "{tuple:?} and {named:?} disagree on channels"
+                );
+                assert_eq!(
+                    tuple.bytes_per_channel(),
+                    named.bytes_per_channel(),
+                    "{tuple:?} and {named:?} disagree on bytes_per_channel"
+                );
+                assert_eq!(
+                    tuple.bytes_per_pixel(),
+                    named.bytes_per_pixel(),
+                    "{tuple:?} and {named:?} disagree on bytes_per_pixel"
+                );
+                assert_eq!(
+                    tuple.is_float(),
+                    named.is_float(),
+                    "{tuple:?} and {named:?} disagree on is_float"
+                );
+                assert_eq!(
+                    tuple.has_alpha(),
+                    named.has_alpha(),
+                    "{tuple:?} and {named:?} disagree on has_alpha"
+                );
+                assert_eq!(
+                    tuple.with_alpha(),
+                    named.with_alpha(),
+                    "{tuple:?} and {named:?} disagree on with_alpha"
+                );
+                assert_eq!(
+                    tuple.without_alpha(),
+                    named.without_alpha(),
+                    "{tuple:?} and {named:?} disagree on without_alpha"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the alpha helpers land on the named variant rather than on
+     * the tuple spelling of the same layout, so a promotion or demotion
+     * cannot introduce an alias that was not there before.
+     * Works by promoting and demoting every row of the alias table and
+     * asserting the result is the named variant's answer, by value.
+     * Input: Multi8(1).with_alpha() -> Rgba8; Multi8(4).without_alpha() ->
+     * Rgb8; FloatF32(4).without_alpha() -> FloatF32(3).
+     */
+    #[test]
+    fn alpha_helpers_land_on_the_named_variant() {
+        for (alias, named) in alias_table() {
+            assert_eq!(
+                alias.with_alpha(),
+                named.with_alpha(),
+                "{alias:?}.with_alpha() must match {named:?}.with_alpha()"
+            );
+            assert_eq!(
+                alias.without_alpha(),
+                named.without_alpha(),
+                "{alias:?}.without_alpha() must match {named:?}.without_alpha()"
+            );
+        }
+    }
 }

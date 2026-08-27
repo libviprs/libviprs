@@ -956,4 +956,88 @@ mod tests {
             "no staging temp file may linger after a successful write: {leftovers:?}"
         );
     }
+
+    /// A pixel layout has one canonical spelling, so it must reach the
+    /// persisted manifest as one tag. The tuple variants are public, so
+    /// `FloatF32(4)` is constructible and names exactly what `RgbaF32`
+    /// names; before issue #531 the serializer wrote `"floatf32:4"` for it
+    /// and the reader canonicalized that back to `RgbaF32`, so what came off
+    /// disk was not what went on to it. The check is on the tag rather than
+    /// on the round trip because the round trip cannot see this: it already
+    /// lands on the canonical value either way.
+    #[test]
+    fn pixel_format_serde_writes_only_canonical_tags() {
+        let nz = |n: u16| core::num::NonZeroU16::new(n).expect("the table holds no zeroes");
+        for (alias, tag) in [
+            (PixelFormat::Multi8(nz(1)), "\"gray8\""),
+            (PixelFormat::Multi8(nz(3)), "\"rgb8\""),
+            (PixelFormat::Multi8(nz(4)), "\"rgba8\""),
+            (PixelFormat::Multi16(nz(1)), "\"gray16\""),
+            (PixelFormat::Multi16(nz(3)), "\"rgb16\""),
+            (PixelFormat::Multi16(nz(4)), "\"rgba16\""),
+            (PixelFormat::FloatF32(nz(4)), "\"rgbaf32\""),
+        ] {
+            let mut v1 = sample_manifest();
+            v1.source.pixel_format = alias;
+            let m = v1.into_manifest();
+            let s = m.to_json_string().unwrap();
+            assert!(
+                s.contains(tag),
+                "{alias:?} must persist as {tag}, got {s}"
+            );
+        }
+    }
+
+    /// `sink.rs` fills `source.pixel_format` from `tile.raster.format()`, and
+    /// a raster's format is canonical however the caller spelled it, so the
+    /// persisted manifest round-trips by identity. Without that, a manifest
+    /// built from an aliased raster parsed back into a manifest that was not
+    /// equal to it (issue #531).
+    #[test]
+    fn a_raster_derived_pixel_format_round_trips_by_identity() {
+        use crate::raster::Raster;
+
+        let alias = PixelFormat::FloatF32(core::num::NonZeroU16::new(4).expect("4 is non-zero"));
+        let raster = Raster::new(1, 1, alias, vec![0u8; 16]).unwrap();
+
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = raster.format();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            parsed, m,
+            "a manifest built from a raster must survive its own wire format: {s}"
+        );
+    }
+
+    /// Manifests already on disk can carry a non-canonical tag, because
+    /// older builds wrote one. The reader must keep accepting those and keep
+    /// canonicalizing them, so fixing the writer cannot orphan a checkpoint
+    /// that was written before the fix.
+    #[test]
+    fn legacy_non_canonical_tags_still_load() {
+        for (tag, want) in [
+            ("multi8:1", PixelFormat::Gray8),
+            ("multi8:3", PixelFormat::Rgb8),
+            ("multi8:4", PixelFormat::Rgba8),
+            ("multi16:1", PixelFormat::Gray16),
+            ("multi16:3", PixelFormat::Rgb16),
+            ("multi16:4", PixelFormat::Rgba16),
+            ("floatf32:4", PixelFormat::RgbaF32),
+            ("multi8:7", PixelFormat::Multi8(core::num::NonZeroU16::new(7).unwrap())),
+            ("floatf32:3", PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap())),
+        ] {
+            let m = sample_manifest().into_manifest();
+            let mut v: serde_json::Value = serde_json::from_str(&m.to_json_string().unwrap()).unwrap();
+            v["source"]["pixel_format"] = serde_json::Value::String(tag.to_string());
+            let bumped = serde_json::to_string(&v).unwrap();
+            let parsed: Manifest = serde_json::from_str(&bumped).unwrap();
+            assert_eq!(
+                parsed.as_v1().source.pixel_format,
+                want,
+                "the legacy tag {tag} must still load"
+            );
+        }
+    }
 }

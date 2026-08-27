@@ -1308,6 +1308,59 @@ mod tests {
             Err(RasterError::InvalidMemoryBands { bands: 0, .. })
         ));
     }
+
+    /**
+     * Tests that a raster's format is the canonical spelling of the layout,
+     * whichever spelling the caller declared. PixelFormat's tuple variants
+     * are public, so a caller (or a decoder) can hand in FloatF32(4), which
+     * names exactly what RgbaF32 names; every match on raster.format() and
+     * every has_alpha() decision downstream then depends on which spelling
+     * happened to be used (issue #531).
+     * Works by building the same one-pixel raster through all three
+     * constructors with a non-canonical format and asserting the format that
+     * comes back out is the named variant, plus the has_alpha answer that
+     * decides whether resize premultiplies.
+     * Input: FloatF32(4) -> RgbaF32 with alpha; Multi8(3) -> Rgb8.
+     */
+    #[test]
+    fn constructors_canonicalise_the_declared_format() {
+        use core::num::NonZeroU16;
+
+        let f4 = PixelFormat::FloatF32(NonZeroU16::new(4).expect("4 is non-zero"));
+        let m3 = PixelFormat::Multi8(NonZeroU16::new(3).expect("3 is non-zero"));
+
+        let from_new = Raster::new(1, 1, f4, vec![0u8; 16]).unwrap();
+        assert_eq!(
+            from_new.format(),
+            PixelFormat::RgbaF32,
+            "Raster::new must store the canonical spelling"
+        );
+        assert!(
+            from_new.format().has_alpha(),
+            "a four-band float raster has alpha whichever way it was spelled"
+        );
+
+        let zeroed = Raster::zeroed(1, 1, f4).unwrap();
+        assert_eq!(
+            zeroed.format(),
+            PixelFormat::RgbaF32,
+            "Raster::zeroed must store the canonical spelling"
+        );
+
+        let from_op = Raster::from_op_output(1, 1, m3, vec![0u8; 3]).unwrap();
+        assert_eq!(
+            from_op.format(),
+            PixelFormat::Rgb8,
+            "Raster::from_op_output must store the canonical spelling"
+        );
+
+        // The buffer-length invariant is unaffected: both spellings agree on
+        // bytes_per_pixel, so canonicalising cannot change what validates.
+        assert!(
+            Raster::new(1, 1, f4, vec![0u8; 15]).is_err(),
+            "canonicalising must not weaken the buffer-size check"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1372,4 +1425,5 @@ mod proptests {
             }
         }
     }
+
 }
