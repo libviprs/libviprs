@@ -14,7 +14,7 @@
 //! setup is reproduced with direct `Raster` construction and the arithmetic
 //! expressions are kept literal.
 
-use libviprs::{PixelFormat, Raster};
+use libviprs::{Interpretation, PixelFormat, Raster};
 
 /// The ported `make_test_mono`: a 100x100 Gray8 band-reject ring image.
 fn make_test_mono() -> Raster {
@@ -514,6 +514,54 @@ fn ported_surface_premultiply() {
         );
     }
     assert!((px_unpre[3] - alpha).abs() < 1.0);
+}
+
+/// The alpha pair is callable on a float raster from outside the crate and
+/// answers rather than unwinding (issue #631). It used to panic from inside
+/// the fallible form, so this pins the `try_` contract at the crate boundary
+/// where a caller with an OpenEXR or FITS load actually stands.
+///
+/// The two numbers are vips 8.18.6 on `(100, 100, 100, 0.5)`: `0.19607845`
+/// against the default `max_alpha` of 255, and `50` once the raster is tagged
+/// scRGB, which is what an RGB OpenEXR load carries.
+#[test]
+fn ported_surface_premultiply_accepts_float_rasters() {
+    let mut data = Vec::new();
+    for v in [100.0f32, 100.0, 100.0, 0.5] {
+        data.extend_from_slice(&v.to_ne_bytes());
+    }
+    let im = Raster::new(1, 1, PixelFormat::RgbaF32, data).unwrap();
+
+    let pre = im
+        .try_premultiply()
+        .expect("try_premultiply must not fail on a float raster");
+    assert_eq!(pre.format(), PixelFormat::RgbaF32);
+    let got = pre.getpoint(0, 0)[0] as f32;
+    assert_eq!(
+        got.to_bits(),
+        0.196_078_45f32.to_bits(),
+        "premultiply: got {got:?}, want vips' 0.19607845"
+    );
+
+    let unpre = im
+        .try_unpremultiply()
+        .expect("try_unpremultiply must not fail on a float raster");
+    let got = unpre.getpoint(0, 0)[0] as f32;
+    assert_eq!(
+        got.to_bits(),
+        51_000.0f32.to_bits(),
+        "unpremultiply: got {got:?}, want vips' 51000"
+    );
+
+    // The float `max_alpha` follows the interpretation tag, so the same
+    // pixel tagged scRGB divides by 1.0 instead of by 255.
+    let scrgb = im.copy().interpretation(Interpretation::ScRgb).build();
+    let got = scrgb.try_premultiply().unwrap().getpoint(0, 0)[0] as f32;
+    assert_eq!(
+        got.to_bits(),
+        50.0f32.to_bits(),
+        "scRGB premultiply: got {got:?}, want vips' 50"
+    );
 }
 
 /// The ported `test_stdif` call site (`ported_histogram.rs`): stdif(10, 10)

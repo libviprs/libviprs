@@ -536,6 +536,16 @@ struct SampleLayout {
     /// Sample ceiling for rounding and for the premultiply denominator
     /// (255 for 8-bit and float, 65535 for 16-bit, the `vips_premultiply`
     /// defaults).
+    ///
+    /// This keys on the storage depth alone, where
+    /// [`Raster::try_premultiply`](crate::Raster::try_premultiply) keys a
+    /// float carrier on the [`Interpretation`](crate::Interpretation) instead
+    /// (#631), so a float raster tagged scRGB brackets here against 255 and
+    /// premultiplies there against 1.0. Nothing in the crate produces that
+    /// combination today, since the bracket's float raster is
+    /// [`premultiply_to_float`]'s own working buffer, but a caller that
+    /// resizes an OpenEXR load would hit it, so it is written down rather
+    /// than left to be rediscovered.
     max: f64,
 }
 
