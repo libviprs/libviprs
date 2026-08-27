@@ -1,7 +1,9 @@
 name: Merge Gate
 
-# The release gate: the checks that are too slow to justify on every branch push
-# but have to hold before a release lands. Ported back to GitHub from
+# The deep checks. Miri is the release gate, too slow to justify on every branch
+# push; Loom and the pdfium audit gate `main`, because they are not slow at all
+# and gating them at `release` only made them unreachable (#642). Ported back
+# from
 # `.gitea/workflows/merge-gate.yml` as part of dropping Gitea (#585).
 #
 # The Gitea copy bookended the `miri` job with "Report pending to GitHub" and
@@ -12,18 +14,29 @@ name: Merge Gate
 # below.
 
 on:
-  # The trigger the pre-migration GitHub workflow used, restored as it was: this
-  # gates pull requests into `release`, not day-to-day branch work. Gitea had
-  # widened it to every branch push because that was the only event its mirror
-  # delivered, which is not a reason that applies here.
+  # Loom and the pdfium audit gate every pull request into `main`. Miri stays at
+  # the release boundary, held there by the `if:` on that job below.
   #
-  # `workflow_dispatch` is added deliberately. A `pull_request` run is never
+  # The split is measured rather than assumed. The old trigger gated all three
+  # at `release` on the grounds that they are too slow for day-to-day branch
+  # work, and for Miri that is true and then some. For the other two it is not
+  # close. Across the four dispatched runs on 2026-08-26 and 08-27:
+  #
+  #   pdfium-render source audit    11s, 11s, 19s, 20s    all green
+  #   Loom                          33s, 39s, 39s, 39s    all green
+  #   Miri                          never finished
+  #
+  # So two of the three cost about a minute between them, and had been sitting
+  # behind a gate that last fired on 2026-04-25, four months earlier. That is
+  # the whole of #642. The checks were not too slow, they were unreachable.
+  #
+  # `workflow_dispatch` stays. A `pull_request` run is never
   # created while the pull request has a merge conflict (the long note in ci.yml
   # has the measurements), and a release PR is exactly the kind that sits
   # conflicted for a while. Without a manual trigger the gate would be
   # unreachable at precisely the moment it matters.
   pull_request:
-    branches: [release]
+    branches: [main, release]
   workflow_dispatch:
 
 env:
@@ -51,6 +64,14 @@ jobs:
   miri:
     name: Miri
     runs-on: ubuntu-latest
+    # Held at the release boundary rather than widened to `main` with the other
+    # two, because it does not currently finish at all (#675). Three consecutive
+    # dispatched runs were killed at the 90 minute ceiling below, and the run
+    # before that ceiling existed went 4h13m. Widening this now would put a 90
+    # minute timeout on every pull request and report it as `cancelled`. When
+    # #675 lands, which is itself waiting on #670, drop this condition so Miri
+    # gates `main` too.
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'release'
     # A hang has to report as a failure, not as a cancellation. Miri on this
     # crate has run past 1h27m, been cancelled at 1h41m, and gone 4h without
     # finishing, and with no ceiling the only signal was "cancelled", which
@@ -69,11 +90,18 @@ jobs:
       # test using `tempfile` takes the job down and reports it as a Miri
       # failure rather than as a missing annotation.
       #
-      # It is not a coverage loss. The 48 annotated tests stay ignored exactly
-      # as before; this only stops *unannotated* fs tests from aborting the run,
-      # so the job now covers strictly more than it did. Removing those 48
-      # annotations so their tests run under Miri too is a bigger and separate
-      # question (issue #652).
+      # I claimed here that this was not a coverage loss, on the reasoning that
+      # the 48 annotated tests stay ignored and only *unannotated* fs tests stop
+      # aborting the run, so the job covers strictly more. I never measured it
+      # and it is false. Letting those unannotated tests actually execute under
+      # Miri is what pushed the run past any ceiling, so the job now covers
+      # strictly less: it covers nothing, because it never reports. The old
+      # behaviour at least aborted quickly and named the unannotated test.
+      #
+      # The flag stays for the moment only because removing it before #670 lands
+      # puts the gate straight back to aborting on the first `tempdir`. #675 has
+      # the ordering and the measurements; #652 has the larger question of
+      # un-ignoring those 48 tests.
       #
       # `RUSTFLAGS: -A deprecated` is the nightly-only half of #643. Nightly std
       # has renamed `AtomicU64::fetch_update` to `try_update` and deprecated the

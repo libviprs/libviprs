@@ -1059,6 +1059,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Loom and the pdfium-render source audit now gate every pull request into
+  `main`, where before all three Merge Gate jobs sat behind `branches:
+  [release]` and had not run since 2026-04-25 (issue #642). Miri stays on the
+  release boundary for now because it does not finish (issue #675).
+
+  The old trigger justified itself on the three checks being too slow for
+  day-to-day branch work. That holds for Miri and nothing else. Across the four
+  dispatched runs on 2026-08-26 and 08-27 the pdfium audit took 11, 11, 19 and
+  20 seconds and Loom took 33, 39, 39 and 39, all green, while Miri was killed
+  at the 90 minute ceiling three times and ran 4h13m the time before that
+  ceiling existed. So two of the three cost about a minute between them and
+  were unreachable rather than expensive, which is worth fixing on its own...
+  they cover the `unsafe` in the three decoder dependencies this epic added.
+
 - `n-pages` has one documented meaning, and `Raster::get_n_pages` now ports the
   whole of the libvips sanity check that guards it (issue #635). The panel that
   filed the issue counted four meanings behind the one accessor. Re-measured
