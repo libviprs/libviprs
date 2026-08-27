@@ -1238,6 +1238,21 @@ mod tests {
             );
         }
         assert_eq!(decode_tiff_page(&single, 0).unwrap().get_n_pages(), 1);
+
+        // Three pages and one page share a geometry, so the pair already
+        // shows the count tracks the IFD chain rather than the picture. A
+        // third point makes it a line, and five collides with nothing this
+        // fixture carries: issue #635 is exactly the case where a plausible
+        // number under this key turned out to be counting something else.
+        let five = dir.path().join("five.tif");
+        std::fs::write(&five, multipage_gray8_fixture(5)).unwrap();
+        for p in 0..5u32 {
+            assert_eq!(
+                decode_tiff_page(&five, p).unwrap().get_n_pages(),
+                5,
+                "page {p} of a five-page file must report n-pages = 5"
+            );
+        }
     }
 
     /// Rewrite one tag's value in the first IFD of a little-endian classic

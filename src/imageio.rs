@@ -886,35 +886,84 @@ impl Raster {
         i32::from(self.orientation())
     }
 
-    /// The number of pages this raster represents (libvips `n-pages`),
-    /// defaulting to `1` for a single-page image.
+    /// The number of pages the **original file** holds (libvips `n-pages`),
+    /// defaulting to `1`.
     ///
-    /// Reads the attached `n-pages` field. Three loaders set it and they do
-    /// not agree on when, so the field being *present* does not mean the
-    /// image has more than one page:
+    /// A port of `vips_image_get_n_pages` (`iofuncs/header.c:917-928`),
+    /// sanity check included. The key has one meaning across this crate and
+    /// it is the one vips gives it: **how many pages the file this raster
+    /// was decoded from contains**, where a page is something a loader's
+    /// zero-based `page` argument can select. It is a count and not an
+    /// index, so the sweep over every page is
+    /// `for page in 0..raster.get_n_pages()` and the last page is
+    /// `get_n_pages() - 1` (issue #566).
     ///
-    /// * [`crate::gif`] and [`decode_tiff_page`](crate::decode_tiff_page)
-    ///   attach it on every load, a one-frame GIF and a single-page TIFF
-    ///   included, where it reads `1`;
-    /// * [`crate::webp`] attaches it only when the file is animated, so a
-    ///   still WebP carries no such field at all, which is what
-    ///   `vipsheader -a` reports for one;
-    /// * the PDF loader does not attach it, and neither does
-    ///   [`crate::exr`], which reports its part count as `exr-parts`
-    ///   instead: `vipsheader -a` attaches no `n-pages` to an EXR either,
-    ///   and an EXR part is a layer rather than a page, so there is no
-    ///   part index [`crate::decode_exr`] could be asked for.
+    /// It is *not* how many pages were loaded into this raster. Every loader
+    /// here reads page 0, so a raster reporting `3` still holds one page of
+    /// pixels, exactly as a default `vips` load does.
     ///
-    /// A raster with no `n-pages` field reports `1` either way, matching the
-    /// oracle (`n-pages = 1` for `sample.jpg`, `5` / `4` / `3` / `35` for the
-    /// animated fixtures).
+    /// # Which loaders attach it
     ///
-    /// The count is 1-based and the page index is 0-based (issue #566), so a
-    /// sweep over every page is `for page in 0..raster.get_n_pages()`.
+    /// Four do, and each was measured against `vipsheader -a` on the same
+    /// file under vips 8.18.6:
+    ///
+    /// | loader | what it counts | the vips writer it ports |
+    /// |---|---|---|
+    /// | [`crate::gif`] | frames in the GIF | `nsgifload.c:281` |
+    /// | [`decode_tiff_page`](crate::decode_tiff_page) | IFDs in the chain | `tiff2vips.c:1879` |
+    /// | [`crate::webp`] | frames in the original animation | `webp2vips.c:508` |
+    /// | [`crate::jxl`] | frames in the original | `jxlload.c:747` |
+    ///
+    /// GIF and TIFF attach it to every load, a one-frame GIF and a
+    /// single-page TIFF included, where it reads `1`. WebP attaches it only
+    /// when the container is animated, and JPEG XL only when there is more
+    /// than one frame, so a still of either carries no such field at all.
+    /// That split is vips's rather than an inconsistency to tidy away:
+    /// `vipsheader -a` reports `n-pages: 1` for a still GIF and a one-page
+    /// TIFF, and no `n-pages` at all for a still WebP or a single-frame
+    /// JPEG XL. Both shapes read back as `1` here, so a caller never has to
+    /// know which one it is holding.
+    ///
+    /// # What stays off this key
+    ///
+    /// A count belongs here only if a page index can select it. Anything
+    /// else gets a name that says what it is (issue #635):
+    ///
+    /// * [`crate::exr`] reports its multi-part count as `exr-parts`. An EXR
+    ///   part is a layer, `openexrload` attaches no `n-pages` to an EXR, and
+    ///   [`crate::decode_exr`] takes no part index, so `0..get_n_pages()`
+    ///   would be a sweep over something unreachable (issue #626).
+    /// * The PDF readers attach nothing. vips's `pdfload` does attach it
+    ///   (measured: `n-pages: 3` for a three-page document, `1` for a
+    ///   one-page one), but its `page` argument is zero-based where this
+    ///   crate's PDF page numbers are one-based on purpose, so a caller
+    ///   sweeping `0..get_n_pages()` would be off by one. The document's
+    ///   count is [`crate::PdfInfo::page_count`].
+    ///
+    /// vips's own `jp2kload` is the case not to copy: it puts the JPEG 2000
+    /// *resolution* count under this key (`jp2kload.c:586`), so `page` there
+    /// picks a shrink level rather than a frame.
+    ///
+    /// # The sanity check
+    ///
+    /// vips reports a single page unless the field is an int strictly
+    /// between 1 and 10000, and so does this. Measured against
+    /// `vips_image_get_n_pages` on 8.18.6: `9999` comes back as `9999`,
+    /// `10000` and `65536` come back as `1`, and a string-typed field comes
+    /// back as `1` whatever it spells, because `vips_image_get_int` will not
+    /// coerce one. The stored value is untouched either way and stays
+    /// readable through [`Raster::get_field`], and a TIFF's real chain
+    /// length is [`tiff_page_count`](crate::tiff_page_count) regardless of
+    /// what this reports.
     pub fn get_n_pages(&self) -> u32 {
+        // `iofuncs/header.c:921-926`: the field has to be an int and it has
+        // to sit strictly between 1 and this ceiling, or vips calls the
+        // value crazy and reports a single page.
+        const CEILING: i64 = 10_000;
         match self.get_field("n-pages") {
-            Some(MetadataValue::Int(n)) => u32::try_from(n).ok().filter(|&n| n > 0).unwrap_or(1),
-            Some(MetadataValue::Str(s)) => s.parse::<u32>().ok().filter(|&n| n > 0).unwrap_or(1),
+            Some(MetadataValue::Int(n)) if (2..CEILING).contains(&n) => {
+                u32::try_from(n).unwrap_or(1)
+            }
             _ => 1,
         }
     }
@@ -2203,6 +2252,40 @@ mod tests {
         let mut im0 = Raster::black(4, 4);
         im0.set_field("n-pages", MetadataValue::Int(0));
         assert_eq!(im0.get_n_pages(), 1);
+    }
+
+    #[test]
+    fn get_n_pages_ports_the_whole_vips_sanity_check() {
+        // `vips_image_get_n_pages` (`iofuncs/header.c:917-928`) reports a
+        // single page unless the field is an int strictly between 1 and
+        // 10000. Measured rather than transcribed: a C program linking
+        // libvips 8.18.6 set each of these on a fresh image and printed what
+        // the accessor gave back (issue #635).
+        for (stored, expected) in [
+            (-5i64, 1u32),
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (9_999, 9_999),
+            (10_000, 1),
+            (10_001, 1),
+            (65_536, 1),
+            (2_000_000_000, 1),
+        ] {
+            let mut im = Raster::black(1, 1);
+            im.set_field("n-pages", MetadataValue::Int(stored));
+            assert_eq!(im.get_n_pages(), expected, "stored n-pages = {stored}");
+        }
+
+        // vips reads the field with `vips_image_get_int`, which will not
+        // coerce a string, so a `gchararray` "3" reports 1 there too. This
+        // crate's own `get_int` refuses the same way, and the raw value
+        // stays readable through `get_field`.
+        let mut str_field = Raster::black(1, 1);
+        str_field.set_field("n-pages", MetadataValue::Str("3".to_string()));
+        assert_eq!(str_field.get_n_pages(), 1);
+        assert_eq!(str_field.get_int("n-pages"), None);
+        assert_eq!(str_field.get_field("n-pages").unwrap().as_str(), "3");
     }
 
     fn rgb_2x2() -> Raster {

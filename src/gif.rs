@@ -1048,6 +1048,41 @@ mod tests {
     }
 
     /**
+     * Tests what the number under `n-pages` actually counts, which is the
+     * question issue #635 was filed on: the frames in the file and nothing
+     * else. The test above uses three frames, which is also the band count
+     * a GIF with no transparency expands to, so a loader that attached the
+     * wrong number would still read as right there. Works by assembling a
+     * FIVE-frame GIF on a 4x4 screen with a five-entry palette, so the
+     * expected count matches neither axis, nor either band count, nor the
+     * one frame that was loaded.
+     * Input: a 4x4 GIF with five frames -> Output: frame zero's pixels and
+     * `get_n_pages() == 5`.
+     */
+    #[test]
+    fn n_pages_counts_the_frames_in_the_file_and_nothing_else() {
+        let palette = [
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 0, 255],
+            [0, 255, 0],
+            [255, 255, 0],
+        ];
+        let frames: Vec<Frame> = (0..5u8).map(|f| Frame::full(4, 4, vec![f; 16])).collect();
+        let bytes = fixture((4, 4), &palette, 0, Some(0), &frames);
+
+        let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
+        assert_eq!(&raster.data()[..3], &[0, 0, 0], "frame zero is index 0");
+        assert_eq!((raster.width(), raster.height()), (4, 4));
+        assert_eq!(
+            raster.get_n_pages(),
+            5,
+            "n-pages is the frame count, not an axis, a band count, or the \
+             one frame that was loaded"
+        );
+    }
+
+    /**
      * Tests that the GIF encoder produces bytes the decoder reads back
      * unchanged when the raster already fits in the palette. GIF's LZW is
      * exactly lossless, so this is a byte-for-byte equality and not a
