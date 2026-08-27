@@ -1348,9 +1348,15 @@ impl Raster {
 const VIPS_HEADER_LEN: usize = 64;
 
 /// First four file bytes of a big-endian (SPARC-order) `.v` file.
-const VIPS_MAGIC_BE: [u8; 4] = [0x08, 0xf2, 0xa6, 0xb6];
+///
+/// `pub(crate)` for the same reason [`crate::exr::MAGIC`],
+/// [`crate::fits::MAGIC`] and [`crate::radiance::MAGIC`] are: the container's
+/// signature belongs to the module that owns the container, and the route
+/// table in [`crate::source`] reads it from here rather than keeping a
+/// second copy.
+pub(crate) const VIPS_MAGIC_BE: [u8; 4] = [0x08, 0xf2, 0xa6, 0xb6];
 /// First four file bytes of a little-endian (Intel-order) `.v` file.
-const VIPS_MAGIC_LE: [u8; 4] = [0xb6, 0xa6, 0xf2, 0x08];
+pub(crate) const VIPS_MAGIC_LE: [u8; 4] = [0xb6, 0xa6, 0xf2, 0x08];
 
 /// The magic this build writes: native byte order, as libvips does.
 #[cfg(target_endian = "little")]
@@ -1773,11 +1779,6 @@ enum VFieldValue<'a> {
     Known(&'a MetadataValue),
     /// A value a newer build wrote, echoed back as it arrived.
     Carried(&'a CarriedValue),
-}
-
-/// Whether `bytes` begin with a `.v` magic (either byte order).
-pub(crate) fn is_vips_bytes(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && (bytes[..4] == VIPS_MAGIC_LE || bytes[..4] == VIPS_MAGIC_BE)
 }
 
 /// Decode a native `.v` file (both byte orders). Enforces the caller's
@@ -2611,7 +2612,7 @@ mod tests {
         im.set_icc_profile(&[5, 5, 5]);
 
         let bytes = im.encode_vips().unwrap();
-        assert!(is_vips_bytes(&bytes));
+        assert_eq!(bytes[..4], VIPS_MAGIC_NATIVE);
         let back = decode_bytes(&bytes).unwrap();
         assert_eq!(back.width(), 2);
         assert_eq!(back.height(), 2);
