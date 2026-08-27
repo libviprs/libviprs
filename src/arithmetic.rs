@@ -3121,16 +3121,20 @@ impl Raster {
     ///
     /// Because sharing one was expensive, measured. The first cut of #631 put
     /// both arms in a single function behind an `if fmt.is_float()`, and that
-    /// alone cost the *unsigned* carriers 8 to 51 percent against `main`, on
+    /// alone cost the *unsigned* carriers 18 to 51 percent against `main`, on
     /// top of the `fn`-pointer regression and independent of it. Round-robin
-    /// at 2048x1536, `opt-level=3`, min of 5 x 9 reps:
+    /// at 2048x1536, `opt-level=3`, min over 5 runs of 7 to 9 reps:
     ///
     /// | | main | one function | two functions |
     /// |---|---|---|---|
-    /// | `Rgba8` premultiply | 11.27 | 13.35 | 11.01 |
-    /// | `Rgba8` unpremultiply | 10.31 | 13.33 | 10.36 |
-    /// | `Rgba16` premultiply | 11.96 | 17.89 | 12.07 |
-    /// | `Rgba16` unpremultiply | 11.72 | 17.90 | 11.87 |
+    /// | `Rgba8` premultiply | 11.36 | 13.35 | 11.01 |
+    /// | `Rgba8` unpremultiply | 10.48 | 13.33 | 10.36 |
+    /// | `Rgba16` premultiply | 12.16 | 17.93 | 12.07 |
+    /// | `Rgba16` unpremultiply | 11.91 | 17.94 | 11.87 |
+    ///
+    /// The `main` and one-function columns share a round-robin; the
+    /// two-function column comes from a second one, whose `main` re-measured
+    /// within one percent at 11.27, 10.31, 11.96 and 11.72.
     ///
     /// Three candidate explanations are ruled out rather than argued. The
     /// interpretation stamp is free (removing it moved nothing, 17.88 against
