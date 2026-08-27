@@ -205,6 +205,8 @@ use crate::imageio::SaveError;
 #[cfg(feature = "jxl")]
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
+#[cfg(feature = "jxl")]
+use crate::raster::{buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The smallest width or height [`Raster::encode_jxl`] will encode.
@@ -569,11 +571,28 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // thing from inside the decoder, but only once the frame data has been
     // fed in and only as an advisory; this is the ceiling with a typed
     // error behind it, and it is the same one the WebP path reports.
-    let samples = (width as usize)
-        .saturating_mul(height as usize)
-        .saturating_mul(bands as usize);
-    let bytes_needed = (samples as u64).saturating_mul(format.bytes_per_channel() as u64);
-    if bytes_needed > limits.max_alloc_bytes {
+    //
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632). This one used to saturate in `usize`, which makes the
+    // answer depend on the target's pointer width: on a 32-bit target the
+    // sample count pins at `u32::MAX` before the sample size is applied,
+    // so no frame can ever be priced above `u32::MAX * sample_bytes`, or
+    // about 16 GiB, however large the header says it is. Reaching that
+    // wants `max_pixels` above 2^32 and `max_alloc_bytes` above ~8.6 GB,
+    // both far past their defaults, on a target with a 4 GiB address
+    // space, so no such decode was ever going to succeed either way: what
+    // differs is which typed refusal the caller gets, and FITS and OpenEXR
+    // answer the budget where this one answered the allocator.
+    // `decode_alloc_bytes` widens every multiplicand to `u64` first, which
+    // is the rule `raster::buffer_len` states and the reason it uses
+    // `checked_mul`.
+    let bytes_needed = decode_alloc_bytes(
+        width,
+        height,
+        u64::from(bands),
+        format.bytes_per_channel() as u64,
+    );
+    if limits.exceeds_alloc_budget(bytes_needed) {
         return Err(JxlError::AllocLimitExceeded {
             width,
             height,
@@ -583,6 +602,15 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         }
         .into());
     }
+    // `samples` sizes the frame buffer below, and clearing the budget
+    // above is not what makes it safe to compute. `max_alloc_bytes` is a
+    // `u64` a caller sets, so on a 32-bit target a 65536x65536x1 frame
+    // under a 16 GiB budget passes the check and *then* pins a `usize`
+    // sample count at `u32::MAX`, which is the same pointer-width bug one
+    // line higher wearing a different hat. `buffer_len` computes the same
+    // widened product and checks the narrowing, so the count is right by
+    // construction rather than by a precondition nothing enforces.
+    let samples = buffer_len(width, height, bands as usize).map_err(JxlError::Raster)?;
 
     image
         .feed_bytes(&bytes[consumed..])
@@ -1842,6 +1870,85 @@ mod tests {
         let roomy = DecodeLimits::default().with_max_alloc_bytes(4 * 1024 * 1024);
         let back = decode_jxl(&bytes, roomy).expect("a 4 MiB budget holds a 512x512 RGB frame");
         assert_eq!((back.width(), back.height()), (512, 512));
+    }
+
+    /**
+     * Tests that the frame pre-check bites at exactly the byte the declared
+     * frame costs, and not one byte either side. The case above refuses at
+     * 256 KiB against a 768 KiB frame, which a price wrong by a factor
+     * would also refuse; only the exact pair below pins the arithmetic and
+     * the `>` in the comparison.
+     * One byte short of the frame the pre-check answers and names the
+     * price. At exactly the frame it does not, and that is what proves the
+     * comparison is `>` and not `>=`: the refusal that arrives instead is
+     * `jxl-oxide`'s own tracker, which holds the same budget and is still
+     * carrying its header-phase buffers when the frame is asked for. So
+     * the accepting half of this boundary is not reachable through the
+     * decoder, and asserting a clean decode there would be asserting the
+     * tracker's ceiling rather than this one.
+     * Input: the same 512x512 `Rgb8` file at `max_alloc_bytes` 786431 then
+     * 786432 -> Output: `AllocLimitExceeded { needed: 786432 }`, then
+     * `DecoderAllocLimitExceeded`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_frame_budget_bites_at_exactly_the_declared_price() {
+        let big = Raster::zeroed(512, 512, PixelFormat::Rgb8).unwrap();
+        let bytes = big.encode_jxl(SaveOptions::default()).unwrap();
+        let price = 512u64 * 512 * 3;
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(price - 1);
+        let err = decode_jxl(&bytes, short).expect_err("786431 bytes is one short of the frame");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::AllocLimitExceeded {
+                    width: 512,
+                    height: 512,
+                    channels: 3,
+                    needed: 786_432,
+                    max_alloc_bytes: 786_431,
+                })
+            ),
+            "{err:?}"
+        );
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(price);
+        let err = decode_jxl(&bytes, exact).expect_err("the decoder needs room of its own too");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::DecoderAllocLimitExceeded {
+                    max_alloc_bytes: 786_432
+                })
+            ),
+            "a frame priced at exactly the budget must clear the pre-check, so the \
+             only refusal left is the decoder's own tracker: {err:?}"
+        );
+
+        // And again on a carrier wider than a byte, because an 8-bit frame
+        // cannot tell the sample size apart from 1: dropping
+        // `bytes_per_channel()` from the price leaves the 512x512 `Rgb8`
+        // case above answering exactly the same thing. A 256x256 `Rgb16`
+        // frame is 393216 bytes and only half that without it.
+        let deep = Raster::zeroed(256, 256, PixelFormat::Rgb16).unwrap();
+        let deep_bytes = deep.encode_jxl(SaveOptions::default()).unwrap();
+        let deep_price = 256u64 * 256 * 3 * 2;
+        let short = DecodeLimits::default().with_max_alloc_bytes(deep_price - 1);
+        let err = decode_jxl(&deep_bytes, short).expect_err("393215 bytes is one short");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::AllocLimitExceeded {
+                    width: 256,
+                    height: 256,
+                    channels: 3,
+                    needed: 393_216,
+                    max_alloc_bytes: 393_215,
+                })
+            ),
+            "{err:?}"
+        );
     }
 
     /**

@@ -141,7 +141,7 @@ use tiff::tags::Tag;
 use crate::codec::{DecodeError, TiffCompression};
 use crate::imageio::SaveError;
 use crate::pixel::PixelFormat;
-use crate::raster::Raster;
+use crate::raster::{Raster, decode_alloc_bytes};
 use crate::sink::SinkError;
 use crate::source::{DecodeLimits, read_file_bounded};
 
@@ -641,10 +641,12 @@ fn decode_current_image<R: Read + Seek>(
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
     let (channels, bit_depth) = resolve_channels_and_depth(decoder)?;
-    let needed = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(channels as u64)
-        .saturating_mul(u64::from(bit_depth).div_ceil(8));
+    let needed = decode_alloc_bytes(
+        width,
+        height,
+        channels as u64,
+        u64::from(bit_depth).div_ceil(8),
+    );
     limits.check_alloc("TIFF page pixel buffer", needed)?;
     let orientation = read_tiff_orientation(decoder);
     let result = decoder.read_image().map_err(tiff_decode_err)?;
@@ -1381,6 +1383,41 @@ mod tests {
         assert_eq!(
             decode_tiff_page_with_limits(&path, 0, ok).unwrap().data(),
             ramp_gray8(64, 64).data()
+        );
+
+        // And again on a page that has more than one band and more than
+        // eight bits, because a gray8 page cannot tell either of those
+        // apart from 1: the price above is the same whether or not the
+        // band count and the sample depth are in it, and this check is the
+        // only one of the three that can see them at all. A 64x64 RGBA
+        // 16-bit page is 32768 bytes and an eighth of that without them.
+        let deep = dir.path().join("deep.tif");
+        ramp_rgba16(64, 64)
+            .save_tiff(&deep, TiffCompression::Deflate)
+            .unwrap();
+        let deep_len = std::fs::metadata(&deep).unwrap().len();
+        let deep_price = 64 * 64 * 4 * 2;
+        assert!(
+            deep_len < deep_price,
+            "the deflate fixture must compress below its {deep_price}-byte pixel \
+             buffer or the file read would answer first, got {deep_len}"
+        );
+        let starved = DecodeLimits::default().with_max_alloc_bytes(deep_price - 1);
+        assert!(
+            matches!(
+                decode_tiff_page_with_limits(&deep, 0, starved),
+                Err(DecodeError::AllocLimitExceeded {
+                    what: "TIFF page pixel buffer",
+                    needed_bytes: 32768,
+                    max_alloc_bytes: 32767,
+                })
+            ),
+            "a 64x64 RGBA16 page prices at 32768 bytes"
+        );
+        let ok = DecodeLimits::default().with_max_alloc_bytes(deep_price);
+        assert_eq!(
+            decode_tiff_page_with_limits(&deep, 0, ok).unwrap().data(),
+            ramp_rgba16(64, 64).data()
         );
     }
 

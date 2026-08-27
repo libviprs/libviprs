@@ -1435,6 +1435,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The six decoders that price a frame buffer from declared geometry (GIF,
+  Radiance, FITS, OpenEXR, JPEG XL and the TIFF page reader) do it with one
+  shared, saturating `width * height * bands * sample_bytes` and hand the answer
+  to one shared comparison, instead of five near-copies of the same arithmetic
+  that did not agree on what to do when the product overflows (issue #632). #612
+  shipped that comparison as `DecodeLimits::check_alloc` in the same batch that
+  added the FITS, OpenEXR and JPEG XL loaders, and none of the three used it,
+  because all three were written in parallel against a `main` that did not have
+  it yet. WebP still does neither half and is deliberately left alone: it prices
+  off the decoder's own `output_buffer_size()` rather than a declared-geometry
+  product and reports `SourceError::Decode` carrying an `image` `LimitError`, so
+  nothing in the shared pair fits it.
+
+  The one that actually diverged is JPEG XL. It saturated the first three
+  multiplicands in `usize` and only then widened, so on a 32-bit target the
+  sample count pins at `u32::MAX` before the sample size is applied, and no
+  frame can be priced above `u32::MAX * sample_bytes`, about 16 GiB, however
+  large the header says it is. Reaching that wants `max_pixels` above 2^32 and
+  `max_alloc_bytes` above ~8.6 GB, both far past their defaults, on a target
+  with a 4 GiB address space, so no such decode was ever going to succeed: what
+  differed is which typed refusal came back, the budget's or the allocator's. On
+  a 64-bit build `usize` is `u64` and all five spellings agree to the byte, so
+  nothing moves for anyone on x86_64 or aarch64... it was a latent divergence
+  rather than a live one, and it is the exact hazard `Raster::buffer_len`
+  already documents and guards with `checked_mul` two functions further up.
+
+  GIF and Radiance were the other two shapes, both a plain `*` with no
+  saturation at all. Neither can overflow today, but only because a GIF states
+  its logical screen in `u16` and `parse_resolution` bounds a `.hdr` axis below
+  `DEFAULT_MAX_COORD` before `DecodeLimits` is consulted. Neither guarantee is
+  written anywhere near the expression that leans on it, and the three codecs
+  that copied the shape do not have one: their axes are `u32` and both ceilings
+  above them are caller-settable, which is what turned a safe idiom into an
+  unsafe one on the way across.
+
+  The typed per-format variants stay. `FitsError::AllocLimitExceeded`,
+  `ExrError::AllocLimitExceeded`, `JxlError::AllocLimitExceeded`,
+  `GifError::AllocLimitExceeded` and `RadianceError::AllocLimitExceeded` are all
+  still what a caller sees, because collapsing them onto
+  `SourceError::AllocLimitExceeded` is a breaking change to five public enums;
+  #632 deferred it and issue #686 carries it for 0.5.0. They are built from the
+  budget's answer rather than retagged off its error, through the new
+  `DecodeLimits::exceeds_alloc_budget`: `check_alloc`'s `what` label is only
+  ever observable through a decoder that propagates the `SourceError` whole,
+  which is the file-body read and the TIFF page reader, so the five formats that
+  rebuild the message were constructing a label nobody could see.
+
+  A saturated price is now refused whatever the budget says. `check_alloc` was a
+  plain `needed > max_alloc_bytes`, which is false when both sides are
+  `u64::MAX`, and `with_max_alloc_bytes(u64::MAX)` is the idiomatic spelling of
+  "no limit" against a public unclamped field. So the one value saturation
+  produces was the one value that budget waved through, and OpenEXR would then
+  have sized its buffer from a plain `usize` product of the same untrusted
+  geometry. `u64::MAX` is a sentinel meaning "this did not fit a `u64`", not a
+  price, and the comparison treats it as one. The arm costs exactly one
+  accepted value, and that value is 16 EiB.
+
+  GIF, OpenEXR and Radiance also size their output buffers through
+  `raster::buffer_len` rather than a bare `usize` multiply. Clearing the budget
+  says the byte count fits a `u64`, which on a 32-bit target is not the same as
+  fitting the address space: a caller who raises `max_alloc_bytes` past 4 GiB
+  clears the check and then wraps the product two lines lower, in release. Same
+  defect as the price, one line down, and it now answers
+  `RasterError::SizeOverflow` on both widths. JPEG XL's sample count moves the
+  same way, which also retires a comment claiming the pre-check made a `usize`
+  chain safe; it only does so while `max_alloc_bytes <= usize::MAX`, and nothing
+  enforces that.
+
+  Two of the existing budget tests could not fail for the reason they claimed.
+  The TIFF one decoded a 64x64 **gray8** page, where the band count and the
+  sample depth are both 1, so it priced the same whether or not the check saw
+  them, and that check is the only one of the three ceilings that can see them
+  at all. The JPEG XL one had the same hole on the sample size, with a 512x512
+  `Rgb8` frame. Both now carry a second case on a wider carrier (a 64x64 RGBA
+  16-bit TIFF page at 32768 bytes, a 256x256 `Rgb16` JPEG XL frame at 393216)
+  where dropping either multiplicand changes the answer. Every format also
+  pins the budget at exactly the byte its geometry costs and one byte below it,
+  which is what fixes the comparison at `>` rather than `>=`, and the overflow
+  boundary itself is pinned once on the shared price rather than three times in
+  three dialects. The sentinel gets its own boundary test, offering a saturated
+  price to a `u64::MAX` budget and pinning both the refusal and the one value
+  below it that is still accepted.
+
 - `try_premultiply` and `try_unpremultiply` handle float rasters instead of
   panicking on them (issue #631). They used to fall into `depth_max`'s "the
   arithmetic operations do not support float rasters yet" panic from inside
