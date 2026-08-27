@@ -1,0 +1,192 @@
+# Contributing to libviprs
+
+Most of what is written down here is about dependencies. That is the decision
+this project keeps having to make, it is the one it kept getting wrong, and it
+is the one that has been used to accept and reject other people's work. The
+rest of the workflow lives in the README and the `Makefile`; the last section
+points at it.
+
+## The dependency rule
+
+**Nothing libviprs builds may need a library that is not already in the
+dependency tree.**
+
+Three clauses, and they are exactly what `tests/dependency_policy.rs` checks on
+every `cargo test`:
+
+1. **No dependency may go looking for a library on the build machine.** No
+   `pkg-config`, `vcpkg`, `system-deps` or `cmake` probe may run in any build
+   script that this crate causes to run.
+2. **No dependency may link a third-party library that somebody has to install
+   first.** Linking what the platform itself always ships is fine and
+   unavoidable: libc, libm, `CoreFoundation` on macOS, the Windows import
+   libraries.
+3. **Compiling *vendored* C or assembly through a `build.rs` is allowed**, and
+   the instances are listed below. The crate already does this on every single
+   build, so a rule that forbade it would be a rule the crate itself breaks.
+
+Two features are named carve-outs, `packfile` and `pdfium`. Both are off by
+default and both are written up below. The list is closed: a new feature does
+not get to add a third without an explicit decision recorded in this file and
+in the test.
+
+That rule still rejects everything this project has turned down. OpenSlide
+(#503), ImageMagick (#509) and `fitsio` (via `fitsio-sys`, see the note at the
+top of `src/fits.rs`) all fail clause 1 or clause 2, which is the reason they
+were actually rejected. The objection was never "it has a `build.rs`".
+
+### What the rule is not
+
+I used to enforce this as "zero `-sys` crates and zero C compiles anywhere in
+the tree" (#606). That was never true of the tree, not on any commit, and every
+obvious tightening of it is false too. Here is each tempting discriminator with
+the counterexample that kills it, all of them in the graph today:
+
+| Tempting rule | Counterexample, in this tree, right now |
+|---|---|
+| "no `build.rs`" | 21 crates in the default host graph have one, `serde`, `libc` and `proc-macro2` among them |
+| "nothing compiles C" | `blake3` compiles `c/blake3_neon.c` into `libblake3_neon.a` on every aarch64 build, and assembles `.S` files through `cc` on x86_64 |
+| "no `links =` key" | `rayon-core` declares `links = "rayon-core"` in every default build on every target. It is not a C library at all: `links` is doing its *other* job there, letting cargo enforce a single version of a crate across the graph |
+| "no `-sys` suffix" | `libbz2-rs-sys` is pure Rust, 0 `.c` files and no `build.rs`. So are `core-foundation-sys`, `linux-raw-sys`, `js-sys` and `web-sys` |
+| "no `pkg-config` in the graph" | `--features packfile` puts `pkg-config` in the build graph today, dormant but present |
+| "no `cc` in the graph" | `cc` is a build-dependency in every graph, on every target, including a default build with no features enabled |
+
+None of those six properties separates a crate that vendors its own C from a
+crate that needs something installed on the machine, which is the distinction
+that actually matters.
+
+### What is in the tree, measured
+
+Everything below comes from
+`cargo tree -p libviprs -e normal,build --target <triple>` plus
+`cargo metadata`, on cargo 1.98, and the test re-derives it rather than trusting
+this table. Note the `--target` flag: `cargo metadata` without
+`--filter-platform` reports every target's dependencies at once, so an audit
+that skips it will flag `wasm-bindgen-shared` on a mac. Note also that
+`cargo metadata`'s resolve graph includes optional dependencies that nothing
+enabled, which is why `defmt` (an unused optional of `chrono`, `jiff` and
+`tinyvec`, and a `links = "defmt"` declarer) looks like it is in the default
+build and is not. `cargo tree` is feature-aware and does not have that problem,
+which is why the test drives it.
+
+**Vendored native code.** Two crates, and only two, ship compilable C or
+assembly *and* a build script that can compile it:
+
+| crate | native sources | reached by | what it emits |
+|---|---|---|---|
+| `blake3` 1.8.7 | 11 `.c`, 1 `.cpp`, 12 `.S`/`.asm` | **default**, a direct dependency | `cargo:rustc-link-lib=static=blake3_neon` and a link search into `OUT_DIR` |
+| `zstd-sys` 2.0.16 | 42 `.c`, 1 `.S` | `packfile` only | `cargo:rustc-link-lib=static=zstd` and a link search into `OUT_DIR` |
+
+Both link directives are `static=` and both search paths point inside the
+target directory, which is the whole point: the library is built here, from
+source that came down with the crate, and nothing on the machine is consulted.
+`libbz2-rs-sys`, despite the name, has neither a `build.rs` nor a single `.c`
+file and belongs in no table.
+
+On aarch64 the blake3 C compile is unconditional, so a default build genuinely
+needs a working C compiler there. On x86_64 blake3 probes for one and falls
+back to Rust intrinsics if it finds none, so the compiler is preferred rather
+than required. Either way, `cc` runs.
+
+**`links` keys in the resolved graph**, per target and per feature set:
+
+| target | default | `--features packfile` | `--all-features` |
+|---|---|---|---|
+| `aarch64-apple-darwin` | `rayon-core` | `rayon-core`, `zstd-sys` | `rayon-core`, `zstd-sys` |
+| `x86_64-unknown-linux-gnu` | `rayon-core` | `rayon-core`, `zstd-sys` | `rayon-core`, `zstd-sys` |
+| `x86_64-pc-windows-msvc` | `rayon-core` | `rayon-core`, `zstd-sys` | `rayon-core`, `zstd-sys` |
+| `wasm32-unknown-unknown` | `rayon-core` | `rayon-core`, `wasm-bindgen-shared`, `zstd-sys` | `rayon-core`, `wasm-bindgen-shared`, `zstd-sys` |
+
+`wasm-bindgen-shared` is real on wasm32 rather than a metadata artifact.
+`packfile` is what puts it there: `zip` turns on `getrandom`'s `wasm_js`
+backend and pulls `time`'s wasm clock through `js-sys`, and both land on
+`wasm-bindgen`. `--features pdfium` reaches it a second way, directly. It
+declares `links = "wasm_bindgen"` for the same version-unification reason
+`rayon-core` does, and it compiles nothing.
+
+**Library-discovery crates.** `pkg-config`, `system-deps`, `vcpkg`, `cmake` and
+`bindgen`: none of them is in any default graph on any target. `pkg-config`
+appears under `packfile` and nowhere else. `cc` is deliberately not on that
+list, because `cc` compiles vendored sources rather than discovering installed
+ones, and the whole argument above is that those two are different things.
+
+**Dev-dependencies** get the same rule applied one notch looser, since they
+never reach a consumer. The only thing they add today is `generator` 0.8.9,
+which `loom` pulls and which assembles 10 `.s` stack-switching files through
+`cc`. Vendored, so clause 3 covers it.
+
+### `packfile` is a carve-out, on purpose
+
+`--features packfile` pulls `zip` -> `zstd` -> `zstd-safe` -> `zstd-sys`, and
+`zstd-sys` is the one crate here that looks like the thing the rule forbids. It
+declares `links = "zstd"`, it vendors 42 `.c` files, and it drags `pkg-config`
+into the build graph as an unconditional build-dependency of its own.
+
+It stays, and it stays as a deliberate exception rather than an accident:
+
+- It is **off by default**, so nobody who does not write packfiles pays for it.
+- It **vendors**. As resolved here `zstd-sys` gets only its `std` feature, so
+  `main()` takes the `compile_zstd()` branch and builds `zstd/lib` from the
+  crate's own source. The 26 `.o` files land in the target directory.
+- The `pkg-config` path exists but is **dormant**. It fires only if the crate's
+  own `pkg-config` feature is on, which nothing here enables, or if
+  `ZSTD_SYS_USE_PKG_CONFIG` is set in the environment. That environment
+  variable is worth knowing about: it is a build-time escape hatch that no
+  feature resolution will warn you about, and setting it turns a libviprs build
+  into one that links a system zstd. Do not set it in CI.
+
+The honest summary is that `packfile` costs a vendored C compile and carries a
+dormant discovery path. That is a smaller thing than an installed library, and
+it is the price of a zip container that reads what everyone else writes.
+
+### `pdfium` is the real external library, and it is opt-in
+
+This is the one place the crate does depend on something that is not in the
+tree, so it needs saying plainly rather than being left for someone to find:
+
+- `--features pdfium` links no library at build time. `pdfium-render` binds the
+  PDFium API dynamically through `libloading`, so the dependency lands at
+  **runtime**: the process needs a `libpdfium` shared library to load. The
+  README's "PDFium setup" section is the install instructions for it.
+- `--features pdfium-static` turns on `pdfium-render/static`, whose `build.rs`
+  emits `cargo:rustc-link-lib=static=pdfium` and a link search read out of
+  `PDFIUM_STATIC_LIB_PATH`. That one *is* a build-time link against a library
+  from outside the tree.
+
+`pdfium-render` itself ships no C and declares no `links` key, so no mechanical
+check keyed on those would ever have noticed either of them. What the test
+pins instead is that `pdfium-render` is absent from every default graph, which
+is the property that actually matters: the external dependency is opt-in and
+stays opt-in.
+
+Its `bindings` feature would pull `bindgen` and run libclang over the PDFium
+headers at build time. Nothing here enables it, and nothing should.
+
+### Adding a dependency
+
+Before you add one, check it against the rule:
+
+```sh
+# Does it drag in a crate whose job is to find an installed library?
+# No output is the pass.
+cargo tree -p libviprs -e normal,build --target "$(rustc -vV | sed -n 's/^host: //p')" \
+  | grep -E 'pkg-config|system-deps|vcpkg|cmake|bindgen'
+
+# What does it actually emit at build time?
+cargo build && grep -h 'rustc-link-lib\|rustc-link-search' target/debug/build/*/output
+```
+
+Every `rustc-link-lib` should be `static=` and every `rustc-link-search` should
+point inside the target directory. If one points at `/usr/lib`,
+`/opt/homebrew/lib` or anywhere else on the machine, the crate fails clause 2.
+
+Then update `tests/dependency_policy.rs`, which will already be red, and write
+the reasoning into the `[workspace.dependencies]` comment next to the new pin.
+Every entry in that table carries the argument for why it is there and why its
+feature list is what it is; that is the house style and it is not optional.
+
+## Before you push
+
+`make ci` runs the lot: `fmt`, `clippy`, `test`, `doc`, plus `miri` and `loom`,
+which are the merge gate rather than the per-push CI. Any of those runs on its
+own, and the README has the longer version.

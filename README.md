@@ -182,6 +182,15 @@ See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tr
 | [libviprs-cli](../libviprs-cli) | Command-line interface (`viprs` binary) |
 | [libviprs-tests](../libviprs-tests) | Integration tests and fixtures, including end-to-end PDF-to-pyramid tests for `blueprint.pdf` and `blueprint-mix.pdf` |
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the dependency rule: what this crate will
+and will not take on, why `build.rs`, `links =` and a `-sys` suffix are none of
+them the thing that decides it, and where the two carve-outs (`packfile` and
+`pdfium`) sit. Read it before adding a dependency. `tests/dependency_policy.rs`
+checks it against the graph cargo actually resolves, so a dependency that breaks
+the rule turns the suite red rather than getting caught in review.
+
 ## CI
 
 GitHub Actions runs two workflows:
