@@ -724,6 +724,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `MemoryTracker::alloc` saturates at `u64::MAX` instead of overflowing (the
+  `alloc` half of issue #114, which fixed the same thing on `dealloc`). It read
+  `self.current.fetch_add(bytes, Relaxed) + bytes`, and that `+ bytes` panics
+  with "attempt to add with overflow" in debug builds and under Miri once the
+  counter is high enough, which is not a thing an observability counter should
+  do to a run. Saturating the local sum alone would have been worse than the
+  bug: `fetch_add` wraps the stored counter, so `current` would come back small
+  while `peak` ratcheted to `u64::MAX` permanently, which is exactly the
+  corruption #114 removed from the other side. The counter now clamps through
+  the same saturating `fetch_update` `dealloc` uses, so the two ends match and
+  `current` and `peak` stay consistent. In-tree call sites never get near the
+  ceiling, but the type is `pub` with a `Clone`-able `Arc` inside, so a caller
+  can put it there.
+
 - A `.v` file written by a newer libviprs no longer loses every metadata field
   when it is read by an older one (issue #565). The trailer was read as one
   `serde_json::from_slice` onto a struct holding a plain externally tagged
