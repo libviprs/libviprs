@@ -853,6 +853,60 @@ pub(crate) enum SniffedFormat {
 }
 
 impl SniffedFormat {
+    /// The variant after `self` in declaration order, or `None` at the end
+    /// of the enum.
+    ///
+    /// This exists only to build [`Self::ALL`], and it is written as an
+    /// exhaustive `match` on purpose: adding a variant stops the crate
+    /// compiling here, which is the link a hand-maintained list of variants
+    /// does not have. `Jxl` escaped exactly that way between #628 and #659.
+    /// The route-table test asserted "only these read the whole file" over
+    /// a list of its own, `Jxl` was missing from that list *and* from the
+    /// expected answer, so the arithmetic stayed consistent and two
+    /// invariants held for the wrong reason.
+    #[cfg(test)]
+    const fn next(self) -> Option<Self> {
+        match self {
+            Self::Vips => Some(Self::Jpeg),
+            Self::Jpeg => Some(Self::Png),
+            Self::Png => Some(Self::Tiff),
+            Self::Tiff => Some(Self::Gif),
+            Self::Gif => Some(Self::WebP),
+            Self::WebP => Some(Self::Jxl),
+            Self::Jxl => Some(Self::Radiance),
+            Self::Radiance => Some(Self::Fits),
+            Self::Fits => Some(Self::OpenExr),
+            Self::OpenExr => None,
+        }
+    }
+
+    /// Every variant, in declaration order.
+    ///
+    /// Walked out of [`Self::next`] rather than written out, so the length
+    /// and the contents both come from the enum. A variant added without
+    /// growing the length fails this `const` block at compile time, and one
+    /// added without touching [`Self::next`] fails that `match` first.
+    ///
+    /// Test-only, so the compile error lands on `cargo test` and on
+    /// `cargo clippy --all-targets`, both of which CI runs.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 10] = {
+        let mut all = [Self::Vips; 10];
+        let mut i = 1;
+        while i < all.len() {
+            all[i] = match all[i - 1].next() {
+                Some(format) => format,
+                None => panic!("SniffedFormat::ALL is longer than the enum"),
+            };
+            i += 1;
+        }
+        assert!(
+            all[all.len() - 1].next().is_none(),
+            "SniffedFormat::ALL is shorter than the enum"
+        );
+        all
+    };
+
     /// Whether [`decode_file_with_limits`] has to read the whole file into
     /// memory rather than streaming it.
     ///
@@ -2029,6 +2083,11 @@ mod tests {
      * decode into a read-whole-file. Second, the mapping is identity: one
      * container in, one decoder out, no options and no many-to-one
      * collapsing.
+     * The set of variants comes from `SniffedFormat::ALL`, which is built
+     * from an exhaustive `match`, not from a list kept here. A list kept
+     * here is how `Jxl` escaped between #628 and #659: it was missing from
+     * the list *and* from the expected answer, so the arithmetic stayed
+     * consistent and both invariants held over nine variants of ten.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
      * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Jxl`, `Radiance`,
      * `Fits` and `OpenExr`, and distinct `image` formats for every container
@@ -2036,18 +2095,7 @@ mod tests {
      */
     #[test]
     fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
-        let all = [
-            SniffedFormat::Vips,
-            SniffedFormat::Jpeg,
-            SniffedFormat::Png,
-            SniffedFormat::Tiff,
-            SniffedFormat::Gif,
-            SniffedFormat::WebP,
-            SniffedFormat::Jxl,
-            SniffedFormat::Radiance,
-            SniffedFormat::Fits,
-            SniffedFormat::OpenExr,
-        ];
+        let all = SniffedFormat::ALL;
         // These are the containers libviprs decodes itself, so they are
         // the ones the route table maps to no `image` decoder.
         let self_decoded = [
@@ -2236,6 +2284,87 @@ mod tests {
             ),
             "one byte under the file length must refuse the body"
         );
+    }
+
+    /**
+     * Verifies that the post-read half of the file-body ceiling refuses a
+     * source that yields more bytes than its `stat` declared. The
+     * stat-first check is the cheap one and it is the one the other two
+     * tests pin, but it is only as good as `metadata().len()`, and there
+     * are ordinary sources where that number is a lie: a FIFO reports 0,
+     * a `/proc` file reports 0, and a regular file can grow between the
+     * stat and the read. Without the post-read check the `take(cap + 1)`
+     * still bounds the memory, so nothing aborts, but the caller gets a
+     * silently truncated buffer handed to the decoder as though it were a
+     * whole file and the refusal comes back as "not a recognisable image"
+     * instead of "over the ceiling". That is a worse failure than the one
+     * issue #629 set out to fix.
+     * Works by reading a FIFO, which stats as 0 bytes so the declared-length
+     * check cannot fire, while a writer thread feeds it four times the
+     * ceiling. `needed_bytes` has to be exactly `cap + 1`, which is all the
+     * capped read ever sees, so this cannot be confused with the stat-first
+     * refusal that `decode_file_bounds_the_whole_file_read` pins at the
+     * apparent length.
+     * Input: a FIFO fed 16384 bytes at max_alloc_bytes = 4096 -> Output:
+     * `AllocLimitExceeded { what: "image file body", needed_bytes: 4097,
+     * max_alloc_bytes: 4096 }`.
+     */
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_file_body_ceiling_refuses_a_source_that_outruns_its_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("body.fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo(1) is POSIX and must be on PATH");
+        assert!(made.success(), "mkfifo failed for {}", fifo.display());
+        assert_eq!(
+            std::fs::metadata(&fifo).unwrap().len(),
+            0,
+            "a FIFO must stat as empty, otherwise the declared-length check \
+             fires and this test is pinning the wrong half"
+        );
+
+        let cap = 4096u64;
+        let fed = usize::try_from(cap).unwrap() * 4;
+        let writer = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut sink = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+                // The reader stops at cap + 1 bytes and closes, so the tail
+                // of this write is expected to come back as a broken pipe.
+                // That is the refusal working, not a failure.
+                let _ = sink.write_all(&vec![0x5Au8; fed]);
+            })
+        };
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(cap);
+        let refused = read_file_bounded(&fifo, limits, "image file body");
+        writer.join().unwrap();
+
+        match refused {
+            Err(SourceError::AllocLimitExceeded {
+                what,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "image file body");
+                assert_eq!(
+                    needed_bytes,
+                    cap + 1,
+                    "the capped read never sees more than one byte past the \
+                     ceiling, so anything else means the stat-first check fired"
+                );
+                assert_eq!(max_alloc_bytes, cap);
+            }
+            other => panic!(
+                "a source that outruns its stat must be refused, not truncated \
+                 and handed to the decoder, got {other:?}"
+            ),
+        }
     }
 
     /**
