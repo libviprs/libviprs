@@ -1899,7 +1899,9 @@ mod tests {
     #[test]
     fn the_defensive_channel_checks_report_their_own_variants() {
         for bands in [0u32, u32::from(u16::MAX) + 1] {
-            let err = carrier(bands, false, 8).expect_err("no carrier for {bands} bands");
+            let err = carrier(bands, false, 8)
+                .err()
+                .unwrap_or_else(|| panic!("{bands} bands should have no raster carrier"));
             assert!(
                 matches!(
                     err,
