@@ -51,6 +51,11 @@ jobs:
   miri:
     name: Miri
     runs-on: ubuntu-latest
+    # A hang has to report as a failure, not as a cancellation. Miri on this
+    # crate has run past 1h27m, been cancelled at 1h41m, and gone 4h without
+    # finishing, and with no ceiling the only signal was "cancelled", which
+    # reads like someone pressed stop rather than like the gate breaking.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -74,6 +79,7 @@ jobs:
   loom:
     name: Loom
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -91,6 +97,7 @@ jobs:
   pdfium-source:
     name: pdfium-render source audit (#149)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
