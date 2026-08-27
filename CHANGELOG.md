@@ -9,6 +9,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `resize`, `shrink`, `reduce` and `affine` take the premultiply bracket's
+  alpha ceiling from the raster's interpretation instead of from its storage
+  depth, so a float raster tagged `ScRgb` brackets against `1.0` and one tagged
+  `Rgb16` against `65535` (issue #664). An untagged raster resolves to the same
+  ceiling it always had, and the unsigned carriers stay on the depth rule
+  deliberately, so an 8-bit buffer someone labelled `Rgb16` still premultiplies
+  against 255 rather than coming back black.
+
+  `max_alpha` was derived from the depth, which is right for the unsigned
+  carriers by accident: an untagged `Rgba8` resolves to `Srgb` and 255, an
+  untagged `Rgba16` to `Rgb16` and 65535. A float carrier has no depth-implied
+  ceiling at all, so the tag is the only thing that can say what "fully opaque"
+  means, and `colourspace(Interpretation::ScRgb)` hands back exactly that
+  combination: an `RgbaF32` of scene-linear 0..1 samples, which the old rule
+  bracketed against 255.
+
+  `vips_resize` premultiplies nothing of its own, and the binary confirms it:
+  the same float RGBA resizes to identical bytes under `multiband`, `b-w`,
+  `srgb`, `scrgb` and `rgb16`. The bracket lives in `vips_affine`
+  (`affine.c:553`) and `vips_thumbnail` (`thumbnail.c:835`), both of which
+  reach it through `vips_premultiply` / `vips_unpremultiply`, and those default
+  `max_alpha` from `vips_interpretation_max_alpha` (`header.c:195`). Measured
+  on vips 8.18.6, an 8x8 constant float RGBA `(100, 20, 3, 1.5)` through
+  `premultiply | resize 0.5 | unpremultiply` comes back `100 20 3 1.5` untagged
+  and `66.666671752929688 13.333333969116211 2 1` under scRGB, and
+  `affine "0.5 0 0 0.5"` on its own gives the same three-tag table because
+  `vips_affine` calls the pair itself.
+
+  You do not need an out-of-range alpha to see it. lanczos3 rings, so resizing
+  a hard transparency edge pushes the resampled alpha above the source's
+  maximum, and the stored alpha is clipped to the ceiling on the way out: a
+  16x2 edge fixture puts `1.0152533054351807` in the output untagged and
+  exactly `1` under scRGB. So committed reference images of a resized float
+  scRGB raster with alpha will need regenerating.
+
+- The premultiply bracket rounds through `f32` where it used to compute in
+  `f64` and round once at the store, and that moves **unsigned** output bytes
+  as well as float ones (issue #664, found while measuring the above).
+  `vips_premultiply` writes `OUT nalpha = (OUT) clip_alpha / max_alpha` with
+  `OUT` = float for every carrier this crate has (only a DOUBLE input widens to
+  DOUBLE, `premultiply.c:229-232`), and multiplies the colour by that
+  already-rounded value; `vips_unpremultiply` mirrors it with `OUT factor`. So
+  the bracket rounds twice on an 8-bit RGBA exactly as it does on a float one,
+  the same shape #631 found in the standalone pair.
+
+  Measured against the code this branched from, on pseudo-random data, a 64x64
+  `Rgba8` `resize(2.0)` moves 6 of 65536 samples and a 32x32 `Rgba16`
+  `resize(0.5)` moves 4 of 1024, every one of them by a single count. Those are
+  the ones that were wrong: against `premultiply | resize | unpremultiply` on
+  vips 8.18.6, read back as FLOAT and quantised the way libviprs quantises, the
+  new bytes agree on 65536 of 65536 and 1024 of 1024 where the old ones agreed
+  on 65530 and 1020. The two 8-bit samples that move in the pinned fixture sit
+  on `59.500003814697266` and `226.5` in vips's float, and the old `f64`
+  expression put both a hair below and rounded them the wrong way.
+
+  Float output moves by an ulp on the same fixtures, and `affine` moves with
+  it. `vips_affine` premultiplies into a FLOAT image, interpolates that, and
+  lets `vips_unpremultiply` read the FLOAT result back, so there are three
+  `f32` rounding points on that path rather than two, and the interpolation
+  itself accumulates in `f64` because `BILINEAR_FLOAT` uses `double`
+  coefficients. All three are reproduced now, and the 8x8 constant table and a
+  4x4 `affine "0.8 0.15 -0.15 0.8"` fixture are both bit-exact against the
+  binary. Dropping any one of them shows: without the accumulator rounding, 9
+  of that fixture's 64 samples move off the binary's value.
+
 - Every conversion into `srgb`, `rgb16`, `b-w`, `grey16` and `hsv` now
   produces different output bytes, because the linear -> sRGB store goes
   through the libvips lookup table instead of evaluating the transfer
