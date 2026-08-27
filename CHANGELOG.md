@@ -1872,6 +1872,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was `[0.5, 0.0, 180.0]` here. The branch is now transcribed from the C, so
   the whole `a` axis answers the way vips does whichever zero it is handed.
 
+- The `foreign-radiance` and `foreign-uhdr` oracle captures are JSON a standard
+  parser will read (issue #674). Both carried bare `NaN` and `Infinity`
+  literals, which RFC 8259 has no spelling for, so `serde_json`, `jq` and
+  `JSON.parse` rejected the whole file rather than the one record that needed
+  them: one `Infinity` in the radiance `encode_setcolr` sweep, and six `NaN`
+  across the two degenerate-metadata arms of `uhdr2scRGB`.
+
+  Nothing was failing over it, because Python writes these files and Python
+  read them back. `json.dump` emits the bare literals by default and
+  `json.load` takes them again as a documented non-standard extension, so a
+  capture round-trips perfectly on the machine that produced it and breaks for
+  a consumer in any other language... which is the moment someone ports a
+  radiance or uhdr differential test to Rust, and starts by suspecting their
+  own code rather than the fixture.
+
+  Both files now quote the token `json.dump` would have written bare: `"NaN"`,
+  `"Infinity"` and `"-Infinity"`, with every finite value staying an ordinary
+  JSON number. That convention is introduced here rather than inherited.
+  `foreign-nifti` is the only other capture that records a non-finite float and
+  it carries both spellings at once: `"Infinity"` and `"NaN"` from its
+  `probe.c`, and `"inf"`, `"-inf"` and `"nan"` from a `str(v)` in its
+  `capture.py`. Bringing that file onto one spelling means re-capturing it, so
+  it belongs with the #650 / #673 repin rather than here, and
+  `tests/oracle_capture_json.rs` says which spelling it would have to move to.
+  I picked quoting over `null` because those two records exist precisely to say
+  which non-finite value libvips produced, and `null` folds all three onto one
+  answer. Each `capture.py` sanitises on the way out and then dumps with
+  `allow_nan=False`, so a value the sanitiser misses stops the capture rather
+  than writing a file nobody outside Python can parse.
+
+  I rewrote the two files in place instead of re-running the captures, because
+  a re-run would have moved each area's recorded vips version too (issue #650)
+  and the repair is worth exactly three lines. I drove the committed writer
+  functions over the parsed documents to produce them, so what landed is
+  byte-for-byte what a fresh capture emits and the diff is the added quotes and
+  nothing else.
+
+  `tests/oracle_capture_json.rs` is what keeps it shut. It walks the whole
+  capture tree and parses every `oracle.json` with `serde_json`, reporting all
+  the offenders rather than the first, so the next capture that reaches for a
+  bare literal goes red in CI instead of waiting for someone to try to read it.
+  Two more tests sit next to it: one checks the three tokens are pairwise
+  distinct and each comes back as itself rather than as one of the others,
+  which is the property `null` would lose, and one asserts `serde_json` really
+  does refuse the bare literals, so the guard cannot quietly become a check
+  that passes for the wrong reason. A fourth reads the two repaired files back
+  and checks the values really are a `+inf` and a `NaN` in the rows that are
+  supposed to carry them, which is the only one of the four that tests what the
+  Python writer actually emitted.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
