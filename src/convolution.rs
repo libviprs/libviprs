@@ -2870,6 +2870,7 @@ fn convsep_short_pass(
 mod tests {
     use super::*;
     use crate::imageio::MetadataValue;
+    use crate::raster::with_f32_samples_alloc_cap;
 
     /// Deterministic pseudo-random byte stream for synthetic images.
     fn lcg(seed: u32) -> impl FnMut() -> u8 {
@@ -3424,6 +3425,70 @@ mod tests {
         // The ordinary path still widens every sample exactly.
         let im = Raster::new(2, 1, PixelFormat::Gray8, vec![7, 9]).unwrap();
         assert_eq!(samples_f64(&im).unwrap(), vec![7.0, 9.0]);
+    }
+
+    /// #627: the `f32` widening `try_sharpen` sits on is fallible, so an
+    /// allocation the host cannot serve arrives as
+    /// [`ConvolutionError::Raster`] instead of reaching `handle_alloc_error`
+    /// and ending the process.
+    ///
+    /// #575 took nine of the eleven entry points here abort-free and
+    /// `try_sharpen` could not follow, because the abort was not in this file:
+    /// it was the `.collect()` inside [`Raster::f32_samples`]. A `try_` API
+    /// that aborts is worse than an infallible one, since a caller reasonably
+    /// reads the `Result` as covering allocation.
+    ///
+    /// The widening is reached at a buildable input through the `cfg(test)`
+    /// ceiling in `raster.rs`; a LabS raster whose samples genuinely exhaust
+    /// the allocator is far past the construction budget. The uncapped call
+    /// alongside it is what stops the ceiling passing for a guard on its own.
+    #[test]
+    fn sharpen_widening_returns_typed_error_not_abort() {
+        let im = noise_rgb(6, 4, 31);
+        let capped = with_f32_samples_alloc_cap(16, || im.try_sharpen(1.0, 1.0, 2.0));
+        // Summarised rather than `{capped:?}`, which prints the whole pixel
+        // buffer of the raster the failing case wrongly returns.
+        let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+        assert!(
+            matches!(
+                capped,
+                Err(ConvolutionError::Raster(
+                    RasterError::AllocationFailed { .. }
+                ))
+            ),
+            "an unservable sharpen widening must be a typed error, got {got:?}"
+        );
+        assert!(im.try_sharpen(1.0, 1.0, 2.0).is_ok());
+    }
+
+    /// #627: the same widening on canny's float arm, which reads the two
+    /// gradient rasters back as `f32` before the non-maximum suppression.
+    ///
+    /// The uchar arm never widens, so it stays green under the same ceiling.
+    /// That split is what pins the guard to the float arm rather than to
+    /// canny in general: canny's own default is float precision, so the arm
+    /// that used to abort is the one on the default path.
+    #[test]
+    fn canny_float_arm_widening_returns_typed_error_not_abort() {
+        let im = noise_gray(8, 8, 32);
+        let capped = with_f32_samples_alloc_cap(16, || im.try_canny(1.4, Precision::Float));
+        let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+        assert!(
+            matches!(
+                capped,
+                Err(ConvolutionError::Raster(
+                    RasterError::AllocationFailed { .. }
+                ))
+            ),
+            "an unservable canny widening must be a typed error, got {got:?}"
+        );
+        assert!(im.try_canny(1.4, Precision::Float).is_ok());
+        // sigma < 0.2 short-circuits the blur to a copy, so the gradient runs
+        // on a uchar image and the float widening is never reached.
+        assert!(
+            with_f32_samples_alloc_cap(16, || im.try_canny(0.1, Precision::Integer)).is_ok(),
+            "the uchar arm does not widen, so the ceiling must not reach it"
+        );
     }
 
     /// FNV-1a over a whole buffer, so a full `data()` comparison fits in

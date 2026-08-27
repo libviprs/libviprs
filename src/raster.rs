@@ -3,6 +3,9 @@ use crate::imageio::MetadataFields;
 use crate::pixel::PixelFormat;
 use thiserror::Error;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// Errors that can occur when creating or slicing a [`Raster`].
 ///
 /// These guard against programmer mistakes such as mismatched buffer sizes,
@@ -177,6 +180,42 @@ fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError>
         .and_then(|wh| wh.checked_mul(bpp as u64))
         .and_then(|bytes| usize::try_from(bytes).ok())
         .ok_or_else(overflow)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread ceiling, in bytes, on the [`Raster::try_f32_samples`] sample
+    /// buffer.
+    ///
+    /// Defaults to `u64::MAX` (no ceiling), so an ordinary run bounds the
+    /// widening only by what the allocator will serve, exactly as
+    /// [`alloc_op_output`] does. [`with_f32_samples_alloc_cap`] lowers it so a
+    /// test can reach the fallible branch at a raster it can actually build: a
+    /// float raster whose sample buffer genuinely exhausts the allocator is far
+    /// past the [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch
+    /// is otherwise unreachable from a test (issue #627). This is the same hook
+    /// #460 added to `arithmetic`'s scratch allocation, for the same reason.
+    static F32_SAMPLES_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
+}
+
+/// Test-only hook: run `f` with the calling thread's
+/// [`Raster::try_f32_samples`] allocation ceiling lowered to `max_bytes`,
+/// restoring the previous ceiling afterwards, including on unwind.
+///
+/// The ceiling is thread-local, so tests running in parallel do not perturb one
+/// another. Both it and this helper compile only under `cfg(test)`, so nothing
+/// test-support reaches a production build and the crate's public surface is
+/// unchanged.
+#[cfg(test)]
+pub(crate) fn with_f32_samples_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            F32_SAMPLES_ALLOC_CAP.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(F32_SAMPLES_ALLOC_CAP.with(|c| c.replace(max_bytes)));
+    f()
 }
 
 /// An owned raster image buffer with known dimensions and pixel format.
@@ -523,6 +562,27 @@ impl Raster {
             data.extend_from_slice(&s.to_ne_bytes());
         }
         Raster::new(width, height, format, data)
+    }
+
+    /// Fallible form of [`Raster::f32_samples`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::NotFloatFormat`] when the format does not store
+    /// float samples.
+    pub fn try_f32_samples(&self) -> Result<Vec<f32>, RasterError> {
+        if !self.format.is_float() {
+            return Err(RasterError::NotFloatFormat {
+                format: self.format,
+            });
+        }
+        Ok(self
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| f32::from_ne_bytes(c))
+            .collect())
     }
 
     /// The pixel data as `f32` samples, for float formats.
@@ -1134,6 +1194,89 @@ mod tests {
         assert_eq!(copy.interpretation(), im.interpretation());
         assert_eq!(copy.get_fields(), im.get_fields());
         assert_eq!(copy.get_field("hello"), Some(MetadataValue::Int(7)));
+    }
+
+    /**
+     * Tests that the f32 widening is fallible (issue #627): an allocation the
+     * host cannot serve arrives as RasterError::AllocationFailed rather than
+     * reaching handle_alloc_error and aborting the process. `f32_samples` was
+     * a plain `.collect()`, which is exactly that abort, and it is the widening
+     * `try_sharpen` and `try_canny`'s float arm sit on, so a `try_` signature
+     * there was not actually fallible.
+     * Works by lowering the per-thread ceiling with `with_f32_samples_alloc_cap`
+     * so the branch is reachable at a raster small enough to build; a float
+     * raster whose samples genuinely exhaust the allocator is far past the
+     * construction budget. The error names the raster and the size of the
+     * request, and the ceiling is restored when the closure returns.
+     * Input: a 4x2 FloatF32(1) raster (32 sample bytes) under a 16-byte ceiling
+     * → Err(AllocationFailed{4,2,32}); the same raster uncapped → the exact
+     * samples; an Rgb8 raster → Err(NotFloatFormat).
+     */
+    #[test]
+    fn try_f32_samples_reserves_fallibly_rather_than_aborting() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+
+        assert!(matches!(
+            with_f32_samples_alloc_cap(16, || im.try_f32_samples()),
+            Err(RasterError::AllocationFailed {
+                width: 4,
+                height: 2,
+                bytes: 32
+            })
+        ));
+        // The ceiling is per-thread and restored on the way out, so the very
+        // same raster widens normally afterwards.
+        assert_eq!(
+            im.try_f32_samples().unwrap(),
+            vec![1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0]
+        );
+        // A non-float carrier is a typed error, not an empty widening.
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert!(matches!(
+            rgb.try_f32_samples(),
+            Err(RasterError::NotFloatFormat { .. })
+        ));
+    }
+
+    /**
+     * Tests that the infallible `f32_samples` panics rather than aborting when
+     * the widening cannot be allocated (issue #627), and that `None` still
+     * means only "not a float format". A panic unwinds and a caller can catch
+     * it; the `handle_alloc_error` a `.collect()` reaches cannot be caught by
+     * anything, which is why the whole convolution family went fallible in
+     * #575 and these two entry points could not follow.
+     * Works by lowering the per-thread ceiling inside `catch_unwind` and
+     * asserting the call unwound, mirroring how arithmetic's
+     * `project_oversize_scratch_panics_not_aborts` pins the same property for
+     * an op form with no error channel.
+     * Input: a 4x2 FloatF32(1) raster under a 16-byte ceiling → unwinding
+     * panic; an Rgb8 raster → None; the same float raster uncapped → Some.
+     */
+    #[test]
+    fn f32_samples_panics_rather_than_aborting_when_the_widening_fails() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught =
+            std::panic::catch_unwind(|| with_f32_samples_alloc_cap(16, || im.f32_samples()));
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "an unservable widening must panic (unwindable), not abort"
+        );
+
+        // None keeps its single meaning: the carrier is not a float one.
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert_eq!(rgb.f32_samples(), None);
+        assert_eq!(
+            im.f32_samples().unwrap(),
+            vec![1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0]
+        );
     }
 
     /**
