@@ -308,6 +308,21 @@ pub enum SourceError {
     /// build has no pixel format for; the variant says which.
     #[error(transparent)]
     Fits(#[from] crate::fits::FitsError),
+    /// A malformed or unsupported JPEG XL file, raised by
+    /// [`crate::jxl::decode_jxl`]. libviprs decodes JPEG XL through
+    /// `jxl-oxide` rather than through the `image` facade, which has no
+    /// JPEG XL variant at all (see [`crate::jxl`]), so its failures arrive
+    /// as the codec's own typed [`JxlError`](crate::jxl::JxlError) rather
+    /// than as an `image::ImageError` carrying a hand-spelled format hint.
+    ///
+    /// The variant is declared whether or not the **`jxl`** feature is on,
+    /// so `SourceError` has the same shape in both builds. Without the
+    /// feature the only [`JxlError`](crate::jxl::JxlError) it can carry is
+    /// [`FeatureNotEnabled`](crate::jxl::JxlError::FeatureNotEnabled),
+    /// which is how a caller tells "this build has no JPEG XL" from "these
+    /// bytes are not JPEG XL" without reading a message (issue #634).
+    #[error(transparent)]
+    Jxl(#[from] crate::jxl::JxlError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
