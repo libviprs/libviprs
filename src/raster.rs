@@ -170,7 +170,14 @@ pub(crate) fn alloc_op_output(
 /// dimensions, then narrowed to `usize`. On 32-bit targets a product that
 /// exceeds `usize::MAX` yields [`RasterError::SizeOverflow`] rather than
 /// wrapping, so behaviour is identical on 32- and 64-bit targets.
-fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError> {
+///
+/// Crate-visible so the format decoders size their own output buffers with
+/// it. Clearing [`decode_alloc_bytes`]'s budget says the price fits a `u64`,
+/// which is not the same as fitting the address space: on a 32-bit target a
+/// caller who has raised `max_alloc_bytes` past 4 GiB clears the budget and
+/// then wraps a plain `usize` product two lines lower. Same defect as the
+/// price, one line down, which is why issue #632 fixed both.
+pub(crate) fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError> {
     let overflow = || RasterError::SizeOverflow { width, height, bpp };
     (width as u64)
         .checked_mul(height as u64)
@@ -182,16 +189,33 @@ fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError>
 /// Price `width * height * bands * sample_bytes` for a decoder's allocation
 /// budget, saturating at `u64::MAX`.
 ///
-/// The same product [`buffer_len`] computes, and deliberately next to it,
-/// because the two differ only in what they do when it does not fit.
-/// `buffer_len` sizes a buffer that is about to exist, so a product it cannot
-/// represent has to be an error; this one is only ever handed to
-/// [`DecodeLimits::check_alloc`](crate::source::DecodeLimits::check_alloc) and
-/// compared against a ceiling, so saturating to `u64::MAX` *is* the answer,
-/// the one value no budget can clear. A wrapping product is the failure to
-/// avoid: `2^24 x 2^24 x 2^14` four-byte samples is exactly `2^64`, which
-/// wraps to `0`, clears every budget, and then sizes a buffer from a
-/// different number.
+/// The same product [`buffer_len`] computes, differing only in what the two do
+/// when it does not fit. `buffer_len` sizes a buffer that is about to exist, so
+/// a product it cannot represent has to be an error; this one is only ever
+/// compared against a ceiling, so it saturates and lets the comparison decide.
+/// The sweep in `the_decode_price_agrees_with_buffer_len_wherever_buffer_len_answers`
+/// is what holds the two together, rather than their being next to each other in
+/// the file.
+///
+/// `u64::MAX` is a sentinel here and not a price, and the comparison is where
+/// that is made true, not this function:
+/// [`DecodeLimits::exceeds_alloc_budget`](crate::source::DecodeLimits::exceeds_alloc_budget)
+/// refuses it whatever the ceiling says. Saturating on its own refuses nothing,
+/// because `needed > max` is false when both sides are `u64::MAX`, and
+/// `max_alloc_bytes = u64::MAX` is the idiomatic spelling of "no limit". So a
+/// saturated price under a lifted budget would otherwise be waved through and
+/// the decoder would size a buffer from a number that was never the real one.
+///
+/// A wrapping product is the failure both halves exist to avoid: `2^24 x 2^24 x
+/// 2^14` four-byte samples is exactly `2^64`, which wraps to `0`, clears every
+/// budget, and then sizes a buffer from a different number.
+///
+/// Saturation does not survive a later zero, either: `bands` or `sample_bytes`
+/// of `0` collapses an already-saturated product back to `0`, and `0` clears
+/// every budget. Nothing here can tell a declared zero from a saturated one, so
+/// a caller taking either factor from the file (a TIFF `BitsPerSample`, an
+/// OpenEXR channel list) has to refuse zero on its own account. [`Raster::new`]
+/// does refuse a zero dimension, but only after the buffer has been sized.
 ///
 /// Every multiplicand widens to `u64` before it is multiplied, so the price
 /// does not depend on the target's pointer width the way a `usize` chain
@@ -203,6 +227,7 @@ fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError>
 /// callers hold, because they are not all the same type: a FITS `NAXIS3` is a
 /// `u16`, an OpenEXR channel count is a `usize`, and a TIFF sample depth
 /// arrives in bits and is rounded up here by its caller.
+#[must_use]
 pub(crate) fn decode_alloc_bytes(width: u32, height: u32, bands: u64, sample_bytes: u64) -> u64 {
     u64::from(width)
         .saturating_mul(u64::from(height))
@@ -1366,8 +1391,13 @@ mod tests {
         assert!(decode_alloc_bytes(u32::MAX, u32::MAX, 1, 1) > u64::from(u32::MAX));
 
         // Exactly 2^64: `0` if the multiply wraps, `u64::MAX` if it
-        // saturates. No budget can be cleared by `u64::MAX`, and every
-        // budget is cleared by `0`.
+        // saturates. Every budget is cleared by `0`, which is why the wrap
+        // is the failure to avoid. The sentinel is not self-refusing: a
+        // `u64::MAX` budget clears `u64::MAX` under a plain `>`, which is
+        // what `DecodeLimits::exceeds_alloc_budget`'s own arm exists for
+        // and what
+        // `source::tests::the_saturated_price_is_refused_even_by_a_u64_max_budget`
+        // pins.
         assert_eq!(decode_alloc_bytes(1 << 24, 1 << 24, 1 << 14, 4), u64::MAX);
         // And well past it, where each of the four multiplicands is at its
         // own ceiling.
@@ -1375,6 +1405,14 @@ mod tests {
             decode_alloc_bytes(u32::MAX, u32::MAX, u64::from(u16::MAX), 4),
             u64::MAX
         );
+
+        // Saturating multiply is not monotone through zero, and
+        // `sample_bytes` is applied last: a zero factor after a saturated
+        // product gives `0` back, not `u64::MAX`. Pinned because the doc
+        // hands that case to the callers rather than handling it here.
+        assert_eq!(decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 0), 0);
+        assert_eq!(decode_alloc_bytes(u32::MAX, u32::MAX, 0, u64::MAX), 0);
+        assert_eq!(decode_alloc_bytes(0, u32::MAX, u64::MAX, u64::MAX), 0);
     }
 
     /**
@@ -1390,22 +1428,34 @@ mod tests {
      */
     #[test]
     fn the_decode_price_agrees_with_buffer_len_wherever_buffer_len_answers() {
-        for (w, h, bands, sample_bytes) in [
-            (1u32, 1u32, 1u64, 1u64),
-            (4, 3, 3, 2),
-            (65_535, 65_535, 4, 1),
-            (1024, 1024, 4, 4),
-        ] {
+        let agree = |w: u32, h: u32, bands: u64, sample_bytes: u64| {
             let bpp = usize::try_from(bands * sample_bytes).unwrap();
             assert_eq!(
                 decode_alloc_bytes(w, h, bands, sample_bytes),
                 buffer_len(w, h, bpp).unwrap() as u64,
                 "{w}x{h}x{bands} at {sample_bytes} bytes"
             );
+        };
+        for (w, h, bands, sample_bytes) in
+            [(1u32, 1u32, 1u64, 1u64), (4, 3, 3, 2), (1024, 1024, 4, 4)]
+        {
+            agree(w, h, bands, sample_bytes);
         }
-        // Where `buffer_len` refuses, the price is the one value no budget
-        // can clear rather than an error the budget check has no variant
-        // for.
+        // 65_535x65_535x4 is 17_179_344_900 bytes, which is past
+        // `usize::MAX` on a 32-bit target, so `buffer_len` answers
+        // `SizeOverflow` there and has nothing to agree with. The sweep is
+        // the wrong place to assert that: this test exists to hold the two
+        // spellings together, and the promise `buffer_len` makes about
+        // 32-bit targets is that it refuses rather than wraps, which the
+        // case below pins on both widths.
+        #[cfg(target_pointer_width = "64")]
+        agree(65_535, 65_535, 4, 1);
+
+        // Where `buffer_len` refuses, the price is the saturation sentinel
+        // rather than an error the budget check has no variant for. What
+        // makes the sentinel a refusal is
+        // `DecodeLimits::exceeds_alloc_budget`'s `u64::MAX` arm, not the
+        // value itself.
         assert!(buffer_len(u32::MAX, u32::MAX, usize::MAX).is_err());
         assert_eq!(
             decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1),

@@ -116,7 +116,7 @@
 use crate::codec::EncodeError;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, decode_alloc_bytes};
+use crate::raster::{Raster, buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 use std::io::Cursor;
 use std::path::Path;
@@ -299,23 +299,31 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // a `u64` will not hold; nothing in the expression said so, and the
     // three codecs that copied the shape do not have that guarantee.
     // `decode_alloc_bytes` saturates, so the guarantee is no longer load
-    // bearing. The typed variant is retagged from `check_alloc`'s rather
-    // than replacing it; #632 deferred collapsing the per-format variants.
+    // bearing. The typed variant is this module's own, built from
+    // `exceeds_alloc_budget`'s answer rather than retagged off a
+    // `SourceError` whose `what` label no caller could ever see; #632
+    // deferred collapsing the per-format variants and #686 carries it.
     let needed = decode_alloc_bytes(width, height, bands as u64, 1);
-    limits
-        .check_alloc("GIF canvas", needed)
-        .map_err(|_| GifError::AllocLimitExceeded {
+    if limits.exceeds_alloc_budget(needed) {
+        return Err(GifError::AllocLimitExceeded {
             width,
             height,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        })?;
+        }
+        .into());
+    }
 
     // The canvas starts fully transparent and stays that way outside the
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and
     // never paints the background colour, which is why `vips getpoint`
     // reports `0 0 0` at a corner the header calls blue.
-    let mut data = vec![0u8; width as usize * height as usize * bands];
+    // Through `buffer_len` rather than a plain `usize` product for the
+    // same reason the price goes through `decode_alloc_bytes`: clearing
+    // the budget says the byte count fits a `u64`, which on a 32-bit
+    // target is not the same as fitting the address space, and a caller
+    // can raise `max_alloc_bytes` past 4 GiB there.
+    let mut data = vec![0u8; buffer_len(width, height, bands).map_err(GifError::Raster)?];
     let frame = decoder
         .next_frame_info()
         .map_err(decode_error)?

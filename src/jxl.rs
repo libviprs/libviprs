@@ -204,9 +204,9 @@ use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jxl")]
 use crate::pixel::PixelFormat;
-#[cfg(feature = "jxl")]
-use crate::raster::decode_alloc_bytes;
 use crate::raster::{Raster, RasterError};
+#[cfg(feature = "jxl")]
+use crate::raster::{buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The smallest width or height [`Raster::encode_jxl`] will encode.
@@ -577,32 +577,40 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // answer depend on the target's pointer width: on a 32-bit target the
     // sample count pins at `u32::MAX` before the sample size is applied,
     // so no frame can ever be priced above `u32::MAX * sample_bytes`, or
-    // about 16 GiB, however large the header says it is. A caller who has
-    // raised the budget past that gets a frame accepted there that FITS
-    // and OpenEXR refuse at the same geometry. `decode_alloc_bytes` widens
-    // every multiplicand to `u64` first, which is the rule
-    // `raster::buffer_len` states and the reason it uses `checked_mul`.
+    // about 16 GiB, however large the header says it is. Reaching that
+    // wants `max_pixels` above 2^32 and `max_alloc_bytes` above ~8.6 GB,
+    // both far past their defaults, on a target with a 4 GiB address
+    // space, so no such decode was ever going to succeed either way: what
+    // differs is which typed refusal the caller gets, and FITS and OpenEXR
+    // answer the budget where this one answered the allocator.
+    // `decode_alloc_bytes` widens every multiplicand to `u64` first, which
+    // is the rule `raster::buffer_len` states and the reason it uses
+    // `checked_mul`.
     let bytes_needed = decode_alloc_bytes(
         width,
         height,
         u64::from(bands),
         format.bytes_per_channel() as u64,
     );
-    limits
-        .check_alloc("JPEG XL frame buffer", bytes_needed)
-        .map_err(|_| JxlError::AllocLimitExceeded {
+    if limits.exceeds_alloc_budget(bytes_needed) {
+        return Err(JxlError::AllocLimitExceeded {
             width,
             height,
             channels: bands,
             needed: bytes_needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        })?;
-    // `samples` sizes the frame buffer below and is only reached once the
-    // price above has cleared the budget, so it cannot be a saturated
-    // count by the time it is used.
-    let samples = (width as usize)
-        .saturating_mul(height as usize)
-        .saturating_mul(bands as usize);
+        }
+        .into());
+    }
+    // `samples` sizes the frame buffer below, and clearing the budget
+    // above is not what makes it safe to compute. `max_alloc_bytes` is a
+    // `u64` a caller sets, so on a 32-bit target a 65536x65536x1 frame
+    // under a 16 GiB budget passes the check and *then* pins a `usize`
+    // sample count at `u32::MAX`, which is the same pointer-width bug one
+    // line higher wearing a different hat. `buffer_len` computes the same
+    // widened product and checks the narrowing, so the count is right by
+    // construction rather than by a precondition nothing enforces.
+    let samples = buffer_len(width, height, bands as usize).map_err(JxlError::Raster)?;
 
     image
         .feed_bytes(&bytes[consumed..])

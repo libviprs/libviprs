@@ -787,32 +787,38 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     limits.check_pixels(width, height)?;
     // One spelling of the budget for the whole crate (issue #632): the
     // price comes from `decode_alloc_bytes` and the comparison from
-    // `DecodeLimits::check_alloc`, so neither can drift here on its own.
+    // `DecodeLimits::exceeds_alloc_budget`, so neither can drift here on
+    // its own.
     // The saturation the price carries is what this module needs: a caller
     // may lift `max_coord` and `max_pixels` and declare a geometry whose
-    // byte count does not fit a `u64`, and a saturated `u64::MAX` still
-    // fails the truncation check below even when the budget itself is
-    // `u64::MAX`.
+    // byte count does not fit a `u64`. That saturated `u64::MAX` is
+    // refused by `exceeds_alloc_budget`'s own sentinel arm, which is where
+    // it belongs; before that arm existed it only failed the truncation
+    // check below, so this module happened to survive a hole the four
+    // codecs beside it did not.
     //
-    // The typed variant is retagged from `check_alloc`'s rather than
-    // replacing it, because collapsing the per-format variants onto
+    // The typed variant is this module's own, built from
+    // `exceeds_alloc_budget`'s answer rather than retagged off a
+    // `SourceError` whose `what` label no caller could ever see, because
+    // collapsing the per-format variants onto
     // `SourceError::AllocLimitExceeded` is a breaking change to five
-    // public enums and #632 deferred it to its own release note.
+    // public enums, deferred out of #632 and carried by #686.
     let needed = decode_alloc_bytes(
         width,
         height,
         u64::from(bands),
         carrier.sample_bytes() as u64,
     );
-    limits
-        .check_alloc("FITS pixel buffer", needed)
-        .map_err(|_| FitsError::AllocLimitExceeded {
+    if limits.exceeds_alloc_budget(needed) {
+        return Err(FitsError::AllocLimitExceeded {
             width,
             height,
             bands,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        })?;
+        }
+        .into());
+    }
 
     let data_start = offset + unit.len;
     let available = bytes.len().saturating_sub(data_start);
@@ -1550,9 +1556,15 @@ mod tests {
      * a caller is free to do, and then declaring the largest geometry the
      * axes can spell: `u32::MAX` on both axes with 65535 bands of float is
      * about 4.8e24 bytes. A wrapping product would look small enough to
-     * pass and then index a buffer sized from a different number.
+     * pass and then index a buffer sized from a different number; a
+     * saturating one gives `u64::MAX`, which the budget refuses as a
+     * sentinel rather than comparing as a price, so the refusal lands on
+     * the budget even though the budget itself is `u64::MAX`. It used to
+     * fall through to the truncation check one line lower, which is how
+     * FITS survived a hole the four codecs beside it did not.
      * Input: the largest declarable geometry with no ceiling in force ->
-     * Output: `TruncatedData`, reached without allocating anything.
+     * Output: `AllocLimitExceeded` carrying the saturated price, reached
+     * without allocating anything.
      */
     #[test]
     fn a_byte_count_past_u64_cannot_wrap_past_the_budget() {
@@ -1570,10 +1582,18 @@ mod tests {
             .with_max_height(u32::MAX)
             .with_max_pixels(u64::MAX)
             .with_max_alloc_bytes(u64::MAX);
-        assert!(matches!(
-            decode_fits(&file, unbounded),
-            Err(SourceError::Fits(FitsError::TruncatedData { .. }))
-        ));
+        let err = decode_fits(&file, unbounded);
+        assert!(
+            matches!(
+                err,
+                Err(SourceError::Fits(FitsError::AllocLimitExceeded {
+                    needed: u64::MAX,
+                    max_alloc_bytes: u64::MAX,
+                    ..
+                }))
+            ),
+            "{err:?}"
+        );
     }
 
     /**
@@ -1583,12 +1603,14 @@ mod tests {
      * itself: 2^24 by 2^24 with 2^14 bands of four-byte float is exactly
      * 2^64 bytes. A wrapping multiply gives `0` there, which clears every
      * budget, takes an empty payload slice and then indexes it; the
-     * saturating one gives `u64::MAX`, which no available byte count can
-     * reach. Every ceiling is lifted, as a caller may lift them, so the
-     * byte count is the only guard left standing. The neighbouring case
-     * above is far from the wrap point and so cannot catch this.
-     * Input: 2^24 x 2^24 x 2^14 at BITPIX -32 -> Output: `TruncatedData`,
-     * refused without allocating anything.
+     * saturating one gives `u64::MAX`, which the budget refuses as a
+     * sentinel. Every ceiling is lifted, as a caller may lift them, so the
+     * price and the sentinel arm are the only guards left standing. The
+     * neighbouring case above is far from the wrap point and so cannot
+     * catch this.
+     * Input: 2^24 x 2^24 x 2^14 at BITPIX -32 -> Output:
+     * `AllocLimitExceeded` carrying the saturated price, refused without
+     * allocating anything.
      */
     #[test]
     fn a_byte_count_of_exactly_two_to_the_64_saturates_rather_than_wrapping() {
@@ -1606,10 +1628,18 @@ mod tests {
             .with_max_height(u32::MAX)
             .with_max_pixels(u64::MAX)
             .with_max_alloc_bytes(u64::MAX);
-        assert!(matches!(
-            decode_fits(&file, unbounded),
-            Err(SourceError::Fits(FitsError::TruncatedData { .. }))
-        ));
+        let err = decode_fits(&file, unbounded);
+        assert!(
+            matches!(
+                err,
+                Err(SourceError::Fits(FitsError::AllocLimitExceeded {
+                    needed: u64::MAX,
+                    max_alloc_bytes: u64::MAX,
+                    ..
+                }))
+            ),
+            "{err:?}"
+        );
     }
 
     /**

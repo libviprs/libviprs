@@ -95,7 +95,7 @@ use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError, decode_alloc_bytes};
+use crate::raster::{Raster, RasterError, buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The exact magic line every Radiance file opens with
@@ -367,21 +367,34 @@ pub fn decode_radiance(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sou
     // `DEFAULT_MAX_COORD` before `DecodeLimits` is consulted at all, so
     // the product could not leave a `u64`. That is a different check's
     // guarantee, spelled nowhere near this line, and the codecs that
-    // copied the shape do not all have one. The typed variant is retagged
-    // from `check_alloc`'s rather than replacing it; #632 deferred
-    // collapsing the per-format variants.
+    // copied the shape do not all have one. The typed variant is this
+    // module's own, built from `exceeds_alloc_budget`'s answer rather than
+    // retagged off a `SourceError` whose `what` label no caller could ever
+    // see; #632 deferred collapsing the per-format variants and #686
+    // carries it.
     let needed = decode_alloc_bytes(width, height, BANDS as u64, SAMPLE_BYTES as u64);
-    limits
-        .check_alloc("Radiance pixel buffer", needed)
-        .map_err(|_| RadianceError::AllocLimitExceeded {
+    if limits.exceeds_alloc_budget(needed) {
+        return Err(RadianceError::AllocLimitExceeded {
             width,
             height,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        })?;
+        }
+        .into());
+    }
 
+    // Through `buffer_len` rather than a plain `usize` product for the
+    // same reason the price goes through `decode_alloc_bytes`: clearing
+    // the budget says the byte count fits a `u64`, which on a 32-bit
+    // target is not the same as fitting the address space, and a caller
+    // can raise `max_alloc_bytes` past 4 GiB there.
+    let mut data =
+        vec![0u8; buffer_len(width, height, BANDS * SAMPLE_BYTES).map_err(RadianceError::Raster)?];
+    // Bounded by that same checked product: the buffer holds
+    // `row_samples * SAMPLE_BYTES` bytes for each of `height` rows, and
+    // `row_samples` is only ever read inside the loop below, which does
+    // not run at all when `height` is zero.
     let row_samples = width as usize * BANDS;
-    let mut data = vec![0u8; row_samples * height as usize * SAMPLE_BYTES];
     let mut scanline = vec![[0u8; 4]; width as usize];
     for row in 0..height {
         read_scanline(&mut cursor, &mut scanline, row)?;

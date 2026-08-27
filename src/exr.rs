@@ -101,7 +101,7 @@ use thiserror::Error;
 use crate::conversion::Interpretation;
 use crate::imageio::MetadataValue;
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError, decode_alloc_bytes};
+use crate::raster::{Raster, RasterError, buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The four magic bytes every OpenEXR file opens with
@@ -450,19 +450,22 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // `max_alloc_bytes` are all caller-settable and a caller who lifts
     // every ceiling must still get a refusal here rather than a wrapped
     // price that waves a huge allocation through. The typed variant is
-    // retagged from `check_alloc`'s rather than replacing it; #632
-    // deferred collapsing the per-format variants.
+    // this module's own, built from `exceeds_alloc_budget`'s answer rather
+    // than retagged off a `SourceError` whose `what` label no caller could
+    // ever see; #632 deferred collapsing the per-format variants and #686
+    // carries it.
     let declared = header.channels.list.len();
     let needed = decode_alloc_bytes(width, height, declared as u64, SAMPLE_BYTES as u64);
-    limits
-        .check_alloc("OpenEXR sample buffers", needed)
-        .map_err(|_| ExrError::AllocLimitExceeded {
+    if limits.exceeds_alloc_budget(needed) {
+        return Err(ExrError::AllocLimitExceeded {
             width,
             height,
             channels: declared,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        })?;
+        }
+        .into());
+    }
 
     // `non_parallel` is not an optimisation choice, it is the contract:
     // `exr`'s `rayon` feature is off in `Cargo.toml` because libviprs owns
@@ -496,8 +499,17 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
         .into());
     }
 
-    let pixels = width as usize * height as usize;
-    let mut data = vec![0u8; pixels * bands * SAMPLE_BYTES];
+    // Both of these were plain `usize` products. They go through
+    // `buffer_len` for the same reason the price goes through
+    // `decode_alloc_bytes`: clearing the budget says the byte count fits a
+    // `u64`, which on a 32-bit target is not the same as fitting the
+    // address space, and a caller can raise `max_alloc_bytes` past 4 GiB
+    // there. `bands` is at most `u16::MAX` by the `band_count` conversion
+    // above, so `bands * SAMPLE_BYTES` is the one multiply here that
+    // cannot overflow on any target.
+    let pixels = buffer_len(width, height, 1).map_err(ExrError::Raster)?;
+    let mut data =
+        vec![0u8; buffer_len(width, height, bands * SAMPLE_BYTES).map_err(ExrError::Raster)?];
     for (band, name) in selection.names.iter().enumerate() {
         let channel = layer
             .channel_data
