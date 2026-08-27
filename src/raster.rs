@@ -179,6 +179,37 @@ fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError>
         .ok_or_else(overflow)
 }
 
+/// Price `width * height * bands * sample_bytes` for a decoder's allocation
+/// budget, saturating at `u64::MAX`.
+///
+/// The same product [`buffer_len`] computes, and deliberately next to it,
+/// because the two differ only in what they do when it does not fit.
+/// `buffer_len` sizes a buffer that is about to exist, so a product it cannot
+/// represent has to be an error; this one is only ever handed to
+/// [`DecodeLimits::check_alloc`](crate::source::DecodeLimits::check_alloc) and
+/// compared against a ceiling, so saturating to `u64::MAX` *is* the answer,
+/// the one value no budget can clear. A wrapping product is the failure to
+/// avoid: `2^24 x 2^24 x 2^14` four-byte samples is exactly `2^64`, which
+/// wraps to `0`, clears every budget, and then sizes a buffer from a
+/// different number.
+///
+/// Every multiplicand widens to `u64` before it is multiplied, so the price
+/// does not depend on the target's pointer width the way a `usize` chain
+/// does. That is the same rule `buffer_len` states above, and issue #632 is
+/// the five per-format spellings of this product that had each drifted off
+/// it in their own direction.
+///
+/// `bands` and `sample_bytes` are `u64` rather than the narrower types the
+/// callers hold, because they are not all the same type: a FITS `NAXIS3` is a
+/// `u16`, an OpenEXR channel count is a `usize`, and a TIFF sample depth
+/// arrives in bits and is rounded up here by its caller.
+pub(crate) fn decode_alloc_bytes(width: u32, height: u32, bands: u64, sample_bytes: u64) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(bands)
+        .saturating_mul(sample_bytes)
+}
+
 /// An owned raster image buffer with known dimensions and pixel format.
 ///
 /// `Raster` is the core pixel container in libviprs. It owns a tightly-packed
@@ -1307,6 +1338,79 @@ mod tests {
             Raster::try_new_from_memory(&[], 1, 1, 0, "uchar"),
             Err(RasterError::InvalidMemoryBands { bands: 0, .. })
         ));
+    }
+
+    /**
+     * Tests that the decode allocation price is exact where it fits and
+     * saturates where it does not, which is the one boundary every format
+     * decoder now shares (issue #632).
+     * Works by pricing three geometries whose exact products are known: a
+     * small one, the largest product the two axes alone can reach (which is
+     * already past `u32::MAX` and so is the case a `usize` chain gets wrong
+     * on a 32-bit target), and the one geometry whose product lands exactly
+     * on 2^64, where a wrapping multiply gives `0` and clears every budget.
+     * Input: 4x3x3x2, `u32::MAX` square, and 2^24 x 2^24 x 2^14 x 4 ->
+     * Output: 72, 18446744065119617025, and `u64::MAX`.
+     */
+    #[test]
+    fn the_decode_price_is_exact_where_it_fits_and_saturates_where_it_does_not() {
+        assert_eq!(decode_alloc_bytes(4, 3, 3, 2), 72);
+
+        // Past `u32::MAX` on the axes alone, so a product computed in
+        // `usize` and narrowed would already be wrong here on a 32-bit
+        // target while this one is not.
+        assert_eq!(
+            decode_alloc_bytes(u32::MAX, u32::MAX, 1, 1),
+            18_446_744_065_119_617_025
+        );
+        assert!(decode_alloc_bytes(u32::MAX, u32::MAX, 1, 1) > u64::from(u32::MAX));
+
+        // Exactly 2^64: `0` if the multiply wraps, `u64::MAX` if it
+        // saturates. No budget can be cleared by `u64::MAX`, and every
+        // budget is cleared by `0`.
+        assert_eq!(decode_alloc_bytes(1 << 24, 1 << 24, 1 << 14, 4), u64::MAX);
+        // And well past it, where each of the four multiplicands is at its
+        // own ceiling.
+        assert_eq!(
+            decode_alloc_bytes(u32::MAX, u32::MAX, u64::from(u16::MAX), 4),
+            u64::MAX
+        );
+    }
+
+    /**
+     * Tests that the shared price agrees with [`buffer_len`], the crate's
+     * other spelling of the same product, everywhere `buffer_len` can
+     * answer at all.
+     * Works by sweeping band counts and sample sizes through both and
+     * comparing, which is what stops the two drifting apart the way the
+     * four per-format spellings did before #632.
+     * Input: a sweep of geometries and carriers -> Output: the same byte
+     * count from both, and `u64::MAX` from the saturating one wherever
+     * `buffer_len` refuses.
+     */
+    #[test]
+    fn the_decode_price_agrees_with_buffer_len_wherever_buffer_len_answers() {
+        for (w, h, bands, sample_bytes) in [
+            (1u32, 1u32, 1u64, 1u64),
+            (4, 3, 3, 2),
+            (65_535, 65_535, 4, 1),
+            (1024, 1024, 4, 4),
+        ] {
+            let bpp = usize::try_from(bands * sample_bytes).unwrap();
+            assert_eq!(
+                decode_alloc_bytes(w, h, bands, sample_bytes),
+                buffer_len(w, h, bpp).unwrap() as u64,
+                "{w}x{h}x{bands} at {sample_bytes} bytes"
+            );
+        }
+        // Where `buffer_len` refuses, the price is the one value no budget
+        // can clear rather than an error the budget check has no variant
+        // for.
+        assert!(buffer_len(u32::MAX, u32::MAX, usize::MAX).is_err());
+        assert_eq!(
+            decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1),
+            u64::MAX
+        );
     }
 }
 

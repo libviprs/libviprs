@@ -95,7 +95,7 @@ use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError};
+use crate::raster::{Raster, RasterError, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The exact magic line every Radiance file opens with
@@ -361,16 +361,24 @@ pub fn decode_radiance(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sou
 
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    let needed = u64::from(width) * u64::from(height) * (BANDS * SAMPLE_BYTES) as u64;
-    if needed > limits.max_alloc_bytes {
-        return Err(RadianceError::AllocLimitExceeded {
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632). This one used to be a plain `*`, reachable only
+    // because `parse_resolution` bounds each axis below
+    // `DEFAULT_MAX_COORD` before `DecodeLimits` is consulted at all, so
+    // the product could not leave a `u64`. That is a different check's
+    // guarantee, spelled nowhere near this line, and the codecs that
+    // copied the shape do not all have one. The typed variant is retagged
+    // from `check_alloc`'s rather than replacing it; #632 deferred
+    // collapsing the per-format variants.
+    let needed = decode_alloc_bytes(width, height, BANDS as u64, SAMPLE_BYTES as u64);
+    limits
+        .check_alloc("Radiance pixel buffer", needed)
+        .map_err(|_| RadianceError::AllocLimitExceeded {
             width,
             height,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+        })?;
 
     let row_samples = width as usize * BANDS;
     let mut data = vec![0u8; row_samples * height as usize * SAMPLE_BYTES];
@@ -1790,6 +1798,40 @@ mod tests {
                     needed: 72,
                     max_alloc_bytes: 8,
                     ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /**
+     * Tests that the budget bites at exactly the byte the declared
+     * geometry costs, and not one byte either side. The case above refuses
+     * at a budget of eight against a price of seventy-two, which a price
+     * wrong by a factor would also refuse; only the exact pair below pins
+     * the arithmetic and the `>` in the comparison.
+     * Input: the same 6x1 file at `max_alloc_bytes` 72 then 71 -> Output: a
+     * clean 6x1 decode, then `AllocLimitExceeded { needed: 72 }`.
+     */
+    #[test]
+    fn the_decode_budget_bites_at_exactly_the_declared_price() {
+        let px = [[1u8, 2, 3, 128]; 6];
+        let file = flat_file(6, 1, &px);
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(72);
+        let raster = decode_radiance(&file, exact).expect("72 bytes is exactly a 6x1 RGB float");
+        assert_eq!((raster.width(), raster.height()), (6, 1));
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(71);
+        let err = radiance_error(decode_radiance(&file, short).unwrap_err());
+        assert!(
+            matches!(
+                err,
+                RadianceError::AllocLimitExceeded {
+                    width: 6,
+                    height: 1,
+                    needed: 72,
+                    max_alloc_bytes: 71,
                 }
             ),
             "got {err:?}"

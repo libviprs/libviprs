@@ -116,7 +116,7 @@
 use crate::codec::EncodeError;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::Raster;
+use crate::raster::{Raster, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 use std::io::Cursor;
 use std::path::Path;
@@ -293,16 +293,23 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    let needed = u64::from(width) * u64::from(height) * bands as u64;
-    if needed > limits.max_alloc_bytes {
-        return Err(GifError::AllocLimitExceeded {
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632). This one used to be a plain `*`, safe only because a
+    // GIF states its logical screen in `u16` and so cannot reach a product
+    // a `u64` will not hold; nothing in the expression said so, and the
+    // three codecs that copied the shape do not have that guarantee.
+    // `decode_alloc_bytes` saturates, so the guarantee is no longer load
+    // bearing. The typed variant is retagged from `check_alloc`'s rather
+    // than replacing it; #632 deferred collapsing the per-format variants.
+    let needed = decode_alloc_bytes(width, height, bands as u64, 1);
+    limits
+        .check_alloc("GIF canvas", needed)
+        .map_err(|_| GifError::AllocLimitExceeded {
             width,
             height,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+        })?;
 
     // The canvas starts fully transparent and stays that way outside the
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and
@@ -1658,6 +1665,40 @@ mod tests {
             }
             other => panic!("expected AllocLimitExceeded, got {other:?}"),
         }
+    }
+
+    /**
+     * Tests that the allocation budget bites at exactly the byte the
+     * declared canvas costs, and not one byte either side. The case above
+     * refuses at a budget of four against a price of forty-eight, which a
+     * price wrong by a factor would also refuse; this one cannot pass
+     * unless the price is exact.
+     * Input: the 4x4 opaque fixture at `max_alloc_bytes` 48 then 47 ->
+     * Output: a clean 4x4 three-band decode, then `AllocLimitExceeded
+     * { needed: 48 }`.
+     */
+    #[test]
+    fn the_canvas_budget_bites_at_exactly_the_declared_price() {
+        let bytes = opaque_fixture();
+        let exact = DecodeLimits::default().with_max_alloc_bytes(48);
+        let raster = decode_gif(&bytes, exact).expect("48 bytes is exactly a 4x4 RGB canvas");
+        assert_eq!((raster.width(), raster.height()), (4, 4));
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(47);
+        let err = decode_gif(&bytes, short).expect_err("47 bytes is one short of the canvas");
+        assert!(
+            matches!(
+                err,
+                SourceError::Gif(GifError::AllocLimitExceeded {
+                    width: 4,
+                    height: 4,
+                    needed: 48,
+                    max_alloc_bytes: 47,
+                })
+            ),
+            "{err:?}"
+        );
     }
 
     /**

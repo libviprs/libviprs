@@ -101,7 +101,7 @@ use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError};
+use crate::raster::{Raster, RasterError, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The prefix every FITS file's first card carries.
@@ -785,26 +785,34 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     // reserved, the way `crate::gif` and `crate::webp` do it.
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    // Saturating, not wrapping. `max_coord` and `max_pixels` are both
-    // caller-settable, so a caller who lifts them can declare a geometry
-    // whose byte count does not fit a `u64`. A wrapped product would look
-    // small enough to pass the budget and then index a buffer sized from a
-    // different number; a saturated one is `u64::MAX`, which fails the
-    // truncation check below even when the budget itself is `u64::MAX`.
-    let needed = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(u64::from(bands))
-        .saturating_mul(carrier.sample_bytes() as u64);
-    if needed > limits.max_alloc_bytes {
-        return Err(FitsError::AllocLimitExceeded {
+    // One spelling of the budget for the whole crate (issue #632): the
+    // price comes from `decode_alloc_bytes` and the comparison from
+    // `DecodeLimits::check_alloc`, so neither can drift here on its own.
+    // The saturation the price carries is what this module needs: a caller
+    // may lift `max_coord` and `max_pixels` and declare a geometry whose
+    // byte count does not fit a `u64`, and a saturated `u64::MAX` still
+    // fails the truncation check below even when the budget itself is
+    // `u64::MAX`.
+    //
+    // The typed variant is retagged from `check_alloc`'s rather than
+    // replacing it, because collapsing the per-format variants onto
+    // `SourceError::AllocLimitExceeded` is a breaking change to five
+    // public enums and #632 deferred it to its own release note.
+    let needed = decode_alloc_bytes(
+        width,
+        height,
+        u64::from(bands),
+        carrier.sample_bytes() as u64,
+    );
+    limits
+        .check_alloc("FITS pixel buffer", needed)
+        .map_err(|_| FitsError::AllocLimitExceeded {
             width,
             height,
             bands,
             needed,
             max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+        })?;
 
     let data_start = offset + unit.len;
     let available = bytes.len().saturating_sub(data_start);
@@ -1480,6 +1488,59 @@ mod tests {
             ),
             Err(SourceError::Fits(FitsError::AllocLimitExceeded { .. }))
         ));
+    }
+
+    /**
+     * Tests that the allocation budget bites at exactly the byte the
+     * declared geometry costs, and not one byte either side. The cases
+     * above sit far below the price, where a price wrong by a factor
+     * refuses too; this one cannot pass unless the arithmetic is exact,
+     * and it fixes the comparison at `>` rather than `>=`.
+     * Works on three bands of 16-bit samples on purpose, so neither the
+     * band count nor the sample size can be dropped from the price without
+     * moving the answer: a 2x2x3 ushort raster is 24 bytes with both and
+     * four without them.
+     * Input: a 2x2x3 BITPIX 16 file at `max_alloc_bytes` 24 then 23 ->
+     * Output: a clean `Rgb16` decode, then `AllocLimitExceeded
+     * { needed: 24 }`.
+     */
+    #[test]
+    fn the_allocation_budget_bites_at_exactly_the_declared_price() {
+        let mut file = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    3",
+            "NAXIS1  =                    2",
+            "NAXIS2  =                    2",
+            "NAXIS3  =                    3",
+            "BZERO   =                32768",
+            "BSCALE  =                    1",
+        ]);
+        for sample in 0..12i32 {
+            file.extend_from_slice(&((sample - 32768) as i16).to_be_bytes());
+        }
+        pad_to_block(&mut file, 0);
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(24);
+        let raster = decode_fits(&file, exact).expect("24 bytes is exactly a 2x2x3 ushort raster");
+        assert_eq!((raster.width(), raster.height()), (2, 2));
+        assert_eq!(raster.format(), PixelFormat::Rgb16);
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(23);
+        let err = decode_fits(&file, short).expect_err("23 bytes is one short of the raster");
+        assert!(
+            matches!(
+                err,
+                SourceError::Fits(FitsError::AllocLimitExceeded {
+                    width: 2,
+                    height: 2,
+                    bands: 3,
+                    needed: 24,
+                    max_alloc_bytes: 23,
+                })
+            ),
+            "{err:?}"
+        );
     }
 
     /**
