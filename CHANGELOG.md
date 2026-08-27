@@ -1179,6 +1179,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `try_premultiply` and `try_unpremultiply` handle float rasters instead of
+  panicking on them (issue #631). They used to fall into `depth_max`'s "the
+  arithmetic operations do not support float rasters yet" panic from inside
+  the fallible form, which is the one thing a `try_` method is not allowed to
+  do, and the panicking twins then panicked with a reason that had nothing to
+  do with their own contract.
+
+  The panic was always reachable, but this release made it easy: OpenEXR and
+  FITS both hand back float pixel data straight out of a file, so loading an
+  EXR and calling a premultiply helper now hits it on ordinary input rather
+  than on a raster you built on purpose.
+
+  I implemented the float carriers rather than refusing them with a typed
+  error, because there was nothing left to guess at. libvips defines both ops
+  on float and this build runs them, `unpremultiply_factor` already carried
+  the dead-zone and alpha-clip rules from #611, and the resize path has been
+  doing the same arithmetic internally since #604. All of it checks against
+  the binary, so I pinned it there rather than inventing a refusal.
+
+  Three things about the float arm are worth knowing. Its `max_alpha` comes
+  from the raster's `Interpretation` and not from the sample depth, the way
+  `vips_interpretation_max_alpha` supplies it, so an scRGB raster (what an RGB
+  OpenEXR load is tagged) divides by `1.0` where an untagged one divides by
+  `255` and an `Rgb16`-tagged one by `65535`. Get that wrong and an EXR's 0..1
+  samples premultiply to roughly black. The arithmetic runs in `f32` rather
+  than `f64`, because the C macros land the multiplier in a `float` before the
+  colour multiply, so the result rounds twice: `(100, 100, 100, 0.5)` comes
+  out `0.19607845` through the float intermediate and `0.19607843` without it.
+  And NaN and the infinities propagate the way `VIPS_CLIP`'s plain ternaries
+  make them, so a NaN alpha gives a NaN pixel instead of being quietly
+  rewritten.
+
+  Both ops keep the input format, so an unsigned raster still comes back
+  unsigned, rounded and saturated. Nothing on that path changed. vips itself
+  always writes `FLOAT` output here, and that divergence is unchanged and now
+  written down on both methods.
+
 - A `.v` file libviprs writes is now readable by real vips, metadata and all,
   and no longer makes it print a warning on every open (issue #546). The
   trailer after the pixel data was libviprs's own JSON. libvips parses that

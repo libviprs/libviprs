@@ -122,6 +122,23 @@
 //! [`Raster::polar`] / [`Raster::rect`] / [`Raster::conj`] map pairs
 //! (angles in degrees, matching `vips_complex`).
 //!
+//! # The alpha pair on a float carrier
+//!
+//! [`Raster::premultiply`] and [`Raster::unpremultiply`] accept float rasters
+//! as well as the unsigned ones (issue #631), which matters because
+//! [`crate::exr`] and [`crate::fits`] hand back float pixel data straight from
+//! a file. They keep the input format either way, so a float raster stays
+//! float and is stored raw rather than rounded and saturated.
+//!
+//! Two things about the float arm are worth knowing before reading the code.
+//! Its `max_alpha` comes from the raster's [`Interpretation`] and not from the
+//! sample depth, exactly as `vips_interpretation_max_alpha` supplies it to
+//! `vips_premultiply`, so an scRGB raster divides by `1.0` where an untagged
+//! one divides by `255`. And its arithmetic runs in `f32`, not `f64`: the C
+//! macros land the multiplier in a `float` before the colour multiply, so the
+//! result rounds twice, and an `f64` expression rounded once at the store
+//! differs from vips by around an ulp on ordinary values.
+//!
 //! `floor`, `ceil`, and `rint` round float rasters samplewise and are exact
 //! identities on the integer formats, which is also what libvips produces
 //! for integer input. `abs` and `sign` likewise gained float branches when
@@ -134,6 +151,7 @@
 #[cfg(test)]
 use std::cell::Cell;
 
+use crate::conversion::Interpretation;
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError, alloc_op_output};
 use thiserror::Error;
@@ -317,6 +335,11 @@ fn write_f64(data: &mut [u8], bpc: usize, i: usize, v: f64, max: f64) {
 /// lanczos resample undershoots: an alpha that dips to `0.003`, or through
 /// zero to a small negative, is ordinary at a hard transparency edge, and
 /// dividing by it amplifies the colour by ~333 or flips its sign.
+///
+/// [`crate::resample`]'s premultiply bracket was the only caller that could
+/// reach the float branch until #631; [`Raster::try_unpremultiply`] now takes
+/// it too, on any float raster the caller hands it, including one loaded
+/// straight out of an OpenEXR or FITS file.
 pub(crate) const UNPREMULTIPLY_DEAD_ZONE: f64 = 0.01;
 
 /// The libvips un-premultiply factor for `alpha` against a `max` sample
@@ -333,6 +356,52 @@ pub(crate) fn unpremultiply_factor(alpha: f64, max: f64) -> f64 {
         0.0
     } else {
         max / alpha
+    }
+}
+
+/// Which of the two alpha operations [`Raster::alpha_map`] is running.
+///
+/// libvips keeps these in two files with two sets of macros rather than one
+/// parameterised kernel, and the split matters: the factor and the stored
+/// alpha swap which of them sees the clipped value, and only un-premultiply
+/// has a dead zone.
+#[derive(Clone, Copy)]
+enum AlphaOp {
+    /// `libvips/conversion/premultiply.c`.
+    Premultiply,
+    /// `libvips/conversion/unpremultiply.c`.
+    Unpremultiply,
+}
+
+/// The alpha ceiling an interpretation implies, transcribed from
+/// `vips_interpretation_max_alpha` (`libvips/iofuncs/header.c:195`).
+///
+/// This is how `vips_premultiply` and `vips_unpremultiply` default
+/// `max_alpha`, and it is a property of the *interpretation*, not of the
+/// sample depth. On the unsigned carriers the two agree, which is why
+/// [`depth_max`] has served so far: an untagged `Gray8` / `Rgb8` / `Rgba8`
+/// resolves to `Bw` / `Srgb` (255) and an untagged `Gray16` / `Rgb16` /
+/// `Rgba16` to `Grey16` / `Rgb16` (65535).
+///
+/// A float carrier has no depth-implied ceiling at all, so the tag is the
+/// only thing that can say what "fully opaque" means, and getting it wrong
+/// is not a rounding difference. [`crate::exr`] tags an RGB OpenEXR load
+/// [`Interpretation::ScRgb`], whose samples are scene-linear around 0..1; on
+/// the 255 ceiling those premultiply to roughly zero and un-premultiply to
+/// roughly 255x their value. Measured on vips 8.18.6, the same
+/// `(100, 100, 100, 0.5)` float pixel premultiplies to `50` under scRGB,
+/// `0.19607845` under the default and `0.00076295109` under `Rgb16`.
+///
+/// Kept out of [`depth_max`] deliberately: routing the unsigned carriers
+/// through here as well would change what an untagged `Multi16` raster does
+/// (it resolves to `Multiband`, so 255 rather than 65535) and that is a
+/// separate question from this one.
+#[inline]
+fn interpretation_max_alpha(interpretation: Interpretation) -> f64 {
+    match interpretation {
+        Interpretation::Rgb16 | Interpretation::Grey16 => 65535.0,
+        Interpretation::ScRgb => 1.0,
+        _ => 255.0,
     }
 }
 
@@ -2738,8 +2807,20 @@ impl Raster {
     /// `premultiply`).
     ///
     /// The last band is the alpha band; every other band becomes
-    /// `v * alpha / max` (`max` is `255` or `65535` by depth), rounded to
-    /// nearest. The alpha band and the format are unchanged.
+    /// `v * clip(alpha) / max_alpha`. The alpha band and the format are
+    /// unchanged. On the unsigned carriers the result is rounded to nearest
+    /// and saturated into the input depth; on the float carriers it is
+    /// stored raw, which is what libvips writes there.
+    ///
+    /// `max_alpha` comes from the raster's [`Interpretation`], the way
+    /// `vips_interpretation_max_alpha` supplies it: `65535` for
+    /// [`Interpretation::Rgb16`] / [`Interpretation::Grey16`], `1.0` for
+    /// [`Interpretation::ScRgb`], `255` otherwise. For the unsigned carriers
+    /// that is the depth ceiling and nothing changes. For a float carrier it
+    /// is the only thing that can say what "fully opaque" means, so an
+    /// OpenEXR RGB load (tagged [`Interpretation::ScRgb`] by [`crate::exr`])
+    /// divides by `1.0` and not by `255`. See `interpretation_max_alpha`
+    /// in this module.
     ///
     /// There is no dead zone here to match [`Raster::try_unpremultiply`]'s,
     /// and that asymmetry is libvips' rather than an omission (issue #604):
@@ -2751,16 +2832,27 @@ impl Raster {
     /// What it does have is the mirror image of un-premultiply's clip: the
     /// *factor* is built from `VIPS_CLIP(0, alpha, max_alpha)` while the alpha
     /// that is *stored* is the raw one, exactly the other way round from
-    /// un-premultiply, so the pair cancels on a round trip. That clip is
-    /// applied here too, though on the unsigned 8- and 16-bit carriers this op
-    /// accepts it can never fire.
+    /// un-premultiply, so the pair cancels on a round trip. On the unsigned
+    /// carriers that clip can never fire; on a float carrier it does, and both
+    /// halves of it are observable (issue #631).
+    ///
+    /// # Divergence from stock libvips
+    ///
+    /// `vips_premultiply` always writes `FLOAT` output, even for `uchar`
+    /// input. Here the input format survives, so the unsigned carriers stay
+    /// unsigned and round. That is the crate's standing integer contract (see
+    /// the module docs) and it is unchanged by #631; only the float carriers,
+    /// where the two agree, are new.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::NoAlphaBand`] if the image has fewer
-    /// than two bands.
+    /// than two bands. Float rasters are **not** an error: they used to reach
+    /// `depth_max`'s panic arm through this method, which is exactly what a
+    /// `try_` form must not do, and they now take the float arm instead
+    /// (issue #631).
     pub fn try_premultiply(&self) -> Result<Raster, ArithmeticError> {
-        self.alpha_map(|v, a, max| v * a.clamp(0.0, max) / max)
+        self.alpha_map(AlphaOp::Premultiply)
     }
 
     /// Panicking form of [`Raster::try_premultiply`], matching the
@@ -2769,6 +2861,11 @@ impl Raster {
     /// # Panics
     ///
     /// Panics on any [`ArithmeticError`]; see [`Raster::try_premultiply`].
+    /// In practice that is [`ArithmeticError::NoAlphaBand`] and the
+    /// allocation failures behind [`ArithmeticError::Raster`]. A **float
+    /// raster is not one of them** any more: it used to take the whole
+    /// process down from inside the fallible form, which is what #631
+    /// fixed, and both forms now compute it.
     #[track_caller]
     pub fn premultiply(&self) -> Raster {
         expect_arith("premultiply", self.try_premultiply())
@@ -2777,26 +2874,42 @@ impl Raster {
     /// Undo alpha premultiplication (libvips `unpremultiply`).
     ///
     /// The last band is the alpha band; every other band is multiplied by
-    /// the shared un-premultiply factor, so it becomes `v * max / alpha`
-    /// (saturated to the depth) outside the `0.01` dead zone around zero alpha
-    /// and `0` inside it. The alpha band and the format are unchanged.
+    /// the shared un-premultiply factor (`unpremultiply_factor`), so it
+    /// becomes `v * max_alpha / alpha` outside the `0.01` dead zone around
+    /// zero alpha and `0` inside it, while the stored alpha clips to
+    /// `0..=max_alpha`. The format is unchanged: the unsigned carriers round
+    /// and saturate into their depth, the float carriers store the raw
+    /// result. `max_alpha` comes from the [`Interpretation`], as it does for
+    /// [`Raster::try_premultiply`].
     ///
-    /// Both of the libvips guards are inert on the carriers this op accepts,
-    /// and that is worth saying rather than leaving to be re-derived: these
-    /// are unsigned 8- and 16-bit rasters, so the smallest non-zero alpha
-    /// magnitude is `1` and the dead zone collapses to `alpha == 0` (libvips
-    /// hits the `UNPRE_*` integer macros here for the same reason), while the
-    /// stored alpha is already inside `0..=max` by construction so the
-    /// `VIPS_CLIP(0, alpha, max_alpha)` on the way out has nothing to do. The
-    /// guards bite on the float path, [`crate::resample`]'s premultiply
-    /// bracket, where a resample undershoot can put alpha near or below zero.
+    /// Which carrier this runs on decides whether either guard does anything,
+    /// and libvips splits the macros for the same reason. On an unsigned 8- or
+    /// 16-bit raster the smallest non-zero alpha magnitude is `1`, so the dead
+    /// zone collapses to `alpha == 0` (libvips takes the `UNPRE_*` integer
+    /// macros there), and the stored alpha is inside `0..=max` by
+    /// construction, so `VIPS_CLIP(0, alpha, max_alpha)` has nothing to do.
+    /// On a float raster both are live and observable, through the `FUNPRE_*`
+    /// macros: a lanczos undershoot at a hard transparency edge routinely
+    /// lands alpha in `(0, 0.01)` or just below zero, and an OpenEXR or FITS
+    /// file can hand back an alpha of any magnitude at all, NaN and the
+    /// infinities included. That is the case [`crate::resample`]'s premultiply
+    /// bracket has always hit; since #631 it is reachable through this method
+    /// too, instead of panicking.
+    ///
+    /// # Divergence from stock libvips
+    ///
+    /// `vips_unpremultiply` always writes `FLOAT` output and never saturates,
+    /// so an unsigned raster whose colour exceeds its alpha comes back from
+    /// vips as a number above the depth ceiling and from here clamped to it.
+    /// The float carriers do not saturate and agree with vips exactly.
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::NoAlphaBand`] if the image has fewer
-    /// than two bands.
+    /// than two bands. Float rasters are **not** an error; see
+    /// [`Raster::try_premultiply`] (issue #631).
     pub fn try_unpremultiply(&self) -> Result<Raster, ArithmeticError> {
-        self.alpha_map(|v, a, max| v * unpremultiply_factor(a, max))
+        self.alpha_map(AlphaOp::Unpremultiply)
     }
 
     /// Panicking form of [`Raster::try_unpremultiply`], matching the
@@ -2805,38 +2918,94 @@ impl Raster {
     /// # Panics
     ///
     /// Panics on any [`ArithmeticError`]; see
-    /// [`Raster::try_unpremultiply`].
+    /// [`Raster::try_unpremultiply`]. As with [`Raster::premultiply`], that
+    /// is [`ArithmeticError::NoAlphaBand`] and allocation failure, and no
+    /// longer a float carrier (#631).
     #[track_caller]
     pub fn unpremultiply(&self) -> Raster {
         expect_arith("unpremultiply", self.try_unpremultiply())
     }
 
-    /// Shared kernel for the alpha ops: apply `f(sample, alpha, max)` to
-    /// every non-alpha band and copy the alpha band through.
-    fn alpha_map(&self, f: impl Fn(f64, f64, f64) -> f64) -> Result<Raster, ArithmeticError> {
+    /// Shared kernel for the alpha ops, over both the unsigned and the float
+    /// carriers.
+    ///
+    /// The two carriers are genuinely different code in libvips as well as
+    /// here: `premultiply.c` and `unpremultiply.c` each switch on
+    /// `im->BandFmt`, and the float arms differ from the integer ones in the
+    /// dead zone (`FUNPRE_*` against `UNPRE_*`), in the output depth, and in
+    /// the rounding. Rather than force one `f64` closure to cover both, this
+    /// takes the op as a discriminant and runs the arm that matches the
+    /// carrier.
+    ///
+    /// The unsigned arm is unchanged: compute in `f64`, round to nearest and
+    /// saturate into the input depth, `max` from [`depth_max`]. The float arm
+    /// stores raw `f32` with no rounding or clamping, which is what
+    /// `VIPS_FORMAT_FLOAT` input produces (both ops write `FLOAT` output),
+    /// and takes `max` from the interpretation via
+    /// [`interpretation_max_alpha`].
+    fn alpha_map(&self, op: AlphaOp) -> Result<Raster, ArithmeticError> {
         let fmt = self.format();
         let (bands, bpc) = (fmt.channels(), fmt.bytes_per_channel());
         if bands < 2 {
             return Err(ArithmeticError::NoAlphaBand { bands });
         }
         let pixels = self.width() as usize * self.height() as usize;
-        let max = depth_max(bpc);
         let data = self.data();
         let mut out = alloc_op_output(self.width(), self.height(), fmt)?;
-        for p in 0..pixels {
-            let alpha = read_f64(data, bpc, p * bands + bands - 1);
-            for c in 0..bands - 1 {
-                let v = read_f64(data, bpc, p * bands + c);
-                write_f64(&mut out, bpc, p * bands + c, f(v, alpha, max), max);
+        if fmt.is_float() {
+            // `read_f64` widens the stored `f32` losslessly, so narrowing it
+            // straight back is exact and keeps the arithmetic in `f32` from
+            // here on, which is the point (see below).
+            let max = interpretation_max_alpha(self.interpretation()) as f32;
+            for p in 0..pixels {
+                let alpha = read_f64(data, bpc, p * bands + bands - 1) as f32;
+                // Both C macros land the multiplier in a `float` *before*
+                // the colour multiply (`OUT nalpha` / `OUT factor`, with
+                // `OUT` = float for FLOAT input), so the result rounds twice
+                // and an `f64` expression rounded once at the store is not
+                // the same number: 100 * 0.5 / 255 is 0.19607845 through the
+                // float intermediate and 0.19607843 without it.
+                let (factor, stored) = match op {
+                    // `premultiply.c`: the factor takes the *clipped* alpha
+                    // and the stored alpha stays raw.
+                    AlphaOp::Premultiply => (
+                        (f64::from(alpha.clamp(0.0, max)) / f64::from(max)) as f32,
+                        alpha,
+                    ),
+                    // `unpremultiply.c`: the mirror image, factor from the
+                    // raw alpha (so over- and undershoots cancel) and the
+                    // stored alpha clipped. This is the carrier the `0.01`
+                    // dead zone was written for (#604).
+                    AlphaOp::Unpremultiply => (
+                        unpremultiply_factor(f64::from(alpha), f64::from(max)) as f32,
+                        alpha.clamp(0.0, max),
+                    ),
+                };
+                for c in 0..bands - 1 {
+                    let v = read_f64(data, bpc, p * bands + c) as f32;
+                    write_f32(&mut out, p * bands + c, f64::from(v * factor));
+                }
+                write_f32(&mut out, p * bands + bands - 1, f64::from(stored));
             }
-            write_f64(&mut out, bpc, p * bands + bands - 1, alpha, max);
+        } else {
+            let max = depth_max(bpc);
+            let f: fn(f64, f64, f64) -> f64 = match op {
+                AlphaOp::Premultiply => |v, a, max| v * a.clamp(0.0, max) / max,
+                AlphaOp::Unpremultiply => |v, a, max| v * unpremultiply_factor(a, max),
+            };
+            for p in 0..pixels {
+                let alpha = read_f64(data, bpc, p * bands + bands - 1);
+                for c in 0..bands - 1 {
+                    let v = read_f64(data, bpc, p * bands + c);
+                    write_f64(&mut out, bpc, p * bands + c, f(v, alpha, max), max);
+                }
+                write_f64(&mut out, bpc, p * bands + bands - 1, alpha, max);
+            }
         }
-        Ok(Raster::from_op_output(
-            self.width(),
-            self.height(),
-            fmt,
-            out,
-        )?)
+        Ok(stamp_source_interpretation(
+            Raster::from_op_output(self.width(), self.height(), fmt, out)?,
+            self,
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -4978,6 +5147,384 @@ mod tests {
         )
         .unwrap();
         assert_eq!(im.unpremultiply().getpoint(0, 0), vec![255.0, 100.0]);
+    }
+
+    // ---- premultiply / unpremultiply on the float carriers (#631) ----
+
+    /// The eight alphas the float sweeps below are pinned on. They cover the
+    /// dead zone (`0.005`), its first value outside (`0.02`), the ordinary
+    /// range, an overshoot above every `max_alpha` (`1.5`, `300`), and an
+    /// undershoot below zero.
+    const FLOAT_ALPHAS: [f32; 8] = [0.0, 0.005, 0.02, 0.5, 1.0, 1.5, -0.5, 300.0];
+
+    /// A 4-band `RgbaF32` raster of `(100, 100, 100, alpha)` pixels, one
+    /// column per alpha: the same probe pixel the #604 resample tests use.
+    fn float_rgba(alphas: &[f32]) -> Raster {
+        let mut data = Vec::with_capacity(alphas.len() * 16);
+        for &a in alphas {
+            for v in [100.0f32, 100.0, 100.0, a] {
+                data.extend_from_slice(&v.to_ne_bytes());
+            }
+        }
+        Raster::new(alphas.len() as u32, 1, PixelFormat::RgbaF32, data).unwrap()
+    }
+
+    /// Assert a float sample came out bit-identical to the one vips wrote.
+    /// The comparison is on the `f32` bit pattern rather than a tolerance
+    /// because the point of these pins is the exact rounding, and a
+    /// tolerance loose enough to be comfortable would not see it.
+    fn assert_vips_f32(got: f64, want: f32, what: &str) {
+        let got = got as f32;
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "{what}: got {got:?}, want vips' {want:?}"
+        );
+    }
+
+    /// Run one of the two alpha ops over [`FLOAT_ALPHAS`] and check every
+    /// colour band and the stored alpha against the vips capture.
+    fn check_float_sweep(
+        src: &Raster,
+        out: &Raster,
+        colours: [f32; 8],
+        alphas: [f32; 8],
+        label: &str,
+    ) {
+        assert_eq!(out.format(), src.format(), "{label}: format must survive");
+        for (i, ((&want_c, &want_a), &alpha_in)) in colours
+            .iter()
+            .zip(alphas.iter())
+            .zip(FLOAT_ALPHAS.iter())
+            .enumerate()
+        {
+            let px = out.getpoint(i as u32, 0);
+            for (b, &got) in px[..3].iter().enumerate() {
+                assert_vips_f32(got, want_c, &format!("{label} alpha {alpha_in} band {b}"));
+            }
+            assert_vips_f32(
+                px[3],
+                want_a,
+                &format!("{label} alpha {alpha_in} stored alpha"),
+            );
+        }
+    }
+
+    /// `try_premultiply` on a float carrier is arithmetic, not a panic
+    /// (#631). Pinned bit-exactly on vips 8.18.6 with an untagged float
+    /// raster, whose interpretation resolves to sRGB and so takes the
+    /// default `max_alpha` of 255:
+    ///
+    /// ```text
+    /// vips rawload sw.raw sw.v 8 1 4 --format float
+    /// vips premultiply sw.v swp.v ; vips rawsave swp.v swp.raw
+    ///   alpha  0      ->  0            0
+    ///   alpha  0.005  ->  0.0019607844 0.005
+    ///   alpha  0.02   ->  0.007843138  0.02
+    ///   alpha  0.5    ->  0.19607845   0.5
+    ///   alpha  1      ->  0.3921569    1
+    ///   alpha  1.5    ->  0.5882353    1.5
+    ///   alpha -0.5    ->  0           -0.5
+    ///   alpha  300    ->  100          300
+    /// ```
+    ///
+    /// The last two are the mirror-image guard of #604: the *factor* takes
+    /// the clipped alpha (so `300` normalises to `1` and `-0.5` to `0`)
+    /// while the alpha that is *stored* stays raw.
+    #[test]
+    fn premultiply_float_matches_vips() {
+        let im = float_rgba(&FLOAT_ALPHAS);
+        let out = im
+            .try_premultiply()
+            .expect("float premultiply must succeed");
+        check_float_sweep(
+            &im,
+            &out,
+            [
+                0.0,
+                0.001_960_784_4,
+                0.007_843_138,
+                0.196_078_45,
+                0.392_156_9,
+                0.588_235_3,
+                0.0,
+                100.0,
+            ],
+            FLOAT_ALPHAS,
+            "premultiply f32 max_alpha 255",
+        );
+    }
+
+    /// `try_unpremultiply` on a float carrier is arithmetic too (#631), and
+    /// this is where both #604 guards are live at once. Pinned on vips
+    /// 8.18.6 over the same raster:
+    ///
+    /// ```text
+    /// vips unpremultiply sw.v swu.v ; vips rawsave swu.v swu.raw
+    ///   alpha  0      ->        0    0      (dead zone)
+    ///   alpha  0.005  ->        0    0.005  (dead zone)
+    ///   alpha  0.02   ->  1275000    0.02
+    ///   alpha  0.5    ->    51000    0.5
+    ///   alpha  1      ->    25500    1
+    ///   alpha  1.5    ->    17000    1.5
+    ///   alpha -0.5    ->   -51000    0      (raw factor, clipped alpha)
+    ///   alpha  300    ->       85    255
+    /// ```
+    #[test]
+    fn unpremultiply_float_matches_vips() {
+        let im = float_rgba(&FLOAT_ALPHAS);
+        let out = im
+            .try_unpremultiply()
+            .expect("float unpremultiply must succeed");
+        check_float_sweep(
+            &im,
+            &out,
+            [
+                0.0,
+                0.0,
+                1_275_000.0,
+                51_000.0,
+                25_500.0,
+                17_000.0,
+                -51_000.0,
+                85.0,
+            ],
+            [0.0, 0.005, 0.02, 0.5, 1.0, 1.5, 0.0, 255.0],
+            "unpremultiply f32 max_alpha 255",
+        );
+    }
+
+    /// The float `max_alpha` follows the raster's interpretation, exactly as
+    /// `vips_interpretation_max_alpha` does, so an scRGB raster (which is
+    /// what [`crate::exr`] tags an RGB OpenEXR load) divides by `1.0` and not
+    /// by `255`. Without this an EXR's 0..1 samples premultiply to
+    /// approximately black. Pinned on vips 8.18.6:
+    ///
+    /// ```text
+    /// vips copy sw.v sws.v --interpretation scrgb
+    /// vips premultiply sws.v swps.v
+    ///   alpha 0.005 -> 0.5    ;  alpha 0.5 -> 50  ;  alpha 1.5 -> 100
+    /// vips unpremultiply sws.v swus.v
+    ///   alpha 0.02  -> 5000   ;  alpha 0.5 -> 200 ;  alpha 1.5 -> 66.66667
+    /// ```
+    #[test]
+    fn float_alpha_ops_read_max_alpha_from_the_interpretation() {
+        let im = float_rgba(&FLOAT_ALPHAS)
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build();
+        let pre = im
+            .try_premultiply()
+            .expect("scRGB premultiply must succeed");
+        check_float_sweep(
+            &im,
+            &pre,
+            [0.0, 0.5, 2.0, 50.0, 100.0, 100.0, 0.0, 100.0],
+            FLOAT_ALPHAS,
+            "premultiply f32 scRGB",
+        );
+        let unp = im
+            .try_unpremultiply()
+            .expect("scRGB unpremultiply must succeed");
+        check_float_sweep(
+            &im,
+            &unp,
+            [
+                0.0,
+                0.0,
+                5000.0,
+                200.0,
+                100.0,
+                66.666_67,
+                -200.0,
+                0.333_333_34,
+            ],
+            [0.0, 0.005, 0.02, 0.5, 1.0, 1.0, 0.0, 1.0],
+            "unpremultiply f32 scRGB",
+        );
+        assert_eq!(
+            pre.interpretation(),
+            Interpretation::ScRgb,
+            "the output must carry the tag its max_alpha was read from, or a \
+             premultiply / unpremultiply round trip divides by 1 and \
+             multiplies by 255"
+        );
+    }
+
+    /// The 16-bit interpretations put the float carrier on the 65535 ceiling,
+    /// completing the `vips_interpretation_max_alpha` table. Pinned on vips
+    /// 8.18.6 for the `alpha = 0.5` column of the same raster:
+    ///
+    /// ```text
+    /// vips copy sw.v sw16.v --interpretation rgb16
+    /// vips premultiply   sw16.v ... -> 0.00076295109465718269
+    /// vips unpremultiply sw16.v ... -> 13107000
+    /// ```
+    #[test]
+    fn float_alpha_ops_take_the_65535_ceiling_from_rgb16() {
+        let im = float_rgba(&[0.5])
+            .copy()
+            .interpretation(Interpretation::Rgb16)
+            .build();
+        assert_vips_f32(
+            im.try_premultiply().unwrap().getpoint(0, 0)[0],
+            0.000_762_951_1,
+            "premultiply f32 Rgb16",
+        );
+        assert_vips_f32(
+            im.try_unpremultiply().unwrap().getpoint(0, 0)[0],
+            13_107_000.0,
+            "unpremultiply f32 Rgb16",
+        );
+    }
+
+    /// The float path rounds the way the C does: `nalpha` and `factor` land
+    /// in `float` before the colour multiply, so there are **two** roundings
+    /// and not one. Computing the whole expression in `f64` and rounding at
+    /// the store gives `0.19607843` for this pixel where vips gives
+    /// `0.19607845`, a difference of about 1.2 ulp, so this pins the
+    /// intermediate rather than only the shape of the formula (runbook
+    /// section 14, same class as the fused multiply-add).
+    #[test]
+    fn float_alpha_ops_round_through_f32_like_the_c_macros() {
+        let im = float_rgba(&[0.5]);
+        let got = im.try_premultiply().unwrap().getpoint(0, 0)[0] as f32;
+        let single_rounded = (100.0f64 * 0.5f64 / 255.0f64) as f32;
+        assert_eq!(
+            got.to_bits(),
+            0.196_078_45f32.to_bits(),
+            "want vips' 0.19607845, got {got:?}"
+        );
+        assert_ne!(
+            got.to_bits(),
+            single_rounded.to_bits(),
+            "an f64 intermediate would have given {single_rounded:?}; the C \
+             stores nalpha in a float before multiplying"
+        );
+
+        // The un-premultiply half has the same shape: 1.5 against max_alpha
+        // 1.0 is 66.66667 through a float factor, 66.666664 through f64.
+        let im = float_rgba(&[1.5])
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build();
+        let got = im.try_unpremultiply().unwrap().getpoint(0, 0)[0] as f32;
+        let single_rounded = (100.0f64 * 1.0f64 / 1.5f64) as f32;
+        assert_eq!(
+            got.to_bits(),
+            66.666_67f32.to_bits(),
+            "want vips' 66.66667, got {got:?}"
+        );
+        assert_ne!(
+            got.to_bits(),
+            single_rounded.to_bits(),
+            "an f64 intermediate would have given {single_rounded:?}"
+        );
+    }
+
+    /// A float file can hand back NaN and infinities, and OpenEXR routinely
+    /// does, so both ops are pinned on them rather than left to chance.
+    /// `VIPS_CLIP` is `MAX(0, MIN(max, alpha))` with plain `<` / `>`
+    /// ternaries, so `MIN(max, NaN)` returns the NaN and it propagates.
+    /// Pinned on vips 8.18.6 over `(100, 100, 100, alpha)`:
+    ///
+    /// ```text
+    /// premultiply    NaN -> nan nan nan nan   +inf -> 100 100 100 inf
+    ///                                         -inf ->   0   0   0 -inf
+    /// unpremultiply  NaN -> nan nan nan nan   +inf ->   0   0   0 255
+    ///                                         -inf ->  -0  -0  -0 0
+    /// ```
+    #[test]
+    fn float_alpha_ops_propagate_nan_and_infinity_like_vips() {
+        let im = float_rgba(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY]);
+
+        let pre = im.try_premultiply().expect("NaN must not panic");
+        let nan = pre.getpoint(0, 0);
+        assert!(
+            nan.iter().all(|v| v.is_nan()),
+            "a NaN alpha must propagate through premultiply, got {nan:?}"
+        );
+        assert_vips_f32(pre.getpoint(1, 0)[0], 100.0, "premultiply +inf colour");
+        assert_vips_f32(pre.getpoint(2, 0)[0], 0.0, "premultiply -inf colour");
+        assert!(
+            pre.getpoint(1, 0)[3].is_infinite() && pre.getpoint(2, 0)[3].is_infinite(),
+            "premultiply stores the raw alpha, infinities included"
+        );
+
+        let unp = im.try_unpremultiply().expect("NaN must not panic");
+        let nan = unp.getpoint(0, 0);
+        assert!(
+            nan.iter().all(|v| v.is_nan()),
+            "a NaN alpha must propagate through unpremultiply, got {nan:?}"
+        );
+        assert_vips_f32(unp.getpoint(1, 0)[0], 0.0, "unpremultiply +inf colour");
+        assert_vips_f32(unp.getpoint(1, 0)[3], 255.0, "unpremultiply +inf alpha");
+        assert_vips_f32(unp.getpoint(2, 0)[0], -0.0, "unpremultiply -inf colour");
+        assert_vips_f32(unp.getpoint(2, 0)[3], 0.0, "unpremultiply -inf alpha");
+    }
+
+    /// The float path is band-agnostic, like the `*_MANY` C macros: the last
+    /// band is the alpha whatever the band count, and a two-band
+    /// `FloatF32(2)` raster gives the same numbers as the RGBA sweep.
+    /// Pinned on vips 8.18.6 with a 2x1 two-band float raster of
+    /// `(100, alpha)`:
+    ///
+    /// ```text
+    /// vips premultiply   tb.v ... -> 0.19607844948768616 / 0.58823531866073608
+    /// vips unpremultiply tb.v ... -> 51000 / 17000
+    /// ```
+    #[test]
+    fn float_alpha_ops_work_on_a_two_band_carrier() {
+        let mut data = Vec::new();
+        for v in [100.0f32, 0.5, 100.0, 1.5] {
+            data.extend_from_slice(&v.to_ne_bytes());
+        }
+        let im = Raster::new(2, 1, PixelFormat::with_channels(2, 4).unwrap(), data).unwrap();
+        let pre = im.try_premultiply().expect("two-band float premultiply");
+        assert_vips_f32(
+            pre.getpoint(0, 0)[0],
+            0.196_078_45,
+            "2-band premultiply 0.5",
+        );
+        assert_vips_f32(pre.getpoint(1, 0)[0], 0.588_235_3, "2-band premultiply 1.5");
+        let unp = im
+            .try_unpremultiply()
+            .expect("two-band float unpremultiply");
+        assert_vips_f32(unp.getpoint(0, 0)[0], 51_000.0, "2-band unpremultiply 0.5");
+        assert_vips_f32(unp.getpoint(1, 0)[0], 17_000.0, "2-band unpremultiply 1.5");
+    }
+
+    /// The panicking twins keep their contract on the float carrier: they
+    /// panic only on the errors their `try_` form returns, and a float
+    /// raster is no longer one of them (#631).
+    #[test]
+    fn panicking_alpha_twins_no_longer_panic_on_float() {
+        let im = float_rgba(&[0.5]);
+        assert_vips_f32(
+            im.premultiply().getpoint(0, 0)[0],
+            0.196_078_45,
+            "premultiply",
+        );
+        assert_vips_f32(
+            im.unpremultiply().getpoint(0, 0)[0],
+            51_000.0,
+            "unpremultiply",
+        );
+    }
+
+    /// A single-band float raster still has no alpha band, and that stays a
+    /// typed error rather than becoming a float panic by another route.
+    #[test]
+    fn float_single_band_is_still_a_typed_error() {
+        let im = Raster::zeroed(1, 1, PixelFormat::with_channels(1, 4).unwrap()).unwrap();
+        assert!(matches!(
+            im.try_premultiply(),
+            Err(ArithmeticError::NoAlphaBand { bands: 1 })
+        ));
+        assert!(matches!(
+            im.try_unpremultiply(),
+            Err(ArithmeticError::NoAlphaBand { bands: 1 })
+        ));
     }
 
     /// The integer-writing arithmetic ops still reject float rasters
