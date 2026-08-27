@@ -358,7 +358,7 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     };
     let mut raster = Raster::new(width, height, format, data).map_err(GifError::Raster)?;
     raster.meta.interpretation = Some(crate::conversion::Interpretation::Srgb);
-    raster.set_field("n-pages", MetadataValue::Int(i64::from(scan.frames)));
+    raster.set_n_pages(scan.frames);
     raster.set_field("loop", MetadataValue::Int(scan.loop_count));
     raster.set_field("palette", MetadataValue::Int(1));
     if scan.colours > 0 {
@@ -1044,6 +1044,41 @@ mod tests {
             raster.get_int("n-pages"),
             Some(3),
             "n-pages counts every frame in the file, not the ones loaded"
+        );
+    }
+
+    /**
+     * Tests what the number under `n-pages` actually counts, which is the
+     * question issue #635 was filed on: the frames in the file and nothing
+     * else. The test above uses three frames, which is also the band count
+     * a GIF with no transparency expands to, so a loader that attached the
+     * wrong number would still read as right there. Works by assembling a
+     * FIVE-frame GIF on a 4x4 screen with a five-entry palette, so the
+     * expected count matches neither axis, nor either band count, nor the
+     * one frame that was loaded.
+     * Input: a 4x4 GIF with five frames -> Output: frame zero's pixels and
+     * `get_n_pages() == 5`.
+     */
+    #[test]
+    fn n_pages_counts_the_frames_in_the_file_and_nothing_else() {
+        let palette = [
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 0, 255],
+            [0, 255, 0],
+            [255, 255, 0],
+        ];
+        let frames: Vec<Frame> = (0..5u8).map(|f| Frame::full(4, 4, vec![f; 16])).collect();
+        let bytes = fixture((4, 4), &palette, 0, Some(0), &frames);
+
+        let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
+        assert_eq!(&raster.data()[..3], &[0, 0, 0], "frame zero is index 0");
+        assert_eq!((raster.width(), raster.height()), (4, 4));
+        assert_eq!(
+            raster.get_n_pages(),
+            5,
+            "n-pages is the frame count, not an axis, a band count, or the \
+             one frame that was loaded"
         );
     }
 

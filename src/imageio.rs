@@ -740,17 +740,18 @@ impl Raster {
 
     /// Read a metadata field as an `i32` (libvips `vips_image_get_int`).
     ///
-    /// Resolves `name` through [`Raster::get_field`] and returns the value
-    /// when it is an integer that fits in an `i32` (for example the built-in
-    /// `width`/`height`/`bands` header fields, or an attached field such as
-    /// `bits-per-sample`, `tile-width`, or `page-height` set by a loader).
-    /// Returns `None` for an absent field, a non-integer value, or an integer
-    /// outside the `i32` range.
+    /// Answers the same names [`Raster::get_field`] does and returns the
+    /// value when it is an integer that fits in an `i32` (for example the
+    /// built-in `width`/`height`/`bands` header fields, or an attached field
+    /// such as `bits-per-sample`, `tile-width`, or `page-height` set by a
+    /// loader). Returns `None` for an absent field, a non-integer value, or
+    /// an integer outside the `i32` range.
+    ///
+    /// It borrows the stored value rather than cloning one out, so reading an
+    /// int costs nothing even when the name happens to hold a large
+    /// [`MetadataValue::Blob`] (issue #635).
     pub fn get_int(&self, name: &str) -> Option<i32> {
-        match self.get_field(name)? {
-            MetadataValue::Int(value) => i32::try_from(value).ok(),
-            _ => None,
-        }
+        i32::try_from(self.field_i64(name)?).ok()
     }
 
     /// Fallible form of [`Raster::set_field`].
@@ -886,36 +887,139 @@ impl Raster {
         i32::from(self.orientation())
     }
 
-    /// The number of pages this raster represents (libvips `n-pages`),
-    /// defaulting to `1` for a single-page image.
+    /// The number of pages the **original file** holds (libvips `n-pages`),
+    /// defaulting to `1`.
     ///
-    /// Reads the attached `n-pages` field. Three loaders set it and they do
-    /// not agree on when, so the field being *present* does not mean the
-    /// image has more than one page:
+    /// A port of `vips_image_get_n_pages` (`iofuncs/header.c:917-928`),
+    /// sanity check included. The key has one meaning across this crate and
+    /// it is the one vips gives it: **how many pages the file this raster
+    /// was decoded from contains**, where a page is something a loader's
+    /// zero-based `page` argument can select. It is a count and not an
+    /// index, so the sweep over every page is
+    /// `for page in 0..raster.get_n_pages()` and the last page is
+    /// `get_n_pages() - 1` (issue #566).
     ///
-    /// * [`crate::gif`] and [`decode_tiff_page`](crate::decode_tiff_page)
-    ///   attach it on every load, a one-frame GIF and a single-page TIFF
-    ///   included, where it reads `1`;
-    /// * [`crate::webp`] attaches it only when the file is animated, so a
-    ///   still WebP carries no such field at all, which is what
-    ///   `vipsheader -a` reports for one;
-    /// * the PDF loader does not attach it, and neither does
-    ///   [`crate::exr`], which reports its part count as `exr-parts`
-    ///   instead: `vipsheader -a` attaches no `n-pages` to an EXR either,
-    ///   and an EXR part is a layer rather than a page, so there is no
-    ///   part index [`crate::decode_exr`] could be asked for.
+    /// It is *not* how many pages were loaded into this raster. Every loader
+    /// here reads page 0, so a raster reporting `3` still holds one page of
+    /// pixels, exactly as a default `vips` load does.
     ///
-    /// A raster with no `n-pages` field reports `1` either way, matching the
-    /// oracle (`n-pages = 1` for `sample.jpg`, `5` / `4` / `3` / `35` for the
-    /// animated fixtures).
+    /// # Which loaders attach it
     ///
-    /// The count is 1-based and the page index is 0-based (issue #566), so a
-    /// sweep over every page is `for page in 0..raster.get_n_pages()`.
+    /// Four do, and each was measured against `vipsheader -a` on the same
+    /// file under vips 8.18.6:
+    ///
+    /// | loader | what it counts | the vips writer it ports |
+    /// |---|---|---|
+    /// | [`crate::gif`] | frames in the GIF | `nsgifload.c:281` |
+    /// | [`decode_tiff_page`](crate::decode_tiff_page) | IFDs in the chain | `tiff2vips.c:1879` |
+    /// | [`crate::webp`] | frames in the original animation | `webp2vips.c:508` |
+    /// | [`crate::jxl`] | frames in the original | `jxlload.c:747` |
+    ///
+    /// GIF and TIFF attach it to every load, a one-frame GIF and a
+    /// single-page TIFF included, where it reads `1`. WebP attaches it only
+    /// when the container is animated, and JPEG XL only when there is more
+    /// than one frame, so a still of either carries no such field at all.
+    /// That split is vips's rather than an inconsistency to tidy away:
+    /// `vipsheader -a` reports `n-pages: 1` for a still GIF and a one-page
+    /// TIFF, and no `n-pages` at all for a still WebP or a single-frame
+    /// JPEG XL. Both shapes read back as `1` here, so a caller never has to
+    /// know which one it is holding.
+    ///
+    /// # What stays off this key
+    ///
+    /// A count belongs here only if a page index can select it. Anything
+    /// else gets a name that says what it is (issue #635):
+    ///
+    /// * [`crate::exr`] reports its multi-part count as `exr-parts`. An EXR
+    ///   part is a layer, `openexrload` attaches no `n-pages` to an EXR, and
+    ///   [`crate::decode_exr`] takes no part index, so `0..get_n_pages()`
+    ///   would be a sweep over something unreachable (issue #626).
+    /// * The PDF readers attach nothing. vips's `pdfload` does attach it
+    ///   (measured: `n-pages: 3` for a three-page document, `1` for a
+    ///   one-page one), but its `page` argument is zero-based where this
+    ///   crate's PDF page numbers are one-based on purpose, so a caller
+    ///   sweeping `0..get_n_pages()` would be off by one. The document's
+    ///   count is [`crate::PdfInfo::page_count`].
+    ///
+    /// vips's own `jp2kload` is the case not to copy: it puts the JPEG 2000
+    /// *resolution* count under this key (`jp2kload.c:586`), so `page` there
+    /// picks a shrink level rather than a frame.
+    ///
+    /// # The sanity check
+    ///
+    /// vips reports a single page unless the field is an int strictly
+    /// between 1 and 10000, and so does this. Measured against
+    /// `vips_image_get_n_pages` on 8.18.6: `9999` comes back as `9999`,
+    /// `10000` and `65536` come back as `1`, and a string-typed field comes
+    /// back as `1` whatever it spells, because `vips_image_get_int` will not
+    /// coerce one. The stored value is untouched either way and stays
+    /// readable through [`Raster::get_field`], and a TIFF's real chain
+    /// length is [`tiff_page_count`](crate::tiff_page_count) regardless of
+    /// what this reports. Reading costs no allocation whatever type is
+    /// sitting under the name.
     pub fn get_n_pages(&self) -> u32 {
-        match self.get_field("n-pages") {
-            Some(MetadataValue::Int(n)) => u32::try_from(n).ok().filter(|&n| n > 0).unwrap_or(1),
-            Some(MetadataValue::Str(s)) => s.parse::<u32>().ok().filter(|&n| n > 0).unwrap_or(1),
+        // `iofuncs/header.c:921-926`: the field has to be an int and it has
+        // to sit strictly between 1 and this ceiling, or vips calls the
+        // value crazy and reports a single page.
+        const CEILING: i64 = 10_000;
+        match self.field_i64("n-pages") {
+            Some(n) if (2..CEILING).contains(&n) => u32::try_from(n).unwrap_or(1),
             _ => 1,
+        }
+    }
+
+    /// Attach `n-pages`: the one place in the crate that names the key
+    /// (issue #635).
+    ///
+    /// `count` is how many pages the **file** holds, where a page is
+    /// something a loader's zero-based `page` argument can select. That is
+    /// the whole of the contract [`Raster::get_n_pages`] documents, and
+    /// routing every writer through one function is what stops a fifth
+    /// meaning arriving under the same name: a count no page index can reach
+    /// gets a key of its own instead, the way the OpenEXR part count became
+    /// `exr-parts` (issue #626).
+    ///
+    /// `tests/n_pages_meaning.rs` asserts that the literal key appears in
+    /// exactly one source file, so a new writer either comes through here or
+    /// fails that guard.
+    pub(crate) fn set_n_pages(&mut self, count: u32) {
+        self.fields
+            .set("n-pages", MetadataValue::Int(i64::from(count)));
+    }
+
+    /// The integer under `name`, borrowed rather than materialised.
+    ///
+    /// [`Raster::get_field`] hands back an **owned** [`MetadataValue`], so
+    /// every reader that goes through it deep-copies whatever sits under the
+    /// name before looking at it. For a [`MetadataValue::Blob`] that copy is
+    /// bounded only by the file that wrote it: any name can hold any type
+    /// ([`Raster::try_set_field`] stores what it is given outside the
+    /// built-ins) and a `.v` trailer restores arbitrary named fields with
+    /// arbitrary types from an untrusted file (issue #565). Reading a `u32`
+    /// out of `n-pages` should not depend on what else got stored there, so
+    /// the readers borrow through here instead (issue #635).
+    ///
+    /// The built-in header fields answer exactly as [`Raster::get_field`]
+    /// would: the six int-valued ones report their value out of the header,
+    /// the string and double ones report `None` because they are not ints
+    /// there either, and `filename` goes to the field list because that is
+    /// where `get_field` reads it from.
+    fn field_i64(&self, name: &str) -> Option<i64> {
+        match name {
+            "width" => Some(i64::from(self.width())),
+            "height" => Some(i64::from(self.height())),
+            "bands" => Some(self.format().channels() as i64),
+            "xoffset" => Some(i64::from(self.xoffset())),
+            "yoffset" => Some(i64::from(self.yoffset())),
+            "orientation" => Some(i64::from(self.orientation())),
+            "format" | "coding" | "interpretation" | "xres" | "yres" => None,
+            // `filename` is the one built-in [`Raster::get_field`] answers
+            // out of the field list rather than the header, so it takes the
+            // same route here and reports an int if that is what is stored.
+            other => match self.fields.get(other) {
+                Some(&MetadataValue::Int(n)) => Some(n),
+                _ => None,
+            },
         }
     }
 
@@ -2205,6 +2309,40 @@ mod tests {
         assert_eq!(im0.get_n_pages(), 1);
     }
 
+    #[test]
+    fn get_n_pages_ports_the_whole_vips_sanity_check() {
+        // `vips_image_get_n_pages` (`iofuncs/header.c:917-928`) reports a
+        // single page unless the field is an int strictly between 1 and
+        // 10000. Measured rather than transcribed: a C program linking
+        // libvips 8.18.6 set each of these on a fresh image and printed what
+        // the accessor gave back (issue #635).
+        for (stored, expected) in [
+            (-5i64, 1u32),
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (9_999, 9_999),
+            (10_000, 1),
+            (10_001, 1),
+            (65_536, 1),
+            (2_000_000_000, 1),
+        ] {
+            let mut im = Raster::black(1, 1);
+            im.set_field("n-pages", MetadataValue::Int(stored));
+            assert_eq!(im.get_n_pages(), expected, "stored n-pages = {stored}");
+        }
+
+        // vips reads the field with `vips_image_get_int`, which will not
+        // coerce a string, so a `gchararray` "3" reports 1 there too. This
+        // crate's own `get_int` refuses the same way, and the raw value
+        // stays readable through `get_field`.
+        let mut str_field = Raster::black(1, 1);
+        str_field.set_field("n-pages", MetadataValue::Str("3".to_string()));
+        assert_eq!(str_field.get_n_pages(), 1);
+        assert_eq!(str_field.get_int("n-pages"), None);
+        assert_eq!(str_field.get_field("n-pages").unwrap().as_str(), "3");
+    }
+
     fn rgb_2x2() -> Raster {
         Raster::new(
             2,
@@ -2409,6 +2547,45 @@ mod tests {
         assert_eq!(im.get_int("note"), None);
         im.set_field("huge", MetadataValue::Int(i64::from(i32::MAX) + 1));
         assert_eq!(im.get_int("huge"), None);
+    }
+
+    /**
+     * Tests that `get_int` answers exactly what resolving through
+     * `get_field` answers, on every readable name. It used to *be* that
+     * resolution and now borrows through `field_i64` instead, so this is
+     * what pins the refactor: the built-in header fields, the ones that are
+     * strings or doubles there, `filename` (the one built-in `get_field`
+     * reads out of the field list rather than the header), attached ints,
+     * an attached blob, an attached string and a name that is not set at
+     * all. Works by asking both accessors for every name `get_fields`
+     * reports and comparing them (issue #635).
+     */
+    #[test]
+    fn get_int_agrees_with_get_field_on_every_readable_name() {
+        let mut im = rgb_2x2();
+        im.set_field("orientation", MetadataValue::Int(6));
+        im.set_field("xoffset", MetadataValue::Int(-4));
+        im.set_field("yres", MetadataValue::Double(1.5));
+        im.set_field("filename", MetadataValue::Int(11));
+        im.set_field("bits-per-sample", MetadataValue::Int(8));
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        im.set_field("note", MetadataValue::Str("hello".to_string()));
+        im.set_field("huge", MetadataValue::Int(i64::from(i32::MAX) + 1));
+
+        let names = im.get_fields();
+        assert!(names.len() > 12, "the sweep has to reach the attachments");
+        for name in names {
+            let through_get_field = match im.get_field(&name) {
+                Some(MetadataValue::Int(v)) => i32::try_from(v).ok(),
+                _ => None,
+            };
+            assert_eq!(
+                im.get_int(&name),
+                through_get_field,
+                "get_int and get_field disagree on {name}"
+            );
+        }
+        assert_eq!(im.get_int("no-such-field"), None);
     }
 
     // -- save / .v ----------------------------------------------------------

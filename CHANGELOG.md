@@ -994,6 +994,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `n-pages` has one documented meaning, and `Raster::get_n_pages` now ports the
+  whole of the libvips sanity check that guards it (issue #635). The panel that
+  filed the issue counted four meanings behind the one accessor. Re-measured
+  after #626 moved the OpenEXR multi-part count out to `exr-parts`, there is one
+  meaning left and four loaders honouring it: `n-pages` is how many pages the
+  original **file** holds, where a page is something a zero-based `page`
+  argument can select. GIF counts frames, TIFF counts IFDs, WebP and JPEG XL
+  count frames in the original, and every one of them agrees with the vips
+  loader it ports, on the value and on whether the field is attached at all.
+  `vipsheader -a` on 8.18.6 reports `n-pages: 1` for a still GIF and a one-page
+  TIFF and nothing at all for a still WebP or a single-frame JPEG XL, which is
+  exactly what libviprs does. So the answer is one shared key rather than
+  per-format ones, and a count that no page index can reach keeps getting its
+  own name the way `exr-parts` did.
+
+  What actually changes for a caller is the accessor. `vips_image_get_n_pages`
+  (`iofuncs/header.c:917-928`) reports a single page unless the stored field is
+  an int strictly between 1 and 10000; libviprs only had half of that, accepting
+  anything positive and additionally parsing a string-typed field. Measured
+  against the C on 8.18.6, a stored `9999` reads back as `9999` while `10000`,
+  `65536` and `2000000000` all read back as `1`, and a `gchararray` `"3"` reads
+  back as `1` because `vips_image_get_int` does not coerce one. `get_n_pages`
+  now matches on all of those. The ceiling is reachable rather than theoretical:
+  `DecodeLimits::max_pages` defaults to 100000, so a TIFF with 12000 IFDs
+  decodes fine here and used to report 12000 where vips reports 1, and the same
+  goes for a GIF or an animation with that many frames. Nothing is lost, only
+  moved: the field itself is never rewritten, so `get_field("n-pages")` still
+  hands back the real number and `tiff_page_count` still walks the chain. The
+  string arm has no producer in the crate at all, since every loader stores an
+  int and the `.v` trailer round trip preserves the `gint` type.
+
+  The PDF readers still attach no `n-pages`, and that is now written down with
+  its reason rather than left as a silence: vips's `pdfload` does attach one
+  (measured: 3 for a three-page document), but its `page` is zero-based where
+  this crate's PDF page numbers are deliberately one-based, so a caller sweeping
+  `0..get_n_pages()` would be off by one. `PdfInfo::page_count` is the count for
+  a PDF.
+
+  Two doc blocks in `encode_tiff` that promised the count travels back on the
+  raster and reads out of `get_n_pages` are corrected rather than left to
+  describe the old behaviour. They now point at `tiff_page_count` as the
+  uncapped page count for a TIFF and say where the accessor caps, and the
+  matching promises in the WebP and JPEG XL loader docs say the same. A `0..n`
+  sweep is still safe on a long chain, because the capped answer is 1 rather
+  than something longer than the file.
+
+  `get_n_pages` and `get_int` also stopped deep-copying to read a number.
+  Both resolved through `get_field`, which hands back an **owned**
+  `MetadataValue` cloned out of the field list, and any name can hold a
+  `Blob`: `try_set_field` stores whatever type it is given outside the
+  built-ins, and the `.v` trailer restores arbitrary named fields with
+  arbitrary types out of an untrusted file. Measured in release with 64 MiB
+  under the key, `get_n_pages` cost 1.296 ms and a 64 MiB alloc-and-free per
+  call, against 2 ns now; with an ordinary `Int` under it the same call went
+  from 18 ns to 2 ns. Both accessors borrow the stored value now, and a
+  counting global allocator in `tests/n_pages_meaning.rs` asserts zero
+  allocations across each call so a regression fails on the mechanism rather
+  than on a timing threshold.
+
 - `SaveError::UnsupportedExtension`'s message names the extensions the build
   in front of you can actually write, instead of a fixed list (issue #500).
   It used to end "libviprs encodes png, jpg/jpeg, gif, webp, and v/vips",
