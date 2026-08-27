@@ -86,9 +86,16 @@
 //!   [`Interpretation::ScRgb`], 255 otherwise. The unsigned carriers keep the
 //!   depth ceiling, where an untagged raster gives the same answer either way;
 //!   only a float carrier, which has no depth-implied ceiling at all, reads the
-//!   tag. Both halves round through `f32` exactly as the C macros do, because
-//!   `OUT nalpha` and `OUT factor` are `float` for float output, so the
-//!   multiplier is rounded before the colour multiply. The averaging resamplers —
+//!   tag. Both ends of the bracket round through `f32` exactly where the C
+//!   does, because
+//!   `OUT nalpha` and `OUT factor` are `float` for every carrier but DOUBLE
+//!   (`premultiply.c:229-232`), so the multiplier is quantised before the
+//!   colour multiply even on an 8-bit input. The affine half has a third such
+//!   point, since `vips_affine` premultiplies into a **FLOAT** image and
+//!   `vips_unpremultiply` reads that image back, so the interpolated pixel is
+//!   quantised at the seam between them; the interpolation itself accumulates
+//!   in `f64`, which is what `BILINEAR_FLOAT` does with its `double`
+//!   coefficients (`interpolate.c:462`). The averaging resamplers —
 //!   `reduce` / `reduceh` / `reducev`, `shrink` / `shrinkh` / `shrinkv`, and
 //!   `resize` — do the same: an alpha image is premultiplied once into a float
 //!   working buffer, the separable box / kernel / affine passes all run in that
@@ -142,6 +149,37 @@
 //!   centring), so on samples that land exactly on the input grid they
 //!   return the input pixel unchanged, which keeps the 4x rotation
 //!   round-trip an identity.
+//!
+//! # Divergence from stock libvips
+//!
+//! One gap is open between this module and a stock libvips, and it is the
+//! quantisation at the end of a bracketed resample rather than any of the
+//! arithmetic inside one.
+//!
+//! * **`vips_cast` truncates where this module rounds.** Whenever libvips
+//!   brackets a resample in a premultiply it works in FLOAT and casts back to
+//!   the input format afterwards (`vips_affine`'s
+//!   `vips_cast(t[5], &t[6], unpremultiplied_format)`, `affine.c:616`), and
+//!   `vips_cast` converts a float to an integer with a plain C cast, which
+//!   truncates towards zero: `q[x] = CAST((double) p[x])` where `CAST` only
+//!   clips (`cast.c:237`), and the file's own header note says "now does
+//!   floor(), not rint() ... you'll need to round yourself". libviprs stores
+//!   through its own sample writer, which rounds half up like
+//!   `VIPS_ROUND_UINT`. So on an unsigned carrier **with an alpha band** the
+//!   two disagree wherever the premultiply round-trip lands a hair below the
+//!   value it started from: vips floors the step away and libviprs keeps it.
+//!   Measured on 8.18.6, `affine "0.5 0 0 0.5"` bilinear over a 64x64
+//!   pseudo-random `Rgba8` moves 240 of 4096 samples, every one of them
+//!   libviprs one **above** vips and equal to the input sample, so this module
+//!   is the one that round-trips. It is unchanged by issue #664 and predates
+//!   it. Float carriers are unaffected, because nothing is requantised.
+//!
+//!   It matters when reading the oracle: a comparison run as
+//!   `premultiply | resize | unpremultiply | cast uchar` disagrees with this
+//!   module on about half of all samples for that reason alone. Read the
+//!   unpremultiplied result as FLOAT and quantise it the same way instead,
+//!   which is what `resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data`
+//!   does.
 //!
 //! # Example usage
 //!
@@ -936,9 +974,13 @@ impl TapFetch<'_> {
             _ => px.fill(self.fill_value()),
         }
         if premultiply {
-            let alpha = px[self.bands - 1].clamp(0.0, self.alpha_max) / self.alpha_max;
+            // `OUT nalpha = (OUT) clip_alpha / max_alpha` with `OUT` = float,
+            // then `q[i] = p[i] * nalpha` as a float multiply: both round to
+            // `f32`, so the tap matches the FLOAT image `vips_premultiply`
+            // hands `vips_affine_gen` (issue #664).
+            let nalpha = (px[self.bands - 1].clamp(0.0, self.alpha_max) / self.alpha_max) as f32;
             for v in px.iter_mut().take(self.bands - 1) {
-                *v *= alpha;
+                *v = f64::from((*v as f32) * nalpha);
             }
         }
     }
@@ -1775,9 +1817,11 @@ impl NohaloStencil {
 fn unpremultiply(px: &mut [f64], max: f64) {
     let bands = px.len();
     let alpha = px[bands - 1];
-    let factor = unpremultiply_factor(alpha, max);
+    // `OUT factor` is a `float` and `q[i] = p[i] * factor` a float multiply,
+    // so both round to `f32`, mirroring [`TapFetch::fetch`] (issue #664).
+    let factor = unpremultiply_factor(alpha, max) as f32;
     for v in px.iter_mut().take(bands - 1) {
-        *v *= factor;
+        *v = f64::from((*v as f32) * factor);
     }
     px[bands - 1] = alpha.clamp(0.0, max);
 }
@@ -2418,6 +2462,13 @@ impl Raster {
                 if fx >= -1.0 && fx <= (w - 1) as f64 && fy >= -1.0 && fy <= (h - 1) as f64 {
                     interpolate_at(&fetch, interpolate, ix, iy, premultiply, &mut px, &mut acc);
                     if premultiply {
+                        // `vips_affine_gen` writes the interpolated
+                        // premultiplied pixel into the FLOAT image
+                        // `vips_unpremultiply` then reads, so the accumulator
+                        // is quantised to `f32` at that seam (issue #664).
+                        for v in acc.iter_mut() {
+                            *v = f64::from(*v as f32);
+                        }
                         unpremultiply(&mut acc, fetch.alpha_max);
                     }
                     for (bi, v) in acc.iter().enumerate() {
@@ -3469,16 +3520,21 @@ mod tests {
     /// units the alpha band carries, never a fraction of `max`. Measured on the
     /// binary, `alpha = 0.02` on the same `(100, 100, 100, alpha)` pixel gives
     /// `5000` under scRGB (`max_alpha` 1), `1275000` under the 255 default and
-    /// `327675008` under RGB16 (`max_alpha` 65535 — vips prints the float32
-    /// rounding of the exact 327675000), and `alpha = 0.005` gives 0 in all
-    /// three. So the 16-bit carrier's dead zone is `0.01 / 65535` of full
-    /// scale, not `0.01`.
+    /// `327675008` under RGB16 (`max_alpha` 65535), and `alpha = 0.005` gives 0
+    /// in all three. So the 16-bit carrier's dead zone is `0.01 / 65535` of
+    /// full scale, not `0.01`.
+    ///
+    /// The RGB16 row is the one that moved with #664. It used to pin
+    /// `327675000`, the exact quotient, and carry a note saying the binary
+    /// "prints the float32 rounding" of it. That was the divergence, not a
+    /// printing artefact: `OUT factor` is a `float`, so vips genuinely computes
+    /// `327675008` and this pins the binary now rather than a model of it.
     #[test]
     fn unpremultiply_dead_zone_does_not_scale_with_max() {
         for (max, want) in [
             (1.0, 5000.0),
             (255.0, 1_275_000.0),
-            (65535.0, 327_675_000.0),
+            (65535.0, 327_675_008.0),
         ] {
             let mut px = [100.0, 100.0, 100.0, 0.02];
             unpremultiply(&mut px, max);
@@ -4227,6 +4283,12 @@ mod tests {
     /// destructive: an 8-bit buffer mislabelled `Rgb16` would premultiply
     /// against 65535 and come back black. `RasterCopyBuilder::interpretation`
     /// accepts any tag without checking the depth, so that is reachable.
+    ///
+    /// This one guards the **ceiling** and nothing else. Its raster is
+    /// constant, and `max_alpha` cancels across the bracket on a constant, so
+    /// it cannot see the `f32` re-rounding at all;
+    /// [`resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data`] is
+    /// where that is pinned, on data that varies.
     #[test]
     fn resize_unsigned_carriers_keep_the_depth_ceiling() {
         let mut data = Vec::with_capacity(8 * 8 * 4);
@@ -4249,5 +4311,303 @@ mod tests {
         }
         // And the value itself: a constant survives the bracket unchanged.
         assert_eq!(&plain.data()[..4], &[200u8, 100, 50, 128]);
+    }
+
+    /// The interior sample of
+    /// `const_rgba_f32(alpha, tag).affine([0.5, 0, 0, 0.5], "bilinear")`.
+    /// Bilinear at an exact half-scale lands every tap on the input grid, and
+    /// the raster is constant anyway, so the interpolation contributes nothing
+    /// and what comes out is the premultiply bracket alone.
+    fn affine_const_pixel(alpha: f32, tag: Option<Interpretation>) -> [f32; 4] {
+        let out = const_rgba_f32(alpha, tag).affine([0.5, 0.0, 0.0, 0.5], "bilinear");
+        assert_eq!(out.width(), 4, "affine 0.5 of an 8x8 is 4 wide");
+        assert_eq!(out.height(), 4, "affine 0.5 of an 8x8 is 4 high");
+        assert_eq!(out.format(), PixelFormat::RgbaF32, "the carrier survives");
+        let s = out.f32_samples().expect("float carrier");
+        // Pixel (1, 1) of the 4x4 output, the one vips was read at.
+        let base = (4 + 1) * 4;
+        [s[base], s[base + 1], s[base + 2], s[base + 3]]
+    }
+
+    /// Issue #664, the affine half. Same rule as
+    /// [`resize_float_bracket_takes_max_alpha_from_the_interpretation`], on the
+    /// path with the better oracle: `vips_affine` calls `vips_premultiply`
+    /// itself (`affine.c:553`), so `vips affine` on its own *is* the bracket
+    /// rather than something wrapped around one, and the composed
+    /// `premultiply | affine | unpremultiply` agrees with it value for value.
+    ///
+    /// Measured on vips 8.18.6,
+    /// `vips affine in.v out.v "0.5 0 0 0.5" --interpolate bilinear` over the
+    /// 8x8 constant float RGBA `(100, 20, 3, alpha)`, read at pixel (1, 1):
+    ///
+    /// ```text
+    /// alpha  srgb (255)                                    scrgb (1.0)                                                   rgb16 (65535)
+    /// 0.5    100.00000762939453 20 3.0000002384185791 0.5  100 20 3 0.5                                                  100 20 3 0.5
+    /// 1.5    100.00000762939453 20 3.0000002384185791 1.5  66.666671752929688 13.333333969116211 2 1                     100 20 3 1.5
+    /// 300    85 17 2.5500001907348633 255                  0.3333333432674408 0.066666670143604279 0.0099999997764825821 1  99.999992370605469 20 3 300
+    /// ```
+    ///
+    /// `srgb` is the untagged row here rather than `multiband`, because
+    /// `vips_image_hasalpha` is `bands > vips_interpretation_bands(Type)` and
+    /// `vips_interpretation_bands(MULTIBAND)` is `0` (`image.c:3104`,
+    /// `header.c:218`), so vips skips the bracket entirely on a 4-band
+    /// MULTIBAND image and there is nothing to compare. libviprs decides from
+    /// the carrier instead, and an untagged `RgbaF32` reports
+    /// [`Interpretation::Srgb`] via `Interpretation::for_format`, so `srgb` is
+    /// the row that matches.
+    ///
+    /// The `0.5` row is the cancellation guard: an alpha inside every candidate
+    /// ceiling makes the bracket cancel, so all three tags agree and nothing may
+    /// move there. `1.5` and `300` discriminate, because the premultiply clip
+    /// and the stored-alpha clip both bite and the three ceilings separate by a
+    /// factor of 300.
+    #[test]
+    fn affine_float_bracket_takes_max_alpha_from_the_interpretation() {
+        let cases: [(f32, Option<Interpretation>, [f32; 4]); 9] = [
+            (0.5, None, [100.000_01, 20.0, 3.000_000_2, 0.5]),
+            (0.5, Some(Interpretation::ScRgb), [100.0, 20.0, 3.0, 0.5]),
+            (0.5, Some(Interpretation::Rgb16), [100.0, 20.0, 3.0, 0.5]),
+            (1.5, None, [100.000_01, 20.0, 3.000_000_2, 1.5]),
+            (
+                1.5,
+                Some(Interpretation::ScRgb),
+                [66.666_67, 13.333_334, 2.0, 1.0],
+            ),
+            (1.5, Some(Interpretation::Rgb16), [100.0, 20.0, 3.0, 1.5]),
+            (300.0, None, [85.0, 17.0, 2.550_000_2, 255.0]),
+            (
+                300.0,
+                Some(Interpretation::ScRgb),
+                [0.333_333_34, 0.066_666_67, 0.01, 1.0],
+            ),
+            (
+                300.0,
+                Some(Interpretation::Rgb16),
+                [99.999_99, 20.0, 3.0, 300.0],
+            ),
+        ];
+        for (alpha, tag, want) in cases {
+            let got = affine_const_pixel(alpha, tag);
+            for (band, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (f64::from(*g) - f64::from(*w)).abs() <= f64::from(w.abs()) * 1e-6,
+                    "alpha {alpha}, tag {tag:?}, band {band}: got {g}, want vips' {w}"
+                );
+            }
+        }
+    }
+
+    /// Issue #664, the affine half of the bit-exact claim. `vips_affine`
+    /// premultiplies into a **FLOAT** image (`affine.c:553`), interpolates that
+    /// with `BILINEAR_FLOAT`, which accumulates in `double` and stores back to
+    /// `float` (`interpolate.c:462`), and unpremultiplies the float result. So
+    /// three rounding points are `f32` and only the accumulation is `f64`, and
+    /// [`TapFetch::fetch`], the accumulator quantisation in
+    /// [`Raster::try_affine_with`] and [`unpremultiply`] reproduce that.
+    ///
+    /// Pinned on the two rows where the `f64` spelling of the same expression
+    /// gives a visibly different number: `100 * f32(0.5 / 255) * f32(255 / 0.5)`
+    /// is `100.00000762939453` and not `100`, and `100 * f32(1 / 1.5)` is
+    /// `66.666671752929688` and not `66.66666412353516`. Both are one ulp, and
+    /// both are the difference between a value pinned on the binary and a value
+    /// pinned on a model of it.
+    #[test]
+    fn affine_float_bracket_rounds_through_f32_like_the_c_macros() {
+        let got = affine_const_pixel(0.5, None);
+        assert_eq!(
+            got[0].to_bits(),
+            100.000_01f32.to_bits(),
+            "band 0 came out {}, want vips' 100.00000762939453 (f64 single-rounded \
+             gives exactly 100)",
+            got[0]
+        );
+        let got = affine_const_pixel(1.5, Some(Interpretation::ScRgb));
+        assert_eq!(
+            got[0].to_bits(),
+            66.666_67f32.to_bits(),
+            "band 0 came out {}, want vips' 66.666671752929688 (f64 single-rounded \
+             gives 66.66666412353516)",
+            got[0]
+        );
+    }
+
+    /// Issue #664. The `f32` re-rounding is **not** confined to the float
+    /// carriers: `vips_premultiply` widens only a DOUBLE input to DOUBLE and
+    /// writes FLOAT for everything else (`premultiply.c:229-232`), so an 8-bit
+    /// or 16-bit RGBA premultiplies through an `f32` multiplier too, and the
+    /// bytes that come back move. `resize_unsigned_carriers_keep_the_depth_ceiling`
+    /// cannot see that, because its raster is constant and `max_alpha` cancels
+    /// across the bracket on a constant. These two fixtures vary, and they are
+    /// pinned on the binary.
+    ///
+    /// The oracle is `premultiply | resize | unpremultiply` on vips 8.18.6, read
+    /// back as FLOAT and quantised with libviprs' own `round(v + 0.5)`. It has
+    /// to be read as float rather than piped through `vips cast`, because
+    /// `vips_cast` **truncates** a float towards zero rather than rounding it
+    /// (`cast.c:237`, and the header note "now does floor(), not rint() ...
+    /// you'll need to round yourself"). That is a real and separate divergence,
+    /// unchanged by this issue, and the module docs record it; holding it fixed
+    /// is what lets these fixtures ask only which float value is being
+    /// quantised.
+    ///
+    /// Measured that way, on 64x64 pseudo-random `Rgba8`, the `f32` spelling
+    /// agrees with vips on 65536 of 65536 samples and the `f64` spelling on
+    /// 65530. The two fixtures below are the smallest cases found that carry
+    /// the same discrimination:
+    ///
+    /// ```text
+    /// Rgba8  4x4 -> resize(2.0)  sample 225  vips float 59.500003814697266  f32 -> 60      f64 -> 59
+    /// Rgba8  4x4 -> resize(2.0)  sample 226  vips float 226.5               f32 -> 227     f64 -> 226
+    /// Rgba16 4x4 -> resize(0.5)  sample 1    vips float 46267.5             f32 -> 46268   f64 -> 46267
+    /// Rgba16 4x4 -> resize(0.5)  sample 10   vips float 40023.5             f32 -> 40024   f64 -> 40023
+    /// ```
+    #[test]
+    fn resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data() {
+        #[rustfmt::skip]
+        let src8: [u8; 64] = [
+            83, 124, 157, 3, 66, 96, 173, 188, 252, 118, 220, 58, 6, 83, 160, 155,
+            61, 64, 99, 48, 32, 122, 7, 174, 253, 7, 246, 173, 225, 220, 177, 120,
+            23, 28, 63, 7, 69, 153, 163, 153, 156, 69, 162, 32, 125, 150, 34, 67,
+            95, 49, 202, 30, 92, 7, 104, 102, 178, 158, 238, 79, 169, 55, 51, 198,
+        ];
+        #[rustfmt::skip]
+        let want8: [u8; 256] = [
+            62, 78, 167, 0, 255, 255, 255, 0, 63, 94, 182, 103, 68, 95, 183, 189,
+            116, 107, 192, 125, 252, 142, 214, 51, 63, 94, 173, 95, 0, 76, 159, 157,
+            60, 86, 179, 0, 83, 124, 157, 3, 60, 96, 171, 104, 66, 96, 173, 188,
+            118, 103, 186, 129, 252, 118, 220, 58, 80, 93, 178, 98, 6, 83, 160, 155,
+            72, 44, 114, 18, 63, 68, 103, 28, 35, 107, 76, 109, 48, 107, 84, 182,
+            133, 73, 147, 162, 254, 32, 241, 124, 192, 88, 217, 129, 107, 147, 172, 141,
+            69, 48, 124, 40, 61, 64, 99, 48, 17, 121, 4, 111, 32, 122, 7, 174,
+            140, 58, 125, 185, 253, 7, 246, 173, 255, 86, 235, 146, 225, 220, 177, 120,
+            57, 16, 94, 20, 53, 60, 87, 29, 35, 141, 64, 101, 46, 144, 72, 166,
+            120, 86, 136, 146, 240, 7, 233, 107, 250, 92, 206, 91, 214, 229, 133, 83,
+            230, 255, 255, 0, 23, 28, 63, 7, 65, 150, 159, 88, 69, 153, 163, 153,
+            83, 138, 169, 99, 156, 69, 162, 32, 151, 115, 60, 42, 125, 150, 34, 67,
+            85, 0, 217, 9, 84, 41, 187, 16, 79, 88, 154, 76, 81, 97, 153, 126,
+            96, 118, 179, 88, 152, 159, 207, 47, 159, 98, 81, 83, 153, 73, 39, 129,
+            96, 60, 227, 26, 95, 49, 202, 30, 86, 5, 116, 67, 92, 7, 104, 102,
+            125, 76, 177, 88, 178, 158, 238, 79, 175, 91, 109, 137, 169, 55, 51, 198,
+        ];
+        let out8 = Raster::new(4, 4, PixelFormat::Rgba8, src8.to_vec())
+            .unwrap()
+            .resize(2.0);
+        assert_eq!(
+            (out8.width(), out8.height()),
+            (8, 8),
+            "resize(2.0) of a 4x4"
+        );
+        assert_eq!(
+            out8.data(),
+            &want8[..],
+            "Rgba8 resize(2.0) must match the vips premultiply bracket; samples \
+             225 and 226 are the ones the f64 spelling gets wrong"
+        );
+
+        #[rustfmt::skip]
+        let src16: [u16; 64] = [
+            5811, 45664, 6410, 60453, 41496, 17556, 1957, 5372,
+            8592, 58651, 44857, 50526, 63461, 32455, 56025, 31877,
+            53299, 13787, 42485, 1040, 22692, 34103, 23367, 28187,
+            22750, 30003, 17440, 5032, 27552, 27809, 28992, 61172,
+            35549, 36785, 43531, 26206, 57364, 39895, 55208, 19333,
+            6402, 40411, 48481, 13289, 61001, 43977, 21054, 60646,
+            61466, 51347, 9527, 29216, 18132, 6665, 62257, 26093,
+            11912, 1600, 9749, 50747, 28458, 19948, 39624, 56728,
+        ];
+        #[rustfmt::skip]
+        let want16: [u16; 16] = [
+            7692, 46268, 15071, 22530, 35811, 42627, 40829, 34163,
+            40590, 27893, 40024, 20702, 31511, 21821, 26686, 44624,
+        ];
+        let bytes16: Vec<u8> = src16.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let out16 = Raster::new(4, 4, PixelFormat::Rgba16, bytes16)
+            .unwrap()
+            .resize(0.5);
+        assert_eq!(
+            (out16.width(), out16.height()),
+            (2, 2),
+            "resize(0.5) of a 4x4"
+        );
+        let got16: Vec<u16> = out16
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(
+            got16,
+            want16.to_vec(),
+            "Rgba16 resize(0.5) must match the vips premultiply bracket; samples \
+             1 and 10 are the ones the f64 spelling gets wrong"
+        );
+    }
+
+    /// Issue #664, the affine bracket on data that varies. The constant table
+    /// in [`affine_float_bracket_takes_max_alpha_from_the_interpretation`]
+    /// isolates the ceiling by making the interpolation contribute nothing,
+    /// which is exactly what makes it blind to the third rounding point:
+    /// `vips_affine_gen` writes each interpolated premultiplied pixel into a
+    /// **FLOAT** image before `vips_unpremultiply` reads it back, so the
+    /// accumulator is quantised to `f32` at that seam, and on a constant raster
+    /// it already is. Drop the quantisation and 9 of the 64 samples below move.
+    ///
+    /// Measured on vips 8.18.6:
+    /// `vips affine in.v out.v "0.8 0.15 -0.15 0.8" --interpolate bilinear` over
+    /// a 4x4 float RGBA tagged `scrgb`, whose alpha runs 0.25, 0.5, 1.25, 0.75
+    /// so the `max_alpha` clip bites on a quarter of the taps and the lanczos
+    /// -free bilinear stencil still lands off the grid everywhere. All 64
+    /// samples are bit-exact, which is the claim the module docs make.
+    #[test]
+    fn affine_float_bracket_matches_the_vips_oracle_on_varying_data() {
+        let mut src = Vec::with_capacity(4 * 4 * 4);
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let alpha = [0.25f32, 0.5, 1.25, 0.75][((x + y) % 4) as usize];
+                src.extend_from_slice(&[
+                    10.0 * (x + 1) as f32,
+                    20.0 * (y + 1) as f32,
+                    5.0 * (x + y + 1) as f32,
+                    alpha,
+                ]);
+            }
+        }
+        #[rustfmt::skip]
+        let want: [f32; 64] = [
+            0.0, 0.0, 0.0, 0.0,
+            22.62857, 17.371428, 11.314285, 0.015574938,
+            32.284264, 18.071066, 16.142132, 0.22792809,
+            40.000004, 20.000002, 20.000002, 0.053399786,
+            10.0, 20.0, 5.0, 0.25,
+            20.33662, 23.382473, 11.568194, 0.7667319,
+            29.72189, 24.059332, 16.366016, 0.8160377,
+            40.0, 28.275862, 22.068966, 0.15485938,
+            9.208634, 43.16547, 10.791368, 0.50720894,
+            17.1305, 40.88904, 14.472023, 1.0,
+            31.869556, 49.369026, 23.277035, 0.41892132,
+            40.0, 58.800003, 29.700003, 0.28479886,
+            8.597285, 57.556557, 14.389139, 0.57039875,
+            15.471698, 66.273186, 19.503305, 0.5518868,
+            29.741463, 78.46035, 29.485819, 0.46128514,
+            32.0, 64.0, 28.0, 0.93983626,
+        ];
+        let out = Raster::from_f32_samples(4, 4, PixelFormat::RgbaF32, &src)
+            .unwrap()
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build()
+            .affine([0.8, 0.15, -0.15, 0.8], "bilinear");
+        assert_eq!((out.width(), out.height()), (4, 4), "the vips output area");
+        let got = out.f32_samples().expect("float carrier");
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                w.to_bits(),
+                "sample {i} (pixel {}, band {}) came out {g}, want vips' {w}",
+                i / 4,
+                i % 4
+            );
+        }
     }
 }
