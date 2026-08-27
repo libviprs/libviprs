@@ -1059,6 +1059,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Adding a format to `src/source.rs` is one edit the compiler checks now,
+  instead of six coordinated ones with two that failed silently (issue #633).
+  Every container has a single row in a route table: the magic signatures
+  `sniff` matches on, and the decoder the bytes go to. `sniff` walks
+  `SniffedFormat::ALL` and reads the signatures off the rows,
+  `decodes_from_memory` and `image_format` are derived from the row's decoder,
+  and the chain of `if sniffed == Some(..)` arms at the top of
+  `decode_bytes_with_limits` is gone, because the arm is the row.
+
+  I reproduced the problem before fixing it rather than taking the issue's word
+  for it. On `a356c50` I added an eleventh container the way a format lane
+  would, wiring every site the compiler insists on and every list the tests
+  count, and leaving out the two that are silent: the magic in `sniff` and the
+  memory profile in `decodes_from_memory`. It compiled, and all 1794 tests
+  passed, over a container nothing could ever detect and that would have been
+  streamed to an `image` decoder it does not have. The same eleventh variant on
+  this branch fails `cargo build` with two errors naming `SniffedFormat::next`
+  and `SniffedFormat::route`, and the `ALL` length assert fires once those are
+  filled...
+
+  That it is `cargo build` and not `cargo test` is part of the change.
+  `SniffedFormat::ALL` and `next` were `#[cfg(test)]`, so the library itself
+  compiled happily with a variant nothing could reach. `sniff` walks `ALL` now,
+  so the enum is load-bearing in an ordinary build.
+
+  The magics are data rather than a hand-written chain, which is what lets
+  `sniff` be driven from the table at all. Three shapes cover everything
+  libviprs routes, because a signature is not always a leading prefix: WebP's
+  `RIFF????WEBP` is split either side of a file-specific chunk length, and
+  Radiance's `#?RADIANCE` is a whole first line rather than a prefix of one.
+  Measured on vips 8.18.6, `#?RADIANCE\n` loads through `radload` while the
+  near-misses `#?RGBE\n` and `#?RADIANCEX\n` both fall past it to `magickload`.
+  That is `vips__rad_israd` (`radiance.c:568-577`) comparing the whole line,
+  and it is what the `Line` shape encodes.
+
+  Two tests carry the new guarantees. One builds the shortest head every
+  signature accepts and runs it back through `sniff`, so a row with no magic, a
+  magic `sniff` cannot match, a magic longer than the 16 bytes a file entry
+  point ever reads, and a magic some earlier row shadows all fail. The other
+  writes those same heads to disk and compares `decode_file` against
+  `decode_bytes` for all ten containers, which is what pins the memory profile:
+  a native codec whose row said "stream me" answers one way from a buffer and a
+  different way from a path, and only the second answer is wrong. The old
+  route-table test kept two hand-written lists of variants and both are gone,
+  since a list kept by hand beside a table is the shape this is retiring.
+
+  Nothing about detection or decoding moves. Same signatures, same decoders,
+  same answers. The only ordering change is that FITS is tried before OpenEXR
+  now because that is their declaration order, and their signatures share no
+  bytes. One live doc drift went with it: `image_format`'s doc named five of
+  the seven containers libviprs decodes itself, never having been updated when
+  FITS and OpenEXR landed. It names none of them now, because the row says.
+
+  `crate::imageio::is_vips_bytes` is gone and `VIPS_MAGIC_LE` / `VIPS_MAGIC_BE`
+  are `pub(crate)` in its place, so the `.v` signature is owned by the module
+  that owns the container, the way `exr::MAGIC`, `fits::MAGIC` and
+  `radiance::MAGIC` already were. Everything here is crate-internal, so no
+  public API moves.
+
 - `n-pages` has one documented meaning, and `Raster::get_n_pages` now ports the
   whole of the libvips sanity check that guards it (issue #635). The panel that
   filed the issue counted four meanings behind the one accessor. Re-measured
