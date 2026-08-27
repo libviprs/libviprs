@@ -1,43 +1,93 @@
 name: Merge Gate
 
-# The deep checks. Miri is the release gate, too slow to justify on every branch
-# push; Loom and the pdfium audit gate `main`, because they are not slow at all
-# and gating them at `release` only made them unreachable (#642). Ported back
-# from
-# `.gitea/workflows/merge-gate.yml` as part of dropping Gitea (#585).
+# The deep checks. Loom and the pdfium-render source audit run on every branch
+# push and on pull requests into `main` or `release`. Miri is held at the
+# release boundary by the `if:` on its job, because it does not currently
+# finish (#675).
 #
-# The Gitea copy bookended the `miri` job with "Report pending to GitHub" and
-# carried a trailing `report` job, both of which existed only to push a
-# `gitea/merge-gate` commit status here through `GH_STATUS_TOKEN`. Running
-# natively on GitHub they report nothing that the run itself does not, so they
-# are gone. The three real jobs are unchanged apart from the loom fix noted
-# below.
+# The split is measured rather than assumed. The old trigger sat all three
+# behind `branches: [release]` on the grounds that they are too slow for
+# day-to-day branch work, and for Miri that is true and then some. For the
+# other two it is not close. Across the four dispatched runs on 2026-08-26 and
+# 08-27:
+#
+#   pdfium-render source audit    11s, 11s, 19s, 20s    all green
+#   Loom                          33s, 39s, 39s, 39s    all green
+#   Miri                          never finished
+#
+# So two of the three cost about a minute between them, and had been sitting
+# behind a trigger that last fired on 2026-04-25, four months earlier. That is
+# the whole of #642. The checks were not too slow, they were unreachable.
+#
+# "Gate" in the name is historical, and today it is aspirational: these jobs
+# run and report, they do not block. Nothing in this repository enforces them.
+# `main` carries branch protection with no `required_status_checks` at all (the
+# sub-resource 404s), `release` is not protected, and the only ruleset, `basic`,
+# sits at `enforcement: "disabled"`. So a red Loom does not stop a merge, and
+# nothing here changes that.
+#
+# If you are the person turning required checks on, read the note on the `miri`
+# job before you do. There is a trap in it that costs you the coverage you
+# think you are buying.
+#
+# Ported back from `.gitea/workflows/merge-gate.yml` as part of dropping Gitea
+# (#585). The Gitea copy bookended the `miri` job with "Report pending to
+# GitHub" and carried a trailing `report` job, both of which existed only to
+# push a `gitea/merge-gate` commit status here through `GH_STATUS_TOKEN`.
+# Running natively on GitHub they report nothing the run itself does not, so
+# they are gone.
 
 on:
-  # Loom and the pdfium audit gate every pull request into `main`. Miri stays at
-  # the release boundary, held there by the `if:` on that job below.
+  # Branch pushes are what actually carries this workflow, exactly as in
+  # ci.yml. The long note at the top of `.github/workflows/ci.yml` has the
+  # dated measurements and the method for re-checking them; the short version
+  # is that GitHub never creates a `pull_request` run while the pull request
+  # has a merge conflict, and that in this epic a branch conflicts with `main`
+  # on CHANGELOG.md the moment any other lane merges, so conflicting is the
+  # normal state here rather than the exception.
   #
-  # The split is measured rather than assumed. The old trigger gated all three
-  # at `release` on the grounds that they are too slow for day-to-day branch
-  # work, and for Miri that is true and then some. For the other two it is not
-  # close. Across the four dispatched runs on 2026-08-26 and 08-27:
+  # I had this right for `release` and missed it for `main`. Gating the fast
+  # pair on `pull_request` alone would have reproduced #642 inside the fix for
+  # #642: a check that silently reports nothing on precisely the mid-epic pull
+  # requests where the new decoder dependencies' `unsafe` most needs covering.
+  # A `push` run builds the branch head, needs no merge commit, and so is
+  # unaffected by whether the pull request currently merges.
+  push:
+    branches: ['**']
+
+  # `synchronize` is deliberately absent, for the reason ci.yml spells out: a
+  # push to a branch in this repository is already covered above, and adding
+  # `synchronize` would run everything twice for every one of those pushes.
+  # What is left here are the pull-request transitions that no push accompanies.
   #
-  #   pdfium-render source audit    11s, 11s, 19s, 20s    all green
-  #   Loom                          33s, 39s, 39s, 39s    all green
-  #   Miri                          never finished
-  #
-  # So two of the three cost about a minute between them, and had been sitting
-  # behind a gate that last fired on 2026-04-25, four months earlier. That is
-  # the whole of #642. The checks were not too slow, they were unreachable.
-  #
-  # `workflow_dispatch` stays. A `pull_request` run is never
-  # created while the pull request has a merge conflict (the long note in ci.yml
-  # has the measurements), and a release PR is exactly the kind that sits
-  # conflicted for a while. Without a manual trigger the gate would be
-  # unreachable at precisely the moment it matters.
+  # This is also the only trigger that covers a pull request opened from a
+  # fork, where no push ever reaches this repository. The repository has no
+  # forks today; if that changes, add `synchronize` back and guard the jobs so
+  # in-repo branches do not run twice.
   pull_request:
+    types: [opened, reopened, ready_for_review]
     branches: [main, release]
+
+  # Manual dispatch stays, and it is now the only way to ask for Miri outside a
+  # release pull request. `run_miri` defaults false so the fast pair can be
+  # dispatched on its own, which is the operation #642 most wants available:
+  # the old `if:` keyed off `github.event_name == 'workflow_dispatch'`, so every
+  # manual run queued a 90 minute Miri alongside the minute of useful work.
   workflow_dispatch:
+    inputs:
+      run_miri:
+        description: 'Also run Miri (90 minute ceiling, does not finish today, #675)'
+        type: boolean
+        default: false
+
+# One group per branch, shared by the push run and any pull_request run for the
+# same branch, so a newer push supersedes an older run rather than racing it.
+# `main` is excluded: that run is the record of what actually landed. Same
+# shape as ci.yml, keyed on `github.workflow` as well as the branch so the two
+# workflows never cancel each other.
+concurrency:
+  group: merge-gate-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ (github.head_ref || github.ref_name) != 'main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,27 +105,39 @@ jobs:
   # local fix.
   #
   # It is also real coverage rather than decoration, which is the bar for keeping
-  # a gate at all. The tree is actively maintained for Miri: 48
+  # a check at all. The tree is actively maintained for Miri: 48
   # `#[cfg_attr(miri, ignore)]` annotations across seven modules, each naming the
   # isolation limit it works around, and a `fix/miri-fs-isolation` branch that
-  # went green through this gate. The last GitHub runs of this workflow, on
-  # 2026-04-25, all passed. Dropping it would quietly remove the only check the
-  # repository has on undefined behaviour.
+  # went green here. The last GitHub runs of this workflow, on 2026-04-25, all
+  # passed. Dropping it would quietly remove the only check the repository has on
+  # undefined behaviour.
   miri:
     name: Miri
     runs-on: ubuntu-latest
-    # Held at the release boundary rather than widened to `main` with the other
-    # two, because it does not currently finish at all (#675). Three consecutive
+    # Held at the release boundary rather than widened with the other two,
+    # because it does not currently finish at all (#675). Three consecutive
     # dispatched runs were killed at the 90 minute ceiling below, and the run
-    # before that ceiling existed went 4h13m. Widening this now would put a 90
-    # minute timeout on every pull request and report it as `cancelled`. When
-    # #675 lands, which is itself waiting on #670, drop this condition so Miri
-    # gates `main` too.
-    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'release'
+    # before that ceiling existed went 4h13m. Widening it now would hang a 90
+    # minute timeout off every pull request and report it as `cancelled`.
+    #
+    # `inputs.run_miri` is null on every event except `workflow_dispatch`, so
+    # this reads as: a release pull request, or someone asking for it by hand.
+    # A push run carries no `base_ref`, so pushes never queue Miri either.
+    #
+    # Read this before you drop the condition when #675 lands (itself waiting
+    # on #670), and before anyone makes these checks required on `main`.
+    # GitHub reports a job skipped by a job-level `if:` to branch protection as
+    # **passing**, not as skipped. So with required checks turned on and this
+    # condition still in place, "Miri" goes green on every `main` pull request
+    # without ever having run, which is a worse outcome than today's honest
+    # `skipping` on the run page: it manufactures the exact false assurance
+    # #642 was filed about. Either the condition comes off or Miri stays off
+    # the required list. Not both.
+    if: inputs.run_miri || github.base_ref == 'release'
     # A hang has to report as a failure, not as a cancellation. Miri on this
     # crate has run past 1h27m, been cancelled at 1h41m, and gone 4h without
     # finishing, and with no ceiling the only signal was "cancelled", which
-    # reads like someone pressed stop rather than like the gate breaking.
+    # reads like someone pressed stop rather than like the check breaking.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # `-Zmiri-disable-isolation` is what lets the fs-touching tests run at all.
       # Without it Miri refuses `mkdir` and the whole run aborts on the first
-      # test that reaches for a `tempdir`, which is how this gate broke: nothing
+      # test that reaches for a `tempdir`, which is how this check broke: nothing
       # enforces the `#[cfg_attr(miri, ignore)]` convention below, so one new
       # test using `tempfile` takes the job down and reports it as a Miri
       # failure rather than as a missing annotation.
@@ -99,7 +161,7 @@ jobs:
       # behaviour at least aborted quickly and named the unannotated test.
       #
       # The flag stays for the moment only because removing it before #670 lands
-      # puts the gate straight back to aborting on the first `tempdir`. #675 has
+      # puts the job straight back to aborting on the first `tempdir`. #675 has
       # the ordering and the measurements; #652 has the larger question of
       # un-ignoring those 48 tests.
       #
@@ -147,7 +209,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Fail the release gate if the pdfium-render thread-safety fork is not
-      # resolved from the libviprs git source (i.e. the [patch.crates-io] was
-      # dropped and the unpatched, segfault-prone wrapper would be linked).
+      # Fail the run if the pdfium-render thread-safety fork is not resolved
+      # from the libviprs git source (i.e. the [patch.crates-io] was dropped and
+      # the unpatched, segfault-prone wrapper would be linked).
       - run: bash scripts/audit-pdfium-source.sh . -- --features pdfium
