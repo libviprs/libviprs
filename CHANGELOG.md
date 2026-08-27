@@ -1399,9 +1399,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping.
 
 - `try_colourspace` no longer aborts the process when it cannot allocate its
-  output, which also takes `try_sharpen` abort-free through the LabS round trip
-  it opens and closes (issue #672). There is a new `ColourError::Raster`
-  variant carrying the `RasterError` that says why.
+  output, so both ends of the LabS round trip `try_sharpen` opens and closes
+  report the failure instead of taking the process down with them (issue #672).
+  There is a new `ColourError::Raster` variant carrying the `RasterError` that
+  says why.
 
   Every colour result is one image-sized `Vec<u8>`, and every one of them was a
   plain `vec![0u8; ..]`. An over-capacity request there reaches
@@ -1410,8 +1411,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cover the failure a caller most reasonably assumes it covers, and
   `try_sharpen` inherited that however its own signature read: it converts to
   LabS on the way in and back on the way out, so both ends of it were the same
-  abort. #627 took the widening in `raster.rs` fallible and could not follow
-  the round trip here, because the abort was in `colour.rs`.
+  abort. #627 is the same problem one module over, in the `raster.rs` widening,
+  and it descoped this round trip on purpose, because the abort was not in
+  `convolution.rs` or `raster.rs` at all.
 
   Both image-sized sites now reserve through `Vec::try_reserve_exact` and
   report `RasterError::AllocationFailed`: the conversion buffer the
@@ -1435,8 +1437,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The remaining infallible allocations in `colour.rs` are the `Vec<f64>` sample
   staging on the colour-difference path and the ICC fallback buffers. None of
   them is on the `try_colourspace` route, and each needs its own way to be
-  driven honestly, so they stay for their own issue rather than being converted
-  on the assumption that they are reachable.
+  driven honestly, so they stay for issue #685 rather than being converted on
+  the assumption that they are reachable.
+
+  **This does not make `try_sharpen` abort-free**, and the claim is deliberately
+  narrower than that. Its own body still widens through `Raster::f32_samples`
+  and still keeps five image-sized `vec![]` and `clone` scratch buffers of its
+  own, so an allocation failure in any of those ends the process before it can
+  be reported. That set is issue #627's, PR #669 is open against it, and
+  `try_sharpen`'s `# Errors` now names the five sites so a caller reading the
+  API docs gets the same answer. What changed here is only the two `colour.rs`
+  allocations the round trip reaches, which is all #672 was ever about.
 
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
@@ -1607,12 +1618,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two things are deliberately not on that list, so the claim is not read wider
   than it goes. `try_canny`'s float arm and `try_sharpen` both widen through
   `Raster::f32_samples`, which still collects infallibly, and `try_sharpen`
-  makes the LabS round trip through `colour.rs` on top of that, where every
-  intermediate is a plain `vec![]`. Neither is one allocation away from the
-  list, and pretending otherwise would be the same failure as a `try_` API
-  that aborts, so both stay off it until the widening itself goes.
-  `try_sharpen`'s `# Errors` now says so in as many words, so the exclusion
-  is where a caller reading the API docs will find it.
+  keeps five image-sized `vec![]` and `clone` scratch buffers of its own on top
+  of that. Neither is one allocation away from the list, and pretending
+  otherwise would be the same failure as a `try_` API that aborts, so both stay
+  off it until the widening itself goes. `try_sharpen`'s `# Errors` says so in
+  as many words, so the exclusion is where a caller reading the API docs will
+  find it. The LabS round trip it makes through `colour.rs` was a third reason
+  when this landed; that half is fixed in this same release under issue #672,
+  and the `# Errors` block was rewritten there rather than left pointing at a
+  claim that had stopped being true.
 
   It matters more than it reads: measured on a 4000x4000 `Rgb8` at integer
   precision, the widened buffer is 384 MB of a 486 MB peak for 48 MB of input,

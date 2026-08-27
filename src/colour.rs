@@ -244,8 +244,25 @@ pub enum ColourError {
     /// The CMS could not build or run a transform for this profile pair.
     #[error("ICC transform failed: {detail}")]
     IccTransform { detail: String },
-    /// Allocating a colour operation's output raster failed: the allocator
-    /// refused the request, or the declared size overflows `usize`.
+    /// Building a colour operation's output raster failed.
+    ///
+    /// The variant is `#[from] RasterError`, so it carries whatever that
+    /// type says, and `#[error(transparent)]` means the caller reads
+    /// `RasterError`'s own message rather than a colour one. Two of those
+    /// are caller conditions: [`RasterError::AllocationFailed`] when the
+    /// host cannot serve an output this size, and
+    /// [`RasterError::SizeOverflow`] when the geometry implies a length no
+    /// `usize` can address. Both are answered by asking for a smaller
+    /// image, and neither is a process abort any more, which is the point
+    /// of the variant (issue #672).
+    ///
+    /// The wrap through `Raster::from_op_output` can also spell
+    /// [`RasterError::ZeroDimension`] and
+    /// [`RasterError::BufferSizeMismatch`], and those two are **libviprs
+    /// bugs rather than caller conditions**: the buffer is allocated from
+    /// the same geometry a few lines above and then validated against it,
+    /// so seeing either means the two disagreed. There is nothing for a
+    /// caller to do about them except report them.
     #[error(transparent)]
     Raster(#[from] RasterError),
 }
@@ -1356,6 +1373,22 @@ fn format_for(channels: usize, depth: SpaceDepth) -> PixelFormat {
 /// grows on top of that — `Srgb -> Lab` widens 8-bit bands to `f32`, a 4x — so
 /// re-imposing the budget here would reject legal large conversions (#279).
 ///
+/// One cost is worth naming, because it is not free and it is not new here.
+/// [`alloc_op_output`] reserves and then fills with [`Vec::resize`], so the
+/// buffer is a `malloc` plus a full `memset` where the `vec![0u8; n]` it
+/// replaces lowered to `alloc_zeroed` and, at image sizes, took fresh zeroed
+/// pages at no write cost. The fill has no reader on either colour path: the
+/// [`Raster::try_colourspace`] loop writes every byte of the buffer and
+/// [`build_raster`] quantises into every byte of its own. It is measurable in
+/// the size class this function's own justification invokes, `rustc -O`, best
+/// of nine: 256 MiB and 1 GiB are level at 6.4 ms and 25.8 ms, and 4 GiB goes
+/// 241 ms to 325 ms, a 34% regression. `arithmetic.rs`'s `try_scratch` carries
+/// the same cost for the same reason and records it as a follow-up on #460,
+/// and so does this: std exposes no fallible zeroed `Vec` today, so the
+/// `calloc`-preserving shape (probe with [`Vec::try_reserve_exact`], drop the
+/// probe, then `vec![0u8; size]`) belongs with that issue rather than
+/// hand-rolled `unsafe` here.
+///
 /// [`DEFAULT_MAX_ALLOC_BYTES`]: crate::raster::DEFAULT_MAX_ALLOC_BYTES
 /// [`Raster::try_sharpen`]: crate::Raster::try_sharpen
 fn alloc_colour_output(
@@ -1367,7 +1400,7 @@ fn alloc_colour_output(
     // reachable at a buildable input, the hook #460 added to the arithmetic
     // scratch. An output the allocator genuinely refuses needs an input far
     // past the 8 GiB construction budget, so no test can reach the branch on
-    // its own. This branch and the thread-local it reads compile only under
+    // its own. This branch and the thread-locals it reads compile only under
     // `cfg(test)`: production allocation is bounded solely by the allocator,
     // exactly as `alloc_op_output`, and no test-support surface ships.
     #[cfg(test)]
@@ -1375,7 +1408,7 @@ fn alloc_colour_output(
         let bytes = (width as usize)
             .saturating_mul(height as usize)
             .saturating_mul(format.bytes_per_pixel());
-        if bytes as u64 > OUTPUT_ALLOC_CAP.with(Cell::get) {
+        if bytes as u64 > OUTPUT_ALLOC_CAP.with(Cell::get) && !spare_an_over_cap_output() {
             return Err(RasterError::AllocationFailed {
                 width,
                 height,
@@ -1384,6 +1417,29 @@ fn alloc_colour_output(
         }
     }
     alloc_op_output(width, height, format)
+}
+
+/// Test-only: consume one of the calling thread's spared over-ceiling colour
+/// outputs, reporting whether there was one to consume.
+///
+/// This is what makes the ceiling a *counting* hook rather than a size one. An
+/// operation that allocates more than once through here (`try_sharpen` opens
+/// and closes a LabS round trip, so it is two) otherwise always fails at the
+/// first site, and a byte ceiling cannot tell the sites apart: the entry
+/// conversion's output is the larger of the two on every route into LabS, so
+/// no ceiling exists that admits it and refuses the exit. Sparing the first
+/// `n` refusals instead lets a test run the whole body and starve a chosen
+/// later allocation.
+#[cfg(test)]
+fn spare_an_over_cap_output() -> bool {
+    OUTPUT_ALLOC_SPARE.with(|spare| {
+        let left = spare.get();
+        if left == 0 {
+            return false;
+        }
+        spare.set(left - 1);
+        true
+    })
 }
 
 #[cfg(test)]
@@ -1396,6 +1452,13 @@ thread_local! {
     /// buildable input. Compiled only under `cfg(test)`, so it never exists in
     /// a production build.
     static OUTPUT_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
+
+    /// Per-thread count of over-ceiling colour outputs to wave through before
+    /// the ceiling starts refusing, set by [`with_colour_alloc_cap_after`].
+    ///
+    /// Defaults to zero, so the plain [`with_colour_alloc_cap`] refuses the
+    /// first over-ceiling output as it always did.
+    static OUTPUT_ALLOC_SPARE: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Test-only hook: run `f` with the calling thread's [`alloc_colour_output`]
@@ -1408,13 +1471,31 @@ thread_local! {
 /// thread-local, so parallel tests do not perturb one another (#460).
 #[cfg(test)]
 fn with_colour_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
-    struct Restore(u64);
+    with_colour_alloc_cap_after(0, max_bytes, f)
+}
+
+/// Test-only hook: [`with_colour_alloc_cap`], but wave the first `spare`
+/// over-ceiling outputs through before the ceiling starts refusing.
+///
+/// For an operation with one colour allocation the two are the same call. For
+/// one with several, `spare` picks which of them starves, which is the only way
+/// to prove a test reached past the first: `try_sharpen`'s entry conversion
+/// into LabS allocates at least as much as its exit conversion back on every
+/// route (LabS is the widest storage depth the space table has), so a byte
+/// ceiling that admits the entry admits the exit too.
+#[cfg(test)]
+fn with_colour_alloc_cap_after<R>(spare: u32, max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    struct Restore(u64, u32);
     impl Drop for Restore {
         fn drop(&mut self) {
             OUTPUT_ALLOC_CAP.with(|c| c.set(self.0));
+            OUTPUT_ALLOC_SPARE.with(|c| c.set(self.1));
         }
     }
-    let _restore = Restore(OUTPUT_ALLOC_CAP.with(|c| c.replace(max_bytes)));
+    let _restore = Restore(
+        OUTPUT_ALLOC_CAP.with(|c| c.replace(max_bytes)),
+        OUTPUT_ALLOC_SPARE.with(|c| c.replace(spare)),
+    );
     f()
 }
 
@@ -2536,6 +2617,7 @@ impl Raster {
     /// # Errors
     ///
     /// [`ColourError::UnsupportedDepth`] for depths other than 8 and 16,
+    /// [`ColourError::Raster`] when the device output cannot be allocated,
     /// plus the [`Raster::try_icc_import_with`] profile errors.
     pub fn try_icc_export_with(
         &self,
@@ -5152,26 +5234,73 @@ mod tests {
     }
 
     /**
-     * Tests the reason #672 was filed: try_sharpen opens and closes a LabS
-     * round trip through try_colourspace, so it inherited that abort however
-     * its signature read. An output the host cannot allocate now arrives as
-     * ConvolutionError::Colour(ColourError::Raster) at the call site.
-     * Lives here rather than in `convolution.rs` because the ceiling hook it
-     * needs is this module's.
+     * Tests the reason #672 was filed: try_sharpen opens a LabS round trip
+     * through try_colourspace, so it inherited that abort however its own
+     * signature read. An entry conversion the host cannot allocate now
+     * arrives as ConvolutionError::Colour(ColourError::Raster) at the call
+     * site. Lives here rather than in `convolution.rs` because the ceiling
+     * hook it needs is this module's.
+     *
+     * Named for the *entry* conversion deliberately. `?` returns from the
+     * first statement of try_sharpen, so nothing in the body runs and this
+     * check can say nothing about it; the exit-conversion test below is the
+     * one that gets past here. Mutation: an unconditional panic! at the
+     * `sharpened` construction leaves this test green, which is correct for
+     * what its name now claims and was not for what it used to.
      * Input: 8x8 sRGB, sharpen(1.5, 1.0, 2.0) under a 16-byte ceiling.
      */
     #[test]
-    fn try_sharpen_reports_an_unservable_labs_round_trip_not_an_abort() {
+    fn try_sharpen_reports_an_unservable_entry_conversion_not_an_abort() {
         let im = srgb_8x8();
         let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || im.try_sharpen(1.5, 1.0, 2.0));
         assert!(
             matches!(
                 out,
                 Err(ConvolutionError::Colour(ColourError::Raster(
-                    RasterError::AllocationFailed { .. }
+                    RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 768
+                    }
                 )))
             ),
-            "expected a typed allocation failure through the LabS round trip, got {:?}",
+            "expected a typed allocation failure entering the LabS round trip, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the closing half of the same round trip, which is the half no
+     * byte ceiling on its own can reach. try_sharpen allocates twice through
+     * colour.rs and the entry conversion is the larger of the two on every
+     * route into LabS (F32 is the widest depth in the space table), so any
+     * ceiling that refuses the exit refuses the entry first and returns
+     * before the body runs. Sparing the first refusal lets the whole body
+     * execute and starves the conversion back, which is what proves this
+     * check observes try_sharpen rather than only its first statement.
+     * Mutation: an unconditional panic! at the `sharpened` construction
+     * reddens this test, and the entry test above stays green.
+     * Input: 8x8 sRGB, sharpen(1.5, 1.0, 2.0) under a 16-byte ceiling with
+     * one refusal spared -> the 768-byte entry succeeds, the 192-byte exit
+     * back to sRGB is Err(Raster(AllocationFailed)).
+     */
+    #[test]
+    fn try_sharpen_reports_an_unservable_exit_conversion_not_an_abort() {
+        let im = srgb_8x8();
+        let out =
+            with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || im.try_sharpen(1.5, 1.0, 2.0));
+        assert!(
+            matches!(
+                out,
+                Err(ConvolutionError::Colour(ColourError::Raster(
+                    RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 192
+                    }
+                )))
+            ),
+            "expected a typed allocation failure leaving the LabS round trip, got {:?}",
             out.map(|r| (r.width(), r.height(), r.format()))
         );
     }
