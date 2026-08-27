@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Seek};
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -367,9 +367,11 @@ pub enum SourceError {
     /// [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded),
     /// which counts pixels and so cannot see the band count or the sample
     /// depth: a 1-gigapixel `max_pixels` still permits a 4 GiB `Rgba8`
-    /// frame. Used by the TIFF page readers for both the file body they
-    /// read in and the pixel buffer a page decodes into; the equivalent GIF
-    /// check has its own
+    /// frame. Raised for the whole-file read every memory-decoded container
+    /// needs, with `what = "image file body"` (issue #629), and by the TIFF
+    /// page readers for both their own file body and
+    /// the pixel buffer a page decodes into; the equivalent GIF check has
+    /// its own
     /// [`GifError::AllocLimitExceeded`](crate::gif::GifError::AllocLimitExceeded).
     #[error(
         "{what} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
@@ -425,7 +427,7 @@ pub enum SourceError {
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
 /// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
-/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`] | — (`.v` is an uncompressed body sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read (`.v`'s own uncompressed body is sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
 ///
 /// The single-axis [`max_coord`](Self::max_coord) and total
@@ -866,6 +868,60 @@ pub(crate) enum SniffedFormat {
 }
 
 impl SniffedFormat {
+    /// The variant after `self` in declaration order, or `None` at the end
+    /// of the enum.
+    ///
+    /// This exists only to build [`Self::ALL`], and it is written as an
+    /// exhaustive `match` on purpose: adding a variant stops the crate
+    /// compiling here, which is the link a hand-maintained list of variants
+    /// does not have. `Jxl` escaped exactly that way between #628 and #659.
+    /// The route-table test asserted "only these read the whole file" over
+    /// a list of its own, `Jxl` was missing from that list *and* from the
+    /// expected answer, so the arithmetic stayed consistent and two
+    /// invariants held for the wrong reason.
+    #[cfg(test)]
+    const fn next(self) -> Option<Self> {
+        match self {
+            Self::Vips => Some(Self::Jpeg),
+            Self::Jpeg => Some(Self::Png),
+            Self::Png => Some(Self::Tiff),
+            Self::Tiff => Some(Self::Gif),
+            Self::Gif => Some(Self::WebP),
+            Self::WebP => Some(Self::Jxl),
+            Self::Jxl => Some(Self::Radiance),
+            Self::Radiance => Some(Self::Fits),
+            Self::Fits => Some(Self::OpenExr),
+            Self::OpenExr => None,
+        }
+    }
+
+    /// Every variant, in declaration order.
+    ///
+    /// Walked out of [`Self::next`] rather than written out, so the length
+    /// and the contents both come from the enum. A variant added without
+    /// growing the length fails this `const` block at compile time, and one
+    /// added without touching [`Self::next`] fails that `match` first.
+    ///
+    /// Test-only, so the compile error lands on `cargo test` and on
+    /// `cargo clippy --all-targets`, both of which CI runs.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 10] = {
+        let mut all = [Self::Vips; 10];
+        let mut i = 1;
+        while i < all.len() {
+            all[i] = match all[i - 1].next() {
+                Some(format) => format,
+                None => panic!("SniffedFormat::ALL is longer than the enum"),
+            };
+            i += 1;
+        }
+        assert!(
+            all[all.len() - 1].next().is_none(),
+            "SniffedFormat::ALL is shorter than the enum"
+        );
+        all
+    };
+
     /// Whether [`decode_file_with_limits`] has to read the whole file into
     /// memory rather than streaming it.
     ///
@@ -904,6 +960,12 @@ impl SniffedFormat {
     ///
     /// Everything else keeps the streaming reader, so widening the table
     /// above cannot quietly turn a streaming decode into a whole-file read.
+    ///
+    /// That read goes through [`read_file_bounded`], so a container joining
+    /// this list gets [`DecodeLimits::max_alloc_bytes`] applied to the file
+    /// length before a byte of it is read. It used to be a plain
+    /// `std::fs::read`, which meant every ceiling was checked after the whole
+    /// file was already resident (issue #629).
     const fn decodes_from_memory(self) -> bool {
         matches!(
             self,
@@ -1053,6 +1115,56 @@ fn read_head<R: std::io::Read>(mut source: R) -> std::io::Result<([u8; SNIFF_HEA
     Ok((head, filled))
 }
 
+/// Read the whole of `path` into memory, refusing a file whose length is
+/// past [`DecodeLimits::max_alloc_bytes`].
+///
+/// This is the crate's one bounded whole-file read. Some decoders genuinely
+/// need the bytes addressable end to end rather than streamed (see
+/// [`SniffedFormat::decodes_from_memory`], and the TIFF page readers, which
+/// patch the multiband photometric tag before the decoder ever sees it), and
+/// `std::fs::read` is the wrong way to get them: it sizes the buffer from the
+/// file and then grows it infallibly, so every ceiling in [`DecodeLimits`] is
+/// consulted after the allocation has already happened, and on a constrained
+/// host the failure is an abort rather than a returned error (issue #629).
+///
+/// The declared length is checked first, so an oversized file costs one
+/// `stat` rather than a full read, and the read itself is capped as well so a
+/// file that grows between the two cannot slip past. `what` names the buffer
+/// in the error, because a caller reading
+/// [`SourceError::AllocLimitExceeded`] needs to know whether it was the file
+/// or a pixel buffer that blew the budget.
+///
+/// # Errors
+///
+/// * [`SourceError::Io`] if the file cannot be opened, stat'd or read.
+/// * [`SourceError::AllocLimitExceeded`] if the file is longer than
+///   [`DecodeLimits::max_alloc_bytes`], which is the same variant the
+///   declared-geometry checks raise, so a caller does not have to tell "too
+///   big by header" from "too big by file length".
+pub(crate) fn read_file_bounded(
+    path: &Path,
+    limits: DecodeLimits,
+    what: &'static str,
+) -> Result<Vec<u8>, SourceError> {
+    let file = std::fs::File::open(path)?;
+    let declared = file.metadata()?.len();
+    limits.check_alloc(what, declared)?;
+
+    let cap = limits.max_alloc_bytes;
+    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let mut reader = std::io::BufReader::new(&file).take(cap.saturating_add(1));
+    reader.read_to_end(&mut bytes)?;
+    let read = bytes.len() as u64;
+    if read > cap {
+        return Err(SourceError::AllocLimitExceeded {
+            what,
+            needed_bytes: read,
+            max_alloc_bytes: cap,
+        });
+    }
+    Ok(bytes)
+}
+
 /// Configure an [`ImageReader`] over an already-opened source for a sniffed
 /// container.
 ///
@@ -1089,10 +1201,19 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
 ///
+/// The containers libviprs decodes from memory rather than streaming (`.v`,
+/// JPEG, GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR) go through one
+/// bounded whole-file read, so [`DecodeLimits::max_alloc_bytes`] bounds the
+/// read itself rather than only what the decoder does with the bytes
+/// afterwards. Everything else streams and never holds more than the
+/// decoder asks for.
+///
 /// # Errors
 ///
 /// As [`decode_file`], plus [`SourceError::DimensionLimitExceeded`] when
-/// the decoded `width * height` exceeds the supplied budget.
+/// the decoded `width * height` exceeds the supplied budget, and
+/// [`SourceError::AllocLimitExceeded`] when a memory-decoded container's
+/// file is longer than [`DecodeLimits::max_alloc_bytes`].
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
     // Identify the container from its leading magic, never from the path
     // extension: `decode_bytes_with_limits` has no filename to consult, so
@@ -1102,7 +1223,7 @@ pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Rast
     let (head, filled) = read_head(&mut file)?;
     let sniffed = sniff(&head[..filled]);
     let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
-        decode_bytes_with_limits(&std::fs::read(path)?, limits)?
+        decode_bytes_with_limits(&read_file_bounded(path, limits, "image file body")?, limits)?
     } else {
         // Rewind past the sniff and keep reading from the same handle, so
         // every streaming format's memory profile is unchanged.
@@ -1977,24 +2098,19 @@ mod tests {
      * decode into a read-whole-file. Second, the mapping is identity: one
      * container in, one decoder out, no options and no many-to-one
      * collapsing.
+     * The set of variants comes from `SniffedFormat::ALL`, which is built
+     * from an exhaustive `match`, not from a list kept here. A list kept
+     * here is how `Jxl` escaped between #628 and #659: it was missing from
+     * the list *and* from the expected answer, so the arithmetic stayed
+     * consistent and both invariants held over nine variants of ten.
      * Input: every `SniffedFormat` variant -> Output: `decodes_from_memory`
-     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Radiance` and
-     * `Fits`, `OpenExr`, and distinct `image` formats for every container libviprs
-     * does not decode itself.
+     * true for exactly `Vips`, `Jpeg`, `Gif`, `WebP`, `Jxl`, `Radiance`,
+     * `Fits` and `OpenExr`, and distinct `image` formats for every container
+     * libviprs does not decode itself.
      */
     #[test]
     fn route_table_is_identity_and_only_self_decoded_formats_buffer_whole() {
-        let all = [
-            SniffedFormat::Vips,
-            SniffedFormat::Jpeg,
-            SniffedFormat::Png,
-            SniffedFormat::Tiff,
-            SniffedFormat::Gif,
-            SniffedFormat::WebP,
-            SniffedFormat::Radiance,
-            SniffedFormat::Fits,
-            SniffedFormat::OpenExr,
-        ];
+        let all = SniffedFormat::ALL;
         // These are the containers libviprs decodes itself, so they are
         // the ones the route table maps to no `image` decoder.
         let self_decoded = [
@@ -2002,6 +2118,7 @@ mod tests {
             SniffedFormat::Radiance,
             SniffedFormat::Gif,
             SniffedFormat::WebP,
+            SniffedFormat::Jxl,
             SniffedFormat::Fits,
             SniffedFormat::OpenExr,
         ];
@@ -2018,12 +2135,13 @@ mod tests {
                 SniffedFormat::Jpeg,
                 SniffedFormat::Gif,
                 SniffedFormat::WebP,
+                SniffedFormat::Jxl,
                 SniffedFormat::Radiance,
                 SniffedFormat::Fits,
                 SniffedFormat::OpenExr
             ],
-            "only .v, JPEG, GIF, WebP, Radiance, FITS and OpenEXR may read the \
-             whole file into memory"
+            "only .v, JPEG, GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR may \
+             read the whole file into memory"
         );
 
         for format in self_decoded {
@@ -2075,6 +2193,217 @@ mod tests {
             assert_eq!(decoded.format(), PixelFormat::Gray8);
             assert_eq!(decoded.data(), &[3, 1, 4, 1]);
         }
+    }
+
+    /// Write `bytes` to `path` and then grow the file to `apparent` bytes.
+    ///
+    /// The tail is a hole rather than written zeros, so a file that claims
+    /// megabytes costs one block on disk. That asymmetry is the whole shape
+    /// of issue #629: the file is cheap to make and expensive to serve, and
+    /// nothing in the header hints at how big the read will be.
+    fn write_sparse(path: &Path, bytes: &[u8], apparent: u64) {
+        std::fs::write(path, bytes).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len(apparent).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), apparent);
+    }
+
+    /**
+     * Verifies that `decode_file_with_limits` bounds the whole-file read it
+     * does for the containers that decode from memory, so an oversized file
+     * costs one `stat` instead of a full read. Before issue #629 the read
+     * ran first and every ceiling in `DecodeLimits` was consulted after it
+     * had already finished, so a 3 GiB sparse FITS declaring a 4x3 image
+     * decoded successfully at 3 GiB resident.
+     * Works by writing one real FITS file and one that is byte-identical
+     * except for a sparse tail, then decoding both under a ceiling that sits
+     * between the two lengths. The small one has to decode, otherwise the
+     * bound is refusing on something other than the file size.
+     * Input: a 4x3 Gray8 FITS and the same file grown to 4 MiB, both under
+     * max_alloc_bytes = 65536 -> Output: the Gray8 raster from the first and
+     * `AllocLimitExceeded { what: "image file body" }` from the second.
+     */
+    #[test]
+    fn decode_file_bounds_the_whole_file_read() {
+        let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let honest = dir.path().join("honest.fits");
+        std::fs::write(&honest, &file).unwrap();
+        let real_len = std::fs::metadata(&honest).unwrap().len();
+
+        let apparent = 4 * 1024 * 1024;
+        let sparse = dir.path().join("sparse.fits");
+        write_sparse(&sparse, &file, apparent);
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(65_536);
+        assert!(
+            real_len < 65_536,
+            "the honest file must sit under the ceiling, got {real_len}"
+        );
+
+        let ok = decode_file_with_limits(&honest, limits).unwrap();
+        assert_eq!((ok.width(), ok.height()), (4, 3));
+        assert_eq!(ok.data(), &[7u8; 12]);
+
+        match decode_file_with_limits(&sparse, limits) {
+            Err(SourceError::AllocLimitExceeded {
+                what,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "image file body");
+                assert_eq!(needed_bytes, apparent);
+                assert_eq!(max_alloc_bytes, 65_536);
+            }
+            other => panic!("expected the file body to be refused, got {other:?}"),
+        }
+    }
+
+    /**
+     * Verifies that the file-body ceiling is inclusive, so a file of exactly
+     * `max_alloc_bytes` still decodes and one byte less of budget refuses it.
+     * A bound that is safe but off by one is a bound that rejects files the
+     * caller explicitly paid for, and this epic has found several.
+     * Works by measuring the encoded file rather than assuming its length,
+     * then running the decode at exactly that budget and at one byte under.
+     * The refusal has to name the file body, otherwise it is the pixel
+     * buffer's own check firing and the boundary is untested.
+     * Input: a 4x3 Gray8 FITS of `n` bytes at max_alloc_bytes = n, then
+     * n - 1 -> Output: the Gray8 raster, then
+     * `AllocLimitExceeded { needed_bytes: n }`.
+     */
+    #[test]
+    fn the_file_body_ceiling_is_inclusive() {
+        let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.fits");
+        std::fs::write(&path, &file).unwrap();
+        let n = std::fs::metadata(&path).unwrap().len();
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(n);
+        let decoded = decode_file_with_limits(&path, exact).unwrap();
+        assert_eq!(decoded.data(), &[7u8; 12]);
+
+        let one_short = DecodeLimits::default().with_max_alloc_bytes(n - 1);
+        assert!(
+            matches!(
+                decode_file_with_limits(&path, one_short),
+                Err(SourceError::AllocLimitExceeded {
+                    what: "image file body",
+                    needed_bytes,
+                    max_alloc_bytes,
+                }) if needed_bytes == n && max_alloc_bytes == n - 1
+            ),
+            "one byte under the file length must refuse the body"
+        );
+    }
+
+    /**
+     * Verifies that the post-read half of the file-body ceiling refuses a
+     * source that yields more bytes than its `stat` declared. The
+     * stat-first check is the cheap one and it is the one the other two
+     * tests pin, but it is only as good as `metadata().len()`, and there
+     * are ordinary sources where that number is a lie: a FIFO reports 0,
+     * a `/proc` file reports 0, and a regular file can grow between the
+     * stat and the read. Without the post-read check the `take(cap + 1)`
+     * still bounds the memory, so nothing aborts, but the caller gets a
+     * silently truncated buffer handed to the decoder as though it were a
+     * whole file and the refusal comes back as "not a recognisable image"
+     * instead of "over the ceiling". That is a worse failure than the one
+     * issue #629 set out to fix.
+     * Works by reading a FIFO, which stats as 0 bytes so the declared-length
+     * check cannot fire, while a writer thread feeds it four times the
+     * ceiling. `needed_bytes` has to be exactly `cap + 1`, which is all the
+     * capped read ever sees, so this cannot be confused with the stat-first
+     * refusal that `decode_file_bounds_the_whole_file_read` pins at the
+     * apparent length.
+     * Input: a FIFO fed 16384 bytes at max_alloc_bytes = 4096 -> Output:
+     * `AllocLimitExceeded { what: "image file body", needed_bytes: 4097,
+     * max_alloc_bytes: 4096 }`.
+     */
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_file_body_ceiling_refuses_a_source_that_outruns_its_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("body.fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo(1) is POSIX and must be on PATH");
+        assert!(made.success(), "mkfifo failed for {}", fifo.display());
+        assert_eq!(
+            std::fs::metadata(&fifo).unwrap().len(),
+            0,
+            "a FIFO must stat as empty, otherwise the declared-length check \
+             fires and this test is pinning the wrong half"
+        );
+
+        let cap = 4096u64;
+        let fed = usize::try_from(cap).unwrap() * 4;
+        let writer = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut sink = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+                // The reader stops at cap + 1 bytes and closes, so the tail
+                // of this write is expected to come back as a broken pipe.
+                // That is the refusal working, not a failure.
+                let _ = sink.write_all(&vec![0x5Au8; fed]);
+            })
+        };
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(cap);
+        let refused = read_file_bounded(&fifo, limits, "image file body");
+        writer.join().unwrap();
+
+        match refused {
+            Err(SourceError::AllocLimitExceeded {
+                what,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "image file body");
+                assert_eq!(
+                    needed_bytes,
+                    cap + 1,
+                    "the capped read never sees more than one byte past the \
+                     ceiling, so anything else means the stat-first check fired"
+                );
+                assert_eq!(max_alloc_bytes, cap);
+            }
+            other => panic!(
+                "a source that outruns its stat must be refused, not truncated \
+                 and handed to the decoder, got {other:?}"
+            ),
+        }
+    }
+
+    /**
+     * Verifies that the new ceiling reaches only the containers that decode
+     * from memory, and that the streaming decoders still never see the whole
+     * file. Those paths already read no more than they need, so bounding
+     * them by file length would refuse files that cost nothing to decode.
+     * Works by growing a PNG with a sparse tail well past the ceiling. PNG
+     * stops at `IEND`, so the tail is never read, and a decode that succeeds
+     * under a ceiling far below the apparent length is proof the streaming
+     * path is untouched.
+     * Input: a 16x16 RGB PNG grown to 4 MiB, max_alloc_bytes = 65536 ->
+     * Output: the 16x16 raster, decoded.
+     */
+    #[test]
+    fn the_file_body_ceiling_leaves_the_streaming_path_alone() {
+        let png = create_test_png(16, 16);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing.png");
+        write_sparse(&path, &png, 4 * 1024 * 1024);
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(65_536);
+        let decoded = decode_file_with_limits(&path, limits).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
 
     /**
