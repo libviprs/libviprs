@@ -34,6 +34,7 @@ deterministically. Nothing outside this script's own directory is written.
 """
 import hashlib
 import json
+import math
 import os
 import struct
 import subprocess
@@ -374,8 +375,29 @@ oracle = {
     "records": records,
 }
 
+
+def json_safe(value):
+    """Quote the floats JSON has no literal for (issue #674). json.dump
+    writes a bare NaN, Infinity or -Infinity by default; Python reads those
+    back and no other language does, so the ENCODE_INPUTS infinity would make
+    the whole file unreadable to serde_json, jq and JSON.parse. Quoting is
+    what foreign-nifti already does, and it keeps the three apart the way a
+    null would not."""
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
+
+
 with open(os.path.join(ROOT, "oracle.json"), "w") as f:
-    json.dump(oracle, f, indent=2, sort_keys=False)
+    # allow_nan=False so a value json_safe missed stops the capture here
+    # rather than writing a file nobody outside Python can parse.
+    json.dump(json_safe(oracle), f, indent=2, sort_keys=False, allow_nan=False)
     f.write("\n")
 
 with open(os.path.join(ROOT, "commands.sh"), "w") as f:
