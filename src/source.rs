@@ -880,17 +880,37 @@ impl Magic {
     /// answered from 11 bytes would be a guess.
     fn matches(self, head: &[u8]) -> bool {
         match self {
-            Self::Prefix(magic) => head.starts_with(magic),
+            Self::Prefix(magic) => {
+                // `[].starts_with(&[])` is true, so an empty prefix matches
+                // every buffer and would shadow every row declared after it.
+                debug_assert!(!magic.is_empty(), "an empty Prefix matches every buffer");
+                head.starts_with(magic)
+            }
             Self::Split {
                 prefix,
                 tag_at,
                 tag,
             } => {
+                // Nothing else constrains these two to sit apart, and a row
+                // where they overlap is quietly self-consistent rather than
+                // rejected: `shortest_head` lays the prefix down and then
+                // writes the tag over the end of it, and `matches` accepts
+                // the result it just built. The row would be wrong and every
+                // test that probes it with its own head would still pass.
+                debug_assert!(!tag.is_empty(), "an empty Split tag constrains nothing");
+                debug_assert!(
+                    prefix.len() <= tag_at,
+                    "a Split prefix that runs into its own tag is self-consistent and wrong"
+                );
                 head.len() >= tag_at + tag.len()
                     && head.starts_with(prefix)
                     && head[tag_at..tag_at + tag.len()] == *tag
             }
             Self::Line(magic) => {
+                debug_assert!(
+                    !magic.is_empty(),
+                    "an empty Line magic matches every terminated head"
+                );
                 head.len() > magic.len()
                     && head.starts_with(magic)
                     && matches!(head[magic.len()], b'\n' | b'\r')
@@ -951,14 +971,19 @@ enum Decoder {
 
 /// One row of the route table: everything routing knows about a container.
 ///
-/// This is the single place a format lane edits. It used to be six: the
-/// variant, its magic in `sniff`, its memory profile in
-/// `decodes_from_memory`, its decoder in `image_format`, its arm in the
-/// dispatch chain at the top of [`decode_bytes_with_limits`], and the
-/// bookkeeping in [`SniffedFormat::next`]. Two of those — the magic and the
-/// memory profile — compiled clean and tested clean when they were missed,
-/// which is how one wave of three parallel format lanes managed to drop a
-/// different one each (issue #633).
+/// This is the single place the routing data for a container lives. Four
+/// sites used to carry it between them: its magic in `sniff`, its memory
+/// profile in `decodes_from_memory`, its decoder in `image_format`, and its
+/// arm in the dispatch chain at the top of [`decode_bytes_with_limits`]. Two
+/// of those, the magic and the memory profile, compiled clean and tested
+/// clean when they were missed, which is how one wave of three parallel
+/// format lanes managed to drop a different one each (issue #633).
+///
+/// It is not the only edit adding a format takes. The variant itself, one
+/// arm in [`SniffedFormat::next`] and the two lengths on
+/// [`SniffedFormat::ALL`] are still hand-written. The difference is that
+/// `cargo build` now insists on every one of them, where two of the six used
+/// to be silent.
 #[derive(Clone, Copy, Debug)]
 struct Route {
     /// The signatures [`sniff`] accepts for this container; any one of them
@@ -985,9 +1010,13 @@ struct Route {
 /// `every_container_is_reachable_from_its_own_magic`, which reports the
 /// wrong variant the moment one row starts shadowing another.
 ///
-/// Growing this list is one edit that says what the container is,
-/// [`Self::route`], plus the one-line bookkeeping in [`Self::next`] that the
-/// same compile pass demands. Everything else is read off that row.
+/// Growing this list takes four edits, and `cargo build` insists on all
+/// four: the variant here, its row in [`Self::route`] saying what the
+/// container is, one arm of bookkeeping in [`Self::next`], and the two
+/// lengths on [`Self::ALL`]. Everything else about the container is read off
+/// the row. The count is not the point, the enforcement is: none of the four
+/// can be missed quietly, where the magic and the memory profile used to be
+/// (issue #633).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SniffedFormat {
     /// Native libvips `.v`, either byte order.
@@ -1355,12 +1384,18 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
 ///
-/// The containers libviprs decodes from memory rather than streaming — every
-/// row in the route table whose decoder is not the streaming `image` facade
-/// — go through one bounded whole-file read, so
-/// [`DecodeLimits::max_alloc_bytes`] bounds the read itself rather than only
-/// what the decoder does with the bytes afterwards. Everything else streams
-/// and never holds more than the decoder asks for.
+/// PNG and TIFF stream, and never hold more than the decoder asks for. Every
+/// other container libviprs recognises is read into memory whole, through a
+/// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
+/// itself rather than only what the decoder does with the bytes afterwards.
+/// That is native `.v`, JPEG, GIF, WebP, JPEG XL, Radiance HDR, FITS and
+/// OpenEXR: each one either parses its own container end to end or makes a
+/// second pass over the same bytes for metadata.
+///
+/// A file in a container libviprs does not recognise is streamed and guessed
+/// by the `image` facade. The two lists above are checked against the routing
+/// table by `every_row_carries_the_decoder_kind_its_container_needs`, so this
+/// paragraph cannot drift away from what the code does.
 ///
 /// # Errors
 ///
@@ -2123,6 +2158,11 @@ mod tests {
             for magic in magics {
                 let head = magic.shortest_head();
                 assert!(
+                    !head.is_empty(),
+                    "{format:?} declares {magic:?}, which no buffer can fail to match, \
+                     so it would shadow every row declared after it"
+                );
+                assert!(
                     head.len() <= SNIFF_HEAD_LEN,
                     "{format:?} needs {} bytes to decide {magic:?}, more than the \
                      {SNIFF_HEAD_LEN} a file entry point reads, so it is unreachable from disk",
@@ -2383,6 +2423,112 @@ mod tests {
             buffered,
             vec![SniffedFormat::Jpeg],
             "only JPEG rereads bytes the image facade has already decoded"
+        );
+    }
+
+    /**
+     * Restates, by hand and per variant, which kind of decoder each
+     * container's row has to name. Deliberately redundant with the table: the
+     * table is where the answer lives, and this is a second opinion about
+     * what the answer ought to be, kept for the same reason the near-miss
+     * list in `sniff_maps_each_magic_to_one_container` is kept.
+     *
+     * Collapsing the old sites into one row makes a MISSING row a build
+     * error, but it leaves a WRONG row consistent with itself. Changing
+     * WebP's row from the libviprs codec to
+     * `Decoder::Streamed(ImageFormat::WebP)` bypasses `crate::webp`, drops
+     * the ICCP/EXIF/XMP handling issue #567 exists for, and turns a bounded
+     * whole-file read into a stream, and every other test in this module
+     * still passes. The full suite does catch it, in `webp::tests`, and it
+     * catches the same mutation on every other row too, so nothing merges
+     * silently. But the red lands three modules from the edit that caused it,
+     * and someone changing the table and running `cargo test source::` sees
+     * green. This puts the red beside the table.
+     *
+     * What it does not cover is worth naming, because the discriminant is
+     * only half of a row: pointing FITS at `crate::exr::decode_exr` leaves
+     * this green, both being `Native`. That one is caught by
+     * `fits_reaches_its_codec_from_both_entry_points`, and every native row
+     * has an equivalent somewhere that decodes a real file through both entry
+     * points. This is the cheap local guard, not the oracle.
+     *
+     * The inner `match` is exhaustive, so a new variant fails to compile here
+     * rather than quietly going unasserted.
+     * Input: every `SniffedFormat` variant -> Output: the decoder kind its
+     * row carries, the memory profile derived from it, and the streaming list
+     * the public docs promise.
+     */
+    #[test]
+    fn every_row_carries_the_decoder_kind_its_container_needs() {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        enum Kind {
+            /// A libviprs codec, over the whole file.
+            Native,
+            /// The `image` facade, over the whole file.
+            Buffered,
+            /// The `image` facade, streamed.
+            Streamed,
+        }
+
+        // Written out rather than read off `route()`; see the doc above.
+        fn wanted(format: SniffedFormat) -> Kind {
+            match format {
+                // libviprs parses the `.v` header and metadata trailer itself.
+                SniffedFormat::Vips => Kind::Native,
+                // The facade decodes it, then the metadata pass rescans the
+                // same bytes for the APP1/APP2 segments.
+                SniffedFormat::Jpeg => Kind::Buffered,
+                SniffedFormat::Png => Kind::Streamed,
+                SniffedFormat::Tiff => Kind::Streamed,
+                // `crate::gif` drives the `gif` crate directly (issue #570).
+                SniffedFormat::Gif => Kind::Native,
+                // `crate::webp` drives `image-webp` directly (issue #567).
+                SniffedFormat::WebP => Kind::Native,
+                // `image` 0.25 has no JPEG XL decoder at all (issue #619).
+                SniffedFormat::Jxl => Kind::Native,
+                // `image`'s RGBE maths is not vips' (issue #506).
+                SniffedFormat::Radiance => Kind::Native,
+                // `image` has no FITS route at all (issue #505).
+                SniffedFormat::Fits => Kind::Native,
+                // The facade flattens the channel set `crate::exr` needs
+                // (issue #504).
+                SniffedFormat::OpenExr => Kind::Native,
+            }
+        }
+
+        for format in SniffedFormat::ALL {
+            let carried = match format.route().decoder {
+                Decoder::Native(_) => Kind::Native,
+                Decoder::Buffered(_) => Kind::Buffered,
+                Decoder::Streamed(_) => Kind::Streamed,
+            };
+            assert_eq!(
+                carried,
+                wanted(format),
+                "{format:?}'s row names a {carried:?} decoder where the container needs a \
+                 {:?} one. That is a behaviour change rather than a refactor: it swaps \
+                 which codec sees the bytes, and whether the file is read whole",
+                wanted(format)
+            );
+            assert_eq!(
+                format.decodes_from_memory(),
+                wanted(format) != Kind::Streamed,
+                "{format:?}'s memory profile does not follow from its decoder kind"
+            );
+        }
+
+        // The concrete list `decode_file_with_limits`' public doc gives a
+        // caller sizing `max_alloc_bytes`. It is prose, so nothing else would
+        // notice it drifting away from the table.
+        let streaming: Vec<SniffedFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter(|format| !format.decodes_from_memory())
+            .collect();
+        assert_eq!(
+            streaming,
+            vec![SniffedFormat::Png, SniffedFormat::Tiff],
+            "decode_file_with_limits' doc tells callers PNG and TIFF are the only \
+             containers that stream; move the doc and this list together"
         );
     }
 

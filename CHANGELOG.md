@@ -1059,8 +1059,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Adding a format to `src/source.rs` is one edit the compiler checks now,
-  instead of six coordinated ones with two that failed silently (issue #633).
+- Every edit that adds a format to `src/source.rs` is checked by `cargo build`
+  now, where two of the six used to fail silently (issue #633). It is still
+  more than one edit, and worth being exact about which: the variant itself,
+  its arm in `SniffedFormat::next`, the two lengths on `SniffedFormat::ALL`,
+  and its row in `SniffedFormat::route`. What changed is that leaving any of
+  them out stops the build. The two that used to be silent, the magic in
+  `sniff` and the memory profile in `decodes_from_memory`, are not edits any
+  more at all, because both are read off the row.
+
   Every container has a single row in a route table: the magic signatures
   `sniff` matches on, and the decoder the bytes go to. `sniff` walks
   `SniffedFormat::ALL` and reads the signatures off the rows,
@@ -1104,6 +1111,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different way from a path, and only the second answer is wrong. The old
   route-table test kept two hand-written lists of variants and both are gone,
   since a list kept by hand beside a table is the shape this is retiring.
+
+  A third test names, per variant and by hand, which kind of decoder its row
+  has to carry. That one is redundant with the table on purpose, because one
+  row being wrong is a different failure from one row being missing: a missing
+  row stops the build, a wrong row is consistent with itself. Swapping WebP's
+  row for the streaming `image` facade bypasses `crate::webp` and everything
+  issue #567 put there, and every other test in `src/source.rs` stays green.
+  The suite as a whole does catch it, in `webp::tests`, and I checked it
+  catches the same swap on every other row too, so nothing was going to merge
+  silently... but the red landed three modules from the edit that caused it.
+  Now it lands beside the table. The `match` inside is exhaustive, so a new
+  container has to be named there or the crate does not compile.
+
+  `Magic::matches` grew three `debug_assert!`s for the shapes that would
+  otherwise be self-consistent and wrong: an empty `Prefix` matches every
+  buffer and would shadow every row declared after it, and a `Split` whose
+  prefix runs into its own tag builds the very probe that then matches it. The
+  public doc on `decode_file_with_limits` names the containers held whole
+  again, too, rather than pointing a caller sizing `max_alloc_bytes` at a
+  routing table that is `pub(crate)` and renders nowhere, and the same new test
+  pins that list so the prose cannot drift.
 
   Nothing about detection or decoding moves. Same signatures, same decoders,
   same answers. The only ordering change is that FITS is tried before OpenEXR
