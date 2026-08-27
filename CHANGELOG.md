@@ -1180,39 +1180,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `decode_file` bounds the whole-file read it does for the formats that are
-  decoded from memory, so `DecodeLimits` can now refuse an oversized file
-  instead of finding out about it afterwards (issue #629). `.v`, JPEG, GIF,
-  WebP, JPEG XL, Radiance, FITS and OpenEXR all need the bytes addressable
-  end to end rather than streamed, and the read that got them was a plain
-  `std::fs::read`. That sizes its buffer from the file and then grows
+  decoded from memory, so `DecodeLimits::max_alloc_bytes` is now in the path
+  of that read instead of being consulted after it (issue #629). `.v`, JPEG,
+  GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR all need the bytes
+  addressable end to end rather than streamed, and the read that got them was
+  a plain `std::fs::read`. That sizes its buffer from the file and then grows
   infallibly, so `max_coord`, `max_pixels` and `max_alloc_bytes` were every
   one of them consulted after the whole file was already resident, and on a
   constrained host the failure was a process abort rather than a returned
   error.
 
-  A 3 GiB sparse FITS declaring a 4x3 image made the point: it decoded
-  successfully, at 3.0 GiB resident, from twelve bytes of image, under the
-  default 512 MiB ceiling. The file costs 8 KiB on disk, so it is cheap to
-  construct and expensive to serve, which is the wrong way round.
+  So the read had no ceiling at all, and a file could name any size it liked.
+  A 3 GiB FITS declaring a 4x3 image decoded successfully at 3.01 GiB
+  resident under the default 512 MiB ceiling; the same file is now refused at
+  6 MiB resident with `AllocLimitExceeded { needed_bytes: 3221225472,
+  max_alloc_bytes: 536870912 }`. That is the whole of what changed: the worst
+  case went from unbounded to `max_alloc_bytes`, and the failure went from an
+  abort on a constrained host to a returned error everywhere.
 
   The read now stats first and refuses anything longer than
-  `DecodeLimits::max_alloc_bytes`, then caps the read as well so a file that
-  grows between the two cannot slip past. It is the same
-  `read_file_bounded` the TIFF page readers have used since #612, lifted
-  into `source` so both call sites share one implementation rather than
-  drifting apart.
+  `max_alloc_bytes`, then caps the read as well, so a source that yields more
+  bytes than its `stat` declared is refused rather than silently truncated
+  and handed to the decoder as a whole file. It is the same
+  `read_file_bounded` the TIFF page readers have used since #612, lifted into
+  `source` so both call sites share one implementation rather than drifting
+  apart.
+
+  **What this does not do is make a cheap file cheap to decode.** The ceiling
+  is a byte count, not a ratio between what a file costs to store and what it
+  costs to decode, so anything under it is untouched. Measured on APFS, where
+  a file grown with `set_len` leaves the tail as a hole, so it declares 400
+  MiB and occupies 8 KiB: it decodes to a 4x3 image at 406 MiB resident, and
+  that number is the same before and after this change. At exactly the
+  ceiling it is 518 MiB resident from the same 8 KiB on disk. If you serve
+  untrusted files, `max_alloc_bytes` is now the number that bounds what one
+  decode can cost you, and the default 512 MiB is a lot to hand a file you
+  did not write.
 
   **This can refuse a file that used to decode.** A file longer than
   `max_alloc_bytes` in one of the formats above is now
   `SourceError::AllocLimitExceeded { what: "image file body", .. }`, which
   is the same variant the declared-geometry checks already raised, so
-  nothing has to tell "too big by header" from "too big by file length". The
-  default ceiling is 512 MiB; raise it with
-  `DecodeLimits::with_max_alloc_bytes` if you legitimately load files bigger
-  than that. The ceiling is inclusive, so a file of exactly `max_alloc_bytes`
-  still decodes. The streaming decoders are untouched: they never read the
-  whole file, so bounding them by its length would refuse work that costs
-  nothing.
+  nothing has to tell "too big by header" from "too big by file length".
+  Raise the ceiling with `DecodeLimits::with_max_alloc_bytes` if you
+  legitimately load files bigger than that. The ceiling is inclusive, so a
+  file of exactly `max_alloc_bytes` still decodes. The streaming decoders are
+  untouched: they never read the whole file, so bounding them by its length
+  would refuse work that costs nothing.
 
 - A `.v` file libviprs writes is now readable by real vips, metadata and all,
   and no longer makes it print a warning on every open (issue #546). The
