@@ -1195,7 +1195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   combination: an `RgbaF32` of scene-linear 0..1 samples, which the old rule
   bracketed against 255.
 
-  `vips_resize` premultiplies nothing of its own, and the binary confirms it —
+  `vips_resize` premultiplies nothing of its own, and the binary confirms it:
   the same float RGBA resizes to identical bytes under `multiband`, `b-w`,
   `srgb`, `scrgb` and `rgb16`. The bracket lives in `vips_affine`
   (`affine.c:553`) and `vips_thumbnail` (`thumbnail.c:835`), both of which

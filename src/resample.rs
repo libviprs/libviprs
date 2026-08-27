@@ -606,9 +606,9 @@ impl SampleLayout {
 /// `vips_premultiply` / `vips_unpremultiply` read from
 /// `vips_interpretation_max_alpha` (issue #664).
 ///
-/// `vips_resize` premultiplies nothing of its own — "This operation does not
+/// `vips_resize` premultiplies nothing of its own ("This operation does not
 /// premultiply alpha. If your image has an alpha channel, you should use
-/// premultiply on it first", `libvips/resample/resize.c`, and the binary
+/// premultiply on it first", `libvips/resample/resize.c`), and the binary
 /// agrees: a float RGBA raster resized on 8.18.6 comes back byte-identical
 /// under `multiband`, `b-w`, `srgb`, `scrgb` and `rgb16`. The bracket lives in
 /// the callers, `vips_affine` (`affine.c:553`) and `vips_thumbnail`
@@ -620,7 +620,7 @@ impl SampleLayout {
 /// [`SampleLayout::max`], mirroring what #631 did for the standalone pair. On
 /// an untagged raster the two answers are the same, so the only thing routing
 /// the unsigned carriers through the tag would change is a raster whose tag
-/// disagrees with its bytes — and
+/// disagrees with its bytes, and
 /// [`RasterCopyBuilder::interpretation`](crate::conversion::RasterCopyBuilder::interpretation)
 /// accepts any tag without checking the depth, so an 8-bit buffer labelled
 /// `Rgb16` would premultiply against 65535 and come back black. [`crate::composite`]
@@ -4068,8 +4068,8 @@ mod tests {
     /// scRGB brackets against `1.0` and one tagged RGB16 against `65535`, where
     /// an untagged one keeps the `255` default.
     ///
-    /// `vips_resize` premultiplies nothing of its own — "This operation does
-    /// not premultiply alpha", `libvips/resample/resize.c`, and measured: the
+    /// `vips_resize` premultiplies nothing of its own ("This operation does
+    /// not premultiply alpha", `libvips/resample/resize.c`), and measured: the
     /// same float RGBA resizes to identical bytes under every interpretation
     /// tag. The bracket libviprs runs around it is `vips_premultiply` /
     /// `vips_unpremultiply`, which default `max_alpha` from
