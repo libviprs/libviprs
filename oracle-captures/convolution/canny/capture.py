@@ -2,7 +2,7 @@
 """
 Oracle capture for `vips canny` (issues #511, #559, #560).
 
-Runs the real vips 8.18.4 CLI over synthetic fixtures and records exact
+Runs the real vips CLI over synthetic fixtures and records exact
 input -> output behaviour for the whole operation and for each of its four
 internal stages, on both the vectorised and the portable-C (VIPS_NOVECTOR=1)
 libvips paths.
@@ -10,7 +10,9 @@ libvips paths.
 Everything the script needs it generates itself, so a re-run on the same
 vips build reproduces oracle.json byte for byte. The pseudo-random fixtures
 use a hand-rolled LCG rather than Python's `random`, so the bytes do not
-depend on the CPython version.
+depend on the CPython version. Which vips build "the same" means is no longer
+a matter of remembering: oracle-captures/ORACLE_PIN.json names it and this
+script refuses to run against anything else unless passed --repin (#650).
 
 Writes, next to this file:
   commands.sh  - every vips CLI command actually executed, in order
@@ -24,6 +26,7 @@ import json
 import os
 import struct
 import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(ROOT, "fixtures")
@@ -31,6 +34,14 @@ MASKS = os.path.join(FIX, "masks")
 OUT = os.path.join(FIX, "outputs")
 VIPS = "/opt/homebrew/bin/vips"
 VIPSHEADER = "/opt/homebrew/bin/vipsheader"
+
+AREA = "convolution/canny"
+
+# Issue #650. The pin lives one level up, next to the other capture areas.
+sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir, os.pardir)))
+import oracle_pin  # noqa: E402  (needs the path above)
+
+VIPS_VERSION, ORACLE_PIN = oracle_pin.check(AREA, VIPS)
 
 for d in (FIX, MASKS, OUT):
     os.makedirs(d, exist_ok=True)
@@ -805,9 +816,27 @@ for _rec in [r for r in RECORDS if r["op"] == "canny"]:
 # ---------------------------------------------------------------------------
 DOC = {
     "meta": {
-        "vips_version": run([VIPS, "--version"], log=False),
+        "vips_version": VIPS_VERSION,
         "vips_binary": VIPS,
-        "area": "convolution/canny",
+        "area": AREA,
+        "oracle_pin": {
+            "file": "oracle-captures/ORACLE_PIN.json",
+            "pinned_vips_version": ORACLE_PIN["pinned_vips_version"],
+            "checked_how": (
+                "capture.py compares `vips --version` against the pin before "
+                "it writes anything; tests/oracle_capture_pins.rs compares "
+                "the version recorded here against the same file. Issue "
+                "#650, after a brew upgrade redefined the oracle mid-session "
+                "and nothing was looking."),
+        },
+        "homebrew_kegs": oracle_pin.homebrew_kegs(VIPS),
+        "why_homebrew_kegs": (
+            "Every Homebrew keg the vips binary reaches transitively, with "
+            "its version, walked from `otool -L`. `vips --vips-config` names "
+            "the codec libraries with no version for any of them, and the "
+            "codec version is what a future disagreement over these numbers "
+            "turns on. Provenance, not a pin: only the vips version is "
+            "enforced."),
         "issues": ["#511", "#559", "#560"],
         "source": "libvips/libvips/convolution/canny.c",
         "captured_by": "oracle-captures/convolution/canny/capture.py",
@@ -825,7 +854,7 @@ DOC = {
         "signature": (
             "vips canny in out [--sigma S] [--precision integer|float|approximate]. "
             "sigma defaults to 1.4 with min 0.01 and max 1000, precision defaults "
-            "to float. There are no hysteresis threshold arguments in 8.18.4."),
+            "to float. There are no hysteresis threshold arguments in 8.18.6."),
         "precision_never_reaches_the_gradient": (
             "The caller's `precision` is handed to ONE stage, the gaussblur. The "
             "gradient stage picks its own: canny.c:80-85 tests the format of the "

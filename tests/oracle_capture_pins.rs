@@ -54,46 +54,42 @@ const PYTHON_ONLY_JSON: &[&str] = &["foreign-radiance", "foreign-uhdr"];
 /// Quote bare `NaN` / `Infinity` / `-Infinity` so a Python-written capture
 /// parses. Returns the repaired text and whether anything needed repairing.
 fn quote_non_finite(text: &str) -> (String, bool) {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut chars = text.char_indices().peekable();
     let mut in_string = false;
     let mut repaired = false;
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some((i, c)) = chars.next() {
         if in_string {
-            out.push(b as char);
-            if b == b'\\' && i + 1 < bytes.len() {
-                out.push(bytes[i + 1] as char);
-                i += 2;
-                continue;
-            }
-            if b == b'"' {
+            out.push(c);
+            if c == '\\' {
+                if let Some((_, escaped)) = chars.next() {
+                    out.push(escaped);
+                }
+            } else if c == '"' {
                 in_string = false;
             }
-            i += 1;
             continue;
         }
-        if b == b'"' {
+        if c == '"' {
             in_string = true;
-            out.push('"');
-            i += 1;
+            out.push(c);
             continue;
         }
-        let rest = &text[i..];
         let token = ["-Infinity", "Infinity", "NaN"]
             .into_iter()
-            .find(|t| rest.starts_with(t));
-        if let Some(token) = token {
-            out.push('"');
-            out.push_str(token);
-            out.push('"');
-            i += token.len();
-            repaired = true;
-            continue;
+            .find(|t| text[i..].starts_with(t));
+        match token {
+            Some(token) => {
+                out.push('"');
+                out.push_str(token);
+                out.push('"');
+                for _ in 1..token.len() {
+                    chars.next();
+                }
+                repaired = true;
+            }
+            None => out.push(c),
         }
-        out.push(b as char);
-        i += 1;
     }
     (out, repaired)
 }
