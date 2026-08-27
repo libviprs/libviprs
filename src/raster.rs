@@ -69,7 +69,7 @@ pub enum RasterError {
     },
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
     FloatUnsupported { op: &'static str },
-    #[error("from_f32_samples requires a float pixel format (RgbaF32 / FloatF32), got {format:?}")]
+    #[error("a float pixel format (RgbaF32 / FloatF32) is required, got {format:?}")]
     NotFloatFormat { format: PixelFormat },
     #[error("unknown memory format {format:?}; expected \"uchar\", \"ushort\", or \"float\"")]
     UnknownMemoryFormat { format: String },
@@ -564,25 +564,59 @@ impl Raster {
         Raster::new(width, height, format, data)
     }
 
-    /// Fallible form of [`Raster::f32_samples`].
+    /// Fallible form of [`Raster::f32_samples`], which carries the contract.
+    ///
+    /// The decoded buffer is the same size as the raster's own pixel buffer, so
+    /// on a full-resolution image it is one of the largest allocations an
+    /// operation that widens through it makes. It is reserved with
+    /// [`Vec::try_reserve_exact`] and reports [`RasterError::AllocationFailed`],
+    /// so it never reaches `handle_alloc_error` and never ends the process.
+    ///
+    /// That is the whole reason this exists. `f32_samples` used to `.collect()`
+    /// here, and a `.collect()` sized from an [`ExactSizeIterator`] allocates
+    /// through `handle_alloc_error`, which **aborts**. An abort cannot be
+    /// caught by anything, so it put an unavoidable process exit on
+    /// [`Raster::try_sharpen`] and on [`Raster::try_canny`]'s float arm however
+    /// their signatures read, which is what kept those two off the abort-free
+    /// list #575 took the rest of the convolution family onto (issue #627).
     ///
     /// # Errors
     ///
     /// Returns [`RasterError::NotFloatFormat`] when the format does not store
-    /// float samples.
+    /// float samples, or [`RasterError::AllocationFailed`] when the sample
+    /// buffer cannot be reserved.
+    ///
+    /// [`ExactSizeIterator`]: std::iter::ExactSizeIterator
     pub fn try_f32_samples(&self) -> Result<Vec<f32>, RasterError> {
         if !self.format.is_float() {
             return Err(RasterError::NotFloatFormat {
                 format: self.format,
             });
         }
-        Ok(self
-            .data
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|&c| f32::from_ne_bytes(c))
-            .collect())
+        let chunks = self.data.as_chunks::<4>().0;
+        let bytes = chunks.len().saturating_mul(size_of::<f32>());
+        // Test-only: honour a lowered per-thread ceiling so the fallible branch
+        // below is reachable at a raster a test can actually build. This branch
+        // and the thread-local it reads compile only under `cfg(test)`, so a
+        // production widening is bounded solely by the allocator, exactly as
+        // `alloc_op_output` is.
+        #[cfg(test)]
+        if bytes as u64 > F32_SAMPLES_ALLOC_CAP.with(Cell::get) {
+            return Err(RasterError::AllocationFailed {
+                width: self.width,
+                height: self.height,
+                bytes,
+            });
+        }
+        let mut out: Vec<f32> = Vec::new();
+        out.try_reserve_exact(chunks.len())
+            .map_err(|_| RasterError::AllocationFailed {
+                width: self.width,
+                height: self.height,
+                bytes,
+            })?;
+        out.extend(chunks.iter().map(|&c| f32::from_ne_bytes(c)));
+        Ok(out)
     }
 
     /// The pixel data as `f32` samples, for float formats.
@@ -591,18 +625,26 @@ impl Raster {
     /// decoded from the native-byte-order buffer, or `None` when the
     /// format does not store float samples. The inverse of
     /// [`Raster::from_f32_samples`].
+    ///
+    /// This is the convenience half of the pair. Reach for
+    /// [`Raster::try_f32_samples`] wherever an allocation failure should arrive
+    /// as a value rather than as a panic.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sample buffer cannot be allocated; see
+    /// [`Raster::try_f32_samples`]. It used to **abort** the process there
+    /// instead, through the `handle_alloc_error` a `.collect()` reaches, which
+    /// is nothing a caller can catch or recover from (issue #627). `None` still
+    /// means only "the format does not store float samples", and never
+    /// "the allocation failed".
+    #[track_caller]
     pub fn f32_samples(&self) -> Option<Vec<f32>> {
-        if !self.format.is_float() {
-            return None;
+        match self.try_f32_samples() {
+            Ok(samples) => Some(samples),
+            Err(RasterError::NotFloatFormat { .. }) => None,
+            Err(e) => panic!("f32_samples: {e}"),
         }
-        Some(
-            self.data
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| f32::from_ne_bytes(c))
-                .collect(),
-        )
     }
 
     /// Bytes per row (stride). No padding -- rows are tightly packed.
