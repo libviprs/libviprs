@@ -1485,6 +1485,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved interpretation, so this is a behaviour change rather than
   bookkeeping.
 
+- `try_colourspace` no longer aborts the process when it cannot allocate its
+  output, so both ends of the LabS round trip `try_sharpen` opens and closes
+  report the failure instead of taking the process down with them (issue #672).
+  There is a new `ColourError::Raster` variant carrying the `RasterError` that
+  says why.
+
+  Every colour result is one image-sized `Vec<u8>`, and every one of them was a
+  plain `vec![0u8; ..]`. An over-capacity request there reaches
+  `handle_alloc_error`, which ends the process instead of returning, and no `?`
+  catches an abort. So `try_colourspace` handed back a `Result` that did not
+  cover the failure a caller most reasonably assumes it covers, and
+  `try_sharpen` inherited that however its own signature read: it converts to
+  LabS on the way in and back on the way out, so both ends of it were the same
+  abort. #627 is the same problem one module over, in the `raster.rs` widening,
+  and it descoped this round trip on purpose, because the abort was not in
+  `convolution.rs` or `raster.rs` at all.
+
+  Both image-sized sites now reserve through `Vec::try_reserve_exact` and
+  report `RasterError::AllocationFailed`: the conversion buffer the
+  `try_colourspace` loop writes samples into, and the quantisation buffer the
+  colour-difference and ICC arms finish through. `ColourError` is
+  `#[non_exhaustive]`, so the new variant is additive and a downstream match
+  with the wildcard arm the attribute asks for keeps compiling. The panicking
+  twins, `colourspace`, `de76`, `icc_import` and the rest, keep panicking on
+  it, which is what they do with every other `ColourError` and which at least
+  unwinds where the abort did not.
+
+  The wrap that follows the allocation moved to the op-output constructor at
+  the same time, so a legal widening conversion is no longer rejected for
+  exceeding the 8 GiB construction budget. `Srgb -> Lab` turns 8-bit bands into
+  `f32`, a 4x, and an input at the budget ceiling produced an output over it;
+  `Raster::new` refused that and the `.expect` around it turned the refusal
+  into a panic out of a `try_` form. An op output derives from an input that
+  was budget-checked at its own construction, which is the whole reason
+  `Raster::from_op_output` exists (issue #279).
+
+  The remaining infallible allocations in `colour.rs` are the `Vec<f64>` sample
+  staging on the colour-difference path and the ICC fallback buffers. None of
+  them is on the `try_colourspace` route, and each needs its own way to be
+  driven honestly, so they stay for issue #685 rather than being converted on
+  the assumption that they are reachable.
+
+  **This does not make `try_sharpen` abort-free**, and the claim is deliberately
+  narrower than that. Its own body still widens through `Raster::f32_samples`
+  and still keeps five image-sized `vec![]` and `clone` scratch buffers of its
+  own, so an allocation failure in any of those ends the process before it can
+  be reported. That set is issue #627's, PR #669 is open against it, and
+  `try_sharpen`'s `# Errors` now names the five sites so a caller reading the
+  API docs gets the same answer. What changed here is only the two `colour.rs`
+  allocations the round trip reaches, which is all #672 was ever about.
+
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
   (issue #631). They reached the same `depth_max` panic the alpha pair did, on
@@ -1654,12 +1705,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two things are deliberately not on that list, so the claim is not read wider
   than it goes. `try_canny`'s float arm and `try_sharpen` both widen through
   `Raster::f32_samples`, which still collects infallibly, and `try_sharpen`
-  makes the LabS round trip through `colour.rs` on top of that, where every
-  intermediate is a plain `vec![]`. Neither is one allocation away from the
-  list, and pretending otherwise would be the same failure as a `try_` API
-  that aborts, so both stay off it until the widening itself goes.
-  `try_sharpen`'s `# Errors` now says so in as many words, so the exclusion
-  is where a caller reading the API docs will find it.
+  keeps five image-sized `vec![]` and `clone` scratch buffers of its own on top
+  of that. Neither is one allocation away from the list, and pretending
+  otherwise would be the same failure as a `try_` API that aborts, so both stay
+  off it until the widening itself goes. `try_sharpen`'s `# Errors` says so in
+  as many words, so the exclusion is where a caller reading the API docs will
+  find it. The LabS round trip it makes through `colour.rs` was a third reason
+  when this landed; that half is fixed in this same release under issue #672,
+  and the `# Errors` block was rewritten there rather than left pointing at a
+  claim that had stopped being true.
 
   It matters more than it reads: measured on a 4000x4000 `Rgb8` at integer
   precision, the widened buffer is 384 MB of a 486 MB peak for 48 MB of input,
@@ -1904,6 +1958,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the binary, OkLab `[0.5, -0.0, 0.0]` is OkLCh `0.5 0 0` in vips 8.18.4 and
   was `[0.5, 0.0, 180.0]` here. The branch is now transcribed from the C, so
   the whole `a` axis answers the way vips does whichever zero it is handed.
+
+- The `foreign-radiance` and `foreign-uhdr` oracle captures are JSON a standard
+  parser will read (issue #674). Both carried bare `NaN` and `Infinity`
+  literals, which RFC 8259 has no spelling for, so `serde_json`, `jq` and
+  `JSON.parse` rejected the whole file rather than the one record that needed
+  them: one `Infinity` in the radiance `encode_setcolr` sweep, and six `NaN`
+  across the two degenerate-metadata arms of `uhdr2scRGB`.
+
+  Nothing was failing over it, because Python writes these files and Python
+  read them back. `json.dump` emits the bare literals by default and
+  `json.load` takes them again as a documented non-standard extension, so a
+  capture round-trips perfectly on the machine that produced it and breaks for
+  a consumer in any other language... which is the moment someone ports a
+  radiance or uhdr differential test to Rust, and starts by suspecting their
+  own code rather than the fixture.
+
+  Both files now quote the token `json.dump` would have written bare: `"NaN"`,
+  `"Infinity"` and `"-Infinity"`, with every finite value staying an ordinary
+  JSON number. That convention is introduced here rather than inherited.
+  `foreign-nifti` is the only other capture that records a non-finite float and
+  it carries both spellings at once: `"Infinity"` and `"NaN"` from its
+  `probe.c`, and `"inf"`, `"-inf"` and `"nan"` from a `str(v)` in its
+  `capture.py`. Bringing that file onto one spelling means re-capturing it, so
+  it belongs with the #650 / #673 repin rather than here, and
+  `tests/oracle_capture_json.rs` says which spelling it would have to move to.
+  I picked quoting over `null` because those two records exist precisely to say
+  which non-finite value libvips produced, and `null` folds all three onto one
+  answer. Each `capture.py` sanitises on the way out and then dumps with
+  `allow_nan=False`, so a value the sanitiser misses stops the capture rather
+  than writing a file nobody outside Python can parse.
+
+  I rewrote the two files in place instead of re-running the captures, because
+  a re-run would have moved each area's recorded vips version too (issue #650)
+  and the repair is worth exactly three lines. I drove the committed writer
+  functions over the parsed documents to produce them, so what landed is
+  byte-for-byte what a fresh capture emits and the diff is the added quotes and
+  nothing else.
+
+  `tests/oracle_capture_json.rs` is what keeps it shut. It walks the whole
+  capture tree and parses every `oracle.json` with `serde_json`, reporting all
+  the offenders rather than the first, so the next capture that reaches for a
+  bare literal goes red in CI instead of waiting for someone to try to read it.
+  Two more tests sit next to it: one checks the three tokens are pairwise
+  distinct and each comes back as itself rather than as one of the others,
+  which is the property `null` would lose, and one asserts `serde_json` really
+  does refuse the bare literals, so the guard cannot quietly become a check
+  that passes for the wrong reason. A fourth reads the two repaired files back
+  and checks the values really are a `+inf` and a `NaN` in the rows that are
+  supposed to carry them, which is the only one of the four that tests what the
+  Python writer actually emitted.
 
 ## [0.4.0] — 2026-07-20
 
