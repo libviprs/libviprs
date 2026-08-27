@@ -2062,6 +2062,136 @@ mod tests {
         }
     }
 
+    /// Write `bytes` to `path` and then grow the file to `apparent` bytes.
+    ///
+    /// The tail is a hole rather than written zeros, so a file that claims
+    /// megabytes costs one block on disk. That asymmetry is the whole shape
+    /// of issue #629: the file is cheap to make and expensive to serve, and
+    /// nothing in the header hints at how big the read will be.
+    fn write_sparse(path: &Path, bytes: &[u8], apparent: u64) {
+        std::fs::write(path, bytes).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len(apparent).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), apparent);
+    }
+
+    /**
+     * Verifies that `decode_file_with_limits` bounds the whole-file read it
+     * does for the containers that decode from memory, so an oversized file
+     * costs one `stat` instead of a full read. Before issue #629 the read
+     * ran first and every ceiling in `DecodeLimits` was consulted after it
+     * had already finished, so a 3 GiB sparse FITS declaring a 4x3 image
+     * decoded successfully at 3 GiB resident.
+     * Works by writing one real FITS file and one that is byte-identical
+     * except for a sparse tail, then decoding both under a ceiling that sits
+     * between the two lengths. The small one has to decode, otherwise the
+     * bound is refusing on something other than the file size.
+     * Input: a 4x3 Gray8 FITS and the same file grown to 4 MiB, both under
+     * max_alloc_bytes = 65536 -> Output: the Gray8 raster from the first and
+     * `AllocLimitExceeded { what: "image file body" }` from the second.
+     */
+    #[test]
+    fn decode_file_bounds_the_whole_file_read() {
+        let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let honest = dir.path().join("honest.fits");
+        std::fs::write(&honest, &file).unwrap();
+        let real_len = std::fs::metadata(&honest).unwrap().len();
+
+        let apparent = 4 * 1024 * 1024;
+        let sparse = dir.path().join("sparse.fits");
+        write_sparse(&sparse, &file, apparent);
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(65_536);
+        assert!(
+            real_len < 65_536,
+            "the honest file must sit under the ceiling, got {real_len}"
+        );
+
+        let ok = decode_file_with_limits(&honest, limits).unwrap();
+        assert_eq!((ok.width(), ok.height()), (4, 3));
+        assert_eq!(ok.data(), &[7u8; 12]);
+
+        match decode_file_with_limits(&sparse, limits) {
+            Err(SourceError::AllocLimitExceeded {
+                what,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "image file body");
+                assert_eq!(needed_bytes, apparent);
+                assert_eq!(max_alloc_bytes, 65_536);
+            }
+            other => panic!("expected the file body to be refused, got {other:?}"),
+        }
+    }
+
+    /**
+     * Verifies that the file-body ceiling is inclusive, so a file of exactly
+     * `max_alloc_bytes` still decodes and one byte less of budget refuses it.
+     * A bound that is safe but off by one is a bound that rejects files the
+     * caller explicitly paid for, and this epic has found several.
+     * Works by measuring the encoded file rather than assuming its length,
+     * then running the decode at exactly that budget and at one byte under.
+     * The refusal has to name the file body, otherwise it is the pixel
+     * buffer's own check firing and the boundary is untested.
+     * Input: a 4x3 Gray8 FITS of `n` bytes at max_alloc_bytes = n, then
+     * n - 1 -> Output: the Gray8 raster, then
+     * `AllocLimitExceeded { needed_bytes: n }`.
+     */
+    #[test]
+    fn the_file_body_ceiling_is_inclusive() {
+        let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.fits");
+        std::fs::write(&path, &file).unwrap();
+        let n = std::fs::metadata(&path).unwrap().len();
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(n);
+        let decoded = decode_file_with_limits(&path, exact).unwrap();
+        assert_eq!(decoded.data(), &[7u8; 12]);
+
+        let one_short = DecodeLimits::default().with_max_alloc_bytes(n - 1);
+        assert!(
+            matches!(
+                decode_file_with_limits(&path, one_short),
+                Err(SourceError::AllocLimitExceeded {
+                    what: "image file body",
+                    needed_bytes,
+                    max_alloc_bytes,
+                }) if needed_bytes == n && max_alloc_bytes == n - 1
+            ),
+            "one byte under the file length must refuse the body"
+        );
+    }
+
+    /**
+     * Verifies that the new ceiling reaches only the containers that decode
+     * from memory, and that the streaming decoders still never see the whole
+     * file. Those paths already read no more than they need, so bounding
+     * them by file length would refuse files that cost nothing to decode.
+     * Works by growing a PNG with a sparse tail well past the ceiling. PNG
+     * stops at `IEND`, so the tail is never read, and a decode that succeeds
+     * under a ceiling far below the apparent length is proof the streaming
+     * path is untouched.
+     * Input: a 16x16 RGB PNG grown to 4 MiB, max_alloc_bytes = 65536 ->
+     * Output: the 16x16 raster, decoded.
+     */
+    #[test]
+    fn the_file_body_ceiling_leaves_the_streaming_path_alone() {
+        let png = create_test_png(16, 16);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing.png");
+        write_sparse(&path, &png, 4 * 1024 * 1024);
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(65_536);
+        let decoded = decode_file_with_limits(&path, limits).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 16));
+    }
+
     /**
      * Verifies that a Radiance file reaches the hand-rolled codec through
      * both public decode entry points, and that neither consults the file
