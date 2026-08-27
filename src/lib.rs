@@ -311,10 +311,12 @@ pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
 pub use webp::decode_webp;
 // `decode_jxl` is re-exported for the reason `decode_webp` and
 // `decode_radiance` are: it is the format-specific decode entry point a
-// caller reaches for when they already know the bytes are JPEG XL. The
+// caller reaches for when they already know the bytes are JPEG XL, and
+// `JxlError` travels beside it the way `ExrError` and `FitsError` travel
+// beside theirs, so a caller can name the type they are matching on. The
 // option types stay behind `libviprs::jxl::` so the crate root does not
 // gain a third `SaveOptions`.
-pub use jxl::decode_jxl;
+pub use jxl::{JxlError, decode_jxl};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root

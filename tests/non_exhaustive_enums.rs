@@ -13,9 +13,9 @@
 
 use libviprs::{
     Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError, GifError,
-    Intent, Interpretation, JoinDirection, Layout, ManifestError, MetadataValue, Pcs, PdfError,
-    PixelFormat, PlannerError, Precision, RadianceError, RasterError, ResumeError, SourceError,
-    VerifyError,
+    Intent, Interpretation, JoinDirection, JxlError, Layout, ManifestError, MetadataValue, Pcs,
+    PdfError, PixelFormat, PlannerError, Precision, RadianceError, RasterError, ResumeError,
+    SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -68,6 +68,29 @@ fn assert_fits_error_non_exhaustive(v: &FitsError) {
         FitsError::UnsupportedCarrier { .. } => {}
         FitsError::UnsupportedScaling { .. } => {}
         FitsError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+/// `JxlError` is declared whether or not the `jxl` feature is on, and so is
+/// every variant, so this list is the same in both builds. This test crate
+/// builds with default features, which do not include `jxl`; if a variant
+/// ever picks up a `#[cfg(feature = "jxl")]` this stops compiling, which is
+/// the same guard `pdf_error_pdfium_variant_is_feature_independent` gives
+/// `PdfError::Pdfium` (issue #634).
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_jxl_error_non_exhaustive(v: &JxlError) {
+    match v {
+        JxlError::FeatureNotEnabled => {}
+        JxlError::Decode { .. } => {}
+        JxlError::Truncated { .. } => {}
+        JxlError::CmykNotSupported { .. } => {}
+        JxlError::UnsupportedChannelCount { .. } => {}
+        JxlError::ChannelCountMismatch { .. } => {}
+        JxlError::AllocLimitExceeded { .. } => {}
+        JxlError::DecoderAllocLimitExceeded { .. } => {}
+        JxlError::Raster(_) => {}
         _ => {}
     }
 }
@@ -386,6 +409,7 @@ fn non_exhaustive_checks_compile() {
     assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
     assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
     assert_jxl_compression_non_exhaustive(&libviprs::jxl::Compression::Lossless);
+    assert_jxl_error_non_exhaustive(&JxlError::FeatureNotEnabled);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);
