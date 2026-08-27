@@ -32,6 +32,7 @@ absent. Nothing outside this script's own directory is written.
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import struct
@@ -1065,8 +1066,29 @@ oracle = {
     "records": records,
 }
 
-SCALAR = r"(?:-?[\d.]+(?:[eE][-+]?\d+)?|true|false|null|NaN|-?Infinity)"
+SCALAR = r'(?:-?[\d.]+(?:[eE][-+]?\d+)?|true|false|null|"NaN"|"-?Infinity")'
 INLINE = re.compile(r"\[\s*(" + SCALAR + r"(?:,\s*" + SCALAR + r")*)\s*\]")
+
+
+def json_safe(value):
+    """Quote the floats JSON has no literal for (issue #674). json.dump
+    writes a bare NaN, Infinity or -Infinity by default; Python reads those
+    back and no other language does, so the degenerate-metadata NaNs would
+    make the whole file unreadable to serde_json, jq and JSON.parse. Quoting
+    keeps the three apart the way a null would not. The spelling is pinned for
+    every reader in tests/oracle_capture_json.rs; foreign-nifti is NOT the
+    precedent, it carries both this spelling and a lowercase str(v) one.
+    SCALAR above matches the quoted spelling so those rows still reflow onto
+    one line."""
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
 
 
 def inline_numeric_arrays(text):
@@ -1083,7 +1105,10 @@ def inline_numeric_arrays(text):
 
 
 with open(os.path.join(ROOT, "oracle.json"), "w") as f:
-    f.write(inline_numeric_arrays(json.dumps(oracle, indent=2)))
+    # allow_nan=False so a value json_safe missed stops the capture here
+    # rather than writing a file nobody outside Python can parse.
+    f.write(inline_numeric_arrays(
+        json.dumps(json_safe(oracle), indent=2, allow_nan=False)))
     f.write("\n")
 
 with open(os.path.join(ROOT, "commands.sh"), "w") as f:
