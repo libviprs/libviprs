@@ -330,6 +330,7 @@ fn assert_colour_error_non_exhaustive(v: &ColourError) {
         ColourError::UnsupportedDeviceSpace { .. } => {}
         ColourError::UnsupportedDepth { .. } => {}
         ColourError::IccTransform { .. } => {}
+        ColourError::Raster(_) => {}
         _ => {}
     }
 }
