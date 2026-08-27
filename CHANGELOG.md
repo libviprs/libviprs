@@ -1607,8 +1607,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The remaining infallible allocations in `colour.rs` are the `Vec<f64>` sample
   staging on the colour-difference path and the ICC fallback buffers. None of
   them is on the `try_colourspace` route, and each needs its own way to be
-  driven honestly, so they stay for issue #685 rather than being converted on
-  the assumption that they are reachable.
+  driven honestly, so they went to issue #685 rather than being converted here
+  on the assumption that they are reachable. They are converted in this same
+  release, in the entry below.
 
   **This does not make `try_sharpen` abort-free**, and the claim is deliberately
   narrower than that. Its own body still widens through `Raster::f32_samples`
@@ -1618,6 +1619,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `try_sharpen`'s `# Errors` now names the five sites so a caller reading the
   API docs gets the same answer. What changed here is only the two `colour.rs`
   allocations the round trip reaches, which is all #672 was ever about.
+
+- The colour-difference and ICC paths no longer abort the process when they
+  cannot allocate, so `try_de76`, `try_de00`, `try_de00_sharma`, `try_de_cmc`,
+  `try_icc_import_with`, `try_icc_export_with` and `try_icc_transform` report
+  the failure as `ColourError::Raster` rather than ending it (issue #685).
+  No new public error variant: this reports through the one #672 added.
+
+  #678 made `try_colourspace`'s output fallible and deliberately converted only
+  the sites on that route. Fourteen image-sized allocations were left over
+  everywhere else in `colour.rs`, spelled `Vec::with_capacity`, `vec![0.0; ..]`,
+  `collect()` and `clone()`, and every one of them reaches `handle_alloc_error`
+  on a request the host cannot serve, which no `?` catches. The largest is the
+  colour-difference plane at an `f64` a sample, so a dE asked for more memory
+  than either of the two Lab conversions ahead of it and asked for it
+  infallibly... the `try_` form's `Result` covered the small allocations and not
+  the big one. The ICC paths carry four or five each: the normalised device
+  plane, the `Vec<[f64; 3]>` Lab staging on both directions, the `f64` sample
+  buffer, the copy `try_icc_export_with` takes of an already-Lab input, and the
+  two moxcms buffers each LUT-profile fallback fills.
+
+  All fourteen now reserve through `Vec::try_reserve_exact` and report
+  `RasterError::AllocationFailed`, via one `alloc_colour_plane` helper that
+  prices a plane the way `Raster::new` prices a buffer, so a geometry whose
+  element count does not fit a `usize` comes back as `SizeOverflow` on a 32-bit
+  target instead of a wrapped product. The copy goes through
+  `Raster::try_clone`, which exists for exactly this. The panicking twins keep
+  panicking, as they do on every other `ColourError`.
+
+  Testing this is the whole difficulty and it is worth writing down, because a
+  byte ceiling cannot reach any of it. Both dE operands convert to Lab first,
+  and after #678 those conversions are themselves fallible, so any ceiling low
+  enough to starve the difference plane returns from the first
+  `try_colourspace` and the check goes green having never run the line it
+  names. #678 hit the same wall on `try_sharpen` and answered it with a counter
+  on the existing hook: wave the first `n` over-ceiling requests through, then
+  refuse. That counter is what these tests use, so `spare` is the index of the
+  site along the path and the byte count in the resulting error says which
+  buffer it was. The fixtures carry an extra band on purpose, so that every
+  site on a path has a size no neighbour can produce and an assertion cannot
+  be satisfied by the wrong allocation.
+
+  One pair cannot be separated that way. The export fallback's PCS buffer and
+  its device buffer are both three-and-one-ink f32 over the same pixels, and
+  the only device space the suite can build a profile for is RGB, so both are
+  the same size. They are covered jointly by a check that counts the refusals
+  the function offers up instead of sizing them, which is what notices if
+  either site quietly goes back to an infallible `Vec::with_capacity`.
+
+  On the zeroing cost #672's entry records: twelve of the fourteen dodge it
+  entirely, because they reserve and then push or copy and never touch a byte
+  they do not write. The two moxcms buffers do pay it. `vec![0.0f32; n]` hits
+  std's zero specialisation and lowers to `alloc_zeroed`, and reserve plus
+  `resize` is a `malloc` and a full `memset`, so those two acquire the same
+  34%-at-4-GiB regression `alloc_colour_output` documents, and the fill is dead
+  in both, since the transform writes every element. Same follow-up (#460),
+  same reason: std has no fallible zeroed `Vec` today.
 
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
