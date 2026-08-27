@@ -95,7 +95,14 @@ def container_script(job, tag):
         if "${{" in run:
             if "libviprs-tests.git" in run:
                 if not os.path.isdir(TESTS_DIR):
-                    out.append('echo "SKIP: no libviprs-tests sibling to mount"; exit 0')
+                    # Exit 99, not 0. Exiting 0 here made the runner print
+                    # "PASS Integration Tests" for a job that compiled nothing,
+                    # and counted it toward "All jobs passed". A lane worktree
+                    # has no sibling checkout, so that was the DEFAULT state
+                    # rather than an edge case: the one job that crosses repos
+                    # silently reported success for everybody who had not
+                    # cloned the other repo.
+                    out.append('echo "SKIP: no libviprs-tests sibling to mount"; exit 99')
                 else:
                     out.append('echo ">> adapted: using the bind-mounted libviprs-tests sibling, not git clone"')
                 continue
@@ -172,6 +179,7 @@ def main():
         print(f"note: {TESTS_DIR} not found, the integration job will skip", file=sys.stderr)
 
     failed = []
+    skipped = []
     for j in plan:
         print(f"\n{'=' * 64}\n  {j['name']}   (toolchain {j['toolchain']})\n{'=' * 64}")
         # Stream the output AND keep it, so a failure can never be reported
@@ -191,6 +199,10 @@ def main():
             sys.stdout.write(line)
             tail.append(line)
         rc = proc.wait()
+        if rc == 99:
+            print(f"  SKIP  {j['name']}")
+            skipped.append(j["name"])
+            continue
         print(f"  {'PASS' if rc == 0 else 'FAIL'}  {j['name']}")
         if rc != 0:
             failed.append(j["name"])
@@ -206,9 +218,15 @@ def main():
                 print("      tools/local-ci.py --native " + j["name"].split()[0])
 
     print()
+    if skipped:
+        print("SKIPPED: " + ", ".join(skipped))
     if failed:
         print("FAILED: " + ", ".join(failed))
         return 1
+    ran = len(plan) - len(skipped)
+    if skipped:
+        print(f"{ran} of {len(plan)} jobs passed; {len(skipped)} skipped and did NOT run.")
+        return 0
     print("All jobs passed.")
     return 0
 
