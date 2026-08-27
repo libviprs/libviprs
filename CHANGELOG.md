@@ -382,12 +382,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Without the feature nothing about the surface moves: every one of those entry
   points still exists at the same signature and returns a typed refusal naming
-  the feature, the way `crate::svg` does without `svg`. `decode_jxl` reports an
-  `Unsupported` I/O error, both encoders report
-  `EncodeError::Unsupported { format: "jxl" }`, and `.jxl` leaves the extension
-  route entirely, so `save("x.jxl")` reports an unsupported extension like any
-  other format with no encoder behind it. Consumer code compiles against either
-  build.
+  the feature. `decode_jxl` reports `JxlError::FeatureNotEnabled`, both encoders
+  report `EncodeError::Unsupported { format: "jxl" }`, and `.jxl` leaves the
+  extension route entirely, so `save("x.jxl")` reports an unsupported extension
+  like any other format with no encoder behind it. Consumer code compiles
+  against either build.
 
   Decode goes to `jxl-oxide`, which targets the same JPEG XL conformance suite
   libjxl does, so this is a parity port rather than an approximation, and the
@@ -463,6 +462,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GHSA-66m8-c62j-h6v5, an unchecked `usize` multiply in `FrameBuffer::new` that
   hands out oversized slices from an undersized buffer.
   `fuzz/fuzz_targets/fuzz_jxl.rs` and a 26-seed corpus ship with it.
+- `JxlError`, the JPEG XL loader's own error type, reached through a new
+  `SourceError::Jxl` variant (issue #634). JPEG XL was the only one of the three
+  codecs in this release with no typed error of its own, so its refusals came
+  back as `SourceError::Decode` wrapping an `image::ImageError` with a
+  hand-spelled `"JPEG XL"` format hint, and telling a CMYK refusal from a
+  truncated file from an over-budget one meant matching on the message text.
+  That is exactly what `ExrError`, `FitsError`, `GifError` and `RadianceError`
+  exist to avoid, and `JxlError` is the same shape: `#[non_exhaustive]`, struct
+  variants with named fields, and an `#[error(transparent)] Raster(RasterError)`
+  tail.
+
+  Nine variants. `FeatureNotEnabled` for a build without the `jxl` feature,
+  `Decode` for a bitstream `jxl-oxide` refuses, `Truncated` for one that simply
+  runs out (the two-phase feed makes those different answers, and the variant
+  names which of the header and the first frame was still missing),
+  `CmykNotSupported` for a file with a black ink channel,
+  `UnsupportedChannelCount` and `ChannelCountMismatch` for the two defensive
+  channel checks, and `Raster` for a frame that cannot be wrapped.
+
+  The two allocation refusals stayed separate rather than collapsing into one,
+  and that is the change with teeth. `AllocLimitExceeded` is the crate's own
+  ceiling, priced from the declared header geometry before the decoder reserves
+  a thing, and it reports the geometry, the bytes needed and the budget.
+  `DecoderAllocLimitExceeded` is `jxl-oxide`'s `AllocTracker` refusing an
+  internal buffer part-way through, where the size is the decoder's business and
+  never reaches us. Both used to arrive as the same
+  `image::ImageError::Limits(InsufficientMemory)`, so the test covering them
+  passed whichever one fired. Measured now that they are distinguishable: a
+  4x3 file under an 8-byte budget answers with the tracker, because even a
+  header's working buffers are over 8 bytes, while a 512x512 one under 256 KiB
+  answers with the pre-check. Both are pinned, one per test.
+
+  `JxlError` and `SourceError::Jxl` are declared whether or not the feature is
+  on, so a caller's `match` has the same arms in either build and none of them
+  names a type that is not there. Without the feature `FeatureNotEnabled` is
+  the only reachable variant, and with it it is the only unreachable one, which
+  is what lets a caller tell "this build has no JPEG XL" from "these bytes are
+  not JPEG XL" without reading a message. `decode_jxl` used to report the
+  feature-off case as an `Unsupported` I/O error, the way `crate::svg` still
+  does; that is the one behaviour change here and it only affects a build
+  without `jxl`.
+
+  The encoder is deliberately not on this enum. `Raster::encode_jxl` and
+  `Raster::save_jxl` stay on the shared `EncodeError` spine, which is where
+  `gif`, `radiance` and `fits` leave their save refusals too, so JPEG XL does
+  not become the one codec with a third convention.
 - OpenEXR load: `decode_exr`, plus the sniff route so `decode_bytes` and
   `decode_file` reach it from the magic bytes rather than the extension
   (issues #504, #614 and #615). An `.exr` decodes to `FloatF32(n)` holding the
@@ -1238,6 +1283,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `decode_file` bounds the whole-file read it does for the formats that are
+  decoded from memory, so `DecodeLimits::max_alloc_bytes` is now in the path
+  of that read instead of being consulted after it (issue #629). `.v`, JPEG,
+  GIF, WebP, JPEG XL, Radiance, FITS and OpenEXR all need the bytes
+  addressable end to end rather than streamed, and the read that got them was
+  a plain `std::fs::read`. That sizes its buffer from the file and then grows
+  infallibly, so `max_coord`, `max_pixels` and `max_alloc_bytes` were every
+  one of them consulted after the whole file was already resident, and on a
+  constrained host the failure was a process abort rather than a returned
+  error.
+
+  So the read had no ceiling at all, and a file could name any size it liked.
+  A 3 GiB FITS declaring a 4x3 image decoded successfully at 3.01 GiB
+  resident under the default 512 MiB ceiling; the same file is now refused at
+  6 MiB resident with `AllocLimitExceeded { needed_bytes: 3221225472,
+  max_alloc_bytes: 536870912 }`. That is the whole of what changed: the worst
+  case went from unbounded to `max_alloc_bytes`, and the failure went from an
+  abort on a constrained host to a returned error everywhere.
+
+  The read now stats first and refuses anything longer than
+  `max_alloc_bytes`, then caps the read as well, so a source that yields more
+  bytes than its `stat` declared is refused rather than silently truncated
+  and handed to the decoder as a whole file. It is the same
+  `read_file_bounded` the TIFF page readers have used since #612, lifted into
+  `source` so both call sites share one implementation rather than drifting
+  apart.
+
+  **What this does not do is make a cheap file cheap to decode.** The ceiling
+  is a byte count, not a ratio between what a file costs to store and what it
+  costs to decode, so anything under it is untouched. Measured on APFS, where
+  a file grown with `set_len` leaves the tail as a hole, so it declares 400
+  MiB and occupies 8 KiB: it decodes to a 4x3 image at 406 MiB resident, and
+  that number is the same before and after this change. At exactly the
+  ceiling it is 518 MiB resident from the same 8 KiB on disk. If you serve
+  untrusted files, `max_alloc_bytes` is now the number that bounds what one
+  decode can cost you, and the default 512 MiB is a lot to hand a file you
+  did not write.
+
+  **This can refuse a file that used to decode.** A file longer than
+  `max_alloc_bytes` in one of the formats above is now
+  `SourceError::AllocLimitExceeded { what: "image file body", .. }`, which
+  is the same variant the declared-geometry checks already raised, so
+  nothing has to tell "too big by header" from "too big by file length".
+  Raise the ceiling with `DecodeLimits::with_max_alloc_bytes` if you
+  legitimately load files bigger than that. The ceiling is inclusive, so a
+  file of exactly `max_alloc_bytes` still decodes. The streaming decoders are
+  untouched: they never read the whole file, so bounding them by its length
+  would refuse work that costs nothing.
+
+- `MemoryTracker::alloc` saturates at `u64::MAX` instead of overflowing (the
+  `alloc` half of issue #114, which fixed the same thing on `dealloc`). It read
+  `self.current.fetch_add(bytes, Relaxed) + bytes`, and that `+ bytes` panics
+  with "attempt to add with overflow" in debug builds and under Miri once the
+  counter is high enough, which is not a thing an observability counter should
+  do to a run. Saturating the local sum alone would have been worse than the
+  bug: `fetch_add` wraps the stored counter, so `current` would come back small
+  while `peak` ratcheted to `u64::MAX` permanently, which is exactly the
+  corruption #114 removed from the other side. The counter now clamps through
+  the same saturating `fetch_update` `dealloc` uses, so the two ends match and
+  `current` and `peak` stay consistent. In-tree call sites never get near the
+  ceiling, but the type is `pub` with a `Clone`-able `Arc` inside, so a caller
+  can put it there.
 - A `.v` file libviprs writes is now readable by real vips, metadata and all,
   and no longer makes it print a warning on every open (issue #546). The
   trailer after the pixel data was libviprs's own JSON. libvips parses that

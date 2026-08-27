@@ -76,9 +76,11 @@
 //!
 //! * The **file body**. `decode_tiff_page` reads the whole file rather than
 //!   streaming it, because the vips multiband relabel below patches the bytes
-//!   before the decoder sees them. That read is capped at
+//!   before the decoder sees them. That read goes through the crate's shared
+//!   `read_file_bounded`, so it is capped at
 //!   [`DecodeLimits::max_alloc_bytes`], checked against the declared length
-//!   first and again against what was actually read.
+//!   first and again against what was actually read. The same helper now
+//!   backs [`crate::decode_file`]'s whole-file read (issue #629).
 //! * The **relabel**. It patches the buffer the reader already owns instead of
 //!   cloning it (`normalize_multiband_photometric_in_place`), so the peak
 //!   footprint is one copy of the file, not two.
@@ -141,7 +143,7 @@ use crate::imageio::SaveError;
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
 use crate::sink::SinkError;
-use crate::source::DecodeLimits;
+use crate::source::{DecodeLimits, read_file_bounded};
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -621,36 +623,6 @@ fn open_decoder<R: Read + Seek>(
         .with_limits(tiff_limits))
 }
 
-/// Read the whole of `path` into memory, refusing a file larger than
-/// [`DecodeLimits::max_alloc_bytes`].
-///
-/// The page readers need the bytes in memory rather than streamed, because the
-/// vips multiband relabel patches them before the decoder ever sees them. A
-/// plain `std::fs::read` sizes that buffer from the file, which is exactly the
-/// unbounded allocation the limits exist to prevent. The declared length is
-/// checked first so a huge file costs one `stat` rather than a huge read, and
-/// the read is capped as well so a file that grows between the two cannot slip
-/// past.
-fn read_file_bounded(path: &Path, limits: DecodeLimits) -> Result<Vec<u8>, DecodeError> {
-    let file = std::fs::File::open(path)?;
-    let declared = file.metadata()?.len();
-    limits.check_alloc("TIFF file body", declared)?;
-
-    let cap = limits.max_alloc_bytes;
-    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
-    let mut reader = std::io::BufReader::new(&file).take(cap.saturating_add(1));
-    reader.read_to_end(&mut bytes)?;
-    let read = bytes.len() as u64;
-    if read > cap {
-        return Err(DecodeError::AllocLimitExceeded {
-            what: "TIFF file body",
-            needed_bytes: read,
-            max_alloc_bytes: cap,
-        });
-    }
-    Ok(bytes)
-}
-
 /// Read the decoder's currently-selected image into a [`Raster`], applying
 /// `limits` to the declared geometry before anything is allocated for it.
 ///
@@ -822,7 +794,7 @@ pub fn decode_tiff_page_with_limits(
     page: u32,
     limits: DecodeLimits,
 ) -> Result<Raster, DecodeError> {
-    let mut bytes = read_file_bounded(path, limits)?;
+    let mut bytes = read_file_bounded(path, limits, "TIFF file body")?;
     normalize_multiband_photometric_in_place(&mut bytes);
 
     // Counting first buys two things: an out-of-range index reports the bound
