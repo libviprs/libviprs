@@ -9,9 +9,18 @@
 //! `JSON.parse`. Two files had drifted that way before this test existed:
 //! `foreign-radiance` (one `Infinity`) and `foreign-uhdr` (six `NaN`).
 //!
-//! The repair is the spelling `foreign-nifti` already used, quoting the token
-//! `json.dump` would have written bare. It is the encoding a reader has to
-//! agree with, so it is pinned here rather than left to each consumer:
+//! The repair quotes the token `json.dump` would have written bare. That is a
+//! convention this file INTRODUCES, not one it inherits: nothing in the tree
+//! had settled on one. `foreign-nifti` is the only other capture that records
+//! a non-finite float, and it carries both spellings at once. Its `probe.c`
+//! prints `"Infinity"` and `"NaN"` for the header floats it cannot spell as
+//! numbers, while a `str(v)` in its `capture.py` writes `"inf"`, `"-inf"` and
+//! `"nan"` for the `on_disk_pixdim` rows... same kind of data, different
+//! token. Bringing it onto one spelling means re-capturing it, which is the
+//! repin question #650 / #673 own rather than this one.
+//!
+//! So the encoding a reader has to agree with is pinned here rather than left
+//! to each consumer:
 //!
 //!   * a finite value stays a JSON number,
 //!   * the other three are the strings `"NaN"`, `"Infinity"` and
@@ -47,25 +56,76 @@ fn oracle_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(&repo_root().join("oracle-captures"), &mut out);
     out.sort();
-    assert!(
-        out.len() >= 13,
-        "expected the whole capture tree, found only {out:?}"
-    );
+
+    // Named rather than counted. A floor of `>= 13` cannot fire while the tree
+    // is pruned down to 13, and pinning the exact number turns every capture
+    // anyone adds into an unrelated red test here. The list catches the two
+    // things that would actually make the guard vacuous, a walk that quietly
+    // finds nothing and an area that quietly disappears, and stays silent when
+    // an area is added.
+    let found: Vec<String> = out
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root())
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    for area in KNOWN_CAPTURES {
+        assert!(
+            found.iter().any(|f| f == area),
+            "{area} is missing, so the walk is not seeing the whole tree. Found: {found:?}"
+        );
+    }
     out
 }
 
+/// Every capture area checked in today. See `oracle_files` for why this is a
+/// list and not a count.
+const KNOWN_CAPTURES: [&str; 14] = [
+    "oracle-captures/convolution/canny/oracle.json",
+    "oracle-captures/convolution/oracle.json",
+    "oracle-captures/foreign-analyze/oracle.json",
+    "oracle-captures/foreign-avif/oracle.json",
+    "oracle-captures/foreign-exr/oracle.json",
+    "oracle-captures/foreign-fits/oracle.json",
+    "oracle-captures/foreign-gif/oracle.json",
+    "oracle-captures/foreign-jp2k/oracle.json",
+    "oracle-captures/foreign-jxl/oracle.json",
+    "oracle-captures/foreign-mat/oracle.json",
+    "oracle-captures/foreign-nifti/oracle.json",
+    "oracle-captures/foreign-radiance/oracle.json",
+    "oracle-captures/foreign-uhdr/oracle.json",
+    "oracle-captures/foreign-webp/oracle.json",
+];
+
 /// Decode one recorded float: a JSON number, or one of the three quoted
 /// tokens a capture writes for a value RFC 8259 has no literal for.
-fn recorded_float(v: &serde_json::Value) -> f64 {
+///
+/// `at` names the file and the key, because the tree is not uniform yet.
+/// `foreign-nifti` spells the same three values `"nan"`, `"inf"` and `"-inf"`
+/// in its `on_disk_pixdim` rows, so pointing this at that capture is a
+/// plausible next move and it should come back with a diagnosis rather than a
+/// bare panic naming a token and no row.
+fn recorded_float(v: &serde_json::Value, at: &str) -> f64 {
     match v {
-        serde_json::Value::Number(n) => n.as_f64().expect("a recorded float fits an f64"),
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .unwrap_or_else(|| panic!("{at}: the recorded float {n} does not fit an f64")),
         serde_json::Value::String(s) => match s.as_str() {
             "NaN" => f64::NAN,
             "Infinity" => f64::INFINITY,
             "-Infinity" => f64::NEG_INFINITY,
-            other => panic!("{other:?} is not a recorded non-finite float"),
+            other => panic!(
+                "{at}: {other:?} is not one of the three recorded non-finite tokens \
+                 (\"NaN\", \"Infinity\", \"-Infinity\"). foreign-nifti writes \
+                 \"nan\", \"inf\" and \"-inf\" for the same values, so if that is \
+                 the capture being read it has to be brought onto this spelling \
+                 first (issue #674)"
+            ),
         },
-        other => panic!("{other} is not a recorded float"),
+        other => panic!("{at}: {other} is not a recorded float"),
     }
 }
 
@@ -120,11 +180,19 @@ fn the_strict_parser_really_does_reject_bare_literals() {
     }
 }
 
-/// The encoding has to survive write-then-read with the value's identity
-/// intact, which is exactly what `null` would not do. NaN, `+inf` and `-inf`
-/// must come back as themselves and not as each other.
+/// The three tokens are pairwise distinct and survive write-then-read with the
+/// value's identity intact, which is exactly what `null` would not give: NaN,
+/// `+inf` and `-inf` come back as themselves and not as each other.
+///
+/// Worth naming what this does NOT prove, because the name it used to have
+/// claimed more. Both halves live in this file and `record_float` has no other
+/// caller anywhere in the tree, so this is two functions written together
+/// agreeing with each other. It says nothing about whether `capture.py`'s
+/// `json_safe` writes the same three tokens... that is
+/// `the_repaired_captures_still_record_a_real_infinity_and_a_real_nan` below,
+/// which reads what the encoder actually wrote to disk.
 #[test]
-fn non_finite_floats_round_trip_through_the_recorded_spelling() {
+fn the_three_recorded_tokens_are_distinct_and_survive_a_round_trip() {
     let values = [
         f64::NAN,
         f64::INFINITY,
@@ -143,7 +211,11 @@ fn non_finite_floats_round_trip_through_the_recorded_spelling() {
 
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&text).expect("the encoded form must be strict JSON");
-    let read_back: Vec<f64> = parsed.iter().map(recorded_float).collect();
+    let read_back: Vec<f64> = parsed
+        .iter()
+        .enumerate()
+        .map(|(i, v)| recorded_float(v, &format!("this test's own encoded[{i}]")))
+        .collect();
 
     assert_eq!(read_back.len(), values.len());
     for (before, after) in values.iter().zip(&read_back) {
@@ -180,13 +252,15 @@ fn the_repaired_captures_still_record_a_real_infinity_and_a_real_nan() {
     // `float2rad`'s setcolr sweep: row 8 is the undefined-behaviour row, and
     // its first component is the +inf that makes it one.
     let row = &radiance["records"]["encode_setcolr"]["inputs"][8];
-    let inf = recorded_float(&row[0]);
+    let at =
+        |band| format!("foreign-radiance/oracle.json records.encode_setcolr.inputs[8][{band}]");
+    let inf = recorded_float(&row[0], &at(0));
     assert!(
         inf.is_infinite() && inf.is_sign_positive(),
         "encode_setcolr input 8 must be +inf, got {inf}"
     );
-    assert_eq!(recorded_float(&row[1]), 1.0);
-    assert_eq!(recorded_float(&row[2]), 1.0);
+    assert_eq!(recorded_float(&row[1], &at(1)), 1.0);
+    assert_eq!(recorded_float(&row[2], &at(2)), 1.0);
 
     let uhdr: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(repo_root().join("oracle-captures/foreign-uhdr/oracle.json"))
@@ -202,7 +276,13 @@ fn the_repaired_captures_still_record_a_real_infinity_and_a_real_nan() {
         let scrgb = &results[arm]["scRGB"];
         assert_eq!(scrgb.as_array().expect("a 16-pixel row").len(), 16);
         for band in 0..3 {
-            let v = recorded_float(&scrgb[pixel][band]);
+            let v = recorded_float(
+                &scrgb[pixel][band],
+                &format!(
+                    "foreign-uhdr/oracle.json records.uhdr2scRGB_degenerate_metadata\
+                     .results.{arm}.scRGB[{pixel}][{band}]"
+                ),
+            );
             assert!(
                 v.is_nan(),
                 "{arm} pixel {pixel} band {band} must be NaN, got {v}"

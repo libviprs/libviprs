@@ -380,9 +380,10 @@ def json_safe(value):
     """Quote the floats JSON has no literal for (issue #674). json.dump
     writes a bare NaN, Infinity or -Infinity by default; Python reads those
     back and no other language does, so the ENCODE_INPUTS infinity would make
-    the whole file unreadable to serde_json, jq and JSON.parse. Quoting is
-    what foreign-nifti already does, and it keeps the three apart the way a
-    null would not."""
+    the whole file unreadable to serde_json, jq and JSON.parse. Quoting keeps
+    the three apart the way a null would not. The spelling is pinned for every
+    reader in tests/oracle_capture_json.rs; foreign-nifti is NOT the precedent,
+    it carries both this spelling and a lowercase str(v) one."""
     if isinstance(value, float) and not math.isfinite(value):
         if math.isnan(value):
             return "NaN"

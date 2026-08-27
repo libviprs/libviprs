@@ -1075,9 +1075,11 @@ def json_safe(value):
     writes a bare NaN, Infinity or -Infinity by default; Python reads those
     back and no other language does, so the degenerate-metadata NaNs would
     make the whole file unreadable to serde_json, jq and JSON.parse. Quoting
-    is what foreign-nifti already does, and it keeps the three apart the way a
-    null would not. SCALAR above matches the quoted spelling so those rows
-    still reflow onto one line."""
+    keeps the three apart the way a null would not. The spelling is pinned for
+    every reader in tests/oracle_capture_json.rs; foreign-nifti is NOT the
+    precedent, it carries both this spelling and a lowercase str(v) one.
+    SCALAR above matches the quoted spelling so those rows still reflow onto
+    one line."""
     if isinstance(value, float) and not math.isfinite(value):
         if math.isnan(value):
             return "NaN"

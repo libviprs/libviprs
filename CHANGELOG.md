@@ -1833,10 +1833,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   radiance or uhdr differential test to Rust, and starts by suspecting their
   own code rather than the fixture.
 
-  Both files now use the spelling `foreign-nifti` already had, quoting the
-  token `json.dump` would have written bare: `"NaN"`, `"Infinity"` and
-  `"-Infinity"`, with every finite value staying an ordinary JSON number. I
-  picked quoting over `null` because those two records exist precisely to say
+  Both files now quote the token `json.dump` would have written bare: `"NaN"`,
+  `"Infinity"` and `"-Infinity"`, with every finite value staying an ordinary
+  JSON number. That convention is introduced here rather than inherited.
+  `foreign-nifti` is the only other capture that records a non-finite float and
+  it carries both spellings at once: `"Infinity"` and `"NaN"` from its
+  `probe.c`, and `"inf"`, `"-inf"` and `"nan"` from a `str(v)` in its
+  `capture.py`. Bringing that file onto one spelling means re-capturing it, so
+  it belongs with the #650 / #673 repin rather than here, and
+  `tests/oracle_capture_json.rs` says which spelling it would have to move to.
+  I picked quoting over `null` because those two records exist precisely to say
   which non-finite value libvips produced, and `null` folds all three onto one
   answer. Each `capture.py` sanitises on the way out and then dumps with
   `allow_nan=False`, so a value the sanitiser misses stops the capture rather
@@ -1853,11 +1859,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture tree and parses every `oracle.json` with `serde_json`, reporting all
   the offenders rather than the first, so the next capture that reaches for a
   bare literal goes red in CI instead of waiting for someone to try to read it.
-  Two more tests sit next to it: one round-trips NaN and both infinities
-  through the encoding and checks each comes back as itself rather than as one
-  of the others, and one asserts `serde_json` really does refuse the bare
-  literals, so the guard cannot quietly become a check that passes for the
-  wrong reason.
+  Two more tests sit next to it: one checks the three tokens are pairwise
+  distinct and each comes back as itself rather than as one of the others,
+  which is the property `null` would lose, and one asserts `serde_json` really
+  does refuse the bare literals, so the guard cannot quietly become a check
+  that passes for the wrong reason. A fourth reads the two repaired files back
+  and checks the values really are a `+inf` and a `NaN` in the rows that are
+  supposed to carry them, which is the only one of the four that tests what the
+  Python writer actually emitted.
 
 ## [0.4.0] — 2026-07-20
 
