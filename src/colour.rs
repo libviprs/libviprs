@@ -1423,6 +1423,13 @@ fn with_colour_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
 /// [`Raster::try_colourspace`] loop writes its output samples straight
 /// into `buf` (via [`write_sample`]) and finishes through here, so no
 /// intermediate full-image `Vec<f64>` staging is materialised.
+///
+/// The wrap goes through [`Raster::from_op_output`] rather than
+/// [`Raster::new`], for the reason [`alloc_colour_output`] skips the byte
+/// budget: a colour output derives from an already-budget-checked input and
+/// legitimately grows past `DEFAULT_MAX_ALLOC_BYTES` on a widening conversion,
+/// where `Raster::new` would reject it and the old `.expect` would turn that
+/// rejection into a panic out of a `try_` form (issue #279).
 fn raster_from_bytes(
     width: u32,
     height: u32,
@@ -1431,17 +1438,20 @@ fn raster_from_bytes(
     buf: Vec<u8>,
     like: &Raster,
     tag: Interpretation,
-) -> Raster {
-    let mut out = Raster::new(width, height, format_for(channels, depth), buf)
-        .expect("colour op output is well-formed");
+) -> Result<Raster, RasterError> {
+    let mut out = Raster::from_op_output(width, height, format_for(channels, depth), buf)?;
     out.meta = like.meta;
     out.meta.interpretation = Some(tag);
     out.fields = like.fields.clone();
-    out
+    Ok(out)
 }
 
 /// Build a raster from per-channel `f64` samples at `depth`, carrying
 /// `like`'s metadata block and attached fields, tagged `tag`.
+///
+/// The byte buffer is the colour-difference and ICC arms' output, so it goes
+/// through [`alloc_colour_output`] and reports
+/// [`RasterError::AllocationFailed`] rather than aborting (issue #672).
 fn build_raster(
     width: u32,
     height: u32,
@@ -1450,8 +1460,8 @@ fn build_raster(
     samples: &[f64],
     like: &Raster,
     tag: Interpretation,
-) -> Raster {
-    let mut buf = vec![0u8; samples.len() * depth.bytes()];
+) -> Result<Raster, RasterError> {
+    let mut buf = alloc_colour_output(width, height, format_for(channels, depth))?;
     for (i, &v) in samples.iter().enumerate() {
         write_sample(&mut buf, depth, i, v);
     }
@@ -2123,8 +2133,11 @@ impl Raster {
     /// # Errors
     ///
     /// [`ColourError::UnsupportedColourspace`] when the source or target
-    /// has no route, and [`ColourError::TooFewBands`] when the image has
-    /// fewer bands than its space needs.
+    /// has no route, [`ColourError::TooFewBands`] when the image has
+    /// fewer bands than its space needs, and [`ColourError::Raster`] when
+    /// the output cannot be allocated. That last one arrives as a value:
+    /// the output buffer is reserved fallibly, so an over-capacity
+    /// conversion is an `Err` and never a process abort.
     pub fn try_colourspace(&self, target: Interpretation) -> Result<Raster, ColourError> {
         let src = alias_source(self.interpretation());
         if !space_supported(src) {
@@ -2161,8 +2174,15 @@ impl Raster {
         // (libviprs#284). `src_px` is reused across pixels for the source
         // colour bands, and `tgt_px` is a reused stack scratch wide enough
         // for every space (CMYK is the widest at four bands) that
-        // `from_xyz_into` writes into.
-        let mut buf = vec![0u8; total * out_channels * tgt_depth.bytes()];
+        // `from_xyz_into` writes into. The output buffer is the one
+        // image-sized allocation on this path, so it is reserved fallibly:
+        // `vec![]` here reached `handle_alloc_error` and aborted the process,
+        // which is the one thing a `try_` form must not do (issue #672).
+        let mut buf = alloc_colour_output(
+            self.width(),
+            self.height(),
+            format_for(out_channels, tgt_depth),
+        )?;
         let mut src_px = vec![0.0f64; src_bands];
         let mut tgt_px = [0.0f64; 4];
         let identity = src == target;
@@ -2212,7 +2232,7 @@ impl Raster {
             buf,
             self,
             target,
-        ))
+        )?)
     }
 
     /// Convert this image to the target colour space (libvips
@@ -2282,7 +2302,7 @@ impl Raster {
             &samples,
             &left,
             Interpretation::Bw,
-        ))
+        )?)
     }
 
     /// CIE76 colour difference between two images (libvips `vips_dE76`):
@@ -2416,7 +2436,8 @@ impl Raster {
     /// profiles, [`ColourError::TooFewBands`] when the image has fewer
     /// bands than the profile's device space, and
     /// [`ColourError::IccTransform`] when the CMS cannot build a
-    /// transform for a LUT profile.
+    /// transform for a LUT profile, and [`ColourError::Raster`] when the
+    /// output cannot be allocated.
     pub fn try_icc_import_with(
         &self,
         intent: Intent,
@@ -2470,7 +2491,7 @@ impl Raster {
             &samples,
             self,
             tag,
-        ))
+        )?)
     }
 
     /// Panicking form of [`Raster::try_icc_import_with`], matching the
@@ -2582,7 +2603,7 @@ impl Raster {
             &samples,
             &source,
             device_tag(dev_ch, out_depth),
-        );
+        )?;
         out.set_icc_profile(&bytes);
         Ok(out)
     }
