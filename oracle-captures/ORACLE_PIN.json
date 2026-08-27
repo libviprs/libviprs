@@ -1,0 +1,70 @@
+{
+  "what": "The libvips build every oracle capture in this directory is measured against, and which areas have actually been captured on it. Issue #650.",
+  "why": "A `brew upgrade` nobody ran deliberately replaced vips 8.18.4 with 8.18.6 mid-session and deleted the old keg, so the reference implementation for twenty-odd issues of work moved without anyone choosing to move it. Every area recorded `vips-8.18.4` in its own meta block, in its own key, and nothing compared those strings to each other or to the binary on the machine. This file is the one place the target is written down, `capture.py` refuses to run against a binary that disagrees with it, and `tests/oracle_capture_pins.rs` fails if a committed capture records a version this file does not declare for it.",
+  "pinned_vips_version": "vips-8.18.6",
+  "pinned_because": "8.18.6 is what exists on the capture host; 8.18.4 cannot be reinstalled from the current Homebrew tap without building it. The delta between the two is two loader-level behaviours (EXR refuses a data window under 2 pixels on either axis, and vips__mat_ismat now validates 128 bytes rather than 10) plus one byte of container metadata: `build_xml` in libvips/iofuncs/vips.c writes VIPS_MICRO_VERSION into the `.v` trailer's XML namespace, so every `.v` file written by 8.18.6 differs from the 8.18.4 one at exactly that byte and nowhere else. No arithmetic moved.",
+  "how_to_move_the_pin": "Run the area's capture.py with --repin against the new binary, then edit this file. Both halves are needed: --repin alone leaves the committed capture recording a version this file does not declare, which is what the Rust guard fails on.",
+  "codec_versions": "Not pinned here, and deliberately so. Each capture records the full transitive Homebrew keg version map of its own vips binary under `meta.provenance.homebrew_kegs`, derived automatically from `otool -L`, so provenance travels with the numbers instead of being reinvented per lane. The stack under vips moves independently of vips: the same upgrade took libheif 1.23.1 to 1.23.2, x265 4.2 to 4.3 and libultrahdr 1.5.1 to 2.0.2.",
+  "areas": {
+    "convolution": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "convolution/canny": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "foreign-analyze": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "foreign-avif": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "foreign-exr": {
+      "vips_version": "vips-8.18.4",
+      "state": "pre_pin",
+      "note": "Re-capturing this one is not mechanical. 8.18.6 refuses any EXR whose data window is under 2 pixels on either axis, so the `rgba_half_1x1` fixture that loaded to a 1x1 four-band raster under 8.18.4 now fails with `exr2vips: bad window geometry`. libviprs reads it, so the reconciliation is a real decision, not a re-run (issue #650)."
+    },
+    "foreign-fits": {
+      "vips_version": "vips-8.18.4",
+      "state": "pre_pin"
+    },
+    "foreign-gif": {
+      "vips_version": "vips-8.18.4",
+      "state": "pre_pin"
+    },
+    "foreign-jp2k": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "foreign-jxl": {
+      "vips_version": "vips-8.18.4",
+      "state": "pre_pin"
+    },
+    "foreign-mat": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "foreign-nifti": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin",
+      "note": "The oracle here is nifti_clib, not libvips, because this build registers neither niftiload nor niftisave. The version recorded is the vips that was asked and declined."
+    },
+    "foreign-radiance": {
+      "vips_version": "vips-8.18.4",
+      "state": "pre_pin",
+      "note": "Re-measured against 8.18.6: 351 leaves, 1 differs, and it is `meta.vips_version`."
+    },
+    "foreign-uhdr": {
+      "vips_version": "vips-8.18.6",
+      "state": "on_pin"
+    },
+    "foreign-webp": {
+      "vips_version": "vips-8.18.4",
+      "state": "pre_pin",
+      "note": "Re-measured against 8.18.6: 718 leaves, 14 differ, and all 14 are the version string or an absolute path embedded in `vipsheader` output."
+    }
+  }
+}
