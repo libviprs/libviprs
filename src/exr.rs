@@ -101,7 +101,7 @@ use thiserror::Error;
 use crate::conversion::Interpretation;
 use crate::imageio::MetadataValue;
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError};
+use crate::raster::{Raster, RasterError, buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The four magic bytes every OpenEXR file opens with
@@ -444,16 +444,19 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // on top of what `exr` is holding. The budget is therefore a floor on
     // the peak rather than the peak itself.
     //
-    // Saturating rather than wrapping, because `max_coord`, `max_pixels`
-    // and `max_alloc_bytes` are all caller-settable: a caller who lifts
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632): `decode_alloc_bytes` saturates rather than wrapping,
+    // which matters because `max_coord`, `max_pixels` and
+    // `max_alloc_bytes` are all caller-settable and a caller who lifts
     // every ceiling must still get a refusal here rather than a wrapped
-    // price that waves a huge allocation through.
+    // price that waves a huge allocation through. The typed variant is
+    // this module's own, built from `exceeds_alloc_budget`'s answer rather
+    // than retagged off a `SourceError` whose `what` label no caller could
+    // ever see; #632 deferred collapsing the per-format variants and #686
+    // carries it.
     let declared = header.channels.list.len();
-    let needed = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(declared as u64)
-        .saturating_mul(SAMPLE_BYTES as u64);
-    if needed > limits.max_alloc_bytes {
+    let needed = decode_alloc_bytes(width, height, declared as u64, SAMPLE_BYTES as u64);
+    if limits.exceeds_alloc_budget(needed) {
         return Err(ExrError::AllocLimitExceeded {
             width,
             height,
@@ -496,8 +499,17 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
         .into());
     }
 
-    let pixels = width as usize * height as usize;
-    let mut data = vec![0u8; pixels * bands * SAMPLE_BYTES];
+    // Both of these were plain `usize` products. They go through
+    // `buffer_len` for the same reason the price goes through
+    // `decode_alloc_bytes`: clearing the budget says the byte count fits a
+    // `u64`, which on a 32-bit target is not the same as fitting the
+    // address space, and a caller can raise `max_alloc_bytes` past 4 GiB
+    // there. `bands` is at most `u16::MAX` by the `band_count` conversion
+    // above, so `bands * SAMPLE_BYTES` is the one multiply here that
+    // cannot overflow on any target.
+    let pixels = buffer_len(width, height, 1).map_err(ExrError::Raster)?;
+    let mut data =
+        vec![0u8; buffer_len(width, height, bands * SAMPLE_BYTES).map_err(ExrError::Raster)?];
     for (band, name) in selection.names.iter().enumerate() {
         let channel = layer
             .channel_data
@@ -1078,6 +1090,33 @@ mod tests {
             ),
             "expected the 8x4x4 geometry to be priced at 512 bytes, got {err:?}"
         );
+    }
+
+    /**
+     * Tests that the budget bites at exactly the byte the declared window
+     * costs, and not one byte either side. The case above pins only the
+     * refusing half, at 511 against a price of 512; a price wrong by a
+     * factor would refuse there too. This one adds the half that a wrong
+     * price cannot survive.
+     * Input: `rgba_half_zip.exr` at `max_alloc_bytes` 512 then 511 ->
+     * Output: a clean 8x4 four-band decode, then `AllocLimitExceeded`.
+     */
+    #[test]
+    fn the_window_budget_bites_at_exactly_the_declared_price() {
+        let exact = DecodeLimits::default().with_max_alloc_bytes(512);
+        let raster = decode_exr(&fixture("rgba_half_zip"), exact)
+            .expect("512 bytes is exactly the 8x4x4 declared window");
+        assert_eq!((raster.width(), raster.height()), (8, 4));
+        assert_eq!(raster.format().channels(), 4);
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(511);
+        assert!(matches!(
+            decode_exr(&fixture("rgba_half_zip"), short),
+            Err(SourceError::Exr(ExrError::AllocLimitExceeded {
+                needed: 512,
+                ..
+            }))
+        ));
     }
 
     /**

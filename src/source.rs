@@ -369,10 +369,26 @@ pub enum SourceError {
     /// depth: a 1-gigapixel `max_pixels` still permits a 4 GiB `Rgba8`
     /// frame. Raised for the whole-file read every memory-decoded container
     /// needs, with `what = "image file body"` (issue #629), and by the TIFF
-    /// page readers for both their own file body and
-    /// the pixel buffer a page decodes into; the equivalent GIF check has
-    /// its own
-    /// [`GifError::AllocLimitExceeded`](crate::gif::GifError::AllocLimitExceeded).
+    /// page readers for both their own file body and the pixel buffer a
+    /// page decodes into.
+    ///
+    /// It is not the only shape the decode budget refuses a file in, so a
+    /// handler matching this variant alone catches one of seven. Five
+    /// formats price their frame against the same
+    /// [`DecodeLimits::max_alloc_bytes`] through the same shared
+    /// arithmetic and then report a variant of their own instead of this
+    /// one:
+    /// [`GifError::AllocLimitExceeded`](crate::gif::GifError::AllocLimitExceeded),
+    /// [`FitsError::AllocLimitExceeded`](crate::fits::FitsError::AllocLimitExceeded),
+    /// [`ExrError::AllocLimitExceeded`](crate::exr::ExrError::AllocLimitExceeded),
+    /// [`JxlError::AllocLimitExceeded`](crate::jxl::JxlError::AllocLimitExceeded)
+    /// and
+    /// [`RadianceError::AllocLimitExceeded`](crate::radiance::RadianceError::AllocLimitExceeded).
+    /// WebP is a seventh shape again: it prices off the decoder's own
+    /// output buffer size rather than a declared-geometry product, and
+    /// reports [`SourceError::Decode`] carrying an `image` `LimitError`.
+    /// Collapsing the six onto this variant is a breaking change to five
+    /// public enums, deferred out of issue #632 and carried by issue #686.
     #[error(
         "{what} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
          allocation ceiling; raise DecodeLimits::max_alloc_bytes"
@@ -631,20 +647,53 @@ impl DecodeLimits {
         Ok(())
     }
 
+    /// Answer whether a single buffer of `needed_bytes` is over
+    /// [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes), with no error
+    /// attached.
+    ///
+    /// The arithmetic half of [`check_alloc`](Self::check_alloc), split out
+    /// because five of the seven callers of the budget throw the
+    /// `SourceError` away and report a per-format variant of their own, so
+    /// the `what` label they had to pass was built at every call and never
+    /// observable by anyone.
+    ///
+    /// `u64::MAX` is refused whatever the budget says, and that arm is the
+    /// point of this function rather than a detail of it.
+    /// [`decode_alloc_bytes`](crate::raster::decode_alloc_bytes) saturates
+    /// there, so `u64::MAX` is the answer "this product did not fit a
+    /// `u64`" rather than a price. Compared with `>` alone it clears the
+    /// one budget a caller is most likely to set, since
+    /// [`with_max_alloc_bytes(u64::MAX)`](Self::with_max_alloc_bytes) is
+    /// the idiomatic spelling of "no limit", and the decoder then goes on
+    /// to size a buffer from a number that was never the real one. Refusing
+    /// it costs nothing real either way: 16 exbibytes is not an allocation
+    /// any target can serve, so a geometry that priced there exactly is
+    /// just as unservable as one that saturated.
+    pub(crate) fn exceeds_alloc_budget(self, needed_bytes: u64) -> bool {
+        needed_bytes > self.max_alloc_bytes || needed_bytes == u64::MAX
+    }
+
     /// Enforce [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) on a
-    /// single buffer a decoder is about to reserve, named by `what` so the
-    /// error says which one. `check_pixels` cannot stand in for this: it
-    /// counts pixels and so sees neither the band count nor the sample
-    /// depth, and the default 1-gigapixel ceiling still permits a 4 GiB
-    /// `Rgba8` frame. Crate-visible so the format decoders that do their own
-    /// reads (the TIFF page readers) apply the published budget rather than
-    /// falling back to [`crate::raster::Raster::new`]'s much looser one.
+    /// single buffer a decoder is about to reserve, named by `what`.
+    ///
+    /// The label only reaches a caller through a decoder that propagates
+    /// this `SourceError` as it stands, which is the whole-file read and
+    /// the TIFF page readers. The five formats carrying their own
+    /// `AllocLimitExceeded` build their own message and so take
+    /// [`exceeds_alloc_budget`](Self::exceeds_alloc_budget) instead.
+    ///
+    /// `check_pixels` cannot stand in for either: it counts pixels and so
+    /// sees neither the band count nor the sample depth, and the default
+    /// 1-gigapixel ceiling still permits a 4 GiB `Rgba8` frame.
+    /// Crate-visible so the format decoders that do their own reads (the
+    /// TIFF page readers) apply the published budget rather than falling
+    /// back to [`crate::raster::Raster::new`]'s much looser one.
     pub(crate) fn check_alloc(
         self,
         what: &'static str,
         needed_bytes: u64,
     ) -> Result<(), SourceError> {
-        if needed_bytes > self.max_alloc_bytes {
+        if self.exceeds_alloc_budget(needed_bytes) {
             return Err(SourceError::AllocLimitExceeded {
                 what,
                 needed_bytes,
@@ -1707,6 +1756,55 @@ mod tests {
         // (c) At or below the ceiling is accepted.
         assert!(only_coord.check_coord(1000, 1000).is_ok());
         assert!(only_coord.check_coord(0, 0).is_ok());
+    }
+
+    /**
+     * Tests that the shared decode price's saturation sentinel is refused
+     * by every budget including `u64::MAX`, the one a caller sets to mean
+     * "no limit" (issue #632).
+     * Works by pricing a geometry whose product does not fit a `u64`, so
+     * `decode_alloc_bytes` saturates, and offering it to both halves of
+     * the budget check under the largest budget that can be expressed at
+     * all. Saturating is only a refusal if something refuses the sentinel,
+     * and a plain `needed > max` does not.
+     * Input: `decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1)` against
+     * `max_alloc_bytes = u64::MAX` -> Output: refused, carrying
+     * `needed_bytes = u64::MAX`, while `u64::MAX - 1` at the same budget
+     * is accepted.
+     */
+    #[test]
+    fn the_saturated_price_is_refused_even_by_a_u64_max_budget() {
+        let no_limit = DecodeLimits::default().with_max_alloc_bytes(u64::MAX);
+        let saturated = crate::raster::decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1);
+        assert_eq!(saturated, u64::MAX);
+
+        assert!(no_limit.exceeds_alloc_budget(saturated));
+        assert!(matches!(
+            no_limit.check_alloc("saturated price", saturated),
+            Err(SourceError::AllocLimitExceeded {
+                what: "saturated price",
+                needed_bytes: u64::MAX,
+                max_alloc_bytes: u64::MAX,
+            })
+        ));
+
+        // The arm costs exactly one value, and that value is 16 EiB: one
+        // byte below the sentinel is a price like any other and the
+        // "no limit" budget still clears it.
+        assert!(!no_limit.exceeds_alloc_budget(u64::MAX - 1));
+        assert!(
+            no_limit
+                .check_alloc("one below the sentinel", u64::MAX - 1)
+                .is_ok()
+        );
+
+        // And the ordinary boundary is unmoved: `needed == budget` is
+        // accepted, one byte more is not.
+        let tight = DecodeLimits::default().with_max_alloc_bytes(4096);
+        assert!(!tight.exceeds_alloc_budget(4096));
+        assert!(tight.check_alloc("exactly the budget", 4096).is_ok());
+        assert!(tight.exceeds_alloc_budget(4097));
+        assert!(tight.check_alloc("one over the budget", 4097).is_err());
     }
 
     /// Encode a `w x h` La16 (gray + alpha) PNG in memory, returning the
