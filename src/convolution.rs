@@ -962,16 +962,23 @@ fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize
 /// Read every sample of `r` as `f64`, row-major with bands interleaved.
 /// Unsigned samples convert exactly; float samples widen exactly.
 ///
-/// Eight bytes per sample where the source carries one or two makes this
-/// the largest single allocation on the convolution path: measured
-/// post-#598 on a 4000x4000 `Rgb8` integer conv, 384 MB of a 486 MB peak
-/// for 48 MB of input. It is also the allocation every fallible entry
-/// point in this module sits on, so it is reserved through
-/// [`try_buffer`] and reports [`RasterError::AllocationFailed`]. It used
+/// Eight bytes per sample where the source carries one or two, so this is
+/// eight or four times the raster it is handed. It is reserved through
+/// [`try_buffer`] and reports [`RasterError::AllocationFailed`]; it used
 /// to be a plain `.collect()`, which on failure reaches
 /// `handle_alloc_error` and **aborts the process**. A `try_` API that
 /// aborts is worse than an infallible one, because a caller reasonably
 /// reads the `Result` as covering allocation (issue #575).
+///
+/// **The convolution traversal no longer calls this.** It was where the
+/// module's memory went: 384 MB of a 464 MiB peak on a 4000x4000 `Rgb8`
+/// integer `conv` over a 48 MB input. [`Scan`] widens a rolling window of
+/// rows instead, which took the same measurement to 98 MiB, and the same
+/// change reads on `sobel` and on `gaussblur` (issue #575). What is left
+/// on this function is [`Raster::try_compass`], which widens each of its
+/// `times` results to combine them, and the two correlations, which read
+/// arbitrary offsets into both operands and so have no row window to
+/// keep.
 fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let fmt = r.format();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
@@ -1213,9 +1220,9 @@ fn compact_taps<C: Copy + Default + PartialEq>(
     taps
 }
 
-/// Everything one traversal shares across the masks it carries: the
-/// source widened to `f64` **once**, the output geometry, and the two
-/// clamped index tables that replace per-tap edge arithmetic.
+/// Everything one traversal shares across the masks it carries: a rolling
+/// window of the source widened to `f64`, the output geometry, and the
+/// two clamped index tables that replace per-tap edge arithmetic.
 ///
 /// The tables are `vips_embed(..., VIPS_EXTEND_COPY)` expressed as
 /// indices rather than as pixels: `convf.c:335-341` embeds the input into
@@ -1228,17 +1235,58 @@ fn compact_taps<C: Copy + Default + PartialEq>(
 /// `kw / 2` over the masks in the traversal, so masks of different sizes
 /// (the 90-degree rotation of a non-square mask, for one) share one pair
 /// of tables.
-struct Scan {
-    samples: Vec<f64>,
+///
+/// # Why the window is a window
+///
+/// This used to widen the **whole** source up front, eight bytes a sample
+/// where a uchar carries one, and that made it the largest allocation in
+/// the module by a wide margin: at 4000x4000 `Rgb8` it was 384 MB of a
+/// 464 MiB peak over a 48 MB input, and `conv` cost 10.1 times the image
+/// it was handed (issue #575).
+///
+/// Nothing needed it whole. The traversal runs output rows in order and
+/// an output row only reads the source rows its own taps reach, so the
+/// window holds `span = min(h, oy + ty + 1)` rows and each source row is
+/// widened exactly once on the way past. Source row `r` lives at slot
+/// `r % span` and `ytab` names that slot instead of an absolute offset,
+/// so the inner loop is the same code reading the same values in the same
+/// order and no arithmetic moved.
+///
+/// The residency argument is the whole correctness of it. Output row `y`
+/// reads clamped source rows `[max(0, y - oy), min(h - 1, y + ty)]`, an
+/// interval of at most `span` values, so no two of them share a residue
+/// mod `span` and none can evict another. [`Scan::advance`] fills up to
+/// `min(y + ty, h - 1)` before row `y` runs, and widening row `r` evicts
+/// row `r - span`, which sits below that interval's floor.
+struct Scan<'a> {
+    /// The source bytes, read one row at a time on the way past.
+    data: &'a [u8],
+    /// Bytes per sample in `data`: 1, 2 or 4, the three carriers
+    /// [`samples_f64`] widens.
+    depth: usize,
+    /// `span` source rows widened to `f64`, source row `r` at slot
+    /// `r % span`.
+    window: Vec<f64>,
+    /// How many source rows `window` holds.
+    span: usize,
+    /// The next source row [`Scan::advance`] will widen. Advancing to a
+    /// row already resident is free, so the total work stays at one
+    /// widening per source row however tall the mask is.
+    next: usize,
+    /// The furthest row **below** the output row a tap reaches, which is
+    /// how far ahead of `y` the window has to be filled.
+    trail: usize,
     w: usize,
     h: usize,
     channels: usize,
+    /// Samples in one source row, which is one window slot.
+    row_stride: usize,
     origin: (usize, usize),
     ytab: Vec<usize>,
     xtab: Vec<usize>,
 }
 
-impl Scan {
+impl<'a> Scan<'a> {
     /// Validate every mask's scale and offset, then decode `src` and build
     /// the tables.
     ///
@@ -1249,9 +1297,9 @@ impl Scan {
     /// silently wraps to black in release. Both are rejected here, at the
     /// one boundary every caller passes through.
     fn new<const M: usize>(
-        src: &Raster,
+        src: &'a Raster,
         masks: &[&DenseKernel; M],
-    ) -> Result<Scan, ConvolutionError> {
+    ) -> Result<Scan<'a>, ConvolutionError> {
         for mask in masks {
             if mask.scale == 0.0 {
                 return Err(ConvolutionError::ZeroScale);
@@ -1269,21 +1317,72 @@ impl Scan {
         let ox = masks.iter().map(|m| m.w / 2).max().unwrap_or(0);
         let ty = masks.iter().map(|m| m.h - 1 - m.h / 2).max().unwrap_or(0);
         let tx = masks.iter().map(|m| m.w - 1 - m.w / 2).max().unwrap_or(0);
+        // A raster cannot be zero-height (`RasterError::ZeroDimension`), so
+        // the span is at least one row and the residue arithmetic below has
+        // no division by zero in it.
+        let span = (oy + ty + 1).min(h);
         let ytab = (0..h + oy + ty)
-            .map(|t| clamp_coord(t as i64 - oy as i64, src.height()) * row_stride)
+            .map(|t| (clamp_coord(t as i64 - oy as i64, src.height()) % span) * row_stride)
             .collect();
         let xtab = (0..w + ox + tx)
             .map(|t| clamp_coord(t as i64 - ox as i64, src.width()) * channels)
             .collect();
+        // Named for the raster whose convolution failed rather than for the
+        // window, because that is what a caller holding the error has.
+        let mut window = try_buffer::<f64>(src.width(), src.height(), span * row_stride)?;
+        window.resize(span * row_stride, 0.0);
         Ok(Scan {
-            samples: samples_f64(src)?,
+            data: src.data(),
+            depth: src.format().bytes_per_channel(),
+            window,
+            span,
+            next: 0,
+            trail: ty,
             w,
             h,
             channels,
+            row_stride,
             origin: (oy, ox),
             ytab,
             xtab,
         })
+    }
+
+    /// Widen every source row output row `y` reaches that is not resident
+    /// yet, which is every row up to `min(y + ty, h - 1)`.
+    ///
+    /// This is [`samples_f64`] one row at a time, over the same three
+    /// carriers and producing the same values; the widening moved here
+    /// rather than changing.
+    fn advance(&mut self, y: usize) {
+        let (data, depth, stride) = (self.data, self.depth, self.row_stride);
+        let last = (y + self.trail).min(self.h - 1);
+        while self.next <= last {
+            let start = self.next * stride;
+            let base = (self.next % self.span) * stride;
+            let row = &mut self.window[base..base + stride];
+            match depth {
+                1 => {
+                    for (out, &b) in row.iter_mut().zip(&data[start..start + stride]) {
+                        *out = b as f64;
+                    }
+                }
+                2 => {
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let p = (start + i) * 2;
+                        *out = u16::from_ne_bytes([data[p], data[p + 1]]) as f64;
+                    }
+                }
+                _ => {
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let p = (start + i) * 4;
+                        *out = f32::from_ne_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                            as f64;
+                    }
+                }
+            }
+            self.next += 1;
+        }
     }
 
     /// The half-open span of output columns for which tap column `tx`
@@ -1305,7 +1404,8 @@ impl Scan {
         (lo, hi, (lo + tx).saturating_sub(ox) * self.channels)
     }
 
-    /// Add one tap's contribution across a whole output row.
+    /// Add one tap's contribution across a whole output row, reading the
+    /// source row already resident at window offset `row`.
     ///
     /// Taps are applied to an output row in mask order, exactly the order
     /// the per-sample accumulator used to add them in, so the float sums
@@ -1320,7 +1420,7 @@ impl Scan {
         mut fma: impl FnMut(&mut A, C, f64),
     ) {
         let (lo, hi, start) = self.interior(tx);
-        let (samples, xtab) = (&self.samples[..], &self.xtab[..]);
+        let (samples, xtab) = (&self.window[..], &self.xtab[..]);
         for x in 0..lo {
             let col = xtab[x + tx];
             for band in 0..self.channels {
@@ -1333,7 +1433,7 @@ impl Scan {
         }
         if hi > lo {
             // Guarded rather than left to an empty slice: a mask wider
-            // than the image can push `start` past the end of `samples`
+            // than the image can push `start` past the end of the row
             // even when the span itself is empty, and `&v[n..n]` still
             // demands `n <= v.len()`.
             let (a, b) = (lo * self.channels, hi * self.channels);
@@ -1362,7 +1462,7 @@ impl Scan {
     /// offset summand goes (`convf.c:172`).
     #[inline]
     fn float<const M: usize>(
-        &self,
+        &mut self,
         taps: &[Vec<Tap<f64>>; M],
         init: [f64; M],
         mut emit: impl FnMut(usize, [f64; M]),
@@ -1371,6 +1471,7 @@ impl Scan {
         let mut acc: [Vec<f64>; M] = std::array::from_fn(|_| vec![0.0f64; stride]);
         let mut idx = 0;
         for y in 0..self.h {
+            self.advance(y);
             for ((row, mask), &seed) in acc.iter_mut().zip(taps).zip(&init) {
                 row.fill(seed);
                 for t in mask {
@@ -1394,7 +1495,7 @@ impl Scan {
     /// [`Precision::Integer`].
     #[inline]
     fn int<const M: usize>(
-        &self,
+        &mut self,
         taps: &[Vec<Tap<i64>>; M],
         mut emit: impl FnMut(usize, [i64; M]),
     ) {
@@ -1402,6 +1503,7 @@ impl Scan {
         let mut acc: [Vec<i64>; M] = std::array::from_fn(|_| vec![0i64; stride]);
         let mut idx = 0;
         for y in 0..self.h {
+            self.advance(y);
             for (row, mask) in acc.iter_mut().zip(taps) {
                 row.fill(0);
                 for t in mask {
@@ -1536,7 +1638,7 @@ fn conv_planes<const M: usize>(
     masks: [&DenseKernel; M],
     precision: Precision,
 ) -> Result<[Raster; M], ConvolutionError> {
-    let scan = Scan::new(src, &masks)?;
+    let mut scan = Scan::new(src, &masks)?;
     let (w, h) = (src.width(), src.height());
     let channels = src.format().channels();
 
@@ -1722,6 +1824,27 @@ impl Raster {
     /// scale, [`ConvolutionError::NonFiniteMaskParameter`] for a `NaN` or
     /// infinite one, or [`ConvolutionError::Raster`] on allocation
     /// failure.
+    ///
+    /// # What it costs to run
+    ///
+    /// One image-sized allocation, the output, plus a row window of
+    /// `mask height * width * bands * 8` bytes. Peak live memory over a
+    /// three-band uchar image is three bytes a pixel at integer precision and
+    /// twelve at float, where the output is a float image; measured at
+    /// 4000x4000 `Rgb8`, a 3x3 integer `conv` peaks at 98 MiB over a 48 MB
+    /// input.
+    ///
+    /// It used to widen the whole source to `f64` first, which was eight bytes
+    /// a sample on top of all that: the same measurement read 464 MiB, ten
+    /// times the image it was handed (issue #575). `sobel`, `scharr`,
+    /// `prewitt`, `convsep`, `gaussblur`, `compass` and canny's gradient stage
+    /// all run the same traversal and all moved with it.
+    ///
+    /// `tests/convolution_image_sized_allocations.rs` holds those numbers
+    /// rather than this paragraph asserting them: it counts image-sized
+    /// allocations and peak live image-sized bytes a pixel through a counting
+    /// allocator, at two image sizes so a budget has to be a rate, and pins
+    /// both at what they measure.
     pub fn try_conv(
         &self,
         kernel: &Kernel,
@@ -1997,7 +2120,7 @@ impl Raster {
     /// sense in which this is still not abort-free.
     ///
     /// A test holds that, rather than only this paragraph asserting it.
-    /// `tests/sharpen_canny_image_sized_allocations.rs` counts the path's
+    /// `tests/convolution_image_sized_allocations.rs` counts the path's
     /// image-sized allocations and its peak live image-sized bytes per pixel
     /// through a counting allocator, at two image sizes so the budgets have to
     /// hold as rates, and pins both at what they measure. Either of the two
@@ -2377,7 +2500,7 @@ impl Raster {
         };
         let spun = dense.rot90();
         let masks = [&dense, &spun];
-        let scan = Scan::new(self, &masks)?;
+        let mut scan = Scan::new(self, &masks)?;
         let mut data = alloc_op_output(w, h, fmt)?;
 
         if uchar {
@@ -2878,7 +3001,7 @@ impl Raster {
     /// with the pixel count.
     ///
     /// Both arms are held to that by
-    /// `tests/sharpen_canny_image_sized_allocations.rs`, which budgets each of
+    /// `tests/convolution_image_sized_allocations.rs`, which budgets each of
     /// them separately through a counting allocator; see
     /// [`Raster::try_sharpen`] for what the two numbers mean (issue #700).
     pub fn try_canny(&self, sigma: f64, precision: Precision) -> Result<Raster, ConvolutionError> {
