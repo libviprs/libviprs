@@ -587,9 +587,9 @@ fn function_name(header: &str) -> Option<String> {
 /// last. That is fine for what it feeds: the caller only asks whether *some*
 /// function of that name spawns, and the answer it wants on a collision is the
 /// conservative one.
-fn fn_bodies(masked: &str) -> Vec<(String, String)> {
+fn fn_bodies(masked: &str) -> Vec<(String, usize, String)> {
     let lines: Vec<&str> = masked.lines().collect();
-    let mut out: Vec<(String, String)> = Vec::new();
+    let mut out: Vec<(String, usize, String)> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let Some(name) = function_name(line) else {
             continue;
@@ -628,7 +628,7 @@ fn fn_bodies(masked: &str) -> Vec<(String, String)> {
             }
         }
         if !declaration {
-            out.push((name, body));
+            out.push((name, i, body));
         }
     }
     out
@@ -654,25 +654,97 @@ fn mentions_ident(body: &str, ident: &str) -> bool {
 /// tests issue #714 found call `cells()`, which calls `graphs()`, which calls
 /// `Command::new(cargo())`. One hop would still see them all as pure.
 fn process_spawning_fns(masked: &str) -> BTreeSet<String> {
-    let bodies = fn_bodies(masked);
-    let mut spawning: BTreeSet<String> = bodies
+    reaching_fns(masked, PROCESS_MARKERS, &|_| true)
+}
+
+/// The line ranges of every `#[cfg(test)]` module in `masked`, as inclusive
+/// `(first, last)` line indices.
+///
+/// Used to answer "is this function test scaffolding" in a `src/` file. An
+/// integration test under `tests/` is all scaffolding, so it has no ranges and
+/// the predicate that uses this returns true for the whole file.
+fn cfg_test_module_ranges(masked: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = masked.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() != "#[cfg(test)]" {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].trim().starts_with("#[") {
+            j += 1;
+        }
+        if j >= lines.len() || !format!(" {}", lines[j]).contains(" mod ") {
+            continue;
+        }
+        let mut depth = 0i64;
+        let mut opened = false;
+        let mut k = j;
+        while k < lines.len() {
+            for ch in lines[k].chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if opened && depth == 0 {
+                break;
+            }
+            k += 1;
+        }
+        out.push((j, k.min(lines.len().saturating_sub(1))));
+    }
+    out
+}
+
+/// The names of every function in `masked` whose body matches `markers`, or
+/// which reaches one that does through another function in the same file that
+/// `in_scope` accepts.
+///
+/// The fixed point is what makes this useful rather than decorative: the eleven
+/// tests issue #714 found call `cells()`, which calls `graphs()`, which calls
+/// `Command::new(cargo())`. One hop would still see them all as pure.
+///
+/// `in_scope` is what stops the filesystem arm annotating the crate. Process
+/// spawning takes every function, because the only things that spawn here are
+/// test helpers and an unnecessary annotation costs one test. Filesystem access
+/// does not: `src/colour.rs` reads an ICC profile off disk inside the *library*,
+/// so following calls through production code marks all 23 colour tests that
+/// call the loader, whether or not any of them passes it a path. Measured, on
+/// the tree this landed against: 85 tests over eleven files with every function
+/// in scope, 39 over six with only test scaffolding in scope, and the 46 in the
+/// difference are almost all that one colour arm.
+fn reaching_fns(
+    masked: &str,
+    markers: &[&str],
+    in_scope: &dyn Fn(usize) -> bool,
+) -> BTreeSet<String> {
+    let bodies: Vec<(String, usize, String)> = fn_bodies(masked)
+        .into_iter()
+        .filter(|(_, at, _)| in_scope(*at))
+        .collect();
+    let mut reaching: BTreeSet<String> = bodies
         .iter()
-        .filter(|(_, body)| PROCESS_MARKERS.iter().any(|m| body.contains(m)))
-        .map(|(name, _)| name.clone())
+        .filter(|(_, _, body)| markers.iter().any(|m| body.contains(m)))
+        .map(|(name, _, _)| name.clone())
         .collect();
     loop {
         let mut grew = false;
-        for (name, body) in &bodies {
-            if spawning.contains(name) {
+        for (name, _, body) in &bodies {
+            if reaching.contains(name) {
                 continue;
             }
-            if spawning.iter().any(|callee| mentions_ident(body, callee)) {
-                spawning.insert(name.clone());
+            if reaching.iter().any(|callee| mentions_ident(body, callee)) {
+                reaching.insert(name.clone());
                 grew = true;
             }
         }
         if !grew {
-            return spawning;
+            return reaching;
         }
     }
 }
@@ -712,6 +784,14 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
     }
 
     let spawning = process_spawning_fns(&masked);
+    // Filesystem helpers, but only the ones that are test scaffolding: every
+    // function in an integration test, and only the `#[cfg(test)]` modules of a
+    // `src/` file. See [`reaching_fns`] for what the restriction buys.
+    let ranges = cfg_test_module_ranges(&masked);
+    let whole_file_is_test_scaffolding = rel.starts_with("tests/");
+    let fs_reaching = reaching_fns(&masked, FS_MARKERS, &|at| {
+        whole_file_is_test_scaffolding || ranges.iter().any(|(a, b)| at >= *a && at <= *b)
+    });
     let lines: Vec<&str> = masked.lines().collect();
     let raw: Vec<&str> = src.lines().collect();
 
@@ -803,7 +883,7 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
             j + 1
         );
 
-        let touches_fs = FS_MARKERS.iter().any(|m| body.contains(m));
+        let touches_fs = FS_MARKERS.iter().any(|m| body.contains(m)) || fs_reaching.contains(&name);
         let spawns_process = spawning.contains(&name);
         found.push(TestFn {
             file: rel.to_string(),
@@ -1388,7 +1468,7 @@ mod tests {
 }
 "#;
     let masked = mask_literals_and_comments(src);
-    let parsed: BTreeSet<String> = fn_bodies(&masked).into_iter().map(|(n, _)| n).collect();
+    let parsed: BTreeSet<String> = fn_bodies(&masked).into_iter().map(|(n, _, _)| n).collect();
     for want in ["fingerprint", "constrained"] {
         assert!(
             parsed.contains(want),
