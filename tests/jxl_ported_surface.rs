@@ -83,19 +83,20 @@ fn decode_jxl_is_public_and_follows_the_files_carrier() {
     assert_eq!(back.interpretation(), libviprs::Interpretation::Rgb16);
 }
 
-/// The options struct is a plain, `Default`, module-scoped type a caller
-/// can build with `..Default::default()`, which is the format wave's naming
-/// verdict, and neither distance nor quality has a spelling in it.
+/// The options struct is a `#[non_exhaustive]`, `Default`, module-scoped type
+/// a caller outside the crate builds from `default()` through the `with_*`
+/// setters, and neither distance nor quality has a spelling in it. It used to
+/// be a struct literal here, which is what issue #630 took away: this test
+/// compiles as an external crate, so it was itself the downstream caller the
+/// old "later fields can be added without a breaking change" promise would
+/// have broken.
 #[test]
 fn save_options_are_constructible_downstream() {
-    let explicit = jxl::SaveOptions {
-        compression: jxl::Compression::Lossless,
-    };
-    let partial = jxl::SaveOptions {
-        ..Default::default()
-    };
+    let explicit = jxl::SaveOptions::default().with_compression(jxl::Compression::Lossless);
+    let partial = jxl::SaveOptions::default();
     assert_eq!(explicit, partial);
     assert_eq!(jxl::SaveOptions::default(), explicit);
+    assert_eq!(explicit.compression, jxl::Compression::Lossless);
 }
 
 /// The lossless encoder is a true identity from outside the crate too,
@@ -103,6 +104,7 @@ fn save_options_are_constructible_downstream() {
 /// integer carriers.
 #[test]
 #[cfg(feature = "jxl")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_exactly() {
     let dir = tempfile::tempdir().unwrap();
     for (name, original) in [("eight", ramp()), ("sixteen", ramp16())] {
@@ -126,6 +128,7 @@ fn encode_and_save_round_trip_exactly() {
 /// routes the bytes back without help from the filename.
 #[test]
 #[cfg(feature = "jxl")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_shared_dispatchers_carry_jxl() {
     let original = ramp();
     let dir = tempfile::tempdir().unwrap();
@@ -225,6 +228,7 @@ fn a_single_pixel_axis_is_refused_from_outside_the_crate() {
 /// that a consumer's code compiles against either build.
 #[test]
 #[cfg(not(feature = "jxl"))]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn without_the_feature_the_surface_is_unchanged_and_typed() {
     let raster = ramp();
 

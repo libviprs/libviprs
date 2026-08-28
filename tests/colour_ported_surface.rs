@@ -252,6 +252,7 @@ fn ported_de_cmc_call_site() {
 /// The ported `test_icc` body, on the profiled synthetic fixture, with a
 /// real sRGB profile file standing in for `sRGB.icm`.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn ported_icc_call_site() {
     let dir = tempfile::tempdir().unwrap();
     let srgb_profile: std::path::PathBuf = dir.path().join("sRGB.icm");

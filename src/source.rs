@@ -357,6 +357,23 @@ pub enum SourceError {
     /// caller's `match` has the same arms in either build (issue #634).
     #[error(transparent)]
     Jp2k(#[from] crate::jp2k::Jp2kError),
+    /// A malformed or unsupported MATLAB level 5 file. libviprs decodes MAT
+    /// itself rather than through `matio` (see [`crate::mat`]), so its
+    /// failures arrive as the codec's own typed
+    /// [`MatError`](crate::mat::MatError) rather than as an opaque string.
+    /// As with FITS and NIfTI, that matters here because a `.mat` can be
+    /// perfectly well formed and still hold a class this build has no pixel
+    /// format for; the variant says which, and names the issue that would
+    /// add it.
+    #[error(transparent)]
+    Mat(#[from] crate::mat::MatError),
+    /// A malformed or unsupported Analyze `.hdr` / `.img` pair, raised by
+    /// [`crate::analyze`]. It is the one container in this crate that is
+    /// inherently two files, so its errors include one no other format has:
+    /// `PixelsAreInASiblingFile`, which is what [`decode_bytes`] reports for
+    /// a `.hdr` handed to it on its own (issue #764).
+    #[error(transparent)]
+    Analyze(#[from] crate::analyze::AnalyzeError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -627,7 +644,7 @@ impl DeclaredGeometry {
 /// | Field | `image` raster path | native `.v` reader | TIFF page readers |
 /// |---|---|---|---|
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
-/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
+/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in the shared `decode_reader` path, re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
 /// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read, and on the pixel body itself, priced from the declared header geometry (issue #710) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
@@ -657,7 +674,8 @@ impl DeclaredGeometry {
 /// rejected inside the `image` crate via [`image::Limits`], so it arrives as
 /// [`SourceError::Decode`] wrapping [`image::ImageError::Limits`] — **not**
 /// [`SourceError::CoordLimitExceeded`], which is reserved for the
-/// `max_coord` check applied by [`decode_reader`] / the `.v` reader. Because
+/// `max_coord` check applied by the shared `decode_reader` path and the `.v`
+/// reader. Because
 /// the default `max_width` / `max_height` (65,535) sit far below the default
 /// `max_coord` (10,000,000), a raster dimension between those bounds trips
 /// the `image::Limits` path first; `CoordLimitExceeded` is what you see once
@@ -686,7 +704,7 @@ pub struct DecodeLimits {
     /// per decode on the declared header geometry — before any pixel
     /// allocation — by **every** decoder: the native `.v` reader and the
     /// `image`-crate raster path (PNG/JPEG/TIFF) alike, both routing
-    /// through [`DecodeLimits::check_coord`] and returning
+    /// through one shared `check_coord` helper on this struct and returning
     /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This is
     /// the sole coordinate-ceiling knob: it replaced an earlier
     /// process-global whose races under concurrent jobs made the ceiling
@@ -987,7 +1005,8 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 ///
 /// The decode is served through a process-global, bounded-LRU load cache
-/// (see [`LoadCache`]): the first load of a path is decoded from disk and
+/// (mirroring libvips' bounded, LRU-evicted operation cache): the first load
+/// of a path is decoded from disk and
 /// cached, and every later call returns that cached raster even if the
 /// file has since changed on disk. Use [`decode_file_with_options`] with
 /// `revalidate = true` to force a re-read, or [`Raster::invalidate`] to
@@ -1006,7 +1025,7 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// since changed on disk. With `revalidate = true` the cache lookup is
 /// skipped, the file is re-read and decoded fresh, and the cache entry for
 /// `path` is refreshed so subsequent plain [`decode_file`] calls see the
-/// new image. See [`LoadCache`] for the caching contract and its
+/// new image. See [`decode_file`] for the caching contract and its
 /// libvips-binding rationale.
 ///
 /// # Errors
@@ -1051,7 +1070,7 @@ impl Raster {
     /// memory) has nothing cached under a path, so this is a no-op for it.
     /// The recorded filename is canonicalized to the same identity the load
     /// keyed off, so invalidation reliably drops the entry even when this
-    /// raster's filename spells the path differently. See [`LoadCache`] for
+    /// raster's filename spells the path differently. See [`decode_file`] for
     /// the caching contract.
     pub fn invalidate(&mut self) {
         if let Some(MetadataValue::Str(filename)) = self.fields.get("filename") {
@@ -1327,6 +1346,25 @@ enum Decoder {
     /// parses the container itself and needs the bytes addressable end to
     /// end; the per-format reason is on the row.
     Native(fn(&[u8], DecodeLimits) -> Result<Raster, SourceError>),
+    /// A libviprs codec over a **pair** of files, reached from the path of
+    /// the half that carries the signature. Analyze is the only one, and
+    /// issue #764 is where the decision to add this kind rather than work
+    /// around it is argued: a `.hdr` has a geometry and no pixels and an
+    /// `.img` has pixels and no geometry, so neither half is decodable on
+    /// its own and `Native`'s one-buffer signature cannot express it.
+    ///
+    /// Two function pointers rather than one, so both entry points stay
+    /// table-driven. [`decode_file_with_limits`] calls `from_path` with the
+    /// path it sniffed; [`decode_bytes_with_limits`], which has no path,
+    /// calls `from_bytes` with the signature-carrying half alone, and that
+    /// function's job is to say so by name. Neither is a hand-written
+    /// `if sniffed == Some(..)`, which is the shape issue #633 retired.
+    Paired {
+        /// Decode from the path of the sniffed half, resolving its sibling.
+        from_path: fn(&Path, DecodeLimits) -> Result<Raster, SourceError>,
+        /// What a buffer decode of that half alone reports.
+        from_bytes: fn(&[u8], DecodeLimits) -> Result<Raster, SourceError>,
+    },
 }
 
 /// One row of the route table: everything routing knows about a container.
@@ -1417,6 +1455,18 @@ pub(crate) enum SniffedFormat {
     /// JPEG 2000, in either of its two containers: the RFC 3745 JP2
     /// signature box, or the bare codestream's `SOC` + `SIZ` pair.
     Jp2k,
+    /// MATLAB level 5, either byte order: `MATLAB 5.0` at offset 0 plus the
+    /// version word and endian indicator at 124.
+    Mat,
+    /// Analyze 7.5, from the `.hdr` half of the pair: a big-endian 348 in
+    /// the four `sizeof_hdr` bytes at offset 0.
+    ///
+    /// **Declared last on purpose.** `analyzeload` is registered at priority
+    /// -50, the lowest of any loader in the build, because its `is_a` opens
+    /// and fully parses a second file. This signature is four bytes and
+    /// carries no format name, so it is the widest in the table and it has
+    /// to be tried after everything narrower.
+    Analyze,
 }
 
 impl SniffedFormat {
@@ -1446,7 +1496,9 @@ impl SniffedFormat {
             Self::OpenExr => Some(Self::Nifti),
             Self::Nifti => Some(Self::Avif),
             Self::Avif => Some(Self::Jp2k),
-            Self::Jp2k => None,
+            Self::Jp2k => Some(Self::Mat),
+            Self::Mat => Some(Self::Analyze),
+            Self::Analyze => None,
         }
     }
 
@@ -1460,8 +1512,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 14] = {
-        let mut all = [Self::Vips; 14];
+    pub(crate) const ALL: [Self; 16] = {
+        let mut all = [Self::Vips; 16];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1725,6 +1777,63 @@ impl SniffedFormat {
                 ],
                 decoder: Decoder::Native(crate::jp2k::decode_jp2k),
             },
+            // `image` has no MATLAB route, and neither has any Rust crate
+            // that models `matio`'s behaviour, so [`crate::mat`] hand-rolls
+            // the container (issue #510). It reads the file whole because
+            // the element stream is a linked walk from byte 128 and the
+            // chosen variable can be anywhere in it, and because a
+            // `miCOMPRESSED` element has to be inflated out of the same
+            // bytes.
+            //
+            // Two signatures, one per byte order, and between them they are
+            // the whole of the shipped 8.18.6 sniff predicate: the 128-byte
+            // length floor falls out of the tag offset, and the version
+            // word and the endian indicator are one four-byte constant
+            // because the version is `0x0100` read whichever way the
+            // indicator declares. That is deliberately *not* the ten-byte
+            // prefix test the reference C source does: the dylib that
+            // shipped changed under the capture and validates 128 bytes
+            // (issue #650), and a port written from the source would claim
+            // files 8.18.6 refuses.
+            Self::Mat => Route {
+                magics: &[
+                    Magic::Split {
+                        prefix: crate::mat::MAGIC_PREFIX,
+                        tag_at: crate::mat::VERSION_INDICATOR_AT,
+                        tag: crate::mat::VERSION_INDICATOR_LE,
+                    },
+                    Magic::Split {
+                        prefix: crate::mat::MAGIC_PREFIX,
+                        tag_at: crate::mat::VERSION_INDICATOR_AT,
+                        tag: crate::mat::VERSION_INDICATOR_BE,
+                    },
+                ],
+                decoder: Decoder::Native(crate::mat::decode_mat),
+            },
+            // The one paired row, and the one container whose sniff is
+            // deliberately **wider** than the reference's own `is_a`.
+            // `vips__isanalyze` opens the `.hdr` and validates its length,
+            // its `sizeof_hdr` field, its rank and its datatype, which is
+            // why `analyzeload` is priority -50; a content sniff can only
+            // reach the second of those four. So this claims a strictly
+            // larger set and then refuses the difference **by name**, where
+            // vips lets it fall through to `magickload`. Since libviprs has
+            // no `magickload`, the set of files that actually *load* is the
+            // same on both sides, which `crate::analyze`'s
+            // `every_measured_fixture_loads_exactly_where_vips_loads_it`
+            // holds rather than asserts (issue #764).
+            //
+            // One signature, because there is only one: `sizeof_hdr` is the
+            // first field and it is big-endian 348 in every Analyze header
+            // ever written. There is no byte-order flag in the format, so
+            // this four-byte prefix is the byte-order check as well.
+            Self::Analyze => Route {
+                magics: &[Magic::Prefix(crate::analyze::SIZEOF_HDR_BE)],
+                decoder: Decoder::Paired {
+                    from_path: crate::analyze::decode_analyze_file,
+                    from_bytes: crate::analyze::decode_analyze_header,
+                },
+            },
         }
     }
 
@@ -1752,7 +1861,7 @@ impl SniffedFormat {
     const fn image_format(self) -> Option<image::ImageFormat> {
         match self.route().decoder {
             Decoder::Streamed(format) | Decoder::Buffered(format) => Some(format),
-            Decoder::Native(_) => None,
+            Decoder::Native(_) | Decoder::Paired { .. } => None,
         }
     }
 }
@@ -1892,9 +2001,10 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
 /// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
-/// FITS, OpenEXR, NIfTI, AVIF and JPEG 2000: each one either parses its own
-/// container end to end or makes a second pass over the same bytes for
-/// metadata.
+/// FITS, OpenEXR, NIfTI, AVIF, JPEG 2000, MATLAB and Analyze: each one either
+/// parses its own container end to end or makes a second pass over the same
+/// bytes for metadata. Analyze is read whole twice over, because it is two
+/// files.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -1915,6 +2025,18 @@ pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Rast
     let mut file = std::fs::File::open(path)?;
     let (head, filled) = read_head(&mut file)?;
     let sniffed = sniff(&head[..filled]);
+    // The paired row goes first, because it is the only one that needs the
+    // path rather than the bytes: `decode_bytes_with_limits` below would
+    // reach its `from_bytes` half instead and report "the pixels are in a
+    // sibling file", which is the right answer to a different question
+    // (issue #764).
+    if let Some(Decoder::Paired { from_path, .. }) = sniffed.map(|format| format.route().decoder) {
+        let mut raster = from_path(path, limits)?;
+        raster
+            .fields
+            .set("filename", path.display().to_string().into());
+        return Ok(raster);
+    }
     let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
         decode_bytes_with_limits(&read_file_bounded(path, limits, "image file body")?, limits)?
     } else {
@@ -1962,8 +2084,14 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     // The arm is read off the route table rather than written out as a chain
     // of `if sniffed == Some(..)` tests, so the edit that declares a
     // container is the edit that dispatches it (issue #633).
-    if let Some(Decoder::Native(decode)) = sniffed.map(|format| format.route().decoder) {
-        return decode(bytes, limits);
+    match sniffed.map(|format| format.route().decoder) {
+        Some(Decoder::Native(decode)) => return decode(bytes, limits),
+        // A paired container has no second buffer here, so its row's
+        // `from_bytes` half is what answers. Reached through the table
+        // rather than through a variant test, so the edit that declares a
+        // paired container is the edit that dispatches it (issue #633).
+        Some(Decoder::Paired { from_bytes, .. }) => return from_bytes(bytes, limits),
+        _ => {}
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
@@ -2487,6 +2615,7 @@ mod tests {
      * filesystem round-trip (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_from_disk() {
         let png = create_test_png(8, 8);
 
@@ -2774,9 +2903,20 @@ mod tests {
      * table is covered rather than the five that happen to have an encoder
      * in this crate to build a fixture with. They are all far too short to
      * decode, which is the point: what is being compared is the refusal.
+     * The one row this cannot be said about is a `Decoder::Paired` one,
+     * because for a pair the two entry points deliberately read *different*
+     * bytes: the file one resolves the sibling from the path and the buffer
+     * one has only the signature-carrying half. So a paired row gets the
+     * sharper replacement claim instead, in the arm below: the file entry
+     * point has to go looking for the sibling (an I/O error naming it) and
+     * the buffer one has to reach the container's own codec rather than the
+     * `image` facade's "these bytes are not an image". `crate::analyze`'s
+     * `decode_file_reaches_the_pair_from_the_hdr` is what covers the
+     * successful half, with a real pair on disk.
      * Input: the shortest head of every magic of every variant -> Output:
      * `decode_file_with_limits` and `decode_bytes_with_limits` report the
-     * same outcome for each.
+     * same outcome for each, except a paired row, which reports the two
+     * halves of its own split.
      */
     #[test]
     #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
@@ -2784,6 +2924,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut disagreements: Vec<String> = Vec::new();
         let mut probes = 0;
+        let mut paired = 0;
         for format in SniffedFormat::ALL {
             for (i, magic) in format.route().magics.iter().enumerate() {
                 let head = magic.shortest_head();
@@ -2793,6 +2934,22 @@ mod tests {
 
                 let from_file = decode_file_with_limits(&path, DecodeLimits::default());
                 let from_bytes = decode_bytes_with_limits(&head, DecodeLimits::default());
+                if matches!(format.route().decoder, Decoder::Paired { .. }) {
+                    paired += 1;
+                    assert!(
+                        matches!(from_file, Err(SourceError::Io(_))),
+                        "{format:?} is a paired row, so the file entry point has to go \
+                         looking for the sibling this probe does not have: {}",
+                        outcome(&from_file)
+                    );
+                    assert!(
+                        matches!(from_bytes, Err(ref e) if !matches!(e, SourceError::Decode(_))),
+                        "{format:?} is a paired row, so the buffer entry point has to reach \
+                         its own codec rather than the image facade: {}",
+                        outcome(&from_bytes)
+                    );
+                    continue;
+                }
                 if outcome(&from_file) != outcome(&from_bytes) {
                     disagreements.push(format!(
                         "{format:?} {magic:?}: decode_file_with_limits {} vs \
@@ -2808,6 +2965,12 @@ mod tests {
             "the file and byte entry points disagree on {} of {probes} containers:\n  {}",
             disagreements.len(),
             disagreements.join("\n  ")
+        );
+        // And the paired arm above ran, rather than the loop quietly having
+        // no paired row left to exercise it (issue #764).
+        assert_eq!(
+            paired, 1,
+            "exactly one row is paired, and its own claim above is what covers it"
         );
     }
 
@@ -2866,7 +3029,50 @@ mod tests {
         // writes rather than a byte-string literal: the row's signature is
         // structural, so there is no literal to write.
         let uhdr = crate::uhdr::smallest_container();
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 52] = [
+        // MAT is the other container whose signature is too long to spell
+        // out: the version word and the endian indicator sit at byte 124.
+        // These come out of the oracle capture for the same reason the
+        // NIfTI ones do, and the eight near-misses below are the whole
+        // point of the row, because the shipped 8.18.6 sniff refuses every
+        // one of them while the reference C source accepts four (issue
+        // #650).
+        macro_rules! mat_fixture {
+            ($name:literal) => {
+                include_bytes!(concat!("../oracle-captures/foreign-mat/fixtures/", $name))
+            };
+        }
+        const MAT_LE: &[u8] = mat_fixture!("base_2x3_uint8.mat");
+        const MAT_BE: &[u8] = mat_fixture!("endian_big.mat");
+        const MAT_FREE_TEXT: &[u8] = mat_fixture!("prefix_only.mat");
+        const MAT_HEADER_ONLY: &[u8] = mat_fixture!("header_only.mat");
+        const MAT_51: &[u8] = mat_fixture!("magic_MATLAB_51.mat");
+        const MAT_LOWERCASE: &[u8] = mat_fixture!("magic_matlab_50.mat");
+        const MAT_UNDERSCORE: &[u8] = mat_fixture!("magic_MATLAB_50.mat");
+        const MAT_BAD_VERSION: &[u8] = mat_fixture!("magic_only.mat");
+        const MAT_BAD_INDICATOR: &[u8] = mat_fixture!("endian_bogus.mat");
+        const MAT_NINE_BYTES: &[u8] = mat_fixture!("nine_bytes.mat");
+        const MAT_LEVEL_4: &[u8] = mat_fixture!("level4.mat");
+        const MAT_LEVEL_73: &[u8] = mat_fixture!("level73_hdf5.mat");
+        // Analyze's signature is four bytes, and it is the widest row in
+        // the table: `sizeof_hdr` is the first field of the `.hdr` and it
+        // is big-endian 348 in every Analyze header ever written. The
+        // near-misses matter more here than anywhere else, because a row
+        // this wide declared in the wrong place would steal files from
+        // every container after it, which is why it is declared last.
+        macro_rules! analyze_fixture {
+            ($name:literal) => {
+                include_bytes!(concat!(
+                    "../oracle-captures/foreign-analyze/fixtures/",
+                    $name
+                ))
+            };
+        }
+        const ANALYZE_HDR: &[u8] = analyze_fixture!("base_2d_uchar.hdr");
+        const ANALYZE_IMG: &[u8] = analyze_fixture!("base_2d_uchar.img");
+        const ANALYZE_BAD_RANK: &[u8] = analyze_fixture!("rank8.hdr");
+        const ANALYZE_BAD_SIZEOF: &[u8] = analyze_fixture!("sizeof_hdr_200.hdr");
+        const ANALYZE_LE: &[u8] = analyze_fixture!("le_header.hdr");
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 71] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -3057,6 +3263,58 @@ mod tests {
                 b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a",
                 Some(SniffedFormat::Jxl),
             ),
+            // MATLAB level 5, both byte orders. The free-text and
+            // header-only rows are the two that pin how *little* the sniff
+            // reads: bytes 10..124 are not looked at, and a bare 128-byte
+            // header with no variables in it still routes here, where the
+            // decode then reports `no matrix variables` rather than
+            // "these bytes are not an image".
+            ("mat le", MAT_LE, Some(SniffedFormat::Mat)),
+            ("mat be", MAT_BE, Some(SniffedFormat::Mat)),
+            (
+                "mat free text after the prefix",
+                MAT_FREE_TEXT,
+                Some(SniffedFormat::Mat),
+            ),
+            (
+                "mat header with no variables",
+                MAT_HEADER_ONLY,
+                Some(SniffedFormat::Mat),
+            ),
+            // The eight near-misses. The first three differ from `mat le`
+            // only in the ten-byte prefix and the next two only in bytes
+            // 124..128, and the first three are files a direct
+            // `vips matload` loads: the sniff and `Mat_Open` disagree, and
+            // libviprs follows the sniff.
+            ("mat MATLAB 5.1", MAT_51, None),
+            ("mat lowercase matlab 5.0", MAT_LOWERCASE, None),
+            ("mat MATLAB_5.0", MAT_UNDERSCORE, None),
+            ("mat version 0xffff", MAT_BAD_VERSION, None),
+            ("mat indicator XY", MAT_BAD_INDICATOR, None),
+            ("mat nine bytes", MAT_NINE_BYTES, None),
+            ("mat level 4", MAT_LEVEL_4, None),
+            ("mat level 7.3", MAT_LEVEL_73, None),
+            // One byte short of the 128 the shipped sniff insists on.
+            ("mat truncated to 127", &MAT_LE[..127], None),
+            // Analyze, from the `.hdr` half only. The `rank8` row is the
+            // deliberate width: `vips__isanalyze` refuses it and this
+            // claims it, and `crate::analyze` then refuses it by name.
+            ("analyze hdr", ANALYZE_HDR, Some(SniffedFormat::Analyze)),
+            (
+                "analyze hdr with a rank vips refuses",
+                ANALYZE_BAD_RANK,
+                Some(SniffedFormat::Analyze),
+            ),
+            // A raw pixel array has no signature at all, which is the one
+            // place libviprs cannot follow `analyzeload`'s entry point.
+            ("analyze img", ANALYZE_IMG, None),
+            ("analyze sizeof_hdr 200", ANALYZE_BAD_SIZEOF, None),
+            // The byte-order check, as a sniff: a little-endian 348 is
+            // `5c 01 00 00` and does not match.
+            ("analyze little-endian header", ANALYZE_LE, None),
+            // The near-miss that matters most, because it is one byte away:
+            // an ICO file opens `00 00 01 00`.
+            ("ico is not analyze", b"\x00\x00\x01\x00\x01\x00 \x20", None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -3105,24 +3363,25 @@ mod tests {
      * `priced_by_libviprs` row, or wraps a crate that refuses internally the
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
-     * Input: `SniffedFormat::ALL.len()` -> Output: 14, which is what the two
-     * tables account for between them, with no exclusions left.
+     * Input: `SniffedFormat::ALL.len()` -> Output: 16, which is what the two
+     * tables plus the one documented exclusion account for.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            14,
+            16,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 14 are: 11 self-priced (gif, radiance, fits, openexr, \
+             count. Today the 16 are: 12 self-priced (gif, radiance, fits, openexr, \
              jxl, webp which joined them in #686, uhdr which joined them in #508 and \
              prices two images rather than one, .v which joined them in #710, nifti \
-             which joined them in #510, avif which joined them in #605, and jp2k \
-             which joined them in #501) and 3 refused inside the image crate (jpeg, \
-             png, tiff). There are no exclusions left"
+             and mat which joined them in #510, avif which joined them in #605, and \
+             jp2k which joined them in #501), 3 refused inside the image crate \
+             (jpeg, png, tiff), and analyze, whose decode takes two buffers so it \
+             cannot be a row in a table driven by decode_bytes (issue #764)"
         );
     }
 
@@ -3215,6 +3474,8 @@ mod tests {
         enum Kind {
             /// A libviprs codec, over the whole file.
             Native,
+            /// A libviprs codec, over a pair of files reached from a path.
+            Paired,
             /// The `image` facade, over the whole file.
             Buffered,
             /// The `image` facade, streamed.
@@ -3257,12 +3518,19 @@ mod tests {
                 SniffedFormat::Avif => Kind::Native,
                 // `image` has no JPEG 2000 route at all (issue #501).
                 SniffedFormat::Jp2k => Kind::Native,
+                // `image` has no MATLAB route, and the container is a tagged
+                // element stream with zlib inside it (issue #510).
+                SniffedFormat::Mat => Kind::Native,
+                // Analyze is a `.hdr` plus an `.img`, and one buffer cannot
+                // carry both (issue #764).
+                SniffedFormat::Analyze => Kind::Paired,
             }
         }
 
         for format in SniffedFormat::ALL {
             let carried = match format.route().decoder {
                 Decoder::Native(_) => Kind::Native,
+                Decoder::Paired { .. } => Kind::Paired,
                 Decoder::Buffered(_) => Kind::Buffered,
                 Decoder::Streamed(_) => Kind::Streamed,
             };
@@ -3318,6 +3586,8 @@ mod tests {
                 SniffedFormat::Nifti,
                 SniffedFormat::Avif,
                 SniffedFormat::Jp2k,
+                SniffedFormat::Mat,
+                SniffedFormat::Analyze,
             ],
             "decode_file_with_limits' doc names every container it reads whole, in \
              this order; move the doc and this list together"
@@ -3333,6 +3603,7 @@ mod tests {
      * `Gray8` raster from `decode_file` and `decode_bytes`, right way up.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fits_reaches_its_codec_from_both_entry_points() {
         let raster = Raster::new(4, 1, PixelFormat::Gray8, vec![3, 1, 4, 1]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3378,6 +3649,7 @@ mod tests {
      * `AllocLimitExceeded { what: "image file body" }` from the second.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_bounds_the_whole_file_read() {
         let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3434,6 +3706,7 @@ mod tests {
      * `AllocLimitExceeded { needed_bytes: n }`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_file_body_ceiling_is_inclusive() {
         let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3557,6 +3830,7 @@ mod tests {
      * Output: the 16x16 raster, decoded.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_file_body_ceiling_leaves_the_streaming_path_alone() {
         let png = create_test_png(16, 16);
         let dir = tempfile::tempdir().unwrap();
@@ -3578,6 +3852,7 @@ mod tests {
      * first pixel at the half-bit value vips prints.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn radiance_reaches_its_codec_from_both_entry_points() {
         let mut file = Vec::new();
         file.extend_from_slice(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 6\n");
@@ -3916,6 +4191,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sequential_matches_decode_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seq.v");
@@ -3930,6 +4206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_with_shrink_reduces_dimensions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.v");
