@@ -349,7 +349,7 @@ impl Raster {
         };
         // Pin the resolved interpretation so it survives the band-count change
         // even when the source left it inferred from the format.
-        out.meta.interpretation = Some(self.interpretation());
+        out.set_interpretation(Some(self.interpretation()));
         Ok(out)
     }
 
@@ -979,7 +979,7 @@ impl Raster {
             data.extend_from_slice(&(*v as f32).to_ne_bytes());
         }
         let mut out = Raster::new(width, 1, format, data)?;
-        out.meta.interpretation = Some(Interpretation::Histogram);
+        out.set_interpretation(Some(Interpretation::Histogram));
         Ok(out)
     }
 
@@ -1051,7 +1051,7 @@ impl Raster {
             data.extend_from_slice(&v.to_ne_bytes());
         }
         let mut out = Raster::new((IN_MAX + 1) as u32, 1, PixelFormat::Gray16, data)?;
-        out.meta.interpretation = Some(Interpretation::Histogram);
+        out.set_interpretation(Some(Interpretation::Histogram));
         Ok(out)
     }
 
@@ -1092,7 +1092,7 @@ impl Raster {
             }
         }
         let mut out = Raster::new(width, height, float1(), data)?;
-        out.meta.interpretation = Some(Interpretation::Matrix);
+        out.set_interpretation(Some(Interpretation::Matrix));
         Ok(out)
     }
 
@@ -1144,7 +1144,7 @@ fn mask_image(
         }
     })?;
     if !uchar {
-        out.meta.interpretation = Some(Interpretation::Fourier);
+        out.set_interpretation(Some(Interpretation::Fourier));
     }
     Ok(out)
 }
@@ -1819,7 +1819,7 @@ impl Raster {
                 }
             }
         })?;
-        out.meta.interpretation = Some(Interpretation::Bw);
+        out.set_interpretation(Some(Interpretation::Bw));
         Ok(out)
     }
 
