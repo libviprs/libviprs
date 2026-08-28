@@ -52,10 +52,13 @@ const WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const MAKEFILE: &str = include_str!("../Makefile");
 
 /// Lints both invocations have to deny. `broken_intra_doc_links` was already
-/// there; `private_intra_doc_links` is what issue #697 adds.
-const REQUIRED_DENIES: [&str; 2] = [
+/// there; `private_intra_doc_links` is what issue #697 adds, and
+/// `redundant_explicit_links` is issue #795, which takes the warning count to
+/// zero so the next warning is the only one in the output.
+const REQUIRED_DENIES: [&str; 3] = [
     "rustdoc::broken_intra_doc_links",
     "rustdoc::private_intra_doc_links",
+    "rustdoc::redundant_explicit_links",
 ];
 
 /// One `cargo doc` invocation, however it was spelled.
