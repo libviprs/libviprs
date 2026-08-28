@@ -81,7 +81,20 @@
 //!   So the fixed point is the `uchar` arithmetic and only the `uchar`
 //!   arithmetic, and an alpha band takes the decision away from the stored
 //!   depth entirely, because `vips_affine` premultiplies into a FLOAT image
-//!   before it resamples. Porting the fixed point is a deliberate loss of
+//!   before it resamples.
+//!
+//!   The `FLOAT` row carries a second consequence, which is issue #705.
+//!   `bicubic_float<T>` sums each of the four rows through `cubic_float<T>` and
+//!   then combines them through `cubic_float<T>` again, and that helper
+//!   **returns `T`**. Its arithmetic is `double` either way, because the
+//!   coefficients are, so with `T = float` all five sums are computed in `f64`
+//!   and narrowed to `f32` on the way out, and with `T = double` nothing
+//!   narrows. This module does the same, keyed on the same carrier rule. The
+//!   accumulation *order* is not part of it: flat 16-term `f64` and
+//!   row-then-column `f64` are bit-identical here (measured 0 of 1764 apart on
+//!   a random 24x24 float raster, where both miss the binary by the same
+//!   1.5259e-05 in the same 356 samples), so it is the narrowing and not the
+//!   reassociation that closes it. Porting the fixed point is a deliberate loss of
 //!   accuracy in exchange for parity: measured against Catmull-Rom evaluated at
 //!   the true offset in exact rational arithmetic, the mean absolute error over
 //!   17814 interior samples of random `uchar` images goes from 0.4371 LSB to
@@ -151,7 +164,10 @@
 //!   `vips_unpremultiply` reads that image back, so the interpolated pixel is
 //!   quantised at the seam between them; the interpolation itself accumulates
 //!   in `f64`, which is what `BILINEAR_FLOAT` does with its `double`
-//!   coefficients (`interpolate.c:462`). The averaging resamplers —
+//!   coefficients (`interpolate.c:462`). Bicubic is the exception, and only
+//!   because the premultiply moved the carrier: `bicubic_float<float>` narrows
+//!   each row sum to `f32` (issue #705, and the per-carrier table above), so a
+//!   premultiplied raster takes that narrowing whatever its stored depth was. The averaging resamplers —
 //!   `reduce` / `reduceh` / `reducev`, `shrink` / `shrinkh` / `shrinkv`, and
 //!   `resize` — do the same: an alpha image is premultiplied once into a float
 //!   working buffer, the separable box / kernel / affine passes all run in that
@@ -1119,6 +1135,23 @@ impl TapFetch<'_> {
         !premultiply && !self.layout.is_float && self.layout.bpc == 1
     }
 
+    /// True when `vips_interpolate_bicubic_interpolate` would run
+    /// `bicubic_float<T>` with `T = float`, so each of the four row sums and
+    /// the column combine are narrowed to `f32` on the way out of
+    /// `cubic_float<T>` (issue #705).
+    ///
+    /// That is `VIPS_FORMAT_FLOAT` and `VIPS_FORMAT_COMPLEX`, plus anything
+    /// with an alpha band, because `vips_affine_build` premultiplies into a
+    /// FLOAT image before it resamples whatever the stored depth was. The
+    /// 16- and 32-bit integer carriers take `bicubic_float<double>` instead
+    /// and narrow nothing, and the `uchar` carrier never reaches this at all
+    /// (see [`bicubic_is_fixed_point`]).
+    ///
+    /// [`bicubic_is_fixed_point`]: TapFetch::bicubic_is_fixed_point
+    fn bicubic_narrows_rows(&self, premultiply: bool) -> bool {
+        premultiply || self.layout.is_float
+    }
+
     fn fill_value(&self) -> f64 {
         match self.extend {
             Extend::White => self.white,
@@ -1165,6 +1198,11 @@ struct InterpScratch {
     /// [`INTERPOLATE_SCALE`] units, `4 * bands` long and row-major. Only that
     /// path uses it; every other kernel leaves it untouched.
     rows: Vec<i64>,
+    /// The same four row sums for the floating-point bicubic path, which
+    /// carries them separately because vips rounds each one to `f32` on a
+    /// float carrier and that has to happen between the two stages
+    /// (issue #705).
+    rows_f: Vec<f64>,
 }
 
 impl InterpScratch {
@@ -1172,6 +1210,7 @@ impl InterpScratch {
         Self {
             tap: vec![0.0f64; bands],
             rows: vec![0i64; 4 * bands],
+            rows_f: vec![0.0f64; 4 * bands],
         }
     }
 }
@@ -1187,7 +1226,7 @@ fn interpolate_at(
     scratch: &mut InterpScratch,
     out: &mut [f64],
 ) {
-    let InterpScratch { tap, rows } = scratch;
+    let InterpScratch { tap, rows, rows_f } = scratch;
     let px = &mut tap[..];
     let x0 = x.floor() as i64;
     let y0 = y.floor() as i64;
@@ -1266,18 +1305,39 @@ fn interpolate_at(
             // (issue #668).
             catmull_coefficients(&mut cx, table_offset(x));
             catmull_coefficients(&mut cy, table_offset(y));
-            out.fill(0.0);
-            for (j, cyj) in cy.iter().enumerate() {
+            // `bicubic_float` runs the four rows through `cubic_float<T>` and
+            // then combines them through `cubic_float<T>` again, and that
+            // helper *returns* `T`. With `T = float` every one of those five
+            // sums is computed in `double` and narrowed to `f32` on the way
+            // out; with `T = double`, which is what the 16- and 32-bit integer
+            // carriers get from `bicubic_unsigned_int32_tab`, nothing narrows.
+            // Reassociating alone changes no bits (measured: 0 of 1764), so
+            // the narrowing is the whole of issue #705.
+            let narrow = fetch.bicubic_narrows_rows(premultiply);
+            let bands = out.len();
+            rows_f.fill(0.0);
+            for (j, row) in rows_f.chunks_exact_mut(bands).enumerate() {
+                if cy[j] == 0.0 {
+                    continue;
+                }
                 for (i, cxi) in cx.iter().enumerate() {
-                    let wgt = cyj * cxi;
-                    if wgt == 0.0 {
+                    if *cxi == 0.0 {
                         continue;
                     }
                     fetch.fetch(x0 - 1 + i as i64, y0 - 1 + j as i64, premultiply, px);
-                    for (o, p) in out.iter_mut().zip(px.iter()) {
-                        *o += wgt * p;
+                    for (r, p) in row.iter_mut().zip(px.iter()) {
+                        *r += cxi * p;
                     }
                 }
+                if narrow {
+                    for r in row.iter_mut() {
+                        *r = f64::from(*r as f32);
+                    }
+                }
+            }
+            for (b, o) in out.iter_mut().enumerate() {
+                let acc: f64 = (0..4).map(|j| cy[j] * rows_f[j * bands + b]).sum();
+                *o = if narrow { f64::from(acc as f32) } else { acc };
             }
         }
         Interpolator::Lbb => {
@@ -4490,6 +4550,65 @@ mod tests {
             want,
             "float bicubic against vips 8.18.6"
         );
+    }
+
+    /// Issue #705, the premultiplied half. `vips_affine_build` premultiplies
+    /// into a **FLOAT** image whenever `vips_image_hasalpha()`, so an alpha
+    /// raster takes `bicubic_float_tab<float>` and the per-row narrowing
+    /// whatever its stored depth was. Without a case here the `premultiply`
+    /// arm of `bicubic_narrows_rows` has nothing behind it: an 8-bit output
+    /// quantum swallows an `f32` ulp whole, so an `Rgba8` fixture cannot see
+    /// this at all (measured: 0 samples move over 40 random 12x12 `Rgba8`
+    /// rasters, against 28 of 40 for `Rgba16`).
+    ///
+    /// The oracle is `premultiply | affine --premultiplied | unpremultiply` on
+    /// 8.18.6 with `--max-alpha 65535`, read back as FLOAT and quantised with
+    /// this module's own round-half-up, for the reason
+    /// `resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data` gives:
+    /// `vips_cast` truncates a float toward zero, so casting the oracle to
+    /// `ushort` would ask a different question. Read that way the whole 12x10
+    /// output agrees in **480 of 480** samples with the narrowing and 477 of
+    /// 480 without it.
+    ///
+    /// The three that separate them are output pixel `(0, 7)`, bands 0 to 2,
+    /// and they are on the rounding boundary, which is the only place an `f32`
+    /// ulp at 50000 can reach:
+    ///
+    /// ```text
+    /// vips float 56743.50390625  ->  56744   without the narrowing 56743
+    /// vips float 51235.5         ->  51236   without the narrowing 51235
+    /// vips float 45727.5         ->  45728   without the narrowing 45727
+    /// ```
+    ///
+    /// Row 7 of the output is pinned rather than only those three, so the test
+    /// says what the row is and not just where it bends.
+    #[test]
+    fn affine_bicubic_narrows_the_rows_when_alpha_premultiplies_to_float() {
+        let data: Vec<u8> = (0..8 * 8 * 4usize)
+            .flat_map(|i| (((i * 60013 + 977) % 65521) as u16).to_ne_bytes())
+            .collect();
+        #[rustfmt::skip]
+        let want_row7: [u16; 48] = [
+            56744, 51236, 45728, 3151, 54961, 49453, 43945, 27834,
+            24906, 19398, 13890, 36248, 17693, 12185, 6677, 45305,
+            23153, 17645, 12137, 60075, 57805, 52297, 46789, 38234,
+            52224, 46716, 41208, 20211, 14154, 8646, 2902, 36135,
+            15458, 9950, 6030, 58270, 41591, 36083, 50625, 47886,
+            46338, 40830, 48301, 31296, 59024, 53516, 37023, 12280,
+        ];
+        let out = Raster::new(8, 8, PixelFormat::Rgba16, data)
+            .unwrap()
+            .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!((out.width(), out.height()), (12, 10), "output size");
+        let got: Vec<u16> = out
+            .extract_area(0, 7, 12, 1)
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect();
+        assert_eq!(got, want_row7, "premultiplied Rgba16 bicubic row 7");
     }
 
     /// Issue #705, the over-reach guard. Only bicubic sums rows through a
