@@ -612,3 +612,46 @@ fn the_v_budget_prices_the_declared_body_and_not_the_file() {
     assert_eq!((ok.width(), ok.height()), (4, 3));
     assert_eq!(ok.format(), PixelFormat::Rgb16);
 }
+
+/// Issue #710. A `.v` band count with no `PixelFormat` is still a format
+/// error, not an allocation refusal, however tight the budget is.
+///
+/// This pins an ordering decision rather than a behaviour: the budget check
+/// sits after `PixelFormat::with_channels` in `decode_vips_bytes`, so a header
+/// declaring more bands than a `PixelFormat` can hold comes back the way it
+/// always did. Moving the check one line earlier answers `AllocLimitExceeded`
+/// for the same file, which is a worse answer, because raising
+/// `max_alloc_bytes` would not make the file readable.
+///
+/// It takes a budget of 1 to see at all. At the default ceiling a 4x4 raster
+/// of 70000 bands is 1.1 MB and neither order refuses it, so the two spellings
+/// are indistinguishable and this test would be green either way.
+#[test]
+fn an_unrepresentable_v_band_count_is_a_format_error_not_a_budget_one() {
+    let mut bytes = rgb8(4).encode_vips().expect("v fixture");
+    // Offset 12 is the band count, and 70000 is past `u16::MAX`, which is
+    // where `PixelFormat::with_channels` gives up.
+    bytes[12..16].copy_from_slice(&70_000i32.to_ne_bytes());
+
+    let err = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(1))
+        .expect_err("70000 bands is not a representable PixelFormat");
+    assert!(
+        matches!(err, SourceError::VipsFormat(ref m) if m.contains("70000")),
+        "an unrepresentable band count must stay a format error even under a \
+         budget that would also refuse it: {err:?}"
+    );
+
+    // The positive control: the same file under the same budget is genuinely
+    // over it, so the assertion above is about which check fires first and not
+    // about the file being fine.
+    let representable = rgb8(4).encode_vips().expect("v fixture");
+    let over = decode_bytes_with_limits(
+        &representable,
+        DecodeLimits::default().with_max_alloc_bytes(1),
+    )
+    .expect_err("48 bytes is over a 1-byte ceiling");
+    assert!(
+        over.is_alloc_limit(),
+        "the control must reach the budget: {over:?}"
+    );
+}
