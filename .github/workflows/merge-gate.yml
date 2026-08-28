@@ -2,8 +2,10 @@ name: Merge Gate
 
 # The deep checks. Loom and the pdfium-render source audit run on every branch
 # push and on pull requests into `main` or `release`. Miri is held at the
-# release boundary by the `if:` on its job, because it does not currently
-# finish (#675).
+# release boundary by the `if:` on its job, because it still does not pass
+# (#675). What #675 changed is the shape of the failure, not the colour: it
+# used to burn 90 minutes and report `cancelled`, and now it aborts in a couple
+# of minutes naming the next test that needs an annotation.
 #
 # The split is measured rather than assumed. The old trigger sat all three
 # behind `branches: [release]` on the grounds that they are too slow for
@@ -76,7 +78,7 @@ on:
   workflow_dispatch:
     inputs:
       run_miri:
-        description: 'Also run Miri (90 minute ceiling, does not finish today, #675)'
+        description: 'Also run Miri (aborts on the first unannotated fs test, #675)'
         type: boolean
         default: false
 
@@ -95,37 +97,71 @@ env:
 jobs:
   # Miri is kept, deliberately.
   #
-  # `cargo +nightly miri test` cannot run on the dev machine at the moment, which
-  # sounds like a reason to drop the job, but the cause is local and says nothing
-  # about this workflow. The nightly installed there is 1.96.0-nightly
-  # (1d8897a4e, 2026-03-13), which is *older* than the crate's MSRV of 1.97, so
-  # the crate does not compile under it at all. `dtolnay/rust-toolchain@nightly`
-  # on a GitHub-hosted runner resolves the current nightly, which is well past
-  # 1.97, so the job builds where it actually runs. `rustup update nightly` is the
-  # local fix.
+  # It runs on the dev machine again, on a *dated* nightly. This block used to
+  # say `cargo +nightly miri test` could not run there, and gave the reason: the
+  # nightly installed at the time was 1.96.0-nightly (1d8897a4e, 2026-03-13),
+  # older than the crate's MSRV of 1.97, so cargo refused to build before Miri
+  # was reached. That is still true of the floating `nightly` on that machine
+  # today, so `make miri` pins `MIRI_TOOLCHAIN` to a nightly that satisfies the
+  # MSRV and checks it before running. Read the `Makefile` for the whole of it.
   #
-  # It is also real coverage rather than decoration, which is the bar for keeping
-  # a check at all. The tree is actively maintained for Miri: 48
-  # `#[cfg_attr(miri, ignore)]` annotations across seven modules, each naming the
-  # isolation limit it works around, and a `fix/miri-fs-isolation` branch that
-  # went green here. The last GitHub runs of this workflow, on 2026-04-25, all
-  # passed. Dropping it would quietly remove the only check the repository has on
-  # undefined behaviour.
+  # That leaves one thing the mirror cannot mirror, and it is worth being blunt
+  # about it: this job resolves `dtolnay/rust-toolchain@nightly` on the day and
+  # the local side pins a date, so the two run the same command and the same
+  # flags on *different compilers*. `tests/miri_invocation_parity.rs` compares
+  # the command and the environment, not the compiler, because there is nothing
+  # it could compare them to. A local green is evidence about the crate, not a
+  # prediction of this job.
+  #
+  # It is real coverage rather than decoration, which is the bar for keeping a
+  # check at all, but be precise about whose code it covers. This crate has no
+  # `unsafe` of its own: all four matches for the word under `src/` are in
+  # comments. So Miri here checks the `unsafe` in the dependencies the tests
+  # reach, which is a dozen image decoders plus the colour and hash crates, and
+  # that is the surface #642 was filed about in the first place.
+  #
+  # The tree is maintained for it: every filesystem-touching test is meant to
+  # carry a `#[cfg_attr(miri, ignore)]` naming the isolation limit it works
+  # around, the set is pinned by `tests/miri_fs_test_inventory.txt`, and
+  # `tests/miri_ignore_convention.rs` holds that file against the tree (#652,
+  # #670). Counts live in the inventory rather than here, on purpose: this file
+  # quoted "48 annotations across seven modules" for months after it stopped
+  # being true, and quoting the live number instead made this a file every
+  # unrelated pull request had to edit. Dropping this job would quietly remove
+  # the only check the repository has on undefined behaviour.
   miri:
     name: Miri
     runs-on: ubuntu-latest
     # Held at the release boundary rather than widened with the other two,
-    # because it does not currently finish at all (#675). Three consecutive
-    # dispatched runs were killed at the 90 minute ceiling below, and the run
-    # before that ceiling existed went 4h13m. Widening it now would hang a 90
-    # minute timeout off every pull request and report it as `cancelled`.
+    # because it still does not pass. Three consecutive dispatched runs were
+    # killed at the 90 minute ceiling below, and the run before that ceiling
+    # existed went 4h13m. Since #675 it aborts fast instead, on the first
+    # unannotated filesystem test, so the cost of widening it would now be
+    # minutes rather than hours. It stays held anyway, because a check that is
+    # red by construction on every pull request teaches people to ignore it.
+    #
+    # Do not read that as "#712 turns this green". #712 clears the aborts; it
+    # says nothing about the clock, and the clock looks bad. Measured on
+    # nightly-2026-08-20 with isolation on and the sha2 backend pinned, the
+    # single proptest `arithmetic::proptests::no_try_method_panics_on_a_float_raster`
+    # ran for over twenty minutes under the interpreter without finishing. It
+    # touches no filesystem, so it carries no annotation and #712 will never
+    # reach it, and it is one test out of more than fifteen hundred in the lib
+    # target alone.
+    #
+    # So the open question is not "when does #712 land" but whether Miri on this
+    # crate wants a whole-suite invocation at all, or a `--lib`-only or
+    # per-target one aimed at the code whose `unsafe` is worth interpreting.
+    # That is #652's territory and it wants deciding before anyone promises a
+    # green Miri job.
     #
     # `inputs.run_miri` is null on every event except `workflow_dispatch`, so
     # this reads as: a release pull request, or someone asking for it by hand.
     # A push run carries no `base_ref`, so pushes never queue Miri either.
     #
-    # Read this before you drop the condition when #675 lands (itself waiting
-    # on #670), and before anyone makes these checks required on `main`.
+    # #675 has landed and this condition is still here, on purpose. Read what
+    # follows before you drop it, and before anyone makes these checks required
+    # on `main`.
     # GitHub reports a job skipped by a job-level `if:` to branch protection as
     # **passing**, not as skipped. So with required checks turned on and this
     # condition still in place, "Miri" goes green on every `main` pull request
@@ -145,43 +181,94 @@ jobs:
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
-      # `-Zmiri-disable-isolation` is what lets the fs-touching tests run at all.
-      # Without it Miri refuses `mkdir` and the whole run aborts on the first
-      # test that reaches for a `tempdir`, which is how this check broke: nothing
-      # enforces the `#[cfg_attr(miri, ignore)]` convention below, so one new
-      # test using `tempfile` takes the job down and reports it as a Miri
-      # failure rather than as a missing annotation.
+      # There is no `-Zmiri-disable-isolation` here any more, and it must not
+      # come back. `tests/miri_invocation_parity.rs` fails if it does.
       #
-      # I claimed here that this was not a coverage loss, on the reasoning that
-      # the 48 annotated tests stay ignored and only *unannotated* fs tests stop
-      # aborting the run, so the job covers strictly more. I never measured it
-      # and it is false. Letting those unannotated tests actually execute under
-      # Miri is what pushed the run past any ceiling, so the job now covers
-      # strictly less: it covers nothing, because it never reports. The old
-      # behaviour at least aborted quickly and named the unannotated test.
+      # It was added to let the filesystem tests run at all, with the claim that
+      # this was not a coverage loss: the annotated tests stay ignored and only
+      # *unannotated* fs tests stop aborting the run, so the job covers strictly
+      # more. That was reasoning, not measurement, and it was false. Letting
+      # those tests execute under the interpreter is what pushed the run past
+      # any ceiling, so the job covered strictly less. It covered nothing,
+      # because it never reported: three consecutive runs died at the 90 minute
+      # ceiling and reported `cancelled`. #675.
       #
-      # The flag stays for the moment only because removing it before #670 lands
-      # puts the job straight back to aborting on the first `tempdir`. #675 has
-      # the ordering and the measurements; #652 has the larger question of
-      # un-ignoring those 48 tests.
+      # With the flag gone the run aborts on the first unannotated filesystem
+      # test instead. That is not a finished gate, and the inventory says how
+      # far off it is:
+      # more than a hundred unannotated filesystem-touching tests are recorded
+      # in `tests/miri_fs_test_inventory.txt`, against the three that #670
+      # annotated. The exact count lives there rather than here so that adding
+      # one filesystem test does not mean editing this workflow;
+      # `tests/miri_invocation_parity.rs` holds the bound. Measured with
+      # isolation on, at 120acb6:
       #
-      # `RUSTFLAGS: -A deprecated` is the nightly-only half of #643. Nightly std
-      # has renamed `AtomicU64::fetch_update` to `try_update` and deprecated the
-      # old name, and the crate sets `[lints.rust] deprecated = "deny"`, so the
-      # lib does not compile under nightly at all and Miri never runs. It lives
-      # here rather than as an `#[allow(deprecated)]` in `src/observe.rs`
-      # because the attribute has no `cfg` to hang the "nightly only" claim on:
-      # it would disarm the deny on stable too, at the exact call site the deny
-      # was added to watch, for every expression inside that statement. This is
-      # scoped to the one job that needs it.
+      #   connection::tests::file_target_writes_and_reads_back_identical_bytes
+      #     error: unsupported operation: `mkdir` not available when isolation
+      #     is enabled, from tempfile::tempdir at src/connection.rs:552
+      #
+      # Annotating them reaches into most of `src/` and is its own change,
+      # so it is #712 rather than smuggled in here. Each round of it moves the
+      # abort point forward and the abort names the next test, so the work
+      # drives itself. #652 has the larger question of which of the annotated
+      # tests should be un-ignored once it does complete.
+      #
+      # `RUSTFLAGS` carries two things, and the `Makefile` mirror carries the
+      # same string.
+      #
+      # `-A deprecated` is the nightly-only half of #643. Nightly std has
+      # renamed `AtomicU64::fetch_update` to `try_update` and deprecated the old
+      # name, and the crate sets `[lints.rust] deprecated = "deny"`, so the lib
+      # does not compile under nightly at all and Miri never runs. It lives here
+      # rather than as an `#[allow(deprecated)]` in `src/observe.rs` because the
+      # attribute has no `cfg` to hang the "nightly only" claim on: it would
+      # disarm the deny on stable too, at the exact call site the deny was added
+      # to watch, for every expression inside that statement. This is scoped to
+      # the one job that needs it.
       #
       # Cargo appends `RUSTFLAGS` after the `[lints]` table's own `--deny=...`,
       # and rustc takes the last lint-level flag on the command line, so this
       # does win. Verified with `cargo build -v`.
+      #
+      # `--cfg sha2_backend="soft"` pins sha2's portable backend (#707), and it
+      # matters locally rather than here. Be exact about that, because the first
+      # version of this comment was not.
+      #
+      # Under Miri, `cpufeatures` does not detect anything at runtime. It
+      # compiles to `cpufeatures-0.3.1/src/miri.rs`, where the detection macro is
+      # replaced by `cfg!(all(target_feature = ...))` and the probe by a constant
+      # `false`. So sha2's backend is chosen at *compile* time, from the
+      # target's baseline features. `rustc --print cfg` settles what those are:
+      # `aarch64-apple-darwin` carries `target_feature="sha2"`, and
+      # `x86_64-unknown-linux-gnu` carries `sse2` but none of `sha`, `ssse3` or
+      # `sse4.1`, which is what sha2's x86 path needs.
+      #
+      # That gives two different facts, not one. On the dev machine the NEON
+      # backend is selected and the run reaches `vld1q_u32(&K32[0])`, a 16 byte
+      # load through a `&u32` whose retag covers four, and aborts about 30
+      # seconds in on a Stacked Borrows violation. On this runner the portable
+      # backend was already being selected, so the flag changes nothing at all
+      # here and costs no coverage: the SIMD path it gives up was never compiled
+      # in the first place. It is set on both sides so the two invocations stay
+      # one string, and so that a runner image moving to arm64 would not quietly
+      # reintroduce the abort.
+      #
+      # The violation itself is on file against Miri as rust-lang/miri#3900,
+      # "SIMD load intrinsics false positive", closed as not planned, so it is
+      # Stacked Borrows being stricter than the model that eventually lands
+      # rather than something that can go wrong at runtime.
+      #
+      # `-Zmiri-tree-borrows` clears it too, measured. It is not used because it
+      # is the larger change of the two: it swaps the aliasing model for the
+      # whole run, and Tree Borrows accepts this pattern by design rather than by
+      # accident, so it would also be a defensible answer. What it is not is a
+      # *safer* one, and the argument that it "changes the model every test is
+      # checked against" is worth discounting while no test is being checked at
+      # all. If the backend pin ever becomes awkward, switching is a one line
+      # change here and in the `Makefile`.
       - run: cargo +nightly miri test
         env:
-          MIRIFLAGS: -Zmiri-disable-isolation
-          RUSTFLAGS: -A deprecated
+          RUSTFLAGS: '-A deprecated --cfg sha2_backend="soft"'
 
   loom:
     name: Loom
