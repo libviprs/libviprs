@@ -1718,9 +1718,9 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// other container libviprs recognises is read into memory whole, through a
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
-/// That is native `.v`, JPEG, GIF, WebP, JPEG XL, Radiance HDR, FITS and
-/// OpenEXR: each one either parses its own container end to end or makes a
-/// second pass over the same bytes for metadata.
+/// That is native `.v`, JPEG, GIF, WebP, JPEG XL, Radiance HDR, FITS,
+/// OpenEXR and NIfTI: each one either parses its own container end to end or
+/// makes a second pass over the same bytes for metadata.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -3012,6 +3012,31 @@ mod tests {
             vec![SniffedFormat::Png, SniffedFormat::Tiff],
             "decode_file_with_limits' doc tells callers PNG and TIFF are the only \
              containers that stream; move the doc and this list together"
+        );
+
+        // The same doc paragraph names the other half by hand, and only the
+        // streaming half above had a check behind it. The NIfTI row (#510)
+        // went in with that sentence left saying eight containers, the
+        // suite stayed green, and the prose was wrong for a whole PR.
+        let whole_file: Vec<SniffedFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter(|format| format.decodes_from_memory())
+            .collect();
+        assert_eq!(
+            whole_file,
+            vec![
+                SniffedFormat::Vips,
+                SniffedFormat::Jpeg,
+                SniffedFormat::Gif,
+                SniffedFormat::WebP,
+                SniffedFormat::Jxl,
+                SniffedFormat::Radiance,
+                SniffedFormat::Fits,
+                SniffedFormat::OpenExr,
+                SniffedFormat::Nifti,
+            ],
+            "decode_file_with_limits' doc names every container it reads whole, in \
+             this order; move the doc and this list together"
         );
     }
 

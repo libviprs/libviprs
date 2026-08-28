@@ -42,8 +42,8 @@
 //!   capture's own prose is wrong: `bad_sizeof_swapped.nii` is a
 //!   little-endian file with *only* its four sentinel bytes swapped, and it
 //!   loads `LSB_FIRST` with `dim` reading `3 2 3 1`, which the
-//!   sentinel-decides rule cannot produce. See
-//!   [`field_endian`] for the rule and the four fixtures that force it.
+//!   sentinel-decides rule cannot produce. The rule, and the four fixtures
+//!   that force it, are written out over `field_endian` in this module.
 //! * **The magic decides the dialect, and only four bytes of it are read.**
 //!   `NIFTI_VERSION` looks at `magic[0..4]`: `n`, then `i` or `+`, then a
 //!   digit 1 to 9, then a NUL. Anything else is version 0, the Analyze 7.5
@@ -1169,6 +1169,51 @@ mod tests {
         assert_eq!(
             u16_samples(&raster),
             vec![33152, 33666, 34180, 34694, 35208, 35722]
+        );
+    }
+
+    /**
+     * The same sixteen-bit array written the other way round comes back
+     * identical, which is what actually pins the swap. The test above does
+     * not: every `UINT16` fixture in the capture is little-endian, so on a
+     * little-endian host a decoder that hard-coded `from_le_bytes` would
+     * pass it. **Measured, by mutating exactly that and watching the test
+     * stay green.**
+     *
+     * The big-endian half is `endian_nifti1_int16_be.nii`, which the
+     * reference wrote through its own `nifti_swap_as_nifti1`, with its
+     * datatype poked from `INT16` (4) to `UINT16` (512). Nothing else about
+     * the file changes: `nbyper` is 2 either way, `bitpix` is already 16, and
+     * the payload is untouched. Its on-disk bytes are `8180 8382 ...` against
+     * the little-endian file's `8081 8283 ...`, and the oracle records both
+     * files loading to the same memory, `808182838485868788898a8b`.
+     * Input: the big-endian file as `UINT16` -> Output: the six values
+     * `dt512_uint16.nii` gives.
+     */
+    #[test]
+    fn a_big_endian_uint16_array_is_swapped_into_host_order() {
+        let mut be = fixture("endian_nifti1_int16_be.nii");
+        assert_eq!(
+            &be[352..364],
+            &[
+                0x81, 0x80, 0x83, 0x82, 0x85, 0x84, 0x87, 0x86, 0x89, 0x88, 0x8b, 0x8a
+            ],
+            "the fixture has to be the byte-swapped one, or this proves nothing"
+        );
+        // datatype is a big-endian i16 in this file.
+        be[70..72].copy_from_slice(&512i16.to_be_bytes());
+        let raster = decode_nifti(&be, DecodeLimits::default()).expect("uint16, big-endian");
+        assert_eq!((raster.width(), raster.height()), (2, 3));
+        assert_eq!(raster.format(), PixelFormat::Gray16);
+        assert_eq!(
+            u16_samples(&raster),
+            vec![33152, 33666, 34180, 34694, 35208, 35722],
+            "the same six values the little-endian file gives"
+        );
+        assert_eq!(
+            raster.data(),
+            decoded("dt512_uint16.nii").data(),
+            "and byte for byte the same buffer"
         );
     }
 
