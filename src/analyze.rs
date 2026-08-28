@@ -1420,6 +1420,67 @@ mod tests {
     }
 
     /**
+     * Issue #797. The capture's own prose has to name the predicate its own
+     * data measures, so the sentence a reader ports from cannot say one
+     * thing while the numbers under it say another.
+     *
+     * This is the shape #752 was in the NIfTI capture: the measurements were
+     * right and the sentence above them was wrong, and a port written from
+     * the sentence disagreed with the oracle. Here the sentence said
+     * `isascii(c) || c >= 32` and the record's own `patient_id` rules the
+     * OR out twice over.
+     *
+     * Both halves are checked, because either alone is satisfied by the
+     * wrong fix: the prose, so it cannot drift back, and this module's
+     * `getstr` against the record's measured value, so the prose cannot be
+     * corrected to something the implementation does not do.
+     * Input: `oracle-captures/foreign-analyze/oracle.json` -> Output: the
+     * `metadata` record names the AND, and `getstr` on its
+     * `patient_id_written` bytes gives its recorded `patient_id`.
+     */
+    #[test]
+    fn the_captures_own_prose_names_the_predicate_its_data_measures() {
+        const ORACLE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-captures/foreign-analyze/oracle.json"
+        ));
+        let json: serde_json::Value =
+            serde_json::from_str(ORACLE).expect("the capture is valid JSON");
+        let record = &json["records"]["metadata"];
+        let prose = record["what"].as_str().expect("the record's prose");
+        assert!(
+            prose.contains("isascii(c) && c >= 32"),
+            "the prose has to name the AND its own data measures (issue #797)"
+        );
+        assert!(
+            !prose.contains("isascii(c) || c >= 32"),
+            "and must not still name the OR that data rules out"
+        );
+
+        // The measured half, which is what makes the correction checkable
+        // rather than an edit to a sentence. `0x01` is the byte that decides:
+        // it is `isascii`, so under the OR it would survive.
+        let written: Vec<u8> = record["patient_id_written"]
+            .as_array()
+            .expect("the bytes the fixture was written with")
+            .iter()
+            .map(|v| u8::try_from(v.as_u64().expect("a byte")).expect("a byte"))
+            .collect();
+        assert!(
+            written.contains(&0x01),
+            "the deciding byte is in the fixture"
+        );
+        let measured = record["header"]["dsr-data_history.patient_id"]
+            .as_str()
+            .expect("the value vipsheader printed");
+        assert_eq!(
+            getstr(&written),
+            measured,
+            "getstr has to reproduce the record's own measured value"
+        );
+    }
+
+    /**
      * The buffer entry point on a `.hdr`, which is what
      * [`crate::source::decode_bytes`] reaches through the route table's
      * `Paired` row. A header that would otherwise load reports where its
