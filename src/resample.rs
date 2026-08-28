@@ -104,6 +104,24 @@
 //!   0.4798, worst case 1 LSB either way, and vips is the closer of the two on
 //!   1355 of those samples. The shared error from the 1/64 offset grid above is
 //!   0.44 LSB, ten times larger.
+//! * **Metadata.** Every operation carries the input's header block
+//!   (interpretation, resolution, offsets, orientation) and its attached
+//!   fields (ICC profile, EXIF blob, anything a caller set) onto its output,
+//!   through `Raster::carry_meta_from` (issue #789). The resolution goes
+//!   across **verbatim**: measured on 8.18.6, `vips resize in.v out.v 0.5`
+//!   and the same at 2 both return the input's `xres` and `yres` to the last
+//!   bit rather than rescaling them with the factor, which is the answer #690
+//!   measured for `zoom` and `subsample` too. `mapim` takes the block from the
+//!   image being remapped and not from the index, which is a coordinate field
+//!   rather than a picture, and [`Raster::constant_u8`] has no input to carry
+//!   from.
+//!
+//!   The internal steps carry it as well, so the premultiply bracket sees the
+//!   same interpretation between the vertical and horizontal passes that it
+//!   saw at the start. That is not cosmetic: #664 made the bracket read the
+//!   tag on a float carrier, so while the tag was being dropped the second
+//!   call of `resize(0.5).resize(0.5)` read a different alpha ceiling from the
+//!   first, whichever way the input was tagged.
 //! * **`resize` composition.** The scale is split per axis: any downscale
 //!   runs `reducev` / `reduceh` with the chosen kernel (default `lanczos3`,
 //!   gap 2), any residual upscale runs `affine` with the interpolator
@@ -1075,7 +1093,9 @@ fn shrink_axis(src: &Raster, factor: u32, ceil: bool, axis: Axis) -> Result<Rast
         }
     }
 
-    Ok(Raster::new(ow as u32, oh as u32, format, out)?)
+    let mut out = Raster::new(ow as u32, oh as u32, format, out)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,7 +1239,9 @@ fn reduce_axis(
         }
     }
 
-    Ok(Raster::new(ow as u32, oh as u32, format, out)?)
+    let mut out = Raster::new(ow as u32, oh as u32, format, out)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2353,7 +2375,9 @@ fn premultiply_to_float(src: &Raster, max: f64) -> Result<Raster, ResampleError>
         }
         out_layout.write(&mut out, base + bands - 1, alpha);
     }
-    Ok(Raster::new(src.width(), src.height(), out_fmt, out)?)
+    let mut out = Raster::new(src.width(), src.height(), out_fmt, out)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Un-premultiply the float working raster produced by [`premultiply_to_float`]
@@ -2396,7 +2420,9 @@ fn unpremultiply_from_float(
         }
         out_layout.write(&mut out, base + bands - 1, alpha.clamp(0.0, max));
     }
-    Ok(Raster::new(src.width(), src.height(), dst_fmt, out)?)
+    let mut out = Raster::new(src.width(), src.height(), dst_fmt, out)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Bracket the alpha premultiply exactly once around a separable resample
@@ -2453,7 +2479,9 @@ fn subsample(src: &Raster, xfac: u32, yfac: u32) -> Result<Raster, ResampleError
             out[dst_off..dst_off + bpp].copy_from_slice(&data[src_off..src_off + bpp]);
         }
     }
-    Ok(Raster::new(ow, oh, format, out)?)
+    let mut out = Raster::new(ow, oh, format, out)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Integral pixel replication (`vips_zoom`).
@@ -2482,6 +2510,7 @@ fn zoom(src: &Raster, xfac: u32, yfac: u32) -> Result<Raster, ResampleError> {
             buf[dst_off..dst_off + bpp].copy_from_slice(&data[src_off..src_off + bpp]);
         }
     }
+    out.carry_meta_from(src);
     Ok(out)
 }
 
@@ -2964,6 +2993,7 @@ impl Raster {
             }
         }
 
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -3131,6 +3161,9 @@ impl Raster {
             }
         }
 
+        // The header block comes from the image being remapped, not from the
+        // index image, which is a coordinate field and not a picture.
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -3256,19 +3289,19 @@ fn thumbnail_fit(
         ThumbSpace::Device => resize_if_needed(src, scale)?,
         ThumbSpace::Linear => {
             let linear = src.try_colourspace(Interpretation::ScRgb)?;
+            // The resample carries the scRGB tag through (issue #789), so the
+            // re-encode to sRGB sees the space it was told to expect. This
+            // used to restamp the tag with a `copy()` here, which cost a whole
+            // extra image-sized clone to undo a bug one call up.
             let small = resize_if_needed(&linear, scale)?;
-            // The resampler resets the interpretation tag to the format
-            // default, so restore scRGB before re-encoding to sRGB.
-            let small = small.copy().interpretation(Interpretation::ScRgb).build();
             small.try_colourspace(Interpretation::Srgb)?
         }
         ThumbSpace::IccSrgb => {
             let lab = src.try_icc_import_with(Intent::Perceptual, None, Some(Pcs::Lab))?;
-            let small = resize_if_needed(&lab, scale)?;
-            // Restore the Lab tag (dropped by the resampler) so the export
-            // takes the direct PCS path, and point the export at the
-            // built-in sRGB profile.
-            let mut small = small.copy().interpretation(Interpretation::Lab).build();
+            // Same again: the Lab tag survives the resample, so the export
+            // still takes the direct PCS path. Only the profile is stamped,
+            // pointing the export at the built-in sRGB one.
+            let mut small = resize_if_needed(&lab, scale)?;
             small.set_icc_profile(&builtin_srgb_profile()?);
             small.try_icc_export_with(8, Intent::Perceptual, None)?
         }
