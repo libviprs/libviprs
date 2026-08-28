@@ -1805,6 +1805,7 @@ mod tests {
      * `save_gif`, `save(".gif")` and `encode_to_buffer("gif")`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn every_save_entry_point_writes_the_same_bytes() {
         let im = gradient(8, 8);
         let expected = im.encode_gif(SaveOptions::default()).expect("encodes");

@@ -3,9 +3,11 @@ name: Merge Gate
 # The deep checks. Loom and the pdfium-render source audit run on every branch
 # push and on pull requests into `main` or `release`. Miri is held at the
 # release boundary by the `if:` on its job, because it still does not pass
-# (#675). What #675 changed is the shape of the failure, not the colour: it
-# used to burn 90 minutes and report `cancelled`, and now it aborts in a couple
-# of minutes naming the next test that needs an annotation.
+# (#675). The shape of the failure has changed twice and the colour has not.
+# It used to burn 90 minutes and report `cancelled`; #675 made it abort in a
+# couple of minutes naming the next test that needed an annotation; and now
+# that #712 and #739 have annotated them it is back to burning the clock, this
+# time in the `--lib` target on the first test it runs.
 #
 # The split is measured rather than assumed. The old trigger sat all three
 # behind `branches: [release]` on the grounds that they are too slow for
@@ -78,7 +80,7 @@ on:
   workflow_dispatch:
     inputs:
       run_miri:
-        description: 'Also run Miri (aborts on the first unannotated fs test, #675)'
+        description: 'Also run Miri (does not finish inside the 90m ceiling, #675)'
         type: boolean
         default: false
 
@@ -193,25 +195,33 @@ jobs:
       # because it never reported: three consecutive runs died at the 90 minute
       # ceiling and reported `cancelled`. #675.
       #
-      # With the flag gone the run aborts on the first unannotated filesystem
-      # test instead. That is not a finished gate, and the inventory says how
-      # far off it is:
-      # more than a hundred unannotated filesystem-touching tests are recorded
-      # in `tests/miri_fs_test_inventory.txt`, against the three that #670
-      # annotated. The exact count lives there rather than here so that adding
-      # one filesystem test does not mean editing this workflow;
-      # `tests/miri_invocation_parity.rs` holds the bound. Measured with
-      # isolation on, at 120acb6:
+      # With the flag gone the run aborted on the first unannotated filesystem
+      # test instead. #712 and #739 fixed that: 134 tests across 28 files took
+      # the annotation. What is left is
+      # a named handful of unannotated filesystem-touching tests,
+      # recorded in `tests/miri_fs_test_inventory.txt` and named in
+      # `tests/miri_ignore_convention.rs`, which now refuses any filesystem test
+      # that is neither annotated nor on that list. The exact count lives there
+      # rather than here so that adding one filesystem test does not mean
+      # editing this workflow; `tests/miri_invocation_parity.rs` holds the
+      # bound.
       #
-      #   connection::tests::file_target_writes_and_reads_back_identical_bytes
-      #     error: unsupported operation: `mkdir` not available when isolation
-      #     is enabled, from tempfile::tempdir at src/connection.rs:552
+      # That moved the wall rather than removing it. What stops this job
+      # reporting now is the clock, which is the half of #675 nobody had
+      # measured, because nobody had run the unfiltered command far enough to
+      # see it. `cargo miri test` runs the `--lib` target first and libtest
+      # runs it in sorted order, so the first two tests of the whole invocation
+      # are the two `arithmetic::proptests`. Measured at bd4bb1d on
+      # nightly-2026-08-20 with isolation on, ten cores at load average 15:
+      # ten minutes to build, six more for the first test, and the second was
+      # still running when a 35 minute bound cut the run off. One of 1596 lib
+      # tests done, and no unannotated filesystem test had been reached at all.
+      # Neither of those two touches the filesystem, so no annotation reaches
+      # them.
       #
-      # Annotating them reaches into most of `src/` and is its own change,
-      # so it is #712 rather than smuggled in here. Each round of it moves the
-      # abort point forward and the abort names the next test, so the work
-      # drives itself. #652 has the larger question of which of the annotated
-      # tests should be un-ignored once it does complete.
+      # So #652's question is the live one: whether Miri on this crate wants a
+      # whole-suite invocation at all, or a per-target one aimed at the code
+      # whose `unsafe` is worth interpreting.
       #
       # `RUSTFLAGS` carries two things, and the `Makefile` mirror carries the
       # same string.

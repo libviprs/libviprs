@@ -2247,6 +2247,7 @@ mod tests {
     /// checkpoint through `JobCheckpoint::load` rather than raw-parsing the
     /// header.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn checkpoint_flush_io_is_bounded_per_flush() {
         use crate::resume::{CHECKPOINT_FILENAME, JobCheckpoint, JobMetadata};
 
@@ -2295,6 +2296,7 @@ mod tests {
     /// the probe recorded nothing. GREEN after: the recorded sequence is
     /// `[0, 1, 2, ...]`, proving barrier-before-append ordering.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn flush_syncs_sink_before_certifying_delta() {
         use crate::resume::{JobCheckpoint, JobMetadata};
         use crate::sink::{SinkError, Tile, TileSink};
@@ -2356,6 +2358,7 @@ mod tests {
     /// (`.lock().unwrap()`) the next mark panicked (RED); after it the guard is
     /// recovered and the pre-poison completions survive (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn poisoned_checkpoint_meta_recovers_without_cascade() {
         use crate::resume::JobMetadata;
 
@@ -2429,6 +2432,7 @@ mod tests {
     /// every tile of the level being present in `completed_tiles`, so it is
     /// withheld until the level truly completes (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn partial_level_is_not_recorded_completed() {
         use crate::resume::JobMetadata;
 
@@ -2502,6 +2506,7 @@ mod tests {
     /// each caller a unique value and never resets, so exactly one caller sees
     /// each boundary and the count is exact (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn checkpoint_cadence_preserved_under_concurrency() {
         use crate::resume::JobMetadata;
         use std::sync::Barrier;
@@ -2864,6 +2869,7 @@ mod tests {
     /// [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER); without a dedupe
     /// strategy the same tile carries its full raw payload.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_strategy_writes_placeholder_markers_on_disk() {
         use crate::dedupe::DedupeStrategy;
         use crate::sink::{BLANK_TILE_MARKER, FsSink, TileFormat};

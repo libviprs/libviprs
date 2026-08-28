@@ -57,6 +57,7 @@ fn decode_exr_is_public_and_returns_float_bands() {
 /// the container is identified from its magic and never from the path
 /// extension (issue #563).
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_sniff_route_reaches_the_exr_codec_from_both_entry_points() {
     let bytes = sample();
     let direct = decode_exr(&bytes, DecodeLimits::default()).unwrap();
@@ -94,6 +95,7 @@ fn channel_names_and_compression_are_readable_downstream() {
 /// through `SourceError` as well as on its own. The UINT ceiling is the
 /// variant a caller is most likely to hit, so it is the one pinned here.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_typed_error_is_matchable_downstream() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),

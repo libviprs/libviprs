@@ -931,6 +931,7 @@ mod tests {
     /// (RED); after it the atomic rename replaces the file cleanly (GREEN).
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn write_to_atomically_replaces_a_read_only_manifest() {
         use std::os::unix::fs::PermissionsExt;
 

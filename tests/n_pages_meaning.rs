@@ -252,6 +252,7 @@ fn body_of<'a>(bodies: &'a [(String, String)], file: &str) -> &'a str {
 /// living there would pass unnoticed. That is the exact defect this file was
 /// held on, so it fails loudly here instead of shrinking in silence.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn no_source_file_has_real_code_past_its_cut() {
     let mut offenders = Vec::new();
     for (name, path) in rust_sources() {

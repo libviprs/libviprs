@@ -562,9 +562,10 @@ fn merge_gate_states_the_backlog_as_a_bound_it_still_meets() {
     );
     assert!(
         WORKFLOW.contains(BACKLOG_PHRASE),
-        "`merge-gate.yml` no longer says `{BACKLOG_PHRASE}`. The job aborts on the first \
-         unannotated filesystem test it reaches, and the workflow has to keep saying so or \
-         the next reader will assume the gate reports. The live count is {unannotated}."
+        "`merge-gate.yml` no longer says `{BACKLOG_PHRASE}`. The backlog is not zero and \
+         the workflow has to keep saying so, spelled that way and on one line, or the next \
+         reader will assume the filesystem class is fully enforced. The live count is \
+         {unannotated}."
     );
     assert!(
         WORKFLOW.contains("tests/miri_fs_test_inventory.txt"),
