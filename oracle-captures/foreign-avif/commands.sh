@@ -18,21 +18,21 @@ $VIPS heifload
 # fixtures/rgb16_src.raw written by this script (4x3x3 ushort, deterministic ramp)
 $VIPS rawload fixtures/rgb16_src.raw outputs/rgb16_src.v 4 3 3 --format ushort
 $VIPS copy outputs/rgb16_src.v outputs/rgb16_src-rgb16.v --interpretation rgb16
-$VIPS heifsave outputs/rgb16_src-rgb16.v fixtures/rgb8.avif --bitdepth 8 --lossless --keep none
-$VIPSHEADER -a fixtures/rgb8.avif
-$VIPS getpoint fixtures/rgb8.avif 0 0
-$VIPS getpoint fixtures/rgb8.avif 1 0
-$VIPS getpoint fixtures/rgb8.avif 2 0
-$VIPS getpoint fixtures/rgb8.avif 3 0
-$VIPS getpoint fixtures/rgb8.avif 0 1
-$VIPS getpoint fixtures/rgb8.avif 1 1
-$VIPS getpoint fixtures/rgb8.avif 2 1
-$VIPS getpoint fixtures/rgb8.avif 3 1
-$VIPS getpoint fixtures/rgb8.avif 0 2
-$VIPS getpoint fixtures/rgb8.avif 1 2
-$VIPS getpoint fixtures/rgb8.avif 2 2
-$VIPS getpoint fixtures/rgb8.avif 3 2
-$VIPSHEADER -f heif-bitdepth fixtures/rgb8.avif
+$VIPS heifsave outputs/rgb16_src-rgb16.v fixtures/rgb8_narrowed.avif --bitdepth 8 --lossless --keep none
+$VIPSHEADER -a fixtures/rgb8_narrowed.avif
+$VIPS getpoint fixtures/rgb8_narrowed.avif 0 0
+$VIPS getpoint fixtures/rgb8_narrowed.avif 1 0
+$VIPS getpoint fixtures/rgb8_narrowed.avif 2 0
+$VIPS getpoint fixtures/rgb8_narrowed.avif 3 0
+$VIPS getpoint fixtures/rgb8_narrowed.avif 0 1
+$VIPS getpoint fixtures/rgb8_narrowed.avif 1 1
+$VIPS getpoint fixtures/rgb8_narrowed.avif 2 1
+$VIPS getpoint fixtures/rgb8_narrowed.avif 3 1
+$VIPS getpoint fixtures/rgb8_narrowed.avif 0 2
+$VIPS getpoint fixtures/rgb8_narrowed.avif 1 2
+$VIPS getpoint fixtures/rgb8_narrowed.avif 2 2
+$VIPS getpoint fixtures/rgb8_narrowed.avif 3 2
+$VIPSHEADER -f heif-bitdepth fixtures/rgb8_narrowed.avif
 $VIPS heifsave outputs/rgb16_src-rgb16.v fixtures/rgb10.avif --bitdepth 10 --lossless --keep none
 $VIPSHEADER -a fixtures/rgb10.avif
 $VIPS getpoint fixtures/rgb10.avif 0 0
