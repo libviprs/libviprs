@@ -2,7 +2,7 @@
 """
 Oracle capture for the "convolution" area of libviprs-tests.
 
-Runs the real vips 8.18.4 CLI over synthetic and reference-suite inputs and
+Runs the real vips CLI over synthetic and reference-suite inputs and
 records exact input -> output behaviour for conv, compass, convsep, fastcor,
 spcor, gaussblur, sharpen, plus supplementary convasep/sobel/canny records.
 
@@ -26,15 +26,53 @@ and moving a mask across it changes which kernel runs.
 
 Writes:
   commands.sh  - every vips CLI command actually executed, in order
-  oracle.json  - structured records (dims, avg, min/max+pos, getpoint
-                 samples, sha256 of .v output, precision used, and the
-                 vector/novector comparison)
+  oracle.json  - structured records (dims, avg, min/max + a deterministic
+                 position, getpoint samples, sha256 of the PIXELS, precision
+                 used, and the vector/novector comparison)
 
 Re-running needs two things this directory does not carry: the vips binary at
 VIPS below, and the libvips reference suite's `sample.jpg` at REF_IMAGES (a
 22 KB JPEG, not vendored here). Every other input is generated from scratch by
-this script, deterministically -- the noise fixtures use `random.Random` with a
-fixed seed and the kernels come from `vips gaussmat`.
+this script -- the noise fixtures use `random.Random` with a fixed seed and the
+kernels come from `vips gaussmat`.
+
+## Two things that used to make a re-run diff against the committed file (#649)
+
+The inputs were always deterministic and the committed `.pgm` / `.ppm`
+fixtures are byte-identical after a re-run. About 932 of the 13,794 pinned
+leaves were not, for two reasons that had nothing to do with libvips being
+wrong, and both are fixed here.
+
+**The `sha256` pins hashed the `.v` container, not the pixels.** A `.v` is a
+64-byte header, the pixel data, and an XML metadata trailer, and `build_xml`
+(libvips/iofuncs/vips.c:857-859) writes VIPS_MICRO_VERSION into that trailer's
+namespace URI. So a vips patch release moves every whole-file hash at once
+without a single pixel moving: measured 8.18.4 against 8.18.6, all 452 hashes
+changed and every one of them is reproduced exactly by flipping that one byte
+back, while all 4294 pinned samples, all 452 `avg` values and every geometry
+field were identical. As a regression detector that is exactly backwards, so
+the pin is now `raw_sha256`, the sha256 of `vips rawsave` output, which is the
+pixels alone. That is the same thing canny/capture.py already pins.
+
+**The min/max coordinates came from `vips min --x --y`,** which reports WHERE a
+worker thread found the extreme. 614 of the 904 extremes in this capture sit on
+a tie (312 min, 302 max), so which coordinate comes back is a race: two runs of
+the identical binary on the identical fixtures differ at 478 leaves, all of
+them `x` or `y`. The VALUE still comes from the binary; the POSITION is now
+recomputed as the first occurrence in raster order, and `ties` records how many
+positions hold the extreme so a reader can tell an unambiguous pin from an
+arbitrary-but-reproducible one. Again the shape canny/capture.py already uses.
+
+## The oracle is pinned (#650)
+
+`oracle-captures/ORACLE_PIN.json` names the libvips build this area is
+measured against. This script refuses to run against anything else unless it
+is passed `--repin`, and `tests/oracle_capture_pins.rs` fails if the committed
+`oracle.json` records a version that file does not declare for this area. That
+is the half that matters: the previous arrangement recorded the version in a
+comment and in a meta key nothing ever read, so a `brew upgrade` nobody ran
+deliberately redefined the reference implementation and the only reason anyone
+noticed was that a lane happened to run the same command twice.
 
 Does not touch any git working tree; everything is written under this
 script's own directory (oracle-captures/convolution/).
@@ -44,6 +82,7 @@ import json
 import os
 import struct
 import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(ROOT, "fixtures")
@@ -53,6 +92,17 @@ REF_IMAGES = "/Users/rom/workspace/libviprs/libviprs-tests/tmp/libvips-reference
 
 VIPS = "/opt/homebrew/bin/vips"
 VIPSHEADER = "/opt/homebrew/bin/vipsheader"
+
+AREA = "convolution"
+
+# The oracle is pinned: oracle-captures/ORACLE_PIN.json names the libvips
+# build this area is measured against, and check() exits before anything is
+# written if the binary on the machine disagrees. See #650, and see
+# tests/oracle_capture_pins.rs for the half of the guard that runs in CI.
+sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir)))
+import oracle_pin  # noqa: E402  (needs the path above)
+
+VIPS_VERSION, ORACLE_PIN = oracle_pin.check(AREA, VIPS)
 
 os.makedirs(OUT, exist_ok=True)
 os.makedirs(KER, exist_ok=True)
@@ -195,13 +245,26 @@ FMT_STRUCT = {
 }
 
 
-def pixels(path):
-    """Every sample of `path`, in raster order, exact.
+def raster(path):
+    """(header, every sample in raster order, sha256 of the pixel bytes).
 
-    `vips rawsave` writes the samples with no header, so this compares
-    actual pixel values rather than a container hash -- two runs that differ
-    in one sample must not be allowed to hide behind matching avg/min/max.
+    `vips rawsave` writes the samples with no header and no trailer, so this
+    is the pixels and nothing else. Everything a record pins about an image
+    comes from here rather than from the file on disk, because the file on
+    disk is a container: a 64-byte header, the pixels, and an XML trailer
+    whose namespace carries VIPS_MICRO_VERSION (vips.c:857-859). Hashing the
+    container makes a patch release move all 452 pins at once with no pixel
+    moving, which is what #649 is about.
+
+    The `.raw` dumps are large and land in fixtures/outputs/, which
+    .gitignore already excludes. They are cached per path: several callers
+    want the same image and rawsave is not free at 384540 samples.
     """
+    st = os.stat(path)
+    key = (path, st.st_size, st.st_mtime_ns)
+    cached = RASTER_CACHE.get(key)
+    if cached is not None:
+        return cached
     hdr = vipsheader(path)
     raw = path + ".raw"
     if os.path.exists(raw):
@@ -210,7 +273,18 @@ def pixels(path):
     with open(raw, "rb") as f:
         blob = f.read()
     code, size = FMT_STRUCT[hdr["format"]]
-    return list(struct.unpack("<%d%s" % (len(blob) // size, code), blob))
+    vals = list(struct.unpack("<%d%s" % (len(blob) // size, code), blob))
+    out = (hdr, vals, hashlib.sha256(blob).hexdigest())
+    RASTER_CACHE[key] = out
+    return out
+
+
+RASTER_CACHE = {}
+
+
+def pixels(path):
+    """Every sample of `path`, in raster order, exact."""
+    return raster(path)[1]
 
 
 def vipsheader(path):
@@ -234,27 +308,76 @@ def avg(path):
     return float(run(["vips", "avg", path], log=False))
 
 
-def minmax(path):
-    """Return (min_val, min_x, min_y, max_val, max_x, max_y)."""
+def extreme(hdr, vals, want_max, reported):
+    """The extreme sample, with a position that survives a re-run.
+
+    `vips min --x --y` reports where a worker thread happened to find the
+    extreme. 614 of the 904 extremes in this capture sit on a tie, so which
+    coordinate comes back depends on which thread got there first, and two
+    runs of the identical binary on the identical fixtures differ at 478
+    leaves purely from that (#649). A pin that cannot survive a re-run of the
+    same binary on the same input is worse than no pin, because it trains
+    everyone to ignore a red diff.
+
+    So the VALUE still comes from the binary and the POSITION is recomputed
+    here as the first occurrence in raster order, which is the shape
+    canny/capture.py already uses. `ties` says how many positions hold the
+    extreme: 1 means this position is the only answer vips could have given,
+    anything more means it is one of several and only the raster-order rule
+    makes it reproducible.
+
+    `reported` is what `vips min`/`vips max` actually answered, and it is
+    asserted rather than recorded: the value must agree, and when the extreme
+    is unique the position must agree too. That keeps the binary in the loop
+    instead of quietly replacing it with arithmetic done here.
+    """
+    target = max(vals) if want_max else min(vals)
+    w, b = hdr["width"], hdr["bands"]
+    first = vals.index(target)
+    ties = len({i // b for i, v in enumerate(vals) if v == target})
+    pos = {
+        "value": target,
+        "x": (first // b) % w,
+        "y": (first // b) // w,
+        "band": first % b,
+        "ties": ties,
+    }
+    op = "max" if want_max else "min"
+    got_value, got_x, got_y = reported
+    # The CLI prints the extreme with six decimals, so it can be half a unit
+    # of the sixth decimal away from the sample and no further. `value` is the
+    # SAMPLE, not the print: the old pin recorded 7.0 where the float32 sample
+    # is 6.999999523162842, and a parity test comparing exactly against the
+    # print would have been comparing against a rounding.
+    if abs(got_value - target) > 1e-6 + 1e-9 * abs(target):
+        raise AssertionError(
+            "%s: vips %s printed %r, the raster says %r, and that is further "
+            "apart than six-decimal printing can explain"
+            % (op, op, got_value, target)
+        )
+    if ties == 1 and (got_x, got_y) != (pos["x"], pos["y"]):
+        raise AssertionError(
+            "%s: vips %s --x --y says (%d,%d) but only (%d,%d) holds %r"
+            % (op, op, got_x, got_y, pos["x"], pos["y"], target)
+        )
+    return pos
+
+
+def minmax(path, hdr, vals):
+    """The min and max blocks for one image, positions deterministic."""
     mn = run(["vips", "min", path, "--x", "--y"], log=False).splitlines()
     mx = run(["vips", "max", path, "--x", "--y"], log=False).splitlines()
     return {
-        "min": {"value": float(mn[2]), "x": int(mn[0]), "y": int(mn[1])},
-        "max": {"value": float(mx[2]), "x": int(mx[0]), "y": int(mx[1])},
+        "min": extreme(hdr, vals, False,
+                       (float(mn[2]), int(mn[0]), int(mn[1]))),
+        "max": extreme(hdr, vals, True,
+                       (float(mx[2]), int(mx[0]), int(mx[1]))),
     }
 
 
 def getpoint(path, x, y):
     out = run(["vips", "getpoint", path, str(x), str(y)], log=False)
     return [float(v) for v in out.split()]
-
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def out_path(name):
@@ -266,12 +389,13 @@ VECTOR_ARM = "__vector"
 
 def describe(path, points):
     """The summary block a record carries for one output image."""
+    hdr, vals, sha = raster(path)
     return {
         "path": os.path.relpath(path, ROOT),
-        **vipsheader(path),
-        "sha256": sha256(path),
+        **hdr,
+        "raw_sha256": sha,
         "avg": avg(path),
-        **minmax(path),
+        **minmax(path, hdr, vals),
         "points": {f"{x},{y}": getpoint(path, x, y) for (x, y) in points},
     }
 
@@ -332,7 +456,7 @@ def record_output(op, name, cmd, precision, points, note="", vec_out=None):
     rather than drifting quietly inside somebody's tolerance.
     """
     p = out_path(name)
-    hdr = vipsheader(p)
+    hdr, vals, sha = raster(p)
     rec = {
         "op": op,
         "record_id": name,
@@ -341,10 +465,10 @@ def record_output(op, name, cmd, precision, points, note="", vec_out=None):
         "output": {
             "path": os.path.relpath(p, ROOT),
             **hdr,
-            "sha256": sha256(p),
+            "raw_sha256": sha,
         },
         "avg": avg(p),
-        **minmax(p),
+        **minmax(p, hdr, vals),
         "points": {f"{x},{y}": getpoint(p, x, y) for (x, y) in points},
     }
     if vec_out is not None:
@@ -1141,11 +1265,38 @@ os.chmod(commands_sh_path, 0o755)
 
 oracle = {
     "meta": {
-        "vips_version": run(["vips", "--version"], log=False),
+        "vips_version": VIPS_VERSION,
         "vips_binary": VIPS,
-        "area": "convolution",
+        "area": AREA,
+        "oracle_pin": {
+            "file": "oracle-captures/ORACLE_PIN.json",
+            "pinned_vips_version": ORACLE_PIN["pinned_vips_version"],
+            "checked_how": (
+                "capture.py compares `vips --version` against the pin before "
+                "it writes anything and exits non-zero on a mismatch unless "
+                "it is passed --repin; tests/oracle_capture_pins.rs compares "
+                "the version recorded HERE against the same file, so a "
+                "--repin capture stays red until the pin moves too. Issue "
+                "#650: the previous arrangement wrote 8.18.4 into a comment "
+                "and into a meta key nothing read, and a brew upgrade "
+                "redefined the oracle mid-session without anyone noticing."
+            ),
+        },
         "provenance": {
-            "vips_version": run(["vips", "--version"], log=False),
+            "vips_version": VIPS_VERSION,
+            "homebrew_kegs": oracle_pin.homebrew_kegs(VIPS),
+            "why_homebrew_kegs": (
+                "Every Homebrew keg the vips binary reaches transitively, "
+                "with its version, walked from `otool -L`. `vips "
+                "--vips-config` names libopenjp2, libheif, matio and the "
+                "rest with no version for any of them, and the codec version "
+                "is what a future disagreement over these numbers turns on. "
+                "The stack moves independently of vips: the upgrade that "
+                "took vips 8.18.4 to 8.18.6 also took libheif 1.23.1 to "
+                "1.23.2, x265 4.2 to 4.3 and libultrahdr 1.5.1 to 2.0.2. "
+                "This is provenance, not a pin: only the vips version is "
+                "enforced. Issue #650."
+            ),
             "vips_targets": "; ".join(
                 " ".join(line.split())
                 for line in run(["vips", "--targets"], log=False).splitlines()
@@ -1189,6 +1340,35 @@ oracle = {
             "is checked at capture time against the KNOWN_DIVERGENT table in "
             "capture.py, so a record that changes regime aborts the capture "
             "instead of quietly re-pinning."
+        ),
+        "what_is_hashed": (
+            "`raw_sha256` on every output block is the sha256 of `vips "
+            "rawsave` output, i.e. of the pixel samples alone, in raster "
+            "order, little-endian, no header and no trailer. It is NOT a "
+            "hash of the `.v` file. It used to be, and that was backwards: "
+            "`build_xml` (libvips/iofuncs/vips.c:857-859) writes "
+            "VIPS_MICRO_VERSION into the `.v` trailer's XML namespace, so "
+            "every whole-file hash in this capture moved when the machine "
+            "went from vips 8.18.4 to 8.18.6, and all 452 of them are "
+            "reproduced exactly by flipping that one byte back. Zero pixels "
+            "had changed. A pin that is blind to the thing it is guarding "
+            "and loud about the thing it is not trains everyone to ignore a "
+            "red diff. Issue #649."
+        ),
+        "min_max_positions_are_recomputed": (
+            "`min`/`max` carry `value` from the binary and `x`/`y`/`band` "
+            "recomputed here as the FIRST OCCURRENCE IN RASTER ORDER, plus "
+            "`ties`, the number of (x,y) positions holding that extreme. "
+            "`vips min --x --y` reports where a worker thread found the "
+            "extreme, and 614 of the 904 extremes here sit on a tie (312 "
+            "min, 302 max), so the coordinate it returns is a race: two runs "
+            "of the identical binary on the identical fixtures differed at "
+            "478 leaves, every one of them an x or a y. Where `ties` is 1 "
+            "the recorded position is the only answer vips could have given "
+            "and the capture asserts that it did give it. Where `ties` is "
+            "more than 1, matching this exact coordinate is not a parity "
+            "requirement on libviprs, only a reproducibility rule for this "
+            "file. Issue #649."
         ),
         "no_tolerance_is_derivable": (
             "vips_convi_intize's accuracy gate (convi.c:1096-1113) is often "
