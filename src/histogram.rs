@@ -179,6 +179,9 @@ fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
+        }
     }
 }
 
@@ -198,6 +201,9 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
+        }
     }
 }
 
@@ -700,6 +706,9 @@ impl Raster {
             SampleKind::U8 => 256,
             SampleKind::U16 | SampleKind::F32 => {
                 values.iter().copied().max().unwrap_or(0) as usize + 1
+            }
+            SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+                todo!("the signed and 32-bit sample kinds (issues #516, #517)")
             }
         };
         let mut out = Raster::zeroed(n as u32, height as u32, PixelFormat::Gray8)?;
@@ -1248,6 +1257,81 @@ mod tests {
         assert_eq!(read_flat(&one, SampleKind::U8, 0), 7);
         write_flat(&mut two, SampleKind::U16, 0, 4_242);
         assert_eq!(read_flat(&two, SampleKind::U16, 0), 4_242);
+    }
+
+    /**
+     * Tests that the bin-index read folds a negative sample the way libvips
+     * does, which is what the signed carriers of issue #516 will meet the
+     * moment `hist_find` sees one.
+     * Works by reading each stored bit pattern back as a bin index and
+     * comparing against the measured libvips answer, with an in-range
+     * positive value alongside so a clamp that answered zero for
+     * everything cannot pass.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: a one-band `char` image
+     * holding `[-128, -1, 0, 127]` histograms to a 256-wide result with
+     * `bin 0 = 3` and `bin 127 = 1`, so every negative sample lands in bin
+     * zero. That is the `VipsStatisticClass` input cast at work (the
+     * per-op `format_table` casts `CHAR` to `UCHAR`, saturating), not a
+     * signed bin table.
+     * Input: I8 bit patterns 0x80, 0xFF, 0x00, 0x7F -> bins 0, 0, 0, 127.
+     */
+    #[test]
+    fn read_flat_folds_a_negative_sample_into_bin_zero() {
+        for (kind, bits, bin) in [
+            (SampleKind::I8, 0x80u32, 0u32),
+            (SampleKind::I8, 0xFF, 0),
+            (SampleKind::I8, 0x00, 0),
+            (SampleKind::I8, 0x7F, 127),
+            (SampleKind::I16, 0x8000, 0),
+            (SampleKind::I16, 0xFFFF, 0),
+            (SampleKind::I16, 0x7FFF, 32_767),
+        ] {
+            let mut buf = vec![0u8; kind.bytes()];
+            match kind.bytes() {
+                1 => buf[0] = bits as u8,
+                _ => buf.copy_from_slice(&(bits as u16).to_ne_bytes()),
+            }
+            assert_eq!(
+                read_flat(&buf, kind, 0),
+                bin,
+                "{kind:?} read {bits:#x} into the wrong bin"
+            );
+        }
+    }
+
+    /**
+     * Tests that the count write saturates into every sample kind's
+     * ceiling, including the four kinds no `PixelFormat` carries yet.
+     * Works by writing one value over the ceiling and one inside it per
+     * kind and reading both back, so the clamp cannot pass as a constant.
+     * Input: 300 into I8 -> 127; 5e9 into U32 -> 4294967295; 5e9 into I32
+     * -> 2147483647.
+     */
+    #[test]
+    fn write_flat_saturates_into_every_integer_kind() {
+        for kind in [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            let ceiling = kind.max_value().expect("an integer kind has a ceiling");
+            let mut buf = vec![0u8; kind.bytes()];
+            write_flat(&mut buf, kind, 0, u32::MAX);
+            assert_eq!(
+                read_flat(&buf, kind, 0),
+                ceiling,
+                "{kind:?} did not saturate at its ceiling"
+            );
+            write_flat(&mut buf, kind, 0, 5);
+            assert_eq!(
+                read_flat(&buf, kind, 0),
+                5,
+                "{kind:?} did not write an in-range count through"
+            );
+        }
     }
 
     /**

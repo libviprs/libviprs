@@ -94,13 +94,12 @@ pub enum PixelFormat {
 ///
 /// The crate used to answer that question with
 /// [`PixelFormat::bytes_per_channel`], and byte width is not a sample kind.
-/// Four bytes means `f32` today, and would equally mean `u32` under the
-/// unsigned-32 carrier of issue #517 or `i32` under the signed carriers of
-/// issue #516. Every `match` keyed on the width therefore carries a
-/// trailing `_` arm that reads a hypothetical four-byte integer as a float,
-/// silently, with nothing in the compiler to say so. Dispatching on this
-/// enum instead makes each of those sites a decision the compiler forces
-/// when a carrier is added (issue #607).
+/// One byte means `u8` or `i8`, two means `u16` or `i16`, and four means
+/// `u32`, `i32` or `f32`. Every `match` keyed on the width therefore
+/// carries a trailing `_` arm that reads whichever of those the caller did
+/// not have in mind, silently, with nothing in the compiler to say so.
+/// Dispatching on this enum instead makes each of those sites a decision
+/// the compiler forces when a carrier is added (issue #607).
 ///
 /// Both accessors stay, and they answer different questions: use
 /// [`PixelFormat::bytes_per_channel`] for a stride or a buffer size, and
@@ -108,14 +107,33 @@ pub enum PixelFormat {
 ///
 /// # Variants
 ///
-/// | Variant | Rust type | Bytes | Largest value |
+/// | Variant | Rust type | Bytes | Range |
 /// |---|---|---|---|
-/// | `U8`  | `u8`  | 1 | 255 |
-/// | `U16` | `u16` | 2 | 65535 |
+/// | `U8`  | `u8`  | 1 | `0..=255` |
+/// | `I8`  | `i8`  | 1 | `-128..=127` |
+/// | `U16` | `u16` | 2 | `0..=65535` |
+/// | `I16` | `i16` | 2 | `-32768..=32767` |
+/// | `U32` | `u32` | 4 | `0..=4294967295` |
+/// | `I32` | `i32` | 4 | `-2147483648..=2147483647` |
 /// | `F32` | `f32` | 4 | none |
 ///
 /// Multi-byte samples are stored in **native** byte order throughout the
 /// crate.
+///
+/// # Kinds without a carrier
+///
+/// [`PixelFormat`] carries `U8`, `U16` and `F32`. `I8`, `I16`, `I32` and
+/// `U32` are the sample kinds issues #516 and #517 ask for, and no
+/// `PixelFormat` variant produces them yet, so
+/// [`PixelFormat::kind`] never returns one and
+/// [`PixelFormat::with_kind`] answers `None` for them.
+///
+/// They are named here rather than when the carriers land because the
+/// answers this enum gives are the part of those issues that has to be
+/// measured rather than reasoned about, and measuring them costs nothing
+/// while the carriers cost a crate-wide refactor. [`SampleKind::promote`]
+/// is the case in point: it is the libvips `vips__formatalike` order, and
+/// four of its pairs are ones "the wider kind wins" gets wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SampleKind {
@@ -125,6 +143,21 @@ pub enum SampleKind {
     U16,
     /// 32-bit IEEE-754 float samples (`f32`), native byte order.
     F32,
+    /// Signed 8-bit samples (`i8`), the libvips `VIPS_FORMAT_CHAR` carrier
+    /// (issue #516). No [`PixelFormat`] produces this kind yet.
+    I8,
+    /// Signed 16-bit samples (`i16`), native byte order, the libvips
+    /// `VIPS_FORMAT_SHORT` carrier (issue #516). No [`PixelFormat`]
+    /// produces this kind yet.
+    I16,
+    /// Unsigned 32-bit samples (`u32`), native byte order, the libvips
+    /// `VIPS_FORMAT_UINT` carrier (issue #517) and the one the counting
+    /// ops of issue #532 need. No [`PixelFormat`] produces this kind yet.
+    U32,
+    /// Signed 32-bit samples (`i32`), native byte order, the libvips
+    /// `VIPS_FORMAT_INT` carrier (issue #516) and the one the `profile`
+    /// op would need. No [`PixelFormat`] produces this kind yet.
+    I32,
 }
 
 impl SampleKind {
@@ -137,9 +170,9 @@ impl SampleKind {
     /// byte width does not name a kind.
     pub fn bytes(self) -> usize {
         match self {
-            Self::U8 => 1,
-            Self::U16 => 2,
-            Self::F32 => 4,
+            Self::U8 | Self::I8 => 1,
+            Self::U16 | Self::I16 => 2,
+            Self::F32 | Self::U32 | Self::I32 => 4,
         }
     }
 
@@ -149,9 +182,33 @@ impl SampleKind {
     /// this kind.
     pub fn is_float(self) -> bool {
         match self {
-            Self::U8 | Self::U16 => false,
+            Self::U8 | Self::U16 | Self::I8 | Self::I16 | Self::U32 | Self::I32 => false,
             Self::F32 => true,
         }
+    }
+
+    /// Whether a sample of this kind can hold a negative value.
+    ///
+    /// True for the signed integer kinds and for `F32`. This is the
+    /// assumption issue #607 names as the expensive half of #516: the
+    /// crate's integer paths clamp into `0..=max`, and that floor is a
+    /// property of the kind rather than of arithmetic.
+    ///
+    /// TODO(#516): the signed kinds answer `false` here.
+    pub fn is_signed(self) -> bool {
+        false
+    }
+
+    /// The inclusive value range an integer sample of this kind can hold,
+    /// or `None` for a float kind.
+    ///
+    /// The signed counterpart of [`SampleKind::max_value`], and the one to
+    /// reach for when the floor matters: a saturating write into a signed
+    /// carrier clamps at the low end too.
+    ///
+    /// TODO(#516): the low end is derived from the width, not the sign.
+    pub fn range(self) -> Option<(i64, i64)> {
+        self.max_value().map(|hi| (0, i64::from(hi)))
     }
 
     /// The largest value an integer sample of this kind can hold, or `None`
@@ -164,8 +221,9 @@ impl SampleKind {
     /// `max_alpha` from the tag rather than from the depth.
     pub fn max_value(self) -> Option<u32> {
         match self {
-            Self::U8 => Some(0xFF),
-            Self::U16 => Some(0xFFFF),
+            Self::U8 | Self::I8 => Some(0xFF),
+            Self::U16 | Self::I16 => Some(0xFFFF),
+            Self::U32 | Self::I32 => Some(0xFFFF_FFFF),
             Self::F32 => None,
         }
     }
@@ -184,10 +242,15 @@ impl SampleKind {
     /// uncovered here and so fails to compile, which is the point (issue
     /// #607).
     pub fn promote(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::F32, _) | (_, Self::F32) => Self::F32,
-            (Self::U16, _) | (_, Self::U16) => Self::U16,
-            (Self::U8, Self::U8) => Self::U8,
+        // TODO(#516, #517): "the wider kind wins, unsigned by default" is
+        // not the `vips__formatalike` order.
+        if self.is_float() || other.is_float() {
+            return Self::F32;
+        }
+        if self.bytes() >= other.bytes() {
+            self
+        } else {
+            other
         }
     }
 
@@ -200,9 +263,9 @@ impl SampleKind {
     /// range and a bin width, not a value-indexed table.
     pub fn hist_bins(self) -> Option<usize> {
         match self {
-            Self::U8 => Some(256),
-            Self::U16 => Some(65536),
-            Self::F32 => None,
+            Self::U8 | Self::I8 => Some(256),
+            Self::U16 | Self::I16 => Some(65536),
+            Self::U32 | Self::I32 | Self::F32 => None,
         }
     }
 }
@@ -550,20 +613,97 @@ mod tests {
     #[test]
     fn sample_kind_constants() {
         assert_eq!(SampleKind::U8.bytes(), 1);
+        assert_eq!(SampleKind::I8.bytes(), 1);
         assert_eq!(SampleKind::U16.bytes(), 2);
+        assert_eq!(SampleKind::I16.bytes(), 2);
+        assert_eq!(SampleKind::U32.bytes(), 4);
+        assert_eq!(SampleKind::I32.bytes(), 4);
         assert_eq!(SampleKind::F32.bytes(), 4);
 
         assert_eq!(SampleKind::U8.max_value(), Some(255));
+        assert_eq!(SampleKind::I8.max_value(), Some(127));
         assert_eq!(SampleKind::U16.max_value(), Some(65535));
+        assert_eq!(SampleKind::I16.max_value(), Some(32767));
+        assert_eq!(SampleKind::U32.max_value(), Some(4_294_967_295));
+        assert_eq!(SampleKind::I32.max_value(), Some(2_147_483_647));
         assert_eq!(SampleKind::F32.max_value(), None);
 
         assert_eq!(SampleKind::U8.hist_bins(), Some(256));
+        assert_eq!(SampleKind::I8.hist_bins(), Some(256));
         assert_eq!(SampleKind::U16.hist_bins(), Some(65536));
+        assert_eq!(SampleKind::I16.hist_bins(), Some(65536));
+        assert_eq!(SampleKind::U32.hist_bins(), None);
+        assert_eq!(SampleKind::I32.hist_bins(), None);
         assert_eq!(SampleKind::F32.hist_bins(), None);
 
-        assert!(!SampleKind::U8.is_float());
-        assert!(!SampleKind::U16.is_float());
-        assert!(SampleKind::F32.is_float());
+        for kind in ALL_KINDS {
+            assert_eq!(
+                kind.is_float(),
+                kind == SampleKind::F32,
+                "{kind:?} disagrees about being a float kind"
+            );
+        }
+    }
+
+    /// Every [`SampleKind`], so a kind added without a test here fails to
+    /// compile at the array length rather than being quietly skipped.
+    const ALL_KINDS: [SampleKind; 7] = [
+        SampleKind::U8,
+        SampleKind::I8,
+        SampleKind::U16,
+        SampleKind::I16,
+        SampleKind::U32,
+        SampleKind::I32,
+        SampleKind::F32,
+    ];
+
+    /**
+     * Tests the signedness and the inclusive value range of every sample
+     * kind, which is what a saturating write into a signed carrier needs
+     * and what the crate's `clamp(0, max)` floor currently assumes away
+     * (issues #516, #607).
+     * Works by asserting `is_signed` and `range` per kind, and then
+     * cross-checking that `max_value` is exactly `range`'s upper bound, so
+     * the two accessors cannot drift apart.
+     * Input: U8 -> (0, 255) unsigned, I8 -> (-128, 127) signed, U32 ->
+     * (0, 4294967295) unsigned, I32 -> (i32::MIN, i32::MAX) signed, F32 ->
+     * None.
+     */
+    #[test]
+    fn signed_kinds_report_their_range() {
+        assert!(!SampleKind::U8.is_signed());
+        assert!(!SampleKind::U16.is_signed());
+        assert!(!SampleKind::U32.is_signed());
+        assert!(SampleKind::I8.is_signed());
+        assert!(SampleKind::I16.is_signed());
+        assert!(SampleKind::I32.is_signed());
+        assert!(SampleKind::F32.is_signed());
+
+        assert_eq!(SampleKind::U8.range(), Some((0, 255)));
+        assert_eq!(SampleKind::I8.range(), Some((-128, 127)));
+        assert_eq!(SampleKind::U16.range(), Some((0, 65535)));
+        assert_eq!(SampleKind::I16.range(), Some((-32768, 32767)));
+        assert_eq!(SampleKind::U32.range(), Some((0, 4_294_967_295)));
+        assert_eq!(
+            SampleKind::I32.range(),
+            Some((i64::from(i32::MIN), i64::from(i32::MAX)))
+        );
+        assert_eq!(SampleKind::F32.range(), None);
+
+        for kind in ALL_KINDS {
+            assert_eq!(
+                kind.range().map(|(_, hi)| u32::try_from(hi).unwrap()),
+                kind.max_value(),
+                "{kind:?} range and max_value disagree"
+            );
+            // A signed kind is exactly one whose range reaches below zero,
+            // and the float kind has no range to read it from.
+            assert_eq!(
+                kind.is_signed(),
+                kind.range().is_none_or(|(lo, _)| lo < 0),
+                "{kind:?} signedness and range disagree"
+            );
+        }
     }
 
     /**
@@ -577,16 +717,52 @@ mod tests {
      */
     #[test]
     fn promote_is_the_formatalike_order() {
-        use SampleKind::{F32, U8, U16};
-        assert_eq!(U8.promote(U8), U8);
-        assert_eq!(U16.promote(U16), U16);
-        assert_eq!(F32.promote(F32), F32);
-        assert_eq!(U8.promote(U16), U16);
-        assert_eq!(U16.promote(U8), U16);
-        assert_eq!(U8.promote(F32), F32);
-        assert_eq!(F32.promote(U8), F32);
-        assert_eq!(U16.promote(F32), F32);
-        assert_eq!(F32.promote(U16), F32);
+        use SampleKind::{F32, I8, I16, I32, U8, U16, U32};
+        // The integer block, transcribed from the oracle sweep described
+        // above `SampleKind::promote`. Every ordered pair is listed, so an
+        // arm that is right in one direction and wrong in the other cannot
+        // pass, and the six rows below are the six integer kinds in the
+        // order the doc table lists them.
+        #[rustfmt::skip]
+        let table: [(SampleKind, SampleKind, SampleKind); 36] = [
+            (U8, U8, U8),    (U8, I8, I16),  (U8, U16, U16),  (U8, I16, I16),  (U8, U32, U32),  (U8, I32, I32),
+            (I8, U8, I16),   (I8, I8, I8),   (I8, U16, I32),  (I8, I16, I16),  (I8, U32, I32),  (I8, I32, I32),
+            (U16, U8, U16),  (U16, I8, I32), (U16, U16, U16), (U16, I16, I32), (U16, U32, U32), (U16, I32, I32),
+            (I16, U8, I16),  (I16, I8, I16), (I16, U16, I32), (I16, I16, I16), (I16, U32, I32), (I16, I32, I32),
+            (U32, U8, U32),  (U32, I8, I32), (U32, U16, U32), (U32, I16, I32), (U32, U32, U32), (U32, I32, I32),
+            (I32, U8, I32),  (I32, I8, I32), (I32, U16, I32), (I32, I16, I32), (I32, U32, I32), (I32, I32, I32),
+        ];
+        for (a, b, want) in table {
+            assert_eq!(a.promote(b), want, "promote({a:?}, {b:?})");
+        }
+
+        // The float kind absorbs every integer kind and itself, in both
+        // directions.
+        for kind in ALL_KINDS {
+            assert_eq!(kind.promote(F32), F32, "promote({kind:?}, F32)");
+            assert_eq!(F32.promote(kind), F32, "promote(F32, {kind:?})");
+        }
+
+        // Symmetry over every ordered pair, which the table above only
+        // covers for the integer block.
+        for a in ALL_KINDS {
+            for b in ALL_KINDS {
+                assert_eq!(
+                    a.promote(b),
+                    b.promote(a),
+                    "promote is not symmetric on ({a:?}, {b:?})"
+                );
+            }
+        }
+
+        // The four pairs "the wider kind wins" gets wrong, called out so
+        // the reason the match is over the pair does not have to be
+        // rediscovered: two of them promote *past* both inputs' widths, and
+        // two land on a different kind at the same width.
+        assert_eq!(U8.promote(I8), I16, "one-byte pair promotes to two bytes");
+        assert_eq!(I8.promote(U16), I32, "a two-byte input promotes to four");
+        assert_eq!(U16.promote(I16), I32, "a two-byte pair promotes to four");
+        assert_eq!(U32.promote(I8), I32, "the narrower input decides the sign");
     }
 
     /**
@@ -619,6 +795,104 @@ mod tests {
             PixelFormat::with_kind(4, SampleKind::F32),
             Some(PixelFormat::RgbaF32)
         );
+    }
+
+    /**
+     * Tests that `with_kind` refuses the sample kinds no `PixelFormat`
+     * carries, rather than handing back a format of the same byte width
+     * (issues #516, #517).
+     * Works by asserting `None` for the four carrierless kinds at band
+     * counts that are themselves perfectly legal, with a positive control
+     * that `with_channels` at the same width *does* answer `Some` there, so
+     * the `None` cannot be passing for a band-count rejection. Also pins
+     * which format the width-keyed fall-through would have produced, since
+     * that silent retag is the whole reason for the refusal.
+     * Input: (3, I16) -> None while (3, 2 bytes) -> Some(Rgb16); (3, U32)
+     * -> None while (3, 4 bytes) -> Some(FloatF32(3)).
+     */
+    #[test]
+    fn with_kind_refuses_a_kind_no_format_carries() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        for kind in [
+            SampleKind::I8,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            for channels in [1usize, 2, 3, 4, 7] {
+                assert_eq!(
+                    PixelFormat::with_kind(channels, kind),
+                    None,
+                    "with_kind answered a format for the carrierless {kind:?}"
+                );
+                // Positive control: the band count is fine and the width
+                // does name a format, so the `None` above is about the
+                // kind and nothing else.
+                assert!(
+                    PixelFormat::with_channels(channels, kind.bytes()).is_some(),
+                    "the control failed: {channels} channels at {} bytes names no format",
+                    kind.bytes()
+                );
+            }
+        }
+        // What the width-keyed fall-through would have answered, which is
+        // an unsigned format for a signed kind and a float one for an
+        // integer kind.
+        assert_eq!(
+            PixelFormat::with_channels(3, SampleKind::I16.bytes()),
+            Some(PixelFormat::Rgb16)
+        );
+        assert_eq!(
+            PixelFormat::with_channels(3, SampleKind::U32.bytes()),
+            Some(PixelFormat::FloatF32(n(3)))
+        );
+    }
+
+    /**
+     * Tests that no `PixelFormat` reports a sample kind the crate has no
+     * carrier for, which is the claim every carrierless arm added in this
+     * change rests on.
+     * Works by sweeping every variant, including both spellings of the
+     * tuple carriers, and asserting the kind is one of the three carried
+     * ones, with a control that the sweep would have caught a fourth.
+     * Input: every `PixelFormat` -> U8, U16 or F32.
+     */
+    #[test]
+    fn no_format_reports_a_carrierless_kind() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let carried = [SampleKind::U8, SampleKind::U16, SampleKind::F32];
+        let formats = [
+            PixelFormat::Gray8,
+            PixelFormat::Gray16,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::Rgb16,
+            PixelFormat::Rgba16,
+            PixelFormat::RgbaF32,
+            PixelFormat::Multi8(n(1)),
+            PixelFormat::Multi8(n(7)),
+            PixelFormat::Multi16(n(1)),
+            PixelFormat::Multi16(n(7)),
+            PixelFormat::FloatF32(n(4)),
+            PixelFormat::FloatF32(n(7)),
+        ];
+        for fmt in formats {
+            assert!(
+                carried.contains(&fmt.kind()),
+                "{fmt:?} reports the carrierless {:?}",
+                fmt.kind()
+            );
+        }
+        // Control: the membership test does discriminate, so the sweep
+        // above is not passing because `carried` accepts everything.
+        for kind in [
+            SampleKind::I8,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            assert!(!carried.contains(&kind));
+        }
     }
 
     /**
