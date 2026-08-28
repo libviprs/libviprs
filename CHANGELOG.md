@@ -435,6 +435,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trip. On the unsigned 8- and 16-bit carriers every one of these guards is
   inert, which is why nothing but the float resample paths moved.
 
+- A pixel layout now has one spelling everywhere it is observed, so
+  `PixelFormat::has_alpha`, `with_alpha`, `without_alpha` and
+  `Interpretation::for_format` answer differently for the tuple spellings of a
+  layout that also has a named variant (issue #531). `FloatF32(4).has_alpha()`
+  was `false` and is now `true`; `Multi8(1).with_alpha()` was `Multi8(1)` and is
+  now `Rgba8`; `Interpretation::for_format(FloatF32(4))` was `Multiband` and is
+  now `Srgb`. `Raster::new`, `Raster::zeroed` and the decoders behind them store
+  the canonical spelling, so `decode_exr` on an RGBA file reports `RgbaF32`
+  rather than `FloatF32(4)`, and the manifest writes `"rgbaf32"` rather than
+  `"floatf32:4"`.
+
+  `PixelFormat`'s tuple variants are public, so `FloatF32(4)` is constructible
+  and names exactly the layout `RgbaF32` names. `with_channels` canonicalises and
+  direct construction did not, and nothing reconciled the two, so which answer
+  you got depended on which spelling you happened to be holding. That is not
+  only a wart in memory: `PixelFormat` is written into the persisted manifest,
+  the writer emitted `"floatf32:4"` and the reader turned it back into
+  `RgbaF32`, so the value read off disk was not the value written to it, hashed
+  differently, and disagreed about alpha. Two places in this crate were already
+  minting the alias: `decode_exr` built `FloatF32(n)` straight from the channel
+  count, so a four-channel EXR reported no alpha while `resize` consults exactly
+  that to decide whether to premultiply, and `invertlut` did the same from its
+  column count.
+
+  Reading is unchanged and deliberately so: `"floatf32:4"`, `"multi8:3"` and the
+  rest still load, and still canonicalise, so a manifest written by an older
+  build keeps working. Refusing them would have turned a silent mismatch into a
+  hard failure on data already on disk.
+
+  `PixelFormat::canonical` and `PixelFormat::is_canonical` are new and public.
+  You need them only if you built a format yourself and want to compare it with
+  one of ours, since `PartialEq` and `Hash` stay derived and so still tell the
+  two spellings apart.
+
 - `Extend::White` inks its fill from the raster's interpretation instead of
   from its sample depth, so a float raster tagged `ScRgb` fills with `1.0` and
   one tagged `Rgb16` with `65535` where both used to fill with `255` (issue
@@ -1508,6 +1542,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `Raster::try_sharpen` and `Raster::try_canny`'s float arm no longer abort the
+  process when an allocation fails, and there is a new
+  `Raster::try_f32_samples` for the widening they sit on (issue #627).
+
+  `Raster::f32_samples` is built on `.collect()`, and a `.collect()` sized from
+  an exact-size iterator allocates through `handle_alloc_error`, which ends the
+  process rather than returning. Nothing catches that, so both entry points
+  carried an unavoidable process exit however their signatures read. #575 had
+  taken the other nine convolution entry points abort-free and these two could
+  not follow, because the abort was not in `convolution.rs` at all.
+
+  `try_f32_samples` returns `Result<Vec<f32>, RasterError>`, reserving with
+  `try_reserve_exact` and reporting `RasterError::AllocationFailed`. Reach for
+  it wherever an allocation failure should arrive as a value. `f32_samples`
+  keeps its signature and its meaning, so no existing call has to change:
+  `None` still means only "not a float format". It now delegates to the
+  fallible form and **panics** rather than aborting if the widening fails,
+  which at least unwinds and can be caught.
+
+  `try_sharpen` also stopped cloning: the widened samples are written back in
+  place, and the LabS raster is moved into the result instead of copied, so two
+  image-sized allocations are gone rather than made fallible. Its three
+  remaining scratch planes go through the fallible reservation the rest of the
+  module uses. With #672 and #685 having done the same for the LabS round
+  trip's own buffers, no image-sized allocation on either entry point's path
+  is infallible any more. What is left is smaller than an image and stays out
+  of scope: the `fields.clone()` that carries an input's attachments onto each
+  result, an embedded ICC profile among them, and the mask, table and per-row
+  buffers the mask generator and the convolution scan build.
 
 - The six decoders that price a frame buffer from declared geometry (GIF,
   Radiance, FITS, OpenEXR, JPEG XL and the TIFF page reader) do it with one

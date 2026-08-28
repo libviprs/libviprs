@@ -3,6 +3,9 @@ use crate::imageio::MetadataFields;
 use crate::pixel::PixelFormat;
 use thiserror::Error;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// Errors that can occur when creating or slicing a [`Raster`].
 ///
 /// These guard against programmer mistakes such as mismatched buffer sizes,
@@ -66,7 +69,7 @@ pub enum RasterError {
     },
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
     FloatUnsupported { op: &'static str },
-    #[error("from_f32_samples requires a float pixel format (RgbaF32 / FloatF32), got {format:?}")]
+    #[error("a float pixel format (RgbaF32 / FloatF32) is required, got {format:?}")]
     NotFloatFormat { format: PixelFormat },
     #[error("unknown memory format {format:?}; expected \"uchar\", \"ushort\", or \"float\"")]
     UnknownMemoryFormat { format: String },
@@ -235,6 +238,42 @@ pub(crate) fn decode_alloc_bytes(width: u32, height: u32, bands: u64, sample_byt
         .saturating_mul(sample_bytes)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-thread ceiling, in bytes, on the [`Raster::try_f32_samples`] sample
+    /// buffer.
+    ///
+    /// Defaults to `u64::MAX` (no ceiling), so an ordinary run bounds the
+    /// widening only by what the allocator will serve, exactly as
+    /// [`alloc_op_output`] does. [`with_f32_samples_alloc_cap`] lowers it so a
+    /// test can reach the fallible branch at a raster it can actually build: a
+    /// float raster whose sample buffer genuinely exhausts the allocator is far
+    /// past the [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch
+    /// is otherwise unreachable from a test (issue #627). This is the same hook
+    /// #460 added to `arithmetic`'s scratch allocation, for the same reason.
+    static F32_SAMPLES_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
+}
+
+/// Test-only hook: run `f` with the calling thread's
+/// [`Raster::try_f32_samples`] allocation ceiling lowered to `max_bytes`,
+/// restoring the previous ceiling afterwards, including on unwind.
+///
+/// The ceiling is thread-local, so tests running in parallel do not perturb one
+/// another. Both it and this helper compile only under `cfg(test)`, so nothing
+/// test-support reaches a production build and the crate's public surface is
+/// unchanged.
+#[cfg(test)]
+pub(crate) fn with_f32_samples_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            F32_SAMPLES_ALLOC_CAP.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(F32_SAMPLES_ALLOC_CAP.with(|c| c.replace(max_bytes)));
+    f()
+}
+
 /// An owned raster image buffer with known dimensions and pixel format.
 ///
 /// `Raster` is the core pixel container in libviprs. It owns a tightly-packed
@@ -287,6 +326,15 @@ impl Raster {
     /// and that neither dimension is zero. This is the primary constructor used
     /// when pixel data has already been produced by a decoder or renderer.
     ///
+    /// The format is stored in its canonical spelling. `PixelFormat`'s tuple
+    /// variants are public, so a caller can declare `FloatF32(4)` where
+    /// `RgbaF32` names the same pixel layout; both are accepted and the
+    /// raster reports the named one. That is what lets every `match` on
+    /// [`Raster::format`] and every [`PixelFormat::has_alpha`] decision
+    /// downstream of it read the layout rather than the caller's choice of
+    /// spelling (issue #531). It cannot change what validates here: the two
+    /// spellings agree on `bytes_per_pixel`.
+    ///
     /// # Errors
     ///
     /// Returns [`RasterError::ZeroDimension`] if width or height is 0, or
@@ -322,6 +370,7 @@ impl Raster {
         data: Vec<u8>,
         max_bytes: u64,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -378,6 +427,7 @@ impl Raster {
         format: PixelFormat,
         data: Vec<u8>,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -463,7 +513,8 @@ impl Raster {
     ///
     /// Allocates a buffer of the correct size and fills it with `0u8`. Useful
     /// for creating blank tiles or output buffers that will be written into
-    /// later (e.g., compositing or scaling operations).
+    /// later (e.g., compositing or scaling operations). The format is stored
+    /// in its canonical spelling, as in [`Raster::new`].
     ///
     /// # Errors
     ///
@@ -493,6 +544,7 @@ impl Raster {
         format: PixelFormat,
         max_bytes: u64,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -595,24 +647,102 @@ impl Raster {
         Raster::new(width, height, format, data)
     }
 
+    /// Fallible form of [`Raster::f32_samples`], which carries the contract.
+    ///
+    /// The decoded buffer is the same size as the raster's own pixel buffer, so
+    /// on a full-resolution image it is one of the largest allocations an
+    /// operation that widens through it makes. It is reserved with
+    /// [`Vec::try_reserve_exact`] and reports [`RasterError::AllocationFailed`],
+    /// so it never reaches `handle_alloc_error` and never ends the process.
+    ///
+    /// That is the whole reason this exists. `f32_samples` used to `.collect()`
+    /// here, and a `.collect()` sized from an [`ExactSizeIterator`] allocates
+    /// through `handle_alloc_error`, which **aborts**. An abort cannot be
+    /// caught by anything, so it put an unavoidable process exit on
+    /// [`Raster::try_sharpen`] and on [`Raster::try_canny`]'s float arm however
+    /// their signatures read, which is what kept those two off the abort-free
+    /// list #575 took the rest of the convolution family onto (issue #627).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::NotFloatFormat`] when the format does not store
+    /// float samples, or [`RasterError::AllocationFailed`] when the sample
+    /// buffer cannot be reserved.
+    ///
+    /// [`ExactSizeIterator`]: std::iter::ExactSizeIterator
+    pub fn try_f32_samples(&self) -> Result<Vec<f32>, RasterError> {
+        if !self.format.is_float() {
+            return Err(RasterError::NotFloatFormat {
+                format: self.format,
+            });
+        }
+        let chunks = self.data.as_chunks::<4>().0;
+        let bytes = chunks.len().saturating_mul(size_of::<f32>());
+        // Test-only: over a lowered per-thread ceiling, ask for a reservation
+        // the allocator has to refuse, so the fallible branch is reachable at
+        // a raster a test can actually build. A float raster whose samples
+        // genuinely exhaust the allocator is far past the
+        // [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch is
+        // otherwise unreachable from a test (issue #627).
+        //
+        // The ceiling deliberately does *not* return early. Returning here
+        // would answer before the reservation below ever ran, which leaves
+        // `try_reserve_exact` and an infallible `reserve_exact`
+        // indistinguishable to every test: that is #696's first bullet, and it
+        // is how #689's fourteen guards came to pass with their fallibility
+        // reverted. Driving the real reservation instead keeps the thing under
+        // test on the path.
+        //
+        // This and the thread-local it reads compile only under `cfg(test)`,
+        // so a production widening asks for exactly `chunks.len()` and is
+        // bounded solely by the allocator, exactly as `alloc_op_output` is.
+        #[cfg(test)]
+        let request = if bytes as u64 > F32_SAMPLES_ALLOC_CAP.with(Cell::get) {
+            // Past `isize::MAX` bytes, which `try_reserve_exact` refuses as a
+            // capacity overflow without troubling the allocator.
+            usize::MAX / size_of::<f32>()
+        } else {
+            chunks.len()
+        };
+        #[cfg(not(test))]
+        let request = chunks.len();
+        let mut out: Vec<f32> = Vec::new();
+        out.try_reserve_exact(request)
+            .map_err(|_| RasterError::AllocationFailed {
+                width: self.width,
+                height: self.height,
+                bytes,
+            })?;
+        out.extend(chunks.iter().map(|&c| f32::from_ne_bytes(c)));
+        Ok(out)
+    }
+
     /// The pixel data as `f32` samples, for float formats.
     ///
     /// Returns the flat sample sequence (row-major, channels interleaved)
     /// decoded from the native-byte-order buffer, or `None` when the
     /// format does not store float samples. The inverse of
     /// [`Raster::from_f32_samples`].
+    ///
+    /// This is the convenience half of the pair. Reach for
+    /// [`Raster::try_f32_samples`] wherever an allocation failure should arrive
+    /// as a value rather than as a panic.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sample buffer cannot be allocated; see
+    /// [`Raster::try_f32_samples`]. It used to **abort** the process there
+    /// instead, through the `handle_alloc_error` a `.collect()` reaches, which
+    /// is nothing a caller can catch or recover from (issue #627). `None` still
+    /// means only "the format does not store float samples", and never
+    /// "the allocation failed".
+    #[track_caller]
     pub fn f32_samples(&self) -> Option<Vec<f32>> {
-        if !self.format.is_float() {
-            return None;
+        match self.try_f32_samples() {
+            Ok(samples) => Some(samples),
+            Err(RasterError::NotFloatFormat { .. }) => None,
+            Err(e) => panic!("f32_samples: {e}"),
         }
-        Some(
-            self.data
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&c| f32::from_ne_bytes(c))
-                .collect(),
-        )
     }
 
     /// Bytes per row (stride). No padding -- rows are tightly packed.
@@ -1242,6 +1372,89 @@ mod tests {
     }
 
     /**
+     * Tests that the f32 widening is fallible (issue #627): an allocation the
+     * host cannot serve arrives as RasterError::AllocationFailed rather than
+     * reaching handle_alloc_error and aborting the process. `f32_samples` was
+     * a plain `.collect()`, which is exactly that abort, and it is the widening
+     * `try_sharpen` and `try_canny`'s float arm sit on, so a `try_` signature
+     * there was not actually fallible.
+     * Works by lowering the per-thread ceiling with `with_f32_samples_alloc_cap`
+     * so the branch is reachable at a raster small enough to build; a float
+     * raster whose samples genuinely exhaust the allocator is far past the
+     * construction budget. The error names the raster and the size of the
+     * request, and the ceiling is restored when the closure returns.
+     * Input: a 4x2 FloatF32(1) raster (32 sample bytes) under a 16-byte ceiling
+     * → Err(AllocationFailed{4,2,32}); the same raster uncapped → the exact
+     * samples; an Rgb8 raster → Err(NotFloatFormat).
+     */
+    #[test]
+    fn try_f32_samples_reserves_fallibly_rather_than_aborting() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+
+        assert!(matches!(
+            with_f32_samples_alloc_cap(16, || im.try_f32_samples()),
+            Err(RasterError::AllocationFailed {
+                width: 4,
+                height: 2,
+                bytes: 32
+            })
+        ));
+        // The ceiling is per-thread and restored on the way out, so the very
+        // same raster widens normally afterwards.
+        assert_eq!(
+            im.try_f32_samples().unwrap(),
+            vec![1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0]
+        );
+        // A non-float carrier is a typed error, not an empty widening.
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert!(matches!(
+            rgb.try_f32_samples(),
+            Err(RasterError::NotFloatFormat { .. })
+        ));
+    }
+
+    /**
+     * Tests that the infallible `f32_samples` panics rather than aborting when
+     * the widening cannot be allocated (issue #627), and that `None` still
+     * means only "not a float format". A panic unwinds and a caller can catch
+     * it; the `handle_alloc_error` a `.collect()` reaches cannot be caught by
+     * anything, which is why the whole convolution family went fallible in
+     * #575 and these two entry points could not follow.
+     * Works by lowering the per-thread ceiling inside `catch_unwind` and
+     * asserting the call unwound, mirroring how arithmetic's
+     * `project_oversize_scratch_panics_not_aborts` pins the same property for
+     * an op form with no error channel.
+     * Input: a 4x2 FloatF32(1) raster under a 16-byte ceiling → unwinding
+     * panic; an Rgb8 raster → None; the same float raster uncapped → Some.
+     */
+    #[test]
+    fn f32_samples_panics_rather_than_aborting_when_the_widening_fails() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught =
+            std::panic::catch_unwind(|| with_f32_samples_alloc_cap(16, || im.f32_samples()));
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "an unservable widening must panic (unwindable), not abort"
+        );
+
+        // None keeps its single meaning: the carrier is not a float one.
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert_eq!(rgb.f32_samples(), None);
+        assert_eq!(
+            im.f32_samples().unwrap(),
+            vec![1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    /**
      * Tests that the budget is configurable: a size that exceeds a caller-set
      * budget is rejected, while the same size succeeds under a budget that
      * admits it. Uses `zeroed_with_budget` with a tiny 100-byte budget against
@@ -1412,6 +1625,59 @@ mod tests {
             Raster::try_new_from_memory(&[], 1, 1, 0, "uchar"),
             Err(RasterError::InvalidMemoryBands { bands: 0, .. })
         ));
+    }
+
+    /**
+     * Tests that a raster's format is the canonical spelling of the layout,
+     * whichever spelling the caller declared. PixelFormat's tuple variants
+     * are public, so a caller (or a decoder) can hand in FloatF32(4), which
+     * names exactly what RgbaF32 names; every match on raster.format() and
+     * every has_alpha() decision downstream then depends on which spelling
+     * happened to be used (issue #531).
+     * Works by building the same one-pixel raster through all three
+     * constructors with a non-canonical format and asserting the format that
+     * comes back out is the named variant, plus the has_alpha answer that
+     * decides whether resize premultiplies.
+     * Input: FloatF32(4) -> RgbaF32 with alpha; Multi8(3) -> Rgb8.
+     */
+    #[test]
+    fn constructors_canonicalise_the_declared_format() {
+        use core::num::NonZeroU16;
+
+        let f4 = PixelFormat::FloatF32(NonZeroU16::new(4).expect("4 is non-zero"));
+        let m3 = PixelFormat::Multi8(NonZeroU16::new(3).expect("3 is non-zero"));
+
+        let from_new = Raster::new(1, 1, f4, vec![0u8; 16]).unwrap();
+        assert_eq!(
+            from_new.format(),
+            PixelFormat::RgbaF32,
+            "Raster::new must store the canonical spelling"
+        );
+        assert!(
+            from_new.format().has_alpha(),
+            "a four-band float raster has alpha whichever way it was spelled"
+        );
+
+        let zeroed = Raster::zeroed(1, 1, f4).unwrap();
+        assert_eq!(
+            zeroed.format(),
+            PixelFormat::RgbaF32,
+            "Raster::zeroed must store the canonical spelling"
+        );
+
+        let from_op = Raster::from_op_output(1, 1, m3, vec![0u8; 3]).unwrap();
+        assert_eq!(
+            from_op.format(),
+            PixelFormat::Rgb8,
+            "Raster::from_op_output must store the canonical spelling"
+        );
+
+        // The buffer-length invariant is unaffected: both spellings agree on
+        // bytes_per_pixel, so canonicalising cannot change what validates.
+        assert!(
+            Raster::new(1, 1, f4, vec![0u8; 15]).is_err(),
+            "canonicalising must not weaken the buffer-size check"
+        );
     }
 
     /**
