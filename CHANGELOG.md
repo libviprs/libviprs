@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `Raster::encode_jp2k(quality: u8, lossless: bool)` and
+  `Raster::encode_jp2k_chroma(quality, lossless, subsample)` are **gone**,
+  replaced by `Raster::encode_jp2k(options: jp2k::SaveOptions)` and its new
+  sibling `Raster::save_jp2k` (issue #501). The two old ones lived in
+  `crate::foreign_stubs` and always returned `EncodeError::Unsupported`, so
+  nothing that called them ever produced bytes; the new one does.
+
+  **Migration.** `encode_jp2k(q, true)` becomes
+  `encode_jp2k(jp2k::SaveOptions::default())`. `encode_jp2k(q, false)` becomes
+  `encode_jp2k(jp2k::SaveOptions { compression: jp2k::Compression::Lossy { ratio } })`,
+  and `ratio` is a compression ratio rather than vips's `Q`: see Added below
+  for why there is no `Q` to pass. `encode_jp2k_chroma`'s `subsample` argument
+  has no replacement, because `openjpeg2-pure-rs` exposes no subsampling knob;
+  it never did anything either way.
+
+
 - `ConversionError::FloatFormatUnsupported` is renamed
   `ConversionError::FloatUnsupported` (issue #730). Three of the crate's four
   float-refusal variants already spelled it that way
@@ -674,6 +690,219 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and carries the GIF off-by-one: the NETSCAPE2.0 block holds
   repeats-after-the-first and a single play carries no block at all, where
   WebP's `ANIM` chunk holds the play count unshifted.
+
+- JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
+  #501). Build with `--features jp2k` and `decode_jp2k` reads both container
+  forms, the RFC 3745 JP2 box structure and the bare `SOC` + `SIZ` codestream,
+  `.jp2` and `.j2k` become live rows in the content sniffer, and
+  `Raster::encode_jp2k` and `Raster::save_jp2k` write a JP2 container. The
+  `Raster::encode_jp2k(quality, lossless)` and `Raster::encode_jp2k_chroma`
+  typed-`Unsupported` stubs are gone; see Breaking below.
+
+  Without the feature nothing about the surface moves: every entry point still
+  exists at the same signature and returns a typed refusal naming the feature.
+  `decode_jp2k` reports `Jp2kError::FeatureNotEnabled`, the encoders report
+  `EncodeError::Unsupported { format: "jp2k" }`, and the sniffer still routes a
+  JPEG 2000 file here so it reads as "this build has no JPEG 2000" rather than
+  "these bytes are not an image".
+
+  **It is the cheapest codec feature in the crate.** Measured with
+  `cargo generate-lockfile` on a clean tree, 288 packages before and 290 after:
+  **+2 lock entries, and both of them are the two crates themselves**, because
+  neither has a dependency of its own. `svg` costs +29 and `jxl` costs +21.
+  Neither compiles C, declares a `links` key, runs a build script or carries a
+  `-sys` suffix. It is non-default for compile time alone, which is what `svg`
+  argued on its own: 9.7k lines of decoder and 36.9k of translated encoder is
+  real build time and nobody who does not read or write JPEG 2000 should pay
+  it.
+
+  The two halves are split the way `crate::jxl`'s are, and on the same line.
+  `hayro-jpeg2000` decodes, because it is `#![forbid(unsafe_code)]` at the
+  settings this build uses and the decoder is the half that eats
+  attacker-controlled bytes. `openjpeg2-pure-rs`, a translation of OpenJPEG's
+  own C, encodes, because the encoder only ever sees a `Raster` this crate
+  already owns. Three other pure-Rust encoders were measured and rejected;
+  `justjp2` is the one worth naming, because it looks ideal and is not: its own
+  `lossless: true` round trip is not lossless, `hayro-jpeg2000` refuses its
+  output outright, and OpenJPEG 2.5.4 through `vips jp2kload` decodes it to a
+  flat mid-grey with every coefficient gone.
+
+  Measured against `vips` 8.18.6 over the 27 fixtures in
+  `oracle-captures/foreign-jp2k/`, the result splits by wavelet. The
+  **reversible 5/3** path is byte-identical to what `vips rawsave` writes, for
+  seven fixtures covering greyscale, RGB, RGBA, CMYK, tiled, subsampled and
+  multi-resolution, so its pins carry no tolerance at all. The
+  **irreversible 9/7** path is float-specified and agrees with OpenJPEG to
+  within 4 counts at worst, pinned per fixture at the number each one actually
+  reaches. The encoder goes the other way too: every carrier it writes reads
+  back through `vips jp2kload` bit for bit, including 16-bit greyscale and
+  4-band CMYK.
+
+  Four loader behaviours are ports rather than side effects, and each one is
+  invisible to an 8-bit RGB test. A precision-N component is **left-justified**
+  into its element, so a 12-bit 4095 comes back as 65520 and the real depth
+  survives in `bits-per-sample`. A bare codestream with **subsampled chroma**
+  gets OpenJPEG's inverse YCC, coefficient for coefficient and with its
+  truncating casts, because a rounding implementation is one count out. The
+  **tile geometry** is attached only when the image is more than one tile,
+  which is what `vipsheader` shows. And the **ICC profile** comes out of a
+  `METH=2` `colr` box verbatim and unvalidated, which is what `jp2kload` does
+  and is why the fixture carrying 24 bytes that are not a profile still has
+  one.
+
+  Two refusals are carrier gaps in this crate rather than format ones, and both
+  would otherwise be silently wrong answers. A **signed component** is refused
+  with `Jp2kError::SignedComponent`: `PixelFormat` has no signed carrier and
+  the decoder reports every component DC-level-shifted into the unsigned range,
+  so decoding one anyway comes back offset by half the range. More than **16
+  bits** of precision is refused with `Jp2kError::PrecisionNotSupported`: there
+  is no 32-bit integer carrier, and the decoder's `f32` container cannot hold a
+  31-bit sample either.
+
+  The resolution count travels as **`jp2k-resolutions`**, not as `n-pages`.
+  `vipsheader` calls it `n-pages` and vips's `page` selects a resolution level
+  rather than a frame, and this crate reserves that key for counts a zero-based
+  `page` argument can select (issue #635), which `decode_jp2k` does not have
+  yet.
+
+  Lossy is a **compression ratio and not a `Q`**. `jp2ksave --Q` sets
+  OpenJPEG's `cp_fixed_quality` with a distortion ratio in decibels;
+  `openjpeg2-pure-rs` exposes `cp_disto_alloc` with a compression ratio and
+  keeps the rest `pub(crate)`. Those are different numbers, so
+  `Compression::Lossy` carries a `ratio` and there is no `Q` field for this
+  crate to accept and reinterpret, which is the same answer `jxl` gave to
+  `jxlsave`'s `distance`.
+
+  Known limits, each filed: the image origin is read as the standard defines it
+  and vips subtracts it twice (#766); the `colr` box's enumerated colour space
+  does not override the component count here (#767); tiled save has no encoder
+  parameter behind it (#768); and more than four bands is refused on the way
+  out because the loader cannot read it back, though `jp2ksave` writes it
+  (#769).
+
+- AVIF still-image load, behind a new non-default **`avif`** feature
+  (issue #605). Build with `--features avif` and `decode_avif` reads an AV1
+  keyframe out of an ISOBMFF container, with alpha from an `auxl`-linked
+  auxiliary item, at 8, 10 and 12 bits; `.avif` becomes a live row in the
+  content sniffer, matching `ftyp` + the major brand `avif` at offset 4.
+
+  **It is deliberately not `heifload` parity, and the module says so at its
+  own entry point.** `heifload` also reads HEVC, AVC and JPEG payloads and
+  `heifsave` writes HEVC by default, so this covers one of four inputs and
+  none of the default output. An HEVC payload is refused by name rather than
+  as a generic parse failure, because that is the wall issue #498 closed on
+  and it has not moved. There is no save side and none is deferred: no
+  pure-Rust AV1 encoder is worth shipping in a pyramiding engine.
+
+  Pixels match vips exactly rather than approximately, which almost nothing
+  else in the foreign-format roadmap can claim. AV1 decode is bit-exact by
+  specification, and the colour step that is *not* fixed by any specification
+  is pinned against `oracle-captures/foreign-avif` frame by frame. That step
+  turned out to need two implementations: libheif reaches 4:4:4 and 4:2:0
+  through different arithmetic, float with round-to-nearest for one and 8.8
+  fixed point for the other, and measured over 1024 pixels each way the wrong
+  one is wrong on 103 and 124 pixels respectively, always by exactly one.
+  Chroma is upsampled nearest-neighbour, deeper bit depths left-justify the
+  way `heifload` does, and a monochrome AVIF still returns three bands.
+  Colour encodings that nothing in the tree can measure, which is 4:2:2,
+  limited range, BT.709 and BT.601 above 8 bits, are refused rather than
+  approximated.
+
+  The decoder is `rav1d` (BSD-2-Clause), +16 lock entries, cheaper than `jxl`
+  at +21 and `svg` at +29. It is taken with `default-features = false` so its
+  `asm` feature stays off, which means no assembler is required and no native
+  code is compiled: a debug build emits zero object files under
+  `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
+  rather than taken from `avif-parse`, which is MPL-2.0.
+
+- **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
+  versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
+  and `.nii` becomes a live row in the content sniffer, so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: the format is load-only here, the way Analyze and MAT are
+  load-only in libvips.
+
+  **The oracle is deliberately not libvips**, and that is measured rather than
+  assumed. The pinned `vips` 8.18.6 reports `NIfTI load/save with libnifti:
+  false` and registers neither `niftiload` nor `niftisave`, so a `.nii` handed
+  to it falls through the sniffing chain to `magickload`, which guesses TGA.
+  The reference is `nifti_clib` (`v3.0.1-91-g8f72d11`, the NIH implementation
+  and the library libvips itself would have linked), captured in
+  `oracle-captures/foreign-nifti/`, which re-measures the vips half on every
+  run so a build that gains libnifti announces itself.
+
+  What that buys is the *repair* rules, which are the part of this format a
+  spec reading gets wrong. Non-finite `FLOAT32` samples are rewritten to zero
+  before a caller sees them, so an infinity or a NaN stored in a file never
+  comes back. `vox_offset` is truncated toward zero and floored at the header
+  length, so `-8` and `100` both mean 348. `bitpix` is decoration and the
+  datatype alone fixes the sample width. `scl_slope` and `scl_inter` are
+  carried and never applied, because the scaling rule lives in FSL rather than
+  in the reference. Rank 0 is a one-voxel image, a non-positive `dim[1]` is
+  refused, and a zero extent on any higher axis is silently clamped to 1.
+
+  And one where the capture's own prose was wrong and its measurements were
+  right: on NIfTI-1 the byte order comes from `dim[0]`, not from the
+  `sizeof_hdr` sentinel, with the sentinel only as a fallback. A file with
+  only its four sentinel bytes swapped loads little-endian. That prose is
+  corrected in the capture (issue #752) and the correction is held against
+  this module by a test rather than by hope.
+
+  NIfTI is a volume format and `Raster` is two-dimensional, so the axes above
+  the second fold into the height, `dim[1]` wide by `dim[2] * .. * dim[rank]`
+  high. That is `analyzeload`'s measured rule for the sibling format rather
+  than an invention, it moves no bytes, and the collapsed axes stay readable
+  as `nifti-dim[N]` metadata beside every other header field.
+
+  Five datatypes have a carrier here (`UINT8`, `UINT16`, `FLOAT32`, `RGB24`,
+  `RGBA32`) and the rest are refused **by name** through
+  `NiftiError::UnsupportedCarrier`, naming the issue that would add the
+  carrier, exactly as `crate::fits` refuses a signed BITPIX. `INT16` is the
+  most common datatype in real NIfTI files and it is one of them: it needs
+  #516. Narrowing it into 8 bits would lose data silently, which is worse than
+  failing.
+
+  The allocation budget is the interesting part rather than a checkbox. 348
+  bytes can declare a 35-teravoxel volume in front of a 12-byte payload, so
+  the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved, and the
+  refusal is the shared `SourceError::AllocLimitExceeded` rather than a sixth
+  per-format variant.
+
+  No new dependency. The whole format is a fixed-offset header and a raw
+  array, so `crate::nifti` is field offsets, a byte-order flag and a copy
+  loop; a NIfTI crate would supply the free half and leave every measured
+  repair here anyway.
+
+- `PixelFormat::kind()` and the `SampleKind` enum it returns (`U8`, `U16`,
+  `F32`), plus `PixelFormat::with_kind()` alongside `with_channels()` (issue
+  #607). Reach for `kind()` whenever the question is how to *interpret* a
+  sample, and keep `bytes_per_channel()` for a stride or a buffer size.
+
+  Byte width has been standing in for sample kind throughout the crate, and it
+  cannot: four bytes means `f32` today and would mean `u32` under a uint
+  carrier (issue #517) or `i32` under the signed ones (issue #516). A `match`
+  keyed on the width needs a trailing `_` arm, and that arm reads a four-byte
+  integer as a float without a word from the compiler. `SampleKind` gives the
+  question one answer that a new carrier cannot slip past: every mapping off
+  it is a total match.
+
+  `SampleKind` also carries the per-kind constants the sample code used to
+  keep private copies of: `bytes()`, `is_float()`, `max_value()`,
+  `hist_bins()`, and `promote()`, which is the `vips__formatalike` order for
+  a two-image op whose inputs disagree. `max_value()` and `hist_bins()` are
+  `Option`, and `None` on `F32` is a statement rather than a gap: a float
+  carrier has no depth-implied ceiling and no value-indexed bin table.
+
+  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer name
+  a byte width at all: no `bytes_per_channel()`, and no `with_channels()`
+  either, since handing a width *back* to the constructor is the same
+  ambiguity in the other direction. Nothing they do changes; what changes is that
+  their sample readers and writers now fail to compile, rather than silently
+  misread, the day a carrier arrives. The other 22 modules still key on the
+  width and are tracked separately.
+
+  `SampleKind` lives at `libviprs::pixel::SampleKind`.
 
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
@@ -1760,6 +1989,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
+  containers whose allocation refusal is spent inside the `image` crate (issue
+  #782). It has not been one since #686: WebP is decoded by libviprs, prices its
+  own frame, and reports `SourceError::AllocLimitExceeded` with the declared
+  geometry attached. The predicate itself was right the whole time, so nothing a
+  caller wrote against it breaks; the bullet list beside it sent anyone matching
+  by shape to the wrong arm.
+
+  The list is pinned to the tables in `tests/decode_alloc_refusal_shape.rs` now.
+  Nothing held it before, because those tables pin their own size and what their
+  rows report, and neither of those sees a format moving out of one and leaving
+  its description behind.
+
+- **`profile`'s docs claimed its 16-bit saturating output matched "the libvips
+  `ushort` output". libvips emits `VIPS_FORMAT_INT`** (issue #759), measured on
+  8.18.6 for every one of the eight input formats. The word matters more than
+  it looks: `INT` is the *signed* 32-bit carrier, so `profile` is a payoff of
+  the signed carriers (issue #516), not of the uint one (issue #517).
+
+  Two neighbouring claims were under-specified in the same direction and are
+  corrected with the measured tables. `project` promotes to `UINT` for the
+  unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float ones,
+  so it needs both carrier families rather than just uint. The histogram
+  module's "libvips stores counts in 32-bit unsigned samples" swept in
+  `hist_find_indexed`, which emits `DOUBLE` for every input format and either
+  `combine` mode, and `hist_cum`, which follows its input across all four.
+
+  No value or format changes here: the saturation at `65535` stays until a
+  wider carrier lands. What changes is that the claims now have checks under
+  them. `profile` and `project` had no assertion on their output format
+  anywhere in the crate and `profile` had no saturation test at all, which is
+  how the wrong sentence survived. Six counter ops get a format pin and two
+  get a ceiling pin carrying the measured vips answer beside the libviprs one.
+
+- The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
+  body it copies out of the file, priced from the declared header geometry
+  through the same `DecodeLimits::check_image_alloc` every other self-priced
+  decoder uses (issue #710). It applied `max_coord` and `max_pixels` and then
+  nothing else, so a 36-byte raster decoded clean under a 35-byte ceiling and
+  `.v` was the one container out of ten where setting the budget bought a
+  caller nothing.
+
+  **`.v` was never a decompression-bomb vector**, and that is worth saying
+  because the obvious reading is wrong. The reader refuses a header promising
+  more pixel data than the file physically holds, so the allocation was already
+  bounded by the input length, and no crafted small file ever got past it. What
+  was missing was the contract, in two visible ways. `Raster::new`'s 8 GiB
+  construction budget was the only ceiling in force, fifteen times the 512 MiB
+  decode default. And the two decode entry points disagreed about the same run
+  of bytes: `decode_file_with_limits` spends the budget on the bounded
+  whole-file read, `decode_bytes_with_limits` has no file to spend it on.
+  Measured before the change:
+
+  ```text
+  bytes 4x4 budget=47 (price 48) -> Ok((4, 4))
+  file  4x4 budget=47 (price 48) -> Err(AllocLimitExceeded {
+      what: "image file body", needed_bytes: 112, max_alloc_bytes: 47 })
+  ```
+
+  **What changes for a caller.** Only `decode_bytes_with_limits` and
+  `decode_bytes`, and only on a `.v` whose pixel body is over the budget. The
+  file entry points cannot change: a `.v` file is always its 64-byte header
+  plus the body plus any trailer, so a budget under the body's price is under
+  the file's length too and the whole-file read refuses first. On the in-memory
+  path a `.v` body over `max_alloc_bytes` now comes back as
+  `SourceError::AllocLimitExceeded { what: ".v pixel buffer", .. }` with the
+  declared geometry attached, where it used to decode. At the 512 MiB default
+  that is a `.v` over half a gigabyte handed to the crate as bytes.
 
 - `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
   now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster

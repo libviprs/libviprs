@@ -1857,10 +1857,21 @@ enum VFieldValue<'a> {
     Carried(&'a CarriedValue),
 }
 
-/// Decode a native `.v` file (both byte orders). Enforces the caller's
-/// [`DecodeLimits`] — the [`max_coord`](DecodeLimits::max_coord)
-/// single-axis ceiling and the pixel budget — on the untrusted header
-/// geometry before allocating.
+/// Decode a native `.v` file (both byte orders). Enforces all three of the
+/// caller's [`DecodeLimits`] geometry ceilings on the untrusted header before
+/// anything is allocated: the [`max_coord`](DecodeLimits::max_coord)
+/// single-axis ceiling, the [`max_pixels`](DecodeLimits::max_pixels) count,
+/// and the [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) budget on the
+/// pixel body.
+///
+/// The third arrived last, as issue #710. `.v` was never a decompression-bomb
+/// vector, because the body has to be physically present before it is copied,
+/// so the allocation was already bounded by the input length. What was missing
+/// was the contract: a caller who set `max_alloc_bytes` did not get it here,
+/// and the two decode entry points disagreed about the same run of bytes,
+/// since [`crate::source::decode_file_with_limits`] spends the budget on the
+/// bounded whole-file read and [`crate::source::decode_bytes_with_limits`] has
+/// no file to spend it on.
 pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     if bytes.len() < VIPS_HEADER_LEN {
         return Err(SourceError::VipsFormat(format!(
@@ -1920,9 +1931,25 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     let format = PixelFormat::with_channels(bands as usize, bpc)
         .ok_or_else(|| SourceError::VipsFormat(format!("unrepresentable .v band count {bands}")))?;
 
-    let data_len = width as usize * height as usize * format.bytes_per_pixel();
-    let end = VIPS_HEADER_LEN
-        .checked_add(data_len)
+    // And the allocation budget, which neither ceiling above implies: a pixel
+    // count sees neither the band count nor the sample depth, so the default
+    // 1-gigapixel `max_pixels` still waves a 4 GiB `Rgba8` body through. This
+    // reader consulted it nowhere at all until issue #710, so it was the one
+    // container out of ten where setting `max_alloc_bytes` bought nothing.
+    //
+    // It sits after `with_channels` rather than before, for two reasons. A
+    // band count with no `PixelFormat` keeps coming back as the format error
+    // it always was rather than as an allocation refusal. And the price is
+    // then provably the product the copy below is sized from: `with_channels`
+    // returns a format whose `channels` and `bytes_per_channel` are exactly
+    // the arguments, and `bytes_per_pixel` is their product, so `bands * bpc`
+    // is `format.bytes_per_pixel()` for every representable `.v`. That is why
+    // there is one spelling of the product here now and not two.
+    let data_len =
+        limits.check_image_alloc(".v pixel buffer", width, height, bands as u64, bpc as u64)?;
+    let end = usize::try_from(data_len)
+        .ok()
+        .and_then(|len| VIPS_HEADER_LEN.checked_add(len))
         .filter(|&e| e <= bytes.len())
         .ok_or_else(|| {
             SourceError::VipsFormat(format!(
