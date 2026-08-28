@@ -2325,12 +2325,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supposed to carry them, which is the only one of the four that tests what the
   Python writer actually emitted.
 
-- `resize`, `reduce` and a bicubic `affine` round the sub-pixel offset onto
-  libvips' coefficient-table grid, so they stop diverging from the binary at
-  non-dyadic scales (issue #668). Output moves wherever the offset used to miss
-  that grid, which is every scale that is not a power of two, so committed
+- `resize`, `reduce` and the bicubic interpolator round the sub-pixel offset
+  onto libvips' coefficient-table grid, so they stop diverging from the binary
+  at non-dyadic scales (issue #668). Output moves wherever the offset used to
+  miss that grid, which is every scale that is not a power of two, so committed
   reference images of a fractional resize will need regenerating. The dyadic
   scales are untouched by construction.
+
+  **The full list of operations whose output can move**, because `table_offset`
+  sits in two places and reaches further than the three named above.
+  `Raster::reduce` and `Raster::resize` go through the reduce mask, and so does
+  `Raster::shrink` on its residual reduce and `Raster::thumbnail` /
+  `thumbnail_buffer`, which do their heavy shrink through `resize`. The
+  interpolator half reaches `affine`, `mapim`, `rotate_with` and
+  `similarity_with`, at an explicit `Interpolator::Bicubic` in each case. The
+  bare `rotate` and `similarity` default to bilinear and are genuinely
+  untouched, as are `nohalo` and `lbb`, because none of the three reads a table
+  in libvips either. Anyone with pinned `mapim` or `thumbnail` output needs this
+  list as much as anyone with a pinned `resize`.
 
   libvips never evaluates a resampling kernel at the true offset. `vips_reduceh`
   and `vips_reducev` index a 65-entry table of masks, and
