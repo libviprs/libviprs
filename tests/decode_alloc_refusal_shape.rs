@@ -312,7 +312,7 @@ fn the_two_tables_account_for_every_container() {
     // JPEG XL is only compiled in behind its feature, so the self-priced table
     // is one shorter without it. Spelled out rather than hidden in a `cfg!`
     // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 7 } else { 6 };
+    let expected_self_priced = if cfg!(feature = "jxl") { 8 } else { 7 };
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
