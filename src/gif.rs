@@ -3196,6 +3196,588 @@ mod tests {
         );
     }
 
+    /// One frame as it sits on the wire, for the save-side assertions.
+    #[derive(Debug, PartialEq, Eq)]
+    struct WireFrame {
+        /// The image descriptor's rectangle, `(left, top, width, height)`.
+        rect: (u16, u16, u16, u16),
+        /// The graphic control extension's delay, in centiseconds.
+        delay_cs: u16,
+        /// The graphic control extension's disposal code.
+        disposal: u8,
+        /// The transparent index, when the extension declares one.
+        transparent: Option<u8>,
+        /// Whether the image descriptor sets the interlace bit.
+        interlaced: bool,
+        /// The LZW payload, sub-block headers stripped.
+        payload: Vec<u8>,
+    }
+
+    /// Walk a whole GIF and return the logical screen, the NETSCAPE loop
+    /// count if there is a block, and every frame.
+    ///
+    /// The existing [`wire`] helper stops at the first frame, which is all a
+    /// still needs. This one is the animated half and it is deliberately a
+    /// separate walk rather than a generalisation, so the still assertions
+    /// cannot drift with it.
+    fn wire_frames(bytes: &[u8]) -> ((u16, u16), Option<u16>, Vec<WireFrame>) {
+        let screen = (
+            u16::from_le_bytes([bytes[6], bytes[7]]),
+            u16::from_le_bytes([bytes[8], bytes[9]]),
+        );
+        let mut p = 13usize;
+        if bytes[10] & 0x80 != 0 {
+            p += PALETTE_STRIDE * (2usize << (bytes[10] & 7));
+        }
+        let mut netscape = None;
+        let mut pending: Option<(u16, u8, Option<u8>)> = None;
+        let mut frames = Vec::new();
+        loop {
+            match bytes[p] {
+                0x21 => {
+                    let label = bytes[p + 1];
+                    p += 2;
+                    let mut blocks: Vec<&[u8]> = Vec::new();
+                    while bytes[p] != 0 {
+                        let len = bytes[p] as usize;
+                        blocks.push(&bytes[p + 1..p + 1 + len]);
+                        p += 1 + len;
+                    }
+                    p += 1;
+                    match label {
+                        0xF9 => {
+                            let control = blocks[0];
+                            pending = Some((
+                                u16::from_le_bytes([control[1], control[2]]),
+                                (control[0] >> 2) & 7,
+                                (control[0] & 1 != 0).then_some(control[3]),
+                            ));
+                        }
+                        0xFF if blocks[0] == b"NETSCAPE2.0" => {
+                            for sub in &blocks[1..] {
+                                if sub.first() == Some(&1) {
+                                    netscape = Some(u16::from_le_bytes([sub[1], sub[2]]));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                0x2C => {
+                    let rect = (
+                        u16::from_le_bytes([bytes[p + 1], bytes[p + 2]]),
+                        u16::from_le_bytes([bytes[p + 3], bytes[p + 4]]),
+                        u16::from_le_bytes([bytes[p + 5], bytes[p + 6]]),
+                        u16::from_le_bytes([bytes[p + 7], bytes[p + 8]]),
+                    );
+                    let flags = bytes[p + 9];
+                    p += 10;
+                    if flags & 0x80 != 0 {
+                        p += PALETTE_STRIDE * (2usize << (flags & 7));
+                    }
+                    p += 1; // the LZW minimum code size
+                    let mut payload = Vec::new();
+                    while bytes[p] != 0 {
+                        let len = bytes[p] as usize;
+                        payload.extend_from_slice(&bytes[p + 1..p + 1 + len]);
+                        p += 1 + len;
+                    }
+                    p += 1;
+                    let (delay_cs, disposal, transparent) = pending.take().unwrap_or((0, 0, None));
+                    frames.push(WireFrame {
+                        rect,
+                        delay_cs,
+                        disposal,
+                        transparent,
+                        interlaced: flags & 0x40 != 0,
+                        payload,
+                    });
+                }
+                0x3B => return (screen, netscape, frames),
+                other => panic!("unexpected block {other:#x} at {p}"),
+            }
+        }
+    }
+
+    /// A `pages`-page roll, 2 pixels wide and 2 rows per page, each page a
+    /// flat colour from [`ANIM_PALETTE`].
+    fn roll(pages: u32) -> Raster {
+        let mut data = Vec::new();
+        for page in 0..pages as usize {
+            for _ in 0..4 {
+                data.extend_from_slice(&ANIM_PALETTE[page % ANIM_PALETTE.len()]);
+            }
+        }
+        let mut raster = Raster::new(2, 2 * pages, PixelFormat::Rgb8, data).expect("a valid roll");
+        if pages > 1 {
+            raster.set_page_height(2);
+        }
+        raster
+    }
+
+    /**
+     * Tests that a page roll saves as one GIF frame per page, at the page's
+     * size rather than the roll's. Works by encoding a four-page roll and
+     * reading the logical screen and the frame list back off the wire.
+     * Measured on vips 8.18.6: a 4x12 roll with `page-height 3` comes out as
+     * a GIF whose logical screen is 4x3 and which holds four image blocks.
+     * Input: a 2x8 roll with page height 2 -> Output: a 2x2 screen and four
+     * frames.
+     */
+    #[test]
+    fn a_page_roll_saves_one_frame_per_page() {
+        let bytes = roll(4)
+            .encode_gif(SaveOptions::default())
+            .expect("a four-page roll encodes");
+        let (screen, _, frames) = wire_frames(&bytes);
+        assert_eq!(screen, (2, 2), "the screen is the page, not the roll");
+        assert_eq!(frames.len(), 4);
+        for frame in &frames {
+            assert_eq!(frame.rect, (0, 0, 2, 2));
+        }
+
+        let back = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("what was written loads back");
+        assert_eq!((back.width(), back.height()), (2, 8));
+        assert_eq!(back.pages_loaded(), 4);
+        for page in 0..4u32 {
+            assert_eq!(
+                page_bytes(&back, page),
+                ANIM_PALETTE[page as usize].repeat(4),
+                "page {page} survives the round trip"
+            );
+        }
+    }
+
+    /**
+     * Tests that the `delay` field goes out as centiseconds rounded half to
+     * even, which is what `gifsave` writes and what neither truncation nor
+     * half-up produces. Works by encoding a four-page roll carrying each
+     * measured millisecond array and reading the graphic control extensions
+     * back.
+     * Measured on vips 8.18.6, writing each array through `gifsave` and
+     * parsing the extensions out of the bytes: `35 55 15 25` gave `4 6 2 2`
+     * and `45 67 5 1` gave `4 7 0 0`. Truncation would write 6 for 67 ms and
+     * half-up would write 3 for 25 ms; neither matches. `5 15 25 35` gave
+     * `0 2 2 4`, which is the half-to-even tie rule on its own.
+     * Input: three measured delay arrays -> Output: the centiseconds vips
+     * wrote for each.
+     */
+    #[test]
+    fn delays_go_out_as_centiseconds_rounded_half_to_even() {
+        for (millis, centis) in [
+            ([35i64, 55, 15, 25], [4u16, 6, 2, 2]),
+            ([45, 67, 5, 1], [4, 7, 0, 0]),
+            ([5, 15, 25, 35], [0, 2, 2, 4]),
+        ] {
+            let mut source = roll(4);
+            source.set_field("delay", MetadataValue::IntArray(millis.to_vec()));
+            let bytes = source
+                .encode_gif(SaveOptions::default())
+                .expect("the delay array matches the page count");
+            let (_, _, frames) = wire_frames(&bytes);
+            let written: Vec<u16> = frames.iter().map(|f| f.delay_cs).collect();
+            assert_eq!(written, centis, "{millis:?} ms");
+        }
+    }
+
+    /**
+     * Tests that a short delay goes out as written rather than being lifted
+     * to 100 ms, because that floor is a `webpsave` and `jxlsave` behaviour
+     * and `gifsave` does not have it. Works by encoding the same four
+     * millisecond delays the WebP measurement used and reading them back.
+     * Measured on vips 8.18.6: `8 9 10 11` ms through `gifsave` produced
+     * centiseconds `1 1 1 1`, where the same four through `webpsave`
+     * produced `ANMF` durations `100 100 100 11`.
+     * Input: delays of 8, 9, 10 and 11 ms -> Output: `1 1 1 1`
+     * centiseconds, with no floor applied.
+     */
+    #[test]
+    fn a_short_delay_is_not_floored_the_way_webpsave_floors_it() {
+        let mut source = roll(4);
+        source.set_field("delay", MetadataValue::IntArray(vec![8, 9, 10, 11]));
+        let bytes = source.encode_gif(SaveOptions::default()).expect("encodes");
+        let (_, _, frames) = wire_frames(&bytes);
+        assert_eq!(
+            frames.iter().map(|f| f.delay_cs).collect::<Vec<_>>(),
+            [1, 1, 1, 1],
+            "gifsave does not apply the browser floor"
+        );
+    }
+
+    /**
+     * Tests that the `loop` field becomes the NETSCAPE block vips writes,
+     * including the case where the block is left out altogether. Works by
+     * encoding a roll with each measured loop value and reading the
+     * application extension back.
+     * Measured on vips 8.18.6 by writing each value with `gifsave` and
+     * parsing the block out of the bytes: `loop 0` wrote a block holding 0,
+     * `loop 1` wrote **no block**, `loop 2` wrote 1, `loop 5` wrote 4, and
+     * `loop 65536` wrote 65535. Reading each file back reported the original
+     * `loop`.
+     * Input: loop 0, 1, 2, 5 and 65536 -> Output: the block vips wrote, and
+     * the same `loop` on reload.
+     */
+    #[test]
+    fn the_loop_field_becomes_the_netscape_block_vips_writes() {
+        for (plays, block) in [
+            (0i64, Some(0u16)),
+            (1, None),
+            (2, Some(1)),
+            (5, Some(4)),
+            (65536, Some(65535)),
+        ] {
+            let mut source = roll(2);
+            source.set_field("loop", MetadataValue::Int(plays));
+            let bytes = source.encode_gif(SaveOptions::default()).expect("encodes");
+            let (_, netscape, _) = wire_frames(&bytes);
+            assert_eq!(netscape, block, "loop {plays}");
+
+            let back = decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("what was written loads back");
+            assert_eq!(
+                back.get_int("loop"),
+                Some(plays.min(i64::from(i32::MAX)) as i32),
+                "loop {plays} survives the round trip"
+            );
+        }
+    }
+
+    /**
+     * Tests that a raster with no `loop` field writes the block cgif always
+     * writes, so the still path is unchanged and an animation defaults to
+     * looping forever. Works by encoding a roll and a still, neither
+     * carrying the field.
+     * Measured on vips 8.18.6: a `gifsave` of an image with no `loop`
+     * attaches a NETSCAPE block holding 0, on a still as well as an
+     * animation, and the file reloads as `loop: 0`.
+     * Input: a two-page roll and a still, no `loop` field -> Output: a
+     * NETSCAPE block holding 0 in both.
+     */
+    #[test]
+    fn no_loop_field_means_forever_which_is_what_cgif_writes() {
+        for pages in [1u32, 2] {
+            let bytes = roll(pages)
+                .encode_gif(SaveOptions::default())
+                .expect("encodes");
+            let (_, netscape, frames) = wire_frames(&bytes);
+            assert_eq!(netscape, Some(0), "{pages} page(s)");
+            assert_eq!(frames.len(), pages as usize);
+        }
+    }
+
+    /**
+     * Tests that a `delay` array whose length is not the page count is
+     * refused, where vips pads it with zeros or truncates it silently. Works
+     * by offering a four-page roll a two-entry and a six-entry array, with
+     * the exact-length array as the positive control.
+     * Measured on vips 8.18.6, on a four-page roll: a two-entry array wrote
+     * centiseconds `2 3 0 0` and a six-entry array wrote `2 3 4 5`. Both are
+     * a caller mistake given a silent answer, and the load side now
+     * guarantees the array matches the page count, so a mismatch on save can
+     * only come from a hand-built raster.
+     * Input: delay arrays of length 2, 6 and 4 on a four-page roll ->
+     * Output: two refusals naming both counts, and one encode.
+     */
+    #[test]
+    fn a_delay_array_that_is_not_one_per_page_is_refused() {
+        for wrong in [vec![20i64, 30], vec![20, 30, 40, 50, 60, 70], vec![]] {
+            let mut source = roll(4);
+            let len = wrong.len();
+            source.set_field("delay", MetadataValue::IntArray(wrong));
+            let err = source
+                .encode_gif(SaveOptions::default())
+                .expect_err("the array does not match the page count");
+            let message = err.to_string();
+            assert!(
+                message.starts_with("gif: ") && message.contains(&len.to_string()),
+                "{message}"
+            );
+        }
+
+        let mut exact = roll(4);
+        exact.set_field("delay", MetadataValue::IntArray(vec![20, 30, 40, 50]));
+        let bytes = exact
+            .encode_gif(SaveOptions::default())
+            .expect("four delays on four pages is the positive control");
+        let (_, _, frames) = wire_frames(&bytes);
+        assert_eq!(
+            frames.iter().map(|f| f.delay_cs).collect::<Vec<_>>(),
+            [2, 3, 4, 5]
+        );
+    }
+
+    /**
+     * Tests that a negative `delay` or `loop` is refused rather than wrapped
+     * into a plausible large one, which is what vips does with both. Works by
+     * encoding a roll carrying each, with the non-negative value as the
+     * positive control.
+     * Measured on vips 8.18.6: a delay of -10 ms came out as 65535
+     * centiseconds, which is 655 seconds, and -1 ms came out as 0; a `loop`
+     * of -1 wrote a NETSCAPE count of 65535 and reloaded as `loop: 65536`,
+     * and -5 wrote 65531. Both are an unsigned cast of a value that has no
+     * meaning, so there is no behaviour worth matching.
+     * Input: `delay = [-10, 40]` and `loop = -1` -> Output: two refusals,
+     * and an encode for the same fields made non-negative.
+     */
+    #[test]
+    fn a_negative_delay_or_loop_is_refused() {
+        let mut bad_delay = roll(2);
+        bad_delay.set_field("delay", MetadataValue::IntArray(vec![-10, 40]));
+        let message = bad_delay
+            .encode_gif(SaveOptions::default())
+            .expect_err("a negative delay is not a delay")
+            .to_string();
+        assert!(
+            message.starts_with("gif: ") && message.contains("-10"),
+            "{message}"
+        );
+
+        let mut bad_loop = roll(2);
+        bad_loop.set_field("loop", MetadataValue::Int(-1));
+        let message = bad_loop
+            .encode_gif(SaveOptions::default())
+            .expect_err("a negative play count is not a play count")
+            .to_string();
+        assert!(
+            message.starts_with("gif: ") && message.contains("-1"),
+            "{message}"
+        );
+
+        let mut good = roll(2);
+        good.set_field("delay", MetadataValue::IntArray(vec![10, 40]));
+        good.set_field("loop", MetadataValue::Int(1));
+        good.encode_gif(SaveOptions::default())
+            .expect("the same fields made non-negative are the positive control");
+    }
+
+    /**
+     * Tests that a field of the wrong type is ignored rather than refused,
+     * which is the other half of the negative-value rule. Works by putting a
+     * string under `loop` and a scalar under `delay` and requiring the
+     * defaults.
+     * The distinction is deliberate: an untrusted `.v` can leave anything
+     * under any name, so a wrong type means "this is not the field I read",
+     * the way `Raster::get_n_pages` and the `page-height` reader already
+     * treat it, while a negative int means "this is the field and its value
+     * is impossible". `MetadataValue::as_int_array` documents the scalar
+     * half: a `gif-delay` is the first frame's delay alone and coercing it
+     * would invent a per-frame array.
+     * Input: `loop` as a string and `delay` as an `Int` -> Output: the
+     * NETSCAPE block for "forever" and zero delays.
+     */
+    #[test]
+    fn a_field_of_the_wrong_type_is_ignored_rather_than_refused() {
+        let mut source = roll(2);
+        source.set_field("loop", MetadataValue::Str("forever".into()));
+        source.set_field("delay", MetadataValue::Int(40));
+        let bytes = source
+            .encode_gif(SaveOptions::default())
+            .expect("a wrong-typed field is not this field");
+        let (_, netscape, frames) = wire_frames(&bytes);
+        assert_eq!(netscape, Some(0), "loop falls back to forever");
+        assert_eq!(
+            frames.iter().map(|f| f.delay_cs).collect::<Vec<_>>(),
+            [0, 0],
+            "a scalar does not coerce to a one-per-page array"
+        );
+    }
+
+    /**
+     * Tests that an animation carrying real transparency writes
+     * restore-to-background on every frame but the last, so each frame's
+     * transparent pixels stay transparent instead of showing the frame
+     * before. Works by round-tripping a two-page RGBA roll whose second page
+     * is transparent where the first is opaque, with an opaque roll as the
+     * control.
+     * Measured on vips 8.18.6: `gifsave` of a two-page roll with alpha wrote
+     * disposal 2 on frame 0 and 1 on frame 1, and of a two-page opaque roll
+     * wrote 1 on both. A still with alpha also got 1, because the last
+     * frame's disposal is not observable.
+     * Input: a transparent and an opaque two-page roll -> Output: disposal
+     * `[2, 1]` and `[1, 1]`, and an exact round trip in both.
+     */
+    #[test]
+    fn a_transparent_animation_disposes_to_background_so_each_page_stands_alone() {
+        let mut clear = Raster::new(
+            2,
+            4,
+            PixelFormat::Rgba8,
+            vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, //
+                0, 255, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255,
+            ],
+        )
+        .expect("a valid roll");
+        clear.set_page_height(2);
+        let bytes = clear.encode_gif(SaveOptions::default()).expect("encodes");
+        let (_, _, frames) = wire_frames(&bytes);
+        assert_eq!(
+            frames.iter().map(|f| f.disposal).collect::<Vec<_>>(),
+            [2, 1],
+            "every frame but the last clears itself"
+        );
+        let back = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("loads back");
+        assert_eq!(
+            back.data(),
+            clear.data(),
+            "the transparent pixels do not pick up the frame before"
+        );
+
+        let opaque = roll(2).encode_gif(SaveOptions::default()).expect("encodes");
+        let (_, _, opaque_frames) = wire_frames(&opaque);
+        assert_eq!(
+            opaque_frames.iter().map(|f| f.disposal).collect::<Vec<_>>(),
+            [1, 1],
+            "with nothing transparent there is nothing to clear"
+        );
+    }
+
+    /**
+     * Tests that dithering is computed per page, so the error diffused off
+     * the bottom row of one page does not land on the top row of the next.
+     * Works by encoding a two-page roll whose pages are identical and
+     * requiring the two frames' LZW payloads to match.
+     * A roll dithered as one tall image cannot produce identical frames:
+     * page 1's first row starts with the error page 0's last row pushed
+     * down, and page 0's first row starts with none. The gradient is there
+     * to make the quantiser's palette saturate so there is error to diffuse
+     * at all.
+     * Input: a two-page roll of two identical gradient pages, `dither = 1.0`
+     * -> Output: two byte-identical frames.
+     */
+    #[test]
+    fn dithering_does_not_bleed_across_the_page_boundary() {
+        let page = gradient(16, 16);
+        let mut data = page.data().to_vec();
+        data.extend_from_slice(page.data());
+        let mut source = Raster::new(16, 32, PixelFormat::Rgb8, data).expect("a valid roll");
+        source.set_page_height(16);
+        let bytes = source
+            .encode_gif(SaveOptions::default().with_bitdepth(3))
+            .expect("encodes");
+        let (_, _, frames) = wire_frames(&bytes);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            frames[0].payload, frames[1].payload,
+            "identical pages dither identically, which they cannot if error crosses the seam"
+        );
+    }
+
+    /**
+     * Tests that the GIF axis limit is checked against the frame rather than
+     * the roll, since the logical screen is one page tall. Works by encoding
+     * a roll taller than 65535 rows whose pages are not, with a single page
+     * over the limit as the positive control.
+     * Measured on vips 8.18.6: the logical screen descriptor of a saved roll
+     * holds the page height, not the roll height, so a roll of many pages is
+     * not itself bounded by the 65535-pixel axis.
+     * Input: a 1x80000 roll with page height 40000, then a 1x70000 still ->
+     * Output: two frames of 40000 rows, then a refusal.
+     */
+    #[test]
+    fn the_axis_limit_is_the_frame_not_the_roll() {
+        let mut tall =
+            Raster::new(1, 80_000, PixelFormat::Gray8, vec![7u8; 80_000]).expect("a valid roll");
+        tall.set_page_height(40_000);
+        let bytes = tall
+            .encode_gif(SaveOptions::default())
+            .expect("each page fits the GIF axis even though the roll does not");
+        let (screen, _, frames) = wire_frames(&bytes);
+        assert_eq!(screen, (1, 40_000));
+        assert_eq!(frames.len(), 2);
+
+        let still =
+            Raster::new(1, 70_000, PixelFormat::Gray8, vec![7u8; 70_000]).expect("a valid still");
+        let message = still
+            .encode_gif(SaveOptions::default())
+            .expect_err("one frame of 70000 rows is over the axis limit")
+            .to_string();
+        assert!(message.contains("frame too large"), "{message}");
+    }
+
+    /**
+     * Tests that a stored `page-height` the raster cannot hold is discarded
+     * on both sides of the save, so a bad split cannot reach the wire.
+     * Works by putting a non-divisor under the field the way an untrusted
+     * `.v` would, then encoding, with the divisor as the positive control.
+     * Measured on vips 8.18.6: `vips gifsave roll.v out.gif --page-height 5`
+     * on a 12-row image writes a single 4x12 frame and says nothing, because
+     * `vips_image_get_page_height` discards a value that does not divide the
+     * height. libviprs refuses the same value at `try_set_page_height`
+     * instead, so the mistake is named where it is made, and the save path
+     * reads the derived height, which always divides.
+     * Input: a stored page height of 5 on an 8-row roll, then 2 ->
+     * Output: one frame of 8 rows, then four frames of 2, and a refusal from
+     * the setter.
+     */
+    #[test]
+    fn a_page_height_the_raster_cannot_hold_never_reaches_the_wire() {
+        let mut smuggled = roll(4);
+        smuggled.set_field("page-height", MetadataValue::Int(5));
+        let bytes = smuggled
+            .encode_gif(SaveOptions::default())
+            .expect("a discarded split is one page, as vips reports it");
+        let (screen, _, frames) = wire_frames(&bytes);
+        assert_eq!(screen, (2, 8), "the whole roll is one frame");
+        assert_eq!(frames.len(), 1);
+
+        assert!(
+            roll(4).try_set_page_height(5).is_err(),
+            "the setter refuses at the point of the mistake, where vips accepts and discards"
+        );
+
+        let (screen, _, frames) = wire_frames(
+            &roll(4)
+                .encode_gif(SaveOptions::default())
+                .expect("the divisor is the positive control"),
+        );
+        assert_eq!(screen, (2, 2));
+        assert_eq!(frames.len(), 4);
+    }
+
+    /**
+     * Tests that a delay past what a `u16` of centiseconds can hold
+     * saturates rather than wrapping, which is a deliberate divergence.
+     * Works by encoding delays either side of the 655350 ms ceiling.
+     * Measured on vips 8.18.6: `655350 655360 700000 10` ms came out as
+     * centiseconds `65535 0 4464 1`, so 655360 ms became no delay at all and
+     * 700000 ms became 44.64 seconds. That is a truncating cast, and
+     * `FrameDelay::to_centiseconds` saturates instead: a delay too long to
+     * express comes out as the longest one that fits rather than as an
+     * arbitrary short one.
+     * Input: delays of 655350, 655360, 700000 and 10 ms -> Output:
+     * `65535 65535 65535 1` centiseconds.
+     */
+    #[test]
+    fn a_delay_past_the_wire_ceiling_saturates_where_vips_wraps() {
+        let mut source = roll(4);
+        source.set_field(
+            "delay",
+            MetadataValue::IntArray(vec![655_350, 655_360, 700_000, 10]),
+        );
+        let bytes = source.encode_gif(SaveOptions::default()).expect("encodes");
+        let (_, _, frames) = wire_frames(&bytes);
+        assert_eq!(
+            frames.iter().map(|f| f.delay_cs).collect::<Vec<_>>(),
+            [65_535, 65_535, 65_535, 1],
+            "vips wrote 65535 0 4464 1 here, which turns a long delay into a short one"
+        );
+    }
+
     #[test]
     fn save_options_defaults_match_vips() {
         let d = SaveOptions::default();
