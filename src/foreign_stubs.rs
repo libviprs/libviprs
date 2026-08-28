@@ -192,7 +192,9 @@ impl Raster {
             },
         )
         .map_err(|e| match e {
-            crate::uhdr::UhdrError::BadInput { reason } => EncodeError::InvalidParameter(reason),
+            crate::uhdr::UhdrError::BadSaveInput { reason } => {
+                EncodeError::InvalidParameter(format!("uhdrsave {reason}"))
+            }
             other => EncodeError::encode(other),
         })
     }

@@ -658,6 +658,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `UhdrError::BadSaveInput`, so `uhdr::encode_uhdr`'s input refusal names the
+  operation that actually failed (issue #810). It reused `UhdrError::BadInput`,
+  whose Display is `uhdr2scRGB: {reason}`, so a failed **save** reported the
+  **expand** operation and reported it first:
+  `uhdr2scRGB: uhdrsave needs a 3-band float image, got Rgb8`. It now reads
+  `uhdrsave: needs a 3-band float image, got Rgb8`. `UhdrError` is
+  `#[non_exhaustive]`, so a caller with a wildcard arm is unaffected; a caller
+  matching `BadInput` to catch a save refusal moves to the new variant.
+
 - `Raster::encode_uhdr(quality)` and `Raster::encode_uhdr_gainmap_scale(quality,
   scale_factor)` **write an Ultra HDR container** instead of returning
   `EncodeError::Unsupported` (issue #757). #508 landed the writer in
