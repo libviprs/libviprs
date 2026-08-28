@@ -580,6 +580,7 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::num::NonZeroU16;
 
     fn black(w: u32, h: u32) -> Raster {
         Raster::zeroed(w, h, PixelFormat::Gray8).unwrap()
@@ -1010,5 +1011,134 @@ mod tests {
         im.draw_rect_filled(&[10, 9, 0], 3, 0, 3, 2);
         let (_, segments) = im.label_regions();
         assert_eq!(segments, 3, "two touching rects of distinct colour + 1");
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/morphology.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, and the sites this replaced stepped two bytes per sample for
+     * every width but one, so a four-byte carrier would have been walked at
+     * half stride (issue #607).
+     * Input: `src/morphology.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn morphology_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("morphology.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn sample_", "u32")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/morphology.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the rank walker reads a 16-bit raster at the 16-bit
+     * stride, which is the property the width-keyed helper got right only
+     * by accident: its `_` arm stepped two bytes for every width that was
+     * not one, so it is the arm a four-byte carrier would have taken.
+     * Works by ranking a one-band `u16` row whose samples are all above
+     * `u8::MAX` and asserting the median comes back as the middle sample
+     * rather than as a byte of one of them.
+     * Input: `[1000, 40000, 20000]` in one row, 3x1 window, index 1 ->
+     * Output: 20000 in every output pixel the window covers.
+     */
+    #[test]
+    fn rank_reads_sixteen_bit_samples_at_the_sixteen_bit_stride() {
+        let mut im = Raster::zeroed(3, 1, PixelFormat::Gray16).unwrap();
+        let data = im.data_mut();
+        for (i, v) in [1000u16, 40000, 20000].iter().enumerate() {
+            data[2 * i..2 * i + 2].copy_from_slice(&v.to_ne_bytes());
+        }
+        let out = im.try_rank(3, 1, 1).expect("16-bit rank is supported");
+        let got: Vec<u16> = out
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_ne_bytes(*c))
+            .collect();
+        // Edges replicate, so every window is {1000, 40000, 20000} with one
+        // sample doubled; the median is 20000 in the middle and at the right
+        // edge, and 1000 at the left edge where 1000 is doubled.
+        assert_eq!(got, vec![1000, 20000, 20000], "rank read the wrong bytes");
+    }
+
+    /**
+     * Tests that the erode/dilate guard names the 8-bit *kind* and not the
+     * one-byte width, so a one-byte signed carrier would be refused rather
+     * than walked as unsigned (issue #607).
+     * Works by checking the guard still refuses the deeper kinds the crate
+     * carries today and still accepts `U8`, which is the half of the
+     * contract that is observable before a signed carrier exists.
+     * Input: Gray16 and FloatF32(1) -> `EightBitOnly`; Gray8 -> Ok.
+     */
+    #[test]
+    fn erode_refuses_every_kind_but_u8() {
+        let kernel: &[&[u8]] = &[&[255, 255, 255]];
+        for fmt in [
+            PixelFormat::Gray16,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+        ] {
+            let im = Raster::zeroed(3, 3, fmt).unwrap();
+            assert!(
+                matches!(
+                    im.try_erode(kernel),
+                    Err(MorphologyError::EightBitOnly { .. })
+                ),
+                "{fmt:?} must be refused by the 8-bit guard"
+            );
+        }
+        let im = Raster::zeroed(3, 3, PixelFormat::Gray8).unwrap();
+        assert!(im.try_erode(kernel).is_ok(), "Gray8 must still be accepted");
+    }
+
+    /**
+     * Tests that the rank / countlines / label-regions guard is keyed on
+     * the sample kind, so it accepts exactly the two unsigned kinds its
+     * error variant documents.
+     * Works by driving all three ops at `Gray8`, `Gray16` and
+     * `FloatF32(1)` and asserting the float one is the only refusal.
+     * Input: three formats x three ops -> Output: `UnsignedOnly` for float
+     * only.
+     */
+    #[test]
+    fn the_unsigned_guard_accepts_u8_and_u16_and_refuses_float() {
+        for fmt in [PixelFormat::Gray8, PixelFormat::Gray16] {
+            let im = Raster::zeroed(4, 4, fmt).unwrap();
+            assert!(im.try_rank(3, 3, 4).is_ok(), "{fmt:?} rank");
+            assert!(im.try_countlines(Direction::Horizontal).is_ok(), "{fmt:?}");
+            assert!(im.try_label_regions().is_ok(), "{fmt:?} label_regions");
+        }
+        let f = Raster::zeroed(4, 4, PixelFormat::FloatF32(NonZeroU16::new(1).unwrap())).unwrap();
+        for got in [
+            f.try_rank(3, 3, 4).err(),
+            f.try_countlines(Direction::Horizontal).err(),
+            f.try_label_regions().map(|_| ()).err(),
+        ] {
+            assert!(
+                matches!(got, Some(MorphologyError::UnsignedOnly { .. })),
+                "a float raster must be refused, got {got:?}"
+            );
+        }
     }
 }
