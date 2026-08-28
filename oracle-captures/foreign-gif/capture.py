@@ -553,7 +553,9 @@ record["notes"] = [
 ]
 
 with open(os.path.join(ROOT, "oracle.json"), "w") as fh:
-    json.dump(record, fh, indent=2, sort_keys=True)
+    # allow_nan=False so a non-finite measurement stops the capture here
+    # rather than writing a file nobody outside Python can parse (#682).
+    json.dump(record, fh, indent=2, sort_keys=True, allow_nan=False)
     fh.write("\n")
 with open(os.path.join(ROOT, "commands.sh"), "w") as fh:
     fh.write("#!/bin/sh\n")

@@ -65,8 +65,42 @@
 //! * **Interpolator offsets.** The bicubic interpolator reads the same kind of
 //!   table (`bicubic.cpp:496-519`), so it rounds its offset through
 //!   `table_offset` too. Bilinear and the nonlinear nohalo and lbb have no
-//!   tables and keep the exact offset, which is what `vips_interpolate_*` does
-//!   for them.
+//!   offset table and keep the exact offset, which is what
+//!   `vips_interpolate_*` does for them.
+//! * **Bicubic coefficients, per carrier.** `vips_interpolate_bicubic_interpolate`
+//!   picks its arithmetic from the band format, and this module follows it
+//!   (issue #704):
+//!
+//!   | `BandFmt` | libvips function | coefficients |
+//!   |---|---|---|
+//!   | `UCHAR` / `CHAR` | `bicubic_unsigned_int_tab` | `vips_bicubic_matrixi`, 12-bit fixed point |
+//!   | `USHORT` / `SHORT` / `UINT` / `INT` | `bicubic_unsigned_int32_tab` | `vips_bicubic_matrixf`, `double` |
+//!   | `FLOAT` | `bicubic_float_tab<float>` | `vips_bicubic_matrixf`, `double` |
+//!   | `DOUBLE` | `bicubic_notab` | computed at the exact offset, no table |
+//!
+//!   So the fixed point is the `uchar` arithmetic and only the `uchar`
+//!   arithmetic, and an alpha band takes the decision away from the stored
+//!   depth entirely, because `vips_affine` premultiplies into a FLOAT image
+//!   before it resamples.
+//!
+//!   The `FLOAT` row carries a second consequence, which is issue #705.
+//!   `bicubic_float<T>` sums each of the four rows through `cubic_float<T>` and
+//!   then combines them through `cubic_float<T>` again, and that helper
+//!   **returns `T`**. Its arithmetic is `double` either way, because the
+//!   coefficients are, so with `T = float` all five sums are computed in `f64`
+//!   and narrowed to `f32` on the way out, and with `T = double` nothing
+//!   narrows. This module does the same, keyed on the same carrier rule. The
+//!   accumulation *order* is not part of it: flat 16-term `f64` and
+//!   row-then-column `f64` are bit-identical here (measured 0 of 1764 apart on
+//!   a random 24x24 float raster, where both miss the binary by the same
+//!   1.5259e-05 in the same 356 samples), so it is the narrowing and not the
+//!   reassociation that closes it. Porting the fixed point is a deliberate loss of
+//!   accuracy in exchange for parity: measured against Catmull-Rom evaluated at
+//!   the true offset in exact rational arithmetic, the mean absolute error over
+//!   17814 interior samples of random `uchar` images goes from 0.4371 LSB to
+//!   0.4798, worst case 1 LSB either way, and vips is the closer of the two on
+//!   1355 of those samples. The shared error from the 1/64 offset grid above is
+//!   0.44 LSB, ten times larger.
 //! * **`resize` composition.** The scale is split per axis: any downscale
 //!   runs `reducev` / `reduceh` with the chosen kernel (default `lanczos3`,
 //!   gap 2), any residual upscale runs `affine` with the interpolator
@@ -84,33 +118,79 @@
 //!   interpolated; positions whose floor falls outside `[-1, dim - 1]` are
 //!   painted with the background, and interpolation taps outside the image
 //!   read the [`Extend`] mode (background 0 by default), reproducing the
-//!   one-pixel anti-aliased border of `vips_affine_gen`. `vips_affine` grows
+//!   one-pixel anti-aliased border of `vips_affine_gen`. Both inks are
+//!   converted to the carrier once before any resampling, the way
+//!   `vips_affine_build` runs `vips__vector_to_ink` once before it embeds:
+//!   clipped and truncated toward zero on an integer carrier, narrowed to
+//!   `f32` on a float one (issue #736). Carrying
+//!   the caller's `f64` into the convolution instead was worth up to 75 of 255
+//!   on a byte carrier with an out-of-range background. `vips_affine` grows
 //!   that border by embedding the input with the caller's extend mode before
 //!   it resamples (`affine.c:534`), so on a raster **without** an alpha band
 //!   an [`Extend::White`] tap is inked the way `vips_embed` inks one, from the
 //!   interpretation (`white_ink`, issue #667) and not from the sample depth,
 //!   and the measured cells match `vips embed --extend white` cell for cell.
-//!   They cannot match once the raster carries alpha. `vips_image_hasalpha()`
-//!   sends `vips_affine` through a premultiply into a **float** image before
-//!   it paints that border, so vips runs `FILL_LINE(float, ...)`, the byte
-//!   `memset` that produces 257 never happens, and the border lands on the
-//!   plain interpretation maximum instead. Measured on 8.18.6 by solving the
-//!   border ink back out of a half-pixel bicubic shift over a constant input:
+//!   They stop matching once the raster carries alpha, and the reason is not
+//!   the paint order (issue #692). `vips_affine_build` embeds **before** it
+//!   premultiplies (`affine.c:529`, then `affine.c:551`), so the border is
+//!   painted in the raster's own domain either way and `vips_region_paint`
+//!   memsets an integer carrier exactly as it does for a bare `vips_embed`.
+//!   What moves the value afterwards is that the premultiply / un-premultiply
+//!   pair does **not** cancel on that pixel: `vips_premultiply` builds its
+//!   multiplier from a **clipped** alpha, `nalpha = clip(a, 0, M) / M`, while
+//!   `vips_unpremultiply` builds its reciprocal from the **raw** one,
+//!   `factor = M / a`, deliberately ("we want over and undershoots on alpha
+//!   and RGB to cancel", `unpremultiply.c:78`). A border pixel holds the same
+//!   ink `E` in every band including alpha, so the round trip is
+//!   `E * clip(E, 0, M) / M * M / E`, which is `clip(E, 0, M)`: the ink comes
+//!   back clipped to the **interpretation's** ceiling.
 //!
-//!   | bands | tag | alpha | `embed` | `affine` |
-//!   |---|---|---|---|---|
-//!   | 3 | `srgb` | no | 65535 | 65534.7 |
-//!   | 4 | `srgb` | yes | 65535 | collapses to 255 |
-//!   | 3 | `scrgb` | no | 257 | 256.0 |
-//!   | 4 | `scrgb` | yes | 257 | collapses to 1 |
-//!   | 1 | `b-w` | no | 65535 | 65534.7 |
-//!   | 2 | `b-w` | yes | 65535 | collapses to 255 |
+//!   libviprs does the same arithmetic against its own ceiling, which is the
+//!   **depth's** on an unsigned carrier (`bracket_max_alpha`, issue #664), and
+//!   the white ink never exceeds that, so `clip(E, 0, D)` is just `E`. The two
+//!   therefore agree everywhere except where the tag's ceiling sits below the
+//!   carrier's depth. Measured on 8.18.6 with `--interpolate nearest`, whose
+//!   window is one pixel, so an output shifted one step off the input reads the
+//!   **pure** ink with no blend to solve back out:
 //!
-//!   The alpha rows differ in kind rather than degree: `--extend white` and
-//!   `--extend black` produce the same output there. libviprs paints the ink
-//!   first and premultiplies after, so on an alpha raster it keeps the memset
-//!   values, and the suite pins those three cells rather than leaving the gap
-//!   implied. Issue #692 tracks the reordering.
+//!   | carrier | bands | tag | `embed white` | `affine white` | libviprs |
+//!   |---|---|---|---|---|---|
+//!   | `uchar` | 3 | none / `srgb` | 255 | 255 | 255 |
+//!   | `uchar` | 4 | `srgb` | 255 | 255 | 255 |
+//!   | `uchar` | 4 | `scrgb` | 1 | 1 | 1 |
+//!   | `ushort` | 3 | `srgb` | 65535 | 65535 | 65535 |
+//!   | `ushort` | 4 | `srgb` | 65535 | **255** | 65535 |
+//!   | `ushort` | 3 | `scrgb` | 257 | 257 | 257 |
+//!   | `ushort` | 4 | `scrgb` | 257 | **1** | 257 |
+//!   | `ushort` | 4 | `rgb16` | 65535 | 65535 | 65535 |
+//!   | `ushort` | 2 | `b-w` | 65535 | **255** | 65535 |
+//!   | `float` | 4 | `srgb` / `scrgb` / `rgb16` | 255 / 1 / 65535 | same | same |
+//!
+//!   The three bold cells are the whole divergence, and every one of them is a
+//!   16-bit raster wearing an 8-bit tag. **libviprs does not follow vips here,
+//!   and that is decided rather than pending.** Two reasons, both measured:
+//!
+//!   1. The border ink is not separately settable. What comes out is
+//!      `clip(E, 0, ceiling)` for whatever ceiling the bracket uses, so
+//!      matching the pure-ink cell means either changing the ceiling or
+//!      pre-clipping the fill. Pre-clipping fixes the pure-ink pixels and
+//!      leaves every *blended* one wrong, because the two premultiplied spaces
+//!      are scaled differently: on a `ushort` `srgb` raster with alpha 200 a
+//!      real pixel of 25000 sits at 19608 in vips' premultiplied image and at
+//!      76.3 in this module's. A change that fixes the corner and not the
+//!      fringe looks like a fix and is not one.
+//!   2. Changing the ceiling means `bracket_max_alpha` following the tag on
+//!      unsigned carriers, which is exactly what #664 decided against, and the
+//!      price is not theoretical. `vips affine` on a constant-25000 `ushort`
+//!      RGBA tagged `srgb` returns **255 for every interior sample**, not just
+//!      at the border; tagged `scrgb` it returns 1; and with alpha 65535 a
+//!      colour of 25000 comes back as 97. libviprs returns 25000 in all three.
+//!
+//!   So the border follows the ceiling, the ceiling is #664's, and this module
+//!   is self-consistent under it. The suite pins both halves: the agreeing
+//!   cells so the divergence stays bounded to those three, and the interior
+//!   round-trip so the cost of adopting vips' reading is a number rather than
+//!   an assertion.
 //! * **Premultiplied alpha.** Like `vips_affine`, images with an alpha band
 //!   are premultiplied before interpolation and unpremultiplied afterwards
 //!   unless [`AffineOptions::premultiplied`] says the input already is. The
@@ -130,7 +210,10 @@
 //!   `vips_unpremultiply` reads that image back, so the interpolated pixel is
 //!   quantised at the seam between them; the interpolation itself accumulates
 //!   in `f64`, which is what `BILINEAR_FLOAT` does with its `double`
-//!   coefficients (`interpolate.c:462`). The averaging resamplers —
+//!   coefficients (`interpolate.c:462`). Bicubic is the exception, and only
+//!   because the premultiply moved the carrier: `bicubic_float<float>` narrows
+//!   each row sum to `f32` (issue #705, and the per-carrier table above), so a
+//!   premultiplied raster takes that narrowing whatever its stored depth was. The averaging resamplers —
 //!   `reduce` / `reduceh` / `reducev`, `shrink` / `shrinkh` / `shrinkv`, and
 //!   `resize` — do the same: an alpha image is premultiplied once into a float
 //!   working buffer, the separable box / kernel / affine passes all run in that
@@ -187,9 +270,29 @@
 //!
 //! # Divergence from stock libvips
 //!
-//! One gap is open between this module and a stock libvips, and it is the
-//! quantisation at the end of a bracketed resample rather than any of the
-//! arithmetic inside one.
+//! Three gaps are open between this module and a stock libvips, all three are
+//! quantisation rather than a different convolution, and all three are kept on
+//! purpose. The rule that decided them, and that decided #704 the other way, is
+//! measured rather than stylistic:
+//!
+//! > Adopt libvips' arithmetic when the difference is inside the carrier's own
+//! > noise **and** points both ways, so neither implementation is the more
+//! > accurate one. Keep this module's when the difference is large or
+//! > one-directional, and pin libvips' answer so the gap stays visible.
+//!
+//! Against the exact answer in rational arithmetic, on real `affine` output:
+//!
+//! | | this module | libvips | libvips closer |
+//! |---|---|---|---|
+//! | #704 bicubic coefficients, `uchar` | 0.4371 LSB | 0.4798 LSB | 1355 of 17814 |
+//! | #732 bicubic store, `ushort` | 0.0000 LSB | 0.4680 LSB | 0 of 1017 |
+//! | #733 bilinear weights, `uchar` | 0.0000 LSB | 0.0252 LSB | 0 of 1113 |
+//! | #733 bilinear weights, `ushort` | 0.0000 LSB | 6.2848 LSB | 0 of 1113 |
+//!
+//! #704 was a coin toss the project took for parity, because both spellings
+//! were within a hair of each other and this module was not implementing either
+//! one cleanly after #668 put the offsets on libvips' grid. The other three are
+//! not coin tosses: this module is exact and libvips is not, on every sample.
 //!
 //! * **`vips_cast` truncates where this module rounds.** Whenever libvips
 //!   brackets a resample in a premultiply it works in FLOAT and casts back to
@@ -215,6 +318,42 @@
 //!   unpremultiplied result as FLOAT and quantise it the same way instead,
 //!   which is what `resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data`
 //!   does.
+//!
+//! * **`affine` bicubic truncates its own store on a `ushort` carrier**
+//!   (issue #732). `bicubic_unsigned_int32_tab` finishes `out[z] = bicubic`
+//!   with `out` an `unsigned short *` and `bicubic` a `double`, so that store
+//!   truncates too, and this one needs no alpha band and no premultiply to
+//!   fire. Measured on 8.18.6 over a random 24x24: 691 of 1764 samples at
+//!   exactly 1 LSB, and modelling the truncation instead reproduces the binary
+//!   in 0 of 1764. It is the same shape as the `vips_cast` gap above and it
+//!   goes the same way: truncation is a one-directional bias of -0.499 LSB
+//!   where round-half-up is +0.0006, so libvips darkens every resampled `ushort`
+//!   image by half a level and this module round-trips.
+//!   `affine_bicubic_rounds_the_ushort_store_where_vips_truncates` pins it on a
+//!   linear ramp, where Catmull-Rom's answer is closed form: libvips hits
+//!   `floor(exact)` on 441 of 441 interior samples and this module hits
+//!   `round(exact)` on 441 of 441.
+//!
+//! * **`bilinear` keeps `f64` weights on the carriers where vips uses 12-bit
+//!   fixed point** (issue #733). `SWITCH_INTERPOLATE` sends `UCHAR`, `CHAR`,
+//!   `USHORT` and `SHORT` to `BILINEAR_INT`, whose four weights are
+//!   `(x - ix) * VIPS_INTERPOLATE_SCALE` truncated to an `int`. That is worth
+//!   1 LSB on a byte carrier and up to **26** on a 16-bit one, because a weight
+//!   quantised to 1/4096 costs `65535 / 4096` of a sample. Measured over the
+//!   same random 24x24: 31 of 1764 at `uchar`, 1345 of 1764 at `ushort`, and a
+//!   `BILINEAR_INT` model reproduces the binary in 0 and 5 respectively (those
+//!   5 are the equidistant-neighbour ties every interpolator shares).
+//!
+//!   This one stays too, and it is the least close of the three calls. Bilinear
+//!   reproduces a linear function exactly, so there is a closed-form right
+//!   answer, and this module hits it on 529 of 529 interior samples of a ramp
+//!   where libvips misses it on 529 of 529. Adopting the 12-bit weights would
+//!   introduce a mean error of 6.28 LSB on a 16-bit carrier where there is
+//!   currently none, and libvips is closer on 0 of 1113 samples. What the
+//!   argument for adopting it does buy, a gate that can see a regression, comes
+//!   from pinning the divergence instead:
+//!   `affine_bilinear_divergence_from_the_12_bit_weights_is_bounded` asserts it
+//!   from both sides, so it can neither grow nor quietly vanish.
 //!
 //! # Example usage
 //!
@@ -648,6 +787,38 @@ fn table_offset(x: f64) -> f64 {
     ((six + 1) >> 1) as f64 / TRANSFORM_SCALE as f64
 }
 
+/// `VIPS_INTERPOLATE_SHIFT` / `VIPS_INTERPOLATE_SCALE` (`interpolate.h:117`):
+/// the 12-bit fixed point libvips accumulates its `uchar` interpolators in.
+const INTERPOLATE_SHIFT: u32 = 12;
+const INTERPOLATE_SCALE: i64 = 1 << INTERPOLATE_SHIFT;
+
+/// One row of `vips_bicubic_matrixi`: the Catmull-Rom coefficients for a grid
+/// offset, scaled by [`INTERPOLATE_SCALE`] and **truncated toward zero**, which
+/// is what the `double` to `int` assignment in
+/// `vips_interpolate_bicubic_class_init` does:
+///
+/// ```c
+/// vips_bicubic_matrixi[x][i] = vips_bicubic_matrixf[x][i] * VIPS_INTERPOLATE_SCALE;
+/// ```
+///
+/// Two of the four Catmull-Rom coefficients are negative, so truncating toward
+/// zero is not the same as flooring and the difference shows up as a bias in
+/// the reconstructed sample. Rust's `as` cast truncates toward zero too, so the
+/// spelling carries over directly.
+fn fixed_catmull(offset: f64) -> [i64; 4] {
+    let mut c = [0.0f64; 4];
+    catmull_coefficients(&mut c, offset);
+    c.map(|v| (v * INTERPOLATE_SCALE as f64) as i64)
+}
+
+/// `unsigned_fixed_round` (`resample/templates.h:152`): bring a fixed-point
+/// accumulator back to sample units, rounding half up. The C spells the divide
+/// as `>>` on a signed `int`, an arithmetic shift, so a negative accumulator
+/// floors rather than truncating; `>>` on `i64` does the same.
+fn fixed_round(v: i64) -> i64 {
+    (v + (INTERPOLATE_SCALE >> 1)) >> INTERPOLATE_SHIFT
+}
+
 /// Per-format sample layout: bytes per channel and float flag.
 #[derive(Clone, Copy)]
 struct SampleLayout {
@@ -715,6 +886,35 @@ impl SampleLayout {
             } else {
                 data[o] = r as u8;
             }
+        }
+    }
+}
+
+impl SampleLayout {
+    /// Convert a caller-supplied ink to the carrier the way
+    /// `vips__vector_to_ink` does (issue #736): it builds a one-pixel image of
+    /// the doubles and casts it to the input's band format, and `vips_cast`
+    /// **clips and then truncates toward zero** on an integer carrier
+    /// (`cast.c:237`, and the file's own header note: "now does floor(), not
+    /// rint() ... you'll need to round yourself"), and narrows without clipping
+    /// on a float one.
+    ///
+    /// `vips_affine_build` runs that once, before the embed and before the
+    /// resample, so both the taps the interpolator reads past the edge and the
+    /// pixels `vips_affine_gen` paints outside the transformed input are
+    /// already carrier values. Carrying the raw `f64` instead is worth up to
+    /// 75 of 255 on a byte carrier with an out-of-range background, because the
+    /// convolution then weights a value the carrier cannot hold.
+    ///
+    /// Note this is **not** [`write`](SampleLayout::write), which rounds half
+    /// up. The two disagree on every fractional ink, and that is the whole
+    /// point: vips quantises the ink one way and the resampled sample the
+    /// other.
+    fn cast_ink(self, v: f64) -> f64 {
+        if self.is_float {
+            f64::from(v as f32)
+        } else {
+            v.clamp(0.0, self.max).trunc()
         }
     }
 }
@@ -1002,16 +1202,23 @@ struct TapFetch<'a> {
 
 impl TapFetch<'_> {
     fn new(src: &Raster, extend: Extend, background: f64) -> TapFetch<'_> {
+        let layout = SampleLayout::of(src.format());
         TapFetch {
             data: src.data(),
             w: i64::from(src.width()),
             h: i64::from(src.height()),
             bands: src.format().channels(),
-            layout: SampleLayout::of(src.format()),
+            layout,
             alpha_max: bracket_max_alpha(src.format(), src.interpretation()),
-            white: white_ink(src.format(), src.interpretation()),
+            // Both inks go through the carrier once, here, exactly as
+            // `vips_affine_build` runs `vips__vector_to_ink` once before it
+            // embeds (issue #736). The white ink is already integral and in
+            // range on every carrier, so this is a no-op for it and #667's
+            // table does not move; the caller's background is the one that
+            // needs it.
+            white: layout.cast_ink(white_ink(src.format(), src.interpretation())),
             extend,
-            background,
+            background: layout.cast_ink(background),
         }
     }
 
@@ -1031,6 +1238,37 @@ impl TapFetch<'_> {
             }
             Extend::Black | Extend::White | Extend::Background => None,
         }
+    }
+
+    /// True when `vips_interpolate_bicubic_interpolate` would dispatch this
+    /// raster to `bicubic_unsigned_int_tab` and read the 12-bit
+    /// `vips_bicubic_matrixi` rather than the `double` table (issue #704).
+    ///
+    /// That is the `uchar` carrier and nothing else. `USHORT` and `SHORT` go to
+    /// `bicubic_unsigned_int32_tab` / `bicubic_signed_int32_tab`, which take
+    /// `cxf`/`cyf`; `FLOAT` goes to `bicubic_float_tab<float>`, likewise. An
+    /// alpha band takes the decision away from the stored depth altogether,
+    /// because `vips_affine_build` premultiplies into a FLOAT image before it
+    /// resamples (`affine.c:551`), which is what `premultiply` stands for here.
+    fn bicubic_is_fixed_point(&self, premultiply: bool) -> bool {
+        !premultiply && !self.layout.is_float && self.layout.bpc == 1
+    }
+
+    /// True when `vips_interpolate_bicubic_interpolate` would run
+    /// `bicubic_float<T>` with `T = float`, so each of the four row sums and
+    /// the column combine are narrowed to `f32` on the way out of
+    /// `cubic_float<T>` (issue #705).
+    ///
+    /// That is `VIPS_FORMAT_FLOAT` and `VIPS_FORMAT_COMPLEX`, plus anything
+    /// with an alpha band, because `vips_affine_build` premultiplies into a
+    /// FLOAT image before it resamples whatever the stored depth was. The
+    /// 16- and 32-bit integer carriers take `bicubic_float<double>` instead
+    /// and narrow nothing, and the `uchar` carrier never reaches this at all
+    /// (see [`bicubic_is_fixed_point`]).
+    ///
+    /// [`bicubic_is_fixed_point`]: TapFetch::bicubic_is_fixed_point
+    fn bicubic_narrows_rows(&self, premultiply: bool) -> bool {
+        premultiply || self.layout.is_float
     }
 
     fn fill_value(&self) -> f64 {
@@ -1070,6 +1308,32 @@ impl TapFetch<'_> {
     }
 }
 
+/// Per-operation scratch for [`interpolate_at`], allocated once by the caller
+/// rather than once per output pixel.
+struct InterpScratch {
+    /// One fetched tap, `bands` long.
+    tap: Vec<f64>,
+    /// The four row sums of the fixed-point bicubic path in
+    /// [`INTERPOLATE_SCALE`] units, `4 * bands` long and row-major. Only that
+    /// path uses it; every other kernel leaves it untouched.
+    rows: Vec<i64>,
+    /// The same four row sums for the floating-point bicubic path, which
+    /// carries them separately because vips rounds each one to `f32` on a
+    /// float carrier and that has to happen between the two stages
+    /// (issue #705).
+    rows_f: Vec<f64>,
+}
+
+impl InterpScratch {
+    fn new(bands: usize) -> Self {
+        Self {
+            tap: vec![0.0f64; bands],
+            rows: vec![0i64; 4 * bands],
+            rows_f: vec![0.0f64; 4 * bands],
+        }
+    }
+}
+
 /// Interpolate every band at the continuous position `(x, y)`, writing the
 /// per-band result (premultiplied when `premultiply` is set) into `out`.
 fn interpolate_at(
@@ -1078,9 +1342,11 @@ fn interpolate_at(
     x: f64,
     y: f64,
     premultiply: bool,
-    px: &mut [f64],
+    scratch: &mut InterpScratch,
     out: &mut [f64],
 ) {
+    let InterpScratch { tap, rows, rows_f } = scratch;
+    let px = &mut tap[..];
     let x0 = x.floor() as i64;
     let y0 = y.floor() as i64;
     match interp {
@@ -1106,6 +1372,49 @@ fn interpolate_at(
                 }
             }
         }
+        Interpolator::Bicubic if fetch.bicubic_is_fixed_point(premultiply) => {
+            // `vips_interpolate_bicubic_interpolate` sends a `uchar` carrier
+            // to `bicubic_unsigned_int_tab`, which reads the *other* table,
+            // `vips_bicubic_matrixi`: the coefficients themselves as 12-bit
+            // fixed point, accumulated as integers a row at a time with
+            // `unsigned_fixed_round` closing each row and the column combine
+            // (issue #704). The offset is on the same 1/64 grid either way
+            // (issue #668); this is the second quantisation on top of it, and
+            // it is the only one that is carrier-dependent.
+            let cx = fixed_catmull(table_offset(x));
+            let cy = fixed_catmull(table_offset(y));
+            let bands = out.len();
+            rows.fill(0);
+            for (j, row) in rows.chunks_exact_mut(bands).enumerate() {
+                for (i, cxi) in cx.iter().enumerate() {
+                    fetch.fetch(x0 - 1 + i as i64, y0 - 1 + j as i64, premultiply, px);
+                    for (r, p) in row.iter_mut().zip(px.iter()) {
+                        // The taps vips reads are the stored samples of the
+                        // embedded image, so they are integral even at the
+                        // border: `vips__vector_to_ink` casts the background
+                        // through `vips_cast`, which clips and truncates
+                        // (`affine.c:565`).
+                        *r += cxi * (p.clamp(0.0, fetch.layout.max) as i64);
+                    }
+                }
+            }
+            for (b, o) in out.iter_mut().enumerate() {
+                let acc: i64 = (0..4)
+                    .map(|j| cy[j] * fixed_round(rows[j * bands + b]))
+                    .sum();
+                // `VIPS_CLIP(0, bicubic, max_value)` is the next line in the C
+                // and it is not spelled here, because [`SampleLayout::write`]
+                // already applies exactly that bound to every sample this
+                // function returns and the value is integral by now, so
+                // `(v + 0.5).floor().clamp(0, max)` and `VIPS_CLIP` agree.
+                // Catmull-Rom rings past both ends at a hard edge, so this is
+                // a live path rather than a theoretical one:
+                // `affine_bicubic_clips_the_fixed_point_overshoot_like_vips`
+                // pins a fixture where 15 of 36 samples land outside the
+                // carrier's range.
+                *o = fixed_round(acc) as f64;
+            }
+        }
         Interpolator::Bicubic => {
             let mut cx = [0.0f64; 4];
             let mut cy = [0.0f64; 4];
@@ -1115,18 +1424,46 @@ fn interpolate_at(
             // (issue #668).
             catmull_coefficients(&mut cx, table_offset(x));
             catmull_coefficients(&mut cy, table_offset(y));
-            out.fill(0.0);
-            for (j, cyj) in cy.iter().enumerate() {
+            // `bicubic_float` runs the four rows through `cubic_float<T>` and
+            // then combines them through `cubic_float<T>` again, and that
+            // helper *returns* `T`. With `T = float` every one of those five
+            // sums is computed in `double` and narrowed to `f32` on the way
+            // out; with `T = double`, which is what the 16- and 32-bit integer
+            // carriers get from `bicubic_unsigned_int32_tab`, nothing narrows.
+            // Reassociating alone changes no bits (measured: 0 of 1764), so
+            // the narrowing is the whole of issue #705.
+            let narrow = fetch.bicubic_narrows_rows(premultiply);
+            let bands = out.len();
+            rows_f.fill(0.0);
+            for (j, row) in rows_f.chunks_exact_mut(bands).enumerate() {
+                if cy[j] == 0.0 {
+                    continue;
+                }
                 for (i, cxi) in cx.iter().enumerate() {
-                    let wgt = cyj * cxi;
-                    if wgt == 0.0 {
+                    if *cxi == 0.0 {
                         continue;
                     }
                     fetch.fetch(x0 - 1 + i as i64, y0 - 1 + j as i64, premultiply, px);
-                    for (o, p) in out.iter_mut().zip(px.iter()) {
-                        *o += wgt * p;
+                    for (r, p) in row.iter_mut().zip(px.iter()) {
+                        *r += cxi * p;
                     }
                 }
+                if narrow {
+                    for r in row.iter_mut() {
+                        *r = f64::from(*r as f32);
+                    }
+                }
+            }
+            for (b, o) in out.iter_mut().enumerate() {
+                // `cubic_float<T>` narrows the column combine too, and that
+                // narrowing is deliberately not spelled here: on a float
+                // carrier [`SampleLayout::write`] stores an `f32` anyway, and
+                // on a premultiplied one [`Raster::try_affine_with`] quantises
+                // the accumulator to `f32` at the un-premultiply seam (#664).
+                // Mutation N5 in the PR adds it back and every test stays
+                // green, which is what says the two spellings are the same
+                // bits rather than an assumption that they are.
+                *o = (0..4).map(|j| cy[j] * rows_f[j * bands + b]).sum();
             }
         }
         Interpolator::Lbb => {
@@ -2536,7 +2873,7 @@ impl Raster {
 
         let mut out = Raster::zeroed(ow as u32, oh as u32, format)?;
         let buf = out.data_mut();
-        let mut px = vec![0.0f64; bands];
+        let mut scratch = InterpScratch::new(bands);
         let mut acc = vec![0.0f64; bands];
 
         for y in 0..oh {
@@ -2548,7 +2885,15 @@ impl Raster {
                 let oi = (y * ow + x) as usize * bands;
                 let (fx, fy) = (ix.floor(), iy.floor());
                 if fx >= -1.0 && fx <= (w - 1) as f64 && fy >= -1.0 && fy <= (h - 1) as f64 {
-                    interpolate_at(&fetch, interpolate, ix, iy, premultiply, &mut px, &mut acc);
+                    interpolate_at(
+                        &fetch,
+                        interpolate,
+                        ix,
+                        iy,
+                        premultiply,
+                        &mut scratch,
+                        &mut acc,
+                    );
                     if premultiply {
                         // `vips_affine_gen` writes the interpolated
                         // premultiplied pixel into the FLOAT image
@@ -2563,8 +2908,12 @@ impl Raster {
                         layout.write(buf, oi + bi, *v);
                     }
                 } else {
+                    // `vips_affine_gen` paints everything outside the
+                    // transformed input with `affine->ink`, the same converted
+                    // background the taps read, not with the caller's `f64`
+                    // (issue #736).
                     for bi in 0..bands {
-                        layout.write(buf, oi + bi, options.background);
+                        layout.write(buf, oi + bi, fetch.background);
                     }
                 }
             }
@@ -2709,7 +3058,7 @@ impl Raster {
 
         let mut out = Raster::zeroed(index.width(), index.height(), format)?;
         let buf = out.data_mut();
-        let mut px = vec![0.0f64; bands];
+        let mut scratch = InterpScratch::new(bands);
         let mut acc = vec![0.0f64; bands];
 
         for y in 0..oh {
@@ -2724,13 +3073,14 @@ impl Raster {
                 // (`vips_mapim_gen` clip against `Xsize - window_size` on
                 // the embedded input).
                 if sx >= -1.0 && sx < w + 1.0 && sy >= -1.0 && sy < h + 1.0 {
-                    interpolate_at(&fetch, interpolate, sx, sy, false, &mut px, &mut acc);
+                    interpolate_at(&fetch, interpolate, sx, sy, false, &mut scratch, &mut acc);
                     for (bi, v) in acc.iter().enumerate() {
                         layout.write(buf, oi + bi, *v);
                     }
                 } else {
+                    // The same converted ink the taps read (issue #736).
                     for bi in 0..bands {
-                        layout.write(buf, oi + bi, background);
+                        layout.write(buf, oi + bi, fetch.background);
                     }
                 }
             }
@@ -4057,30 +4407,32 @@ mod tests {
                         let d = a.abs_diff(b);
                         (n + usize::from(d != 0), worst.max(d))
                     });
-            // nohalo and lbb reproduce libvips byte for byte (0 of 144),
-            // which is the exact-parity gate for this work: both compute
-            // their Hermite coefficients directly, just like `nohalo.cpp`
-            // and `lbb.cpp`. The other three kernels only bound the affine
-            // geometry: bilinear differs at a single `.5` rounding tie
-            // (delta 1); nearest at 2 equidistant-neighbour ties (a
-            // whole-pixel swap, so a large delta but the adjacent sample);
-            // and bicubic within delta 1 on 30 of 144.
+            // nohalo, lbb and bicubic reproduce libvips byte for byte
+            // (0 of 144). nohalo and lbb always did: both compute their
+            // Hermite coefficients directly, just like `nohalo.cpp` and
+            // `lbb.cpp`. Bicubic took two changes to get there. It was 60
+            // bytes at delta 3 while this module evaluated Catmull-Rom at
+            // the exact sub-pixel offset and libvips read its 65-entry
+            // table; rounding the offset the same way (#668) halved the
+            // count and took the worst delta to one LSB; reading the
+            // coefficients out of `vips_bicubic_matrixi` as 12-bit fixed
+            // point and accumulating them as integers, which is what
+            // `bicubic_unsigned_int_tab` does on a `uchar` carrier, closes
+            // the rest (#704).
             //
-            // That bicubic allowance was 60 bytes at delta 3 while this
-            // module evaluated Catmull-Rom at the exact sub-pixel offset and
-            // libvips read its 65-entry table. Rounding the offset the same
-            // way (#668) halves the count and takes the worst delta to one
-            // LSB. What is left is the other table: on a `uchar` carrier
-            // `vips_interpolate_bicubic_interpolate` dispatches to
-            // `bicubic_unsigned_int_tab` and reads `vips_bicubic_matrixi`,
-            // the coefficients themselves quantised to `VIPS_INTERPOLATE_SCALE`
-            // (12-bit) fixed point, where this stays in `f64`. None of those
-            // conventions touch the on-grid ported test_affine round-trip.
+            // The other two kernels still only bound the affine geometry.
+            // Nearest differs at 2 equidistant-neighbour ties (a whole-pixel
+            // swap, so a large delta but the adjacent sample). Bilinear
+            // differs in 1 byte at delta 1, and that one is *not* a rounding
+            // tie: `SWITCH_INTERPOLATE` sends a `uchar` raster to
+            // `BILINEAR_INT`, whose four weights are 12-bit fixed point too,
+            // and modelling that reproduces vips exactly where modelling a
+            // tie does not. Issue #733 carries the measurement.
             let (allowed_count, allowed_delta) = match name {
                 "nohalo" | "lbb" => (0, 0),
                 "bilinear" => (1, 1),
                 "nearest" => (2, u8::MAX),
-                "bicubic" => (30, 1),
+                "bicubic" => (0, 0),
                 _ => unreachable!(),
             };
             assert!(
@@ -4089,6 +4441,989 @@ mod tests {
                  (worst delta {worst}); expected at most {allowed_count} bytes, delta {allowed_delta}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Bicubic on the integer carriers: vips picks a different arithmetic
+    // per band format, and the four fixtures below pin all three of them
+    // (issue #704).
+    // -----------------------------------------------------------------
+
+    /// The 12x12 fixture the four bicubic carrier tests share, generated by
+    /// formula so the input never needs pinning: sample `i` is
+    /// `(i * 53 + 17) % 251` for the unsigned byte carriers and
+    /// `(i * 3719 + 977) % 65413` for the 16-bit one, both coprime strides
+    /// over a prime modulus so no row or column repeats.
+    fn carrier_fixture(format: PixelFormat) -> Raster {
+        let n = 12 * 12 * format.channels();
+        let data: Vec<u8> = match format {
+            PixelFormat::Gray16 => (0..n)
+                .flat_map(|i| (((i * 3719 + 977) % 65413) as u16).to_ne_bytes())
+                .collect(),
+            PixelFormat::FloatF32(_) => (0..n)
+                .flat_map(|i| (((i * 37 + 11) % 251) as f32).to_ne_bytes())
+                .collect(),
+            _ => (0..n).map(|i| ((i * 53 + 17) % 251) as u8).collect(),
+        };
+        Raster::new(12, 12, format, data).unwrap()
+    }
+
+    /// The three-band float twin of [`carrier_fixture`], sample `i` being
+    /// `(i * 37 + 11) % 251` as an `f32`, for the float accumulation pins
+    /// (issue #705). Three bands rather than one so the per-band loop is
+    /// exercised at the same time.
+    fn float_carrier_fixture() -> Raster {
+        let data: Vec<u8> = (0..12 * 12 * 3usize)
+            .flat_map(|i| (((i * 37 + 11) % 251) as f32).to_ne_bytes())
+            .collect();
+        Raster::new(
+            12,
+            12,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap()),
+            data,
+        )
+        .unwrap()
+    }
+
+    /// The interior 6x6 crop at `[4, 4]` of the 18x15 affine, as flat
+    /// samples. Every stencil that crop reads spans input x 1..8 and
+    /// y 1..9, so the whole comparison is kernel arithmetic with no
+    /// [`Extend`] rule anywhere in it.
+    fn carrier_crop(r: &Raster) -> Vec<u8> {
+        assert_eq!(
+            (r.width(), r.height()),
+            (18, 15),
+            "carrier fixture output size"
+        );
+        r.extract_area(4, 4, 6, 6).data().to_vec()
+    }
+
+    fn carrier_crop_u16(r: &Raster) -> Vec<u16> {
+        carrier_crop(r)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect()
+    }
+
+    fn carrier_crop_f32(r: &Raster) -> Vec<f32> {
+        carrier_crop(r)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_ne_bytes(*b))
+            .collect()
+    }
+
+    /// Count the mismatches and the worst absolute delta between two
+    /// integer sample runs.
+    fn carrier_diff(got: &[u16], want: &[u16]) -> (usize, u16) {
+        assert_eq!(got.len(), want.len(), "sample count");
+        got.iter()
+            .zip(want.iter())
+            .fold((0usize, 0u16), |(n, worst), (&a, &b)| {
+                let d = a.abs_diff(b);
+                (n + usize::from(d != 0), worst.max(d))
+            })
+    }
+
+    /// Issue #704. On a `uchar` carrier `vips_interpolate_bicubic_interpolate`
+    /// dispatches to `bicubic_unsigned_int_tab`, which reads
+    /// `vips_bicubic_matrixi`: the Catmull-Rom coefficients themselves
+    /// truncated to 12-bit fixed point (`VIPS_INTERPOLATE_SCALE`, 4096), then
+    /// accumulated as integers a row at a time with a fixed-point round after
+    /// each row and after the column combine. #668 put the *offset* on the
+    /// same 1/64 grid vips uses and left the coefficients in `f64`, which is
+    /// the whole of what is left.
+    ///
+    /// Measured on 8.18.6 as
+    /// `vips affine in.v out.v "1.3 0.2 -0.15 1.1" --interpolate bicubic`
+    /// over the three-band byte fixture, interior crop `[4, 4, 6, 6]`.
+    /// Before this change libviprs missed 25 of those 108 bytes, every one by
+    /// exactly 1.
+    #[test]
+    fn affine_bicubic_reads_the_vips_fixed_point_table_on_a_uchar_carrier() {
+        #[rustfmt::skip]
+        let want: [u8; 108] = [
+        58, 138, 159, 141, 75, 87, 162, 65, 131, 44, 113, 182, 97, 153, 64, 116, 192, 87,
+        141, 193, 66, 164, 225, 111, 60, 130, 195, 57, 111, 77, 106, 180, 73, 127, 130, 122,
+        158, 213, 113, 74, 115, 195, 16, 68, 90, 118, 184, 42, 124, 140, 105, 156, 57, 134,
+        129, 114, 177, 245, 51, 95, 172, 191, 11, 88, 147, 110, 130, 58, 140, 197, 76, 129,
+        215, 57, 86, 166, 183, 0, 63, 145, 120, 125, 47, 121, 202, 47, 100, 91, 156, 217,
+        179, 146, 196, 61, 127, 143, 129, 34, 80, 194, 45, 98, 100, 166, 219, 30, 88, 127,
+        ];
+        let out = carrier_fixture(PixelFormat::Rgb8).affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!(
+            carrier_crop(&out),
+            want,
+            "uchar bicubic against vips 8.18.6"
+        );
+    }
+
+    /// Issue #736. `vips_affine_build` converts the background exactly once,
+    /// before any resampling happens:
+    ///
+    /// ```c
+    /// affine->ink = vips__vector_to_ink(class->nickname, in,
+    ///     VIPS_AREA(affine->background)->data, NULL,
+    ///     VIPS_AREA(affine->background)->n);
+    /// ```
+    ///
+    /// `vips__vector_to_ink` builds a one-pixel image of the doubles and casts
+    /// it to the input's band format, and `vips_cast` clips and then truncates
+    /// toward zero (`cast.c:237`, and the file's own header note: "now does
+    /// floor(), not rint()"). So every tap past the edge, and every output
+    /// pixel outside the transformed input, is already an integer inside the
+    /// carrier's range by the time the interpolator sees it. This module
+    /// carried the raw `f64` into both.
+    ///
+    /// Verified on 8.18.6 for every interpolator on both integer carriers,
+    /// `vips affine in.v out.v "1.3 0.2 -0.15 1.1" --interpolate INTERP
+    /// --extend background --background BG` over a 6x6 constant:
+    ///
+    /// ```text
+    ///           200.7 == 200   200.7 != 201   -30.4 == 0   over-range == max
+    /// uchar     yes            yes            yes          400.9 == 255
+    /// ushort    yes            yes            yes          70000.9 == 65535
+    /// ```
+    ///
+    /// all five interpolators, all four columns. The `200.7 != 201` column is
+    /// the positive control: without it the first column would also pass if the
+    /// ink were being ignored altogether.
+    #[test]
+    fn affine_casts_the_background_ink_to_an_integer_carrier() {
+        for (format, value, over, ceiling) in [
+            (PixelFormat::Gray8, 100u16, 400.9, 255.0),
+            (PixelFormat::Gray16, 25000u16, 70000.9, 65535.0),
+        ] {
+            for name in ["nearest", "bilinear", "bicubic", "nohalo", "lbb"] {
+                let bytes: Vec<u8> = if format == PixelFormat::Gray8 {
+                    vec![value as u8; 36]
+                } else {
+                    (0..36).flat_map(|_| value.to_ne_bytes()).collect()
+                };
+                let im = Raster::new(6, 6, format, bytes).unwrap();
+                let interp = Interpolator::from_name(name).unwrap();
+                let shift = |background: f64| -> Vec<u8> {
+                    im.try_affine_with(
+                        [1.3, 0.2, -0.15, 1.1],
+                        interp,
+                        AffineOptions {
+                            extend: Extend::Background,
+                            background,
+                            ..AffineOptions::default()
+                        },
+                    )
+                    .unwrap()
+                    .data()
+                    .to_vec()
+                };
+                assert_eq!(shift(200.7), shift(200.0), "{format:?} {name}: truncates");
+                assert_ne!(
+                    shift(200.7),
+                    shift(201.0),
+                    "{format:?} {name}: truncates rather than rounding"
+                );
+                assert_eq!(shift(-30.4), shift(0.0), "{format:?} {name}: clips low");
+                assert_eq!(shift(over), shift(ceiling), "{format:?} {name}: clips high");
+            }
+        }
+    }
+
+    /// Issue #736, the float carrier. `vips_cast` to `VIPS_FORMAT_FLOAT` is
+    /// still a narrowing and there is no clip on that arm, so vips reads
+    /// `f32(200.7)` where this module read the `f64`. Measured on 8.18.6 for
+    /// all five interpolators: `--background 200.7` and
+    /// `--background 200.6999969482422` produce identical output, `200.7` and
+    /// `200` do not, and an ink below zero is **not** clipped the way it is on
+    /// an integer carrier.
+    #[test]
+    fn affine_narrows_the_background_ink_on_a_float_carrier() {
+        let data: Vec<u8> = (0..36).flat_map(|_| 100.0f32.to_ne_bytes()).collect();
+        let im = Raster::new(
+            6,
+            6,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            data,
+        )
+        .unwrap();
+        for name in ["nearest", "bilinear", "bicubic", "nohalo", "lbb"] {
+            let interp = Interpolator::from_name(name).unwrap();
+            let shift = |background: f64| -> Vec<f32> {
+                float_samples(
+                    &im.try_affine_with(
+                        [1.3, 0.2, -0.15, 1.1],
+                        interp,
+                        AffineOptions {
+                            extend: Extend::Background,
+                            background,
+                            ..AffineOptions::default()
+                        },
+                    )
+                    .unwrap(),
+                )
+            };
+            assert_eq!(
+                shift(200.7),
+                shift(f64::from(200.7f32)),
+                "{name}: the ink narrows to f32"
+            );
+            assert_ne!(shift(200.7), shift(200.0), "{name}: and only to f32");
+            assert_ne!(
+                shift(-30.4),
+                shift(0.0),
+                "{name}: a float carrier has no clip on the cast"
+            );
+        }
+    }
+
+    /// Issue #736, the anchors. The equivalences above say the ink is converted
+    /// the same way vips converts it; these say the converted value is the one
+    /// vips uses. Row 0 of the 9x8 output for five
+    /// `(carrier, interpolator, background)` cells, measured on 8.18.6. The
+    /// last sample of each row is an output pixel outside the transformed
+    /// input, which `vips_affine_gen` paints with `affine->ink` rather than
+    /// interpolating, so each row covers both sites the cast reaches.
+    ///
+    /// No `bilinear` cell here, and that is not an oversight: on an integer
+    /// carrier `SWITCH_INTERPOLATE` sends bilinear to `BILINEAR_INT` and its
+    /// four weights are 12-bit fixed point, so the row still misses the binary
+    /// by a byte for a reason that has nothing to do with the ink (#733). The
+    /// equivalences above do cover bilinear, because they compare two libviprs
+    /// runs against each other and that divergence cancels.
+    #[test]
+    fn affine_background_ink_rows_match_the_oracle() {
+        let gray8 = |v: u8| Raster::new(6, 6, PixelFormat::Gray8, vec![v; 36]).unwrap();
+        let gray16 = |v: u16| {
+            Raster::new(
+                6,
+                6,
+                PixelFormat::Gray16,
+                (0..36).flat_map(|_| v.to_ne_bytes()).collect::<Vec<u8>>(),
+            )
+            .unwrap()
+        };
+        let shift = |im: &Raster, name: &str, background: f64| -> Raster {
+            im.try_affine_with(
+                [1.3, 0.2, -0.15, 1.1],
+                Interpolator::from_name(name).unwrap(),
+                AffineOptions {
+                    extend: Extend::Background,
+                    background,
+                    ..AffineOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let out = shift(&gray8(100), "bicubic", 200.7);
+        assert_eq!((out.width(), out.height()), (9, 8), "output size");
+        assert_eq!(
+            &out.data()[..9],
+            &[193u8, 183, 173, 160, 148, 135, 118, 146, 200],
+            "uchar bicubic, background 200.7"
+        );
+        assert_eq!(
+            &shift(&gray8(100), "lbb", 400.9).data()[..9],
+            &[250u8, 237, 219, 196, 173, 149, 129, 165, 255],
+            "uchar lbb, background 400.9"
+        );
+        let u16_row = |r: &Raster| -> Vec<u16> {
+            r.data().as_chunks::<2>().0[..9]
+                .iter()
+                .map(|b| u16::from_ne_bytes(*b))
+                .collect()
+        };
+        assert_eq!(
+            u16_row(&shift(&gray16(25000), "nearest", 200.7)),
+            vec![200u16; 9],
+            "ushort nearest, background 200.7"
+        );
+        assert_eq!(
+            u16_row(&shift(&gray16(25000), "nohalo", -30.4)),
+            vec![1108u16, 3551, 6799, 10163, 13034, 16155, 19701, 13081, 0],
+            "ushort nohalo, background -30.4"
+        );
+        let data: Vec<u8> = (0..36).flat_map(|_| 100.0f32.to_ne_bytes()).collect();
+        let f = Raster::new(
+            6,
+            6,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            data,
+        )
+        .unwrap();
+        assert_eq!(
+            &float_samples(&shift(&f, "bicubic", 200.7))[..9],
+            &[
+                193.14478f32,
+                183.42047,
+                173.28777,
+                160.13597,
+                148.38359,
+                134.8123,
+                118.18186,
+                146.40132,
+                200.7
+            ],
+            "float bicubic, background 200.7"
+        );
+    }
+
+    /// Issue #704 and #736. The taps `bicubic_unsigned_int_tab` reads are the
+    /// stored samples of the embedded image, so an out-of-band tap is already
+    /// an integer inside the carrier's range by the time the interpolator sees
+    /// it: `vips_affine_build` converts the background once through
+    /// `vips__vector_to_ink`, which casts to the input's band format, and
+    /// `vips_cast` clips and then truncates toward zero (`cast.c:237`). The
+    /// fixed-point path does that conversion per tap.
+    ///
+    /// Measured on 8.18.6 with a 6x6 constant-100 `uchar` raster,
+    /// `vips affine in.v out.v "1.3 0 0 1.1" --interpolate bicubic
+    /// --extend background`: `--background 200.7` produces the same 56 bytes
+    /// as `--background 200`, `-30.4` the same as `0`, and `400.9` the same as
+    /// `255`. The positive control is that `200.7` and `201` do **not** agree,
+    /// so the equivalence is about the conversion and not about the ink being
+    /// ignored.
+    ///
+    /// The matrix is a pure scale on purpose. A sheared one leaves output
+    /// pixels outside the transformed input entirely, and those are painted by
+    /// `try_affine_with` rather than by the interpolator, from an ink that is
+    /// still the raw `f64`. That second site is #736's, not this path's.
+    ///
+    /// The other four interpolators and the other two carriers still read the
+    /// raw `f64` here, worth up to 75 of 255 on a byte carrier; #736 carries
+    /// the whole table and generalises the conversion.
+    #[test]
+    fn affine_bicubic_casts_the_background_ink_to_the_carrier() {
+        let im = Raster::new(6, 6, PixelFormat::Gray8, vec![100u8; 36]).unwrap();
+        let shift = |background: f64| -> Vec<u8> {
+            im.try_affine_with(
+                [1.3, 0.0, 0.0, 1.1],
+                Interpolator::Bicubic,
+                AffineOptions {
+                    extend: Extend::Background,
+                    background,
+                    ..AffineOptions::default()
+                },
+            )
+            .unwrap()
+            .data()
+            .to_vec()
+        };
+        assert_eq!(shift(200.7), shift(200.0), "fractional ink truncates");
+        assert_ne!(
+            shift(200.7),
+            shift(201.0),
+            "and truncates rather than rounding"
+        );
+        assert_eq!(shift(-30.4), shift(0.0), "ink below the carrier clips to 0");
+        assert_eq!(
+            shift(400.9),
+            shift(255.0),
+            "ink above the carrier clips to 255"
+        );
+        // The anchor: row 0 of the 8x7 output at `--background 200.7` on
+        // vips 8.18.6, so the four equivalences above sit on the binary and
+        // not only on each other.
+        assert_eq!(
+            &shift(200.7)[..8],
+            &[100u8, 98, 100, 100, 100, 100, 93, 136],
+            "row 0 against vips 8.18.6"
+        );
+    }
+
+    /// Issue #705. `bicubic_float_tab<float>` reaches `bicubic_float<T>` with
+    /// `T = float`, and every row goes through `cubic_float<T>`, whose *return
+    /// type is `T`*:
+    ///
+    /// ```c
+    /// template <typename T>
+    /// static T inline cubic_float(const T one, ..., const double *cx)
+    /// {
+    ///     return cx[0] * one + cx[1] * two + cx[2] * thr + cx[3] * fou;
+    /// }
+    /// ```
+    ///
+    /// The products and the sum are `double` because the coefficients are, and
+    /// then the `return` narrows to `float`. So on a float carrier vips rounds
+    /// **each of the four row sums** to `f32` before it combines them, and
+    /// rounds the combine to `f32` as well.
+    ///
+    /// The accumulation *order* is not the cause, which is the whole point of
+    /// this test existing separately from the ordering change. Modelling flat
+    /// 16-term `f64` and row-then-column `f64` against the same binary gives
+    /// **bit-identical** output, 0 of 1764 samples apart on a random 24x24, and
+    /// both miss vips in the same 356 of 1764 by the same 1.5259e-05. Adding
+    /// the per-row `f32` narrowing takes it to 0 of 1764.
+    ///
+    /// Measured on 8.18.6 as `vips affine in.v out.v "1.3 0.2 -0.15 1.1"
+    /// --interpolate bicubic` over a three-band float ramp, interior crop
+    /// `[4, 4, 6, 6]`, and asserted **exactly**: this is a bit-for-bit pin, not
+    /// a tolerance. Before this change 16 of the 108 samples were wrong.
+    #[test]
+    fn affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier() {
+        #[rustfmt::skip]
+        let want: [f32; 108] = [
+            221.05179, 60.94549, 90.7095, 171.81142, 106.03813, 107.21296,
+            148.8833, 157.84538, 105.36776, 131.0, 26.8125, 63.8125,
+            122.80959, 152.21906, 200.63866, 94.56327, 145.91641, 141.46187,
+            117.17962, 160.57845, 114.42711, 97.89925, 148.53372, 117.20308,
+            141.41801, 179.07013, 12.738264, 55.36105, 114.84537, 144.2059,
+            168.30489, 111.80183, 160.67693, 163.968, 74.43494, 122.49891,
+            88.708, 127.681114, 178.83788, 137.05281, 162.68243, 200.89423,
+            9.306032, 45.70137, 97.95593, 109.54341, 163.6745, 149.838,
+            178.50795, 118.677635, 94.25602, 143.57538, 54.46303, 103.87227,
+            151.52507, 110.30661, 161.0822, 224.8973, 15.140279, 52.72461,
+            103.42076, 106.68581, 158.4583, 152.80048, 201.55286, 77.08958,
+            128.2253, 173.6129, 52.531086, 74.72636, 123.54618, 178.26077,
+            183.94586, 211.92632, 47.876602, 69.16237, 79.52507, 107.24806,
+            139.33195, 178.72528, 223.97078, 105.58892, 136.03918, 177.21284,
+            30.985691, 74.062935, 121.39275, 157.12605, 198.74245, 175.05026,
+            72.24145, 109.478065, 55.602993, 87.696976, 143.34001, 187.84433,
+            204.26207, 89.05573, 133.19304, 207.79547, 44.639683, 91.34048,
+            106.67966, 150.49532, 168.25237, 192.1947, 231.11996, 42.528263,
+        ];
+        let out = float_carrier_fixture().affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!(
+            carrier_crop_f32(&out),
+            want,
+            "float bicubic against vips 8.18.6"
+        );
+    }
+
+    /// Issue #705, the third guard: the plain `ushort` carrier must **not**
+    /// narrow. `bicubic_unsigned_int32_tab` calls `bicubic_float<double>`, so
+    /// `cubic_float` returns `double` there and nothing rounds between the row
+    /// sums and the combine.
+    ///
+    /// No oracle can arbitrate that one head on. An `f32` ulp at 16-bit
+    /// magnitudes is about 0.004, so it only moves a sample sitting that close
+    /// to a rounding boundary, and vips truncates its own `ushort` store where
+    /// this module rounds half up (#732), so the binary quantises the two
+    /// candidate answers differently anyway. What *can* arbitrate it is the
+    /// float carrier, which is pinned bit for bit against 8.18.6 by
+    /// [`affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier`]: run
+    /// the same numbers through both carriers and they have to **disagree**
+    /// exactly where the narrowing bites. Giving `ushort` the narrowing makes
+    /// them agree, and that is the mutation this catches.
+    ///
+    /// The fixture is `(i * 7907 + 13) % 64007`, picked out of a search over
+    /// 330 candidates because one of its 270 output samples lands within an
+    /// `f32` ulp of a rounding boundary *and* moves under narrowing the rows
+    /// alone. That second condition matters: my first fixture only moved when
+    /// the column combine narrowed, so it let a mutation that narrows only the
+    /// four row sums through, which is exactly the arm this is meant to guard.
+    ///
+    /// [`affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier`]: self::affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier
+    #[test]
+    fn affine_bicubic_keeps_full_f64_rows_on_a_ushort_carrier() {
+        let values: Vec<u32> = (0..12 * 12u32).map(|i| (i * 7907 + 13) % 64007).collect();
+        let as_u16 = Raster::new(
+            12,
+            12,
+            PixelFormat::Gray16,
+            values
+                .iter()
+                .flat_map(|v| (*v as u16).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap()
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        let as_f32 = Raster::new(
+            12,
+            12,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            values
+                .iter()
+                .flat_map(|v| (*v as f32).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap()
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+
+        let got: Vec<u16> = as_u16
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect();
+        // The float result quantised by this module's own writer rule, so the
+        // only thing left between the two runs is the accumulation.
+        let via_float: Vec<u16> = float_samples(&as_f32)
+            .iter()
+            .map(|v| (f64::from(*v) + 0.5).floor().clamp(0.0, 65535.0) as u16)
+            .collect();
+        assert_eq!(got.len(), 18 * 15, "output size");
+
+        let differ: Vec<usize> = (0..got.len()).filter(|&i| got[i] != via_float[i]).collect();
+        assert_eq!(
+            differ,
+            vec![73],
+            "the two carriers must disagree exactly where the f32 narrowing bites"
+        );
+        assert_eq!((got[73], via_float[73]), (38531, 38532));
+    }
+
+    /// Issue #705, the premultiplied half. `vips_affine_build` premultiplies
+    /// into a **FLOAT** image whenever `vips_image_hasalpha()`, so an alpha
+    /// raster takes `bicubic_float_tab<float>` and the per-row narrowing
+    /// whatever its stored depth was. Without a case here the `premultiply`
+    /// arm of `bicubic_narrows_rows` has nothing behind it: an 8-bit output
+    /// quantum swallows an `f32` ulp whole, so an `Rgba8` fixture cannot see
+    /// this at all (measured: 0 samples move over 40 random 12x12 `Rgba8`
+    /// rasters, against 28 of 40 for `Rgba16`).
+    ///
+    /// The oracle is `premultiply | affine --premultiplied | unpremultiply` on
+    /// 8.18.6 with `--max-alpha 65535`, read back as FLOAT and quantised with
+    /// this module's own round-half-up, for the reason
+    /// `resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data` gives:
+    /// `vips_cast` truncates a float toward zero, so casting the oracle to
+    /// `ushort` would ask a different question. Read that way the whole 12x10
+    /// output agrees in **480 of 480** samples with the narrowing and 477 of
+    /// 480 without it.
+    ///
+    /// The three that separate them are output pixel `(0, 7)`, bands 0 to 2,
+    /// and they are on the rounding boundary, which is the only place an `f32`
+    /// ulp at 50000 can reach:
+    ///
+    /// ```text
+    /// vips float 56743.50390625  ->  56744   without the narrowing 56743
+    /// vips float 51235.5         ->  51236   without the narrowing 51235
+    /// vips float 45727.5         ->  45728   without the narrowing 45727
+    /// ```
+    ///
+    /// Row 7 of the output is pinned rather than only those three, so the test
+    /// says what the row is and not just where it bends.
+    #[test]
+    fn affine_bicubic_narrows_the_rows_when_alpha_premultiplies_to_float() {
+        let data: Vec<u8> = (0..8 * 8 * 4usize)
+            .flat_map(|i| (((i * 60013 + 977) % 65521) as u16).to_ne_bytes())
+            .collect();
+        #[rustfmt::skip]
+        let want_row7: [u16; 48] = [
+            56744, 51236, 45728, 3151, 54961, 49453, 43945, 27834,
+            24906, 19398, 13890, 36248, 17693, 12185, 6677, 45305,
+            23153, 17645, 12137, 60075, 57805, 52297, 46789, 38234,
+            52224, 46716, 41208, 20211, 14154, 8646, 2902, 36135,
+            15458, 9950, 6030, 58270, 41591, 36083, 50625, 47886,
+            46338, 40830, 48301, 31296, 59024, 53516, 37023, 12280,
+        ];
+        let out = Raster::new(8, 8, PixelFormat::Rgba16, data)
+            .unwrap()
+            .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!((out.width(), out.height()), (12, 10), "output size");
+        let got: Vec<u16> = out
+            .extract_area(0, 7, 12, 1)
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect();
+        assert_eq!(got, want_row7, "premultiplied Rgba16 bicubic row 7");
+    }
+
+    /// Issue #705, the over-reach guard. Only bicubic sums rows through a
+    /// `T`-returning helper. `BILINEAR_FLOAT` writes
+    /// `tq[z] = c1 * tp1[z] + c2 * tp2[z] + c3 * tp3[z] + c4 * tp4[z]` as one
+    /// expression with a single narrowing at the store, and `lbb.cpp` and
+    /// `nohalo.cpp` compute in `double` throughout and narrow once at the end
+    /// too. All three are already bit-exact against 8.18.6 on this fixture and
+    /// must stay that way: narrowing an intermediate in any of them would move
+    /// these samples by about 1e-05.
+    #[test]
+    fn affine_float_interpolators_other_than_bicubic_narrow_only_at_the_store() {
+        #[rustfmt::skip]
+        let want_bilinear: [f32; 108] = [
+            197.26852, 84.20548, 108.676674, 163.16832, 110.41781, 110.961815,
+            140.3723, 140.0685, 101.942764, 131.0, 42.5, 79.5,
+            121.6277, 134.04109, 171.04109, 98.83167, 135.83168, 135.363,
+            126.74967, 163.74966, 109.23288, 110.2416, 147.24161, 111.37671,
+            126.51567, 163.51567, 41.315067, 79.81601, 116.81601, 132.85617,
+            150.39726, 111.09402, 148.09401, 149.10274, 91.8541, 128.8541,
+            92.2629, 129.2629, 162.58904, 125.11644, 147.35034, 184.35034,
+            27.547945, 63.323326, 100.323326, 112.212326, 149.21233, 135.03734,
+            157.59467, 120.41096, 107.29574, 143.20613, 81.29452, 118.29452,
+            141.9452, 107.72884, 144.72884, 212.85617, 27.37568, 64.37568,
+            112.461624, 111.0274, 148.0274, 140.25183, 177.25183, 91.71918,
+            125.933945, 162.93394, 80.10959, 97.65069, 125.583786, 162.58379,
+            159.03378, 184.16438, 68.32239, 83.7204, 86.595894, 111.8207,
+            130.49222, 164.38356, 201.38356, 105.4589, 133.98076, 170.98076,
+            59.46575, 96.46575, 124.98762, 151.00685, 188.00685, 160.7143,
+            82.15631, 119.15631, 71.65753, 101.39773, 138.39774, 163.19862,
+            180.73973, 98.00957, 135.00957, 193.19862, 66.52345, 103.52345,
+            111.879906, 148.8799, 156.81873, 171.86348, 208.86348, 65.02008,
+        ];
+        #[rustfmt::skip]
+        let want_lbb: [f32; 108] = [
+            223.97984, 63.182693, 89.980804, 177.65471, 107.6153, 104.81888,
+            149.91078, 156.67326, 101.22427, 137.0625, 32.875, 63.8125,
+            123.63425, 152.94336, 193.15602, 88.592865, 145.86058, 139.08575,
+            118.22841, 164.37238, 113.296364, 97.041115, 148.76147, 117.54855,
+            137.64272, 185.66116, 21.03061, 55.103294, 115.21083, 145.20808,
+            163.71788, 107.58647, 164.24315, 162.95132, 70.80461, 126.090485,
+            88.235245, 126.98186, 176.27092, 136.41968, 162.69293, 205.70947,
+            14.805203, 45.779423, 98.33576, 112.73169, 162.11461, 147.71895,
+            181.09906, 119.592834, 93.7493, 149.6334, 60.88833, 102.771034,
+            149.72311, 108.11873, 160.95882, 224.178, 14.91653, 53.13271,
+            103.49911, 108.85715, 159.47243, 151.35829, 202.91455, 79.47844,
+            127.9066, 181.5277, 58.553047, 74.95804, 123.53025, 178.6542,
+            183.75572, 207.03062, 42.808277, 69.97353, 79.5257, 107.78205,
+            139.00935, 178.128, 219.92058, 105.22234, 136.24048, 180.87585,
+            37.62609, 73.83081, 120.96473, 158.00949, 196.41797, 174.71162,
+            65.08279, 112.96368, 59.87288, 86.777824, 143.21373, 187.29716,
+            199.47922, 83.86982, 133.26796, 207.85735, 45.452923, 91.88468,
+            106.17024, 150.52966, 168.45255, 191.63763, 234.06316, 43.11054,
+        ];
+        #[rustfmt::skip]
+        let want_nohalo: [f32; 108] = [
+            224.97852, 66.48908, 93.30692, 172.79782, 107.53387, 103.74632,
+            153.59686, 158.96323, 96.17205, 131.0, 23.25, 60.25,
+            122.54222, 143.90665, 200.35365, 95.67481, 150.86491, 138.24774,
+            120.79364, 166.54047, 111.22518, 100.58867, 153.37073, 115.44871,
+            136.65433, 175.45961, 15.20176, 53.12734, 115.27774, 145.08076,
+            170.37251, 111.6232, 167.74391, 158.46616, 69.20872, 126.323364,
+            89.768036, 129.33746, 191.13144, 135.12457, 160.80562, 199.78749,
+            13.108764, 49.285946, 99.760254, 105.16903, 166.1975, 145.16159,
+            185.39957, 119.98104, 88.485245, 141.9015, 52.766975, 109.648346,
+            162.18074, 104.56628, 158.36682, 223.42383, 14.497568, 53.48192,
+            105.77036, 102.13799, 158.74597, 147.92348, 209.60939, 83.47758,
+            120.97823, 169.89148, 50.86215, 78.40687, 124.20311, 186.91504,
+            181.91985, 205.4671, 45.594307, 67.353546, 76.229294, 100.768616,
+            134.20372, 172.1164, 227.43303, 103.49184, 132.25568, 175.53285,
+            32.38869, 81.44474, 127.17772, 162.42912, 204.23552, 172.94606,
+            73.97242, 111.93984, 49.92682, 75.99779, 140.74083, 179.31236,
+            211.2558, 92.12908, 139.14842, 202.32161, 38.810753, 97.05681,
+            108.59659, 156.0834, 170.3779, 189.37865, 233.43689, 46.334454,
+        ];
+        let im = float_carrier_fixture();
+        for (name, want) in [
+            ("bilinear", want_bilinear),
+            ("lbb", want_lbb),
+            ("nohalo", want_nohalo),
+        ] {
+            let out = im.affine([1.3, 0.2, -0.15, 1.1], name);
+            assert_eq!(
+                carrier_crop_f32(&out),
+                want,
+                "float {name} against vips 8.18.6"
+            );
+        }
+    }
+
+    /// The 24x24 `ushort` linear ramp `a * x + b * y + c`. Both bilinear and
+    /// Catmull-Rom reproduce a linear function **exactly** (bilinear trivially;
+    /// Catmull-Rom because its four coefficients sum to 1 and their first
+    /// moment is the offset, which I checked in exact rationals at 0, 1/4,
+    /// 33/64, 45/64 and 3/4), so over this fixture the right answer is closed
+    /// form and the test does not have to reimplement the interpolator to know
+    /// it. Issues #732 and #733 both turn on that.
+    fn linear_ramp_u16(a: u16, b: u16, c: u16) -> Raster {
+        let data: Vec<u8> = (0..24 * 24usize)
+            .flat_map(|i| {
+                let (x, y) = ((i % 24) as u16, (i / 24) as u16);
+                (a * x + b * y + c).to_ne_bytes()
+            })
+            .collect();
+        Raster::new(24, 24, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// Shift a raster by a sub-pixel displacement with the identity matrix, so
+    /// the inverse map is `ix = ox - idx` and nothing about the geometry has to
+    /// be recomputed in the test.
+    fn subpixel_shift(im: &Raster, name: &str, idx: f64, idy: f64) -> Vec<u16> {
+        let out = im
+            .try_affine_with(
+                [1.0, 0.0, 0.0, 1.0],
+                Interpolator::from_name(name).unwrap(),
+                AffineOptions {
+                    idx,
+                    idy,
+                    extend: Extend::Copy,
+                    ..AffineOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((out.width(), out.height()), (24, 24), "shift output size");
+        out.data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect()
+    }
+
+    /// Issue #733. `vips_interpolate_bilinear_interpolate` dispatches through
+    /// `SWITCH_INTERPOLATE(BandFmt, BILINEAR_INT, BILINEAR_FLOAT)`, and `UCHAR`,
+    /// `CHAR`, `USHORT` and `SHORT` all take `BILINEAR_INT`, which builds its
+    /// four weights as 12-bit fixed point:
+    ///
+    /// ```c
+    /// const int X = (x - ix) * VIPS_INTERPOLATE_SCALE;
+    /// const int Yd = VIPS_INTERPOLATE_SCALE - Y;
+    /// const int c4 = (Y * X) >> VIPS_INTERPOLATE_SHIFT;
+    /// ```
+    ///
+    /// This module keeps the weights in `f64` on every carrier, which is what
+    /// `BILINEAR_FLOAT` does for `UINT`, `INT`, `FLOAT` and `DOUBLE`. **That
+    /// divergence stays**, and this test is the reason it can stay visible.
+    ///
+    /// The fixture is a linear ramp, which bilinear reproduces exactly, so the
+    /// correct answer is `a * ix + b * iy + c` and the identity matrix with a
+    /// sub-pixel `idx` makes `ix = ox - idx`. Measured on 8.18.6 as
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate bilinear --idx 0.3
+    /// --idy 0.6 --extend copy`: this module hits `round(exact)` on **529 of
+    /// 529** interior samples and vips misses it on **529 of 529**, every one
+    /// of them one low. The offsets are 0.7 and 0.4, and `0.7 * 4096` is
+    /// 2867.2, so vips' weight is 2867 and the ramp is reconstructed with a
+    /// slope that is short by one part in 20000.
+    #[test]
+    fn affine_bilinear_reproduces_a_linear_ramp_where_vips_quantises_its_weights() {
+        let (a, b, c) = (2001.0f64, 700.0f64, 1000.0f64);
+        let (idx, idy) = (0.3f64, 0.6f64);
+        let got = subpixel_shift(&linear_ramp_u16(2001, 700, 1000), "bilinear", idx, idy);
+        // `ix = ox - idx` and `iy = oy - idy`, so the exact bilinear value is
+        // the ramp evaluated there. The constant works out to -20.3, whose
+        // fractional part is 0.7: far enough from a rounding boundary that no
+        // `f64` accumulation noise can reach it.
+        let offset = c - a * idx - b * idy;
+        for oy in 1..24usize {
+            for ox in 1..24usize {
+                let exact = a * ox as f64 + b * oy as f64 + offset;
+                assert_eq!(
+                    got[oy * 24 + ox],
+                    (exact + 0.5).floor() as u16,
+                    "sample ({ox}, {oy}): exact bilinear is {exact}"
+                );
+            }
+        }
+    }
+
+    /// Issue #733, the magnitude. The ramp above says which implementation is
+    /// right; this one says what the divergence is worth, because a smooth
+    /// ramp understates it. A 12-bit weight is short by up to `1 / 4096` of a
+    /// pixel, and the error that produces is that fraction of the *difference*
+    /// between neighbouring taps, so it grows with the local contrast and with
+    /// the carrier's depth. On a byte carrier it is 1 LSB; on a 16-bit one it
+    /// is worth `65535 / 4096`, about 16.
+    ///
+    /// Measured on 8.18.6 over the shared 12x12 `Gray16` fixture, interior crop
+    /// `[4, 4, 6, 6]`: 31 of 36 samples differ, worst delta **20**. Over a
+    /// random 24x24 the whole frame is 1345 of 1764 at worst 26.
+    #[test]
+    fn affine_bilinear_divergence_from_the_12_bit_weights_is_bounded() {
+        #[rustfmt::skip]
+        let vips_8_18_6: [u16; 36] = [
+            31024, 31689, 32355, 33023, 33692, 34358,
+            17374, 24763, 30108, 17518, 14675, 15341,
+            56600, 59071, 59736, 26258, 20743, 28121,
+            39389, 40055, 40720, 41386, 42052, 42717,
+            20368, 21039, 21704, 22370, 23036, 23701,
+            43465, 50843, 27059, 3354, 7597, 14986,
+        ];
+        let out = carrier_fixture(PixelFormat::Gray16).affine([1.3, 0.2, -0.15, 1.1], "bilinear");
+        let (mismatches, worst) = carrier_diff(&carrier_crop_u16(&out), &vips_8_18_6);
+        assert!(
+            mismatches <= 31 && worst <= 20,
+            "ushort bilinear differs from vips 8.18.6 in {mismatches} samples \
+             (worst delta {worst}); expected at most 31 samples, delta 20"
+        );
+        assert!(
+            mismatches >= 20 && worst >= 8,
+            "the 12-bit weight divergence is supposed to be here: {mismatches} \
+             samples, worst delta {worst}. If this dropped, either #733 was \
+             adopted or the fixture stopped exercising it"
+        );
+    }
+
+    /// Issue #732. `vips_interpolate_bicubic_interpolate` sends a `ushort`
+    /// raster to `bicubic_unsigned_int32_tab`, which reads the same `double`
+    /// coefficient table this module uses and then ends:
+    ///
+    /// ```c
+    /// bicubic = VIPS_CLIP(0, bicubic, max_value);
+    /// out[z] = bicubic;
+    /// ```
+    ///
+    /// `out` is an `unsigned short *` and `bicubic` a `double`, so that store
+    /// is a plain C conversion and **truncates toward zero**.
+    /// [`SampleLayout::write`] rounds half up. **That divergence stays too.**
+    ///
+    /// Same closed-form fixture, with the displacements chosen so both
+    /// sub-pixel offsets land on the 1/64 grid (0.75 and 0.5), which makes the
+    /// offset quantisation of #668 a no-op and leaves the store as the only
+    /// difference. The constant works out to 149.75. Measured on 8.18.6 as
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate bicubic --idx 0.25
+    /// --idy 0.5 --extend copy`: vips hits `floor(exact)` on **441 of 441**
+    /// interior samples and this module hits `round(exact)` on 441 of 441, so
+    /// every one of the 441 differs by exactly 1 and this module is the one
+    /// 0.25 away rather than 0.75.
+    #[test]
+    fn affine_bicubic_rounds_the_ushort_store_where_vips_truncates() {
+        let (a, b, c) = (2001.0f64, 700.0f64, 1000.0f64);
+        let (idx, idy) = (0.25f64, 0.5f64);
+        let got = subpixel_shift(&linear_ramp_u16(2001, 700, 1000), "bicubic", idx, idy);
+        let offset = c - a * idx - b * idy;
+        for oy in 2..23usize {
+            for ox in 2..23usize {
+                let exact = a * ox as f64 + b * oy as f64 + offset;
+                assert_eq!(
+                    got[oy * 24 + ox],
+                    (exact + 0.5).floor() as u16,
+                    "sample ({ox}, {oy}): exact bicubic is {exact}, and vips \
+                     stores {} because its store truncates (#732)",
+                    exact.floor() as u16
+                );
+            }
+        }
+    }
+
+    /// Issue #704, the overshoot regime. Catmull-Rom rings, so a hard edge
+    /// drives the fixed-point accumulators **negative** and past the carrier's
+    /// ceiling, and that is where two details of the C stop being cosmetic:
+    /// `unsigned_fixed_round` divides with `>>` on a signed `int`, an
+    /// arithmetic shift, so a negative accumulator floors rather than
+    /// truncating; and `vips_bicubic_matrixi` truncates its two negative
+    /// coefficients toward zero, which is the opposite direction.
+    ///
+    /// The 3x3 checkerboard below puts 40 of the 144 row accumulators and 9 of
+    /// the 36 column accumulators below zero and drives 15 of the 36 output
+    /// samples outside `0..=255`, where the smooth fixture in
+    /// `affine_bicubic_reads_the_vips_fixed_point_table_on_a_uchar_carrier`
+    /// reaches one negative row accumulator and clips nothing at all.
+    ///
+    /// Measured on 8.18.6 with the same matrix and the same interior crop.
+    #[test]
+    fn affine_bicubic_clips_the_fixed_point_overshoot_like_vips() {
+        let data: Vec<u8> = (0..12 * 12usize)
+            .map(|i| {
+                let (x, y) = (i % 12, i / 12);
+                if ((x / 3) % 2) ^ ((y / 3) % 2) != 0 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        #[rustfmt::skip]
+        let want: [u8; 36] = [
+            179, 198, 164, 128, 148, 198,
+            91, 0, 0, 0, 166, 255,
+            137, 0, 0, 0, 123, 255,
+            187, 0, 7, 18, 102, 170,
+            73, 223, 255, 255, 225, 0,
+            0, 223, 255, 255, 246, 30,
+        ];
+        let out = Raster::new(12, 12, PixelFormat::Gray8, data)
+            .unwrap()
+            .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!(
+            carrier_crop(&out),
+            want,
+            "uchar bicubic overshoot against vips 8.18.6"
+        );
+    }
+
+    /// Issue #704, the first over-reach guard: the fixed point is the `uchar`
+    /// arithmetic and **only** the `uchar` arithmetic. `VIPS_FORMAT_USHORT`
+    /// goes to `bicubic_unsigned_int32_tab`, which takes `cxf`/`cyf`, the
+    /// `double` table, and never looks at `vips_bicubic_matrixi` at all. So a
+    /// 16-bit raster must keep exact `f64` coefficients, and quantising them
+    /// there moves samples by far more than the residual this test allows
+    /// (measured: 1320 of 1764 samples, worst delta 29, on a random 24x24).
+    ///
+    /// The residual it does allow is a different divergence with a different
+    /// cause: `bicubic_unsigned_int32_tab` finishes with `out[z] = bicubic`
+    /// where `out` is `unsigned short *` and `bicubic` a `double`, so the C
+    /// conversion truncates toward zero, and this module's sample writer
+    /// rounds half up. That is the same shape as the `vips_cast` divergence
+    /// the module header already records, and it is worth 14 of these 36
+    /// samples at exactly 1 LSB. Issue #732 tracks it.
+    #[test]
+    fn affine_bicubic_keeps_f64_coefficients_on_a_ushort_carrier() {
+        #[rustfmt::skip]
+        let want: [u16; 36] = [
+        30157, 29512, 29971, 33022, 36073, 36532,
+        15238, 22199, 27738, 13560, 8704, 10718,
+        57377, 62386, 64601, 23414, 16394, 27797,
+        40015, 40009, 40694, 43805, 47009, 47537,
+        15759, 17450, 21479, 22063, 22070, 22016,
+        45560, 57600, 25251, 0, 6247, 11991,
+        ];
+        let out = carrier_fixture(PixelFormat::Gray16).affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        let (mismatches, worst) = carrier_diff(&carrier_crop_u16(&out), &want);
+        assert!(
+            mismatches <= 14 && worst <= 1,
+            "ushort bicubic differs from vips 8.18.6 in {mismatches} samples \
+             (worst delta {worst}); expected at most 14 samples, delta 1"
+        );
+    }
+
+    /// Issue #704, the second over-reach guard: `VIPS_FORMAT_FLOAT` goes to
+    /// `bicubic_float_tab<float>` and reads the `double` table too, so a float
+    /// raster keeps exact coefficients as well. Twelve-bit coefficients would
+    /// move these samples by around 0.03, four orders of magnitude past the
+    /// residual allowed here.
+    ///
+    /// There is no residual to allow. The accumulation seam that used to leave
+    /// 3.8147e-06 on 2 of these 36 samples is closed by #705, so this is a
+    /// bit-for-bit pin and a 12-bit coefficient would miss it by four orders of
+    /// magnitude.
+    #[test]
+    fn affine_bicubic_keeps_f64_coefficients_on_a_float_carrier() {
+        #[rustfmt::skip]
+        let want: [f32; 36] = [
+        71.703255, 62.78587, 99.873535, 35.3125, 64.543846, 95.86998,
+        185.31021, 227.67528, 227.36438, 108.281334, 44.770844, 7.026093,
+        123.21098, 144.45389, 166.65953, 217.43056, 144.26581, 94.96411,
+        57.04591, 87.824974, 109.839294, 131.09113, 159.03162, 195.53754,
+        178.75148, 26.286255, 44.638718, 73.9971, 93.95278, 118.6862,
+        211.47437, 196.00458, 81.3681, -5.6804013, 48.58261, 63.801754,
+        ];
+        let out = carrier_fixture(PixelFormat::FloatF32(
+            core::num::NonZeroU16::new(1).unwrap(),
+        ))
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!(
+            carrier_crop_f32(&out),
+            want,
+            "float bicubic against vips 8.18.6"
+        );
+    }
+
+    /// Issue #704, the third over-reach guard: an alpha band takes the
+    /// decision away from the stored depth. `vips_affine_build` premultiplies
+    /// whenever `vips_image_hasalpha()` (`affine.c:551`), and
+    /// `vips_premultiply` writes a FLOAT image, so a `uchar` RGBA raster is
+    /// interpolated by `bicubic_float_tab<float>` and never touches the fixed
+    /// point either. Running the integer path here would quantise
+    /// premultiplied colour that is no longer integral at all.
+    ///
+    /// The residual is the `vips_cast` truncation the module header records:
+    /// vips casts the un-premultiplied FLOAT back to `uchar` with a plain C
+    /// cast and this module's writer rounds half up, worth 64 of these 144
+    /// bytes at 1 LSB.
+    #[test]
+    fn affine_bicubic_keeps_f64_coefficients_when_alpha_forces_the_premultiply() {
+        #[rustfmt::skip]
+        let want: [u8; 144] = [
+        135, 19, 90, 143, 186, 76, 59, 117, 193, 166, 58, 91, 158, 238, 114, 66, 177, 255, 241, 23, 98, 144, 255, 29,
+        3, 73, 126, 179, 57, 38, 100, 153, 245, 18, 73, 127, 199, 116, 36, 101, 164, 182, 70, 77, 159, 255, 120, 40,
+        50, 113, 166, 233, 65, 83, 136, 190, 213, 57, 110, 163, 226, 13, 84, 137, 224, 53, 50, 111, 174, 127, 37, 85,
+        71, 126, 188, 95, 67, 120, 173, 236, 24, 93, 146, 201, 129, 68, 121, 175, 213, 33, 93, 146, 234, 9, 67, 121,
+        131, 179, 255, 33, 86, 139, 195, 26, 66, 120, 173, 176, 41, 105, 158, 220, 42, 78, 131, 187, 178, 51, 104, 157,
+        163, 255, 86, 69, 152, 224, 236, 36, 128, 174, 255, 17, 61, 115, 167, 68, 59, 112, 165, 216, 13, 86, 139, 191,
+        ];
+        let out = carrier_fixture(PixelFormat::Rgba8).affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        let got: Vec<u16> = carrier_crop(&out).iter().map(|&b| u16::from(b)).collect();
+        let expected: Vec<u16> = want.iter().map(|&b| u16::from(b)).collect();
+        let (mismatches, worst) = carrier_diff(&got, &expected);
+        assert!(
+            mismatches <= 64 && worst <= 1,
+            "premultiplied uchar bicubic differs from vips 8.18.6 in {mismatches} bytes \
+             (worst delta {worst}); expected at most 64 bytes, delta 1"
+        );
     }
 
     /// The transpose matrix `[0, 1, 1, 0]` samples exactly on the input
@@ -4792,49 +6127,84 @@ mod tests {
         }
     }
 
-    /// Issue #692, the cell where libviprs and vips do **not** agree, pinned
-    /// so the divergence is a recorded number rather than something implied by
-    /// the absence of a fixture.
+    /// Issue #692, the border ink on an alpha raster, and the reason this
+    /// module does not follow vips there.
     ///
-    /// `vips_affine` only reaches the `vips_embed` border in the raster's own
-    /// domain when `vips_image_hasalpha()` is false. With an alpha band it
-    /// premultiplies into a **float** image first and paints the border into
-    /// that, so `vips_region_paint` takes the `FILL_LINE(float, ...)` arm
-    /// (`region.c:936`), the byte `memset` that smears the ink (`region.c:922`)
-    /// never runs, and the border comes out at the plain interpretation max.
-    /// Measured on 8.18.6 by solving the ink back out of a half-pixel bicubic
-    /// shift over a constant input, since a nearest tap on the ring shows the
-    /// border only where the interpolator samples past the edge:
+    /// The cause is **not** the paint order. `vips_affine_build` embeds before
+    /// it premultiplies (`affine.c:529` then `affine.c:551`), so the ink is
+    /// memset into the raster's own domain either way and `vips_embed` on its
+    /// own gives the same byte pattern. What moves it is that the premultiply
+    /// pair does not cancel on that pixel: `vips_premultiply` takes a
+    /// **clipped** alpha into its multiplier, `nalpha = clip(a, 0, M) / M`,
+    /// and `vips_unpremultiply` takes the **raw** one into its reciprocal,
+    /// `factor = M / a`. Every band of a border pixel holds the same ink `E`,
+    /// so the round trip is `E * clip(E, 0, M) / M * M / E`, which is
+    /// `clip(E, 0, M)`. This module runs the same arithmetic against its own
+    /// ceiling, the depth's on an unsigned carrier (issue #664), and the white
+    /// ink never exceeds that, so `clip(E, 0, D)` is `E`.
+    ///
+    /// Measured on 8.18.6 with `--interpolate nearest`, whose window is one
+    /// pixel, so an output shifted one step off the input reads the **pure**
+    /// ink and nothing has to be solved back out of a blend. Both columns are
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate nearest --idx 1 --idy 1
+    /// --extend white`, read at pixel `(0, 0)`.
     ///
     /// ```text
-    /// bands  tag    alpha  embed  affine
-    /// 3      srgb   no     65535  65534.7   (~65535, the alpha-free claim)
-    /// 4      srgb   YES    65535  255       (--extend white == --extend black)
-    /// 3      scrgb  no     257    256.0     (~257)
-    /// 4      scrgb  YES    257    1
-    /// 1      b-w    no     65535  65534.7
-    /// 2      b-w    YES    65535  255
+    /// carrier  bands  tag      vips affine white   libviprs
+    /// uchar    4      srgb     255                 255      agree
+    /// uchar    4      scrgb    1                   1        agree
+    /// ushort   4      rgb16    65535               65535    agree
+    /// ushort   4      grey16   65535               65535    agree
+    /// ushort   4      srgb     255                 65535    DIFFER
+    /// ushort   4      scrgb    1                   257      DIFFER
+    /// ushort   4      b-w      255                 65535    DIFFER
+    /// float    4      srgb     255                 255      agree
+    /// float    4      scrgb    1                   1        agree
+    /// float    4      rgb16    65535               65535    agree
     /// ```
     ///
-    /// libviprs paints the white ink into the raster's own domain and
-    /// premultiplies afterwards, so it keeps the memset values on all three
-    /// alpha rows: 65535, 257, 65535 against vips' 255, 1, 255. That is what
-    /// this test asserts. #688 does not cause it. The fill before #688 was
-    /// [`SampleLayout::max`], which is 65535 here and wrong in the same
-    /// direction, and fixing it means moving the paint to the other side of
-    /// the premultiply in [`TapFetch`], a change to the ordering and not to
-    /// the ink... so it belongs to #692, and this cell is what #692 will flip.
+    /// Every differing cell is a 16-bit raster wearing an 8-bit tag, which is
+    /// the same condition #664 is about, and the agreeing cells are here as the
+    /// positive control: the comparison would report a difference if there were
+    /// one, so a divergence confined to three rows is a measurement rather than
+    /// a blind spot.
+    ///
+    /// [`affine_alpha_bracket_holds_the_image_where_vips_collapses_it`] carries
+    /// the reason not to follow.
+    ///
+    /// [`affine_alpha_bracket_holds_the_image_where_vips_collapses_it`]: self::affine_alpha_bracket_holds_the_image_where_vips_collapses_it
     #[test]
-    fn affine_white_on_an_alpha_raster_keeps_the_memset_ink() {
+    fn affine_white_on_an_alpha_raster_inks_the_depth_not_the_interpretation() {
         use Interpretation as I;
-        // (tag, what libviprs paints today, what vips 8.18.6 measures)
+        // (format, tag, what libviprs inks, what vips 8.18.6 inks)
         let cases = [
-            (I::Srgb, 65535.0, 255.0),
-            (I::ScRgb, 257.0, 1.0),
-            (I::Bw, 65535.0, 255.0),
+            (PixelFormat::Rgba8, I::Srgb, 255.0, 255.0),
+            (PixelFormat::Rgba8, I::ScRgb, 1.0, 1.0),
+            (PixelFormat::Rgba8, I::Rgb16, 255.0, 255.0),
+            (PixelFormat::Rgba16, I::Rgb16, 65535.0, 65535.0),
+            (PixelFormat::Rgba16, I::Grey16, 65535.0, 65535.0),
+            (PixelFormat::Rgba16, I::Srgb, 65535.0, 255.0),
+            (PixelFormat::Rgba16, I::ScRgb, 257.0, 1.0),
+            (PixelFormat::Rgba16, I::Bw, 65535.0, 255.0),
+            (PixelFormat::RgbaF32, I::Srgb, 255.0, 255.0),
+            (PixelFormat::RgbaF32, I::ScRgb, 1.0, 1.0),
+            (PixelFormat::RgbaF32, I::Rgb16, 65535.0, 65535.0),
         ];
-        for (tag, libviprs, vips) in cases {
-            let im = Raster::new(2, 2, PixelFormat::Rgba16, 7u16.to_ne_bytes().repeat(16))
+        let mut differing = 0usize;
+        for (format, tag, libviprs, vips) in cases {
+            let value = if format == PixelFormat::RgbaF32 && tag == I::ScRgb {
+                0.5
+            } else {
+                7.0
+            };
+            let bytes: Vec<u8> = (0..2 * 2 * 4)
+                .flat_map(|_| match format {
+                    PixelFormat::Rgba8 => vec![value as u8],
+                    PixelFormat::Rgba16 => (value as u16).to_ne_bytes().to_vec(),
+                    _ => (value as f32).to_ne_bytes().to_vec(),
+                })
+                .collect();
+            let im = Raster::new(2, 2, format, bytes)
                 .unwrap()
                 .copy()
                 .interpretation(tag)
@@ -4853,13 +6223,98 @@ mod tests {
             assert_eq!(
                 out.getpoint(0, 0),
                 vec![libviprs; 4],
-                "Rgba16 tagged {tag:?}: libviprs paints the memset ink; vips \
-                 gives {vips} because it premultiplies into float first (#692)"
+                "{format:?} tagged {tag:?}: the ink follows the depth ceiling; \
+                 vips 8.18.6 gives {vips} because its ceiling is the tag's (#692)"
             );
             assert_eq!(
                 out.getpoint(1, 1),
-                vec![7.0; 4],
-                "the image itself resamples unchanged"
+                vec![value; 4],
+                "{format:?} tagged {tag:?}: the image itself resamples unchanged"
+            );
+            differing += usize::from(libviprs != vips);
+        }
+        assert_eq!(
+            differing, 3,
+            "exactly three of these eleven cells diverge, and all three are a \
+             16-bit carrier under an 8-bit tag"
+        );
+    }
+
+    /// Issue #692, the reason the cells above are left alone.
+    ///
+    /// Following vips on the border means following it on the ceiling, because
+    /// the border comes out at `clip(ink, 0, ceiling)` and nothing else sets
+    /// it. Pre-clipping only the fill would fix the pure-ink pixel and leave
+    /// every blended one wrong, since the two premultiplied spaces are scaled
+    /// differently: on a `ushort` `srgb` raster with alpha 200, a colour of
+    /// 25000 sits at 19608 in vips' premultiplied image and at 76.3 in this
+    /// module's. So the real choice is whether `bracket_max_alpha` follows the
+    /// tag on an unsigned carrier, which is #664's question, and its price is
+    /// measured rather than argued.
+    ///
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate nearest --idx 1 --idy 1`
+    /// on 8.18.6 over a constant `ushort` RGBA raster, read at an interior
+    /// pixel that never touches the border:
+    ///
+    /// ```text
+    /// tag     colour  alpha   vips interior      libviprs interior
+    /// srgb    25000   200     25000, alpha 200   25000, alpha 200
+    /// srgb    25000   25000   255,   alpha 255   25000, alpha 25000
+    /// srgb    25000   65535   97,    alpha 255   25000, alpha 65535
+    /// scrgb   25000   25000   1,     alpha 1     25000, alpha 25000
+    /// rgb16   25000   25000   25000, alpha 25000 25000, alpha 25000
+    /// ```
+    ///
+    /// The `srgb` and `scrgb` rows with a real alpha are the cost: vips reads a
+    /// 16-bit raster tagged `srgb` as having alpha in `0..=255`, so an ordinary
+    /// alpha of 25000 clips and the whole image collapses to the tag's ceiling.
+    /// It is not a border effect and it is not confined to unusual data. The
+    /// `rgb16` row is the positive control, the one tag whose ceiling matches
+    /// the depth, and there the two agree everywhere including the border.
+    ///
+    /// This test pins the libviprs column. The vips column is in the doc
+    /// comment because reproducing it would mean adopting the behaviour.
+    #[test]
+    fn affine_alpha_bracket_holds_the_image_where_vips_collapses_it() {
+        use Interpretation as I;
+        for (tag, alpha) in [
+            (I::Srgb, 200u16),
+            (I::Srgb, 25000),
+            (I::Srgb, 65535),
+            (I::ScRgb, 25000),
+            (I::Rgb16, 25000),
+        ] {
+            let bytes: Vec<u8> = (0..2 * 2)
+                .flat_map(|_| {
+                    let mut px = Vec::new();
+                    for _ in 0..3 {
+                        px.extend_from_slice(&25000u16.to_ne_bytes());
+                    }
+                    px.extend_from_slice(&alpha.to_ne_bytes());
+                    px
+                })
+                .collect();
+            let out = Raster::new(2, 2, PixelFormat::Rgba16, bytes)
+                .unwrap()
+                .copy()
+                .interpretation(tag)
+                .build()
+                .try_affine_with(
+                    [1.0, 0.0, 0.0, 1.0],
+                    Interpolator::Nearest,
+                    AffineOptions {
+                        oarea: Some([-1, -1, 4, 4]),
+                        extend: Extend::White,
+                        ..AffineOptions::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                out.getpoint(1, 1),
+                vec![25000.0, 25000.0, 25000.0, f64::from(alpha)],
+                "Rgba16 tagged {tag:?} with alpha {alpha}: the premultiply \
+                 bracket must round-trip the interior; vips collapses it to \
+                 the tag's ceiling (#692, #664)"
             );
         }
     }

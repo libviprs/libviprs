@@ -2088,7 +2088,13 @@ fn extract_tile(
         if rect.x >= rw || rect.y >= rh {
             // Tile entirely outside raster — solid background
             let padded = make_background_tile(ts, ts, bpp, background_rgb);
-            return Raster::new(ts, ts, raster.format(), padded);
+            let mut tile = Raster::new(ts, ts, raster.format(), padded)?;
+            // A padded tile is built from a fresh buffer, so it carries
+            // nothing unless it is told to. Same reason as the crop it pads
+            // around (#740): a tile that loses the interpretation is a tile
+            // that encodes without one.
+            tile.carry_meta_from(raster);
+            return Ok(tile);
         }
 
         let inter_w = inter_right - rect.x;
@@ -2110,7 +2116,13 @@ fn extract_tile(
             padded[dst_start..dst_start + src_stride]
                 .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
         }
-        return Raster::new(ts, ts, raster.format(), padded);
+        let mut tile = Raster::new(ts, ts, raster.format(), padded)?;
+        // A padded tile is built from a fresh buffer, so it carries
+        // nothing unless it is told to. Same reason as the crop it pads
+        // around (#740): a tile that loses the interpretation is a tile
+        // that encodes without one.
+        tile.carry_meta_from(raster);
+        return Ok(tile);
     }
 
     // Standard DeepZoom/Xyz path
@@ -2132,7 +2144,13 @@ fn extract_tile(
                 .copy_from_slice(&content.data()[src_start..src_start + src_stride]);
         }
 
-        Raster::new(ts, ts, content.format(), padded)
+        let mut tile = Raster::new(ts, ts, content.format(), padded)?;
+        // A padded tile is built from a fresh buffer, so it carries
+        // nothing unless it is told to. Same reason as the crop it pads
+        // around (#740): a tile that loses the interpretation is a tile
+        // that encodes without one.
+        tile.carry_meta_from(&content);
+        Ok(tile)
     } else {
         Ok(content)
     }

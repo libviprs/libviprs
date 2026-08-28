@@ -489,6 +489,39 @@ impl MetadataFields {
         Some(self.entries.remove(idx).1)
     }
 
+    /// Whether a name is carried at all, under either carrier.
+    fn contains(&self, name: &str) -> bool {
+        self.entries.iter().any(|(n, _)| n == name) || self.unknown.iter().any(|(n, _)| n == name)
+    }
+
+    /// Take `other`'s fields for every name this map does not already carry,
+    /// in `other`'s own order, leaving this map's values alone.
+    ///
+    /// This is the multi-input rule, measured on vips 8.18.6: `insert`,
+    /// `join`, `arrayjoin` and `bandjoin` put the union of both inputs'
+    /// attachments on the output and let the *first* input win a name they
+    /// share, while the header block comes from the first input alone. A
+    /// profile that only the second input carries reaches the output; a
+    /// `lane-711` both carry keeps the first one's value (#718).
+    ///
+    /// Uninterpretable `.v` trailer values merge on the same terms, so a name
+    /// this build cannot read still travels rather than being dropped because
+    /// the reader could not name it (#565). A name held under one carrier here
+    /// blocks the other carrier's copy from `other`, which is the same
+    /// "one value per name" invariant [`MetadataFields::set`] keeps.
+    pub(crate) fn merge_under(&mut self, other: &Self) {
+        for (name, value) in &other.entries {
+            if !self.contains(name) {
+                self.entries.push((name.clone(), value.clone()));
+            }
+        }
+        for (name, value) in &other.unknown {
+            if !self.contains(name) {
+                self.unknown.push((name.clone(), value.clone()));
+            }
+        }
+    }
+
     /// Record a field this build cannot interpret; see
     /// [`MetadataFields::unknown`].
     fn set_unknown(&mut self, name: &str, value: CarriedValue) {
@@ -694,6 +727,35 @@ fn interpretation_from_code(code: i32) -> Option<Interpretation> {
         // re-break every `.v` libviprs has already written.
         1000 => Interpretation::OkLab,
         1001 => Interpretation::OkLch,
+        _ => return None,
+    })
+}
+
+/// How many samples a colour takes in the space an ICC profile describes, read
+/// from bytes 16..20 of the profile header (issue #720).
+///
+/// `None` for a blob too short to hold the field or carrying a signature this
+/// build does not know. Those are **kept** by the caller: dropping an
+/// attachment because the parser could not reach a verdict is worse than
+/// keeping one that may not apply, and it is the same call this module makes
+/// for `.v` trailer values it cannot interpret (#565). It also stops the rule
+/// silently eating a profile in a colour space a later libviprs learns about.
+///
+/// The signatures are the ICC.1 data colour spaces, grouped by channel count.
+/// Only the count matters here, so the 2-channel and 5-to-15-channel `xCLR`
+/// spaces resolve to their own counts rather than being listed one by one.
+pub(crate) fn profile_space_bands(profile: &[u8]) -> Option<usize> {
+    let sig: &[u8; 4] = profile.get(16..20)?.try_into().ok()?;
+    Some(match sig {
+        b"GRAY" => 1,
+        b"CMY " | b"RGB " | b"XYZ " | b"Lab " | b"Luv " | b"YCbr" | b"Yxy " | b"HSV " | b"HLS "
+        | b"3CLR" => 3,
+        b"CMYK" | b"4CLR" => 4,
+        b"2CLR" => 2,
+        b"5CLR" => 5,
+        b"6CLR" => 6,
+        b"7CLR" => 7,
+        b"8CLR" => 8,
         _ => return None,
     })
 }
@@ -1048,6 +1110,20 @@ impl Raster {
     pub fn set_icc_profile(&mut self, profile: &[u8]) {
         self.fields
             .set("icc-profile-data", MetadataValue::Blob(profile.to_vec()));
+    }
+
+    /// Drop the attached ICC profile, the way libvips'
+    /// `vips_image_remove(VIPS_META_ICC_NAME)` does. Removing an absent
+    /// profile is a no-op.
+    ///
+    /// Crate-private because a caller already has the same reach through
+    /// `set_typeof("icc-profile-data", 0)`; this exists so the ops that must
+    /// do it can say what they mean. The ops in question are the inverse
+    /// Fourier transforms: measured on vips 8.18.6 they retag the output
+    /// `b-w`, and a three-channel profile does not survive that retag (#717,
+    /// and the general rule is #720).
+    pub(crate) fn remove_icc_profile(&mut self) {
+        let _ = self.fields.remove("icc-profile-data");
     }
 
     /// The attached ICC profile, if any: the `icc-profile-data` blob set
@@ -1781,10 +1857,21 @@ enum VFieldValue<'a> {
     Carried(&'a CarriedValue),
 }
 
-/// Decode a native `.v` file (both byte orders). Enforces the caller's
-/// [`DecodeLimits`] — the [`max_coord`](DecodeLimits::max_coord)
-/// single-axis ceiling and the pixel budget — on the untrusted header
-/// geometry before allocating.
+/// Decode a native `.v` file (both byte orders). Enforces all three of the
+/// caller's [`DecodeLimits`] geometry ceilings on the untrusted header before
+/// anything is allocated: the [`max_coord`](DecodeLimits::max_coord)
+/// single-axis ceiling, the [`max_pixels`](DecodeLimits::max_pixels) count,
+/// and the [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) budget on the
+/// pixel body.
+///
+/// The third arrived last, as issue #710. `.v` was never a decompression-bomb
+/// vector, because the body has to be physically present before it is copied,
+/// so the allocation was already bounded by the input length. What was missing
+/// was the contract: a caller who set `max_alloc_bytes` did not get it here,
+/// and the two decode entry points disagreed about the same run of bytes,
+/// since [`crate::source::decode_file_with_limits`] spends the budget on the
+/// bounded whole-file read and [`crate::source::decode_bytes_with_limits`] has
+/// no file to spend it on.
 pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     if bytes.len() < VIPS_HEADER_LEN {
         return Err(SourceError::VipsFormat(format!(
@@ -1844,9 +1931,25 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     let format = PixelFormat::with_channels(bands as usize, bpc)
         .ok_or_else(|| SourceError::VipsFormat(format!("unrepresentable .v band count {bands}")))?;
 
-    let data_len = width as usize * height as usize * format.bytes_per_pixel();
-    let end = VIPS_HEADER_LEN
-        .checked_add(data_len)
+    // And the allocation budget, which neither ceiling above implies: a pixel
+    // count sees neither the band count nor the sample depth, so the default
+    // 1-gigapixel `max_pixels` still waves a 4 GiB `Rgba8` body through. This
+    // reader consulted it nowhere at all until issue #710, so it was the one
+    // container out of ten where setting `max_alloc_bytes` bought nothing.
+    //
+    // It sits after `with_channels` rather than before, for two reasons. A
+    // band count with no `PixelFormat` keeps coming back as the format error
+    // it always was rather than as an allocation refusal. And the price is
+    // then provably the product the copy below is sized from: `with_channels`
+    // returns a format whose `channels` and `bytes_per_channel` are exactly
+    // the arguments, and `bytes_per_pixel` is their product, so `bands * bpc`
+    // is `format.bytes_per_pixel()` for every representable `.v`. That is why
+    // there is one spelling of the product here now and not two.
+    let data_len =
+        limits.check_image_alloc(".v pixel buffer", width, height, bands as u64, bpc as u64)?;
+    let end = usize::try_from(data_len)
+        .ok()
+        .and_then(|len| VIPS_HEADER_LEN.checked_add(len))
         .filter(|&e| e <= bytes.len())
         .ok_or_else(|| {
             SourceError::VipsFormat(format!(
@@ -3417,6 +3520,71 @@ mod tests {
         assert!(trailer.fields.entries.iter().any(
             |(n, v)| n == "icc-profile-data" && *v == FutureMetadataValue::Blob(vec![5, 5, 5])
         ));
+    }
+
+    /// Issue #718. The multi-input field union covers the **uninterpretable**
+    /// carrier as well as the named one, in both directions.
+    ///
+    /// The named half is pinned in `tests/metadata_carry.rs`. This half is here
+    /// because [`MetadataFields::unknown`] is only reachable from inside this
+    /// module, through a trailer written by a build this one cannot fully read
+    /// (#565), and without it `merge_under` could drop the opaque carrier and
+    /// stay green: a field a newer build wrote would survive a load and a
+    /// re-save, and then vanish the moment someone inserted the raster into
+    /// another one.
+    #[test]
+    fn the_multi_input_field_merge_carries_an_uninterpretable_field_too() {
+        let sub = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut main = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        main.set_field("main-only", MetadataValue::Str("from-main".into()));
+        main.set_field("note", MetadataValue::Str("from-main".into()));
+
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+
+        // The header block is `main`'s alone, so `sub`'s orientation 6 does
+        // not reach the output.
+        assert_eq!(out.orientation(), 1, "the header block is main's");
+        // The named half of the union: main wins the shared name, both sides'
+        // own fields arrive.
+        assert_eq!(out.get_field("note").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("main-only").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(out.icc_profile(), Some(&[5u8, 5, 5][..]));
+
+        // And the opaque one, which reads as absent through the field API and
+        // is only visible on the way back out.
+        assert_eq!(
+            out.get_field("delay"),
+            None,
+            "an uninterpretable field stays out of the field API"
+        );
+        let rewritten = out.encode_vips().unwrap();
+        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..])
+            .expect("a carried opaque value keeps the file on the JSON trailer");
+        let delay = trailer
+            .fields
+            .entries
+            .iter()
+            .find(|(n, _)| n == "delay")
+            .map(|(_, v)| v);
+        assert_eq!(
+            delay,
+            Some(&FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            "sub's uninterpretable field must reach the output"
+        );
+
+        // The other direction: a name `main` holds *only* under the opaque
+        // carrier still blocks `sub`'s interpretable value, so the output
+        // never ends up holding one name under both carriers.
+        let main = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut sub = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        sub.set_field("delay", MetadataValue::Int(9));
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+        assert_eq!(
+            out.get_field("delay"),
+            None,
+            "main's opaque value wins the shared name"
+        );
     }
 
     /// A field the caller sets by hand supersedes an unknown field of the same

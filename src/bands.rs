@@ -47,6 +47,14 @@
 //!   libvips itself has no negative indexing; the ported tests fold pyvips's
 //!   Python `im[-1]` sugar into the Rust call, so the resolution happens
 //!   here.
+//! * **Metadata.** Every operation carries its input's interpretation,
+//!   resolution, offsets, orientation and attached fields onto its result
+//!   (issue #727). Nothing here stamps the origin offset, unlike `flip`,
+//!   `rot`, `wrap` and the convolving ops, and `bandfold` / `bandunfold`
+//!   reshape the pixel grid without rescaling the resolution. `bandjoin` and
+//!   `bandrank` take more than one input, so they follow the multi-input rule
+//!   (issue #718): the header block comes from `self` alone and the attached
+//!   fields are the union of every input, `self` winning a name they share.
 //!
 //! Multiband (`Multi8`/`Multi16`) rasters are compute intermediates: the
 //! tile-encoding sinks reject them, so reduce or extract back to 1/3/4 bands
@@ -225,7 +233,15 @@ impl Raster {
                 write_flat(&mut out, out_bpc, base + a_bands + c, v);
             }
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
+        result.carry_meta_from(self);
+        // Two-input, so the union rule (#718): the header block is `self`'s
+        // alone and the fields are both inputs' with `self` winning a shared
+        // name. Measured both ways round on vips 8.18.6, and reversing the
+        // arguments flips the header block and the shared name while the ICC
+        // profile still crosses from whichever input has one.
+        result.merge_fields_from(other);
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_bandjoin`], matching the ported-test
@@ -299,7 +315,9 @@ impl Raster {
                 write_flat(&mut out, bpc, base + bands + k, cv);
             }
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
+        result.carry_meta_from(self);
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_bandjoin_vec`], matching the
@@ -340,12 +358,13 @@ impl Raster {
         let fmt = self.format();
         let out_bands = fmt.channels() * factor as usize;
         let out_fmt = format_for(out_bands, fmt.bytes_per_channel())?;
-        Ok(Raster::new(
-            width / factor,
-            self.height(),
-            out_fmt,
-            self.data().to_vec(),
-        )?)
+        let mut result = Raster::new(width / factor, self.height(), out_fmt, self.data().to_vec())?;
+        // Reshapes the pixel grid and does *not* rescale the resolution:
+        // measured on vips 8.18.6, an 8x8 3-band raster folds to 1x8 24-band
+        // and still reports `xres 5 yres 7`. Same shape `zoom` and `subsample`
+        // had in #690, so it is measured rather than assumed.
+        result.carry_meta_from(self);
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_bandfold`], matching the ported-test
@@ -387,12 +406,11 @@ impl Raster {
         let out_width =
             u32::try_from(out_width).map_err(|_| BandError::WidthOverflow { width: out_width })?;
         let out_fmt = format_for(bands / factor as usize, fmt.bytes_per_channel())?;
-        Ok(Raster::new(
-            out_width,
-            self.height(),
-            out_fmt,
-            self.data().to_vec(),
-        )?)
+        let mut result = Raster::new(out_width, self.height(), out_fmt, self.data().to_vec())?;
+        // Same as `bandfold`: 8x8 3-band unfolds to 24x8 1-band and reports
+        // the same `xres 5 yres 7`.
+        result.carry_meta_from(self);
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_bandunfold`], matching the
@@ -432,7 +450,9 @@ impl Raster {
             let bands64 = bands as u64;
             write_flat(&mut out, bpc, p, ((sum + bands64 / 2) / bands64) as u32);
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
+        result.carry_meta_from(self);
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_bandmean`], matching the ported-test
@@ -500,7 +520,15 @@ impl Raster {
             vals.sort_unstable();
             write_flat(&mut out, out_bpc, i, vals[idx]);
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
+        result.carry_meta_from(self);
+        // n-input, same union as `bandjoin`: measured on vips 8.18.6 over three
+        // sources, the output carries each one's own fields and `self` wins the
+        // name all three share.
+        for r in others {
+            result.merge_fields_from(r);
+        }
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_bandrank`], matching the ported-test
@@ -595,7 +623,9 @@ impl Raster {
             }
             write_flat(&mut out, bpc, p, acc);
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
+        result.carry_meta_from(self);
+        Ok(result)
     }
 
     /// Extract a single band as a one-band image (libvips `extract_band`
@@ -667,7 +697,9 @@ impl Raster {
             let dst = p * n * bpc;
             out[dst..dst + n * bpc].copy_from_slice(&data[src..src + n * bpc]);
         }
-        Ok(Raster::new(self.width(), self.height(), out_fmt, out)?)
+        let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
+        result.carry_meta_from(self);
+        Ok(result)
     }
 
     /// Panicking form of [`Raster::try_extract_bands`], matching the

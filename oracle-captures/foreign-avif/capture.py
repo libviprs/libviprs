@@ -1312,7 +1312,11 @@ INLINE = {}
 def inline_scalars(obj):
     """Mark arrays of numbers so they serialise on ONE line. json.dumps with
     indent=2 puts a 36-sample pixel dump on 38 lines, which is three times
-    the bytes and much harder to read than the row it represents."""
+    the bytes and much harder to read than the row it represents.
+
+    Every json.dumps below passes allow_nan=False, this one included: the
+    inlined leaves are where a float actually lives, so guarding only the
+    top-level dump would leave the pixel rows unguarded (#682)."""
     if isinstance(obj, dict):
         return {k: inline_scalars(v) for k, v in obj.items()}
     if isinstance(obj, list) and obj:
@@ -1321,16 +1325,18 @@ def inline_scalars(obj):
                    all(isinstance(y, (int, float)) for y in x) for x in obj)
         if flatish or rows:
             key = f"\u0000{len(INLINE)}\u0000"
-            INLINE[key] = ("[" + ", ".join(json.dumps(x) for x in obj) + "]"
-                           if rows else json.dumps(obj))
+            INLINE[key] = (
+                "[" + ", ".join(json.dumps(x, allow_nan=False)
+                                for x in obj) + "]"
+                if rows else json.dumps(obj, allow_nan=False))
             return key
         return [inline_scalars(x) for x in obj]
     return obj
 
 
-text = json.dumps(inline_scalars(oracle), indent=2)
+text = json.dumps(inline_scalars(oracle), indent=2, allow_nan=False)
 for key, value in INLINE.items():
-    text = text.replace(json.dumps(key), value)
+    text = text.replace(json.dumps(key, allow_nan=False), value)
 with open(os.path.join(ROOT, "oracle.json"), "w") as f:
     f.write(text + "\n")
 

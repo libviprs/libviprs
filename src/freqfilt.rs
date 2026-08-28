@@ -131,6 +131,36 @@ fn is_fourier_complex(r: &Raster) -> bool {
     r.format().channels().is_multiple_of(2) && r.interpretation() == Interpretation::Fourier
 }
 
+/// Drop the ICC profile the way the inverse transforms do, after the carry
+/// has put it there.
+///
+/// This is the one cell in the metadata carry table that is not a wholesale
+/// copy (#717). Measured on vips 8.18.6 from an 8x8 `rgb` source carrying a
+/// real 3144-byte sRGB profile: `fwfft` hands the profile on, and `invfft`,
+/// `invfft --real` and `freqmult` all report no `icc-profile-data` at all
+/// while still reporting every other attachment, including a second plain
+/// 48-byte `VipsBlob` attached alongside. So it is the profile being
+/// invalidated, not the field map being dropped.
+///
+/// The cause is the retag rather than the transform: these three land on
+/// `b-w`, and `vips copy in.v out.v --interpretation b-w` removes the same
+/// three-channel profile. That general rule landed as #720 and lives on
+/// [`Raster::set_interpretation`], which every stamp in the crate goes
+/// through.
+///
+/// **It does not cover these three, and this function is why.** The rule reads
+/// the tag, and libviprs tags an inverse transform `None` where vips tags it
+/// `B_W`: a deliberate divergence, since `b-w` on a six-band complex raster is
+/// what vips says and not what the samples are. `None` resolves through
+/// `Interpretation::for_format`, which reads a six-band float as `Multiband`,
+/// whose space is three channels, so the general rule looks at a three-channel
+/// profile against a three-channel space and keeps it. The rule cannot see what
+/// vips sees because libviprs never writes down the tag vips is reacting to, so
+/// the drop stays explicit here with the measurement attached.
+fn drop_invalidated_profile(raster: &mut Raster) {
+    raster.remove_icc_profile();
+}
+
 /// Read every sample as `f64` in raster order (row-major, bands
 /// interleaved), whatever the depth.
 fn samples_f64(r: &Raster) -> Vec<f64> {
@@ -271,8 +301,8 @@ impl Raster {
         }
 
         let mut raster = float_raster(self.width(), self.height(), format, &out)?;
-        raster.meta = self.meta;
-        raster.meta.interpretation = Some(Interpretation::Fourier);
+        raster.carry_meta_from(self);
+        raster.set_interpretation(Some(Interpretation::Fourier));
         Ok(raster)
     }
 
@@ -331,10 +361,11 @@ impl Raster {
         }
 
         let mut raster = float_raster(self.width(), self.height(), format, &out)?;
-        raster.meta = self.meta;
+        raster.carry_meta_from(self);
         // Back in the spatial domain: drop the Fourier stamp (libvips
         // `invfft.c` retags the output B_W).
-        raster.meta.interpretation = None;
+        raster.set_interpretation(None);
+        drop_invalidated_profile(&mut raster);
         Ok(raster)
     }
 
@@ -380,8 +411,9 @@ impl Raster {
         }
 
         let mut raster = float_raster(self.width(), self.height(), format, &out)?;
-        raster.meta = self.meta;
-        raster.meta.interpretation = None;
+        raster.carry_meta_from(self);
+        raster.set_interpretation(None);
+        drop_invalidated_profile(&mut raster);
         Ok(raster)
     }
 
@@ -592,7 +624,7 @@ impl Raster {
             cross[2 * i + 1] = im;
         }
         let mut cross = float_raster(w, h, float_format("phasecor", bands)?, &cross)?;
-        cross.meta.interpretation = Some(Interpretation::Fourier);
+        cross.set_interpretation(Some(Interpretation::Fourier));
 
         cross.try_invfft_real()
     }
@@ -665,8 +697,8 @@ fn fourier_multiply(
 
     let format = float_format(op, bands)?;
     let mut raster = float_raster(fourier.width(), fourier.height(), format, &out)?;
-    raster.meta = fourier.meta;
-    raster.meta.interpretation = Some(Interpretation::Fourier);
+    raster.carry_meta_from(fourier);
+    raster.set_interpretation(Some(Interpretation::Fourier));
     Ok(raster)
 }
 
