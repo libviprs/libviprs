@@ -13,9 +13,9 @@
 
 use libviprs::{
     Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError, GifError,
-    Intent, Interpretation, JoinDirection, JxlError, Layout, ManifestError, MetadataValue, Pcs,
-    PdfError, PixelFormat, PlannerError, Precision, RadianceError, RasterError, ResumeError,
-    SourceError, VerifyError,
+    Intent, Interpretation, JoinDirection, Jp2kError, JxlError, Layout, ManifestError,
+    MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision, RadianceError, RasterError,
+    ResumeError, SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -87,6 +87,34 @@ fn assert_jxl_error_non_exhaustive(v: &JxlError) {
         JxlError::ChannelCountMismatch { .. } => {}
         JxlError::DecoderAllocLimitExceeded { .. } => {}
         JxlError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_jp2k_error_non_exhaustive(v: &Jp2kError) {
+    match v {
+        Jp2kError::FeatureNotEnabled => {}
+        Jp2kError::Decode { .. } => {}
+        Jp2kError::Container { .. } => {}
+        Jp2kError::SignedComponent { .. } => {}
+        Jp2kError::PrecisionNotSupported { .. } => {}
+        Jp2kError::PrecisionWiderThanDeclared { .. } => {}
+        Jp2kError::UnsupportedBandCount { .. } => {}
+        Jp2kError::BandCountMismatch { .. } => {}
+        Jp2kError::ComponentGeometryMismatch { .. } => {}
+        Jp2kError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_jp2k_compression_non_exhaustive(v: &libviprs::jp2k::Compression) {
+    match v {
+        libviprs::jp2k::Compression::Lossless => {}
+        libviprs::jp2k::Compression::Lossy { .. } => {}
         _ => {}
     }
 }
@@ -406,6 +434,8 @@ fn non_exhaustive_checks_compile() {
     assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
     assert_jxl_compression_non_exhaustive(&libviprs::jxl::Compression::Lossless);
     assert_jxl_error_non_exhaustive(&JxlError::FeatureNotEnabled);
+    assert_jp2k_compression_non_exhaustive(&libviprs::jp2k::Compression::Lossless);
+    assert_jp2k_error_non_exhaustive(&Jp2kError::FeatureNotEnabled);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);
@@ -423,11 +453,17 @@ fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
     }
 }
 
-/// `MetadataValue` grows with the vips GType set it covers: a `.v` trailer
-/// already carries `VipsArrayInt` and `VipsArrayDouble` fields this crate
-/// only forwards opaquely, and #573 wants a `delay` array variant. Marking
-/// it before that lands costs a `_ =>` arm here; marking it after would cost
-/// a major version (issue #609).
+/// `MetadataValue` grows with the vips GType set it covers, and #787 is the
+/// first variant to come through the door #609 held open: `VipsArrayInt`
+/// landed as `IntArray`, and a `.v` trailer still carries `VipsArrayDouble`
+/// and `gboolean` fields this crate only forwards opaquely. Marking the enum
+/// before the first of those landed cost a `_ =>` arm here; marking it after
+/// would have cost a major version (issue #609).
+///
+/// The `IntArray` arm is not decoration. Without it the `_ =>` below would
+/// swallow the new variant and this file would keep compiling whatever the
+/// enum grew, which is the shape of guard that passes while it stops
+/// guarding.
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
 fn assert_metadata_value_non_exhaustive(v: &MetadataValue) {
@@ -436,6 +472,7 @@ fn assert_metadata_value_non_exhaustive(v: &MetadataValue) {
         MetadataValue::Double(_) => {}
         MetadataValue::Str(_) => {}
         MetadataValue::Blob(_) => {}
+        MetadataValue::IntArray(_) => {}
         _ => {}
     }
 }
