@@ -20,42 +20,85 @@
 #                              helper it cannot follow
 #   <file>::<test>             repo-relative path and function name
 #
-# The `unannotated fs-detected` rows are a ledger of known debt, not an
-# endorsement. The original argument for leaving them was that PR #644 disables
-# Miri's isolation on the job, so annotating another 138 tests would cut
-# coverage in the direction #644 was widening. That argument no longer holds:
-# #675 found that the isolation-disabled run never finishes, three attempts all
-# died at the 90 minute ceiling, and the `miri` job now sits behind a job-level
-# `if:` so it does not run on an ordinary pull request at all. So the coverage
-# being protected here is currently zero, and mass-annotating would cost
-# nothing today.
+# There are no `unannotated fs-detected` rows left, and that is the state this
+# file is meant to be in. There were 138, kept as a ledger of known debt on the
+# argument that PR #644 disabled Miri's isolation so letting them run cost
+# nothing. #711 put isolation back, which made every one of them a way to end
+# the whole session on its first syscall. #712 and #739 annotated 134, #781
+# taught the detector to follow a call into a test helper and annotated what
+# that found, and #756 took the last four in `src/resample.rs`.
 #
-# They stay unannotated anyway, for a different and smaller reason: what to do
-# with them depends on how #675 resolves. If Miri comes back with isolation on,
-# they all need annotating and the scanner will say so. If it comes back with
-# isolation off and a workable runtime, none of them do. Deciding now means
-# redoing it either way. Pinning them makes the set knowable (it was previously
-# described as "unknown but clearly larger than one") and makes any addition a
-# visible edit in review, which is the part that holds regardless of #675.
+# So this is not a ledger any more.
+# `no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions` in
+# `tests/miri_ignore_convention.rs` refuses a filesystem-touching test that is
+# neither annotated nor named in `UNANNOTATED_FS_EXCEPTIONS`, and that list is
+# empty. A row spelled `unannotated` below means somebody put a name in that
+# constant, which wants a reason that survives review and an issue to carry it,
+# because the cost is the whole gate rather than one test.
+#
+# The rows stay, and the exact set-equality check with them, because they catch
+# a different edit from the refusal: an annotation being *deleted*, and an
+# annotation being added to a test the detector cannot see through. A refusal
+# alone is green when somebody annotates a pure test by mistake; this file is
+# what turns that into a new `annotated not-detected` row and a red build.
 #
 # The `annotated not-detected` rows are the scanner's blind spot made durable.
-# Those tests reach the filesystem through a helper or through a library
-# function that opens a path, so the detector reads their bodies as pure. They
-# are pinned anyway, which means their annotations cannot be deleted unnoticed
-# even though the detector could not have asked for them in the first place.
+# Those tests reach the filesystem through a library function that opens a path,
+# or through a helper in another file, so the detector reads their bodies as
+# pure. They are pinned anyway, which means their annotations cannot be deleted
+# unnoticed even though the detector could not have asked for them in the first
+# place. #781 halved the class, from 22 rows to 13, by teaching the detector to
+# follow a call into a *test* helper in the same file; what is left is the
+# library boundary, which it does not cross on purpose.
 #
 # To update: run `cargo test --test miri_ignore_convention`. The failure prints
-# a regenerated body you can paste in below this header. Do that only after
-# deciding each `+ unannotated` line is really meant to run under Miri.
+# a regenerated body you can paste in below this header. A `+ unannotated` line
+# in that output is a test that will end the next Miri run on its first
+# syscall, so the answer to it is an annotation, not a paste.
 
 annotated   fs-detected  src/checksum.rs::hash_file_matches_in_memory_hash_for_both_algos
 annotated   fs-detected  src/checksum.rs::hash_file_reports_not_found
 annotated   fs-detected  src/checksum.rs::verify_output_reports_tile_mismatch_in_report_not_as_error
+annotated   fs-detected  src/colour.rs::icc_transform_to_display_p3
+annotated   fs-detected  src/connection.rs::file_target_writes_and_reads_back_identical_bytes
+annotated   fs-detected  src/connection.rs::source_filename_reflects_construction
 annotated   fs-detected  src/dedupe.rs::materialize_reference_creates_a_readable_tile
 annotated   fs-detected  src/dedupe.rs::materialize_reference_surfaces_total_failure
 annotated   fs-detected  src/dedupe.rs::materialize_reference_with_relative_target_does_not_dangle
+annotated   fs-detected  src/encode.rs::save_jpeg_and_png_write_decodable_files
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_attaches_the_page_count
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_bounds_the_file_read
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_bounds_the_pixel_buffer
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_rejects_a_page_past_the_end
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_rejects_an_axis_over_the_coord_ceiling
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_rejects_declared_geometry_over_the_pixel_ceiling
+annotated   fs-detected  src/encode_tiff.rs::decode_tiff_page_zero_is_the_first_image
+annotated   fs-detected  src/encode_tiff.rs::save_bigtiff_is_unsupported_stub
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_ccitt_is_unsupported_stub
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_deflate_round_trips_bit_exact
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_gray16_deflate_round_trips_via_decode_tiff_page
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_jp2k_is_unsupported_stub
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_jpeg_is_unsupported_stub
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_lzw_smaller_than_none
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_multiband8_round_trips_bit_exact
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_multiband_two_band_round_trips
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_none_round_trips_bit_exact
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_rgb8_deflate_round_trips_via_decode_tiff_page
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_rgba16_deflate_round_trips_via_decode_tiff_page
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_rgba16_lzw_round_trips_via_decode_tiff_page
+annotated   fs-detected  src/encode_tiff.rs::save_tiff_tiled_is_unsupported_stub
+annotated   fs-detected  src/encode_tiff.rs::the_default_entry_points_delegate_to_the_default_limits
+annotated   fs-detected  src/encode_tiff.rs::the_page_ceiling_is_inclusive
+annotated   fs-detected  src/encode_tiff.rs::tiff_page_count_and_decode_tiff_page_on_multipage
+annotated   fs-detected  src/encode_tiff.rs::tiff_page_count_stops_at_the_page_ceiling
+annotated   fs-detected  src/engine.rs::checkpoint_cadence_preserved_under_concurrency
+annotated   fs-detected  src/engine.rs::checkpoint_flush_io_is_bounded_per_flush
+annotated   fs-detected  src/engine.rs::dedupe_strategy_writes_placeholder_markers_on_disk
+annotated   fs-detected  src/engine.rs::flush_syncs_sink_before_certifying_delta
 annotated   fs-detected  src/engine.rs::overwrite_clears_sink_not_user_checkpoint_root
+annotated   fs-detected  src/engine.rs::partial_level_is_not_recorded_completed
 annotated   fs-detected  src/engine.rs::plan_hash_mismatch_names_current_expected_and_checkpoint_actual
+annotated   fs-detected  src/engine.rs::poisoned_checkpoint_meta_recovers_without_cascade
 annotated   fs-detected  src/engine.rs::raster_verify_accepts_raw_placeholder_markers
 annotated   fs-detected  src/engine.rs::raster_verify_rejects_unknown_algo
 annotated   fs-detected  src/engine.rs::resumable_emits_observer_events
@@ -65,8 +108,101 @@ annotated   fs-detected  src/engine.rs::verify_uses_active_format_and_rejects_st
 annotated   fs-detected  src/engine.rs::wipe_directory_clears_owned_dir
 annotated   fs-detected  src/engine.rs::wipe_directory_refuses_non_owned_dir
 annotated   fs-detected  src/engine.rs::with_config_does_not_fabricate_destructive_overwrite
+annotated   fs-detected  src/engine_builder.rs::config_checkpoint_every_bounds_resume_rework
+annotated   fs-detected  src/engine_builder.rs::crash_and_resume_at_concurrency_four_matches_a_clean_run_byte_for_byte
+annotated   fs-detected  src/engine_builder.rs::crash_resume_dedupe_checksum_reproduces_uninterrupted_manifest
+annotated   fs-detected  src/engine_builder.rs::distinct_spelling_of_the_sink_dir_as_checkpoint_root_does_not_self_lock
+annotated   fs-detected  src/engine_builder.rs::engine_config_checkpoint_root_drives_verify_through_opaque_wrapper
+annotated   fs-detected  src/engine_builder.rs::interrupted_resume_run_persists_completed_tiles
+annotated   fs-detected  src/engine_builder.rs::non_resume_dedupe_still_runs
+annotated   fs-detected  src/engine_builder.rs::overwrite_is_refused_while_the_checkpoint_dir_is_locked_with_distinct_sink_dir
+annotated   fs-detected  src/engine_builder.rs::overwrite_is_refused_while_the_output_dir_is_locked
+annotated   fs-detected  src/engine_builder.rs::overwrite_is_refused_while_the_sink_dir_is_locked_with_distinct_checkpoint_root
 annotated   fs-detected  src/engine_builder.rs::plan_hash_gate_refuses_before_the_run_lock_is_taken
+annotated   fs-detected  src/engine_builder.rs::refused_plan_hash_mismatch_leaves_the_directory_untouched
+annotated   fs-detected  src/engine_builder.rs::resume_advances_levels_and_excludes_skipped_bytes
+annotated   fs-detected  src/engine_builder.rs::resume_aware_sink_forwards_checkpoint_root
+annotated   fs-detected  src/engine_builder.rs::resume_aware_sink_forwards_content_format
+annotated   fs-detected  src/engine_builder.rs::resume_plus_checksum_now_runs
+annotated   fs-detected  src/engine_builder.rs::resume_plus_engine_dedupe_now_runs
+annotated   fs-detected  src/engine_builder.rs::resume_plus_sink_dedupe_now_runs
+annotated   fs-detected  src/engine_builder.rs::resume_run_has_single_checkpoint_writer
+annotated   fs-detected  src/engine_builder.rs::resume_through_opaque_wrapper_uses_explicit_root
+annotated   fs-detected  src/engine_builder.rs::resume_without_dedupe_or_checksum_still_runs
+annotated   fs-detected  src/engine_builder.rs::run_locks_the_checkpoint_dir_not_the_sink_dir_when_they_differ
+annotated   fs-detected  src/engine_builder.rs::run_releases_the_lock_when_it_finishes
+annotated   fs-detected  src/engine_builder.rs::verify_dedupe_still_runs
+annotated   fs-detected  src/engine_builder.rs::verify_through_opaque_wrapper_requires_and_honors_explicit_root
 annotated   fs-detected  src/engine_builder.rs::with_skip_blanks_writes_strictly_fewer_files_through_the_builder
+annotated   fs-detected  src/exr.rs::alloc_budget_is_checked_before_decoding
+annotated   fs-detected  src/exr.rs::alloc_budget_prices_every_declared_channel_not_only_the_selected_ones
+annotated   fs-detected  src/exr.rs::compression_and_part_count_are_attached
+annotated   fs-detected  src/exr.rs::coord_ceiling_is_enforced_on_the_data_window
+annotated   fs-detected  src/exr.rs::depth_only_file_survives_where_vips_returns_black
+annotated   fs-detected  src/exr.rs::display_window_does_not_size_the_image
+annotated   fs-detected  src/exr.rs::float_channels_keep_full_precision_where_vips_rounds_to_half
+annotated   fs-detected  src/exr.rs::lossless_compressions_agree_byte_for_byte
+annotated   fs-detected  src/exr.rs::lossy_codings_decode_and_are_not_pinned_as_lossless
+annotated   fs-detected  src/exr.rs::luminance_only_file_stays_one_band
+annotated   fs-detected  src/exr.rs::offset_data_window_normalises_to_the_origin
+annotated   fs-detected  src/exr.rs::ragged_tiles_decode_their_edges
+annotated   fs-detected  src/exr.rs::rgb_without_alpha_stays_three_bands
+annotated   fs-detected  src/exr.rs::rgba_half_decodes_exactly
+annotated   fs-detected  src/exr.rs::single_pixel_image_decodes
+annotated   fs-detected  src/exr.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
+annotated   fs-detected  src/exr.rs::the_window_budget_bites_at_exactly_the_declared_price
+annotated   fs-detected  src/exr.rs::tiled_matches_scanline_and_reports_tile_size
+annotated   fs-detected  src/exr.rs::truncated_files_error_rather_than_panic
+annotated   fs-detected  src/exr.rs::uint_channels_are_refused_by_variant
+annotated   fs-detected  src/exr.rs::vips_parity_holds_exactly_once_the_rgba_funnel_is_applied
+annotated   fs-detected  src/fits.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
+annotated   fs-detected  src/gif.rs::every_save_entry_point_writes_the_same_bytes
+annotated   fs-detected  src/imageio.rs::decode_file_sets_filename
+annotated   fs-detected  src/imageio.rs::save_error_lists_exactly_the_wired_extensions
+annotated   fs-detected  src/imageio.rs::save_jpeg_keeps_and_strips_metadata
+annotated   fs-detected  src/imageio.rs::save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way
+annotated   fs-detected  src/imageio.rs::save_png_and_unknown_extension
+annotated   fs-detected  src/imageio.rs::save_v_and_stripped
+annotated   fs-detected  src/imageio.rs::save_webp_round_trips_losslessly_and_honours_strip
+annotated   fs-detected  src/jxl.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
+annotated   fs-detected  src/jxl.rs::without_the_feature_every_entry_point_is_a_typed_refusal
+annotated   fs-detected  src/loom_checkpoint_dedupe.rs::loom_resume_seeding_reconstructs_identical_placement
+annotated   fs-detected  src/manifest.rs::write_to_atomically_replaces_a_read_only_manifest
+annotated   fs-detected  src/nifti.rs::a_big_endian_nifti2_header_is_read_in_its_own_byte_order
+annotated   fs-detected  src/nifti.rs::a_big_endian_uint16_array_is_swapped_into_host_order
+annotated   fs-detected  src/nifti.rs::a_magic_that_is_not_niftis_is_the_analyze_dialect
+annotated   fs-detected  src/nifti.rs::a_short_voxel_array_is_refused_rather_than_zero_filled
+annotated   fs-detected  src/nifti.rs::a_teravoxel_volume_is_refused_before_anything_is_allocated
+annotated   fs-detected  src/nifti.rs::a_two_file_header_says_where_its_voxels_are
+annotated   fs-detected  src/nifti.rs::a_uint16_ramp_is_reassembled_in_the_files_byte_order
+annotated   fs-detected  src/nifti.rs::a_uint8_ramp_loads_the_reference_voxels
+annotated   fs-detected  src/nifti.rs::bitpix_is_decoration
+annotated   fs-detected  src/nifti.rs::dim0_decides_the_byte_order_and_the_sentinel_is_only_a_fallback
+annotated   fs-detected  src/nifti.rs::every_axis_above_the_second_folds_into_the_height
+annotated   fs-detected  src/nifti.rs::every_datatype_without_a_carrier_is_refused_by_name
+annotated   fs-detected  src/nifti.rs::non_finite_float_samples_are_rewritten_to_zero
+annotated   fs-detected  src/nifti.rs::rgb24_and_rgba32_carry_interleaved_bands
+annotated   fs-detected  src/nifti.rs::scl_slope_and_inter_are_carried_but_never_applied
+annotated   fs-detected  src/nifti.rs::the_allocation_budget_is_spent_on_the_declared_geometry
+annotated   fs-detected  src/nifti.rs::the_metadata_carries_the_axes_the_flattening_collapsed
+annotated   fs-detected  src/nifti.rs::the_nifti2_magic_tail_is_never_checked
+annotated   fs-detected  src/nifti.rs::the_rank_and_extent_repairs_are_not_uniform
+annotated   fs-detected  src/nifti.rs::the_sentinel_and_the_magic_have_to_agree_about_the_version
+annotated   fs-detected  src/nifti.rs::the_two_byte_orders_load_to_identical_memory
+annotated   fs-detected  src/nifti.rs::the_version_check_needs_348_bytes_and_not_one_fewer
+annotated   fs-detected  src/nifti.rs::vox_offset_is_truncated_down_and_floored_at_the_header
+annotated   fs-detected  src/pdf.rs::extract_page_image_with_background_applies_clear_colour
+annotated   fs-detected  src/pdf.rs::extract_page_image_with_background_rejects_over_length_slice
+annotated   fs-detected  src/pdf.rs::extract_page_image_with_password_reports_encrypted_as_unsupported
+annotated   fs-detected  src/pdf.rs::pdf_info_with_password_ignores_password_on_unencrypted_doc
+annotated   fs-detected  src/pdf.rs::pdf_info_with_password_reports_encrypted_as_unsupported
+annotated   fs-detected  src/pdf.rs::typed_background_matches_slice_form
+annotated   fs-detected  src/radiance.rs::save_radiance_writes_a_file_decode_radiance_reads_back
+annotated   fs-detected  src/radiance.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
+annotated   fs-detected  src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box
+annotated   fs-detected  src/resample.rs::thumbnail_file_and_buffer_agree
+annotated   fs-detected  src/resample.rs::thumbnail_free_fn_fits_the_width_box
+annotated   fs-detected  src/resample.rs::thumbnail_unknown_profile_is_typed_error
 annotated   fs-detected  src/resume.rs::concurrent_saves_never_publish_a_torn_checkpoint
 annotated   fs-detected  src/resume.rs::load_dedupes_overlap_between_header_and_segments
 annotated   fs-detected  src/resume.rs::load_ignores_torn_trailing_segment_frame
@@ -79,6 +215,30 @@ annotated   fs-detected  src/resume.rs::run_lock_release_removes_the_lock_file
 annotated   fs-detected  src/resume.rs::run_lock_serialises_concurrent_jobs
 annotated   fs-detected  src/resume.rs::save_and_load_roundtrip
 annotated   fs-detected  src/resume.rs::save_is_atomic_no_tmp_left_behind
+annotated   fs-detected  src/sink.rs::dedupe_concurrent_promote_keeps_shared_hardlink
+annotated   fs-detected  src/sink.rs::dedupe_distinct_content_promotes_without_serialising
+annotated   fs-detected  src/sink.rs::dedupe_full_payload_holder_is_coordinate_minimal_regardless_of_arrival
+annotated   fs-detected  src/sink.rs::dedupe_groups_retention_is_occurrence_independent
+annotated   fs-detected  src/sink.rs::dedupe_layout_identical_across_arrival_orders
+annotated   fs-detected  src/sink.rs::dedupe_same_content_serialises_on_promote_shard
+annotated   fs-detected  src/sink.rs::dedupe_shared_blob_validated_once_per_key
+annotated   fs-detected  src/sink.rs::deepzoom_run_still_writes_sibling_dzi_only
+annotated   fs-detected  src/sink.rs::fs_sink_creates_directory_structure
+annotated   fs-detected  src/sink.rs::fs_sink_deterministic_paths
+annotated   fs-detected  src/sink.rs::fs_sink_encodes_jpeg
+annotated   fs-detected  src/sink.rs::fs_sink_encodes_png
+annotated   fs-detected  src/sink.rs::fs_sink_no_dzi_for_xyz
+annotated   fs-detected  src/sink.rs::fs_sink_run_never_nests_leaf_locks
+annotated   fs-detected  src/sink.rs::fs_sink_writes_dzi_manifest
+annotated   fs-detected  src/sink.rs::fs_sink_writes_tile_to_disk
+annotated   fs-detected  src/sink.rs::fs_sink_xyz_path_structure
+annotated   fs-detected  src/sink.rs::iiif_run_writes_info_json
+annotated   fs-detected  src/sink.rs::poisoned_fs_sink_leaf_recovers_without_cascade
+annotated   fs-detected  src/sink.rs::resume_revalidates_corrupt_shared_blob
+annotated   fs-detected  src/sink.rs::sync_pending_fsyncs_every_written_tile
+annotated   fs-detected  src/sink.rs::verify_dedupe_emit_uniform_tiles_digests_match_disk
+annotated   fs-detected  src/sink.rs::verify_recorded_tile_deleted_from_disk_fails
+annotated   fs-detected  src/sink.rs::zoomify_run_writes_tilegroup_and_image_properties
 annotated   fs-detected  src/sink_packfile.rs::archive_stem_handles_common_suffixes
 annotated   fs-detected  src/sink_packfile.rs::end_to_end_tar_smoke
 annotated   fs-detected  src/sink_packfile.rs::manifest_json_contains_structural_fields
@@ -87,176 +247,102 @@ annotated   fs-detected  src/sink_packfile.rs::zip_sink_writes_pyramid_archive
 annotated   fs-detected  src/source.rs::both_entry_points_agree_on_every_container_in_the_route_table
 annotated   fs-detected  src/source.rs::content_beats_extension_in_both_entry_points
 annotated   fs-detected  src/source.rs::decode_file_and_bytes_share_finalize_path
+annotated   fs-detected  src/source.rs::decode_file_bounds_the_whole_file_read
+annotated   fs-detected  src/source.rs::decode_file_from_disk
+annotated   fs-detected  src/source.rs::decode_file_sequential_matches_decode_file
+annotated   fs-detected  src/source.rs::decode_file_with_shrink_reduces_dimensions
+annotated   fs-detected  src/source.rs::fits_reaches_its_codec_from_both_entry_points
 annotated   fs-detected  src/source.rs::invalidate_drops_cache_entry
 annotated   fs-detected  src/source.rs::path_identity_canonicalizes_lookup_and_invalidate
 annotated   fs-detected  src/source.rs::public_cache_controls_bound_and_clear_global_cache
+annotated   fs-detected  src/source.rs::radiance_reaches_its_codec_from_both_entry_points
 annotated   fs-detected  src/source.rs::revalidate_bypasses_and_refreshes_cache
+annotated   fs-detected  src/source.rs::the_file_body_ceiling_is_inclusive
+annotated   fs-detected  src/source.rs::the_file_body_ceiling_leaves_the_streaming_path_alone
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_refuses_a_source_that_outruns_its_stat
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_raw_placeholder_markers
 annotated   fs-detected  src/stream_verify.rs::stream_verify_detects_raw_corruption
 annotated   fs-detected  src/stream_verify.rs::stream_verify_happy_path_raw
+annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_overtall_strip
+annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_overwide_strip
 annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_unknown_algo
+annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_wrong_format_strip
 annotated   fs-detected  src/stream_verify.rs::stream_verify_reports_missing_tile
+annotated   fs-detected  tests/colour_ported_surface.rs::ported_icc_call_site
+annotated   fs-detected  tests/dependency_policy.rs::vendored_native_code_is_only_the_documented_crates
+annotated   fs-detected  tests/exr_ported_surface.rs::channel_names_and_compression_are_readable_downstream
+annotated   fs-detected  tests/exr_ported_surface.rs::decode_exr_is_public_and_returns_float_bands
+annotated   fs-detected  tests/exr_ported_surface.rs::decode_limits_apply_to_exr_downstream
+annotated   fs-detected  tests/exr_ported_surface.rs::the_sniff_route_reaches_the_exr_codec_from_both_entry_points
+annotated   fs-detected  tests/exr_ported_surface.rs::the_typed_error_is_matchable_downstream
+annotated   fs-detected  tests/fits_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
+annotated   fs-detected  tests/fits_ported_surface.rs::the_shared_dispatch_carries_a_fits_row
+annotated   fs-detected  tests/gif_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
+annotated   fs-detected  tests/io_ported_surface.rs::ported_exif_field_call_sites
+annotated   fs-detected  tests/io_ported_surface.rs::ported_keep_custom_profile_call_site
+annotated   fs-detected  tests/io_ported_surface.rs::ported_keep_icc_call_site
+annotated   fs-detected  tests/io_ported_surface.rs::ported_keep_none_call_site
+annotated   fs-detected  tests/io_ported_surface.rs::ported_test_vips_call_site
+annotated   fs-detected  tests/io_ported_surface.rs::save_accepts_path_ref
+annotated   fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
+annotated   fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
+annotated   fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
+annotated   fs-detected  tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
+annotated   fs-detected  tests/miri_ignore_convention.rs::no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions
+annotated   fs-detected  tests/miri_ignore_convention.rs::no_process_spawning_test_can_run_under_miri
+annotated   fs-detected  tests/miri_ignore_convention.rs::the_annotated_set_stays_the_size_it_is_documented_to_be
+annotated   fs-detected  tests/n_pages_meaning.rs::a_count_that_is_not_a_page_count_gets_its_own_key
+annotated   fs-detected  tests/n_pages_meaning.rs::exactly_one_source_file_names_the_shared_key
+annotated   fs-detected  tests/n_pages_meaning.rs::no_source_file_has_real_code_past_its_cut
+annotated   fs-detected  tests/n_pages_meaning.rs::only_the_four_page_counting_loaders_attach_it
 annotated   fs-detected  tests/oracle_capture_json.rs::every_json_dump_call_site_refuses_a_non_finite_float
+annotated   fs-detected  tests/oracle_capture_json.rs::every_oracle_capture_is_strict_json
+annotated   fs-detected  tests/oracle_capture_json.rs::the_repaired_captures_still_record_a_real_infinity_and_a_real_nan
+annotated   fs-detected  tests/oracle_capture_pins.rs::captures_parse_as_json_and_the_python_only_list_does_not_grow
+annotated   fs-detected  tests/oracle_capture_pins.rs::convolution_min_max_positions_are_deterministic
+annotated   fs-detected  tests/oracle_capture_pins.rs::convolution_pins_pixels_not_the_v_container
+annotated   fs-detected  tests/oracle_capture_pins.rs::every_capture_declares_the_oracle_it_was_measured_against
+annotated   fs-detected  tests/oracle_capture_pins.rs::every_capture_script_checks_the_oracle_pin
+annotated   fs-detected  tests/oracle_capture_pins.rs::every_recorded_fixture_hash_matches_the_committed_file
+annotated   fs-detected  tests/oracle_capture_pins.rs::no_two_records_hash_one_name_differently
+annotated   fs-detected  tests/page_model.rs::exactly_one_source_file_names_the_page_height_key
+annotated   fs-detected  tests/path_traversal.rs::svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one
+annotated   fs-detected  tests/path_traversal.rs::svg_image_href_does_not_follow_a_relative_traversal_off_disk
+annotated   fs-detected  tests/path_traversal.rs::svg_image_href_does_not_read_a_readable_file_off_disk
+annotated   fs-detected  tests/path_traversal.rs::svg_image_href_renders_nothing_at_all
+annotated   fs-detected  tests/path_traversal.rs::verify_accepts_wellformed_relative_tile
+annotated   fs-detected  tests/path_traversal.rs::verify_rejects_absolute_path
+annotated   fs-detected  tests/path_traversal.rs::verify_rejects_parent_directory_traversal
+annotated   fs-detected  tests/path_traversal.rs::verify_streams_large_tile_without_buffering_whole_file
+annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_patched_core
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_unpatched_consumer
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_fork
+annotated   fs-detected  tests/radiance_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
+annotated   fs-detected  tests/uhdr_ported_surface.rs::a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest
+annotated   fs-detected  tests/uhdr_ported_surface.rs::an_ordinary_jpeg_stays_jpeg_and_a_uhdr_file_does_not
+annotated   fs-detected  tests/uhdr_ported_surface.rs::degenerate_metadata_reproduces_the_captured_zeros_and_nans
+annotated   fs-detected  tests/uhdr_ported_surface.rs::is_uhdr_agrees_with_the_loader_vips_chose_on_every_fixture
+annotated   fs-detected  tests/uhdr_ported_surface.rs::mpf_graft_is_the_positive_control_for_the_negative_direction
+annotated   fs-detected  tests/uhdr_ported_surface.rs::the_loaded_header_matches_the_captured_vipsheader_output
+annotated   fs-detected  tests/uhdr_ported_surface.rs::the_mono_path_reproduces_the_oracle_floats_exactly
+annotated   fs-detected  tests/uhdr_ported_surface.rs::the_three_band_path_linearises_the_gain_map_and_the_mono_path_does_not
+annotated   fs-detected  tests/uhdr_ported_surface.rs::the_two_powf_cases_are_within_a_measured_ulp_bound
+annotated   fs-detected  tests/uhdr_ported_surface.rs::v2y_8_matches_the_pinned_oracle_table
+annotated   fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_trip_exactly
+annotated   fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
+annotated   fs-detected  tests/workspace_layout.rs::workspace_lockfile_pins_pdfium_render_to_the_fork
 annotated   not-detected src/source.rs::decode_file_not_found
-annotated   not-detected src/stream_verify.rs::stream_verify_rejects_overtall_strip
-annotated   not-detected src/stream_verify.rs::stream_verify_rejects_overwide_strip
-annotated   not-detected src/stream_verify.rs::stream_verify_rejects_wrong_format_strip
 annotated   not-detected tests/dependency_policy.rs::every_links_key_is_on_the_allowlist
 annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confined_to_packfile
 annotated   not-detected tests/dependency_policy.rs::runtime_library_loaders_are_confined_to_the_pdfium_features
 annotated   not-detected tests/dependency_policy.rs::the_external_library_features_stay_opt_in
-annotated   not-detected tests/dependency_policy.rs::vendored_native_code_is_only_the_documented_crates
 annotated   not-detected tests/icc_lut_alloc.rs::a_lut_export_survives_a_ceiling_at_the_promised_cms_bound
 annotated   not-detected tests/icc_lut_alloc.rs::a_lut_import_survives_a_ceiling_at_the_promised_cms_bound
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allocates_itself_ends_the_process
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
-annotated   not-detected tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
-annotated   not-detected tests/miri_ignore_convention.rs::no_process_spawning_test_can_run_under_miri
-annotated   not-detected tests/miri_ignore_convention.rs::the_annotated_set_stays_the_size_it_is_documented_to_be
+annotated   not-detected tests/miri_ignore_convention.rs::the_filesystem_detector_follows_a_test_helper_but_not_the_library
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
-annotated   not-detected tests/pdfium_source_audit.rs::audit_gate_accepts_patched_core
 annotated   not-detected tests/workspace_layout.rs::root_workspace_contains_both_crates
-unannotated fs-detected  src/colour.rs::icc_transform_to_display_p3
-unannotated fs-detected  src/connection.rs::file_target_writes_and_reads_back_identical_bytes
-unannotated fs-detected  src/connection.rs::source_filename_reflects_construction
-unannotated fs-detected  src/encode.rs::save_jpeg_and_png_write_decodable_files
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_attaches_the_page_count
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_bounds_the_file_read
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_bounds_the_pixel_buffer
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_rejects_a_page_past_the_end
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_rejects_an_axis_over_the_coord_ceiling
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_rejects_declared_geometry_over_the_pixel_ceiling
-unannotated fs-detected  src/encode_tiff.rs::decode_tiff_page_zero_is_the_first_image
-unannotated fs-detected  src/encode_tiff.rs::save_bigtiff_is_unsupported_stub
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_ccitt_is_unsupported_stub
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_deflate_round_trips_bit_exact
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_gray16_deflate_round_trips_via_decode_tiff_page
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_jp2k_is_unsupported_stub
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_jpeg_is_unsupported_stub
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_lzw_smaller_than_none
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_multiband8_round_trips_bit_exact
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_multiband_two_band_round_trips
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_none_round_trips_bit_exact
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_rgb8_deflate_round_trips_via_decode_tiff_page
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_rgba16_deflate_round_trips_via_decode_tiff_page
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_rgba16_lzw_round_trips_via_decode_tiff_page
-unannotated fs-detected  src/encode_tiff.rs::save_tiff_tiled_is_unsupported_stub
-unannotated fs-detected  src/encode_tiff.rs::the_default_entry_points_delegate_to_the_default_limits
-unannotated fs-detected  src/encode_tiff.rs::the_page_ceiling_is_inclusive
-unannotated fs-detected  src/encode_tiff.rs::tiff_page_count_and_decode_tiff_page_on_multipage
-unannotated fs-detected  src/encode_tiff.rs::tiff_page_count_stops_at_the_page_ceiling
-unannotated fs-detected  src/engine.rs::checkpoint_cadence_preserved_under_concurrency
-unannotated fs-detected  src/engine.rs::checkpoint_flush_io_is_bounded_per_flush
-unannotated fs-detected  src/engine.rs::dedupe_strategy_writes_placeholder_markers_on_disk
-unannotated fs-detected  src/engine.rs::flush_syncs_sink_before_certifying_delta
-unannotated fs-detected  src/engine.rs::partial_level_is_not_recorded_completed
-unannotated fs-detected  src/engine.rs::poisoned_checkpoint_meta_recovers_without_cascade
-unannotated fs-detected  src/engine_builder.rs::config_checkpoint_every_bounds_resume_rework
-unannotated fs-detected  src/engine_builder.rs::crash_and_resume_at_concurrency_four_matches_a_clean_run_byte_for_byte
-unannotated fs-detected  src/engine_builder.rs::crash_resume_dedupe_checksum_reproduces_uninterrupted_manifest
-unannotated fs-detected  src/engine_builder.rs::distinct_spelling_of_the_sink_dir_as_checkpoint_root_does_not_self_lock
-unannotated fs-detected  src/engine_builder.rs::engine_config_checkpoint_root_drives_verify_through_opaque_wrapper
-unannotated fs-detected  src/engine_builder.rs::interrupted_resume_run_persists_completed_tiles
-unannotated fs-detected  src/engine_builder.rs::non_resume_dedupe_still_runs
-unannotated fs-detected  src/engine_builder.rs::overwrite_is_refused_while_the_checkpoint_dir_is_locked_with_distinct_sink_dir
-unannotated fs-detected  src/engine_builder.rs::overwrite_is_refused_while_the_output_dir_is_locked
-unannotated fs-detected  src/engine_builder.rs::overwrite_is_refused_while_the_sink_dir_is_locked_with_distinct_checkpoint_root
-unannotated fs-detected  src/engine_builder.rs::refused_plan_hash_mismatch_leaves_the_directory_untouched
-unannotated fs-detected  src/engine_builder.rs::resume_advances_levels_and_excludes_skipped_bytes
-unannotated fs-detected  src/engine_builder.rs::resume_aware_sink_forwards_checkpoint_root
-unannotated fs-detected  src/engine_builder.rs::resume_aware_sink_forwards_content_format
-unannotated fs-detected  src/engine_builder.rs::resume_plus_checksum_now_runs
-unannotated fs-detected  src/engine_builder.rs::resume_plus_engine_dedupe_now_runs
-unannotated fs-detected  src/engine_builder.rs::resume_plus_sink_dedupe_now_runs
-unannotated fs-detected  src/engine_builder.rs::resume_run_has_single_checkpoint_writer
-unannotated fs-detected  src/engine_builder.rs::resume_through_opaque_wrapper_uses_explicit_root
-unannotated fs-detected  src/engine_builder.rs::resume_without_dedupe_or_checksum_still_runs
-unannotated fs-detected  src/engine_builder.rs::run_locks_the_checkpoint_dir_not_the_sink_dir_when_they_differ
-unannotated fs-detected  src/engine_builder.rs::run_releases_the_lock_when_it_finishes
-unannotated fs-detected  src/engine_builder.rs::verify_dedupe_still_runs
-unannotated fs-detected  src/engine_builder.rs::verify_through_opaque_wrapper_requires_and_honors_explicit_root
-unannotated fs-detected  src/exr.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
-unannotated fs-detected  src/fits.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
-unannotated fs-detected  src/gif.rs::every_save_entry_point_writes_the_same_bytes
-unannotated fs-detected  src/imageio.rs::decode_file_sets_filename
-unannotated fs-detected  src/imageio.rs::save_error_lists_exactly_the_wired_extensions
-unannotated fs-detected  src/imageio.rs::save_jpeg_keeps_and_strips_metadata
-unannotated fs-detected  src/imageio.rs::save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way
-unannotated fs-detected  src/imageio.rs::save_png_and_unknown_extension
-unannotated fs-detected  src/imageio.rs::save_v_and_stripped
-unannotated fs-detected  src/imageio.rs::save_webp_round_trips_losslessly_and_honours_strip
-unannotated fs-detected  src/jxl.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
-unannotated fs-detected  src/jxl.rs::without_the_feature_every_entry_point_is_a_typed_refusal
-unannotated fs-detected  src/loom_checkpoint_dedupe.rs::loom_resume_seeding_reconstructs_identical_placement
-unannotated fs-detected  src/manifest.rs::write_to_atomically_replaces_a_read_only_manifest
-unannotated fs-detected  src/radiance.rs::save_radiance_writes_a_file_decode_radiance_reads_back
-unannotated fs-detected  src/radiance.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
-unannotated fs-detected  src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box
-unannotated fs-detected  src/resample.rs::thumbnail_file_and_buffer_agree
-unannotated fs-detected  src/resample.rs::thumbnail_free_fn_fits_the_width_box
-unannotated fs-detected  src/resample.rs::thumbnail_unknown_profile_is_typed_error
-unannotated fs-detected  src/sink.rs::dedupe_concurrent_promote_keeps_shared_hardlink
-unannotated fs-detected  src/sink.rs::dedupe_full_payload_holder_is_coordinate_minimal_regardless_of_arrival
-unannotated fs-detected  src/sink.rs::dedupe_layout_identical_across_arrival_orders
-unannotated fs-detected  src/sink.rs::dedupe_shared_blob_validated_once_per_key
-unannotated fs-detected  src/sink.rs::deepzoom_run_still_writes_sibling_dzi_only
-unannotated fs-detected  src/sink.rs::fs_sink_creates_directory_structure
-unannotated fs-detected  src/sink.rs::fs_sink_deterministic_paths
-unannotated fs-detected  src/sink.rs::fs_sink_encodes_jpeg
-unannotated fs-detected  src/sink.rs::fs_sink_encodes_png
-unannotated fs-detected  src/sink.rs::fs_sink_no_dzi_for_xyz
-unannotated fs-detected  src/sink.rs::fs_sink_run_never_nests_leaf_locks
-unannotated fs-detected  src/sink.rs::fs_sink_writes_dzi_manifest
-unannotated fs-detected  src/sink.rs::fs_sink_writes_tile_to_disk
-unannotated fs-detected  src/sink.rs::fs_sink_xyz_path_structure
-unannotated fs-detected  src/sink.rs::iiif_run_writes_info_json
-unannotated fs-detected  src/sink.rs::poisoned_fs_sink_leaf_recovers_without_cascade
-unannotated fs-detected  src/sink.rs::resume_revalidates_corrupt_shared_blob
-unannotated fs-detected  src/sink.rs::sync_pending_fsyncs_every_written_tile
-unannotated fs-detected  src/sink.rs::verify_dedupe_emit_uniform_tiles_digests_match_disk
-unannotated fs-detected  src/sink.rs::verify_recorded_tile_deleted_from_disk_fails
-unannotated fs-detected  src/sink.rs::zoomify_run_writes_tilegroup_and_image_properties
-unannotated fs-detected  src/source.rs::decode_file_bounds_the_whole_file_read
-unannotated fs-detected  src/source.rs::decode_file_from_disk
-unannotated fs-detected  src/source.rs::decode_file_sequential_matches_decode_file
-unannotated fs-detected  src/source.rs::decode_file_with_shrink_reduces_dimensions
-unannotated fs-detected  src/source.rs::fits_reaches_its_codec_from_both_entry_points
-unannotated fs-detected  src/source.rs::radiance_reaches_its_codec_from_both_entry_points
-unannotated fs-detected  src/source.rs::the_file_body_ceiling_is_inclusive
-unannotated fs-detected  src/source.rs::the_file_body_ceiling_leaves_the_streaming_path_alone
-unannotated fs-detected  tests/colour_ported_surface.rs::ported_icc_call_site
-unannotated fs-detected  tests/exr_ported_surface.rs::the_sniff_route_reaches_the_exr_codec_from_both_entry_points
-unannotated fs-detected  tests/exr_ported_surface.rs::the_typed_error_is_matchable_downstream
-unannotated fs-detected  tests/fits_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
-unannotated fs-detected  tests/fits_ported_surface.rs::the_shared_dispatch_carries_a_fits_row
-unannotated fs-detected  tests/gif_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
-unannotated fs-detected  tests/io_ported_surface.rs::ported_exif_field_call_sites
-unannotated fs-detected  tests/io_ported_surface.rs::ported_keep_custom_profile_call_site
-unannotated fs-detected  tests/io_ported_surface.rs::ported_keep_icc_call_site
-unannotated fs-detected  tests/io_ported_surface.rs::ported_keep_none_call_site
-unannotated fs-detected  tests/io_ported_surface.rs::ported_test_vips_call_site
-unannotated fs-detected  tests/io_ported_surface.rs::save_accepts_path_ref
-unannotated fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
-unannotated fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
-unannotated fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
-unannotated fs-detected  tests/n_pages_meaning.rs::no_source_file_has_real_code_past_its_cut
-unannotated fs-detected  tests/oracle_capture_json.rs::every_oracle_capture_is_strict_json
-unannotated fs-detected  tests/oracle_capture_json.rs::the_repaired_captures_still_record_a_real_infinity_and_a_real_nan
-unannotated fs-detected  tests/path_traversal.rs::svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one
-unannotated fs-detected  tests/path_traversal.rs::svg_image_href_does_not_follow_a_relative_traversal_off_disk
-unannotated fs-detected  tests/path_traversal.rs::svg_image_href_does_not_read_a_readable_file_off_disk
-unannotated fs-detected  tests/path_traversal.rs::svg_image_href_renders_nothing_at_all
-unannotated fs-detected  tests/path_traversal.rs::verify_accepts_wellformed_relative_tile
-unannotated fs-detected  tests/path_traversal.rs::verify_rejects_absolute_path
-unannotated fs-detected  tests/path_traversal.rs::verify_rejects_parent_directory_traversal
-unannotated fs-detected  tests/path_traversal.rs::verify_streams_large_tile_without_buffering_whole_file
-unannotated fs-detected  tests/radiance_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
-unannotated fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_trip_exactly
-unannotated fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
-unannotated fs-detected  tests/workspace_layout.rs::workspace_lockfile_pins_pdfium_render_to_the_fork

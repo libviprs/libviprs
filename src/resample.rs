@@ -4225,6 +4225,7 @@ mod tests {
     /// The file and buffer entry points decode the same bytes and agree, and
     /// the associated `thumbnail` resolves to this inherent method.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_file_and_buffer_agree() {
         let im = portrait_290x442();
         let dir = tempfile::tempdir().unwrap();
@@ -4276,6 +4277,7 @@ mod tests {
 
     /// An unknown output profile is reported, not silently treated as sRGB.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_unknown_profile_is_typed_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.png");
@@ -5482,6 +5484,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_free_fn_fits_the_width_box() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("thumb_in.png");
@@ -5501,6 +5504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_crop_free_fn_fills_and_crops_the_box() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("thumb_crop_in.png");
