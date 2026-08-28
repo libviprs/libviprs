@@ -48,6 +48,13 @@
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
 //!   outside the canvas and clip, exactly as libvips does.
+//! * **Metadata.** Every operation carries its input's interpretation,
+//!   resolution, orientation and attached fields onto its result (issue #690).
+//!   The origin offset is the one field they disagree on: `extract_area` and
+//!   `crop` stamp it to `(-left, -top)` and discard the source's, matching
+//!   `vips_extract_area`, where the placement and tiling ops leave the
+//!   source's alone. `insert` is the one operation here that still drops the
+//!   metadata; its rule is a two-input merge and is not ported yet.
 //!
 //! # Smartcrop
 //!
@@ -503,6 +510,19 @@ fn fill_ink(dst: &mut Raster, ink: &[u32]) {
     }
 }
 
+/// `-v` as an `i32` for the crop-origin stamp, saturating rather than
+/// wrapping on the widths only a `u32` dimension can express.
+///
+/// vips holds every dimension and both offsets in an `int`, so the question
+/// does not arise there; here a `left` above `i32::MAX` is representable and
+/// a bare `-(left as i32)` would wrap it back to a *positive* offset. A
+/// raster that wide fits the 8 GiB construction budget at one byte per pixel,
+/// so the branch is reachable rather than theoretical.
+#[inline]
+fn negated_origin(v: u32) -> i32 {
+    -(v.min(i32::MAX as u32) as i32)
+}
+
 /// Unwrap an extract-op result for the panicking ported-test surface.
 #[inline]
 #[track_caller]
@@ -524,6 +544,28 @@ fn expect_smartcrop(r: Result<(Raster, i32, i32), ExtractError>) -> (Raster, i32
 }
 
 impl Raster {
+    /// Carry `self`'s header block and attached fields onto an extract
+    /// result (issue #690).
+    ///
+    /// Every operation here builds its result through a constructor, and
+    /// every constructor starts from [`crate::conversion::RasterMeta::default`]
+    /// and an empty field map, so the carry has to be explicit or the
+    /// interpretation, resolution, orientation and every attachment go
+    /// missing. Measured on vips 8.18.6, `extract_area`, `crop`, `embed`,
+    /// `gravity`, `replicate`, `zoom`, `subsample` and `smartcrop` all hand
+    /// the header block and the attachments straight on, including through
+    /// the ops that rescale the pixel grid: `zoom` by 2x3 on `xres=5 yres=7`
+    /// reports 5 and 7 back rather than 10 and 21.
+    ///
+    /// The origin offset is the one field they disagree on, so
+    /// [`Raster::try_extract_area`] overwrites it after calling this; see
+    /// [`negated_origin`].
+    fn carry_extract_meta(&self, mut out: Raster) -> Raster {
+        out.meta = self.meta;
+        out.fields = self.fields.clone();
+        out
+    }
+
     /// Extract a rectangular region (libvips `extract_area`).
     ///
     /// The rectangle must lie entirely inside the image; libvips
@@ -557,7 +599,15 @@ impl Raster {
                 image_h: self.height(),
             });
         }
-        Ok(self.extract(left, top, width, height)?)
+        let mut out = self.carry_extract_meta(self.extract(left, top, width, height)?);
+        // `vips_extract_area` writes `Xoffset = -left` / `Yoffset = -top` and
+        // throws the source's away (`conversion.c`, `vips_extract_area_build`),
+        // where the placement and tiling ops leave the source's alone. It is
+        // the only field of the header block that is not a verbatim carry, and
+        // `smartcrop` inherits the rule by going through here.
+        out.meta.xoffset = negated_origin(left);
+        out.meta.yoffset = negated_origin(top);
+        Ok(out)
     }
 
     /// Panicking form of [`Raster::try_extract_area`], matching the
@@ -692,7 +742,7 @@ impl Raster {
                 }
             }
         }
-        Ok(Raster::new(width, height, fmt, out)?)
+        Ok(self.carry_extract_meta(Raster::new(width, height, fmt, out)?))
     }
 
     /// Place the image at a compass position inside a `width` x `height`
@@ -898,7 +948,7 @@ impl Raster {
                 out.extend_from_slice(&data[si..si + bpp]);
             }
         }
-        Ok(Raster::new(ow as u32, oh as u32, self.format(), out)?)
+        Ok(self.carry_extract_meta(Raster::new(ow as u32, oh as u32, self.format(), out)?))
     }
 
     /// Insert `sub` over `self` with its top-left corner at `(x, y)`
