@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `Raster::encode_jp2k(quality: u8, lossless: bool)` and
+  `Raster::encode_jp2k_chroma(quality, lossless, subsample)` are **gone**,
+  replaced by `Raster::encode_jp2k(options: jp2k::SaveOptions)` and its new
+  sibling `Raster::save_jp2k` (issue #501). The two old ones lived in
+  `crate::foreign_stubs` and always returned `EncodeError::Unsupported`, so
+  nothing that called them ever produced bytes; the new one does.
+
+  **Migration.** `encode_jp2k(q, true)` becomes
+  `encode_jp2k(jp2k::SaveOptions::default())`. `encode_jp2k(q, false)` becomes
+  `encode_jp2k(jp2k::SaveOptions { compression: jp2k::Compression::Lossy { ratio } })`,
+  and `ratio` is a compression ratio rather than vips's `Q`: see Added below
+  for why there is no `Q` to pass. `encode_jp2k_chroma`'s `subsample` argument
+  has no replacement, because `openjpeg2-pure-rs` exposes no subsampling knob;
+  it never did anything either way.
+
+
 - `ConversionError::FloatFormatUnsupported` is renamed
   `ConversionError::FloatUnsupported` (issue #730). Three of the crate's four
   float-refusal variants already spelled it that way
@@ -641,6 +657,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the ink, so it is issue #692's and not this one's.
 
 ### Added
+
+- JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
+  #501). Build with `--features jp2k` and `decode_jp2k` reads both container
+  forms, the RFC 3745 JP2 box structure and the bare `SOC` + `SIZ` codestream,
+  `.jp2` and `.j2k` become live rows in the content sniffer, and
+  `Raster::encode_jp2k` and `Raster::save_jp2k` write a JP2 container. The
+  `Raster::encode_jp2k(quality, lossless)` and `Raster::encode_jp2k_chroma`
+  typed-`Unsupported` stubs are gone; see Breaking below.
+
+  Without the feature nothing about the surface moves: every entry point still
+  exists at the same signature and returns a typed refusal naming the feature.
+  `decode_jp2k` reports `Jp2kError::FeatureNotEnabled`, the encoders report
+  `EncodeError::Unsupported { format: "jp2k" }`, and the sniffer still routes a
+  JPEG 2000 file here so it reads as "this build has no JPEG 2000" rather than
+  "these bytes are not an image".
+
+  **It is the cheapest codec feature in the crate.** Measured with
+  `cargo generate-lockfile` on a clean tree, 288 packages before and 290 after:
+  **+2 lock entries, and both of them are the two crates themselves**, because
+  neither has a dependency of its own. `svg` costs +29 and `jxl` costs +21.
+  Neither compiles C, declares a `links` key, runs a build script or carries a
+  `-sys` suffix. It is non-default for compile time alone, which is what `svg`
+  argued on its own: 9.7k lines of decoder and 36.9k of translated encoder is
+  real build time and nobody who does not read or write JPEG 2000 should pay
+  it.
+
+  The two halves are split the way `crate::jxl`'s are, and on the same line.
+  `hayro-jpeg2000` decodes, because it is `#![forbid(unsafe_code)]` at the
+  settings this build uses and the decoder is the half that eats
+  attacker-controlled bytes. `openjpeg2-pure-rs`, a translation of OpenJPEG's
+  own C, encodes, because the encoder only ever sees a `Raster` this crate
+  already owns. Three other pure-Rust encoders were measured and rejected;
+  `justjp2` is the one worth naming, because it looks ideal and is not: its own
+  `lossless: true` round trip is not lossless, `hayro-jpeg2000` refuses its
+  output outright, and OpenJPEG 2.5.4 through `vips jp2kload` decodes it to a
+  flat mid-grey with every coefficient gone.
+
+  Measured against `vips` 8.18.6 over the 27 fixtures in
+  `oracle-captures/foreign-jp2k/`, the result splits by wavelet. The
+  **reversible 5/3** path is byte-identical to what `vips rawsave` writes, for
+  seven fixtures covering greyscale, RGB, RGBA, CMYK, tiled, subsampled and
+  multi-resolution, so its pins carry no tolerance at all. The
+  **irreversible 9/7** path is float-specified and agrees with OpenJPEG to
+  within 4 counts at worst, pinned per fixture at the number each one actually
+  reaches. The encoder goes the other way too: every carrier it writes reads
+  back through `vips jp2kload` bit for bit, including 16-bit greyscale and
+  4-band CMYK.
+
+  Four loader behaviours are ports rather than side effects, and each one is
+  invisible to an 8-bit RGB test. A precision-N component is **left-justified**
+  into its element, so a 12-bit 4095 comes back as 65520 and the real depth
+  survives in `bits-per-sample`. A bare codestream with **subsampled chroma**
+  gets OpenJPEG's inverse YCC, coefficient for coefficient and with its
+  truncating casts, because a rounding implementation is one count out. The
+  **tile geometry** is attached only when the image is more than one tile,
+  which is what `vipsheader` shows. And the **ICC profile** comes out of a
+  `METH=2` `colr` box verbatim and unvalidated, which is what `jp2kload` does
+  and is why the fixture carrying 24 bytes that are not a profile still has
+  one.
+
+  Two refusals are carrier gaps in this crate rather than format ones, and both
+  would otherwise be silently wrong answers. A **signed component** is refused
+  with `Jp2kError::SignedComponent`: `PixelFormat` has no signed carrier and
+  the decoder reports every component DC-level-shifted into the unsigned range,
+  so decoding one anyway comes back offset by half the range. More than **16
+  bits** of precision is refused with `Jp2kError::PrecisionNotSupported`: there
+  is no 32-bit integer carrier, and the decoder's `f32` container cannot hold a
+  31-bit sample either.
+
+  The resolution count travels as **`jp2k-resolutions`**, not as `n-pages`.
+  `vipsheader` calls it `n-pages` and vips's `page` selects a resolution level
+  rather than a frame, and this crate reserves that key for counts a zero-based
+  `page` argument can select (issue #635), which `decode_jp2k` does not have
+  yet.
+
+  Lossy is a **compression ratio and not a `Q`**. `jp2ksave --Q` sets
+  OpenJPEG's `cp_fixed_quality` with a distortion ratio in decibels;
+  `openjpeg2-pure-rs` exposes `cp_disto_alloc` with a compression ratio and
+  keeps the rest `pub(crate)`. Those are different numbers, so
+  `Compression::Lossy` carries a `ratio` and there is no `Q` field for this
+  crate to accept and reinterpret, which is the same answer `jxl` gave to
+  `jxlsave`'s `distance`.
+
+  Known limits, each filed: the image origin is read as the standard defines it
+  and vips subtracts it twice (#766); the `colr` box's enumerated colour space
+  does not override the component count here (#767); tiled save has no encoder
+  parameter behind it (#768); and more than four bands is refused on the way
+  out because the loader cannot read it back, though `jp2ksave` writes it
+  (#769).
 
 - AVIF still-image load, behind a new non-default **`avif`** feature
   (issue #605). Build with `--features avif` and `decode_avif` reads an AV1
