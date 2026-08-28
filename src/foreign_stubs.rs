@@ -3,8 +3,9 @@
 //!
 //! The ported foreign and connection cells reference a set of encoders and
 //! decoders for formats that have no mature pure-Rust implementation yet
-//! (HEIF/AVIF, JPEG 2000, Ultra HDR, the ImageMagick delegate,
-//! OpenSlide, and the libvips `fail_on` strictness knob). This
+//! (HEIF/AVIF, Ultra HDR, the ImageMagick delegate, OpenSlide, and the
+//! libvips `fail_on` strictness knob). JPEG 2000 left this list in issue
+//! #501, which replaced its two stubs with [`crate::jp2k`]. This
 //! module supplies those symbols so the cells compile and pin the typed error
 //! path:
 //!
@@ -129,32 +130,6 @@ impl Raster {
     ) -> Result<Vec<u8>, EncodeError> {
         let _ = (quality, compression, tune);
         Err(EncodeError::unsupported("heif"))
-    }
-
-    /// Encode as JPEG 2000 (libvips `jp2ksave`), lossy or lossless.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`]: JPEG 2000 encoding needs an
-    /// external `libopenjp2` path.
-    pub fn encode_jp2k(&self, quality: u8, lossless: bool) -> Result<Vec<u8>, EncodeError> {
-        let _ = (quality, lossless);
-        Err(EncodeError::unsupported("jp2k"))
-    }
-
-    /// Encode as JPEG 2000 with explicit chroma sub-sampling control.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`]; see [`Raster::encode_jp2k`].
-    pub fn encode_jp2k_chroma(
-        &self,
-        quality: u8,
-        lossless: bool,
-        subsample: bool,
-    ) -> Result<Vec<u8>, EncodeError> {
-        let _ = (quality, lossless, subsample);
-        Err(EncodeError::unsupported("jp2k"))
     }
 
     /// Encode as Ultra HDR (gain-map JPEG; libvips `uhdrsave`).
@@ -428,8 +403,6 @@ mod tests {
                 "heif",
             ),
             (im.encode_heif_tune(50, "av1", "ssim").unwrap_err(), "heif"),
-            (im.encode_jp2k(50, false).unwrap_err(), "jp2k"),
-            (im.encode_jp2k_chroma(50, false, true).unwrap_err(), "jp2k"),
             (im.encode_uhdr(75).unwrap_err(), "uhdr"),
             (im.encode_uhdr_gainmap_scale(75, 4).unwrap_err(), "uhdr"),
         ] {
