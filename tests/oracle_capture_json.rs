@@ -530,6 +530,7 @@ fn refuses_non_finite(args: &str) -> bool {
 /// is a thing you can argue your way past six months later. This one has
 /// nothing to argue with.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the capture scripts on disk, which Miri isolation blocks
 fn every_capture_script_refuses_to_write_a_non_finite_float() {
     let scripts = capture_scripts();
     let mut sites_by_script: Vec<(String, usize)> = Vec::new();
