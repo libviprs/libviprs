@@ -22,6 +22,9 @@
 //! | OpenEXR | `SourceError::Exr(ExrError::AllocLimitExceeded)` |
 //! | JPEG XL | `SourceError::Jxl(JxlError::AllocLimitExceeded)` |
 //! | NIfTI | *did not exist yet; it joined self-priced in #510* |
+//! | MATLAB | *did not exist yet; it joined self-priced in #510* |
+//! | Analyze | *did not exist yet; it prices its own frame too, but its
+//!   decode takes two buffers, so it is checked on its own below* |
 //!
 //! JPEG 2000 is not in that table because it did not exist when it was
 //! measured: it landed in #501 on the shared shape from its first commit, and
@@ -60,6 +63,7 @@
 //! prose here and in `SourceError::is_alloc_limit`'s doc went on saying four
 //! until #782.
 
+use libviprs::analyze::decode_analyze;
 use libviprs::jxl::JxlError;
 use libviprs::source::{DecodeLimits, decode_bytes_with_limits};
 use libviprs::{PixelFormat, Raster, SourceError};
@@ -112,6 +116,27 @@ const AVIF: &[u8] = include_bytes!("../oracle-captures/foreign-avif/fixtures/rgb
 /// `vips niftisave` either (the pinned build has no NIfTI support at all,
 /// which is why the oracle for that module is `nifti_clib`).
 const NIFTI: &[u8] = include_bytes!("../oracle-captures/foreign-nifti/fixtures/dt2_uint8.nii");
+
+/// The MATLAB fixture the `mat` module's own budget tests use: a 128-byte
+/// MAT-5 header and one `mxUINT8` variable with `dims = [2, 3]`, which
+/// transposes to a 3x2 image, so `decode_mat` prices it at `3 * 2 * 1 * 1`
+/// = 6 bytes.
+///
+/// Included rather than encoded, for the reason the NIfTI one is: MAT is
+/// load-only here, there is no `Raster::encode_mat`, and `vips` registers no
+/// `matsave` either.
+const MAT: &[u8] = include_bytes!("../oracle-captures/foreign-mat/fixtures/base_2x3_uint8.mat");
+
+/// The Analyze pair the `analyze` module's own budget tests use: a header
+/// declaring `dim = [2, 3, 2]` of `DT_UNSIGNED_CHAR`, so `decode_analyze`
+/// prices it at `3 * 2 * 1 * 1` = 6 bytes.
+const ANALYZE_HDR: &[u8] =
+    include_bytes!("../oracle-captures/foreign-analyze/fixtures/base_2d_uchar.hdr");
+/// Its sibling `.img`, which is the reason Analyze cannot be a `Row`: every
+/// row in the two tables is decoded through `decode_bytes_with_limits`, and
+/// one buffer cannot carry a pair.
+const ANALYZE_IMG: &[u8] =
+    include_bytes!("../oracle-captures/foreign-analyze/fixtures/base_2d_uchar.img");
 
 /// One container, the bytes to decode, and the price `decode_*` computes for
 /// its frame from the declared geometry.
@@ -216,6 +241,21 @@ fn priced_by_libviprs() -> Vec<Row> {
             priced_geometry: (2, 3, 1),
             sample_bytes: 1,
             what: "NIfTI voxel buffer",
+            price: 6,
+        },
+        // MATLAB declares its geometry in a dimensions subelement and then
+        // hands over a raw column-major array, which is the same
+        // decompression-bomb shape, twice over: the array can be declared
+        // ten gigapixels wide behind eight bytes of data, and a
+        // `miCOMPRESSED` element's inflated size is not declared anywhere
+        // (issue #510).
+        Row {
+            format: "mat",
+            bytes: MAT.to_vec(),
+            decoded: (3, 2),
+            priced_geometry: (3, 2, 1),
+            sample_bytes: 1,
+            what: "MAT sample buffer",
             price: 6,
         },
         // WebP prices its own frame from `output_buffer_size` and its own
@@ -377,9 +417,9 @@ fn the_two_tables_account_for_every_container() {
     // JPEG XL, AVIF and JPEG 2000 are each only compiled in behind their own
     // feature, so the self-priced table is one shorter for each that is off.
     // Spelled out rather than hidden in a `cfg!` inside the sum, because a
-    // reader has to be able to check the arithmetic. The 8 unconditional rows
-    // are gif, radiance, fits, openexr, webp, uhdr, .v and nifti.
-    let expected_self_priced = 8
+    // reader has to be able to check the arithmetic. The 9 unconditional rows
+    // are gif, radiance, fits, openexr, webp, uhdr, .v, nifti and mat.
+    let expected_self_priced = 9
         + usize::from(cfg!(feature = "jxl"))
         + usize::from(cfg!(feature = "avif"))
         + usize::from(cfg!(feature = "jp2k"));
@@ -389,15 +429,59 @@ fn the_two_tables_account_for_every_container() {
     );
     assert_eq!(image_backed, 3, "the image-backed table changed size");
 
+    // Analyze prices its declared geometry exactly the way the self-priced
+    // table's rows do, and reports the same shape, but its decode takes two
+    // buffers so it cannot be driven from `decode_bytes_with_limits` like
+    // every `Row` here, which is why it is the one container back outside
+    // the two tables. `the_paired_decoder_reports_the_same_shape_from_its_own_entry_point`
+    // is where it is checked instead (issue #764).
+    let excluded_takes_two_buffers = 1;
+
     let absent_features = usize::from(!cfg!(feature = "jxl"))
         + usize::from(!cfg!(feature = "avif"))
         + usize::from(!cfg!(feature = "jp2k"));
     assert_eq!(
-        self_priced + image_backed + absent_features,
-        14,
-        "the two tables must account for all fourteen containers libviprs sniffs, \
-         with no exclusions left; see SniffedFormat::ALL"
+        self_priced + image_backed + absent_features + excluded_takes_two_buffers,
+        16,
+        "the two tables plus the one documented exclusion must account for all \
+         sixteen containers libviprs sniffs; see SniffedFormat::ALL"
     );
+}
+
+/// Issue #764. The paired decoder is not a row in either table above, because
+/// both are driven through `decode_bytes_with_limits` and an Analyze `.hdr`
+/// alone is refused by design. It still prices its declared geometry the same
+/// way and still reports the same shape, and that is asserted here rather than
+/// left as an exemption.
+///
+/// The budget-lifted control is the same one `refuse` applies to every row: an
+/// assertion about *how* a decode was refused proves nothing if the file was
+/// going to be refused anyway.
+#[test]
+fn the_paired_decoder_reports_the_same_shape_from_its_own_entry_point() {
+    let open = DecodeLimits::default().with_max_alloc_bytes(u64::MAX);
+    let ok = decode_analyze(ANALYZE_HDR, ANALYZE_IMG, open)
+        .expect("analyze must decode with the budget lifted");
+    assert_eq!((ok.width(), ok.height()), (3, 2));
+
+    let tight = DecodeLimits::default().with_max_alloc_bytes(5);
+    let err = decode_analyze(ANALYZE_HDR, ANALYZE_IMG, tight)
+        .expect_err("analyze must be refused one byte under its price");
+    let SourceError::AllocLimitExceeded {
+        what,
+        geometry,
+        needed_bytes,
+        max_alloc_bytes,
+    } = err
+    else {
+        panic!("analyze: not the shared shape: {err:?}");
+    };
+    let g = geometry.expect("a decoder that priced a declared geometry must report it");
+    assert_eq!((g.width, g.height, g.bands), (3, 2, 1));
+    assert_eq!(needed_bytes, 6);
+    assert_eq!(max_alloc_bytes, 5);
+    assert_eq!(what, "Analyze pixel buffer");
+    assert!(err.is_alloc_limit(), "and one call still catches it");
 }
 
 /// Issue #686. Every format libviprs prices itself reports the refusal in one

@@ -95,7 +95,8 @@ pub enum RasterError {
 ///
 /// Dimensions flow unclamped from file headers (`/MediaBox`, TIFF/PNG IHDR)
 /// into buffer allocations. A crafted `50000 × 50000 × Rgba16` (~20 GB) is
-/// below the `usize`-overflow threshold [`buffer_len`] guards against, yet far
+/// below the `usize`-overflow threshold the crate-internal `buffer_len` helper
+/// guards against, yet far
 /// above host memory: an infallible `vec![0u8; size]` would call
 /// `handle_alloc_error` and abort the process (a remote DoS) with no chance to
 /// return a [`Result`]. [`Raster::new`] and [`Raster::zeroed`] reject any size

@@ -104,6 +104,7 @@ fn save_options_are_constructible_downstream() {
 /// integer carriers.
 #[test]
 #[cfg(feature = "jxl")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_exactly() {
     let dir = tempfile::tempdir().unwrap();
     for (name, original) in [("eight", ramp()), ("sixteen", ramp16())] {
@@ -127,6 +128,7 @@ fn encode_and_save_round_trip_exactly() {
 /// routes the bytes back without help from the filename.
 #[test]
 #[cfg(feature = "jxl")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_shared_dispatchers_carry_jxl() {
     let original = ramp();
     let dir = tempfile::tempdir().unwrap();
@@ -226,6 +228,7 @@ fn a_single_pixel_axis_is_refused_from_outside_the_crate() {
 /// that a consumer's code compiles against either build.
 #[test]
 #[cfg(not(feature = "jxl"))]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn without_the_feature_the_surface_is_unchanged_and_typed() {
     let raster = ramp();
 
