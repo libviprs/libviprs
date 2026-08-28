@@ -1413,6 +1413,7 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imageio::MetadataValue;
 
     /// A width x height Gray8 raster from a byte vector.
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
@@ -2359,5 +2360,260 @@ mod tests {
             "sideways".parse::<CompassDirection>(),
             Err(ExtractError::UnknownDirection { .. })
         ));
+    }
+    // -- metadata (issue #690) -----------------------------------------------------------
+
+    /// An 8x8 `Rgb8` ramp carrying every field [`crate::conversion::RasterMeta`]
+    /// holds, plus an attached one, matching the raster the oracle tables in
+    /// this section were measured on.
+    fn tagged_source() -> Raster {
+        let mut im = rgb(8, 8, (0..8u32 * 8 * 3).map(|v| v as u8).collect())
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .xres(5.0)
+            .yres(7.0)
+            .xoffset(11)
+            .yoffset(13)
+            .orientation(6)
+            .build();
+        im.set_field("lane-690", MetadataValue::Str("carried".to_string()));
+        im
+    }
+
+    /// The seven operations issue #690 names, run on `im` with the arguments
+    /// the oracle ran, plus `smartcrop` to pin that it inherits whatever
+    /// `extract_area` decides.
+    ///
+    /// [`Raster::try_insert`] is deliberately absent. It drops the metadata
+    /// the same way, but its rule is a two-input one and a different shape:
+    /// measured on vips 8.18.6, the header block comes from `main` alone
+    /// (`vips insert` of an scRGB main with a Lab sub reports scRGB, and the
+    /// main's resolution, offset and orientation), while the attached fields
+    /// are the union of both with `main` winning a name they share. Carrying
+    /// that union needs a merge on `MetadataFields`, which lives in
+    /// `imageio`, so it is a separate change rather than a line folded in
+    /// here.
+    fn extract_op_results(im: &Raster) -> Vec<(&'static str, Raster)> {
+        vec![
+            ("extract_area", im.extract_area(1, 1, 4, 4)),
+            ("crop", im.crop(1, 1, 4, 4)),
+            ("embed", im.embed(1, 1, 12, 12, Extend::White, None)),
+            ("gravity", im.gravity(CompassDirection::Centre, 12, 12)),
+            ("replicate", im.replicate(2, 3)),
+            ("zoom", im.zoom(2, 3)),
+            ("subsample", im.subsample(2, 4)),
+            (
+                "smartcrop",
+                im.smartcrop(4, 4, SmartcropInteresting::Centre),
+            ),
+        ]
+    }
+
+    /// Issue #690. The interpretation survives every extract operation:
+    /// none of them changes what a sample means.
+    ///
+    /// `ScRgb` on an `Rgb8` carrier is the tag that can actually fail here.
+    /// An untagged `Rgb8` infers [`Interpretation::Srgb`], so a result that
+    /// dropped the tag reads back as `Srgb` rather than as anything obviously
+    /// empty, and the first assertion pins that the two differ so the loop
+    /// below cannot pass by agreeing with the inference.
+    ///
+    /// Measured on vips 8.18.6 against an 8x8 uchar 3-band
+    /// `--interpretation scrgb`: all eight report
+    /// `VIPS_INTERPRETATION_scRGB`. The tag is not an scRGB special case
+    /// either, `grey16`, `b-w`, `lab`, `cmyk`, `rgb16`, `hsv` and `oklab`
+    /// all come back through `extract_area` and `embed` unchanged.
+    #[test]
+    fn every_extract_op_carries_the_interpretation() {
+        let im = tagged_source();
+        assert_eq!(
+            Interpretation::for_format(im.format()),
+            Interpretation::Srgb,
+            "the tag under test has to differ from the inferred one"
+        );
+        for (name, out) in extract_op_results(&im) {
+            assert_eq!(out.interpretation(), Interpretation::ScRgb, "{name}");
+        }
+    }
+
+    /// Issue #690. Resolution and orientation ride along too.
+    ///
+    /// `zoom` and `subsample` are the two the issue asked to measure rather
+    /// than assume, since they rescale the pixel grid: vips does **not**
+    /// rescale the resolution with it. `vips zoom` by 2x3 on `xres=5 yres=7`
+    /// reports 5 and 7 back, not 10 and 21, and `vips subsample` by 2x4
+    /// reports the same 5 and 7 rather than 2.5 and 1.75. So the carry is
+    /// verbatim on all seven and no per-op scaling rule is needed.
+    ///
+    /// A `.v` container stores the resolution as `float`, so `vipsheader -f
+    /// yres` prints `6.9999606...` for the 7 that went in. The seven ops
+    /// each report exactly what their input reported, which is the part
+    /// under test; the rounding is the container's, not theirs.
+    ///
+    /// The defaults are `1.0`, `1.0` and `1`, so every value asserted here
+    /// differs from what a freshly built raster would report.
+    #[test]
+    fn every_extract_op_carries_the_resolution_and_orientation() {
+        let im = tagged_source();
+        for (name, out) in extract_op_results(&im) {
+            assert_eq!(out.xres(), 5.0, "{name} xres");
+            assert_eq!(out.yres(), 7.0, "{name} yres");
+            assert_eq!(out.orientation(), 6, "{name} orientation");
+        }
+    }
+
+    /// Issue #690. The attached fields survive as well, which is the half a
+    /// bare `out.meta = self.meta` leaves behind.
+    ///
+    /// Measured on vips 8.18.6 with a `VipsRefString` field written into the
+    /// source's extension block (`vipsedit --setext`): every one of the
+    /// eight reports it back.
+    ///
+    /// The ICC blob is here because it is the attachment a caller notices
+    /// losing, and because it exercises the other `MetadataValue` arm. That
+    /// half was measured on a real profile rather than a hand-written one,
+    /// since a `VipsBlob` typed into an extension block does not survive
+    /// being written back out: `vips icc_transform in.v out.v "sRGB
+    /// Profile.icc"` attaches 3144 bytes of `icc-profile-data`, and all
+    /// eight hand the same 3144 bytes on.
+    #[test]
+    fn every_extract_op_carries_the_attached_fields() {
+        let mut im = tagged_source();
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        for (name, out) in extract_op_results(&im) {
+            assert_eq!(
+                out.get_field("lane-690"),
+                Some(MetadataValue::Str("carried".to_string())),
+                "{name} attached string"
+            );
+            assert_eq!(
+                out.get_field("icc-profile-data"),
+                Some(MetadataValue::Blob(vec![1, 2, 3])),
+                "{name} attached blob"
+            );
+        }
+    }
+
+    /// Issue #690. The origin offset is the one field the seven do not agree
+    /// on, so it is the one a wholesale carry would get wrong.
+    ///
+    /// `vips_extract_area` sets `Xoffset = -left` and `Yoffset = -top` and
+    /// discards the source's, while the placement and tiling ops leave the
+    /// source's alone. Measured on vips 8.18.6 from a source at
+    /// `xoffset=11 yoffset=13`, sweeping `left` over 0/1/3/4 against `top`
+    /// over 0/2/5: `extract_area` reports `-left` / `-top` in all twelve
+    /// cells. `vips embed` over `x` in 0/2/-2 against `y` in 0/3/-3 reports
+    /// 11 / 13 in all nine, and `replicate 2 3`, `zoom 2 3` and
+    /// `subsample 2 4` report 11 / 13 as well.
+    ///
+    /// `smartcrop` inherits the rule because it is `extract_area`
+    /// underneath: `--interesting centre` on 8x8 to 4x4 gives -2 / -2,
+    /// `low` gives 0 / 0 and `high` gives -4 / -4, which is `-left` / `-top`
+    /// for the three crops those strategies pick.
+    #[test]
+    fn crop_stamps_the_offset_where_the_others_carry_it() {
+        let im = tagged_source();
+        assert_eq!((im.xoffset(), im.yoffset()), (11, 13), "source offset");
+        for left in [0u32, 1, 3, 4] {
+            for top in [0u32, 2, 5] {
+                let want = (-(left as i32), -(top as i32));
+                let area = im.extract_area(left, top, 4, 3);
+                assert_eq!(
+                    (area.xoffset(), area.yoffset()),
+                    want,
+                    "extract_area {left},{top}"
+                );
+                let cropped = im.crop(left, top, 4, 3);
+                assert_eq!(
+                    (cropped.xoffset(), cropped.yoffset()),
+                    want,
+                    "crop {left},{top}"
+                );
+            }
+        }
+        for (name, want, out) in [
+            (
+                "smartcrop centre",
+                (-2, -2),
+                im.smartcrop(4, 4, SmartcropInteresting::Centre),
+            ),
+            (
+                "smartcrop low",
+                (0, 0),
+                im.smartcrop(4, 4, SmartcropInteresting::Low),
+            ),
+            (
+                "smartcrop high",
+                (-4, -4),
+                im.smartcrop(4, 4, SmartcropInteresting::High),
+            ),
+        ] {
+            assert_eq!((out.xoffset(), out.yoffset()), want, "{name}");
+        }
+        for (name, out) in [
+            ("embed", im.embed(1, 1, 12, 12, Extend::White, None)),
+            (
+                "embed negative",
+                im.embed(-2, -3, 12, 12, Extend::Black, None),
+            ),
+            ("gravity", im.gravity(CompassDirection::Centre, 12, 12)),
+            ("replicate", im.replicate(2, 3)),
+            ("zoom", im.zoom(2, 3)),
+            ("subsample", im.subsample(2, 4)),
+        ] {
+            assert_eq!((out.xoffset(), out.yoffset()), (11, 13), "{name}");
+        }
+    }
+
+    /// Issue #690 against #667. [`Extend::White`] inks from the
+    /// interpretation, so an embed that hands back an untagged result inks
+    /// *differently the second time round*: the tag that chose the ink is
+    /// gone, `Rgb8` infers [`Interpretation::Srgb`], and the border lands on
+    /// 255 instead of 1.
+    ///
+    /// This is the pixel-level consequence of the tag carry, so it is
+    /// asserted separately from the header tests above rather than folded
+    /// into them.
+    ///
+    /// Measured on vips 8.18.6:
+    ///
+    /// ```text
+    /// vips copy sevens.v sc.v --interpretation scrgb
+    /// vips embed sc.v e1.v 1 1 8 8 --extend white     -> corner 1 1 1, scrgb
+    /// vips embed e1.v e2.v 1 1 12 12 --extend white   -> corner 1 1 1, scrgb
+    /// vips crop sc.v c1.v 1 1 2 2                     -> scrgb
+    /// vips embed c1.v c2.v 1 1 6 6 --extend white     -> corner 1 1 1
+    /// ```
+    ///
+    /// The sRGB control is the other half of it: the same source tagged
+    /// `--interpretation srgb` paints 255 on both passes, so the assertion
+    /// below is reading the tag rather than a constant either way.
+    #[test]
+    fn embed_white_inks_the_same_on_a_second_pass() {
+        let scrgb = rgb(4, 4, vec![7; 48])
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build();
+        let once = scrgb.embed(1, 1, 8, 8, Extend::White, None);
+        assert_eq!(once.getpoint(0, 0), vec![1.0, 1.0, 1.0], "first embed");
+        let twice = once.embed(1, 1, 12, 12, Extend::White, None);
+        assert_eq!(twice.getpoint(0, 0), vec![1.0, 1.0, 1.0], "second embed");
+        let after_crop = scrgb
+            .crop(1, 1, 2, 2)
+            .embed(1, 1, 6, 6, Extend::White, None);
+        assert_eq!(after_crop.getpoint(0, 0), vec![1.0, 1.0, 1.0], "after crop");
+
+        let srgb = rgb(4, 4, vec![7; 48])
+            .copy()
+            .interpretation(Interpretation::Srgb)
+            .build();
+        let white = srgb.embed(1, 1, 8, 8, Extend::White, None);
+        assert_eq!(white.getpoint(0, 0), vec![255.0, 255.0, 255.0], "srgb once");
+        let white2 = white.embed(1, 1, 12, 12, Extend::White, None);
+        assert_eq!(
+            white2.getpoint(0, 0),
+            vec![255.0, 255.0, 255.0],
+            "srgb twice"
+        );
     }
 }
