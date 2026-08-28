@@ -1264,6 +1264,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Convolution stopped widening the whole image. `conv`, `convsep`, `gaussblur`,
+  `compass`, `sobel`, `scharr`, `prewitt` and canny's gradient stage all run one
+  shared traversal, and that traversal used to decode the entire source to `f64`
+  before it started: eight bytes a sample where a uchar carries one, which made
+  it the largest allocation in the crate. It keeps a rolling window of the rows
+  the mask actually reaches instead, `min(h, mask height)` of them, each source
+  row widened exactly once on the way past (issue #575).
+
+  Measured on a 4000x4000 `Rgb8` input, release, peak resident set:
+
+  | operation | before | after |
+  |---|---|---|
+  | `conv`, 3x3 box, integer | 464 MiB, 10.1x the input | 98 MiB, 2.1x |
+  | `conv`, 3x3 box, float, `Rgb16` | 693 MiB, 7.6x | 327 MiB, 3.6x |
+  | `sobel` | 464 MiB, 10.1x | 98 MiB, 2.1x |
+  | `gaussblur`, sigma 3, integer | 510 MiB | 145 MiB |
+
+  Not one output byte moves. The window holds the same values in the same
+  order and the accumulation is untouched, so every pinned oracle capture and
+  every FNV hash in the module reads exactly what it read before.
+
+  The allocation counts moved with it: a `conv` at integer precision now makes
+  **one** image-sized allocation, its own output, and `canny` makes eight rather
+  than eleven. `tests/convolution_image_sized_allocations.rs` (renamed from
+  `sharpen_canny_image_sized_allocations.rs`, since the budgets are no longer
+  only those two) pins all sixteen rows at two image sizes.
+
+  `Raster::try_compass` is the one operation that did not move, because its
+  combine reads all `times` results at the same sample and so has no row window
+  to keep. It has a row in the budget file saying so, at 159 bytes a pixel over
+  a three-byte-a-pixel input, and an issue of its own.
+
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
   `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
   actually runs (issues #675, #707). Neither change makes the job pass. What
