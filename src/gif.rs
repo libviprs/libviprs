@@ -15,11 +15,12 @@
 //!
 //! # Operations
 //!
-//! | libviprs method          | libvips equivalent | result                                              |
-//! |--------------------------|--------------------|-----------------------------------------------------|
-//! | [`decode_gif`]           | `gifload`          | frame 0 as `Rgb8` or `Rgba8`, plus the GIF fields    |
-//! | [`Raster::encode_gif`]   | `gifsave_buffer`   | one-frame GIF89a bytes                              |
-//! | [`Raster::save_gif`]     | `gifsave`          | the same bytes written to a path                    |
+//! | libviprs method          | libvips equivalent      | result                                           |
+//! |--------------------------|-------------------------|--------------------------------------------------|
+//! | [`decode_gif`]           | `gifload`               | frame 0 as `Rgb8` or `Rgba8`, plus the GIF fields |
+//! | [`decode_gif_with`]      | `gifload` `page` / `n`  | a window of frames as one page roll               |
+//! | [`Raster::encode_gif`]   | `gifsave_buffer`        | one-frame GIF89a bytes                           |
+//! | [`Raster::save_gif`]     | `gifsave`               | the same bytes written to a path                 |
 //!
 //! # Semantics
 //!
@@ -41,6 +42,12 @@
 //!   means `loop = n + 1`. Measured across the reference suite:
 //!   `dispose-background.gif` carries 10 and reports 11, `garden.gif`
 //!   carries 0 and reports 0, `cramps.gif` carries none and reports 1.
+//!   [`LoopCount::from_gif_wire`](crate::frames::LoopCount::from_gif_wire)
+//!   is that mapping over an `Option`, and the `gif` crate's decoder keeps
+//!   the two apart cleanly: it reports a block holding 0 as
+//!   `Repeat::Infinite` and leaves its `Repeat::Finite(0)` default in place
+//!   when there is no block, so "play once" and "play forever" never
+//!   collapse onto each other.
 //! * **Alpha is thresholded at 128 on save**, and a pixel below it is zeroed
 //!   to `(0, 0, 0, 0)` before quantisation, colour included
 //!   (`cgifsave.c:538-548`). GIF has one transparent index and no partial
@@ -96,15 +103,73 @@
 //!   the `gif` crate as the table-size flag; cgif writes zero. Nothing reads
 //!   the field.
 //!
+//! # Animation
+//!
+//! [`decode_gif_with`] takes vips's `page` and `n` and stacks the frames it
+//! selects into one raster whose rows are a whole number of equal-height
+//! pages, the layout [`crate::frames`] describes. `decode_gif` is that with
+//! `page = 0, n = 1`, which is vips's default and a still image.
+//!
+//! Four things about it are measured against vips 8.18.6 rather than read
+//! off `nsgifload.c`, because each of them is a place a plausible
+//! implementation is quietly wrong:
+//!
+//! * **The delay unit.** The graphic control extension counts
+//!   centiseconds and vips's `delay` counts milliseconds, so `4 6 8 10` on
+//!   the wire is `40 60 80 100` in the field.
+//!   [`FrameDelay::from_centiseconds`] is the crossing and the unit is in
+//!   the type, because an integer that passes straight through is a silent
+//!   factor of ten no other assertion catches.
+//! * **The delay array covers the pages this raster holds**, one entry per
+//!   page, and that is a deliberate divergence. vips reports the whole
+//!   file's array whatever window was loaded: `anim4.gif[page=2,n=2]` loads
+//!   frames 2 and 3 and still says `delay: 40 60 80 100`, so re-saving it
+//!   writes 40 and 60 centiseconds onto frames whose real delays are 80 and
+//!   100. Both halves of that are measured. Making `delay[i]` loaded page
+//!   `i`'s delay is what makes the array usable on the raster it is attached
+//!   to, and it is the same split `n-pages` already has: `n-pages` describes
+//!   the file and [`Raster::pages_loaded`] describes the raster.
+//! * **`page-height` is attached only when more than one page is loaded**,
+//!   which is what vips does: a default `gifload` of a four-frame file
+//!   attaches `n-pages`, `loop` and `delay` and no `page-height`, and so
+//!   does `[page=3]`.
+//! * **Compositing starts at frame 0 whatever `page` says.** GIF frames are
+//!   differences, so a window cannot be rendered from its own first frame.
+//!
+//! ## Disposal and blending
+//!
+//! Each frame paints its own rectangle over the canvas, skipping its
+//! transparent index so what is underneath shows through, and then the
+//! canvas is disposed of before the next frame draws. The rules are
+//! libnsgif's, each one measured by building the fixture, running it through
+//! the pinned vips binary and pinning what came back:
+//!
+//! | disposal code | what happens to the canvas                                    |
+//! |---------------|---------------------------------------------------------------|
+//! | 0, 1          | nothing; the next frame draws over it                         |
+//! | 2             | this frame's rectangle is cleared, and only it                |
+//! | 3             | the whole canvas rewinds to before this frame drew            |
+//! | 5, 6, 7       | nothing, as for 0 and 1                                       |
+//!
+//! Code 2 has two arms and one fixture cannot see both: the clear is
+//! **transparent** when the disposed frame declares a transparent index and
+//! the **background colour** when it does not, and the background colour is
+//! the global colour table entry the screen descriptor points at, or black
+//! when that index is past the end of the table. All three are pinned.
+//!
+//! **Code 4 is the one divergence.** libnsgif treats it as a second spelling
+//! of "restore to previous"; libviprs keeps the canvas, as for 0 and 1. The
+//! `gif` crate's decoder maps every code it does not know onto
+//! `DisposalMethod::Any`, so 4 arrives here indistinguishable from 0, and
+//! recovering it would mean a second block walk beside the decoder's own.
+//! Code 4 is reserved by GIF89a, the difference is only visible on a file
+//! that uses it, and `a_reserved_disposal_code_keeps_the_canvas` pins what
+//! libviprs does with it. Issue #827 tracks it.
+//!
 //! # Not handled here
 //!
-//! Animation. `decode_gif` loads **frame 0**, which is exactly what `vips
-//! gifload` does by default (`page = 0`, `n = 1`), and attaches `n-pages` so
-//! a caller can see the rest is there. Multi-page load and save are #572 and
-//! #573, blocked on the page model (#564). For the same reason the array
-//! fields `delay`, `background`, and `gif-palette` are read but not
-//! attached: [`crate::imageio::MetadataValue`] has no array variant yet, and
-//! adding one is #564's call. `gifsave`'s `effort`, `reuse`,
+//! The array fields `background` and `gif-palette` are read but not
+//! attached; issue #828 has the measurements. `gifsave`'s `effort`, `reuse`,
 //! `interpalette-maxerror`, `interframe-maxerror` and `keep-duplicate-frames`
 //! are cgif-specific palette-reuse and frame-coalescing machinery with no
 //! pure-Rust equivalent and are not modelled.
@@ -114,11 +179,13 @@
 //! there is no panicking twin, matching the rest of the codec surface.
 
 use crate::codec::EncodeError;
+use crate::frames::FrameDelay;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, buffer_len};
 use crate::source::{DecodeLimits, SourceError};
 use std::io::Cursor;
+use std::ops::Range;
 use std::path::Path;
 use thiserror::Error;
 
@@ -246,6 +313,33 @@ impl LoadOptions {
         self.n = n;
         self
     }
+
+    /// The half-open range of frames these options select out of a file
+    /// holding `frames` of them.
+    ///
+    /// # Errors
+    ///
+    /// [`GifError::BadPageNumber`] for any window the file cannot serve,
+    /// which is the single case vips reports for all of them.
+    fn window(self, frames: u32) -> Result<Range<u32>, GifError> {
+        let bad = || GifError::BadPageNumber {
+            page: self.page,
+            n: self.n,
+            frames,
+        };
+        if self.page >= frames {
+            return Err(bad());
+        }
+        let count = match self.n {
+            -1 => frames - self.page,
+            n => u32::try_from(n).map_err(|_| bad())?,
+        };
+        let end = self.page.checked_add(count).ok_or_else(bad)?;
+        if count == 0 || end > frames {
+            return Err(bad());
+        }
+        Ok(self.page..end)
+    }
 }
 
 /// Options for [`Raster::encode_gif`] (libvips `gifsave` / `gifsave_buffer`).
@@ -342,7 +436,8 @@ struct FileScan {
 /// gifload` does by default (`page = 0`, `n = 1`). The palette is expanded
 /// to `Rgb8`, or to `Rgba8` when any frame in the file declares a
 /// transparent index; see the [module docs](crate::gif) for the full
-/// semantics and for what is deferred to the animation lanes.
+/// semantics. [`decode_gif_with`] is the same decoder with vips's `page` and
+/// `n`, for loading more than one frame.
 ///
 /// # Errors
 ///
@@ -355,10 +450,39 @@ struct FileScan {
 /// * [`SourceError::DimensionLimitExceeded`] when `width * height` exceeds
 ///   [`DecodeLimits::max_pixels`].
 pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+    decode_gif_with(bytes, limits, LoadOptions::default())
+}
+
+/// Decode a window of a GIF's frames into one page roll (libvips `gifload`
+/// with `page` and `n`).
+///
+/// The frames `options` selects are composited in file order and stacked top
+/// to bottom into a single raster whose `page-height` is the logical screen
+/// height, which is the toilet-roll layout [`crate::frames`] describes and
+/// the one `vips copy 'anim.gif[n=-1]' out.v` writes. A one-page window is
+/// exactly [`decode_gif`], down to the fields.
+///
+/// Compositing always starts at frame 0 whatever `page` says, because GIF
+/// frames are differences: a frame may paint a sub-rectangle, may leave
+/// pixels transparent to show what is underneath, and says how the canvas is
+/// to be disposed of before the next one draws. Skipping to the window would
+/// render the wrong pixels, and vips does not skip either.
+///
+/// # Errors
+///
+/// Everything [`decode_gif`] returns, plus [`GifError::BadPageNumber`] when
+/// `options` asks for pages the file does not hold.
+pub fn decode_gif_with(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    options: LoadOptions,
+) -> Result<Raster, SourceError> {
     let scan = scan_file(bytes)?;
     if scan.frames == 0 {
         return Err(GifError::NoFrames.into());
     }
+    let window = options.window(scan.frames).map_err(SourceError::from)?;
+    let pages = window.end - window.start;
 
     let bands = if scan.has_transparency { 4 } else { 3 };
     let mut decoder = open(bytes)?;
@@ -381,6 +505,21 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // refusal reports.
     limits.check_image_alloc("GIF canvas", width, height, bands as u64, 1)?;
 
+    // The roll is `pages` screens stacked, and it is priced separately from
+    // the canvas because it is a separate allocation and, for an animation,
+    // much the larger of the two. The product is taken in `u64` and narrowed
+    // afterwards: a many-framed file is exactly where `height * pages` would
+    // wrap a `u32` into a small, plausible height, and the saturation is a
+    // refusal rather than a decode, because `u32::MAX` rows is over
+    // `max_coord`, over `max_pixels` and over any allocation budget short of
+    // the `u64::MAX` `exceeds_alloc_budget` refuses outright.
+    let roll_height = u32::try_from(u64::from(height) * u64::from(pages)).unwrap_or(u32::MAX);
+    if pages > 1 {
+        limits.check_coord(width, roll_height)?;
+        limits.check_pixels(width, roll_height)?;
+        limits.check_image_alloc("GIF animation", width, roll_height, bands as u64, 1)?;
+    }
+
     // The canvas starts fully transparent and stays that way outside the
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and
     // never paints the background colour, which is why `vips getpoint`
@@ -390,46 +529,111 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // the budget says the byte count fits a `u64`, which on a 32-bit
     // target is not the same as fitting the address space, and a caller
     // can raise `max_alloc_bytes` past 4 GiB there.
-    let mut data = vec![0u8; buffer_len(width, height, bands).map_err(GifError::Raster)?];
-    let frame = decoder
-        .next_frame_info()
-        .map_err(decode_error)?
-        .ok_or(GifError::NoFrames)?;
-    let transparent = frame.transparent;
-    let (left, top) = (u32::from(frame.left), u32::from(frame.top));
-    let (fw, fh) = (u32::from(frame.width), u32::from(frame.height));
-    let local = frame.palette.clone();
-    let mut indices = vec![0u8; decoder.buffer_size()];
-    // A truncated frame keeps the rows that did arrive. The buffer starts
-    // zeroed and `read_into_buffer` fills it in order, so the tail is left
-    // as index 0 exactly where libnsgif leaves it uncomposited -- which is
-    // why `vips getpoint truncated.gif 574 799` prints `0 0 0 0` while the
-    // top of the same file is real image data.
-    let _truncated = decoder.read_into_buffer(&mut indices);
-    let palette = local
-        .or_else(|| decoder.global_palette().map(<[u8]>::to_vec))
-        .unwrap_or_default();
+    let page_bytes = buffer_len(width, height, bands).map_err(GifError::Raster)?;
+    let mut canvas = vec![0u8; page_bytes];
+    let mut data = vec![0u8; buffer_len(width, roll_height, bands).map_err(GifError::Raster)?];
+    // The snapshot a "restore to previous" disposal rewinds to. Allocated
+    // lazily, and not priced again: it is the same size as the canvas, which
+    // the budget has already cleared, and the budget is per allocation.
+    let mut previous: Vec<u8> = Vec::new();
+    let mut delays: Vec<i64> = Vec::with_capacity(pages as usize);
+    let global = decoder.global_palette().map(<[u8]>::to_vec);
+    let background = background_rgb(global.as_deref(), decoder.bg_color());
 
-    for y in 0..fh.min(height.saturating_sub(top)) {
-        for x in 0..fw.min(width.saturating_sub(left)) {
-            let Some(&index) = indices.get((y * fw + x) as usize) else {
-                continue;
-            };
-            if transparent == Some(index) {
-                continue;
+    for index in 0..window.end {
+        let Some(frame) = decoder.next_frame_info().map_err(decode_error)? else {
+            // `scan_file` counted this frame, so the walk cannot run out
+            // early unless the two disagree about where the file ends.
+            return Err(GifError::NoFrames.into());
+        };
+        let transparent = frame.transparent;
+        let dispose = frame.dispose;
+        let delay_cs = frame.delay;
+        let (left, top) = (u32::from(frame.left), u32::from(frame.top));
+        let (fw, fh) = (u32::from(frame.width), u32::from(frame.height));
+        let local = frame.palette.clone();
+        let mut indices = vec![0u8; decoder.buffer_size()];
+        // A truncated frame keeps the rows that did arrive. The buffer starts
+        // zeroed and `read_into_buffer` fills it in order, so the tail is left
+        // as index 0 exactly where libnsgif leaves it uncomposited -- which is
+        // why `vips getpoint truncated.gif 574 799` prints `0 0 0 0` while the
+        // top of the same file is real image data.
+        let _truncated = decoder.read_into_buffer(&mut indices);
+        let palette = local.as_deref().or(global.as_deref()).unwrap_or(&[]);
+
+        let last = index + 1 == window.end;
+        if !last && dispose == gif::DisposalMethod::Previous {
+            previous.clear();
+            previous.extend_from_slice(&canvas);
+        }
+
+        for y in 0..fh.min(height.saturating_sub(top)) {
+            for x in 0..fw.min(width.saturating_sub(left)) {
+                let Some(&index) = indices.get((y * fw + x) as usize) else {
+                    continue;
+                };
+                if transparent == Some(index) {
+                    continue;
+                }
+                let entry = usize::from(index) * PALETTE_STRIDE;
+                // An index past the end of the colour table is left as the
+                // cleared canvas rather than guessed at, which is what the `gif`
+                // crate's own RGBA expansion does with it.
+                let Some(rgb) = palette.get(entry..entry + PALETTE_STRIDE) else {
+                    continue;
+                };
+                let out = (((y + top) * width) + x + left) as usize * bands;
+                canvas[out..out + PALETTE_STRIDE].copy_from_slice(rgb);
+                if bands == 4 {
+                    canvas[out + 3] = u8::MAX;
+                }
             }
-            let entry = usize::from(index) * PALETTE_STRIDE;
-            // An index past the end of the colour table is left as the
-            // cleared canvas rather than guessed at, which is what the `gif`
-            // crate's own RGBA expansion does with it.
-            let Some(rgb) = palette.get(entry..entry + PALETTE_STRIDE) else {
-                continue;
-            };
-            let out = (((y + top) * width) + x + left) as usize * bands;
-            data[out..out + PALETTE_STRIDE].copy_from_slice(rgb);
-            if bands == 4 {
-                data[out + 3] = u8::MAX;
+        }
+
+        if index >= window.start {
+            let page = (index - window.start) as usize * page_bytes;
+            data[page..page + page_bytes].copy_from_slice(&canvas);
+            // The one conversion this issue exists for: the graphic control
+            // extension counts centiseconds and vips's `delay` counts
+            // milliseconds, so the type carries the unit across the boundary
+            // rather than an integer that looks the same either way.
+            delays.push(i64::from(FrameDelay::from_centiseconds(delay_cs).millis()));
+        }
+
+        if last {
+            continue;
+        }
+        match dispose {
+            // Clear this frame's rectangle, and only it. libnsgif fills with
+            // transparent when *this* frame declared a transparent index and
+            // with the background colour when it did not, which is measured
+            // rather than assumed: the same two-frame file loads with a
+            // transparent hole when frame 0 carries the index and with an
+            // opaque blue one when frame 1 carries it instead.
+            gif::DisposalMethod::Background => {
+                let fill: [u8; 4] = if transparent.is_some() {
+                    [0, 0, 0, 0]
+                } else {
+                    [background[0], background[1], background[2], u8::MAX]
+                };
+                for y in 0..fh.min(height.saturating_sub(top)) {
+                    for x in 0..fw.min(width.saturating_sub(left)) {
+                        let out = (((y + top) * width) + x + left) as usize * bands;
+                        canvas[out..out + bands].copy_from_slice(&fill[..bands]);
+                    }
+                }
             }
+            // Rewind the whole canvas to the snapshot taken above. Only this
+            // frame has drawn since, so restoring the canvas and restoring
+            // its rectangle are the same thing.
+            gif::DisposalMethod::Previous => canvas.copy_from_slice(&previous),
+            // `Any` (code 0) and `Keep` (code 1) both leave the canvas alone.
+            // So do the reserved codes 5, 6 and 7, measured on vips 8.18.6.
+            // Code 4 is where this differs from libnsgif, which treats it as
+            // a second spelling of "restore to previous": the `gif` crate maps
+            // every code it does not know onto `Any`, so the distinction is
+            // not visible here. See the module docs.
+            gif::DisposalMethod::Any | gif::DisposalMethod::Keep => {}
         }
     }
 
@@ -438,10 +642,26 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     } else {
         PixelFormat::Rgb8
     };
-    let mut raster = Raster::new(width, height, format, data).map_err(GifError::Raster)?;
+    let mut raster = Raster::new(width, roll_height, format, data).map_err(GifError::Raster)?;
     raster.meta.interpretation = Some(crate::conversion::Interpretation::Srgb);
+    // The page split is declared only when there is one, matching vips: a
+    // default `gifload` of a four-frame file attaches `n-pages`, `loop` and
+    // `delay` but no `page-height`, and so does `[page=3]`. The setter
+    // refuses a height that does not divide the raster, so a miscounted roll
+    // fails here rather than writing a split a reader would discard.
+    if pages > 1 {
+        raster
+            .try_set_page_height(height)
+            .map_err(GifError::Raster)?;
+    }
     raster.set_n_pages(scan.frames);
     raster.set_field("loop", MetadataValue::Int(scan.loop_count));
+    // One delay per page this raster holds, which vips does not promise: it
+    // reports the whole file's array whatever window was loaded, so
+    // `delay[0]` on a `[page=2,n=2]` load is frame 0's delay sitting on a
+    // page that is really frame 2. Measured, re-saving that raster writes 40
+    // and 60 centiseconds onto frames whose real delays are 80 and 100.
+    raster.set_field("delay", MetadataValue::IntArray(delays));
     raster.set_field("palette", MetadataValue::Int(1));
     if scan.colours > 0 {
         // `nsgifload.c:337-343`: ceil(log2(colours)) over the table as it
@@ -457,24 +677,19 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     Ok(raster)
 }
 
-/// Decode a window of a GIF's frames into one page roll (libvips `gifload`
-/// with `page` and `n`).
+/// The colour a "restore to background" disposal paints, which is the global
+/// colour table entry the logical screen descriptor points at.
 ///
-/// See [`decode_gif`] for the still case and the [module
-/// docs](crate::gif#animation) for the frame model, the delay units and the
-/// disposal rules.
-///
-/// # Errors
-///
-/// Everything [`decode_gif`] returns, plus [`GifError::BadPageNumber`] when
-/// `options` asks for pages the file does not hold.
-pub fn decode_gif_with(
-    bytes: &[u8],
-    limits: DecodeLimits,
-    options: LoadOptions,
-) -> Result<Raster, SourceError> {
-    let _ = options;
-    decode_gif(bytes, limits)
+/// Black when there is no global table, or when the index is past the end of
+/// the one there is. Measured on vips 8.18.6: a background index of 200 on a
+/// four-entry table reports `background: 0 0 0` and disposes to black, where
+/// index 3 on the same table reports `0 0 255` and disposes to blue.
+fn background_rgb(global: Option<&[u8]>, index: Option<usize>) -> [u8; PALETTE_STRIDE] {
+    let entry = index.unwrap_or(0) * PALETTE_STRIDE;
+    match global.and_then(|table| table.get(entry..entry + PALETTE_STRIDE)) {
+        Some(rgb) => [rgb[0], rgb[1], rgb[2]],
+        None => [0; PALETTE_STRIDE],
+    }
 }
 
 /// Open a decoder over `bytes` producing palette indices rather than RGBA.

@@ -711,6 +711,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Animated GIF load** (issue #572). `decode_gif_with` takes `gif::LoadOptions`
+  carrying vips's `page` and `n`, composites the frames it selects and stacks
+  them into one raster whose `page-height` is the logical screen height, which
+  is the page roll `src/frames.rs` landed for. `decode_gif` is that with the
+  vips defaults, so a still load is unchanged down to the bytes.
+
+  **Delays come back in milliseconds**, which is the whole point of the issue.
+  The graphic control extension counts centiseconds and vips's `delay` counts
+  milliseconds, so a decoder that passes the number through is a silent factor
+  of ten that every other assertion still agrees with. `FrameDelay` carries the
+  unit in the type across that boundary, and `4 6 8 10` on the wire has to come
+  back `40 60 80 100`.
+
+  **The delay array covers the pages the raster holds**, one entry per page,
+  and that diverges from vips deliberately. vips reports the whole file's array
+  whatever window was loaded: `anim4.gif[page=2,n=2]` loads frames 2 and 3 and
+  still says `delay: 40 60 80 100`, so re-saving it writes 40 and 60
+  centiseconds onto frames whose real delays are 80 and 100. Both halves of
+  that were measured on the pinned 8.18.6 binary. Making `delay[i]` loaded page
+  `i`'s delay is what makes the array usable on the raster carrying it, and it
+  is the split `n-pages` already has: `n-pages` describes the file,
+  `pages_loaded` describes the raster.
+
+  Disposal and blending are libnsgif's, each rule measured by building the
+  fixture, running it through vips and pinning what came back. The one that
+  needs saying out loud is restore-to-background, which has two arms a single
+  fixture cannot see: the clear is transparent when the disposed frame declares
+  a transparent index and the background colour when it does not, and an index
+  past the end of the colour table is black. Reserved disposal codes 5, 6 and 7
+  keep the canvas, matching vips; code 4 is a tracked divergence (issue #827),
+  because the `gif` crate maps every code it does not know onto
+  `DisposalMethod::Any` and it arrives here indistinguishable from 0.
+
+  A window the file cannot serve is `GifError::BadPageNumber` rather than a
+  clamp, matching vips, which fails `[page=4]`, `[n=99]`, `[n=0]` and
+  `[page=3,n=3]` on a four-frame file with `bad page number`.
+
 - **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
   `decode_analyze_file` takes either half of the pair or the bare stem and
   resolves the other, `analyze::decode_analyze` takes the two buffers, and a
