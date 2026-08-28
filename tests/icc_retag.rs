@@ -176,25 +176,63 @@ fn colourspace_and_the_stamping_ops_apply_the_rule_too() {
     );
 }
 
-/// Issue #720. The rule reads the **tag**, not the image's band count, and this
-/// is the test that says so.
+/// Issue #720. The rule reads the **tag**, not the image's band count.
 ///
-/// Measured: `vips bandmean` and `vips extract_band 0` both take the three-band
-/// source to one band, leave the `scrgb` tag alone, and keep the three-channel
-/// profile. An implementation that compared the profile against
-/// `format().channels()` would drop it here and pass every other test in this
-/// file.
+/// The discriminating case is a **one-band** raster carrying a
+/// **three-channel** profile, so the two readings disagree on every target.
+/// Measured on vips 8.18.6 by taking one band out of the sRGB source, which
+/// keeps the 3144-byte profile, and retagging that:
+///
+/// ```text
+/// vips extract_band rgb.v one.v 0            -> 8x8 uchar, 1 band, srgb, icc 3144
+/// vips copy one.v x.v --interpretation scrgb -> icc 3144
+/// vips copy one.v x.v --interpretation srgb  -> icc 3144
+/// vips copy one.v x.v --interpretation lab   -> icc 3144
+/// vips copy one.v x.v --interpretation b-w   -> no icc
+/// vips copy one.v x.v --interpretation cmyk  -> no icc
+/// ```
+///
+/// The image has one band throughout, so an implementation comparing the
+/// profile against `format().channels()` gets the opposite answer in all five
+/// cells.
+///
+/// The first version of this test used only `bandmean` and `extract_band`, and
+/// the mutation sweep showed it did not guard this at all: those go through the
+/// carry, which never runs the rule, so swapping the tag for the band count
+/// left it green. They are kept below as the carry's own control, which is what
+/// they were actually testing.
 #[test]
 fn the_band_count_does_not_decide_it_the_tag_does() {
-    let im = tagged(3, b"RGB ")
+    let mut one_band = Raster::new(8, 8, PixelFormat::Gray8, vec![64u8; 8 * 8]).unwrap();
+    one_band.set_icc_profile(&profile(b"RGB "));
+
+    for (target, kept) in [
+        (Interpretation::ScRgb, true),
+        (Interpretation::Srgb, true),
+        (Interpretation::Lab, true),
+        (Interpretation::Bw, false),
+        (Interpretation::Cmyk, false),
+    ] {
+        let out = one_band.copy().interpretation(target).build();
+        assert_eq!(out.format().channels(), 1, "still one band");
+        assert_eq!(
+            out.icc_profile().is_some(),
+            kept,
+            "one band, three-channel profile, retagged {target:?}"
+        );
+    }
+
+    // The carry does not run the rule at all, which is the other half of "the
+    // tag decides": these two change the band count without retagging, and
+    // vips keeps the profile through both.
+    let three = tagged(3, b"RGB ")
         .copy()
         .interpretation(Interpretation::ScRgb)
         .build();
-    assert!(im.icc_profile().is_some(), "control: the source has one");
-
+    assert!(three.icc_profile().is_some(), "control: the source has one");
     for (name, out) in [
-        ("bandmean", im.try_bandmean().unwrap()),
-        ("extract_band", im.try_extract_band(0).unwrap()),
+        ("bandmean", three.try_bandmean().unwrap()),
+        ("extract_band", three.try_extract_band(0).unwrap()),
     ] {
         assert_eq!(out.format().channels(), 1, "{name} really is one band");
         assert_eq!(
@@ -204,7 +242,7 @@ fn the_band_count_does_not_decide_it_the_tag_does() {
         );
         assert!(
             out.icc_profile().is_some(),
-            "{name} keeps the profile, because the tag still says three channels"
+            "{name} keeps the profile: the carry does not revalidate"
         );
     }
 }
