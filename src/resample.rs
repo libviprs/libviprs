@@ -57,8 +57,11 @@
 //!   anywhere but on the grid; treating it as one is what made `resize`
 //!   disagree with the binary by up to 2.3 at every non-dyadic scale while
 //!   staying exact at the dyadic ones (issue #668). The masks themselves stay
-//!   in `f64`, where libvips also carries a `short` fixed-point copy it uses
-//!   on the integer carriers. Edges extend by replication
+//!   in `f64` and normalised to unit sum, where libvips carries a `short`
+//!   fixed-point copy it reads on **both** integer carriers and does not
+//!   renormalise after quantising. That divergence is kept on purpose and the
+//!   argument is in the divergence section below (issue #777). Edges extend by
+//!   replication
 //!   (`VIPS_EXTEND_COPY`), so constant images are preserved exactly. `reduce`
 //!   itself runs with gap 0 (no box pre-pass); `shrink` passes gap 1 and
 //!   `resize` gap 2, as in libvips.
@@ -270,8 +273,8 @@
 //!
 //! # Divergence from stock libvips
 //!
-//! Three gaps are open between this module and a stock libvips, all three are
-//! quantisation rather than a different convolution, and all three are kept on
+//! Four gaps are open between this module and a stock libvips, all four are
+//! quantisation rather than a different convolution, and all four are kept on
 //! purpose. The rule that decided them, and that decided #704 the other way, is
 //! measured rather than stylistic:
 //!
@@ -288,11 +291,53 @@
 //! | #732 bicubic store, `ushort` | 0.0000 LSB | 0.4680 LSB | 0 of 1017 |
 //! | #733 bilinear weights, `uchar` | 0.0000 LSB | 0.0252 LSB | 0 of 1113 |
 //! | #733 bilinear weights, `ushort` | 0.0000 LSB | 6.2848 LSB | 0 of 1113 |
+//! | #777 reduce mask, `uchar` | 0.2628 LSB | 0.2667 LSB | 51 of 62685 |
+//! | #777 reduce mask, `ushort` | 0.2558 LSB | 10.1088 LSB | 0 of 43889 |
 //!
 //! #704 was a coin toss the project took for parity, because both spellings
 //! were within a hair of each other and this module was not implementing either
-//! one cleanly after #668 put the offsets on libvips' grid. The other three are
-//! not coin tosses: this module is exact and libvips is not, on every sample.
+//! one cleanly after #668 put the offsets on libvips' grid. The others are not
+//! coin tosses: on the interpolator rows this module is exact and libvips is
+//! not, on every sample, and on the two `reduce` rows the byte column is a hair
+//! and the 16-bit one is 40 times #704's whole disagreement, all of it in the
+//! same direction.
+//!
+//! * **`reduce` reads a `short` mask on the integer carriers.**
+//!   `vips_reduce_make_mask` builds every mask in `double` and keeps a second
+//!   copy scaled by `VIPS_INTERPOLATE_SCALE` and truncated toward zero, and
+//!   the reduce generators read that copy for `UCHAR`, `CHAR`, `USHORT` and
+//!   `SHORT`. It is **not** renormalised, so its taps no longer sum to one and
+//!   the whole image is scaled by whatever the quantisation left behind. This
+//!   module keeps the `f64` masks (issue #777).
+//!
+//!   The sharpest form of it needs no fixture at all: a constant image
+//!   survives `reduce` here and does not survive it there. Measured on 8.18.6
+//!   over a 32x32 constant 65535 `ushort`, six of fifteen kernel-by-shrink
+//!   cells come back short, `lanczos3` at shrink 4 by **128 of 65535**, with
+//!   `vips min` equal to `vips max` in every cell so the output really is
+//!   flat. The byte carrier is clean on both sides, and that is the same
+//!   measurement rather than a second one: `128 / 65535` is 0.498 of a byte
+//!   level, so round-half-up absorbs it with two thousandths of a level to
+//!   spare.
+//!
+//!   On real content, 94080 `uchar` and 66240 `ushort` samples over three
+//!   fixtures crossed with five kernels and seven shrink factors, this module
+//!   differs from the binary on 7.57% of the byte samples at 1 level and on
+//!   61.8% of the 16-bit ones at up to 123. The table above is the accuracy
+//!   side of that, and the `ushort` row's signed mean is **-5.81 LSB**: the
+//!   `short` mask darkens every 16-bit image it touches.
+//!
+//!   Porting it would also not close the gate, which is the second reason and
+//!   the one that separates this from #704. The copy is `matrixf[x][i] * 4096`
+//!   truncated by a C `double`-to-`int` conversion, over a mask normalised by
+//!   a floating-point sum, so a coefficient whose exact value is a multiple of
+//!   1/4096 falls either side of the boundary on its last bit. `mitchell` at
+//!   shrink 4 has one: taps 1 and 14 are exactly `-27/4096`, this module's
+//!   `f64` normalisation lands 3 ulp below it and truncates to -27 where the
+//!   binary has -26. A full port reproduces 94035 of 94080 byte samples and
+//!   leaves **45** at 1 level for that reason alone, so the 1-level allowance
+//!   stays whichever way this goes. #704 bought parity by giving up 0.043 of a
+//!   level; here 0.004 of a level buys 99.95% of it and not the allowance.
 //!
 //! * **`vips_cast` truncates where this module rounds.** Whenever libvips
 //!   brackets a resample in a premultiply it works in FLOAT and casts back to
