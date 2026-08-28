@@ -677,6 +677,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
   rather than taken from `avif-parse`, which is MPL-2.0.
 
+- **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
+  versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
+  and `.nii` becomes a live row in the content sniffer, so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: the format is load-only here, the way Analyze and MAT are
+  load-only in libvips.
+
+  **The oracle is deliberately not libvips**, and that is measured rather than
+  assumed. The pinned `vips` 8.18.6 reports `NIfTI load/save with libnifti:
+  false` and registers neither `niftiload` nor `niftisave`, so a `.nii` handed
+  to it falls through the sniffing chain to `magickload`, which guesses TGA.
+  The reference is `nifti_clib` (`v3.0.1-91-g8f72d11`, the NIH implementation
+  and the library libvips itself would have linked), captured in
+  `oracle-captures/foreign-nifti/`, which re-measures the vips half on every
+  run so a build that gains libnifti announces itself.
+
+  What that buys is the *repair* rules, which are the part of this format a
+  spec reading gets wrong. Non-finite `FLOAT32` samples are rewritten to zero
+  before a caller sees them, so an infinity or a NaN stored in a file never
+  comes back. `vox_offset` is truncated toward zero and floored at the header
+  length, so `-8` and `100` both mean 348. `bitpix` is decoration and the
+  datatype alone fixes the sample width. `scl_slope` and `scl_inter` are
+  carried and never applied, because the scaling rule lives in FSL rather than
+  in the reference. Rank 0 is a one-voxel image, a non-positive `dim[1]` is
+  refused, and a zero extent on any higher axis is silently clamped to 1.
+
+  And one where the capture's own prose was wrong and its measurements were
+  right: on NIfTI-1 the byte order comes from `dim[0]`, not from the
+  `sizeof_hdr` sentinel, with the sentinel only as a fallback. A file with
+  only its four sentinel bytes swapped loads little-endian. That prose is
+  corrected in the capture (issue #752) and the correction is held against
+  this module by a test rather than by hope.
+
+  NIfTI is a volume format and `Raster` is two-dimensional, so the axes above
+  the second fold into the height, `dim[1]` wide by `dim[2] * .. * dim[rank]`
+  high. That is `analyzeload`'s measured rule for the sibling format rather
+  than an invention, it moves no bytes, and the collapsed axes stay readable
+  as `nifti-dim[N]` metadata beside every other header field.
+
+  Five datatypes have a carrier here (`UINT8`, `UINT16`, `FLOAT32`, `RGB24`,
+  `RGBA32`) and the rest are refused **by name** through
+  `NiftiError::UnsupportedCarrier`, naming the issue that would add the
+  carrier, exactly as `crate::fits` refuses a signed BITPIX. `INT16` is the
+  most common datatype in real NIfTI files and it is one of them: it needs
+  #516. Narrowing it into 8 bits would lose data silently, which is worse than
+  failing.
+
+  The allocation budget is the interesting part rather than a checkbox. 348
+  bytes can declare a 35-teravoxel volume in front of a 12-byte payload, so
+  the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved, and the
+  refusal is the shared `SourceError::AllocLimitExceeded` rather than a sixth
+  per-format variant.
+
+  No new dependency. The whole format is a fixed-offset header and a raw
+  array, so `crate::nifti` is field offsets, a byte-order flag and a copy
+  loop; a NIfTI crate would supply the free half and leave every measured
+  repair here anyway.
+
+- `PixelFormat::kind()` and the `SampleKind` enum it returns (`U8`, `U16`,
+  `F32`), plus `PixelFormat::with_kind()` alongside `with_channels()` (issue
+  #607). Reach for `kind()` whenever the question is how to *interpret* a
+  sample, and keep `bytes_per_channel()` for a stride or a buffer size.
+
+  Byte width has been standing in for sample kind throughout the crate, and it
+  cannot: four bytes means `f32` today and would mean `u32` under a uint
+  carrier (issue #517) or `i32` under the signed ones (issue #516). A `match`
+  keyed on the width needs a trailing `_` arm, and that arm reads a four-byte
+  integer as a float without a word from the compiler. `SampleKind` gives the
+  question one answer that a new carrier cannot slip past: every mapping off
+  it is a total match.
+
+  `SampleKind` also carries the per-kind constants the sample code used to
+  keep private copies of: `bytes()`, `is_float()`, `max_value()`,
+  `hist_bins()`, and `promote()`, which is the `vips__formatalike` order for
+  a two-image op whose inputs disagree. `max_value()` and `hist_bins()` are
+  `Option`, and `None` on `F32` is a statement rather than a gap: a float
+  carrier has no depth-implied ceiling and no value-indexed bin table.
+
+  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer name
+  a byte width at all: no `bytes_per_channel()`, and no `with_channels()`
+  either, since handing a width *back* to the constructor is the same
+  ambiguity in the other direction. Nothing they do changes; what changes is that
+  their sample readers and writers now fail to compile, rather than silently
+  misread, the day a carrier arrives. The other 22 modules still key on the
+  width and are tracked separately.
+
+  `SampleKind` lives at `libviprs::pixel::SampleKind`.
+
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
   reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
@@ -1740,6 +1829,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
+  containers whose allocation refusal is spent inside the `image` crate (issue
+  #782). It has not been one since #686: WebP is decoded by libviprs, prices its
+  own frame, and reports `SourceError::AllocLimitExceeded` with the declared
+  geometry attached. The predicate itself was right the whole time, so nothing a
+  caller wrote against it breaks; the bullet list beside it sent anyone matching
+  by shape to the wrong arm.
+
+  The list is pinned to the tables in `tests/decode_alloc_refusal_shape.rs` now.
+  Nothing held it before, because those tables pin their own size and what their
+  rows report, and neither of those sees a format moving out of one and leaving
+  its description behind.
+
+- **`profile`'s docs claimed its 16-bit saturating output matched "the libvips
+  `ushort` output". libvips emits `VIPS_FORMAT_INT`** (issue #759), measured on
+  8.18.6 for every one of the eight input formats. The word matters more than
+  it looks: `INT` is the *signed* 32-bit carrier, so `profile` is a payoff of
+  the signed carriers (issue #516), not of the uint one (issue #517).
+
+  Two neighbouring claims were under-specified in the same direction and are
+  corrected with the measured tables. `project` promotes to `UINT` for the
+  unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float ones,
+  so it needs both carrier families rather than just uint. The histogram
+  module's "libvips stores counts in 32-bit unsigned samples" swept in
+  `hist_find_indexed`, which emits `DOUBLE` for every input format and either
+  `combine` mode, and `hist_cum`, which follows its input across all four.
+
+  No value or format changes here: the saturation at `65535` stays until a
+  wider carrier lands. What changes is that the claims now have checks under
+  them. `profile` and `project` had no assertion on their output format
+  anywhere in the crate and `profile` had no saturation test at all, which is
+  how the wrong sentence survived. Six counter ops get a format pin and two
+  get a ceiling pin carrying the measured vips answer beside the libviprs one.
+
+- The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
+  body it copies out of the file, priced from the declared header geometry
+  through the same `DecodeLimits::check_image_alloc` every other self-priced
+  decoder uses (issue #710). It applied `max_coord` and `max_pixels` and then
+  nothing else, so a 36-byte raster decoded clean under a 35-byte ceiling and
+  `.v` was the one container out of ten where setting the budget bought a
+  caller nothing.
+
+  **`.v` was never a decompression-bomb vector**, and that is worth saying
+  because the obvious reading is wrong. The reader refuses a header promising
+  more pixel data than the file physically holds, so the allocation was already
+  bounded by the input length, and no crafted small file ever got past it. What
+  was missing was the contract, in two visible ways. `Raster::new`'s 8 GiB
+  construction budget was the only ceiling in force, fifteen times the 512 MiB
+  decode default. And the two decode entry points disagreed about the same run
+  of bytes: `decode_file_with_limits` spends the budget on the bounded
+  whole-file read, `decode_bytes_with_limits` has no file to spend it on.
+  Measured before the change:
+
+  ```text
+  bytes 4x4 budget=47 (price 48) -> Ok((4, 4))
+  file  4x4 budget=47 (price 48) -> Err(AllocLimitExceeded {
+      what: "image file body", needed_bytes: 112, max_alloc_bytes: 47 })
+  ```
+
+  **What changes for a caller.** Only `decode_bytes_with_limits` and
+  `decode_bytes`, and only on a `.v` whose pixel body is over the budget. The
+  file entry points cannot change: a `.v` file is always its 64-byte header
+  plus the body plus any trailer, so a budget under the body's price is under
+  the file's length too and the whole-file read refuses first. On the in-memory
+  path a `.v` body over `max_alloc_bytes` now comes back as
+  `SourceError::AllocLimitExceeded { what: ".v pixel buffer", .. }` with the
+  declared geometry attached, where it used to decode. At the 512 MiB default
+  that is a `.v` over half a gigabyte handed to the crate as bytes.
 
 - `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
   now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster
