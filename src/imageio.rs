@@ -3466,6 +3466,71 @@ mod tests {
         ));
     }
 
+    /// Issue #718. The multi-input field union covers the **uninterpretable**
+    /// carrier as well as the named one, in both directions.
+    ///
+    /// The named half is pinned in `tests/metadata_carry.rs`. This half is here
+    /// because [`MetadataFields::unknown`] is only reachable from inside this
+    /// module, through a trailer written by a build this one cannot fully read
+    /// (#565), and without it `merge_under` could drop the opaque carrier and
+    /// stay green: a field a newer build wrote would survive a load and a
+    /// re-save, and then vanish the moment someone inserted the raster into
+    /// another one.
+    #[test]
+    fn the_multi_input_field_merge_carries_an_uninterpretable_field_too() {
+        let sub = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut main = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        main.set_field("main-only", MetadataValue::Str("from-main".into()));
+        main.set_field("note", MetadataValue::Str("from-main".into()));
+
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+
+        // The header block is `main`'s alone, so `sub`'s orientation 6 does
+        // not reach the output.
+        assert_eq!(out.orientation(), 1, "the header block is main's");
+        // The named half of the union: main wins the shared name, both sides'
+        // own fields arrive.
+        assert_eq!(out.get_field("note").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("main-only").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(out.icc_profile(), Some(&[5u8, 5, 5][..]));
+
+        // And the opaque one, which reads as absent through the field API and
+        // is only visible on the way back out.
+        assert_eq!(
+            out.get_field("delay"),
+            None,
+            "an uninterpretable field stays out of the field API"
+        );
+        let rewritten = out.encode_vips().unwrap();
+        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..])
+            .expect("a carried opaque value keeps the file on the JSON trailer");
+        let delay = trailer
+            .fields
+            .entries
+            .iter()
+            .find(|(n, _)| n == "delay")
+            .map(|(_, v)| v);
+        assert_eq!(
+            delay,
+            Some(&FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            "sub's uninterpretable field must reach the output"
+        );
+
+        // The other direction: a name `main` holds *only* under the opaque
+        // carrier still blocks `sub`'s interpretable value, so the output
+        // never ends up holding one name under both carriers.
+        let main = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut sub = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        sub.set_field("delay", MetadataValue::Int(9));
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+        assert_eq!(
+            out.get_field("delay"),
+            None,
+            "main's opaque value wins the shared name"
+        );
+    }
+
     /// A field the caller sets by hand supersedes an unknown field of the same
     /// name, and removing it removes it for good. Otherwise a stripped raster
     /// would leak the old opaque value back into the file.
