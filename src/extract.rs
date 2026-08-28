@@ -639,13 +639,14 @@ impl Raster {
                 image_h: self.height(),
             });
         }
+        // The carry is `Raster::extract`'s now (#740), so this no longer does
+        // it: one physical crop, one carry. Measured on vips 8.18.6:
+        // `extract_area`, `crop`, `embed`, `gravity`, `replicate`, `zoom`,
+        // `subsample` and `smartcrop` all hand the header block and the
+        // attachments straight on, including through the ops that rescale the
+        // pixel grid (`zoom` by 2x3 on `xres=5 yres=7` reports 5 and 7 back,
+        // not 10 and 21). Issue #690.
         let mut out = self.extract(left, top, width, height)?;
-        // Measured on vips 8.18.6: `extract_area`, `crop`, `embed`, `gravity`,
-        // `replicate`, `zoom`, `subsample` and `smartcrop` all hand the header
-        // block and the attachments straight on, including through the ops that
-        // rescale the pixel grid (`zoom` by 2x3 on `xres=5 yres=7` reports 5 and
-        // 7 back, not 10 and 21). Issue #690.
-        out.carry_meta_from(self);
         // `vips_extract_area` writes `Xoffset = -left` / `Yoffset = -top` and
         // throws the source's away (`conversion.c`, `vips_extract_area_build`),
         // where the placement and tiling ops leave the source's alone. It is
