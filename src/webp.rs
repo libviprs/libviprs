@@ -102,7 +102,7 @@ use crate::codec::EncodeError;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
 use crate::raster::Raster;
-use crate::source::{DecodeLimits, SourceError};
+use crate::source::{DeclaredGeometry, DecodeLimits, SourceError};
 
 /// The largest width or height libwebp will encode
 /// (`WEBP_MAX_DIMENSION`; `webpsave.c:740-742` rejects anything above it
@@ -249,13 +249,32 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
         })?;
     // And the allocation budget, which `check_pixels` does not imply: a
     // 1-gigapixel `max_pixels` permits a 4 GiB `Rgba8` frame, four times the
-    // default `max_alloc_bytes`. The shared `image`-crate path spends the
-    // same budget through `Limits::reserve`, so this refuses the same frames
-    // it would and reports the same typed error.
-    if size as u64 > limits.max_alloc_bytes {
-        return Err(SourceError::Decode(image::ImageError::Limits(
-            image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
-        )));
+    // default `max_alloc_bytes`.
+    //
+    // This used to fabricate an `image::ImageError::Limits` so it reported the
+    // same shape as the three formats `image` refuses from inside its own
+    // decoder. That was the wrong thing to be consistent with (issue #686).
+    // The frames refused are set by the comparison, not by the error type, so
+    // reporting through `image` changed nothing about *which* files come back
+    // and only threw away the geometry and the price libviprs already had in
+    // hand. JPEG, PNG and single-image TIFF genuinely have neither, because
+    // the ceiling is spent inside `image` through `Limits::reserve`; WebP has
+    // both, on these two lines.
+    //
+    // The price is the decoder's `output_buffer_size` rather than a declared
+    // product, so it goes through `check_alloc` with the geometry attached by
+    // hand rather than through `check_image_alloc`, which would recompute it.
+    if limits.exceeds_alloc_budget(size as u64) {
+        return Err(SourceError::AllocLimitExceeded {
+            what: "WebP frame buffer",
+            geometry: Some(DeclaredGeometry {
+                width,
+                height,
+                bands: format.channels() as u32,
+            }),
+            needed_bytes: size as u64,
+            max_alloc_bytes: limits.max_alloc_bytes,
+        });
     }
 
     // Metadata first, so an over-budget chunk is reported before the frame
@@ -975,13 +994,26 @@ mod tests {
         ));
         // The allocation budget is separate: 12 pixels are inside every
         // pixel ceiling above and still need 36 bytes of frame buffer.
+        //
+        // It reports libviprs's own shape, with the geometry and the price it
+        // computed. This used to fabricate an `image::ImageError::Limits` to
+        // look like the three formats `image` refuses from inside its own
+        // decoder, which threw away both (issue #686).
         let starved = DecodeLimits::default().with_max_alloc_bytes(8);
         let err = decode_webp(&ANIM3, starved).expect_err("8 bytes is not a 4x3 RGB frame");
         assert!(
             matches!(
                 err,
-                SourceError::Decode(image::ImageError::Limits(ref l))
-                    if matches!(l.kind(), image::error::LimitErrorKind::InsufficientMemory)
+                SourceError::AllocLimitExceeded {
+                    what: "WebP frame buffer",
+                    geometry: Some(DeclaredGeometry {
+                        width: 4,
+                        height: 3,
+                        bands: 3,
+                    }),
+                    needed_bytes: 36,
+                    max_alloc_bytes: 8,
+                }
             ),
             "{err:?}"
         );

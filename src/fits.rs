@@ -103,7 +103,7 @@ use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError, decode_alloc_bytes};
+use crate::raster::{Raster, RasterError};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The prefix every FITS file's first card carries.
@@ -289,27 +289,6 @@ pub enum FitsError {
         height: i64,
         /// The declared `NAXIS3`.
         bands: i64,
-    },
-    /// Decoding the declared geometry would allocate more than
-    /// [`DecodeLimits::max_alloc_bytes`].
-    ///
-    /// A FITS header states its geometry in ASCII, so a few dozen bytes can
-    /// claim a gigapixel image; this is the budget that bounds it.
-    #[error(
-        "fits: decoding {width}x{height}x{bands} needs {needed} bytes, above the \
-         {max_alloc_bytes}-byte decode allocation budget"
-    )]
-    AllocLimitExceeded {
-        /// The declared scanline length.
-        width: u32,
-        /// The declared number of scanlines.
-        height: u32,
-        /// The declared number of bands.
-        bands: u16,
-        /// Bytes the decoded raster would occupy.
-        needed: u64,
-        /// The budget from [`DecodeLimits::max_alloc_bytes`].
-        max_alloc_bytes: u64,
     },
     /// The data segment is shorter than the declared geometry needs.
     #[error("fits: the data segment holds {found} bytes, {needed} are declared")]
@@ -709,7 +688,7 @@ fn pad_card(text: &str) -> Vec<u8> {
 ///   for a malformed header or a short data segment,
 ///   [`FitsError::UnsupportedBitpix`], [`FitsError::UnsupportedCarrier`] or
 ///   [`FitsError::UnsupportedScaling`] for a sample type this build has no
-///   carrier for, and [`FitsError::AllocLimitExceeded`] when the declared
+///   carrier for, and [`SourceError::AllocLimitExceeded`] when the declared
 ///   geometry is over [`DecodeLimits::max_alloc_bytes`].
 /// * [`SourceError::CoordLimitExceeded`] when either axis exceeds
 ///   [`DecodeLimits::max_coord`].
@@ -799,28 +778,19 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     // check below, so this module happened to survive a hole the four
     // codecs beside it did not.
     //
-    // The typed variant is this module's own, built from
-    // `exceeds_alloc_budget`'s answer rather than retagged off a
-    // `SourceError` whose `what` label no caller could ever see, because
-    // collapsing the per-format variants onto
-    // `SourceError::AllocLimitExceeded` is a breaking change to five
-    // public enums, deferred out of #632 and carried by #686.
-    let needed = decode_alloc_bytes(
+    // The price, the comparison and now the reporting are all the crate's:
+    // this used to build a `FitsError::AllocLimitExceeded` of its own, one of
+    // five variants re-tagging the same refusal, which #686 collapsed onto
+    // `SourceError::AllocLimitExceeded`.
+    // The price comes back because the payload slice below is sized from the
+    // same number.
+    let needed = limits.check_image_alloc(
+        "FITS pixel buffer",
         width,
         height,
         u64::from(bands),
         carrier.sample_bytes() as u64,
-    );
-    if limits.exceeds_alloc_budget(needed) {
-        return Err(FitsError::AllocLimitExceeded {
-            width,
-            height,
-            bands,
-            needed,
-            max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+    )?;
 
     let data_start = offset + unit.len;
     let available = bytes.len().saturating_sub(data_start);
@@ -1104,6 +1074,7 @@ fn pad_to_block(bytes: &mut Vec<u8>, fill: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::DeclaredGeometry;
 
     /// Build a header unit from a list of card texts, padded out to whole
     /// blocks the way a real file is.
@@ -1494,7 +1465,7 @@ mod tests {
                 &bomb(30_000, 30_000),
                 DecodeLimits::default().with_max_alloc_bytes(1_000)
             ),
-            Err(SourceError::Fits(FitsError::AllocLimitExceeded { .. }))
+            Err(SourceError::AllocLimitExceeded { .. })
         ));
     }
 
@@ -1539,13 +1510,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Fits(FitsError::AllocLimitExceeded {
-                    width: 2,
-                    height: 2,
-                    bands: 3,
-                    needed: 24,
+                SourceError::AllocLimitExceeded {
+                    what: "FITS pixel buffer",
+                    geometry: Some(DeclaredGeometry {
+                        width: 2,
+                        height: 2,
+                        bands: 3,
+                    }),
+                    needed_bytes: 24,
                     max_alloc_bytes: 23,
-                })
+                }
             ),
             "{err:?}"
         );
@@ -1588,11 +1562,11 @@ mod tests {
         assert!(
             matches!(
                 err,
-                Err(SourceError::Fits(FitsError::AllocLimitExceeded {
-                    needed: u64::MAX,
+                Err(SourceError::AllocLimitExceeded {
+                    needed_bytes: u64::MAX,
                     max_alloc_bytes: u64::MAX,
                     ..
-                }))
+                })
             ),
             "{err:?}"
         );
@@ -1634,11 +1608,11 @@ mod tests {
         assert!(
             matches!(
                 err,
-                Err(SourceError::Fits(FitsError::AllocLimitExceeded {
-                    needed: u64::MAX,
+                Err(SourceError::AllocLimitExceeded {
+                    needed_bytes: u64::MAX,
                     max_alloc_bytes: u64::MAX,
                     ..
-                }))
+                })
             ),
             "{err:?}"
         );
@@ -2010,10 +1984,9 @@ mod tests {
                 "geometry-bomb-pixels" => {
                     matches!(result, Err(SourceError::DimensionLimitExceeded { .. }))
                 }
-                "geometry-bomb-alloc" => matches!(
-                    result,
-                    Err(SourceError::Fits(FitsError::AllocLimitExceeded { .. }))
-                ),
+                "geometry-bomb-alloc" => {
+                    matches!(result, Err(SourceError::AllocLimitExceeded { .. }))
+                }
                 // A card carrying bytes outside printable ASCII is not a
                 // structural fault: the geometry cards are still intact, so
                 // the file loads and the bad bytes come back through the

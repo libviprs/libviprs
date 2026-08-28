@@ -101,7 +101,7 @@ use thiserror::Error;
 use crate::conversion::Interpretation;
 use crate::imageio::MetadataValue;
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError, buffer_len, decode_alloc_bytes};
+use crate::raster::{Raster, RasterError, buffer_len};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The four magic bytes every OpenEXR file opens with
@@ -217,33 +217,6 @@ pub enum ExrError {
         channels: usize,
         /// The ceiling, `u16::MAX`.
         max: usize,
-    },
-    /// Decoding the declared geometry would allocate more than
-    /// [`DecodeLimits::max_alloc_bytes`].
-    ///
-    /// An EXR body is compressed, so a small file can declare a very
-    /// large data window; this is the budget that bounds it. The price is
-    /// per channel the header **declares**, not per band the selection
-    /// keeps, because the decoder builds a full-resolution buffer for
-    /// every declared channel before it decompresses anything. A file
-    /// declaring sixty-four channels and selecting four costs sixty-four.
-    #[error(
-        "exr: decoding {width}x{height}x{channels} needs {needed} bytes, above the \
-         {max_alloc_bytes}-byte decode allocation budget"
-    )]
-    AllocLimitExceeded {
-        /// The declared data-window width.
-        width: u32,
-        /// The declared data-window height.
-        height: u32,
-        /// How many channels the first part **declares**, which is what
-        /// the decoder allocates for and may be more than the number of
-        /// bands the raster would have had.
-        channels: usize,
-        /// Bytes the decoded raster would need.
-        needed: u64,
-        /// The budget in force.
-        max_alloc_bytes: u64,
     },
     /// The layer the decoder returned is not the part the header pass
     /// priced against the decode budget.
@@ -452,23 +425,29 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // which matters because `max_coord`, `max_pixels` and
     // `max_alloc_bytes` are all caller-settable and a caller who lifts
     // every ceiling must still get a refusal here rather than a wrapped
-    // price that waves a huge allocation through. The typed variant is
-    // this module's own, built from `exceeds_alloc_budget`'s answer rather
-    // than retagged off a `SourceError` whose `what` label no caller could
-    // ever see; #632 deferred collapsing the per-format variants and #686
-    // carries it.
+    // price that waves a huge allocation through. The price, the comparison
+    // and now the reporting are all the crate's: this used to build an
+    // `ExrError::AllocLimitExceeded` of its own, one of five variants
+    // re-tagging the same refusal, which #686 collapsed onto
+    // `SourceError::AllocLimitExceeded`.
+    //
+    // The band count reported is the one the header **declares**, not the
+    // number of bands the selection keeps, because that is what the price is
+    // and what the decoder allocates for.
     let declared = header.channels.list.len();
-    let needed = decode_alloc_bytes(width, height, declared as u64, SAMPLE_BYTES as u64);
-    if limits.exceeds_alloc_budget(needed) {
-        return Err(ExrError::AllocLimitExceeded {
-            width,
-            height,
-            channels: declared,
-            needed,
-            max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+    //
+    // `declared as u64` is lossless on every target this builds for, and it is
+    // the count that prices the frame. The `u32` narrowing that used to be
+    // here saturated the price *down*, which is the one direction that can
+    // turn a refusal into a decode; it now happens inside `check_image_alloc`
+    // and only to the geometry the message reports.
+    limits.check_image_alloc(
+        "OpenEXR sample buffers",
+        width,
+        height,
+        declared as u64,
+        SAMPLE_BYTES as u64,
+    )?;
 
     // `non_parallel` is not an optimisation choice, it is the contract:
     // `exr`'s `rayon` feature is off in `Cargo.toml` because libviprs owns
@@ -751,6 +730,7 @@ const fn compression_name(compression: exr::compression::Compression) -> &'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::DeclaredGeometry;
 
     /// Every fixture is written by the OpenEXR reference implementation
     /// 3.4.15 and lives beside the capture script that measured vips on
@@ -1089,13 +1069,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Exr(ExrError::AllocLimitExceeded {
-                    width: 8,
-                    height: 4,
-                    channels: 4,
-                    needed: 512,
+                SourceError::AllocLimitExceeded {
+                    what: "OpenEXR sample buffers",
+                    geometry: Some(DeclaredGeometry {
+                        width: 8,
+                        height: 4,
+                        bands: 4,
+                    }),
+                    needed_bytes: 512,
                     max_alloc_bytes: 511,
-                })
+                }
             ),
             "expected the 8x4x4 geometry to be priced at 512 bytes, got {err:?}"
         );
@@ -1121,10 +1104,10 @@ mod tests {
         let short = DecodeLimits::default().with_max_alloc_bytes(511);
         assert!(matches!(
             decode_exr(&fixture("rgba_half_zip"), short),
-            Err(SourceError::Exr(ExrError::AllocLimitExceeded {
-                needed: 512,
+            Err(SourceError::AllocLimitExceeded {
+                needed_bytes: 512,
                 ..
-            }))
+            })
         ));
     }
 
@@ -1163,13 +1146,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Exr(ExrError::AllocLimitExceeded {
-                    width: 8,
-                    height: 4,
-                    channels: 16,
-                    needed: 2048,
+                SourceError::AllocLimitExceeded {
+                    what: "OpenEXR sample buffers",
+                    geometry: Some(DeclaredGeometry {
+                        width: 8,
+                        height: 4,
+                        bands: 16,
+                    }),
+                    needed_bytes: 2048,
                     max_alloc_bytes: 1024,
-                })
+                }
             ),
             "expected the sixteen declared channels to be priced at 2048 bytes, \
              got {err:?}"

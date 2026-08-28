@@ -95,7 +95,7 @@ use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError, buffer_len, decode_alloc_bytes};
+use crate::raster::{Raster, RasterError, buffer_len};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The exact magic line every Radiance file opens with
@@ -189,25 +189,6 @@ pub enum RadianceError {
         width: i64,
         /// The declared number of scanlines.
         height: i64,
-    },
-    /// Decoding the declared geometry would allocate more than
-    /// [`DecodeLimits::max_alloc_bytes`].
-    ///
-    /// A `.hdr` body is run-length encoded, so a tiny file can declare a
-    /// very large image; this is the budget that bounds it.
-    #[error(
-        "radiance: decoding {width}x{height} needs {needed} bytes, above the \
-         {max_alloc_bytes}-byte decode allocation budget"
-    )]
-    AllocLimitExceeded {
-        /// The declared scanline length.
-        width: u32,
-        /// The declared number of scanlines.
-        height: u32,
-        /// Bytes the decoded raster would occupy.
-        needed: u64,
-        /// The budget from [`DecodeLimits::max_alloc_bytes`].
-        max_alloc_bytes: u64,
     },
     /// A run-length-encoded scanline's own length marker disagrees with the
     /// width the header declared (`radiance.c:437-440`).
@@ -367,21 +348,19 @@ pub fn decode_radiance(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sou
     // `DEFAULT_MAX_COORD` before `DecodeLimits` is consulted at all, so
     // the product could not leave a `u64`. That is a different check's
     // guarantee, spelled nowhere near this line, and the codecs that
-    // copied the shape do not all have one. The typed variant is this
-    // module's own, built from `exceeds_alloc_budget`'s answer rather than
-    // retagged off a `SourceError` whose `what` label no caller could ever
-    // see; #632 deferred collapsing the per-format variants and #686
-    // carries it.
-    let needed = decode_alloc_bytes(width, height, BANDS as u64, SAMPLE_BYTES as u64);
-    if limits.exceeds_alloc_budget(needed) {
-        return Err(RadianceError::AllocLimitExceeded {
-            width,
-            height,
-            needed,
-            max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+    // copied the shape do not all have one. The price, the comparison and
+    // now the reporting are all the crate's: this used to build a
+    // `RadianceError::AllocLimitExceeded` of its own, one of five variants
+    // re-tagging the same refusal, which #686 collapsed onto
+    // `SourceError::AllocLimitExceeded`. Radiance is always three float
+    // bands, and the refusal now says so where this message never did.
+    limits.check_image_alloc(
+        "Radiance pixel buffer",
+        width,
+        height,
+        BANDS as u64,
+        SAMPLE_BYTES as u64,
+    )?;
 
     // Through `buffer_len` rather than a plain `usize` product for the
     // same reason the price goes through `decode_alloc_bytes`: clearing
@@ -1236,6 +1215,7 @@ fn write_scanline(out: &mut Vec<u8>, scanline: &[[u8; 4]]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::DeclaredGeometry;
     use std::num::NonZeroU16;
 
     /// The three-band float format every decode produces.
@@ -1782,7 +1762,7 @@ mod tests {
      * small file under three tightened budgets.
      * Input: a 6x1 file under `max_coord = 4`, `max_pixels = 3`, and
      * `max_alloc_bytes = 8` -> Output: `CoordLimitExceeded`,
-     * `DimensionLimitExceeded`, and `RadianceError::AllocLimitExceeded`.
+     * `DimensionLimitExceeded`, and `SourceError::AllocLimitExceeded`.
      */
     #[test]
     fn decode_enforces_the_decode_budget() {
@@ -1801,14 +1781,13 @@ mod tests {
             "got {err:?}"
         );
 
-        let err = radiance_error(
-            decode_radiance(&file, DecodeLimits::default().with_max_alloc_bytes(8)).unwrap_err(),
-        );
+        let err =
+            decode_radiance(&file, DecodeLimits::default().with_max_alloc_bytes(8)).unwrap_err();
         assert!(
             matches!(
                 err,
-                RadianceError::AllocLimitExceeded {
-                    needed: 72,
+                SourceError::AllocLimitExceeded {
+                    needed_bytes: 72,
                     max_alloc_bytes: 8,
                     ..
                 }
@@ -1836,14 +1815,18 @@ mod tests {
         assert_eq!((raster.width(), raster.height()), (6, 1));
 
         let short = DecodeLimits::default().with_max_alloc_bytes(71);
-        let err = radiance_error(decode_radiance(&file, short).unwrap_err());
+        let err = decode_radiance(&file, short).unwrap_err();
         assert!(
             matches!(
                 err,
-                RadianceError::AllocLimitExceeded {
-                    width: 6,
-                    height: 1,
-                    needed: 72,
+                SourceError::AllocLimitExceeded {
+                    what: "Radiance pixel buffer",
+                    geometry: Some(DeclaredGeometry {
+                        width: 6,
+                        height: 1,
+                        bands: 3,
+                    }),
+                    needed_bytes: 72,
                     max_alloc_bytes: 71,
                 }
             ),
@@ -2186,12 +2169,7 @@ mod tests {
                         RadianceError::DimensionOutOfBounds { .. }
                     ))
                 ),
-                "rle-bomb" => matches!(
-                    result,
-                    Err(SourceError::Radiance(
-                        RadianceError::AllocLimitExceeded { .. }
-                    ))
-                ),
+                "rle-bomb" => matches!(result, Err(SourceError::AllocLimitExceeded { .. })),
                 "empty" => matches!(
                     result,
                     Err(SourceError::Radiance(RadianceError::BadMagic { .. }))
