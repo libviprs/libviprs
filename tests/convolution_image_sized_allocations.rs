@@ -433,6 +433,15 @@ fn rgbf32(dim: u32) -> Raster {
     Raster::new(dim, dim, fmt, data).expect("fixture raster")
 }
 
+/// The template the two correlation rows run against.
+///
+/// Small on purpose: the template is the operand read whole at every output
+/// sample, and both operations are `O(w * h * tw * th)`, so a large one would
+/// cost the suite minutes and pin nothing a small one does not.
+fn correlation_template() -> Raster {
+    generate_test_raster(3, 3).expect("fixture template")
+}
+
 /// The 3x3 box blur every `conv` and `compass` row runs, which is the mask
 /// shape the module's own pins use.
 fn box3() -> Kernel {
@@ -494,14 +503,24 @@ fn box3() -> Kernel {
 /// `Rgb16` row reads six for the same reason in reverse, since `vips_convi`
 /// keeps the input depth.
 ///
-/// `try_compass` is the outlier, and its row is here to say so rather than to
-/// praise it: 159 bytes a pixel over a three-byte-a-pixel input, 53 times what
-/// it was handed. It convolves `times` times, keeps every result, and then
-/// widens every one of them to `f64` to combine, so four whole-image widenings
-/// are 96 of the 159. That is the same `samples_f64` amplification #575 names,
-/// in the one place a row window cannot reach it because the combine reads all
-/// `times` results at the same sample. It has its own issue and this row is
-/// what will move when that lands.
+/// `try_compass` holds its `times` results live and nothing else: at
+/// `times = 4` that is four uchar rasters, the `f64` accumulator and the
+/// output, 39 bytes a pixel. It used to be 159, because it widened every one
+/// of those results to `f64` to combine them and held all four widenings at
+/// once, which was 96 of the 159 and made compass the most expensive operation
+/// in the crate at 36 times its input (issue #790). Holding the results
+/// themselves is inherent: `vips_compass` convolves `times` times and combines
+/// the absolute results, so `times * bands` bytes a pixel is the floor.
+///
+/// The two correlation rows are one allocation and 12 bytes a pixel, which is
+/// the float output raster and nothing else. They were 60: the image widened
+/// to `f64` (24), a `Vec<f64>` of results written and read in output order
+/// (24) and the raster built from it (12). The widening came off when they
+/// went onto the same `RowWindow` the traversal uses, and the result buffer
+/// when they started writing into the output raster directly (issue #791).
+/// Their template is still widened whole and is deliberately 3x3, so it sits
+/// under the threshold: it is bounded by the operand a caller passes rather
+/// than by the image.
 const BUDGETS: &[Budget] = &[
     Budget {
         op: "try_conv",
@@ -590,8 +609,26 @@ const BUDGETS: &[Budget] = &[
         carrier: "Rgb8",
         src: rgb8,
         run: |src| src.try_compass(&box3(), 4, Angle45::D45, Combine::Max, Precision::Integer),
-        allocs: 11,
-        live_per_pixel: 159,
+        allocs: 6,
+        live_per_pixel: 39,
+    },
+    Budget {
+        op: "try_spcor",
+        arm: "3x3 template",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: |src| src.try_spcor(&correlation_template()),
+        allocs: 1,
+        live_per_pixel: 12,
+    },
+    Budget {
+        op: "try_fastcor",
+        arm: "3x3 template",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: |src| src.try_fastcor(&correlation_template()),
+        allocs: 1,
+        live_per_pixel: 12,
     },
     Budget {
         op: "try_sharpen",
