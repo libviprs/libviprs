@@ -53,8 +53,6 @@
 //!   `foo(path)` that opens `path` internally reads as pure to this scanner.
 //! * a filesystem call spelled through an alias (`use std::fs as f;`) or
 //!   through a crate this list does not name.
-//! * other operations Miri refuses under isolation that are not filesystem
-//!   calls at all, most obviously spawning a process with `std::process`.
 //! * anything outside `src/` and `tests/`, which means the `fuzz/` member (a
 //!   separate crate that `cargo miri test` on this package does not build) and
 //!   the `build.rs`-less root manifest.
@@ -62,6 +60,50 @@
 //! The `not-detected` rows are what keeps those blind spots from being silent:
 //! a test the detector cannot classify still gets pinned the moment somebody
 //! annotates it, so the annotation cannot later be deleted unnoticed.
+//!
+//! # Spawning a process, which is a refusal rather than a row
+//!
+//! Everything above is a ledger. The filesystem rows record the tree and let an
+//! `unannotated fs-detected` test stand, because `merge-gate.yml` runs Miri
+//! with `-Zmiri-disable-isolation` and an isolated-away filesystem call comes
+//! back rather than aborting.
+//!
+//! `std::process` is different in kind. Miri supports process spawning on no
+//! target and under no flag, so the first test that shells out ends the entire
+//! run with `unsupported operation: can't call foreign function \`fork\``, and
+//! `-Zmiri-disable-isolation` does nothing about it. Measured on `120acb6`,
+//! `cargo +nightly miri test --test dependency_policy` died on
+//! `every_links_key_is_on_the_allowlist` before running anything else in the
+//! tree (issue #714).
+//!
+//! So [`no_process_spawning_test_can_run_under_miri`] is an outright assertion,
+//! not a row: every test that reaches `std::process` must carry
+//! `#[cfg_attr(miri, ignore)]`, full stop. There is no "record it as
+//! unannotated and say why in the review" arm, because there is no
+//! configuration in which such a test runs.
+//!
+//! # Following a helper, once, for the process case
+//!
+//! The filesystem detector reads one function body and stops, which is why the
+//! `not-detected` rows exist. That is not good enough here, because none of the
+//! eleven tests #714 found spells `Command::new` in its own body: they call
+//! `cells()`, which calls `graphs()`, which spawns cargo. A body scan sees all
+//! eleven as pure.
+//!
+//! [`process_spawning_fns`] closes that by resolving calls inside the file. It
+//! parses every `fn` in the file, marks the ones whose body matches
+//! [`PROCESS_MARKERS`], and then repeats to a fixed point, marking any function
+//! whose body names an already-marked one. Two hops is what the real tree
+//! needs; the loop takes any depth.
+//!
+//! It over-approximates on purpose, in the safe direction. A call is matched as
+//! the *name*, on identifier boundaries, not as `name(`: `graphs()` reaches
+//! cargo through `CELLS.iter().map(resolve)`, where the callee never sits next
+//! to a paren at all, and insisting on one is how my first attempt at this
+//! missed four of the eleven tests #714 lists. The cost is that a method spelled
+//! the same as a spawning free function counts, and so does a name that is
+//! merely mentioned. Over-approximating costs an unnecessary annotation on a
+//! test Miri could have run. Under-approximating costs the whole gate.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -135,6 +177,16 @@ const FS_MARKERS: &[&str] = &[
     ".symlink_metadata()",
 ];
 
+/// Substrings that mean "this function reaches `std::process`".
+///
+/// Short, because there is only one way to start a process from std and every
+/// spelling of it goes through `Command`. `Command::new(` catches the
+/// `use std::process::Command;` form and `process::Command` catches the
+/// qualified one; the bare `.spawn(` / `.output(` / `.status(` methods are
+/// deliberately absent, since those names collide with plenty of innocent APIs
+/// and the constructor is unavoidable.
+const PROCESS_MARKERS: &[&str] = &["Command::new(", "process::Command"];
+
 /// Attribute forms of `#[test]` this scanner does not understand. Finding one
 /// means the parse below would skip a real test, so it is a hard failure with
 /// an instruction rather than a silent gap.
@@ -188,6 +240,9 @@ struct TestFn {
     annotated: bool,
     /// Whether the body matched [`FS_MARKERS`].
     touches_fs: bool,
+    /// Whether the body matched [`PROCESS_MARKERS`], or called something in
+    /// the same file that (transitively) does. See [`process_spawning_fns`].
+    spawns_process: bool,
 }
 
 impl TestFn {
@@ -399,6 +454,98 @@ fn function_name(header: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// Every `fn` in a masked file, by name, with its body.
+///
+/// A second, looser pass than the one [`scan_source`] runs: it takes any line
+/// [`function_name`] can read a name off, not only the ones under `#[test]`, so
+/// the helpers a test calls are in the map too. A signature that ends in `;`
+/// before it opens a brace is a trait declaration with no body and is skipped,
+/// which matters because consuming forward from one would swallow the next
+/// function whole.
+///
+/// Names collide (two `mod`s can each define `helper`), and the map keeps the
+/// last. That is fine for what it feeds: the caller only asks whether *some*
+/// function of that name spawns, and the answer it wants on a collision is the
+/// conservative one.
+fn fn_bodies(masked: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = masked.lines().collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(name) = function_name(line) else {
+            continue;
+        };
+        let mut body = String::new();
+        let mut depth = 0i64;
+        let mut opened = false;
+        let mut declaration = false;
+        for line in &lines[i..] {
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    ';' if !opened => declaration = true,
+                    _ => {}
+                }
+            }
+            body.push_str(line);
+            body.push('\n');
+            if declaration || (opened && depth == 0) {
+                break;
+            }
+        }
+        if !declaration {
+            out.push((name, body));
+        }
+    }
+    out
+}
+
+/// Whether `ident` appears in `body` as a whole identifier rather than as part
+/// of a longer one, so a spawning `run` is not matched by `rerun` or `run_id`.
+fn mentions_ident(body: &str, ident: &str) -> bool {
+    let bytes = body.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    body.match_indices(ident).any(|(at, _)| {
+        let before = at == 0 || !word(bytes[at - 1]);
+        let end = at + ident.len();
+        let after = end == bytes.len() || !word(bytes[end]);
+        before && after
+    })
+}
+
+/// The names of every function in `masked` that reaches `std::process`, either
+/// directly or through another function in the same file.
+///
+/// The fixed point is what makes this useful rather than decorative: the eleven
+/// tests issue #714 found call `cells()`, which calls `graphs()`, which calls
+/// `Command::new(cargo())`. One hop would still see them all as pure.
+fn process_spawning_fns(masked: &str) -> BTreeSet<String> {
+    let bodies = fn_bodies(masked);
+    let mut spawning: BTreeSet<String> = bodies
+        .iter()
+        .filter(|(_, body)| PROCESS_MARKERS.iter().any(|m| body.contains(m)))
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let mut grew = false;
+        for (name, body) in &bodies {
+            if spawning.contains(name) {
+                continue;
+            }
+            if spawning.iter().any(|callee| mentions_ident(body, callee)) {
+                spawning.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            return spawning;
+        }
+    }
+}
+
 /// Parse every `#[test]` function out of one file.
 ///
 /// The parse asserts its own shape as it goes, which is the point: the failure
@@ -433,6 +580,7 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
         );
     }
 
+    let spawning = process_spawning_fns(&masked);
     let lines: Vec<&str> = masked.lines().collect();
     let raw: Vec<&str> = src.lines().collect();
 
@@ -525,11 +673,13 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
         );
 
         let touches_fs = FS_MARKERS.iter().any(|m| body.contains(m));
+        let spawns_process = spawning.contains(&name);
         found.push(TestFn {
             file: rel.to_string(),
             name,
             annotated,
             touches_fs,
+            spawns_process,
         });
         i = k + 1;
     }
@@ -769,6 +919,150 @@ fn the_annotated_set_stays_the_size_it_is_documented_to_be() {
         unannotated_fs > 0,
         "if this ever reaches zero the ledger has stopped being a ledger: drop the \
          `unannotated` rows and make the guard assert the convention outright"
+    );
+}
+
+/// Every test that reaches `std::process` must be ignored under Miri. This is
+/// an assertion rather than an inventory row, and the difference is the point.
+///
+/// The filesystem rows are a ledger because `-Zmiri-disable-isolation` lets an
+/// unannotated filesystem test run. Nothing lets a process spawn run: Miri
+/// supports it on no target and under no flag, so the first one it reaches ends
+/// the whole session with `unsupported operation: can't call foreign function
+/// \`fork\`` and reports as a Miri failure rather than as a missing annotation.
+/// Measured on `120acb6` with `nightly-2026-08-20`,
+/// `cargo miri test --test dependency_policy` died on
+/// `every_links_key_is_on_the_allowlist` having run nothing else (issue #714).
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn no_process_spawning_test_can_run_under_miri() {
+    let offenders: Vec<String> = scan_repo()
+        .iter()
+        .filter(|t| t.spawns_process && !t.annotated)
+        .map(|t| format!("  {}::{}", t.file, t.name))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "{} test(s) reach `std::process` without `#[cfg_attr(miri, ignore)]`:\n{}\n\n\
+         Any one of them ends the whole Miri run on the first `fork`, whatever \
+         `MIRIFLAGS` says, so the annotation is not optional here the way it is for \
+         the filesystem rows (issue #714). If a test genuinely must not carry it, the \
+         fix is to stop it spawning, not to widen this check.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+/// The call-following half of the process detector, pinned on its own source
+/// rather than on the tree, so it says what the classifier does instead of what
+/// the tree happens to contain.
+///
+/// The three cells are the three cases that decide whether #714 stays fixed: a
+/// direct spawn, a spawn two hops down a helper chain (which is the shape all
+/// eleven of #714's tests have), and a test that touches neither.
+#[test]
+fn the_detector_follows_a_spawn_through_helpers() {
+    let src = r#"
+fn runs_cargo() -> String {
+    let out = Command::new("cargo").output().unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn graph() -> String {
+    runs_cargo()
+}
+
+fn passes_it_as_a_reference() -> Vec<String> {
+    [0usize].iter().map(runs_cargo_of).collect()
+}
+
+fn runs_cargo_of(_: &usize) -> String {
+    runs_cargo()
+}
+
+fn pure_helper() -> usize {
+    41 + 1
+}
+
+fn rerun_counter() -> usize {
+    7
+}
+
+mod tests {
+    #[test]
+    fn spawns_directly() {
+        let _ = Command::new("true").status();
+    }
+
+    #[test]
+    fn spawns_two_hops_down() {
+        assert!(!graph().is_empty());
+    }
+
+    #[test]
+    fn mentions_command_new_in_a_string_only() {
+        let msg = "Command::new("cargo") failed";
+        assert!(msg.contains("failed"));
+    }
+
+    #[test]
+    fn takes_the_helper_as_a_function_reference() {
+        assert!(!passes_it_as_a_reference().is_empty());
+    }
+
+    #[test]
+    fn calls_only_a_pure_helper() {
+        assert_eq!(pure_helper() + rerun_counter(), 49);
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    let by_name: Vec<(&str, bool)> = found
+        .iter()
+        .map(|t| (t.name.as_str(), t.spawns_process))
+        .collect();
+    assert_eq!(
+        by_name,
+        vec![
+            ("spawns_directly", true),
+            ("spawns_two_hops_down", true),
+            ("mentions_command_new_in_a_string_only", false),
+            ("takes_the_helper_as_a_function_reference", true),
+            ("calls_only_a_pure_helper", false),
+        ],
+        "the process detector must follow calls within the file, including one passed \
+         as a bare function reference, and must not fire on a marker that only appears \
+         inside a string literal"
+    );
+}
+
+/// A trait method declaration has no body, and consuming forward from one would
+/// swallow the next function whole, which would attribute that function's
+/// spawn to the wrong name and, worse, hide it.
+#[test]
+fn the_fn_body_parser_skips_a_bodyless_declaration() {
+    let src = r#"
+trait Runner {
+    fn run(&self) -> String;
+}
+
+fn run(x: usize) -> usize {
+    let _ = Command::new("true").status();
+    x
+}
+
+mod tests {
+    #[test]
+    fn calls_run() {
+        assert_eq!(run(1), 1);
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    assert_eq!(
+        found.iter().map(|t| t.spawns_process).collect::<Vec<_>>(),
+        vec![true],
+        "the declaration must not shadow the real `run`, got {found:?}"
     );
 }
 

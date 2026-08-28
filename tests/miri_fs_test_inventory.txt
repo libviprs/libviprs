@@ -108,6 +108,7 @@ annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allo
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
+annotated   not-detected tests/miri_ignore_convention.rs::no_process_spawning_test_can_run_under_miri
 annotated   not-detected tests/miri_ignore_convention.rs::the_annotated_set_stays_the_size_it_is_documented_to_be
 unannotated fs-detected  src/colour.rs::icc_transform_to_display_p3
 unannotated fs-detected  src/connection.rs::file_target_writes_and_reads_back_identical_bytes
