@@ -1463,13 +1463,15 @@ mod tests {
         ] {
             assert_eq!(
                 plot_height(kind, &values),
-                6,
+                5,
                 "{kind:?} did not take its plot height from the data"
             );
         }
         // Control: the data-driven answer really does follow the data, so
-        // the 6 above is not a second constant.
-        assert_eq!(plot_height(SampleKind::I8, &[0, 40]), 41);
+        // the 5 above is not a second constant. An all-zero histogram
+        // still gets one row, measured: a `ushort` `[0, 0, 0]` plots 1.
+        assert_eq!(plot_height(SampleKind::I8, &[0, 40]), 40);
+        assert_eq!(plot_height(SampleKind::I8, &[0, 0, 0]), 1);
         assert_eq!(plot_height(SampleKind::I8, &[]), 1);
     }
 
@@ -2161,25 +2163,75 @@ mod tests {
         assert_eq!(plot.format(), PixelFormat::Gray8);
     }
 
-    /// Bars grow from the bottom: column x is white for the bottom hist[x]
-    /// rows and black above, and a 16-bit histogram plots max + 1 high.
+    /**
+     * Tests the bar geometry and the plot height of a 16-bit histogram
+     * against libvips rather than against libviprs's own previous answer
+     * (issue #802).
+     * Works by plotting the same three counts libvips was measured on and
+     * asserting every pixel of the result, so a height that is right by
+     * accident still fails on where the bars start.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips hist_plot` of a
+     * `ushort` `[2, 0, 3]` gives a 3x**3** image whose rows are
+     * `[0, 0, 255]`, `[255, 0, 255]`, `[255, 0, 255]`. This test asserted
+     * 3x4 before, which was libviprs's `max + 1`.
+     * Input: `[2, 0, 3]` -> 3x3, bars growing from the bottom.
+     */
     #[test]
     fn hist_plot_bar_geometry() {
         let plot = gray16(3, 1, &[2, 0, 3]).hist_plot();
-        assert_eq!((plot.width(), plot.height()), (3, 4));
+        assert_eq!((plot.width(), plot.height()), (3, 3));
         assert_eq!(plot.format(), PixelFormat::Gray8);
-        // Column 0: two white pixels at the bottom.
+        // Column 0: two white pixels at the bottom of three rows.
         assert_eq!(plot.getpoint(0, 0), vec![0.0]);
-        assert_eq!(plot.getpoint(0, 1), vec![0.0]);
+        assert_eq!(plot.getpoint(0, 1), vec![255.0]);
         assert_eq!(plot.getpoint(0, 2), vec![255.0]);
-        assert_eq!(plot.getpoint(0, 3), vec![255.0]);
         // Column 1: empty.
-        for y in 0..4 {
+        for y in 0..3 {
             assert_eq!(plot.getpoint(1, y), vec![0.0]);
         }
-        // Column 2: three white pixels.
-        assert_eq!(plot.getpoint(2, 0), vec![0.0]);
-        assert_eq!(plot.getpoint(2, 1), vec![255.0]);
+        // Column 2: the full height.
+        for y in 0..3 {
+            assert_eq!(plot.getpoint(2, y), vec![255.0]);
+        }
+    }
+
+    /**
+     * Tests the plot height of a non-8-bit histogram against the libvips
+     * sweep, which is `max` and not `max + 1` (issue #802).
+     * Works by plotting each measured case through the op and comparing
+     * the height, with the 8-bit fixed height asserted alongside so the
+     * change cannot have collapsed the two rules into one.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6, `ushort` input:
+     * `[0, 1]` -> 1, `[1, 1]` -> 1, `[0, 0, 0]` -> 1, `[0, 5]` -> 5,
+     * `[3, 9]` -> 9, `[100, 200]` -> 200, `[65535, 0]` -> 65535. A `uchar`
+     * `[0, 5]` and a `uchar` `[255, 0]` both give 256.
+     */
+    #[test]
+    fn hist_plot_height_is_the_largest_count() {
+        for (counts, height) in [
+            (vec![0u16, 1], 1u32),
+            (vec![1, 1], 1),
+            (vec![0, 0, 0], 1),
+            (vec![0, 5], 5),
+            (vec![3, 9], 9),
+            (vec![100, 200], 200),
+            (vec![65535, 0], 65535),
+        ] {
+            let n = u32::try_from(counts.len()).unwrap();
+            let plot = gray16(n, 1, &counts).hist_plot();
+            assert_eq!(
+                plot.height(),
+                height,
+                "16-bit histogram {counts:?} plotted the wrong height"
+            );
+            assert_eq!(plot.width(), n);
+        }
+        // The 8-bit height stays fixed at 256 whatever the counts are,
+        // which is the half of the old claim that did hold.
+        for counts in [vec![0u8, 5], vec![255, 0]] {
+            let n = u32::try_from(counts.len()).unwrap();
+            assert_eq!(gray(n, 1, counts).hist_plot().height(), 256);
+        }
     }
 
     /// hist_plot rejects multiband histograms and non-histogram shapes.
