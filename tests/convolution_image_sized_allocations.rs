@@ -494,14 +494,14 @@ fn box3() -> Kernel {
 /// `Rgb16` row reads six for the same reason in reverse, since `vips_convi`
 /// keeps the input depth.
 ///
-/// `try_compass` is the outlier, and its row is here to say so rather than to
-/// praise it: 159 bytes a pixel over a three-byte-a-pixel input, 53 times what
-/// it was handed. It convolves `times` times, keeps every result, and then
-/// widens every one of them to `f64` to combine, so four whole-image widenings
-/// are 96 of the 159. That is the same `samples_f64` amplification #575 names,
-/// in the one place a row window cannot reach it because the combine reads all
-/// `times` results at the same sample. It has its own issue and this row is
-/// what will move when that lands.
+/// `try_compass` holds its `times` results live and nothing else: at
+/// `times = 4` that is four uchar rasters, the `f64` accumulator and the
+/// output, 39 bytes a pixel. It used to be 159, because it widened every one
+/// of those results to `f64` to combine them and held all four widenings at
+/// once, which was 96 of the 159 and made compass the most expensive operation
+/// in the crate at 36 times its input (issue #790). Holding the results
+/// themselves is inherent: `vips_compass` convolves `times` times and combines
+/// the absolute results, so `times * bands` bytes a pixel is the floor.
 const BUDGETS: &[Budget] = &[
     Budget {
         op: "try_conv",

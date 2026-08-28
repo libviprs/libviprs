@@ -1264,6 +1264,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `compass` stopped keeping a widened copy of every result. It convolves
+  `times` times and combines the absolute results, and it used to widen each of
+  those results to `f64` first and hold all `times` widenings live at once, to
+  read each sample once. That made it the most expensive operation in the crate:
+  at 4000x4000 `Rgb8` with a 3x3 box mask and `Combine::Max`, the libvips
+  default `times = 2` peaked at 1.61 GiB over a 48 MB input, 36 times what it
+  was handed, and `times = 4` at 2.42 GiB (issue #790).
+
+  Each result is folded into the accumulator off its own bytes now, and the
+  integer branch builds its output raster from an iterator rather than from a
+  whole `Vec<i64>` of clipped samples. `times = 2` peaks at 556 MiB and
+  `times = 4` at 647 MiB, so 12x and 14x, and no output byte moves.
+
+  Holding every result is inherent to `vips_compass` and is what is left:
+  `times * bands` bytes a pixel, bounded by the `1..=1000` range the operation
+  already enforced on `times`.
+
 - Convolution stopped widening the whole image. `conv`, `convsep`, `gaussblur`,
   `compass`, `sobel`, `scharr`, `prewitt` and canny's gradient stage all run one
   shared traversal, and that traversal used to decode the entire source to `f64`
