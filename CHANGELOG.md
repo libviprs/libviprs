@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Every public options struct is `#[non_exhaustive]` and grows a `with_*`
+  builder setter per field, so a downstream struct literal no longer compiles
+  (issue #630). Ten types: `gif::SaveOptions`, `jp2k::SaveOptions`,
+  `jxl::SaveOptions`, `radiance::SaveOptions`, `uhdr::SaveOptions`,
+  `webp::SaveOptions`, `SvgOptions`, `AffineOptions`, `ResizeOptions` and
+  `MagickLoadOptions`.
+
+  Five of them carried a doc line promising that later fields could be added
+  without a breaking change, and two went further and said they were
+  *deliberately* not `#[non_exhaustive]` so `..Default::default()` would keep
+  working downstream. Half of that was true and the half that mattered was not:
+  a `..Default::default()` literal does survive a new field, an exhaustive one
+  stops compiling with `E0063`, and the docs advertised the exhaustive spelling.
+  So the guarantee held only for callers who happened to pick the other form,
+  with nothing making them.
+
+  The crate proved it against itself: four integration tests were called
+  `save_options_are_constructible_downstream`, each built its options both ways,
+  and integration tests compile as an external crate. Measured on this tree,
+  adding one field to the five save-options structs breaks eight of their twelve
+  construction sites with `E0063`. `#[non_exhaustive]` refuses all twelve up
+  front instead, which is the trade: one break now, before 0.5.0 and at a time
+  somebody picks, against a break later at a time nobody does.
+
+  **Migration.** Start from `default()` and chain a setter per field:
+
+  ```rust
+  // before
+  let o = gif::SaveOptions { interlaced: true, ..Default::default() };
+  let r = ResizeOptions { vscale: Some(0.5), ..ResizeOptions::default() };
+
+  // after
+  let o = gif::SaveOptions::default().with_interlaced(true);
+  let r = ResizeOptions::default().with_vscale(Some(0.5));
+  ```
+
+  Reading a field is unchanged; only construction moves. `DecodeLimits` has had
+  this shape since it was written and is where it comes from.
+
+  Measured downstream cost inside this workspace: 12 sites in this repo's own
+  `tests/`, all migrated here, plus three outside it, all `ResizeOptions`, in
+  `libviprs-cli` (`src/ops/resample.rs`) and `libviprs-tests`
+  (`tests/resample_nearest_alpha.rs`,
+  `tests/resample_premultiplied_alpha_reference.rs`). Both are path
+  dependencies, so they need the one-line change above; `libviprs-cli#46` and
+  `libviprs-tests#181` carry the exact sites.
+
+  `tests/non_exhaustive_options.rs` holds the attribute on all ten and
+  exercises every setter from outside the crate, so a setter that goes missing
+  fails to compile rather than failing quietly. `jp2k::SaveOptions` is the
+  tenth: it landed in #783 while this was in flight, carrying the same promise
+  word for word, which is how a rule with no check behind it spreads.
+
+- `Raster::encode_jp2k(quality: u8, lossless: bool)` and
+  `Raster::encode_jp2k_chroma(quality, lossless, subsample)` are **gone**,
+  replaced by `Raster::encode_jp2k(options: jp2k::SaveOptions)` and its new
+  sibling `Raster::save_jp2k` (issue #501). The two old ones lived in
+  `crate::foreign_stubs` and always returned `EncodeError::Unsupported`, so
+  nothing that called them ever produced bytes; the new one does.
+
+  **Migration.** `encode_jp2k(q, true)` becomes
+  `encode_jp2k(jp2k::SaveOptions::default())`. `encode_jp2k(q, false)` becomes
+  `encode_jp2k(jp2k::SaveOptions { compression: jp2k::Compression::Lossy { ratio } })`,
+  and `ratio` is a compression ratio rather than vips's `Q`: see Added below
+  for why there is no `Q` to pass. `encode_jp2k_chroma`'s `subsample` argument
+  has no replacement, because `openjpeg2-pure-rs` exposes no subsampling knob;
+  it never did anything either way.
+
+
 - `ConversionError::FloatFormatUnsupported` is renamed
   `ConversionError::FloatUnsupported` (issue #730). Three of the crate's four
   float-refusal variants already spelled it that way
@@ -641,6 +710,365 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the ink, so it is issue #692's and not this one's.
 
 ### Added
+
+- **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
+  `decode_analyze_file` takes either half of the pair or the bare stem and
+  resolves the other, `analyze::decode_analyze` takes the two buffers, and a
+  `.hdr` becomes a live row in the content sniffer so `decode_file` loads an
+  Analyze image without being told what it is. There is no save half: `vips`
+  registers no `analyzesave`.
+
+  **The decode seam grew a route kind for it**, which is the part of this
+  worth reading. Analyze is the only container in the crate that is
+  inherently two files: a `.hdr` has a geometry and no pixels, an `.img` has
+  pixels and no geometry, and `Decoder::Native(fn(&[u8], DecodeLimits))`
+  cannot express either. The route table now has a `Paired` kind carrying two
+  function pointers, one the file entry point calls with the path and one the
+  buffer entry point calls with the header half alone; the alternatives, a
+  path-only entry point with no sniff row and a sniff row that always
+  refuses, both leave `decode_file` unable to load an Analyze image at all,
+  which is the format's whole normal use.
+
+  `decode_bytes` on a `.hdr` therefore reports
+  `AnalyzeError::PixelsAreInASiblingFile`, after validating the header in
+  full, so a malformed one still reports its malformation. And one divergence
+  falls out that is unavoidable rather than chosen: `vips` loads `fred.img`
+  as well, because its `is_a` rewrites whatever name it is handed, and a
+  content sniff has nothing to look at in a raw pixel array.
+  `decode_analyze_file` takes all three names, so only the sniffing entry
+  point is narrower.
+
+  **Big-endian, always, with no flag and no escape hatch.** Every field of
+  the 348-byte header and every pixel of the `.img` is big-endian whatever
+  the host is; a little-endian `.hdr` is refused because its `sizeof_hdr`
+  reads back as 0x5C010000. This is the single most likely thing for a port
+  on a little-endian host to get backwards and both halves are pinned.
+
+  The rest of the measured contract: the rank is `dim[0]` and must be 2..=7,
+  the width is `dim[1]` and the height is `dim[2]` multiplied by every extent
+  up to the rank, so a volume flattens into a toilet roll with nothing but
+  the `dsr-image_dimension.dim[]` metadata recording that it was ever 3-D.
+  `vox_offset` is parsed, attached and then ignored, so the pixels come from
+  byte 0 of the `.img` on every file that sets one. `bitpix` is attached and
+  never consulted. `DT_RGB` is the only multi-band datatype and its `.img` is
+  interleaved, not planar. A short `.img` is an error and a long one is not.
+
+  63 `dsr-<section>.<member>` metadata fields and the 348-byte `dsr` blob are
+  attached, with both of `getstr`'s traps reproduced: an 80-byte `descrip`
+  loses its last byte to `g_strlcpy`'s size argument, and every byte that is
+  not printable ASCII becomes `@`, which is lossy and not reversible. The
+  capture's own prose states that second rule with an `||` where its measured
+  data needs an `&&`; that is issue #797, fixed in the same wave.
+
+  Three of the nine datatypes `analyzeload` reads have a carrier here
+  (`DT_UNSIGNED_CHAR`, `DT_FLOAT`, `DT_RGB`) and the rest are refused **by
+  name**: `DT_SIGNED_SHORT` and `DT_SIGNED_INT` need #516, `DT_DOUBLE` needs
+  #518, and `DT_COMPLEX` has no carrier and no issue. `DT_SIGNED_SHORT` is
+  what most real Analyze volumes use, so it is the refusal a caller meets
+  first.
+
+  One deliberate divergence, the same one `matload` carries: a zero or
+  negative dimension is refused rather than clamped to 1 by GObject's
+  property range check, which in vips leaves the load exiting 0 with a
+  silently wrong geometry.
+
+  The declared geometry is priced against every `DecodeLimits` ceiling
+  **before the `.img` is opened**, because a 348-byte header can declare
+  1.07 gigapixels in front of a six-byte image, so a header that prices past
+  the budget costs no second read.
+
+  No new dependency.
+
+- **MATLAB level 5 (`.mat`) load** (issues #510, #640, #763). `decode_mat`
+  reads the first variable of rank 1, 2 or 3 out of a MAT-5 container, in
+  either byte order, bare or inside a `miCOMPRESSED` zlib element, and `.mat`
+  becomes a live row in the content sniffer so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: `vips` registers no `matsave`.
+
+  **The sniff is the shipped binary's, not the C source's**, and that is the
+  sharp edge of this port. `vips__mat_ismat` in the reference checkout reads
+  ten bytes and compares them with `MATLAB 5.0`; the 8.18.6 dylib that
+  shipped reads 128 and validates the version word and the endian indicator
+  as well, and the 8.18.4 it replaced did not (issue #650). A port written
+  from the source would claim `MATLAB 5.1`, `matlab 5.0`, `MATLAB_5.0`, a
+  file with a bogus endian indicator and a 127-byte file, all of which
+  8.18.6 refuses. The whole predicate lands as two route-table rows, because
+  the version and the indicator are one four-byte constant per byte order and
+  the 128-byte length floor falls out of the offset.
+
+  The container is a transpose and a de-planarisation, not a copy.
+  `mat2vips_get_header` takes the height from `dims[0]` and the width from
+  `dims[1]`, so a MATLAB 2x3 becomes a 3x2 image and element `(r, c)` is
+  pixel `(c, r)`; rank 3 makes `dims[2]` the band count and the file holds
+  the planes one after another where a libviprs raster is interleaved.
+
+  The behaviours a spec reading gets wrong are the point. One variable loads
+  and there is no way to pick it. The rank filter runs in the search loop and
+  the class check runs *after* it, so a loadable `uint8` variable behind an
+  `int64` one fails outright. The logical flag is read and ignored. And
+  read-info validates the array-flags, dimensions and name subelements and
+  never the data one, so a file truncated mid-element reports a full header
+  and fails only at the pixels.
+
+  Four deliberate divergences, all refusals where `matload` carries on.
+  A complex array is refused: vips never reads the complex bit and memcpys
+  out of a `mat_complex_split_t`, so its pixels are the raw bytes of two heap
+  addresses and change from run to run under ASLR. A non-positive dimension
+  is refused rather than clamped to 1 by GObject. A band count other than 1,
+  3 or 4 is refused rather than pushed onto a multiband carrier the decode
+  path does not produce. And a stored element type that does not match the
+  array class is refused rather than widened.
+
+  Three of the eight classes `matload` reads have a carrier here (`mxUINT8`,
+  `mxUINT16`, `mxSINGLE`) and the other five are refused **by name** with the
+  issue that would add the carrier: `mxINT8`, `mxINT16` and `mxINT32` need
+  #516, `mxUINT32` needs #517, and `mxDOUBLE`, which is what MATLAB writes
+  unless told otherwise, needs #518.
+
+  The allocation budget matters twice here rather than once.
+  `dims_100000x100000.mat` declares ten gigapixels behind eight bytes of
+  data, so the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved; and a
+  `miCOMPRESSED` element's inflated size is not declared anywhere in the
+  container, so every inflate stops at `max_alloc_bytes` and is refused
+  rather than grown past it.
+
+  No new dependency. `flate2` was already a required dependency of this
+  crate, and nothing else in the format needs one.
+
+- `UhdrError::BadSaveInput`, so `uhdr::encode_uhdr`'s input refusal names the
+  operation that actually failed (issue #810). It reused `UhdrError::BadInput`,
+  whose Display is `uhdr2scRGB: {reason}`, so a failed **save** reported the
+  **expand** operation and reported it first:
+  `uhdr2scRGB: uhdrsave needs a 3-band float image, got Rgb8`. It now reads
+  `uhdrsave: needs a 3-band float image, got Rgb8`. `UhdrError` is
+  `#[non_exhaustive]`, so a caller with a wildcard arm is unaffected; a caller
+  matching `BadInput` to catch a save refusal moves to the new variant.
+
+- `Raster::encode_uhdr(quality)` and `Raster::encode_uhdr_gainmap_scale(quality,
+  scale_factor)` **write an Ultra HDR container** instead of returning
+  `EncodeError::Unsupported` (issue #757). #508 landed the writer in
+  `crate::uhdr` with no new dependency and libvips reads its output back
+  (`vipsheader -a` reports `vips-loader: uhdrload`), but the documented
+  `Raster` surface still refused, so a caller was told this build cannot write
+  Ultra HDR while the crate demonstrably could.
+
+  The input is a **3-band `f32`** raster holding linear-light scRGB, which is
+  what a gain map is computed from. Anything else is
+  `EncodeError::InvalidParameter` naming the format it got, not `Unsupported`:
+  the build can write the format, this raster is the wrong shape for it, and
+  those are different answers. libvips gates on the interpretation tag instead
+  and it does not buy correctness there. Measured on 8.18.6: a 1-band scRGB
+  float image saves as an all-black container, and a `uchar` scRGB image is
+  re-linearised on the way in, so a constant 128 comes back as 0.2137 rather
+  than 0.502.
+
+  `scale_factor` is the libvips `gainmap-scale-factor` and is refused outside
+  1..=128. libvips declares that same range and then silently substitutes the
+  default: `--gainmap-scale-factor 0` and `--gainmap-scale-factor 200` both
+  exit 0 and write the same 2630 bytes as the plain call, with
+  `gainmap-scale-factor: 2` in the header. `quality` is clamped to 1..=100 the
+  way `Raster::encode_jpeg` clamps its own.
+
+- A page model for multi-frame images (issue #564). A multi-frame image is one
+  `Raster` whose rows are a whole number of equal-height pages stacked top to
+  bottom, the layout libvips calls a toilet roll, and the split is now a
+  derived, checked value rather than an integer riding along in the metadata.
+  `Raster::page_layout`, `Raster::get_page_height`, `Raster::pages_loaded`,
+  `Raster::page`, `Raster::try_extract_page` / `Raster::extract_page` and
+  `Raster::try_set_page_height` / `Raster::set_page_height` /
+  `Raster::clear_page_height` are the surface, and the new `frames` module
+  holds `PageLayout`, `FrameDelay` and `LoopCount`.
+
+  `Raster::get_page_height` ports `vips_image_get_page_height`, sanity check
+  included: a stored `page-height` counts only when it is positive and divides
+  the raster's height exactly, and otherwise the raster is one page. Measured
+  against 8.18.6 through `ctypes` on a 4x12 image, where every divisor of 12
+  comes back as stored and 5, 7, 11, 13, 24, 100, 0 and the negatives all come
+  back as 12. So the split can never fail to tile the rows it describes, and a
+  caller sweeping `0..raster.pages_loaded()` cannot land off the end.
+
+  `Raster::pages_loaded` is **not** `Raster::get_n_pages`. The first counts the
+  pages this raster holds; the second counts the pages the file held (#635).
+  They differ whenever a loader was asked for a subset: `vips copy
+  'anim3.webp[n=2]' out.v` reports `n-pages: 3` on a raster holding two pages.
+
+  `FrameDelay` holds milliseconds and says so in the type, because the two wire
+  formats disagree: `gifsave` writes `round(ms / 10)` centiseconds with halves
+  to even (measured: `35 55 15 25` ms wrote `4 6 2 2`, `45 67 5 1` wrote
+  `4 7 0 0`), where `webpsave` writes milliseconds straight into `ANMF` and
+  instead clamps anything at or under 10 ms up to 100 ms (measured: `8 9 10 11`
+  went out as `100 100 100 11`). `LoopCount` counts plays, `0` meaning forever,
+  and carries the GIF off-by-one: the NETSCAPE2.0 block holds
+  repeats-after-the-first and a single play carries no block at all, where
+  WebP's `ANIM` chunk holds the play count unshifted.
+
+- JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
+  #501). Build with `--features jp2k` and `decode_jp2k` reads both container
+  forms, the RFC 3745 JP2 box structure and the bare `SOC` + `SIZ` codestream,
+  `.jp2` and `.j2k` become live rows in the content sniffer, and
+  `Raster::encode_jp2k` and `Raster::save_jp2k` write a JP2 container. The
+  `Raster::encode_jp2k(quality, lossless)` and `Raster::encode_jp2k_chroma`
+  typed-`Unsupported` stubs are gone; see Breaking below.
+
+  Without the feature nothing about the surface moves: every entry point still
+  exists at the same signature and returns a typed refusal naming the feature.
+  `decode_jp2k` reports `Jp2kError::FeatureNotEnabled`, the encoders report
+  `EncodeError::Unsupported { format: "jp2k" }`, and the sniffer still routes a
+  JPEG 2000 file here so it reads as "this build has no JPEG 2000" rather than
+  "these bytes are not an image".
+
+  **It is the cheapest codec feature in the crate.** Measured with
+  `cargo generate-lockfile` on a clean tree, 288 packages before and 290 after:
+  **+2 lock entries, and both of them are the two crates themselves**, because
+  neither has a dependency of its own. `svg` costs +29 and `jxl` costs +21.
+  Neither compiles C, declares a `links` key, runs a build script or carries a
+  `-sys` suffix. It is non-default for compile time alone, which is what `svg`
+  argued on its own: 9.7k lines of decoder and 36.9k of translated encoder is
+  real build time and nobody who does not read or write JPEG 2000 should pay
+  it.
+
+  The two halves are split the way `crate::jxl`'s are, and on the same line.
+  `hayro-jpeg2000` decodes, because it is `#![forbid(unsafe_code)]` at the
+  settings this build uses and the decoder is the half that eats
+  attacker-controlled bytes. `openjpeg2-pure-rs`, a translation of OpenJPEG's
+  own C, encodes, because the encoder only ever sees a `Raster` this crate
+  already owns. Three other pure-Rust encoders were measured and rejected;
+  `justjp2` is the one worth naming, because it looks ideal and is not: its own
+  `lossless: true` round trip is not lossless, `hayro-jpeg2000` refuses its
+  output outright, and OpenJPEG 2.5.4 through `vips jp2kload` decodes it to a
+  flat mid-grey with every coefficient gone.
+
+  Measured against `vips` 8.18.6 over the 27 fixtures in
+  `oracle-captures/foreign-jp2k/`, the result splits by wavelet. The
+  **reversible 5/3** path is byte-identical to what `vips rawsave` writes, for
+  seven fixtures covering greyscale, RGB, RGBA, CMYK, tiled, subsampled and
+  multi-resolution, so its pins carry no tolerance at all. The
+  **irreversible 9/7** path is float-specified and agrees with OpenJPEG to
+  within 4 counts at worst, pinned per fixture at the number each one actually
+  reaches. The encoder goes the other way too: every carrier it writes reads
+  back through `vips jp2kload` bit for bit, including 16-bit greyscale and
+  4-band CMYK.
+
+  Four loader behaviours are ports rather than side effects, and each one is
+  invisible to an 8-bit RGB test. A precision-N component is **left-justified**
+  into its element, so a 12-bit 4095 comes back as 65520 and the real depth
+  survives in `bits-per-sample`. A bare codestream with **subsampled chroma**
+  gets OpenJPEG's inverse YCC, coefficient for coefficient and with its
+  truncating casts, because a rounding implementation is one count out. The
+  **tile geometry** is attached only when the image is more than one tile,
+  which is what `vipsheader` shows. And the **ICC profile** comes out of a
+  `METH=2` `colr` box verbatim and unvalidated, which is what `jp2kload` does
+  and is why the fixture carrying 24 bytes that are not a profile still has
+  one.
+
+  Two refusals are carrier gaps in this crate rather than format ones, and both
+  would otherwise be silently wrong answers. A **signed component** is refused
+  with `Jp2kError::SignedComponent`: `PixelFormat` has no signed carrier and
+  the decoder reports every component DC-level-shifted into the unsigned range,
+  so decoding one anyway comes back offset by half the range. More than **16
+  bits** of precision is refused with `Jp2kError::PrecisionNotSupported`: there
+  is no 32-bit integer carrier, and the decoder's `f32` container cannot hold a
+  31-bit sample either.
+
+  The resolution count travels as **`jp2k-resolutions`**, not as `n-pages`.
+  `vipsheader` calls it `n-pages` and vips's `page` selects a resolution level
+  rather than a frame, and this crate reserves that key for counts a zero-based
+  `page` argument can select (issue #635), which `decode_jp2k` does not have
+  yet.
+
+  Lossy is a **compression ratio and not a `Q`**. `jp2ksave --Q` sets
+  OpenJPEG's `cp_fixed_quality` with a distortion ratio in decibels;
+  `openjpeg2-pure-rs` exposes `cp_disto_alloc` with a compression ratio and
+  keeps the rest `pub(crate)`. Those are different numbers, so
+  `Compression::Lossy` carries a `ratio` and there is no `Q` field for this
+  crate to accept and reinterpret, which is the same answer `jxl` gave to
+  `jxlsave`'s `distance`.
+
+  Known limits, each filed: the image origin is read as the standard defines it
+  and vips subtracts it twice (#766); the `colr` box's enumerated colour space
+  does not override the component count here (#767); tiled save has no encoder
+  parameter behind it (#768); and more than four bands is refused on the way
+  out because the loader cannot read it back, though `jp2ksave` writes it
+  (#769).
+
+- AVIF still-image load, behind a new non-default **`avif`** feature
+  (issue #605). Build with `--features avif` and `decode_avif` reads an AV1
+  keyframe out of an ISOBMFF container, with alpha from an `auxl`-linked
+  auxiliary item, at 8, 10 and 12 bits; `.avif` becomes a live row in the
+  content sniffer, matching `ftyp` + the major brand `avif` at offset 4.
+
+  **It is deliberately not `heifload` parity, and the module says so at its
+  own entry point.** `heifload` also reads HEVC, AVC and JPEG payloads and
+  `heifsave` writes HEVC by default, so this covers one of four inputs and
+  none of the default output. An HEVC payload is refused by name rather than
+  as a generic parse failure, because that is the wall issue #498 closed on
+  and it has not moved. There is no save side and none is deferred: no
+  pure-Rust AV1 encoder is worth shipping in a pyramiding engine.
+
+  Pixels match vips exactly rather than approximately, which almost nothing
+  else in the foreign-format roadmap can claim. AV1 decode is bit-exact by
+  specification, and the colour step that is *not* fixed by any specification
+  is pinned against `oracle-captures/foreign-avif` frame by frame. That step
+  turned out to need two implementations: libheif reaches 4:4:4 and 4:2:0
+  through different arithmetic, float with round-to-nearest for one and 8.8
+  fixed point for the other, and measured over 1024 pixels each way the wrong
+  one is wrong on 103 and 124 pixels respectively, always by exactly one.
+  Chroma is upsampled nearest-neighbour, deeper bit depths left-justify the
+  way `heifload` does, and a monochrome AVIF still returns three bands.
+  Colour encodings that nothing in the tree can measure, which is 4:2:2,
+  limited range, BT.709 and BT.601 above 8 bits, are refused rather than
+  approximated.
+
+  The decoder is `rav1d` (BSD-2-Clause), +16 lock entries, cheaper than `jxl`
+  at +21 and `svg` at +29. It is taken with `default-features = false` so its
+  `asm` feature stays off, which means no assembler is required and no native
+  code is compiled: a debug build emits zero object files under
+  `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
+  rather than taken from `avif-parse`, which is MPL-2.0.
+
+- **`MetadataValue::IntArray`, the array variant every animated codec was
+  waiting on** (issue #787). `MetadataValue` had four variants and none of
+  them could hold a per-frame `delay`, so #572, #573, #569 and #621 all had a
+  page-geometry half they could land and a delay half they could not. It now
+  has five, and the fifth is an ordered list of `i64`.
+
+  The spelling is measured against the pinned vips 8.18.6 rather than read out
+  of the C. `vips copy 'anim3.webp[n=-1]' out.v` writes
+  `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, one space
+  after every element including the last, so that is what the writer produces
+  and it is pinned as bytes. The reader is looser, because vips's is: a
+  trailer carrying `40 60 80`, `40 60 80 ` or `  40   60   80  ` reads back as
+  the same three elements in both libraries, and an empty element list is an
+  empty array rather than a missing field.
+
+  Two answers here are libviprs's own, and both are measured:
+
+  - **an element that will not parse keeps the whole field opaque.** vips
+    hands back an *empty* array for `40 x 80` (`vipsheader -f delay` prints
+    nothing and `vips copy` writes the field back out empty), losing the two
+    elements that did parse. libviprs carries the text through untouched, the
+    same rule `gint`, `gdouble` and `VipsBlob` already follow when their text
+    will not parse.
+  - **the elements are `i64`, not `u32` or `i32`.** vips's `gint` is 32 bits
+    and wraps rather than refusing: a trailer carrying `3000000000` reads back
+    through vips as `-1294967296`, and
+    `9223372036854775807 -9223372036854775808` as `-1 0`. A narrower carrier
+    would lose data on a file libviprs did not write and could not warn about.
+
+  `Raster::get_int_array` reads one borrowed, the way `get_int` does since
+  #635, so reading a delay does not deep-copy whatever blob happens to sit
+  under the same name. `MetadataValue::as_int_array` is the panicking
+  accessor beside `as_blob`, `type_code` gets a fifth code, and `len` reports
+  the element count.
+
+  Naming the variant also releases files from the legacy JSON trailer. The
+  fallback is keyed on what is *still* carried, so a `.v` whose only
+  unnameable value was an `{"IntArray":[...]}` delay is read as a value now
+  and its rewrite comes back out as the XML vips reads. Nothing about the
+  format moved: #565's trailer already carried this exact field opaquely, and
+  #609's `#[non_exhaustive]` already made the variant additive.
 
 - **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
   versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
@@ -1392,6 +1820,240 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `src/resample.rs` records a fourth deliberate quantisation divergence from
+  stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
+  keeps a `short` fixed-point copy of every mask, truncated toward zero and
+  **not renormalised**, and the reduce generators read it on both integer
+  carriers. This module keeps the `f64` masks. Nothing about the behaviour
+  moves; what lands is the measurement, three tests, and the argument in the
+  module header, so the gap can neither grow nor quietly vanish.
+
+  The short version of why: a constant image survives `reduce` here and does
+  not survive it in libvips. Over a 32x32 constant 65535 `ushort`, six of
+  fifteen kernel-by-shrink cells come back short on 8.18.6, `lanczos3` at
+  shrink 4 by 128 of 65535. Against the convolution evaluated in compensated
+  arithmetic at the same table offset, this module's mean absolute error is
+  0.2558 of a level on the 16-bit carrier and libvips' is 10.1088, one-directional
+  at a signed mean of -5.81, and libvips is the closer of the two on 0 of 43889
+  interior samples.
+
+- No test in the tree reaches the filesystem without `#[cfg_attr(miri, ignore)]`
+  any more, and `UNANNOTATED_FS_EXCEPTIONS` is empty (issue #756).
+
+  The four that were left are in `src/resample.rs`, which had four pull requests
+  open against it while #739's sweep ran and so was the one module the sweep
+  could not touch. Those merged, so these are annotated and their four rows in
+  `tests/miri_fs_test_inventory.txt` flip to `annotated`. The file now records
+  272 `annotated fs-detected` and 14 `annotated not-detected` tests, and nothing
+  else.
+
+  Emptying the list cost one further edit and no change to any assertion, which
+  is the difference between an exception list and the floor it replaced. The
+  floor, `assert!(unannotated_fs > 0)`, would have gone red here and demanded
+  rewriting. What did go red, on purpose, is
+  `merge_gate_states_the_backlog_as_a_bound_it_still_meets`: it has a separate
+  arm for zero, because at zero the bound holds and `merge-gate.yml`'s sentence
+  about a named handful of unannotated tests becomes false with nothing to catch
+  it. That sentence is rewritten, once, and the failure named it.
+
+- The Miri filesystem detector follows a call into a test helper, one file deep
+  and to a fixed point, and 73 more tests over nine files carry
+  `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
+  population when the change was written; the other 34 are `src/nifti.rs`,
+  `tests/uhdr_ported_surface.rs` and `tests/page_model.rs`, which reached `main`
+  while it was in flight and were caught by the new detector on the merge rather
+  than by a re-read.
+
+  `tests/page_model.rs` is the one worth naming, because its own module doc had
+  written the gap down and deferred it: "three tests here reach the filesystem
+  to read `src/`, and none carries `#[cfg_attr(miri, ignore)]` ... it belongs in
+  that lane's sweep rather than here". It is one test, not three. The other two
+  it counted go through `encode_vips` and `decode_bytes`, which are in memory,
+  and through string literals declared inline. The detector was right about
+  those and the note was not; it now says what was measured.
+
+  It read one function body and stopped, which the guard's module docs listed as
+  a known blind spot without ever measuring it. Measured: on the tree where
+  every inventory row was annotated,
+  `cargo +nightly-2026-08-20 miri test --test exr_ported_surface` still died in
+  one second on `channel_names_and_compression_are_readable_downstream`, which
+  calls `sample()` six lines above it, whose body is `std::fs::read(path)`. The
+  same shape killed `tests/n_pages_meaning.rs`.
+
+  `process_spawning_fns` had already solved this for `std::process`, so it
+  becomes `reaching_fns`, parameterised on the marker list and on a scope
+  predicate. The filesystem arm passes a predicate that accepts only test
+  scaffolding: every function in an integration test, and only the
+  `#[cfg(test)]` modules of a `src/` file. That restriction is the interesting
+  part and it is measured rather than argued: with every function in scope, the
+  way the process arm has it, the follower finds 85 unannotated tests over
+  eleven files; with only scaffolding in scope it finds 39 over six. The
+  difference is almost all one arm, `src/colour.rs` reading an ICC profile off
+  disk inside the library, which would have marked all 23 colour tests that
+  reach the loader whether or not any of them passes it a path.
+
+  The `annotated not-detected` class halves as a result, from 22 rows to 13:
+  those were annotations the detector could not have asked for, and nine of them
+  it can now. What is left is the library boundary and the helper in another
+  file.
+
+- The filesystem half of the Miri convention is enforced rather than recorded:
+  134 tests across 28 files carry `#[cfg_attr(miri, ignore)]` that did not, and
+  `tests/miri_ignore_convention.rs` now refuses any filesystem-touching test
+  that is neither annotated nor named in a four-entry exception list (issues
+  #712, #739).
+
+  #711 took `-Zmiri-disable-isolation` off the job. Under isolation a
+  filesystem call is an unsupported operation and Miri ends the whole session
+  on the first one rather than failing that test, so the 138 rows
+  `tests/miri_fs_test_inventory.txt` carried as `unannotated fs-detected` ceased
+  to be recorded debt and became 138 ways to take the gate down. Measured on
+  `bd4bb1d`, `cargo +nightly-2026-08-20 miri test --test workspace_layout` died
+  on `fuzz_crate_is_a_member_of_the_root_workspace` having run nothing.
+
+  The guard's own floor had to go with it. It ended with
+  `assert!(unannotated_fs > 0)` and a message saying that if the count ever
+  reached zero the ledger had stopped being a ledger, which is a floor that
+  goes red on the change that clears the debt. It is now a refusal with an
+  exception list, checked in both directions: a filesystem test that is neither
+  annotated nor named fails, and a named entry that is no longer an unannotated
+  filesystem test fails too, so the list cannot rot into decoration. It carries
+  four names, all in `src/resample.rs`, which had four pull requests open
+  against it while the sweep ran; issue #756 carries them.
+
+  This does not make the `miri` job report, and the reason is worth writing
+  down because it is the half of #675 nobody had measured. `cargo miri test`
+  runs the `--lib` target first and libtest runs it in sorted order, so the
+  first two tests of the whole invocation are
+  `arithmetic::proptests::every_try_method_in_the_module_is_in_the_sweep` and
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster`. Neither
+  touches the filesystem, so no annotation sweep can reach them, and the second
+  is the proptest already measured at over twenty minutes without finishing.
+  The unannotated filesystem tests were never the first wall of the whole-suite
+  run, they were the first wall of every target after it.
+
+- The doc gate denies `rustdoc::private_intra_doc_links`, and the 33 public doc
+  comments that pointed at `pub(crate)` items no longer do (issue #697). That
+  lint is warn-by-default and neither invocation denied it, so a public doc
+  comment could link to a private helper, rustdoc would silently drop the link
+  and render it as inert bracketed text on docs.rs, and both `make doc` and the
+  CI docs job stayed green while publishing a dead pointer.
+
+  At `9b1ade6` that had happened 33 times across 13 files: `sink.rs` 7,
+  `source.rs` 6, `resume.rs` 5, two each in `colour.rs`, `dedupe.rs`,
+  `encode_tiff.rs`, `engine.rs` and `gif.rs`, one each in `composite.rs`,
+  `manifest.rs`, `pdf.rs`, `raster.rs` and `streaming_mapreduce.rs`. Every
+  target is a private helper, a crate-internal constant or a `pub(crate)`
+  cache, and none of them is worth making public just to satisfy a link, so
+  each site inlines the sentence the public reader needed and keeps the
+  identifier in plain backticks for anyone reading the source. `cargo doc
+  --no-deps --all-features` goes from 47 warnings to 13, the remaining 13 all
+  being `rustdoc::redundant_explicit_links` (issue #795).
+
+  `tests/doc_link_gate.rs` holds the `Makefile` recipe and the `ci.yml` docs
+  job to the same deny set and the same `cargo doc` arguments, so tightening
+  one file alone fails there rather than quietly un-mirroring the local gate,
+  and it holds the docs job's own `name:` to naming every lint it denies.
+
+- The doc gate denies `rustdoc::redundant_explicit_links` too, and the 13 links
+  that carried a redundant explicit target no longer do (issue #795). Each was
+  written `[`Foo`](crate::path::Foo)` where the label alone already resolves to
+  the same destination, in `engine_builder.rs` (4), `engine.rs` (2), `jxl.rs`
+  (2) and one each in `draw.rs`, `sink.rs`, `sink_object_store.rs`,
+  `stream_verify.rs` and `verify.rs`.
+
+  Nothing rendered wrong, so this is not a rendering fix. It is that 13 standing
+  warnings is a floor which hides the fourteenth, and a warning stream nobody
+  reads is not a gate: that is exactly how the 33 private links above
+  accumulated unnoticed. `cargo doc --no-deps --all-features` is now **silent**,
+  so anything it prints is new.
+
+
+- `spcor` and `fastcor` stopped widening the whole image and stopped
+  materialising their results twice. Both read the image as a sliding window of
+  the template's rows, which is the same access pattern the convolution
+  traversal has, so both now share its row window; and both filled a whole
+  `Vec<f64>` in output order only to hand it to a builder that walked it once,
+  so both write into the output raster directly instead. At 4000x4000 `Rgb8`
+  with a 32x32 template, `spcor` peaks at 238 MiB rather than 967 MiB, 5.2 times
+  the input rather than 21, and `fastcor` reads the same. No output byte moves
+  (issue #791).
+
+  What is left whole is the **template**, which both read in full at every
+  output sample. That one is bounded by the operand a caller passes rather than
+  by the image.
+
+- `compass` stopped keeping a widened copy of every result. It convolves
+  `times` times and combines the absolute results, and it used to widen each of
+  those results to `f64` first and hold all `times` widenings live at once, to
+  read each sample once. That made it the most expensive operation in the crate:
+  at 4000x4000 `Rgb8` with a 3x3 box mask and `Combine::Max`, the libvips
+  default `times = 2` peaked at 1.61 GiB over a 48 MB input, 36 times what it
+  was handed, and `times = 4` at 2.42 GiB (issue #790).
+
+  Each result is folded into the accumulator off its own bytes now, and the
+  integer branch builds its output raster from an iterator rather than from a
+  whole `Vec<i64>` of clipped samples. `times = 2` peaks at 556 MiB and
+  `times = 4` at 647 MiB, so 12x and 14x, and no output byte moves.
+
+  Holding every result is inherent to `vips_compass` and is what is left:
+  `times * bands` bytes a pixel, bounded by the `1..=1000` range the operation
+  already enforced on `times`.
+
+- Convolution stopped widening the whole image. `conv`, `convsep`, `gaussblur`,
+  `compass`, `sobel`, `scharr`, `prewitt` and canny's gradient stage all run one
+  shared traversal, and that traversal used to decode the entire source to `f64`
+  before it started: eight bytes a sample where a uchar carries one, which made
+  it the largest allocation in the crate. It keeps a rolling window of the rows
+  the mask actually reaches instead, `min(h, mask height)` of them, each source
+  row widened exactly once on the way past (issue #575).
+
+  Measured on a 4000x4000 `Rgb8` input, release, peak resident set:
+
+  | operation | before | after |
+  |---|---|---|
+  | `conv`, 3x3 box, integer | 464 MiB, 10.1x the input | 98 MiB, 2.1x |
+  | `conv`, 3x3 box, float, `Rgb16` | 693 MiB, 7.6x | 327 MiB, 3.6x |
+  | `sobel` | 464 MiB, 10.1x | 98 MiB, 2.1x |
+  | `gaussblur`, sigma 3, integer | 510 MiB | 145 MiB |
+
+  Not one output byte moves. The window holds the same values in the same
+  order and the accumulation is untouched, so every pinned oracle capture and
+  every FNV hash in the module reads exactly what it read before.
+
+  The allocation counts moved with it: a `conv` at integer precision now makes
+  **one** image-sized allocation, its own output, and `canny` makes eight rather
+  than eleven. `tests/convolution_image_sized_allocations.rs` (renamed from
+  `sharpen_canny_image_sized_allocations.rs`, since the budgets are no longer
+  only those two) pins all sixteen rows at two image sizes.
+
+  `Raster::try_compass` is the one operation that did not move, because its
+  combine reads all `times` results at the same sample and so has no row window
+  to keep. It has a row in the budget file saying so, at 159 bytes a pixel over
+  a three-byte-a-pixel input, and an issue of its own.
+
+- The page split no longer survives an operation that changes the raster's
+  height, and is no longer imported from a second input by a multi-input op
+  (issue #564). Both are deliberate divergences from libvips and both have a
+  measured counter-example on 8.18.6:
+
+  - `vips resize` on a four-page 4x12 roll writes a 2x6 result still claiming
+    `page-height: 3`, and `gifsave` then writes that as a **two**-frame
+    animation whose frames are two half-height frames stacked, silently.
+    `Raster::carry_meta_from` drops the split on a height change instead, so
+    the same pipeline yields a still image: the safe half of the two wrong
+    answers, and the caller can see it in `pages_loaded`.
+  - `vips join plain.v paged.v out.v horizontal`, where only the **second**
+    input is a four-page roll, produces an 8x12 output carrying
+    `page-height: 3`, `n-pages: 4` and the roll's delay array, so an unpaged
+    image silently becomes a four-frame animation.
+    `Raster::merge_fields_from` is the one name the field union does not
+    import.
+
+  Nothing in the crate attaches `page-height` yet, so this changes no current
+  behaviour; it is the contract the animated GIF, WebP and JPEG XL lanes are
+  written against.
+
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
   `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
   actually runs (issues #675, #707). Neither change makes the job pass. What
@@ -1430,14 +2092,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, measured, and would be a defensible answer; the backend pin is simply
   the smaller of the two changes.
 
-  What the job does now is abort on the first filesystem test that has no
-  `#[cfg_attr(miri, ignore)]`. `tests/miri_fs_test_inventory.txt` still records
-  more than a hundred of those, and annotating them is #712. Whether the suite
-  then fits inside `timeout-minutes: 90` is open, and one measurement says not
-  to assume it will: the single proptest
+  What the job did after this change was abort on the first filesystem test
+  that had no `#[cfg_attr(miri, ignore)]`, of which
+  `tests/miri_fs_test_inventory.txt` recorded 138. Annotating them is #712 and
+  #739, below. Whether the suite then fits inside `timeout-minutes: 90` was
+  open, and one measurement said not to assume it would: the single proptest
   `arithmetic::proptests::no_try_method_panics_on_a_float_raster` ran over
   twenty minutes under the interpreter without finishing, and it touches no
-  filesystem, so no annotation sweep will ever reach it.
+  filesystem, so no annotation sweep will ever reach it. That is the one that
+  turned out to decide the answer.
 
   Three claims in that workflow file were false when I got here and are gone.
   It said Miri "cannot run on the dev machine", which was true of the reason
@@ -1882,6 +2545,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Migration.** A caller reading the plot's height, or indexing rows from the
   top, gets one row fewer for a 16-bit histogram. Bars still grow from the
   bottom.
+
+- `EncodeError::Unsupported`'s own documentation no longer names four formats
+  this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
+  JPEG-XL and JP2K as "genuinely-external formats that have no mature pure-Rust
+  encoder", which made the variant's *contract* wrong rather than merely stale:
+  `crate::uhdr` has written an Ultra HDR container since #508 with no new
+  dependency at all, `crate::fits` hand-rolls FITS, and `crate::jxl` and
+  `crate::jp2k` carry real pure-Rust codecs behind their features. The type's
+  own doc block carried the same list.
+
+  A new guard, `the_unsupported_doc_lists_name_no_format_this_build_encodes`,
+  extracts both lists from the source and probes each named format by calling
+  its encoder, so "this build encodes it" is measured rather than declared and
+  the lists cannot drift again.
+
+- **Every `capture.py` under `oracle-captures/` now checks `ORACLE_PIN.json`
+  before it writes anything. Two of the fourteen did** (issue #796), both of
+  them the convolution scripts `oracle_pin.py` was factored out of. The pin
+  file said "capture.py refuses to run against a binary that disagrees with
+  it", `oracle_pin.py` opened "The oracle pin every capture.py under
+  oracle-captures/ checks", and `tests/oracle_capture_pins.rs` said "each
+  area's". All three were true for `convolution`.
+
+  #650 left a two-sided guard: the capture script stops a bad capture being
+  taken, and the Rust test stops one being kept. Only the second side existed
+  for the twelve `foreign-*` areas, so re-running any of them on a machine
+  whose vips had moved wrote a whole capture with the new version stamped
+  through it and told nobody, which is the exact failure #650 was filed for.
+  All six areas still marked `pre_pin`, the ones most likely to be re-run,
+  were in the unguarded twelve.
+
+  `every_capture_script_checks_the_oracle_pin` is what stops it coming back.
+  It reads the scripts through `include_str!` and matches at column zero,
+  because `oracle_pin.py`'s docstring shows callers the exact lines to write
+  and a substring scan would read that example as an adoption. No committed
+  capture changes: re-running `foreign-avif` with the check in reproduced its
+  `oracle.json`, `commands.sh` and all thirteen fixtures byte for byte.
+
+- **The AVIF oracle recorded a sha256 for an `rgb8.avif` that was not the file
+  in the tree** (issue #779). Two records in
+  `oracle-captures/foreign-avif/capture.py` wrote different images to
+  `fixtures/rgb8.avif`: the bit-depth carrier saved the 16-bit ramp narrowed to
+  8 bits, and the lossless-identity record then saved the 8-bit ramp over the
+  top of it. The later write won, so the carrier's row went on recording
+  `d5a55b1a…` / 323 bytes for a file that was `c1f34aad…` / 355 bytes, and its
+  `read_back` and `source_16bit` arrays described an artefact nobody could
+  open.
+
+  The narrowed image is now `fixtures/rgb8_narrowed.avif` and it is committed.
+  Re-running the capture against the pinned vips 8.18.6 reproduced
+  `d5a55b1a…` / 323 bytes exactly, so the carrier row was measured against the
+  narrowed image all along and only lost the file; the identity row was
+  measured against the committed `rgb8.avif` and was right. Of 1890 leaves in
+  that `oracle.json`, the re-run moved two, both the 8-bit row's file name, and
+  left all twelve existing fixtures byte-identical. `capture.py` now refuses to
+  write any name under `fixtures/` twice, so the next collision stops the
+  capture instead of quietly losing an artefact.
+
+  The half that matters is the guard, because nothing was looking.
+  `tests/oracle_capture_pins.rs` now hashes every committed file a capture
+  names and compares it to what was recorded, across every area: 95 rows, of
+  which exactly one disagreed. A second test reads the same defect off the JSON
+  alone, so a collision under `outputs/` or on a path outside the repository is
+  caught too, with no file to compare against. A green suite used to mean "the
+  recorded vips versions line up"; it now also means the pins describe the
+  tree.
 
 - `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
   containers whose allocation refusal is spent inside the `image` crate (issue
