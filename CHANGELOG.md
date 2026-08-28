@@ -2143,6 +2143,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because `graphs()` reaches cargo through `CELLS.iter().map(resolve)` where the
   callee never sits beside a paren.
 
+  That parse reads a `;` as the end of a bodyless declaration, which is right
+  for a trait method and wrong for `fn fingerprint() -> [u8; 32]`. Measured
+  across `src/` and `tests/`, the naive test dropped 133 function headers where
+  a bracket-aware one drops 17, so **116 real functions were invisible to the
+  call graph**. None of them spawns, so nothing was missed in fact, but the
+  failure was silent and in the under-approximating direction, which is the one
+  that costs the gate rather than an annotation.
+
+  The count of spawning tests is pinned at 17, which is the positive control the
+  rest of it needs: every other assertion here says a set is empty, and a
+  detector that has stopped finding anything satisfies all of them. It earned
+  its place twice over. It caught a miscount the first time it ran, and under
+  the `name(` matching the count goes to 14 while every other check stays green.
+
+  Four shapes still reach `std::process` unseen, none of them in the tree: an
+  aliased `use ... as Cmd`, a spawn inside a `macro_rules!` body, a closure held
+  in a `static`, and a helper in another file, since the scan is per file. The
+  module docs list them and a test pins all three of the single-file ones as
+  misses, so one being fixed shows up as a failure rather than as documentation
+  quietly going stale.
+
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
   (issue #631). They reached the same `depth_max` panic the alpha pair did, on
