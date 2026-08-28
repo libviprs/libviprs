@@ -270,9 +270,29 @@
 //!
 //! # Divergence from stock libvips
 //!
-//! Three gaps are open between this module and a stock libvips, and all three
-//! are quantisation at a store rather than any of the arithmetic before it. The
-//! first is the one this module chose; the other two are measured and filed.
+//! Three gaps are open between this module and a stock libvips, all three are
+//! quantisation rather than a different convolution, and all three are kept on
+//! purpose. The rule that decided them, and that decided #704 the other way, is
+//! measured rather than stylistic:
+//!
+//! > Adopt libvips' arithmetic when the difference is inside the carrier's own
+//! > noise **and** points both ways, so neither implementation is the more
+//! > accurate one. Keep this module's when the difference is large or
+//! > one-directional, and pin libvips' answer so the gap stays visible.
+//!
+//! Against the exact answer in rational arithmetic, on real `affine` output:
+//!
+//! | | this module | libvips | libvips closer |
+//! |---|---|---|---|
+//! | #704 bicubic coefficients, `uchar` | 0.4371 LSB | 0.4798 LSB | 1355 of 17814 |
+//! | #732 bicubic store, `ushort` | 0.0000 LSB | 0.4680 LSB | 0 of 1017 |
+//! | #733 bilinear weights, `uchar` | 0.0000 LSB | 0.0252 LSB | 0 of 1113 |
+//! | #733 bilinear weights, `ushort` | 0.0000 LSB | 6.2848 LSB | 0 of 1113 |
+//!
+//! #704 was a coin toss the project took for parity, because both spellings
+//! were within a hair of each other and this module was not implementing either
+//! one cleanly after #668 put the offsets on libvips' grid. The other three are
+//! not coin tosses: this module is exact and libvips is not, on every sample.
 //!
 //! * **`vips_cast` truncates where this module rounds.** Whenever libvips
 //!   brackets a resample in a premultiply it works in FLOAT and casts back to
@@ -305,8 +325,14 @@
 //!   truncates too, and this one needs no alpha band and no premultiply to
 //!   fire. Measured on 8.18.6 over a random 24x24: 691 of 1764 samples at
 //!   exactly 1 LSB, and modelling the truncation instead reproduces the binary
-//!   in 0 of 1764. `affine_bicubic_keeps_f64_coefficients_on_a_ushort_carrier`
-//!   pins the residual so it cannot grow.
+//!   in 0 of 1764. It is the same shape as the `vips_cast` gap above and it
+//!   goes the same way: truncation is a one-directional bias of -0.499 LSB
+//!   where round-half-up is +0.0006, so libvips darkens every resampled `ushort`
+//!   image by half a level and this module round-trips.
+//!   `affine_bicubic_rounds_the_ushort_store_where_vips_truncates` pins it on a
+//!   linear ramp, where Catmull-Rom's answer is closed form: libvips hits
+//!   `floor(exact)` on 441 of 441 interior samples and this module hits
+//!   `round(exact)` on 441 of 441.
 //!
 //! * **`bilinear` keeps `f64` weights on the carriers where vips uses 12-bit
 //!   fixed point** (issue #733). `SWITCH_INTERPOLATE` sends `UCHAR`, `CHAR`,
@@ -317,6 +343,17 @@
 //!   same random 24x24: 31 of 1764 at `uchar`, 1345 of 1764 at `ushort`, and a
 //!   `BILINEAR_INT` model reproduces the binary in 0 and 5 respectively (those
 //!   5 are the equidistant-neighbour ties every interpolator shares).
+//!
+//!   This one stays too, and it is the least close of the three calls. Bilinear
+//!   reproduces a linear function exactly, so there is a closed-form right
+//!   answer, and this module hits it on 529 of 529 interior samples of a ramp
+//!   where libvips misses it on 529 of 529. Adopting the 12-bit weights would
+//!   introduce a mean error of 6.28 LSB on a 16-bit carrier where there is
+//!   currently none, and libvips is closer on 0 of 1113 samples. What the
+//!   argument for adopting it does buy, a gate that can see a regression, comes
+//!   from pinning the divergence instead:
+//!   `affine_bilinear_divergence_from_the_12_bit_weights_is_bounded` asserts it
+//!   from both sides, so it can neither grow nor quietly vanish.
 //!
 //! # Example usage
 //!
@@ -5072,6 +5109,173 @@ mod tests {
                 want,
                 "float {name} against vips 8.18.6"
             );
+        }
+    }
+
+    /// The 24x24 `ushort` linear ramp `a * x + b * y + c`. Both bilinear and
+    /// Catmull-Rom reproduce a linear function **exactly** (bilinear trivially;
+    /// Catmull-Rom because its four coefficients sum to 1 and their first
+    /// moment is the offset, which I checked in exact rationals at 0, 1/4,
+    /// 33/64, 45/64 and 3/4), so over this fixture the right answer is closed
+    /// form and the test does not have to reimplement the interpolator to know
+    /// it. Issues #732 and #733 both turn on that.
+    fn linear_ramp_u16(a: u16, b: u16, c: u16) -> Raster {
+        let data: Vec<u8> = (0..24 * 24usize)
+            .flat_map(|i| {
+                let (x, y) = ((i % 24) as u16, (i / 24) as u16);
+                (a * x + b * y + c).to_ne_bytes()
+            })
+            .collect();
+        Raster::new(24, 24, PixelFormat::Gray16, data).unwrap()
+    }
+
+    /// Shift a raster by a sub-pixel displacement with the identity matrix, so
+    /// the inverse map is `ix = ox - idx` and nothing about the geometry has to
+    /// be recomputed in the test.
+    fn subpixel_shift(im: &Raster, name: &str, idx: f64, idy: f64) -> Vec<u16> {
+        let out = im
+            .try_affine_with(
+                [1.0, 0.0, 0.0, 1.0],
+                Interpolator::from_name(name).unwrap(),
+                AffineOptions {
+                    idx,
+                    idy,
+                    extend: Extend::Copy,
+                    ..AffineOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((out.width(), out.height()), (24, 24), "shift output size");
+        out.data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect()
+    }
+
+    /// Issue #733. `vips_interpolate_bilinear_interpolate` dispatches through
+    /// `SWITCH_INTERPOLATE(BandFmt, BILINEAR_INT, BILINEAR_FLOAT)`, and `UCHAR`,
+    /// `CHAR`, `USHORT` and `SHORT` all take `BILINEAR_INT`, which builds its
+    /// four weights as 12-bit fixed point:
+    ///
+    /// ```c
+    /// const int X = (x - ix) * VIPS_INTERPOLATE_SCALE;
+    /// const int Yd = VIPS_INTERPOLATE_SCALE - Y;
+    /// const int c4 = (Y * X) >> VIPS_INTERPOLATE_SHIFT;
+    /// ```
+    ///
+    /// This module keeps the weights in `f64` on every carrier, which is what
+    /// `BILINEAR_FLOAT` does for `UINT`, `INT`, `FLOAT` and `DOUBLE`. **That
+    /// divergence stays**, and this test is the reason it can stay visible.
+    ///
+    /// The fixture is a linear ramp, which bilinear reproduces exactly, so the
+    /// correct answer is `a * ix + b * iy + c` and the identity matrix with a
+    /// sub-pixel `idx` makes `ix = ox - idx`. Measured on 8.18.6 as
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate bilinear --idx 0.3
+    /// --idy 0.6 --extend copy`: this module hits `round(exact)` on **529 of
+    /// 529** interior samples and vips misses it on **529 of 529**, every one
+    /// of them one low. The offsets are 0.7 and 0.4, and `0.7 * 4096` is
+    /// 2867.2, so vips' weight is 2867 and the ramp is reconstructed with a
+    /// slope that is short by one part in 20000.
+    #[test]
+    fn affine_bilinear_reproduces_a_linear_ramp_where_vips_quantises_its_weights() {
+        let (a, b, c) = (2001.0f64, 700.0f64, 1000.0f64);
+        let (idx, idy) = (0.3f64, 0.6f64);
+        let got = subpixel_shift(&linear_ramp_u16(2001, 700, 1000), "bilinear", idx, idy);
+        // `ix = ox - idx` and `iy = oy - idy`, so the exact bilinear value is
+        // the ramp evaluated there. The constant works out to -20.3, whose
+        // fractional part is 0.7: far enough from a rounding boundary that no
+        // `f64` accumulation noise can reach it.
+        let offset = c - a * idx - b * idy;
+        for oy in 1..24usize {
+            for ox in 1..24usize {
+                let exact = a * ox as f64 + b * oy as f64 + offset;
+                assert_eq!(
+                    got[oy * 24 + ox],
+                    (exact + 0.5).floor() as u16,
+                    "sample ({ox}, {oy}): exact bilinear is {exact}"
+                );
+            }
+        }
+    }
+
+    /// Issue #733, the magnitude. The ramp above says which implementation is
+    /// right; this one says what the divergence is worth, because a smooth
+    /// ramp understates it. A 12-bit weight is short by up to `1 / 4096` of a
+    /// pixel, and the error that produces is that fraction of the *difference*
+    /// between neighbouring taps, so it grows with the local contrast and with
+    /// the carrier's depth. On a byte carrier it is 1 LSB; on a 16-bit one it
+    /// is worth `65535 / 4096`, about 16.
+    ///
+    /// Measured on 8.18.6 over the shared 12x12 `Gray16` fixture, interior crop
+    /// `[4, 4, 6, 6]`: 31 of 36 samples differ, worst delta **20**. Over a
+    /// random 24x24 the whole frame is 1345 of 1764 at worst 26.
+    #[test]
+    fn affine_bilinear_divergence_from_the_12_bit_weights_is_bounded() {
+        #[rustfmt::skip]
+        let vips_8_18_6: [u16; 36] = [
+            31024, 31689, 32355, 33023, 33692, 34358,
+            17374, 24763, 30108, 17518, 14675, 15341,
+            56600, 59071, 59736, 26258, 20743, 28121,
+            39389, 40055, 40720, 41386, 42052, 42717,
+            20368, 21039, 21704, 22370, 23036, 23701,
+            43465, 50843, 27059, 3354, 7597, 14986,
+        ];
+        let out = carrier_fixture(PixelFormat::Gray16).affine([1.3, 0.2, -0.15, 1.1], "bilinear");
+        let (mismatches, worst) = carrier_diff(&carrier_crop_u16(&out), &vips_8_18_6);
+        assert!(
+            mismatches <= 31 && worst <= 20,
+            "ushort bilinear differs from vips 8.18.6 in {mismatches} samples \
+             (worst delta {worst}); expected at most 31 samples, delta 20"
+        );
+        assert!(
+            mismatches >= 20 && worst >= 8,
+            "the 12-bit weight divergence is supposed to be here: {mismatches} \
+             samples, worst delta {worst}. If this dropped, either #733 was \
+             adopted or the fixture stopped exercising it"
+        );
+    }
+
+    /// Issue #732. `vips_interpolate_bicubic_interpolate` sends a `ushort`
+    /// raster to `bicubic_unsigned_int32_tab`, which reads the same `double`
+    /// coefficient table this module uses and then ends:
+    ///
+    /// ```c
+    /// bicubic = VIPS_CLIP(0, bicubic, max_value);
+    /// out[z] = bicubic;
+    /// ```
+    ///
+    /// `out` is an `unsigned short *` and `bicubic` a `double`, so that store
+    /// is a plain C conversion and **truncates toward zero**.
+    /// [`SampleLayout::write`] rounds half up. **That divergence stays too.**
+    ///
+    /// Same closed-form fixture, with the displacements chosen so both
+    /// sub-pixel offsets land on the 1/64 grid (0.75 and 0.5), which makes the
+    /// offset quantisation of #668 a no-op and leaves the store as the only
+    /// difference. The constant works out to 149.75. Measured on 8.18.6 as
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate bicubic --idx 0.25
+    /// --idy 0.5 --extend copy`: vips hits `floor(exact)` on **441 of 441**
+    /// interior samples and this module hits `round(exact)` on 441 of 441, so
+    /// every one of the 441 differs by exactly 1 and this module is the one
+    /// 0.25 away rather than 0.75.
+    #[test]
+    fn affine_bicubic_rounds_the_ushort_store_where_vips_truncates() {
+        let (a, b, c) = (2001.0f64, 700.0f64, 1000.0f64);
+        let (idx, idy) = (0.25f64, 0.5f64);
+        let got = subpixel_shift(&linear_ramp_u16(2001, 700, 1000), "bicubic", idx, idy);
+        let offset = c - a * idx - b * idy;
+        for oy in 2..23usize {
+            for ox in 2..23usize {
+                let exact = a * ox as f64 + b * oy as f64 + offset;
+                assert_eq!(
+                    got[oy * 24 + ox],
+                    (exact + 0.5).floor() as u16,
+                    "sample ({ox}, {oy}): exact bicubic is {exact}, and vips \
+                     stores {} because its store truncates (#732)",
+                    exact.floor() as u16
+                );
+            }
         }
     }
 
