@@ -304,6 +304,32 @@ mod tests {
     use super::*;
 
     /**
+     * Tests that the sample-kind spine lives in this module, so the rest of
+     * the crate has one shared answer to "what are these bytes" rather than
+     * a hand-rolled depth enum per module (`colour.rs`'s private `SpaceDepth`
+     * is exactly that duplicate, issue #607).
+     * Works by scanning this module's own source, compiled in with
+     * `include_str!`, for the type declaration; the needle is spelled in two
+     * halves so this assertion is not itself a hit.
+     * Input: `src/pixel.rs` -> Output: the declaration is present.
+     */
+    #[test]
+    fn sample_kind_spine_is_declared_here() {
+        const SRC: &str = include_str!("pixel.rs");
+        // Positive control: the same scan finds a declaration that is
+        // present, so a miss below is a real miss and not an empty read.
+        assert!(
+            SRC.contains(concat!("pub enum Pixel", "Format")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        assert!(
+            SRC.contains(concat!("pub enum Sample", "Kind")),
+            "the SampleKind spine must be declared in src/pixel.rs, not \
+             hand-rolled per module"
+        );
+    }
+
+    /**
      * Tests that bytes_per_pixel equals channels * bytes_per_channel for every format.
      * Works by iterating all PixelFormat variants and checking the arithmetic identity,
      * catching mismatches if one method is updated without the others.
