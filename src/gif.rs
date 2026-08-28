@@ -164,7 +164,8 @@
 //! recovering it would mean a second block walk beside the decoder's own.
 //! Code 4 is reserved by GIF89a, the difference is only visible on a file
 //! that uses it, and `a_reserved_disposal_code_keeps_the_canvas` pins what
-//! libviprs does with it. Issue #827 tracks it.
+//! libviprs does with it, alongside the codes 5, 6 and 7 that do agree.
+//! Issue #827 tracks it.
 //!
 //! # Not handled here
 //!
@@ -260,6 +261,31 @@ pub enum GifError {
         n: i32,
         /// How many frames the file actually holds.
         frames: u32,
+    },
+    /// A roll of `pages` screens is taller than a raster can be.
+    ///
+    /// Only reachable with the allocation, coordinate and pixel ceilings all
+    /// lifted, since a roll this tall is over every one of them at their
+    /// defaults. It exists so the overflow is a refusal rather than a panic
+    /// in the page copy that follows.
+    #[error("gif: {pages} pages of {height} rows is taller than an image can be")]
+    RollTooTall {
+        /// The logical screen height, which is one page.
+        height: u32,
+        /// How many pages the load asked for.
+        pages: u32,
+    },
+    /// A frame declares a rectangle whose index buffer will not fit `usize`.
+    ///
+    /// Distinct from the allocation budget, which the frame is priced against
+    /// first: this is the 32-bit target where clearing a `u64` price is not
+    /// the same as fitting the address space.
+    #[error("gif: a {width}x{height} frame does not fit this target's address space")]
+    FrameTooLarge {
+        /// The frame rectangle's width.
+        width: u32,
+        /// The frame rectangle's height.
+        height: u32,
     },
     /// The raster could not be built from the decoded pixels.
     #[error(transparent)]
@@ -471,13 +497,15 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
 /// # Errors
 ///
 /// Everything [`decode_gif`] returns, plus [`GifError::BadPageNumber`] when
-/// `options` asks for pages the file does not hold.
+/// `options` asks for pages the file does not hold, and
+/// [`SourceError::PageLimitExceeded`] when the file declares more frames
+/// than [`DecodeLimits::max_pages`].
 pub fn decode_gif_with(
     bytes: &[u8],
     limits: DecodeLimits,
     options: LoadOptions,
 ) -> Result<Raster, SourceError> {
-    let scan = scan_file(bytes)?;
+    let scan = scan_file(bytes, limits)?;
     if scan.frames == 0 {
         return Err(GifError::NoFrames.into());
     }
@@ -507,13 +535,19 @@ pub fn decode_gif_with(
 
     // The roll is `pages` screens stacked, and it is priced separately from
     // the canvas because it is a separate allocation and, for an animation,
-    // much the larger of the two. The product is taken in `u64` and narrowed
-    // afterwards: a many-framed file is exactly where `height * pages` would
-    // wrap a `u32` into a small, plausible height, and the saturation is a
-    // refusal rather than a decode, because `u32::MAX` rows is over
-    // `max_coord`, over `max_pixels` and over any allocation budget short of
-    // the `u64::MAX` `exceeds_alloc_budget` refuses outright.
-    let roll_height = u32::try_from(u64::from(height) * u64::from(pages)).unwrap_or(u32::MAX);
+    // much the larger of the two.
+    //
+    // The product is taken in `u64` and *checked* rather than saturated. A
+    // saturating narrow would substitute a `u32::MAX` height that is smaller
+    // than the true one, and `data` is sized from it while the emit loop
+    // writes `pages` full pages into it, so the overflow would land as a
+    // panic in `copy_from_slice` rather than as a refusal. Arguing that the
+    // ceilings always catch it first is true at the default limits and not
+    // true at the `u64::MAX` / `u32::MAX` spelling the crate documents for
+    // "no limit", which is exactly the caller who would meet it.
+    let Ok(roll_height) = u32::try_from(u64::from(height) * u64::from(pages)) else {
+        return Err(GifError::RollTooTall { height, pages }.into());
+    };
     if pages > 1 {
         limits.check_coord(width, roll_height)?;
         limits.check_pixels(width, roll_height)?;
@@ -542,9 +576,18 @@ pub fn decode_gif_with(
 
     for index in 0..window.end {
         let Some(frame) = decoder.next_frame_info().map_err(decode_error)? else {
-            // `scan_file` counted this frame, so the walk cannot run out
-            // early unless the two disagree about where the file ends.
-            return Err(GifError::NoFrames.into());
+            // The window is bounded by `scan_file`'s count, so reaching the
+            // end of the file inside it means the two walks disagree about
+            // where the file ends. That is a decode failure and it is
+            // reported as one; `NoFrames` would be the wrong sentence for a
+            // file that demonstrably has frames.
+            return Err(GifError::Decode {
+                message: format!(
+                    "frame {index} is missing; the header scan counted {} frames",
+                    scan.frames
+                ),
+            }
+            .into());
         };
         let transparent = frame.transparent;
         let dispose = frame.dispose;
@@ -552,7 +595,24 @@ pub fn decode_gif_with(
         let (left, top) = (u32::from(frame.left), u32::from(frame.top));
         let (fw, fh) = (u32::from(frame.width), u32::from(frame.height));
         let local = frame.palette.clone();
-        let mut indices = vec![0u8; decoder.buffer_size()];
+        // The index buffer is the frame's own rectangle, not the screen's,
+        // and a GIF may declare a frame far larger than the screen it sits
+        // on: `open()` leaves the `gif` crate's `check_frame_consistency`
+        // off, matching libnsgif, which clips such a frame rather than
+        // refusing the file. Clipping happens below, after the buffer is
+        // allocated, so a 1x1 screen carrying one 65535x65535 frame is a
+        // 4 GiB allocation off a forty-byte file. Priced here, through the
+        // crate's own budget, because the screen price two dozen lines up
+        // does not cover it and the animation walk does this once per frame.
+        let indices_bytes = limits.check_image_alloc("GIF frame indices", fw, fh, 1, 1)?;
+        let mut indices =
+            vec![
+                0u8;
+                usize::try_from(indices_bytes).map_err(|_| GifError::FrameTooLarge {
+                    width: fw,
+                    height: fh
+                })?
+            ];
         // A truncated frame keeps the rows that did arrive. The buffer starts
         // zeroed and `read_into_buffer` fills it in order, so the tail is left
         // as index 0 exactly where libnsgif leaves it uncomposited -- which is
@@ -720,7 +780,7 @@ fn open(bytes: &[u8]) -> Result<gif::Decoder<Cursor<&[u8]>>, GifError> {
 /// This is `vips_foreign_load_nsgif_header`'s scan (`nsgifload.c:424-435`):
 /// the band count, the page count and the palette depth are all properties
 /// of the whole file, so they cannot be read off frame 0 alone.
-fn scan_file(bytes: &[u8]) -> Result<FileScan, GifError> {
+fn scan_file(bytes: &[u8], limits: DecodeLimits) -> Result<FileScan, SourceError> {
     let mut decoder = open(bytes)?;
     let global = decoder
         .global_palette()
@@ -740,6 +800,19 @@ fn scan_file(bytes: &[u8]) -> Result<FileScan, GifError> {
     loop {
         match decoder.next_frame_info() {
             Ok(Some(frame)) => {
+                // The ceiling is checked before the count moves, so the walk
+                // stops *at* it rather than running to the end of a hostile
+                // chain to find out how long it is, which is what
+                // `count_images` does for the TIFF IFD chain
+                // (`encode_tiff.rs:718`). A GIF's frame list has no count in
+                // the header either, so this is the same walk with the same
+                // exposure, and until now it was the one multi-page loader
+                // that did not honour the ceiling written for it.
+                if scan.frames >= limits.max_pages {
+                    return Err(SourceError::PageLimitExceeded {
+                        max_pages: limits.max_pages,
+                    });
+                }
                 scan.frames += 1;
                 scan.has_transparency |= frame.transparent.is_some();
                 scan.interlaced |= frame.interlaced;
@@ -2077,6 +2150,18 @@ mod tests {
             );
             assert_eq!(raster.get_int("palette"), Some(1));
             assert_eq!(raster.get_int("interlaced"), None);
+            // `delay` reaches a single-frame load too, one entry for the one
+            // page, and `loop` is 1 because the fixture writes no NETSCAPE
+            // block. vips attaches both to a still load as well (measured:
+            // a one-frame `gifsave` output reports `delay: 0`), so this is
+            // the field set, not an animation-only extra.
+            assert_eq!(raster.get_int_array("delay"), Some(&[0i64][..]));
+            assert_eq!(raster.get_int("loop"), Some(1));
+            assert_eq!(
+                raster.get_field("page-height"),
+                None,
+                "a one-page load carries no split, as vips reports none"
+            );
             assert_eq!(
                 raster.interpretation(),
                 crate::conversion::Interpretation::Srgb
@@ -2464,10 +2549,18 @@ mod tests {
                 LoadOptions::default().with_page(page).with_n(n),
             )
             .expect_err("the window is out of range");
+            // Every field, not just `frames`: the error reports back what was
+            // asked for, and asserting only the file's frame count would
+            // survive a `bad()` that swapped `page` and `n` or hardcoded
+            // both to zero.
             assert!(
                 matches!(
                     err,
-                    SourceError::Gif(GifError::BadPageNumber { frames: 4, .. })
+                    SourceError::Gif(GifError::BadPageNumber {
+                        page: p,
+                        n: count,
+                        frames: 4,
+                    }) if p == page && count == n
                 ),
                 "page {page} n {n}: {err:?}"
             );
@@ -2850,6 +2943,209 @@ mod tests {
             [7, 8, 9],
             "an absent index is index 0, which is what the descriptor stores"
         );
+    }
+
+    /**
+     * Tests what libviprs does with the reserved disposal codes, which the
+     * module docs claim and, until the review that added this test, claimed
+     * without a check. Works by running the same two-frame file with each of
+     * codes 4, 5, 6 and 7 on frame 0 and reading page 1 back, with codes 1
+     * and 3 as the two controls that bracket the answer.
+     * Measured on vips 8.18.6 against exactly these files: codes 5 and 7
+     * keep the canvas, so page 1 is `green red`, and code 4 rewinds it the
+     * way code 3 does, so page 1 is `green black`. **libviprs keeps the
+     * canvas for 4 as well**, which is the divergence issue #827 tracks: the
+     * `gif` crate maps every code it does not know onto `DisposalMethod::Any`
+     * (`reader/decoder.rs:862`), so 4 arrives here indistinguishable from 0.
+     * Input: a two-frame 2x1 GIF with disposal 4, 5, 6, 7, 1 and 3 ->
+     * Output: `green red` for everything but 3, which rewinds.
+     */
+    #[test]
+    fn a_reserved_disposal_code_keeps_the_canvas() {
+        let build = |disposal: u8| {
+            fixture(
+                (2, 1),
+                &ANIM_PALETTE,
+                3,
+                Some(0),
+                &[
+                    Frame {
+                        disposal,
+                        ..Frame::full(2, 1, vec![1, 1])
+                    },
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        ..Frame::full(1, 1, vec![2])
+                    },
+                ],
+            )
+        };
+        let page_one = |disposal: u8| {
+            let raster = decode_gif_with(
+                &build(disposal),
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF");
+            page_bytes(&raster, 1)
+        };
+
+        let kept = [0, 255, 0, 255, 0, 0];
+        for disposal in [1u8, 5, 6, 7] {
+            assert_eq!(page_one(disposal), kept, "disposal {disposal} keeps");
+        }
+        assert_eq!(
+            page_one(3),
+            [0, 255, 0, 0, 0, 0],
+            "the control: 3 really does rewind, so `kept` is not what every code gives"
+        );
+        assert_eq!(
+            page_one(4),
+            kept,
+            "code 4 keeps here where libnsgif rewinds it; issue #827"
+        );
+    }
+
+    /**
+     * Tests that a windowed load renders from frame 0 rather than from the
+     * window, which is the claim the whole `page` option rests on. Works by
+     * loading page 1 of a file whose frame 0 paints the screen red and whose
+     * frame 1 paints a single green pixel with a transparent index
+     * everywhere else, so the pixels under the transparency say which frame
+     * the canvas started from.
+     * The flat full-screen fixtures the other window tests use cannot see
+     * this: every frame overwrites the whole canvas, so starting at
+     * `window.start` gives the same answer. Here it does not, and the wrong
+     * implementation shows transparent black where the right one shows red.
+     * Measured on vips 8.18.6 against exactly this file: `[page=1]` is
+     * `green red`.
+     * Input: a two-frame 2x1 GIF loaded at `page = 1` -> Output: `green
+     * red`, the red coming from the frame the window skipped.
+     */
+    #[test]
+    fn a_window_still_composites_from_the_first_frame() {
+        let bytes = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame::full(2, 1, vec![1, 1]),
+                Frame {
+                    transparent: Some(0),
+                    ..Frame::full(2, 1, vec![2, 0])
+                },
+            ],
+        );
+        let second = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(second.format(), PixelFormat::Rgba8);
+        assert_eq!(second.pages_loaded(), 1);
+        assert_eq!(
+            second.data(),
+            [0, 255, 0, 255, 255, 0, 0, 255],
+            "the transparent pixel shows frame 0's red, which a window that \
+             starts at itself never painted"
+        );
+
+        // The control: the same file loaded from frame 0 has nothing under
+        // the transparency, so the second pixel is transparent black there.
+        let first = decode_gif(&bytes, DecodeLimits::default()).expect("a valid GIF");
+        assert_eq!(first.data(), [255, 0, 0, 255, 255, 0, 0, 255]);
+    }
+
+    /**
+     * Tests that a frame declaring a rectangle far larger than the logical
+     * screen is priced against the allocation budget before its index buffer
+     * is allocated. Works by building a 1x1 screen carrying one 65535x65535
+     * frame, which is forty bytes on disk and 4 GiB of indices, and offering
+     * it a budget of a kilobyte.
+     * The screen price cannot see this: the canvas is three bytes and passes
+     * every ceiling. `open()` leaves the `gif` crate's frame-consistency
+     * check off, matching libnsgif, which clips an oversized frame rather
+     * than refusing the file, and the clipping happens after the buffer is
+     * allocated.
+     * Input: a 1x1 GIF with a 65535x65535 frame at a 1024-byte budget ->
+     * Output: `AllocLimitExceeded` naming the frame's geometry, and a decode
+     * once the budget covers it.
+     */
+    #[test]
+    fn a_frame_larger_than_the_screen_is_priced_before_it_is_allocated() {
+        let bytes = fixture(
+            (1, 1),
+            &ANIM_PALETTE,
+            0,
+            None,
+            &[Frame {
+                width: 4,
+                height: 4,
+                indices: vec![1; 16],
+                ..Frame::full(4, 4, vec![1; 16])
+            }],
+        );
+
+        let err = decode_gif(&bytes, DecodeLimits::default().with_max_alloc_bytes(15))
+            .expect_err("16 bytes of indices is over a 15-byte budget");
+        assert!(
+            matches!(
+                err,
+                SourceError::AllocLimitExceeded {
+                    what: "GIF frame indices",
+                    geometry: Some(DeclaredGeometry {
+                        width: 4,
+                        height: 4,
+                        bands: 1,
+                    }),
+                    needed_bytes: 16,
+                    max_alloc_bytes: 15,
+                }
+            ),
+            "{err:?}"
+        );
+
+        let raster = decode_gif(&bytes, DecodeLimits::default().with_max_alloc_bytes(16))
+            .expect("16 bytes is exactly the frame's indices");
+        assert_eq!((raster.width(), raster.height()), (1, 1), "the frame clips");
+    }
+
+    /**
+     * Tests that the frame count is bounded by `DecodeLimits::max_pages`, the
+     * ceiling the crate documents for exactly this and which the TIFF reader
+     * already applies to its IFD chain. Works by offering a four-frame file a
+     * ceiling of three, with a ceiling of four as the positive control.
+     * A GIF's frame list has no count in the header, so the only way to know
+     * how long it is, is to walk it, which is the same exposure
+     * `count_images` bounds for TIFF. The walk stops **at** the ceiling
+     * rather than running to the end to count, which is why the error carries
+     * the ceiling and not the real length.
+     * Input: a four-frame GIF at `max_pages` 3 and 4 -> Output:
+     * `PageLimitExceeded`, then a load.
+     */
+    #[test]
+    fn the_frame_count_is_bounded_by_max_pages() {
+        let frames: Vec<Frame> = (0..4u8).map(|i| anim_frame([i; 4], 1, 0)).collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+
+        let err = decode_gif(&bytes, DecodeLimits::default().with_max_pages(3))
+            .expect_err("four frames is over a ceiling of three");
+        assert!(
+            matches!(err, SourceError::PageLimitExceeded { max_pages: 3 }),
+            "{err:?}"
+        );
+
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default().with_max_pages(4),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("four frames is exactly a ceiling of four");
+        assert_eq!(raster.pages_loaded(), 4);
     }
 
     /**
