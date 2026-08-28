@@ -44,11 +44,16 @@
 //!
 //! It is a *syntactic* check on one function body, which means it cannot see:
 //!
-//! * filesystem access reached through a helper. Four of the annotations that
-//!   predate this guard are exactly that shape and are recorded as
-//!   `not-detected`: `stream_verify`'s three malformed-strip tests go through
-//!   `assert_strip_layout_rejected`, and `source::tests::decode_file_not_found`
-//!   goes through `decode_file`, which opens the path itself.
+//! * filesystem access reached through a helper in **production** code, or in
+//!   another file. Since #781 the detector follows a call into a helper that is
+//!   test scaffolding, one file deep and to a fixed point, so
+//!   `stream_verify`'s three malformed-strip tests are seen through
+//!   `assert_strip_layout_rejected` now. It deliberately does not follow calls
+//!   into the library: `source::tests::decode_file_not_found` goes through
+//!   `decode_file`, which opens the path itself, and stays `not-detected`,
+//!   because a production function that *can* open a path is not evidence that
+//!   this caller hands it one. [`reaching_fns`] has the measurement behind
+//!   that choice.
 //! * filesystem access inside a library entry point that takes a `Path`. Any
 //!   `foo(path)` that opens `path` internally reads as pure to this scanner.
 //! * a filesystem call spelled through an alias (`use std::fs as f;`) or
@@ -260,20 +265,21 @@ const ANCHOR_FILES: &[&str] = &[
 /// Annotated tests under `src/`, pinned so a bulk change in either direction is
 /// a deliberate edit here rather than a number that quietly drifts.
 ///
-/// It went from 53 to 157 in a single change, which is #739's sweep: 104
-/// filesystem tests across thirteen more `src/` modules picked the annotation
-/// up at once, because #711 turned Miri's isolation on and made every one of
-/// them fatal to the whole run rather than merely slow.
+/// It went from 53 to 157 in one change, #739's sweep, and from 157 to 186 in
+/// the next, #781's: the first annotated 104 filesystem tests across thirteen
+/// more `src/` modules because #711 turned Miri's isolation on and made every
+/// one of them fatal to the whole run, and the second added 29 more that the
+/// detector could not see until it followed a call into a test helper.
 ///
 /// `merge-gate.yml` used to quote a count here ("48 annotations across seven
 /// modules", true at `f62a56a` and stale for months afterwards). It quotes none
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 157;
+const EXPECTED_SRC_ANNOTATIONS: usize = 186;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation.
-const EXPECTED_SRC_MODULES: usize = 21;
+const EXPECTED_SRC_MODULES: usize = 22;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -338,11 +344,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[
 /// [`no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions`],
 /// which is otherwise an assertion that a set is empty, and a detector that has
 /// stopped recognising filesystem calls produces an empty set too. That is a
-/// one-character edit away: [`FS_MARKERS`] is a substring list, and dropping
-/// `"tempfile::"` from it alone takes this from 191 to 105 while leaving the
-/// offender list empty and the check green. Measured, not reasoned: that
-/// deletion is one of the mutations in #739's table.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 191;
+/// one-character edit away: [`FS_MARKERS`] is a substring list, and deleting
+/// one entry from it moves this number while leaving the offender list empty
+/// and the check green. Measured, not reasoned: three such deletions are in
+/// #739's and #781's mutation tables, one per marker that is the sole match for
+/// any test in the tree.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 239;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
@@ -1583,6 +1590,98 @@ mod tests {
         ],
         "the detector must ignore comments and string literals and must read the \
          annotation off the attribute block"
+    );
+}
+
+/// The filesystem detector follows a call into a test helper, and deliberately
+/// does not follow one into the library.
+///
+/// Both halves are the point. The first is what #781 added: on the tree before
+/// it, `cargo miri test --test exr_ported_surface` died in one second on
+/// `channel_names_and_compression_are_readable_downstream`, whose own body is
+/// pure and which calls `sample()` six lines above it, and no amount of
+/// annotating the inventory reached it.
+///
+/// The second is why the follower takes a scope predicate instead of running
+/// everywhere the way the process one does. Following into production code
+/// marks every test that calls any library function that can open a path,
+/// whether or not that test hands it one, which on this tree is 46 further
+/// tests and most of `src/colour.rs`.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn the_filesystem_detector_follows_a_test_helper_but_not_the_library() {
+    let integration = r#"
+fn sample() -> Vec<u8> {
+    std::fs::read("fixture.exr").expect("committed fixture")
+}
+
+#[test]
+fn reads_through_the_helper() {
+    assert!(!sample().is_empty());
+}
+
+#[test]
+fn touches_nothing_at_all() {
+    assert_eq!(1 + 1, 2);
+}
+"#;
+    let scanned = scan_source("tests/fixture.rs", integration);
+    let found: Vec<(&str, bool)> = scanned
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("reads_through_the_helper", true),
+            ("touches_nothing_at_all", false)
+        ],
+        "every function in an integration test is scaffolding, so a helper that reads a \
+         file has to carry to its callers"
+    );
+
+    let module = r#"
+pub fn load_profile(path: Option<&str>) -> Vec<u8> {
+    match path {
+        Some(p) => std::fs::read(p).expect("profile"),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded_dir() -> std::path::PathBuf {
+        let d = tempfile::tempdir().expect("tempdir");
+        d.keep()
+    }
+
+    #[test]
+    fn calls_the_scaffolding_helper() {
+        assert!(seeded_dir().to_str().is_some());
+    }
+
+    #[test]
+    fn calls_the_library_with_no_path() {
+        assert!(load_profile(None).is_empty());
+    }
+}
+"#;
+    let scanned = scan_source("src/fixture.rs", module);
+    let found: Vec<(&str, bool)> = scanned
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("calls_the_scaffolding_helper", true),
+            ("calls_the_library_with_no_path", false),
+        ],
+        "in a `src/` module the follower takes helpers inside `#[cfg(test)]` and stops at \
+         the library boundary: `load_profile` can open a path, and a caller passing `None` \
+         is not evidence that it does"
     );
 }
 

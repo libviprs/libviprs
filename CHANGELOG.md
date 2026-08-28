@@ -1264,6 +1264,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Miri filesystem detector follows a call into a test helper, one file deep
+  and to a fixed point, and 39 more tests over six files carry
+  `#[cfg_attr(miri, ignore)]` because of it (issue #781).
+
+  It read one function body and stopped, which the guard's module docs listed as
+  a known blind spot without ever measuring it. Measured: on the tree where
+  every inventory row was annotated,
+  `cargo +nightly-2026-08-20 miri test --test exr_ported_surface` still died in
+  one second on `channel_names_and_compression_are_readable_downstream`, which
+  calls `sample()` six lines above it, whose body is `std::fs::read(path)`. The
+  same shape killed `tests/n_pages_meaning.rs`.
+
+  `process_spawning_fns` had already solved this for `std::process`, so it
+  becomes `reaching_fns`, parameterised on the marker list and on a scope
+  predicate. The filesystem arm passes a predicate that accepts only test
+  scaffolding: every function in an integration test, and only the
+  `#[cfg(test)]` modules of a `src/` file. That restriction is the interesting
+  part and it is measured rather than argued: with every function in scope, the
+  way the process arm has it, the follower finds 85 unannotated tests over
+  eleven files; with only scaffolding in scope it finds 39 over six. The
+  difference is almost all one arm, `src/colour.rs` reading an ICC profile off
+  disk inside the library, which would have marked all 23 colour tests that
+  reach the loader whether or not any of them passes it a path.
+
+  The `annotated not-detected` class halves as a result, from 22 rows to 13:
+  those were annotations the detector could not have asked for, and nine of them
+  it can now. What is left is the library boundary and the helper in another
+  file.
+
 - The filesystem half of the Miri convention is enforced rather than recorded:
   134 tests across 28 files carry `#[cfg_attr(miri, ignore)]` that did not, and
   `tests/miri_ignore_convention.rs` now refuses any filesystem-touching test
