@@ -16,8 +16,13 @@ resolver = "3"
 # already in the dependency tree. Vendored C compiled through a `build.rs` is
 # fine, discovering or linking an installed library is not, and neither a
 # `build.rs` nor a `links =` key nor a `-sys` suffix is what decides which is
-# which. `tests/dependency_policy.rs` enforces it, so a new dependency that
-# breaks it fails the suite rather than review.
+# which. `tests/dependency_policy.rs` enforces the two mechanical clauses (no
+# discovering a library on the build machine, no compiling native source that
+# did not come down with the crate), so a new dependency breaking either fails
+# the suite rather than review. The third clause, no linking or loading a
+# library somebody has to install first, has no mechanical check and cannot
+# have one: `pdfium-render` ships no C, declares no `links` key and still needs
+# a libpdfium. Check that one by hand against the checklist in CONTRIBUTING.md.
 [workspace.dependencies]
 # Pure-Rust TrueType glyph outlining and rasterisation (Apache-2.0), used by
 # `Raster::text` with the bundled Bitstream Vera Sans face in `fonts/` (see

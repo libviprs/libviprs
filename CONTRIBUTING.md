@@ -11,8 +11,7 @@ points at it.
 **Nothing libviprs builds may need a library that is not already in the
 dependency tree.**
 
-Three clauses, and they are exactly what `tests/dependency_policy.rs` checks on
-every `cargo test`:
+Three clauses:
 
 1. **No dependency may go looking for a library on the build machine.** No
    `pkg-config`, `vcpkg`, `system-deps` or `cmake` probe may run in any build
@@ -24,6 +23,30 @@ every `cargo test`:
 3. **Compiling *vendored* C or assembly through a `build.rs` is allowed**, and
    the instances are listed below. The crate already does this on every single
    build, so a rule that forbade it would be a rule the crate itself breaks.
+
+`tests/dependency_policy.rs` runs on every `cargo test` and checks clauses 1
+and 3, exactly. Per target and per feature set, the set of library-discovery
+crates and the set of crates that compile vendored native code each have to
+equal a list written into the file, so it goes red in both directions: a new
+one turning up, and a listed one quietly leaving.
+
+Clause 2 it does not check, and nothing could. Nothing in a manifest separates
+a crate that needs a library installed on the machine from one that does not.
+`pdfium-render` is the proof and it is already in this tree: no C, no `links`
+key, no `-sys` suffix, and useless without a `libpdfium` on the machine. So
+clause 2 gets applied by hand, against the checklist in "Adding a dependency"
+below.
+
+The test does carry two tripwires aimed at clause 2. It pins the `links` keys
+in every graph to an allowlist, and it pins the set of crates whose job is to
+open a shared library at runtime (`libloading`, `dlopen`, `dlopen2`) the same
+way. Both are closed lists of names, so they catch the shapes we have already
+been bitten by rather than the property itself. Read a green suite as "nothing
+recognisable turned up", not as "clause 2 holds".
+
+That distinction is not hypothetical. Until the runtime-loader tripwire went
+in, adding `libloading` to `[dependencies]` unconditionally, a crate whose only
+purpose is to open a library that is not in the tree, passed every cell.
 
 Two features are named carve-outs, `packfile` and `pdfium`. Both are off by
 default and both are written up below. The list is closed: a new feature does
@@ -60,7 +83,10 @@ that actually matters.
 Everything below comes from
 `cargo tree -p libviprs -e normal,build --target <triple>` plus
 `cargo metadata`, on cargo 1.98, and the test re-derives it rather than trusting
-this table.
+this table. It does that on four fixed triples and on the host, which it reads
+out of `rustc -vV` the same way the snippet below does, so a cell labelled
+"host" means the machine running it rather than the machine I happened to write
+it on.
 
 Two ways to get this wrong, both of which cost me time. The first is skipping
 `--target`: `cargo metadata` without `--filter-platform` reports every target's
@@ -114,6 +140,12 @@ source that came down with the crate, and nothing on the machine is consulted.
 `libbz2-rs-sys`, despite the name, has neither a `build.rs` nor a single `.c`
 file and belongs in no table.
 
+That scan runs on every cell, not just the host ones, even though it works by
+reading crate source directories off the disk. It can, because the lookup table
+it reads them through comes from a `cargo metadata --all-features` with no
+`--filter-platform`, so cargo has unpacked every package any cell can name,
+`windows-sys` and `wasm-bindgen-shared` included.
+
 On aarch64 the blake3 C compile is unconditional, so a default build genuinely
 needs a working C compiler there. On x86_64 blake3 probes for one and falls
 back to Rust intrinsics if it finds none, so the compiler is preferred rather
@@ -142,6 +174,17 @@ declares `links = "wasm_bindgen"` for the same version-unification reason
 appears under `packfile` and nowhere else. `cc` is deliberately not on that
 list, because `cc` compiles vendored sources rather than discovering installed
 ones, and the whole argument above is that those two are different things.
+
+Those five names are hard-coded in the test rather than derived from anything,
+so `autotools`, `metadeps` and every other build-time prober nobody wrote down
+goes straight past it. The runtime-loader list next to it is three names and
+has the same hole, which is the reason clause 2 stays a by-hand check.
+
+**Runtime library loaders.** `libloading` is in the graph under `pdfium` and
+`pdfium-static` and nowhere else, on every target except wasm32, where
+`pdfium-render` gates it on `cfg(not(target_arch = "wasm32"))` and reaches
+PDFium through `js-sys` instead. It is the only mechanical trace either pdfium
+feature leaves anywhere.
 
 **Dev-dependencies** get the same rule applied one notch looser, since they
 never reach a consumer. The only thing they add today is `generator` 0.8.9,
@@ -197,21 +240,52 @@ headers at build time. Nothing here enables it, and nothing should.
 
 ### Adding a dependency
 
-Before you add one, check it against the rule:
+Before you add one, check it against the rule. Start with the mechanical half,
+which covers every target and every feature set in one go:
 
 ```sh
-# Does it drag in a crate whose job is to find an installed library?
-# No output is the pass.
-cargo tree -p libviprs -e normal,build --target "$(rustc -vV | sed -n 's/^host: //p')" \
-  | grep -E 'pkg-config|system-deps|vcpkg|cmake|bindgen'
-
-# What does it actually emit at build time?
-cargo build && grep -h 'rustc-link-lib\|rustc-link-search' target/debug/build/*/output
+cargo test --test dependency_policy
 ```
+
+Read the diff it prints rather than the assertion text: each failure shows the
+set it found against the set the file expects, so the new crate is whatever is
+on one side and not the other. Checking by hand instead means a single
+`cargo tree` on one target with no `--features`, which is blind to exactly the
+kind of dependency both carve-outs here are, so do not.
+
+It costs 1.3 to 1.8 s warm on this machine: one `cargo metadata --all-features`
+at 0.09 s, then one `cargo tree` per cell at 0.05 to 0.09 s, twenty-one of
+them, plus a walk of each resolved crate's source directory looking for files a
+C toolchain could compile. The number that actually hurts is a cold
+multi-target resolve, where cargo has to fetch every manifest in four target
+graphs before it can answer anything at all. Same reason `cargo test --offline`
+fails here with a cargo error rather than a policy message on a machine that
+never fetched the windows- and wasm-only manifests. Nothing is wrong with the
+tree when that happens.
+
+Then do the half no test can do, which is reading what the new crate's build
+script emits:
+
+```sh
+target_dir="${CARGO_TARGET_DIR:-target}"
+cargo build
+grep -h 'rustc-link-lib\|rustc-link-search' "$target_dir"/debug/build/*/output || true
+```
+
+Note the `|| true`: grep exits non-zero when it matches nothing, which is the
+good case here, and without it the line aborts any `set -e` script you paste it
+into. Note the `$target_dir` too, since this project runs its local CI with
+`CARGO_TARGET_DIR` pointed elsewhere and a bare `target/` would quietly grep an
+empty or stale directory.
 
 Every `rustc-link-lib` should be `static=` and every `rustc-link-search` should
 point inside the target directory. If one points at `/usr/lib`,
 `/opt/homebrew/lib` or anywhere else on the machine, the crate fails clause 2.
+
+That leaves the part neither of those sees: a crate that needs an installed
+library and says nothing about it at build time, the way `pdfium-render` does.
+Read what it links or loads, and if it needs something that is not in the tree,
+it is a carve-out and it needs a decision written down here, not a pin.
 
 Then update `tests/dependency_policy.rs`, which will already be red, and write
 the reasoning into the `[workspace.dependencies]` comment next to the new pin.

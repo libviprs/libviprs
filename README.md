@@ -187,9 +187,17 @@ See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tr
 [CONTRIBUTING.md](CONTRIBUTING.md) has the dependency rule: what this crate will
 and will not take on, why `build.rs`, `links =` and a `-sys` suffix are none of
 them the thing that decides it, and where the two carve-outs (`packfile` and
-`pdfium`) sit. Read it before adding a dependency. `tests/dependency_policy.rs`
-checks it against the graph cargo actually resolves, so a dependency that breaks
-the rule turns the suite red rather than getting caught in review.
+`pdfium`) sit. Read it before adding a dependency.
+
+Two of its three clauses are mechanical, and `tests/dependency_policy.rs` checks
+those two against the graph cargo actually resolves, on every `cargo test`: a
+dependency that goes looking for a library on the build machine, or that
+compiles native source that did not come down with it, turns the suite red
+rather than getting caught in review. The third clause, no linking a
+third-party library somebody has to install first, has no mechanical check and
+cannot have one, because nothing in a manifest tells a crate that needs an
+installed library apart from one that does not. That one is applied by hand,
+with the checklist in CONTRIBUTING.md.
 
 ## CI
 
