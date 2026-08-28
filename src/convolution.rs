@@ -1009,6 +1009,7 @@ fn float_format(channels: usize) -> PixelFormat {
 /// `sobel()` panic on a legal 16-bit input above ~4 GiB, because the float
 /// intermediate is four times the source (issue #575).
 fn raster_from_f64(
+    src: &Raster,
     w: u32,
     h: u32,
     channels: usize,
@@ -1020,7 +1021,9 @@ fn raster_from_f64(
     for (out, &v) in data.as_chunks_mut::<4>().0.iter_mut().zip(samples) {
         *out = (v as f32).to_ne_bytes();
     }
-    Raster::from_op_output(w, h, fmt, data)
+    let mut out = Raster::from_op_output(w, h, fmt, data)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Build an unsigned raster in `fmt` from already-clipped integer samples.
@@ -1028,6 +1031,7 @@ fn raster_from_f64(
 /// Same [`alloc_op_output`] / [`Raster::from_op_output`] pair as
 /// [`raster_from_f64`], for the same reason (issue #575).
 fn raster_from_i64(
+    src: &Raster,
     w: u32,
     h: u32,
     fmt: PixelFormat,
@@ -1044,7 +1048,9 @@ fn raster_from_i64(
             *out = (v as u16).to_ne_bytes();
         }
     }
-    Raster::from_op_output(w, h, fmt, data)
+    let mut out = Raster::from_op_output(w, h, fmt, data)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Clamp a mask-relative coordinate to the image, replicating edge pixels
@@ -1431,6 +1437,7 @@ fn out_buffers<const M: usize>(
 
 /// Wrap `M` finished output buffers as rasters.
 fn rasters_from<const M: usize>(
+    src: &Raster,
     w: u32,
     h: u32,
     fmt: PixelFormat,
@@ -1438,7 +1445,9 @@ fn rasters_from<const M: usize>(
 ) -> Result<[Raster; M], RasterError> {
     let mut built: [Option<Raster>; M] = std::array::from_fn(|_| None);
     for (slot, data) in built.iter_mut().zip(buffers) {
-        *slot = Some(Raster::from_op_output(w, h, fmt, data)?);
+        let mut raster = Raster::from_op_output(w, h, fmt, data)?;
+        raster.carry_meta_from(src);
+        *slot = Some(raster);
     }
     Ok(built.map(|r| r.expect("every slot was just filled")))
 }
@@ -1508,7 +1517,7 @@ fn conv_raster_n<const M: usize>(
                     buf[i * 4..i * 4 + 4].copy_from_slice(&(v as f32).to_ne_bytes());
                 }
             });
-            Ok(rasters_from(w, h, fmt, out)?)
+            Ok(rasters_from(src, w, h, fmt, out)?)
         }
         Precision::Integer => {
             let ints: [IntKernel; M] = std::array::from_fn(|m| intize(masks[m]));
@@ -1535,7 +1544,7 @@ fn conv_raster_n<const M: usize>(
                         buf[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
                     }
                 });
-                Ok(rasters_from(w, h, fmt, out)?)
+                Ok(rasters_from(src, w, h, fmt, out)?)
             } else {
                 // CONV_INT: i64 accumulation, (sum + scale/2) / scale with
                 // C truncating division, then the offset, then the clip
@@ -1573,7 +1582,7 @@ fn conv_raster_n<const M: usize>(
                         }
                     });
                 }
-                Ok(rasters_from(w, h, fmt, out)?)
+                Ok(rasters_from(src, w, h, fmt, out)?)
             }
         }
     }
@@ -1821,7 +1830,7 @@ impl Raster {
 
         let fmt = results[0].format();
         if fmt.is_float() {
-            Ok(raster_from_f64(w, h, channels, &combined)?)
+            Ok(raster_from_f64(self, w, h, channels, &combined)?)
         } else {
             // Unsigned inputs stay unsigned for Max; Sum promotes one
             // depth (vips_sum promotes uchar sums; libviprs tops out at 16
@@ -1834,7 +1843,7 @@ impl Raster {
             let max = depth_max(out_fmt);
             let mut vals = try_buffer::<i64>(w, h, n)?;
             vals.extend(combined.iter().map(|&v| (v as i64).min(max)));
-            Ok(raster_from_i64(w, h, out_fmt, &vals)?)
+            Ok(raster_from_i64(self, w, h, out_fmt, &vals)?)
         }
     }
 
@@ -2113,7 +2122,7 @@ impl Raster {
                 }
             }
         }
-        Ok(raster_from_f64(w, h, channels, &out)?)
+        Ok(raster_from_f64(self, w, h, channels, &out)?)
     }
 
     /// Spatial correlation (libvips `vips_spcor`): each output pixel is
@@ -2186,7 +2195,7 @@ impl Raster {
                 }
             }
         }
-        Ok(raster_from_f64(w, h, channels, &out)?)
+        Ok(raster_from_f64(self, w, h, channels, &out)?)
     }
 
     /// Fast correlation (libvips `vips_fastcor`): each output pixel is the
@@ -2378,11 +2387,9 @@ impl Raster {
         // interpretation and the resolution survive the format change,
         // and so do the attachments: `vips sobel` on a jpeg carrying 186
         // bytes of `exif-data` and a 564-byte ICC profile hands both
-        // through unchanged, on either arm. `conv`, `convsep`, `compass`,
-        // `gaussblur`, `spcor` and `fastcor` still return
-        // `RasterMeta::default()` and drop the fields, where vips carries
-        // both through all six; that is issue #719 and it is not fixed
-        // here.
+        // through unchanged, on either arm. Every op in this module does
+        // the same now (#719); the origin offset is the one field the
+        // convolving ones still get wrong, which is #721.
         out.carry_meta_from(self);
         Ok(out)
     }
