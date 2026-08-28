@@ -782,6 +782,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
   rather than taken from `avif-parse`, which is MPL-2.0.
 
+- **`MetadataValue::IntArray`, the array variant every animated codec was
+  waiting on** (issue #787). `MetadataValue` had four variants and none of
+  them could hold a per-frame `delay`, so #572, #573, #569 and #621 all had a
+  page-geometry half they could land and a delay half they could not. It now
+  has five, and the fifth is an ordered list of `i64`.
+
+  The spelling is measured against the pinned vips 8.18.6 rather than read out
+  of the C. `vips copy 'anim3.webp[n=-1]' out.v` writes
+  `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, one space
+  after every element including the last, so that is what the writer produces
+  and it is pinned as bytes. The reader is looser, because vips's is: a
+  trailer carrying `40 60 80`, `40 60 80 ` or `  40   60   80  ` reads back as
+  the same three elements in both libraries, and an empty element list is an
+  empty array rather than a missing field.
+
+  Two answers here are libviprs's own, and both are measured:
+
+  - **an element that will not parse keeps the whole field opaque.** vips
+    hands back an *empty* array for `40 x 80` (`vipsheader -f delay` prints
+    nothing and `vips copy` writes the field back out empty), losing the two
+    elements that did parse. libviprs carries the text through untouched, the
+    same rule `gint`, `gdouble` and `VipsBlob` already follow when their text
+    will not parse.
+  - **the elements are `i64`, not `u32` or `i32`.** vips's `gint` is 32 bits
+    and wraps rather than refusing: a trailer carrying `3000000000` reads back
+    through vips as `-1294967296`, and
+    `9223372036854775807 -9223372036854775808` as `-1 0`. A narrower carrier
+    would lose data on a file libviprs did not write and could not warn about.
+
+  `Raster::get_int_array` reads one borrowed, the way `get_int` does since
+  #635, so reading a delay does not deep-copy whatever blob happens to sit
+  under the same name. `MetadataValue::as_int_array` is the panicking
+  accessor beside `as_blob`, `type_code` gets a fifth code, and `len` reports
+  the element count.
+
+  Naming the variant also releases files from the legacy JSON trailer. The
+  fallback is keyed on what is *still* carried, so a `.v` whose only
+  unnameable value was an `{"IntArray":[...]}` delay is read as a value now
+  and its rewrite comes back out as the XML vips reads. Nothing about the
+  format moved: #565's trailer already carried this exact field opaquely, and
+  #609's `#[non_exhaustive]` already made the variant additive.
+
 - **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
   versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
   and `.nii` becomes a live row in the content sniffer, so `decode_bytes` and
