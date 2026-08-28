@@ -171,6 +171,24 @@ fn priced_by_libviprs() -> Vec<Row> {
             what: "WebP frame buffer",
             price: 48,
         },
+        // Ultra HDR is the only row here that prices **two** images: a
+        // container holds a base JPEG and a gain-map JPEG, and both go
+        // through `check_image_alloc` from their own SOF before either is
+        // decoded. The base is priced first, so this row's refusal is the
+        // base's; `uhdr_prices_the_gain_map_as_well_as_the_base` in
+        // `tests/uhdr_ported_surface.rs` is the one that pins the other
+        // half, with a budget that admits the base and refuses the gain
+        // map. Pricing only the base would let a 1x1 base smuggle in a
+        // 60000x60000 gain map (issue #508).
+        Row {
+            format: "uhdr",
+            bytes: libviprs::uhdr::smallest_container(),
+            decoded: (8, 8),
+            priced_geometry: (8, 8, 3),
+            sample_bytes: 1,
+            what: "Ultra HDR base image",
+            price: 192,
+        },
     ];
     if cfg!(feature = "jxl") {
         rows.push(Row {
@@ -267,7 +285,7 @@ fn the_two_tables_account_for_every_container() {
     // JPEG XL is only compiled in behind its feature, so the self-priced table
     // is one shorter without it. Spelled out rather than hidden in a `cfg!`
     // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 6 } else { 5 };
+    let expected_self_priced = if cfg!(feature = "jxl") { 7 } else { 6 };
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
@@ -277,8 +295,8 @@ fn the_two_tables_account_for_every_container() {
     let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
     assert_eq!(
         self_priced + image_backed + excluded_no_budget_at_all + jxl_absent,
-        10,
-        "the two tables plus the documented exclusion must account for all ten \
+        11,
+        "the two tables plus the documented exclusion must account for all eleven \
          containers libviprs sniffs; see SniffedFormat::ALL"
     );
 }
