@@ -166,6 +166,41 @@ def sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+# Every path under fixtures/ this run has already written, and what wrote it.
+CLAIMED = {}
+
+
+def fix_path(name, why):
+    """Reserve `fixtures/<name>` for one writer, and refuse a second.
+
+    Issue #779 is what happens without this. Two records wrote DIFFERENT
+    images to `fixtures/rgb8.avif`: the bit-depth carrier saved the 16-bit
+    ramp narrowed to 8 bits, and the lossless-identity record then saved the
+    8-bit ramp straight over the top of it. The later write won, so the
+    carrier's row kept the sha256 and the byte count of a file that no longer
+    existed anywhere, and its `read_back` and `source_16bit` arrays described
+    an artefact nobody could open.
+
+    Renaming the one collision fixes today. This is what stops the next one,
+    because a capture that silently loses an artefact is worse than one that
+    refuses to finish: the file it loses is the evidence.
+
+    Scoped to fixtures/ on purpose. That is the committed set, the set
+    oracle.json hashes, and the set `tests/oracle_capture_pins.rs` can check
+    from the other side. Nothing under outputs/ is committed or hashed by
+    this area.
+    """
+    path = os.path.join(FIX, name)
+    if path in CLAIMED:
+        raise SystemExit(
+            f"two records write fixtures/{name}: {CLAIMED[path]} and {why}. "
+            f"Give one of them its own name. The later write wins, and the "
+            f"earlier record keeps the hash of a file that is no longer "
+            f"there (#779).")
+    CLAIMED[path] = why
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Deterministic sources.
 # ---------------------------------------------------------------------------
@@ -208,7 +243,7 @@ def unpack16(data):
 
 def rawload(name, data, w, h, bands, fmt="uchar", interp="srgb"):
     """Write a raw buffer and load it into a `.v` with an interpretation."""
-    raw = os.path.join(FIX, f"{name}.raw")
+    raw = fix_path(f"{name}.raw", f"rawload({name})")
     with open(raw, "wb") as f:
         f.write(data)
     note(f"fixtures/{name}.raw written by this script "
@@ -464,7 +499,9 @@ def box(tree, kind, nth=0):
 def fixture(name, tagged, w, h, *args):
     """Save `tagged` as fixtures/<name>.avif and record everything about
     what comes back out of it."""
-    path = os.path.join(FIX, f"{name}.avif")
+    path = fix_path(f"{name}.avif",
+                    f"fixture({name}) from "
+                    f"{os.path.relpath(tagged, ROOT)}")
     vips("heifsave", tagged, path, *args)
     return path, {
         "fixture": f"fixtures/{name}.avif",
@@ -520,7 +557,12 @@ tagged16 = rawload("rgb16_src", src16, W, H, 3, fmt="ushort", interp="rgb16")
 
 depth = {}
 for bits in (8, 10, 12):
-    name = f"rgb{bits}"
+    # `rgb8` belongs to record 2, which saves the 8-bit ramp under it. This
+    # row saves the 16-bit ramp NARROWED to 8 bits, which is a different
+    # image, so it needs a different name. Both used to be called `rgb8` and
+    # the second write won (#779). 10 and 12 keep their names: nothing else
+    # claims those, and #605 embeds them.
+    name = "rgb8_narrowed" if bits == 8 else f"rgb{bits}"
     path, rec = fixture(name, tagged16, W, H, "--bitdepth", str(bits),
                         "--lossless", "--keep", "none")
     out = flat(rec["getpoint"])
@@ -562,6 +604,15 @@ records["bit_depth_carrier"] = {
             "maximum is 65472. For 12-bit it is `sample << 4` and 65520.",
     "carrier_by_bitdepth": {"8": "uchar / srgb", "10": "ushort / rgb16",
                             "12": "ushort / rgb16"},
+    "why_the_8_bit_fixture_is_not_called_rgb8": "Because `fixtures/rgb8.avif` "
+        "is record 2's file, saved from the 8-BIT ramp, and this row is the "
+        "16-bit ramp narrowed to 8. They are different images and they used "
+        "to share the name: this row wrote first, record 2 overwrote it, and "
+        "this row went on recording the sha256 and the byte count of a file "
+        "that was no longer in the tree (#779). fixtures/rgb8_narrowed.avif "
+        "is that file, under a name nothing else claims. capture.py now "
+        "refuses to write any fixture name twice, so the next collision "
+        "stops the capture instead of quietly losing an artefact.",
     "why_it_matters": "A port that decodes 10-bit AVIF into u8, or into u16 "
                       "rescaled to full 0..65535 range, passes every header "
                       "assertion (4x3, 3 bands, ushort, rgb16, "
@@ -752,7 +803,7 @@ colour["lossless_untagged"] = {
 }
 
 # Untagged and lossy: no colour box at all.
-lossy = os.path.join(FIX, "rgb8_q50_420.avif")
+lossy = fix_path("rgb8_q50_420.avif", "colour_information.lossy_untagged")
 vips("heifsave", u8_tagged, lossy, "--Q", "50", "--keep", "none")
 colour["lossy_untagged"] = {
     "fixture": "fixtures/rgb8_q50_420.avif",
@@ -766,7 +817,7 @@ colour["lossy_untagged"] = {
 
 # Tagged with libvips' own built-in sRGB profile, so this reproduces without
 # any file off this machine.
-icc = os.path.join(FIX, "rgb8_icc.avif")
+icc = fix_path("rgb8_icc.avif", "colour_information.icc_tagged")
 vips("heifsave", u8_tagged, icc,
      "--lossless", "--profile", "srgb", "--keep", "none")
 colour["icc_tagged"] = {
@@ -831,7 +882,7 @@ for label, args in sweep:
         "bytes": os.path.getsize(out),
     }
 
-q90 = os.path.join(FIX, "rgb8_q90_444.avif")
+q90 = fix_path("rgb8_q90_444.avif", "chroma_subsampling.fixture_444")
 vips("heifsave", u8_tagged, q90, "--Q", "90", "--keep", "none")
 records["chroma_subsampling"] = {
     "what": "`heifsave` on this build does expose `subsample-mode` with "
@@ -859,7 +910,7 @@ records["chroma_subsampling"] = {
 # ---------------------------------------------------------------------------
 odd_src = ramp8(3, 3, 3)
 odd_tagged = rawload("odd3x3_src", odd_src, 3, 3, 3, interp="srgb")
-odd = os.path.join(FIX, "odd3x3_q50.avif")
+odd = fix_path("odd3x3_q50.avif", "odd_dimensions")
 vips("heifsave", odd_tagged, odd, "--Q", "50", "--keep", "none")
 records["odd_dimensions"] = {
     "what": "A 3x3 image at the default Q, so 4:2:0 over an odd width and an "
@@ -1028,8 +1079,8 @@ bad = {}
 
 
 def probe_bad(name, data, keep_as_fixture=False):
-    target = FIX if keep_as_fixture else OUT
-    path = os.path.join(target, name)
+    path = (fix_path(name, f"probe_bad({name})") if keep_as_fixture
+            else os.path.join(OUT, name))
     with open(path, "wb") as f:
         f.write(data)
     note(f"{'fixtures' if keep_as_fixture else 'outputs'}/{name} written by "
