@@ -2325,6 +2325,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supposed to carry them, which is the only one of the four that tests what the
   Python writer actually emitted.
 
+- `resize`, `reduce` and the bicubic interpolator round the sub-pixel offset
+  onto libvips' coefficient-table grid, so they stop diverging from the binary
+  at non-dyadic scales (issue #668). Output moves wherever the offset used to
+  miss that grid, which is every scale that is not a power of two, so committed
+  reference images of a fractional resize will need regenerating. The dyadic
+  scales are untouched by construction.
+
+  **The full list of operations whose output can move**, because `table_offset`
+  sits in two places and reaches further than the three named above.
+  `Raster::reduce` and `Raster::resize` go through the reduce mask, and so does
+  `Raster::shrink` on its residual reduce and `Raster::thumbnail` /
+  `thumbnail_buffer`, which do their heavy shrink through `resize`. The
+  interpolator half reaches `affine`, `mapim`, `rotate_with` and
+  `similarity_with`, at an explicit `Interpolator::Bicubic` in each case. The
+  bare `rotate` and `similarity` default to bilinear and are genuinely
+  untouched, as are `nohalo` and `lbb`, because none of the three reads a table
+  in libvips either. Anyone with pinned `mapim` or `thumbnail` output needs this
+  list as much as anyone with a pinned `resize`.
+
+  libvips never evaluates a resampling kernel at the true offset. `vips_reduceh`
+  and `vips_reducev` index a 65-entry table of masks, and
+  `vips_interpolate_bicubic_interpolate` indexes a 65-entry table of Catmull-Rom
+  coefficients, both built at `(float) x / VIPS_TRANSFORM_SCALE` with
+  `VIPS_TRANSFORM_SCALE` = 64, and both spelling the index the same way
+  (`reduceh.cpp:270-276`, `bicubic.cpp:496-503`). We computed the mask at the
+  exact offset and called that the same convolution without the quantisation
+  error. It is not: it is the mask for a different sub-pixel position.
+
+  Dyadic scales hide it because their offsets land on the grid. A reduce by 2
+  has offset 0 at every output position and one by 2.5 alternates 48/64 and
+  16/64, so the lookup and the exact evaluation agree and always did. A reduce
+  by 4/3 has offsets in thirds and 0.6667 * 64 is 42.67, which does not.
+
+  Measured on vips 8.18.6 over a 64x64 float raster with three bands and no
+  alpha, so no premultiply bracket is involved anywhere. `vips shrinkh` and
+  `vips shrinkv` already agreed exactly at factors 2, 3, 4, 5 and 7, so the box
+  shrink and the split point that picks it were never the problem. `vips resize`
+  went from 6144 of 6912 samples wrong at 0.75 (max 1.54), 1728 of 1728 at 0.37
+  (max 0.46), 936 of 1083 at 0.3 (max 0.21) and 25259 of 27648 at 1.5 (max 2.27)
+  to bit-exact at every downscale and within one f32 ulp at every upscale.
+
+  Rounding has to floor where the C truncates. `(int)(X * 128)` rounds toward
+  zero and `& 127` reads two's complement, so on a negative coordinate that pair
+  lands one bucket above `floor`. vips never meets the case, because
+  `vips_affine_gen` hands the interpolator a coordinate in the embedded space
+  shifted by `window_offset` (`affine.c:361-362`); we interpolate in the input's
+  own coordinates, which go negative on the first output column of any
+  enlargement past 2x.
+
+  Bilinear, nohalo and lbb keep the exact offset, because none of them reads a
+  table in libvips either.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
