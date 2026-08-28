@@ -748,6 +748,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clamp, matching vips, which fails `[page=4]`, `[n=99]`, `[n=0]` and
   `[page=3,n=3]` on a four-frame file with `bad page number`.
 
+  **The frame walk is bounded now, where the still loader's was not.** A GIF's
+  frame list has no count in its header, so the only way to know how long it
+  is, is to walk it, which is the exposure `DecodeLimits::max_pages` exists
+  for and which `decode_tiff_page` already honours for the IFD chain. GIF was
+  the one multi-page loader that did not consult it, and now does. The
+  per-frame index buffer is priced too: a frame may declare a rectangle far
+  larger than the logical screen (libnsgif clips such a frame rather than
+  refusing the file, and libviprs matches that), so a forty-byte file
+  declaring a 65535x65535 frame on a 1x1 screen used to allocate 4 GiB
+  through a budget that had only seen the 3-byte screen.
+
 - **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
   `decode_analyze_file` takes either half of the pair or the bare stem and
   resolves the other, `analyze::decode_analyze` takes the two buffers, and a
