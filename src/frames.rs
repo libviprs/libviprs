@@ -118,7 +118,7 @@ impl PageLayout {
     /// total anyway, and reports a single zero-row page.
     pub fn of(height: u32, stored: Option<i64>) -> Self {
         let page_height = match stored {
-            Some(n) if n > 0 => n as u32,
+            Some(n) if Self::divides(height, n) => n as u32,
             _ => height,
         };
         Self {
@@ -163,11 +163,10 @@ impl PageLayout {
     /// counts the pages of the *file* the raster came from. A loader asked for
     /// a subset reports a larger `n-pages` than this.
     pub fn pages(&self) -> u32 {
-        if self.page_height == 0 {
-            1
-        } else {
-            self.height / self.page_height
-        }
+        // `checked_div` rather than a zero test the lint reads as a manual
+        // one. A zero page height is only reachable on a zero-height layout,
+        // which is a single empty page.
+        self.height.checked_div(self.page_height).unwrap_or(1)
     }
 
     /// Whether this raster holds more than one page.
@@ -241,7 +240,14 @@ impl FrameDelay {
     /// viewers then reinterpret. [`FrameDelay::browser_floor`] is the other
     /// half of that story.
     pub fn to_centiseconds(self) -> u16 {
-        u16::try_from(self.millis / 10).unwrap_or(u16::MAX)
+        let quotient = self.millis / 10;
+        let remainder = self.millis % 10;
+        let rounded = match remainder {
+            0..=4 => quotient,
+            5 if quotient.is_multiple_of(2) => quotient,
+            _ => quotient + 1,
+        };
+        u16::try_from(rounded).unwrap_or(u16::MAX)
     }
 
     /// The delay `webpsave` and `jxlsave` actually write: anything at or
@@ -256,7 +262,11 @@ impl FrameDelay {
     /// through `gifsave` produced `1 1 1 1` centiseconds, so a codec applies
     /// this where its own oracle applies it and nowhere else.
     pub const fn browser_floor(self) -> Self {
-        self
+        if self.millis <= 10 {
+            Self { millis: 100 }
+        } else {
+            self
+        }
     }
 }
 
@@ -300,9 +310,10 @@ impl LoopCount {
     /// `loop` every time.
     pub const fn from_gif_wire(netscape: Option<u16>) -> Self {
         match netscape {
-            None => Self::FOREVER,
-            Some(count) => Self {
-                plays: count as u32,
+            None => Self { plays: 1 },
+            Some(0) => Self::FOREVER,
+            Some(repeats) => Self {
+                plays: repeats as u32 + 1,
             },
         }
     }
@@ -313,7 +324,11 @@ impl LoopCount {
     /// The inverse of [`LoopCount::from_gif_wire`], saturating at `u16::MAX`
     /// because the block holds a `u16`.
     pub fn to_gif_wire(self) -> Option<u16> {
-        Some(u16::try_from(self.plays).unwrap_or(u16::MAX))
+        match self.plays {
+            0 => Some(0),
+            1 => None,
+            plays => Some(u16::try_from(plays - 1).unwrap_or(u16::MAX)),
+        }
     }
 
     /// The loop count a WebP `ANIM` chunk means, which is the play count with
@@ -578,10 +593,19 @@ mod tests {
         assert!(LoopCount::FOREVER.is_forever());
         assert_eq!(LoopCount::FOREVER, LoopCount::default());
         assert!(!LoopCount::from_plays(1).is_forever());
+        // `u32::MAX` is the wrong probe for a saturation guard: its low
+        // sixteen bits are already `u16::MAX`, so `as u16` passes it. 65537
+        // plays is 65536 repeats, which wraps to 0 and would write "play once
+        // more" onto an animation asking for sixty-five thousand.
         assert_eq!(
-            LoopCount::from_plays(u32::MAX).to_gif_wire(),
+            LoopCount::from_plays(65_537).to_gif_wire(),
             Some(u16::MAX),
             "a play count past the wire saturates rather than wrapping"
+        );
+        assert_eq!(65_536_u32 as u16, 0, "the wrap this guards against");
+        assert_eq!(
+            LoopCount::from_plays(u32::MAX).to_gif_wire(),
+            Some(u16::MAX)
         );
     }
 
@@ -606,6 +630,9 @@ mod tests {
                 .expect("two plays writes a block") as u32,
             "the two containers disagree, which is why there are two methods"
         );
+        // Same trap on this side: `u32::MAX as u16` is `u16::MAX`, so the
+        // probe has to be a value the two answers disagree on.
+        assert_eq!(LoopCount::from_plays(65_536).to_webp_wire(), u16::MAX);
         assert_eq!(LoopCount::from_plays(u32::MAX).to_webp_wire(), u16::MAX);
     }
 }
