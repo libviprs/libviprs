@@ -279,6 +279,22 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
         "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
+        // Every spelling `jp2ksave` answers to, on one arm, because vips
+        // writes the same JP2 container for all five suffixes: measured on
+        // 8.18.6, `vips copy base.v out.EXT` over `jp2`, `j2k`, `jpt`, `j2c`
+        // and `jpc` gives five files with one SHA-256 between them. `"jp2k"`
+        // is here too because that is the saver's name and what a caller who
+        // read `vips -l` would type; `jp2ksave` itself does not answer to it
+        // as a suffix, and neither does anything else, so it costs nothing.
+        //
+        // Not gated, like `"jxl"` above and unlike the extension route:
+        // without the feature `encode_jp2k` already reports
+        // `EncodeError::Unsupported { format: "jp2k" }`, which is the same
+        // variant an unrecognised name gets, so the row stays live and typed
+        // rather than disappearing.
+        "jp2k" | "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => {
+            raster.encode_jp2k(crate::jp2k::SaveOptions::default())
+        }
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.

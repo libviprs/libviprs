@@ -711,6 +711,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`.jp2` is a row in `Raster::save` and `"jp2k"` is one in
+  `Raster::encode_to_buffer`** (issue #770). JPEG 2000 was wired into the
+  content sniffer on the way in but into nothing shared on the way out, so
+  `save("x.jp2")` reported an unsupported extension and
+  `encode_to_buffer("jp2k")` an unsupported format, and the only route to the
+  encoder was `Raster::encode_jp2k` by name.
+
+  All five suffixes `jp2ksave` registers are live rows, and they are one arm
+  rather than five because vips writes the same bytes for all of them.
+  Measured on the pinned 8.18.6: `vips copy base.v out.EXT` over `jp2`, `j2k`,
+  `jpt`, `j2c` and `jpc` produces five files with one SHA-256 between them,
+  while `out.jp2000` is refused as an unknown format. So this is the one row in
+  the save table where the suffix does not pick the codec.
+
+  The extension route is gated on the feature, so without it the five fall
+  through to `UnsupportedExtension` like any other extension with no encoder
+  and the refusal message stops naming them. The format dispatch is **not**
+  gated, matching `"jxl"`: `encode_jp2k` without the feature already returns
+  `EncodeError::Unsupported { format: "jp2k" }`, so the row stays live and
+  reports the codec it cannot write rather than the caller's spelling.
+
+  `save_stripped` writes the same bytes as `save` here, because `jp2ksave.c`
+  has no code for an ICC profile, an EXIF block or an XMP packet. That is
+  asserted, with the `.webp` row beside it as the control that does differ.
+
 - **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
   `decode_analyze_file` takes either half of the pair or the bare stem and
   resolves the other, `analyze::decode_analyze` takes the two buffers, and a
