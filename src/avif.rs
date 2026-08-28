@@ -1544,6 +1544,50 @@ mod tests {
     }
 
     /*
+     * An `auxl` reference alone does not make an item the alpha plane: the
+     * same mechanism carries depth maps and gain maps, and treating one of
+     * those as alpha would put an unrelated plane in the fourth band and
+     * silently make the image transparent in the wrong places. Only the
+     * `auxC` URN separates them.
+     *
+     * Found by mutation: dropping the URN test and accepting any `auxl`
+     * broke nothing in the suite, because every committed fixture's only
+     * auxiliary item happens to be alpha. This is the case the fixtures do
+     * not have, built by retyping the URN in place (`alpha` and `depth` are
+     * the same length, so the box lengths do not move).
+     * Input: `rgba8.avif` with a depth-map URN -> Output: three bands, and
+     * the aux item is not found as alpha.
+     */
+    #[cfg_attr(not(feature = "avif"), ignore = "needs the avif feature")]
+    #[test]
+    fn an_auxiliary_item_that_is_not_alpha_is_not_treated_as_alpha() {
+        let mut bytes = RGBA8.to_vec();
+        let at = bytes
+            .windows(ALPHA_URN.len())
+            .position(|w| w == ALPHA_URN.as_bytes())
+            .expect("the fixture carries the alpha URN");
+        let depth = b"urn:mpeg:mpegB:cicp:systems:auxiliary:depth";
+        assert_eq!(
+            depth.len(),
+            ALPHA_URN.len(),
+            "the swap must not move lengths"
+        );
+        bytes[at..at + depth.len()].copy_from_slice(depth);
+
+        let container = parse_container(&bytes).expect("it still parses");
+        assert!(
+            container.alpha_item(1).is_none(),
+            "a depth map is not an alpha plane"
+        );
+        let raster = decode(&bytes).expect("it still decodes, as RGB");
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgb8,
+            "without an alpha aux item the result is three bands"
+        );
+    }
+
+    /*
      * The lossy 4:4:4 path, which is where the YCbCr conversion runs with no
      * chroma upsampling in the way. This isolates the matrix arithmetic: if
      * this passes and the 4:2:0 test below fails, the upsampler is wrong, and
