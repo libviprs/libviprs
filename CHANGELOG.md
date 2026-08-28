@@ -9,6 +9,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Catching "the decode allocation budget refused this file" takes one call
+  instead of seven match arms. `GifError::AllocLimitExceeded`,
+  `FitsError::AllocLimitExceeded`, `ExrError::AllocLimitExceeded`,
+  `RadianceError::AllocLimitExceeded` and `JxlError::AllocLimitExceeded` are
+  **gone**, collapsed onto `SourceError::AllocLimitExceeded`, which grows a
+  `geometry: Option<DeclaredGeometry>` field carrying the width, height and
+  band count the five used to carry separately (issue #686). There is a new
+  `SourceError::is_alloc_limit()` that answers for every shape the budget can
+  refuse in.
+
+  #632 put one price and one comparison behind every declared-geometry
+  decoder. That left five variants doing nothing but re-tagging a refusal
+  computed elsewhere, in two field vocabularies (`needed` against
+  `needed_bytes`, `channels` against `bands`), which is the cheapest they will
+  ever be to delete. They now all go through one
+  `DecodeLimits::check_image_alloc`, and so does the TIFF page reader, which
+  reported no geometry before and reports its page's now.
+
+  **Migration.** Match `SourceError::AllocLimitExceeded { .. }` where you
+  matched any of the five, or call `err.is_alloc_limit()` and stop matching.
+  `needed` becomes `needed_bytes`, and `width` / `height` / `bands` /
+  `channels` move inside `geometry`. Both that struct and the enum are
+  `#[non_exhaustive]`, so a destructuring match needs `..` in two places and
+  the compiler error if you forget will not obviously say why:
+
+  ```rust
+  Err(SourceError::AllocLimitExceeded {
+      geometry: Some(DeclaredGeometry { width, height, .. }),
+      needed_bytes,
+      ..
+  }) => ...
+  ```
+
+  `DeclaredGeometry::new` builds one, so a caller can still construct the
+  error in their own tests.
+
+  The `what` label says which buffer was refused: `"GIF canvas"`,
+  `"FITS pixel buffer"`, `"OpenEXR sample buffers"`,
+  `"Radiance pixel buffer"`, `"JPEG XL frame buffer"`,
+  `"WebP frame buffer"`, `"TIFF page pixel buffer"`, `"TIFF file body"`,
+  `"image file body"`. It is a human-readable label rather than a
+  compatibility promise: the wording may change and new decoders add new
+  labels, so branch on `geometry` or on the variant, never on the string.
+
+  **WebP comes along too**, which is what #686 asked for and what I initially
+  got wrong. It looked like one of four formats reporting the `image` crate's
+  shape, but the four are not alike underneath: JPEG, PNG and single-image
+  TIFF are refused inside `image`'s own decoder through `Limits::reserve`, so
+  there is genuinely no libviprs price and no declared geometry behind them.
+  WebP had both, from `decoder.dimensions()` and
+  `decoder.output_buffer_size()`, and fabricated an `image::ImageError` to
+  look like the other three. Since the frames refused are set by the
+  comparison and not by the error type, that consistency was costing a caller
+  the geometry and the price and buying nothing.
+
+  **Two things this does not do.** JPEG, PNG and single-image TIFF keep the
+  `image` shape, for the reason above. `JxlError::DecoderAllocLimitExceeded`
+  also stays, because it is `jxl-oxide`'s own tracker refusing an internal
+  buffer at a size it does not report out, and a file can trip either without
+  tripping the other. `is_alloc_limit` covers all three so a caller does not
+  have to know the split, and it answers the same in a build with or without
+  the `jxl` feature, since that variant exists in both.
+
+  **What `is_alloc_limit` deliberately says no to**, since one of them looks
+  like a false negative: `DimensionLimitExceeded` and `PageLimitExceeded` are
+  different ceilings, and so is
+  `SourceError::Raster(RasterError::ByteBudgetExceeded)`, which
+  `Raster::ppm_load`, `csv_load` and `matrix_load` return through this same
+  enum with a message reading "needs N bytes, exceeding the M-byte allocation
+  budget". That M is `DEFAULT_MAX_ALLOC_BYTES`, the raster construction
+  ceiling, not `DecodeLimits::max_alloc_bytes`, so raising the decode limit
+  does nothing about it. The predicate's whole test is "does raising
+  `max_alloc_bytes` fix this", and all three fail it.
+
+  `geometry` is an `Option` rather than three flat fields because the
+  whole-file read prices a file's length on disk, which says nothing about the
+  geometry declared inside it. Reporting `0x0x0` there would have been a lie
+  in a field a caller reads.
+
 - `resize`, `shrink`, `reduce` and `affine` take the premultiply bracket's
   alpha ceiling from the raster's interpretation instead of from its storage
   depth, so a float raster tagged `ScRgb` brackets against `1.0` and one tagged

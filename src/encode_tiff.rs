@@ -141,7 +141,7 @@ use tiff::tags::Tag;
 use crate::codec::{DecodeError, TiffCompression};
 use crate::imageio::SaveError;
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, decode_alloc_bytes};
+use crate::raster::Raster;
 use crate::sink::SinkError;
 use crate::source::{DecodeLimits, read_file_bounded};
 
@@ -641,13 +641,15 @@ fn decode_current_image<R: Read + Seek>(
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
     let (channels, bit_depth) = resolve_channels_and_depth(decoder)?;
-    let needed = decode_alloc_bytes(
+    // A declared geometry, so it reports one: the page's own width, height
+    // and channel count travel with the refusal (issue #686).
+    limits.check_image_alloc(
+        "TIFF page pixel buffer",
         width,
         height,
         channels as u64,
         u64::from(bit_depth).div_ceil(8),
-    );
-    limits.check_alloc("TIFF page pixel buffer", needed)?;
+    )?;
     let orientation = read_tiff_orientation(decoder);
     let result = decoder.read_image().map_err(tiff_decode_err)?;
     let (format, data) = interpret(channels, result)?;
@@ -1409,6 +1411,11 @@ mod tests {
                 Err(DecodeError::AllocLimitExceeded {
                     what: "TIFF page pixel buffer",
                     needed_bytes: 32768,
+                    geometry: Some(crate::source::DeclaredGeometry {
+                        width: 64,
+                        height: 64,
+                        bands: 4,
+                    }),
                     max_alloc_bytes: 32767,
                 })
             ),
@@ -1445,10 +1452,15 @@ mod tests {
         match decode_tiff_page_with_limits(&path, 0, limits) {
             Err(DecodeError::AllocLimitExceeded {
                 what,
+                geometry,
                 needed_bytes,
                 max_alloc_bytes,
             }) => {
                 assert_eq!(what, "TIFF file body");
+                assert_eq!(
+                    geometry, None,
+                    "the file body prices a length, not a declared geometry"
+                );
                 assert_eq!(needed_bytes, file_len);
                 assert_eq!(max_alloc_bytes, 8);
             }
