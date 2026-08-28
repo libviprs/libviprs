@@ -1728,6 +1728,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `src/resample.rs` records a fourth deliberate quantisation divergence from
+  stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
+  keeps a `short` fixed-point copy of every mask, truncated toward zero and
+  **not renormalised**, and the reduce generators read it on both integer
+  carriers. This module keeps the `f64` masks. Nothing about the behaviour
+  moves; what lands is the measurement, three tests, and the argument in the
+  module header, so the gap can neither grow nor quietly vanish.
+
+  The short version of why: a constant image survives `reduce` here and does
+  not survive it in libvips. Over a 32x32 constant 65535 `ushort`, six of
+  fifteen kernel-by-shrink cells come back short on 8.18.6, `lanczos3` at
+  shrink 4 by 128 of 65535. Against the convolution evaluated in compensated
+  arithmetic at the same table offset, this module's mean absolute error is
+  0.2558 of a level on the 16-bit carrier and libvips' is 10.1088, one-directional
+  at a signed mean of -5.81, and libvips is the closer of the two on 0 of 43889
+  interior samples.
+
 - No test in the tree reaches the filesystem without `#[cfg_attr(miri, ignore)]`
   any more, and `UNANNOTATED_FS_EXCEPTIONS` is empty (issue #756).
 
