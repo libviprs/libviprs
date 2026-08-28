@@ -1943,6 +1943,13 @@ impl Raster {
     /// pixel count, and the first is the same residue `Raster::try_clone`
     /// names for itself (it is crate-private, so no link). That is the only
     /// sense in which this is still not abort-free.
+    ///
+    /// A test holds that, rather than only this paragraph asserting it.
+    /// `tests/sharpen_canny_image_sized_allocations.rs` counts the path's
+    /// image-sized allocations and its peak live image-sized bytes per pixel
+    /// through a counting allocator, at two image sizes so the budgets have to
+    /// hold as rates, and pins both at what they measure. Either of the two
+    /// copies this function used to make reddens it (issue #700).
     pub fn try_sharpen(&self, sigma: f64, m1: f64, m2: f64) -> Result<Raster, ConvolutionError> {
         // vips_sharpen: remember the interpretation, work in LabS.
         let old_interpretation = self.interpretation();
@@ -2814,6 +2821,11 @@ impl Raster {
     /// two clamp tables, the 2x2 gradient mask, and the `fields.clone()` that
     /// carries the input's attachments onto the result. None of them scales
     /// with the pixel count.
+    ///
+    /// Both arms are held to that by
+    /// `tests/sharpen_canny_image_sized_allocations.rs`, which budgets each of
+    /// them separately through a counting allocator; see
+    /// [`Raster::try_sharpen`] for what the two numbers mean (issue #700).
     pub fn try_canny(&self, sigma: f64, precision: Precision) -> Result<Raster, ConvolutionError> {
         let [gx, gy] = self.canny_gradient(sigma, precision)?;
         let fmt = gx.format();

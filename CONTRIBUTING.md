@@ -292,6 +292,62 @@ the reasoning into the `[workspace.dependencies]` comment next to the new pin.
 Every entry in that table carries the argument for why it is there and why its
 feature list is what it is; that is the house style and it is not optional.
 
+## Allocation instruments: one shape, two questions
+
+There is now a counting `#[global_allocator]` in the core crate, in
+`tests/sharpen_canny_image_sized_allocations.rs`, and #696 is planning another
+one to prove that every image-sized allocation on a path went through the
+fallible reservation helper. Two instruments answering roughly the same
+question is how a third gets invented, so the call is made here rather than
+per-lane: **there is one instrument shape, and #696 extends the existing one
+rather than building a second.**
+
+Concretely, the shape is the one that file already has, and it is deliberately
+small: a `CountingAlloc` wrapping `System`, a thread-local threshold that starts
+and ends at `usize::MAX` so an unarmed thread is never charged, a `measure`
+window that restores every counter on the way out including on unwind, and a
+process-global counter armed only inside the window so a path that fans out onto
+a worker thread cannot go on measuring as if it had not. When a second binary
+needs it, lift it into a shared test-support module and keep one copy. Do not
+write a second counting allocator with different accounting.
+
+One thing #696's issue text assumes and should not: it says a counting allocator
+"has to live in its own test binary because it is process-global, which is why
+the harness repo has it and the core crate does not". The first half is true and
+the second does not follow. `#[global_allocator]` in an integration test is
+scoped to that one test binary and reaches no other test, which is why this one
+lives here instead of in `libviprs-tests`.
+
+The two questions the one instrument answers are different, and which assertion
+you write depends on which you are asking:
+
+- **A budget.** "This named operation costs exactly N image-sized allocations
+  and M bytes a pixel." Pin the exact measured values, never a padded ceiling,
+  and cross-check every row at two image sizes and two carriers so a constant
+  fitted to one image cannot pass as a rate. That is what the sharpen and canny
+  file does.
+- **A funnel.** "Every image-sized allocation on this path went through the
+  fallible helper." Compare the same counter against the helper's
+  `cfg(test)` hook consumptions. That is #696's, and the counter it needs is the
+  one that already exists.
+
+Either way the bar is the one the rest of this repo runs on: a guard that stays
+green under a mutation of the thing it claims to guard is worthless, so break it
+and watch it go red before you believe it. That applies to the instrument as
+much as to the subject. Two of the counting allocator's four arms were provably
+unguarded when it first landed, because nothing on the sharpen or canny path
+allocates through `realloc` or `alloc_zeroed`, and the positive control now
+exercises all four on purpose.
+
+**The cost this puts on anything touching the sharpen or canny path**, which is
+worth knowing before you start rather than when the suite goes red: the budgets
+there are pinned at exact values, six rows of two numbers, each cross-checked at
+two image sizes. A change to what either path holds live reddens three rows at
+once and needs all twelve cells re-measured with the same evidence that set
+them. That is intended, not a bug in the guard: it is the price of a budget with
+no slack in it, and a budget with slack in it would not have caught either of
+the mutations it exists for.
+
 ## Before you push
 
 `make ci` runs the lot: `fmt`, `clippy`, `test`, `doc`, plus `miri` and `loom`,
