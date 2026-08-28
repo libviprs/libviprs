@@ -615,13 +615,41 @@ fn header_version(bytes: &[u8]) -> Result<(Version, Endian), NiftiError> {
             needed: HEADER_1_BYTES,
         });
     }
-    // Not written yet. The length floor above is the additive half, because
-    // `the_version_check_needs_348_bytes_and_not_one_fewer` has nothing else
-    // to assert against; which version and which byte order the sentinel and
-    // the magic name is the part the rest of the tests are about.
-    let _ = magic_version(take(bytes, MAGIC_1_AT));
-    let _ = [Endian::Little, Endian::Big].map(|e| e.i32(take(bytes, 0)));
-    Err(NiftiError::BadSizeofHdr { found: 0 })
+    let raw: [u8; 4] = bytes[..4]
+        .try_into()
+        .expect("four bytes of a 348-byte head");
+    for endian in [Endian::Little, Endian::Big] {
+        let sizeof_hdr = endian.i32(raw);
+        let (version, at, width) = match sizeof_hdr {
+            348 => (Version::One, MAGIC_1_AT, 4),
+            540 => (Version::Two, MAGIC_2_AT, 8),
+            _ => continue,
+        };
+        let magic: [u8; 4] = bytes[at..at + 4]
+            .try_into()
+            .expect("four magic bytes inside a 348-byte head");
+        let declared = magic_version(magic);
+        let wanted = match version {
+            Version::One => 1,
+            Version::Two => 2,
+        };
+        if declared == wanted {
+            return Ok((version, endian));
+        }
+        if declared == 0 && version == Version::One {
+            return Err(NiftiError::AnalyzeDialect {
+                magic: show_magic(&magic),
+            });
+        }
+        return Err(NiftiError::VersionMismatch {
+            header_bytes: version.header_bytes(),
+            magic: show_magic(&bytes[at..at + width]),
+            declared,
+        });
+    }
+    Err(NiftiError::BadSizeofHdr {
+        found: i32::from_le_bytes(raw),
+    })
 }
 
 /// Decide which byte order the header's numeric fields are in.
@@ -656,11 +684,19 @@ fn header_version(bytes: &[u8]) -> Result<(Version, Endian), NiftiError> {
 /// depend on which order is tried first. `both_orders_cannot_match_at_once`
 /// pins that.
 fn field_endian(bytes: &[u8], version: Version, sentinel: Endian) -> Endian {
-    // Not written yet. This is the rule the capture's `byte_order` prose
-    // states, and `dim0_decides_the_byte_order_and_the_sentinel_is_only_a_fallback`
-    // is the test that says the prose is wrong.
-    let _ = (bytes, version);
-    sentinel
+    match version {
+        Version::Two => sentinel,
+        Version::One => {
+            let raw: [u8; 2] = take(bytes, 40);
+            if (1..=MAX_RANK as i16).contains(&i16::from_le_bytes(raw)) {
+                Endian::Little
+            } else if (1..=MAX_RANK as i16).contains(&i16::from_be_bytes(raw)) {
+                Endian::Big
+            } else {
+                sentinel
+            }
+        }
+    }
 }
 
 /// Everything this module reads out of a NIfTI header.
@@ -813,9 +849,19 @@ impl Header {
     /// capture has no NIfTI-2 fixture that exercises it, so that half is
     /// libviprs following one rule rather than two, not a measurement.
     fn data_offset(&self) -> u64 {
-        // Not written yet: neither the truncation nor the header floor is
-        // here.
-        self.vox_offset as u64
+        let declared = if self.vox_offset.is_finite() {
+            self.vox_offset.trunc()
+        } else {
+            0.0
+        };
+        let floor = self.version.header_bytes() as u64;
+        if declared <= 0.0 {
+            return floor;
+        }
+        // `f64` holds every `u64` up to 2^53 exactly, and anything past that
+        // is far beyond any file, so the saturating cast is the honest one.
+        let declared = declared as u64;
+        declared.max(floor)
     }
 }
 
