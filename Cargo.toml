@@ -10,6 +10,19 @@ resolver = "3"
 
 # Single-sourced version pins shared by every workspace member. Members
 # inherit with `{ workspace = true }` so versions cannot drift per crate.
+#
+# Before adding an entry here, read the dependency rule in CONTRIBUTING.md.
+# The short version: nothing this crate builds may need a library that is not
+# already in the dependency tree. Vendored C compiled through a `build.rs` is
+# fine, discovering or linking an installed library is not, and neither a
+# `build.rs` nor a `links =` key nor a `-sys` suffix is what decides which is
+# which. `tests/dependency_policy.rs` enforces the two mechanical clauses (no
+# discovering a library on the build machine, no compiling native source that
+# did not come down with the crate), so a new dependency breaking either fails
+# the suite rather than review. The third clause, no linking or loading a
+# library somebody has to install first, has no mechanical check and cannot
+# have one: `pdfium-render` ships no C, declares no `links` key and still needs
+# a libpdfium. Check that one by hand against the checklist in CONTRIBUTING.md.
 [workspace.dependencies]
 # Pure-Rust TrueType glyph outlining and rasterisation (Apache-2.0), used by
 # `Raster::text` with the bundled Bitstream Vera Sans face in `fonts/` (see
@@ -41,7 +54,7 @@ blake3 = "1.8.4"
 # is, and on x86_64 its `build.rs` generates a `core::arch::global_asm!`
 # block (it returns early on every other architecture). No C compiler and
 # no external system library are involved either way, which is the bar
-# stated in issue #606.
+# CONTRIBUTING.md sets.
 exr = { version = "1.74.2", default-features = false }
 flate2 = "1"
 # The GIF codec, taken directly rather than only through the `image` facade
