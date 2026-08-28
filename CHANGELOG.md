@@ -658,6 +658,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::encode_uhdr(quality)` and `Raster::encode_uhdr_gainmap_scale(quality,
+  scale_factor)` **write an Ultra HDR container** instead of returning
+  `EncodeError::Unsupported` (issue #757). #508 landed the writer in
+  `crate::uhdr` with no new dependency and libvips reads its output back
+  (`vipsheader -a` reports `vips-loader: uhdrload`), but the documented
+  `Raster` surface still refused, so a caller was told this build cannot write
+  Ultra HDR while the crate demonstrably could.
+
+  The input is a **3-band `f32`** raster holding linear-light scRGB, which is
+  what a gain map is computed from. Anything else is
+  `EncodeError::InvalidParameter` naming the format it got, not `Unsupported`:
+  the build can write the format, this raster is the wrong shape for it, and
+  those are different answers. libvips gates on the interpretation tag instead
+  and it does not buy correctness there. Measured on 8.18.6: a 1-band scRGB
+  float image saves as an all-black container, and a `uchar` scRGB image is
+  re-linearised on the way in, so a constant 128 comes back as 0.2137 rather
+  than 0.502.
+
+  `scale_factor` is the libvips `gainmap-scale-factor` and is refused outside
+  1..=128. libvips declares that same range and then silently substitutes the
+  default: `--gainmap-scale-factor 0` and `--gainmap-scale-factor 200` both
+  exit 0 and write the same 2630 bytes as the plain call, with
+  `gainmap-scale-factor: 2` in the header. `quality` is clamped to 1..=100 the
+  way `Raster::encode_jpeg` clamps its own.
+
 - A page model for multi-frame images (issue #564). A multi-frame image is one
   `Raster` whose rows are a whole number of equal-height pages stacked top to
   bottom, the layout libvips calls a toilet roll, and the split is now a
@@ -1590,6 +1615,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   job to the same deny set and the same `cargo doc` arguments, so tightening
   one file alone fails there rather than quietly un-mirroring the local gate,
   and it holds the docs job's own `name:` to naming every lint it denies.
+
+- `spcor` and `fastcor` stopped widening the whole image and stopped
+  materialising their results twice. Both read the image as a sliding window of
+  the template's rows, which is the same access pattern the convolution
+  traversal has, so both now share its row window; and both filled a whole
+  `Vec<f64>` in output order only to hand it to a builder that walked it once,
+  so both write into the output raster directly instead. At 4000x4000 `Rgb8`
+  with a 32x32 template, `spcor` peaks at 238 MiB rather than 967 MiB, 5.2 times
+  the input rather than 21, and `fastcor` reads the same. No output byte moves
+  (issue #791).
+
+  What is left whole is the **template**, which both read in full at every
+  output sample. That one is bounded by the operand a caller passes rather than
+  by the image.
+
+- `compass` stopped keeping a widened copy of every result. It convolves
+  `times` times and combines the absolute results, and it used to widen each of
+  those results to `f64` first and hold all `times` widenings live at once, to
+  read each sample once. That made it the most expensive operation in the crate:
+  at 4000x4000 `Rgb8` with a 3x3 box mask and `Combine::Max`, the libvips
+  default `times = 2` peaked at 1.61 GiB over a 48 MB input, 36 times what it
+  was handed, and `times = 4` at 2.42 GiB (issue #790).
+
+  Each result is folded into the accumulator off its own bytes now, and the
+  integer branch builds its output raster from an iterator rather than from a
+  whole `Vec<i64>` of clipped samples. `times = 2` peaks at 556 MiB and
+  `times = 4` at 647 MiB, so 12x and 14x, and no output byte moves.
+
+  Holding every result is inherent to `vips_compass` and is what is left:
+  `times * bands` bytes a pixel, bounded by the `1..=1000` range the operation
+  already enforced on `times`.
+
+- Convolution stopped widening the whole image. `conv`, `convsep`, `gaussblur`,
+  `compass`, `sobel`, `scharr`, `prewitt` and canny's gradient stage all run one
+  shared traversal, and that traversal used to decode the entire source to `f64`
+  before it started: eight bytes a sample where a uchar carries one, which made
+  it the largest allocation in the crate. It keeps a rolling window of the rows
+  the mask actually reaches instead, `min(h, mask height)` of them, each source
+  row widened exactly once on the way past (issue #575).
+
+  Measured on a 4000x4000 `Rgb8` input, release, peak resident set:
+
+  | operation | before | after |
+  |---|---|---|
+  | `conv`, 3x3 box, integer | 464 MiB, 10.1x the input | 98 MiB, 2.1x |
+  | `conv`, 3x3 box, float, `Rgb16` | 693 MiB, 7.6x | 327 MiB, 3.6x |
+  | `sobel` | 464 MiB, 10.1x | 98 MiB, 2.1x |
+  | `gaussblur`, sigma 3, integer | 510 MiB | 145 MiB |
+
+  Not one output byte moves. The window holds the same values in the same
+  order and the accumulation is untouched, so every pinned oracle capture and
+  every FNV hash in the module reads exactly what it read before.
+
+  The allocation counts moved with it: a `conv` at integer precision now makes
+  **one** image-sized allocation, its own output, and `canny` makes eight rather
+  than eleven. `tests/convolution_image_sized_allocations.rs` (renamed from
+  `sharpen_canny_image_sized_allocations.rs`, since the budgets are no longer
+  only those two) pins all sixteen rows at two image sizes.
+
+  `Raster::try_compass` is the one operation that did not move, because its
+  combine reads all `times` results at the same sample and so has no row window
+  to keep. It has a row in the budget file saying so, at 159 bytes a pixel over
+  a three-byte-a-pixel input, and an issue of its own.
 
 - The page split no longer survives an operation that changes the raster's
   height, and is no longer imported from a second input by a multi-input op
