@@ -1159,6 +1159,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `SampleKind` lives at `libviprs::pixel::SampleKind`.
 
+- `SampleKind` names the four sample kinds no `PixelFormat` carries yet:
+  `I8`, `I16`, `I32` and `U32` (issue #798, towards #516 and #517). Two new
+  accessors come with them, `is_signed()` and `range()`, and `max_value()` is
+  now derived from `range()` so the two cannot drift.
+
+  The point of naming them before the carriers exist is that the answers are
+  the part that has to be *measured*, and measuring costs nothing now while
+  the carriers cost a crate-wide refactor. `promote()` is the case in point.
+  It is `vips__formatalike`, swept on vips 8.18.6 with
+  `vips boolean <a> <b> out and`, whose format table maps every integer format
+  to itself so the output format is the formatalike result rather than a
+  promotion of it. Four of the 36 integer pairs are ones "the wider kind wins"
+  gets wrong: `(U8, I8)` is two one-byte kinds promoting to a **two**-byte one,
+  `(I8, U16)` and `(U16, I16)` promote to **four** bytes, and `(U32, I8)` takes
+  its sign from the one-byte operand.
+
+  `PixelFormat::with_kind()` now returns `None` for a kind no format carries,
+  rather than falling through to `with_channels(channels, kind.bytes())`, which
+  would answer `Rgb16` for three bands of `I16` and `FloatF32(3)` for three
+  bands of `U32`. That silent retag is exactly what `with_kind()` exists to
+  prevent, so it refuses instead. `with_kind()` therefore has two reasons to
+  answer `None` and a caller that needs to tell them apart has to look at the
+  kind.
+
+  `src/arithmetic.rs` and `src/histogram.rs` handle the new kinds for real
+  rather than leaving a hole. Two behaviours are worth knowing. The rounding,
+  saturating write in `arithmetic` takes its floor from `range()` instead of a
+  literal `0.0`, since zero is the right floor for only three of the six
+  integer kinds; nothing moves on the carriers that exist. And `histogram`'s
+  bin-index read *folds* rather than widens, matching the `VipsStatisticClass`
+  input cast, measured: a `char` image of `[-128, -1, 0, 127]` histograms to
+  `bin 0 = 3` and `bin 127 = 1`, and a `uint` image whose largest sample is
+  70000 gives a 65536-wide histogram.
+
+  No `PixelFormat` produces any of the four, so nothing in the crate's
+  behaviour moves. What moves is that the decisions are made, measured and
+  pinned, so the carrier work in #516 and #517 is the `PixelFormat` variant and
+  the 22 modules of #748, and not this as well.
+
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
   reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
@@ -2514,6 +2553,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
+  and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
+  `vips hist_find` of a `ushort` `[4096, 4096, 9]` gives width **4097** where
+  libviprs gave 65536: 65536 is the ceiling of the rule, not the rule. `uchar`
+  really is a fixed 256 even when the data maxes out at 3, and that half is
+  unchanged.
+
+  It follows the band selection too, which is the case a whole-image test
+  cannot separate: on a 16-bit image whose band 0 maxes at 10 and band 1 at
+  5000, `hist_find` is 5001 wide over both bands, `hist_find_band(0)` is 11 and
+  `hist_find_band(1)` is 5001. `hist_find_indexed` is sized the same way from
+  its index image.
+
+  `hist_equal` fuses `maplut(hist_norm(hist_cum(hist_find)))` into one pass and
+  was taking its table width from the depth, so it stopped being that
+  composition the moment `hist_find` moved. The visible consequence is at the
+  constant image: measured, a constant `uchar` band equalises to `255` and a
+  constant `ushort` band equalises to **itself**, because a table one value wide
+  normalises that value's single cumulative entry back to it. The doc said "a
+  constant band maps to the depth maximum" without the qualifier.
+
+  `bins_for` stays as it was, and the two functions now answer different
+  questions on purpose: `hist_find_ndim` uses it as the value **range** it
+  scales samples by, and that range is the depth's rather than the data's,
+  measured (a `ushort` `[0, 5, 10]` and a `uchar` `[0, 5, 10]` both put all
+  three samples in bin 0 at 10 bins).
+
+  **Migration.** A caller reading `hist_find`'s width, or indexing bins beyond
+  its own data's maximum, gets a narrower image for 16-bit input. `maplut`
+  already clips an out-of-range index to the last LUT entry, as libvips does,
+  so the equalisation chain absorbs the narrowing on its own.
+
+- `hist_plot` plots one row too many for every histogram that is not 8-bit
+  (issue #802). Measured on vips 8.18.6, `vips hist_plot` of a `ushort`
+  `[2, 0, 3]` gives a **3x3** image where libviprs gave 3x4: the height is the
+  largest count, floored at one, not `max + 1`. The 8-bit fixed height of 256
+  was right and is unchanged.
+
+  The doc said the old number matched libvips, and nothing checked that.
+  `hist_plot_bar_geometry` pinned libviprs's own answer instead, so the claim
+  and the test agreed with each other and with the code, and with nothing else.
+  Both now compare against a measured sweep: `[0, 1]`, `[1, 1]` and `[0, 0, 0]`
+  plot 1 row, `[3, 9]` plots 9 (not 6, so the floor is a literal zero rather
+  than the smallest count), and `[65535, 0]` plots 65535.
+
+  **Migration.** A caller reading the plot's height, or indexing rows from the
+  top, gets one row fewer for a 16-bit histogram. Bars still grow from the
+  bottom.
+
+- **`uhdr::uhdr_to_scrgb` scales the gain map through `crate::resample`**
+  instead of a private linear interpolator (issue #760). `uhdr2scRGB` scales
+  the gain map with `vips_resize(..., VIPS_KERNEL_LINEAR)`, and `vips_resize`
+  is not a bilinear point sample: below 1.0 it runs `reduce`, which averages
+  every input sample an output covers. #508's copy interpolated between two
+  neighbours at any scale, which is right at scale 1 and scale 2 (the only
+  ones the oracle capture pins, and both still bit-exact) and wrong anywhere
+  else. Measured against `vips resize` 8.18.6 on a 12x9 gain map scaled onto a
+  4x3 base: the copy missed **12 of 12** levels, the worst by 87 of 255; the
+  shared resampler misses none.
+
+  A gain map larger than its base is reachable, because `from_container` reads
+  whatever a file holds even though nothing writes one.
+
+  New `UhdrError::Resample` for a ratio the resize refuses, and
+  `UhdrError::BadInput` when the resize lands on a size other than the base's,
+  which would otherwise have been a short read.
+
+  This also corrects the attribution in #508's own measurement: the residual
+  between a container expanded here and by `vips uhdr2scRGB` is the two JPEG
+  decoders, not the resampler. Hand this module the halves vips decoded and
+  the two agree to `f32` ulp. See the `crate::uhdr` module docs for the table.
+
+- **Every operation in `crate::resample` carries the input's metadata onto its
+  output** (issue #789). `resize`, `shrink`, `shrinkh`, `shrinkv`, `reduce`,
+  `reduceh`, `reducev`, `affine`, `similarity`, `rotate`, `mapim` and
+  `thumbnail_image` all built their result with a bare `Raster::new` and
+  carried nothing: no interpretation, no resolution, no orientation, no ICC
+  profile and no field a caller attached. vips carries all of them, measured on
+  8.18.6 across two image shapes and fifteen ops.
+
+  The resolution is carried **verbatim** rather than rescaled with the factor,
+  which is what vips does and what #690 already measured for `zoom` and
+  `subsample`.
+
+  It is not only tags. #664 made the premultiply bracket read the
+  interpretation on a float carrier, because scRGB's alpha maximum is 1.0 where
+  sRGB's is 255, so while the tag was being dropped `resize(0.5).resize(0.5)`
+  read a different alpha ceiling on the second call from the first. An 8x8
+  `RgbaF32` chequerboard resized to half, twice, differed in 33 of 256 output
+  bytes on the tag alone, with both outputs coming back untagged.
+
+  `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
+  restamps they carried to work around this, which also removes two
+  image-sized clones from the linear and ICC thumbnail pipelines.
 
 - `EncodeError::Unsupported`'s own documentation no longer names four formats
   this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
