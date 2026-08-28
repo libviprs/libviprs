@@ -2097,6 +2097,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile, a katana LUT profile and a four-channel source layout, on a geometry
   that ends on a short chunk. The oracle captures are unchanged.
 
+  `transform_in_chunks` refuses two sides that disagree on pixel count instead
+  of asserting it. `zip` stops at the shorter one, so a mismatch would transform
+  a prefix, leave the rest of the destination holding whatever it was reserved
+  with, and return `Ok(())`. Both callers derive both planes from one
+  `(width, height)` so it cannot happen today, which is why a `debug_assert!`
+  was the wrong tool: nothing would ever exercise it, and the release build
+  would have neither the assert nor an error.
+
+  16384 is a cache choice, and the constant's doc now says which retunes are
+  free and which are not. Anything from 43 to 43690 pixels is green; below that
+  the intermediate stops clearing the test's zeroed logging floor, and above it
+  the intermediate passes the 512 KiB bound this module advertises. Both ends
+  are one named number, and a chunk outside the window now fails saying so
+  rather than sending the reader upstream to bump a moxcms pin.
+
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
   (issue #631). They reached the same `depth_max` panic the alpha pair did, on

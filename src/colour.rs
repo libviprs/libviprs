@@ -2213,6 +2213,25 @@ fn icc_device_to_lab(
 /// 733-chunk transform on a 12-megapixel image. Splitting changes no sample,
 /// because every stage moxcms runs reads only the pixel it is writing
 /// (`conversions/katana/stages.rs:73`).
+///
+/// # Retuning it
+///
+/// Correctness does not depend on the value, but the checks that police it do,
+/// and saying "cache choice" without saying that is how somebody makes a
+/// strictly better choice and gets three red tests blaming an upstream crate.
+/// The window is **43 to 43690 pixels**, and each end is one number in
+/// `tests/icc_lut_alloc.rs`:
+///
+/// * below 43, the intermediate at twelve bytes a pixel stops clearing that
+///   file's 512-byte `ZEROED_LOG_FLOOR`, so the ceiling never sees the request
+///   it is aimed at. Lower the floor and the window moves down with it.
+/// * above 43690, the intermediate passes `CMS_CEILING_BYTES`, which is the
+///   512 KiB bound this module advertises. That end is a real promise rather
+///   than a test artefact, so raise the bound deliberately or not at all.
+///
+/// Nothing else is pinned to it. The equivalence check below sizes its fixture
+/// from this constant, and `LOG_CAP` in that file is diagnostic rather than
+/// load-bearing, both so a retune inside the window costs nothing.
 const ICC_TRANSFORM_CHUNK_PIXELS: usize = 16 * 1024;
 
 /// Run `xf` over a whole plane in [`ICC_TRANSFORM_CHUNK_PIXELS`] slices.
@@ -2220,6 +2239,19 @@ const ICC_TRANSFORM_CHUNK_PIXELS: usize = 16 * 1024;
 /// `src_channels` and `dst_channels` are samples per pixel on each side, which
 /// differ whenever the two profiles disagree on device space, so the two chunk
 /// iterators are stepped over pixels rather than over samples.
+///
+/// # Errors
+///
+/// [`ColourError::IccTransform`] if the two sides do not describe the same
+/// number of pixels, or if moxcms refuses a chunk.
+///
+/// The first of those is a programming error rather than a host condition, and
+/// it is checked rather than asserted on purpose. `zip` stops at the shorter
+/// side, so a mismatch would transform a prefix, leave the rest of `dst` at
+/// whatever it was reserved with, and return `Ok(())`: a wrong image with no
+/// error anywhere. A `debug_assert!` catches that in the tests and says nothing
+/// in the release build people actually run, which is the wrong way round for a
+/// failure whose whole danger is being silent.
 fn transform_in_chunks(
     xf: &TransformF32Executor,
     src: &[f32],
@@ -2227,11 +2259,18 @@ fn transform_in_chunks(
     dst: &mut [f32],
     dst_channels: usize,
 ) -> Result<(), ColourError> {
-    debug_assert_eq!(
-        src.len() / src_channels,
-        dst.len() / dst_channels,
-        "the two sides of an ICC transform must describe the same pixels"
-    );
+    let (src_pixels, dst_pixels) = (src.len() / src_channels, dst.len() / dst_channels);
+    if src_pixels != dst_pixels {
+        return Err(ColourError::IccTransform {
+            detail: format!(
+                "the two sides of an ICC transform must describe the same pixels, \
+                 got {src_pixels} in ({} samples at {src_channels} a pixel) and \
+                 {dst_pixels} out ({} samples at {dst_channels} a pixel)",
+                src.len(),
+                dst.len()
+            ),
+        });
+    }
     for (s, d) in src
         .chunks(ICC_TRANSFORM_CHUNK_PIXELS * src_channels)
         .zip(dst.chunks_mut(ICC_TRANSFORM_CHUNK_PIXELS * dst_channels))
@@ -6404,9 +6443,16 @@ mod tests {
      * in the split. `Rgba -> Rgb` is not a synthetic shape: `moxcms_layout(4)`
      * is `Layout::Rgba`, so that is exactly how a CMYK import reaches moxcms,
      * and it is the only cell where using one side's channel count for the
-     * other side's stride goes wrong. The geometry is 200x100, which is more
-     * than one chunk and not a whole number of them, so a run that dropped the
-     * short tail would leave the last 3616 pixels at zero.
+     * other side's stride goes wrong.
+     *
+     * The plane is sized from [`ICC_TRANSFORM_CHUNK_PIXELS`] rather than
+     * written down, at two full chunks and a single-pixel tail. Two full ones
+     * so a run that only ever made one call cannot pass, and the sharpest tail
+     * available so a run that dropped the remainder leaves exactly one pixel
+     * wrong, which is the hardest version of that failure to notice. Writing a
+     * geometry down instead is what made an earlier version of this quietly
+     * depend on the constant's value: at a 32768-pixel chunk it stopped
+     * spanning two chunks and failed on its own precondition.
      * Input: a ramp plane through each of a fused LUT profile, a katana LUT
      * profile and a four-channel source layout -> chunked == whole, exactly.
      * Mutation: `chunks` to `chunks_exact` drops the tail and reddens all
@@ -6415,15 +6461,7 @@ mod tests {
      */
     #[test]
     fn chunking_the_cms_transform_reproduces_the_whole_plane_result() {
-        const W: u32 = 200;
-        const H: u32 = 100;
-        let pixels = (W * H) as usize;
-        assert!(
-            pixels > ICC_TRANSFORM_CHUNK_PIXELS
-                && !pixels.is_multiple_of(ICC_TRANSFORM_CHUNK_PIXELS),
-            "the fixture must span more than one chunk and end on a short one, \
-             {pixels} pixels against a {ICC_TRANSFORM_CHUNK_PIXELS}-pixel chunk"
-        );
+        let pixels = ICC_TRANSFORM_CHUNK_PIXELS * 2 + 1;
         let lab_profile = ColorProfile::new_lab();
 
         for (what, bytes, src_layout, src_channels) in [
@@ -6480,6 +6518,61 @@ mod tests {
                  chunked buffer would have matched it"
             );
         }
+    }
+
+    /**
+     * Tests that a plane mismatch comes back as an `Err` rather than as a
+     * quietly half-transformed buffer.
+     *
+     * `transform_in_chunks` steps two `chunks` iterators through `zip`, and
+     * `zip` stops at the shorter one. So two sides that disagree on pixel
+     * count would transform a prefix, leave the rest of `dst` holding whatever
+     * it was reserved with, and return `Ok(())`. Both callers derive both
+     * planes from one `(width, height)` so it cannot happen today, which is
+     * exactly why it needs a check rather than a `debug_assert!`: nothing in
+     * the suite would ever exercise the assert, and the release build people
+     * run would have neither.
+     * Input: a 40-sample source at 4 a pixel against a 30-sample destination
+     * at 3 a pixel, so 10 pixels against 10, accepted; then the same source
+     * against a 27-sample destination, so 10 against 9 -> `IccTransform` whose
+     * detail names both counts.
+     * Mutation: dropping the `src_pixels != dst_pixels` arm makes the second
+     * call return `Ok(())` having transformed nine pixels of ten, and reddens
+     * this and nothing else.
+     */
+    #[test]
+    fn a_mismatched_transform_plane_is_refused_rather_than_half_filled() {
+        let profile = parse_profile(&lut_profile_bytes()).unwrap();
+        let xf = profile
+            .create_transform_f32(
+                Layout::Rgba,
+                &ColorProfile::new_lab(),
+                Layout::Rgb,
+                transform_options(Intent::Perceptual),
+            )
+            .unwrap();
+        let src = vec![0.5f32; 40];
+
+        let mut matched = vec![0f32; 30];
+        assert!(
+            transform_in_chunks(xf.as_ref(), &src, 4, &mut matched, 3).is_ok(),
+            "ten pixels against ten must be accepted"
+        );
+
+        let mut short = vec![0f32; 27];
+        let err = transform_in_chunks(xf.as_ref(), &src, 4, &mut short, 3);
+        let Err(ColourError::IccTransform { detail }) = err else {
+            panic!("a nine-against-ten plane must be refused, got {err:?}");
+        };
+        assert!(
+            detail.contains("10 in") && detail.contains("9 out"),
+            "the detail must name both counts so the caller can see which side \
+             is wrong, got {detail:?}"
+        );
+        assert!(
+            short.iter().all(|v| *v == 0.0),
+            "a refused transform must not have written any of the destination"
+        );
     }
 
     /**

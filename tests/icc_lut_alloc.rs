@@ -103,11 +103,43 @@ fn plane_bytes(dim: u32) -> usize {
     (dim as usize) * (dim as usize) * 3 * size_of::<f32>()
 }
 
-/// What counts as a large allocation, for logging and for refusal.
+/// What counts as a large **plain** allocation, for logging and for refusal.
 ///
-/// Below every buffer on either route and above the profile blob, the CLUT and
-/// the tone curves, so the log is the image-sized traffic and nothing else.
-const LOG_FLOOR: usize = 64 * 1024;
+/// Only the plain side carries a floor that means "image-sized", because only
+/// the plain side is indexed: `REFUSE_PLAIN_AT` counts requests in order and
+/// `refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting`
+/// refuses index 0 expecting the device plane. Anything smaller admitted here
+/// would shift that index onto a buffer the check is not about. 64 kB is above
+/// the profile blob (about 30 kB), the CLUT and the tone curves, and below
+/// every image-sized plane either route reserves.
+const PLAIN_LOG_FLOOR: usize = 64 * 1024;
+
+/// What counts as a large **zeroed** allocation.
+///
+/// Two orders of magnitude below the plain floor, and that asymmetry is the
+/// point rather than an oversight. Zeroed requests are not indexed, so nothing
+/// breaks by admitting small ones, and admitting them is what stops this file
+/// silently depending on the chunk `src/colour.rs` happens to pick: the katana
+/// intermediate is twelve bytes a pixel, so a 64 kB floor would stop seeing it
+/// below a 5462-pixel chunk and every check here would fail claiming moxcms had
+/// been fixed upstream. At 512 bytes the floor stops mattering until the chunk
+/// drops under 43 pixels.
+///
+/// It costs nothing, measured rather than assumed: with the floor at 512 the
+/// only zeroed requests in the measured window on either route are the four
+/// katana intermediates. Nothing this crate reserves is zeroed, because
+/// `Vec::try_reserve_exact` reaches the allocator as a plain `alloc`, so there
+/// is no noise down here to exclude.
+const ZEROED_LOG_FLOOR: usize = 512;
+
+/// The floor a request of this kind has to clear to be logged at all.
+fn log_floor(zeroed: bool) -> usize {
+    if zeroed {
+        ZEROED_LOG_FLOOR
+    } else {
+        PLAIN_LOG_FLOOR
+    }
+}
 
 /// The bound `src/colour.rs` promises for a single moxcms allocation.
 ///
@@ -116,16 +148,25 @@ const LOG_FLOOR: usize = 64 * 1024;
 /// chunk for cache behaviour does not break these checks, while going back to
 /// handing moxcms the whole image does: `plane_bytes(DIM)` is 768 kB and
 /// `plane_bytes(WIDE_DIM)` is 3 MB, both well past this.
+///
+/// This is the *upper* end of the chunk window these checks accept, at 43690
+/// pixels. [`ZEROED_LOG_FLOOR`] is the lower end, at 43. See the constant's own
+/// doc in `src/colour.rs` for the window stated from that side.
 const CMS_CEILING_BYTES: usize = 512 * 1024;
 
 // ---------------------------------------------------------------------------
 // The ceiling
 // ---------------------------------------------------------------------------
 
-/// How many large requests the log below can hold. The routes under test make
-/// a couple of dozen at `WIDE_DIM`; the surplus is so an unexpected extra one
-/// is recorded rather than dropped.
-const LOG_CAP: usize = 64;
+/// How many large requests the ordered log below can hold.
+///
+/// Diagnostic only, and deliberately not load-bearing. At the current chunk
+/// the routes make about twenty-two of these at `WIDE_DIM`, but the count goes
+/// up as the chunk comes down, so a cap can always be reached by a legitimate
+/// retune. Overflow is reported as `TRUNCATED` rather than asserted, and the
+/// figure every check actually asserts on comes from [`MAX_ZEROED`], which is
+/// counted outside this array and cannot truncate.
+const LOG_CAP: usize = 256;
 
 /// Large requests seen since [`WATCHING`] went up, in order.
 static LOG_LEN: AtomicUsize = AtomicUsize::new(0);
@@ -147,6 +188,17 @@ static REFUSE_PLAIN_AT: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Large plain requests seen so far, which is what [`REFUSE_PLAIN_AT`] indexes.
 static PLAIN_SEEN: AtomicUsize = AtomicUsize::new(0);
 
+/// The largest zeroed request of the run, and how many there were.
+///
+/// Kept outside the ordered log because they must be exact whatever the chunk
+/// is: at a small chunk a `WIDE_DIM` run makes more chunk-sized requests than
+/// [`LOG_CAP`] holds, and a truncated log would quietly under-report the very
+/// number the bound is asserted on. The ordered log stays for diagnostics and
+/// for the plain index.
+static MAX_ZEROED: AtomicUsize = AtomicUsize::new(0);
+/// Companion to [`MAX_ZEROED`].
+static ZEROED_SEEN: AtomicUsize = AtomicUsize::new(0);
+
 /// How many requests the ceiling actually refused, which is what tells a run
 /// that completed because nothing was refused from one that completed despite
 /// a refusal.
@@ -158,8 +210,12 @@ static REFUSALS: AtomicUsize = AtomicUsize::new(0);
 /// pushing to a `Vec`, because a `Vec` growing inside `alloc` re-enters this
 /// function.
 fn note(size: usize, zeroed: bool) -> bool {
-    if size < LOG_FLOOR || !WATCHING.load(Ordering::Relaxed) {
+    if size < log_floor(zeroed) || !WATCHING.load(Ordering::Relaxed) {
         return false;
+    }
+    if zeroed {
+        MAX_ZEROED.fetch_max(size, Ordering::Relaxed);
+        ZEROED_SEEN.fetch_add(1, Ordering::Relaxed);
     }
     let i = LOG_LEN.fetch_add(1, Ordering::Relaxed);
     if i < LOG_CAP {
@@ -337,10 +393,12 @@ fn env(key: &str) -> String {
 
 /// Run one ICC direction with the ceiling up, then report to stdout.
 ///
-/// The report is four kinds of line, and the parent needs all of them to tell
-/// a mis-aimed run from a real one: the fixture's routing properties,
+/// The report is a handful of line kinds, and the parent needs all of them to
+/// tell a mis-aimed run from a real one: the fixture's routing properties,
 /// `ARMED <dim> <plane bytes>`, `ALLOC <bytes> <zeroed>` per large request in
-/// order, `REFUSALS <n>`, and `RESULT ok` or `RESULT err <e>`.
+/// order up to [`LOG_CAP`], `MAXZEROED <bytes>` and `ZEROEDSEEN <n>` counted
+/// exactly outside that cap, `TRUNCATED <bool>`, `REFUSALS <n>`, and
+/// `RESULT ok` or `RESULT err <e>`.
 #[test]
 #[ignore = "spawned as a child process by the checks below; some modes end the process on purpose"]
 fn child_run() {
@@ -406,6 +464,9 @@ fn child_run() {
             LOG_ZEROED[i].load(Ordering::SeqCst)
         );
     }
+    println!("MAXZEROED {}", MAX_ZEROED.load(Ordering::SeqCst));
+    println!("ZEROEDSEEN {}", ZEROED_SEEN.load(Ordering::SeqCst));
+    println!("TRUNCATED {}", LOG_LEN.load(Ordering::SeqCst) > LOG_CAP);
     println!("REFUSALS {}", REFUSALS.load(Ordering::SeqCst));
     match result {
         Ok(()) => println!("RESULT ok"),
@@ -450,6 +511,12 @@ struct Alloc {
 /// The child's report.
 struct Report {
     allocs: Vec<Alloc>,
+    /// Exact, counted outside the ordered log so a small chunk cannot truncate
+    /// it: the largest zeroed request, and how many there were.
+    max_zeroed: usize,
+    zeroed_seen: usize,
+    /// Whether the ordered log dropped entries past [`LOG_CAP`].
+    truncated: bool,
     refusals: usize,
     result: String,
     stdout: String,
@@ -459,12 +526,12 @@ struct Report {
 impl Report {
     /// The largest zeroed request on the run, which on both routes is the
     /// moxcms katana intermediate and nothing else.
+    ///
+    /// `None` means the run made no zeroed request at all, which is a real
+    /// finding rather than a zero: see the message on the scaling checks for
+    /// the three things it can mean.
     fn largest_zeroed(&self) -> Option<usize> {
-        self.allocs
-            .iter()
-            .filter(|a| a.zeroed)
-            .map(|a| a.bytes)
-            .max()
+        (self.zeroed_seen > 0).then_some(self.max_zeroed)
     }
 
     fn context(&self) -> String {
@@ -500,6 +567,9 @@ fn read_report(what: &str, out: &Output) -> Report {
     let mut allocs = Vec::new();
     let mut refusals = None;
     let mut result = None;
+    let mut max_zeroed = None;
+    let mut zeroed_seen = None;
+    let mut truncated = None;
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("ALLOC ") {
             let (bytes, zeroed) = rest.split_once(' ').expect("ALLOC line shape");
@@ -509,17 +579,22 @@ fn read_report(what: &str, out: &Output) -> Report {
             });
         } else if let Some(rest) = line.strip_prefix("REFUSALS ") {
             refusals = Some(rest.parse().expect("REFUSALS count"));
+        } else if let Some(rest) = line.strip_prefix("MAXZEROED ") {
+            max_zeroed = Some(rest.parse().expect("MAXZEROED size"));
+        } else if let Some(rest) = line.strip_prefix("ZEROEDSEEN ") {
+            zeroed_seen = Some(rest.parse().expect("ZEROEDSEEN count"));
+        } else if let Some(rest) = line.strip_prefix("TRUNCATED ") {
+            truncated = Some(rest.parse().expect("TRUNCATED flag"));
         } else if let Some(rest) = line.strip_prefix("RESULT ") {
             result = Some(rest.to_string());
         }
     }
-    assert!(
-        allocs.len() < LOG_CAP,
-        "{what} filled the {LOG_CAP}-entry log, so the tail is missing\n{context}"
-    );
     Report {
         refusals: refusals.unwrap_or_else(|| panic!("no REFUSALS line\n{context}")),
         result: result.unwrap_or_else(|| panic!("no RESULT line\n{context}")),
+        max_zeroed: max_zeroed.unwrap_or_else(|| panic!("no MAXZEROED line\n{context}")),
+        zeroed_seen: zeroed_seen.unwrap_or_else(|| panic!("no ZEROEDSEEN line\n{context}")),
+        truncated: truncated.unwrap_or_else(|| panic!("no TRUNCATED line\n{context}")),
         allocs,
         stdout,
         stderr,
@@ -558,11 +633,23 @@ fn assert_cms_buffer_does_not_scale(route: &str) {
     let (a, b) = (small.largest_zeroed(), large.largest_zeroed());
     assert!(
         a.is_some() && b.is_some(),
-        "the LUT {route} made no zeroed allocation at one of the two sizes, so \
-         it never reached the katana engine. Either the fixture profile stopped \
-         being degenerate enough to defeat moxcms's LUT fusion, or moxcms \
-         adopted its own `try_vec!` in the `md*` stages, which is issue #693 \
-         landing upstream. small={:?} large={:?}",
+        "the LUT {route} logged no zeroed allocation at one of the two sizes. \
+         Three things do that and they are in the order you should check them, \
+         because the cheapest to cause is listed first and it is entirely \
+         local:\n\
+         \x20 1. `ICC_TRANSFORM_CHUNK_PIXELS` in src/colour.rs dropped below \
+         {} pixels, so the katana intermediate at twelve bytes a pixel no \
+         longer clears this file's {ZEROED_LOG_FLOOR}-byte zeroed floor. \
+         Tightening the chunk is an improvement and should not read as a \
+         failure: lower `ZEROED_LOG_FLOOR` to suit.\n\
+         \x20 2. the fixture profile stopped being degenerate enough to defeat \
+         moxcms's LUT fusion, so the transform never enters the katana engine.\n\
+         \x20 3. moxcms adopted its own `try_vec!` in the `md*` stages, which is \
+         issue #693 landing upstream: bump the pin in Cargo.toml, widen the \
+         `# Allocation` claim in src/colour.rs, and turn these checks into ones \
+         that assert the `Err`.\n\
+         small={:?} large={:?}",
+        ZEROED_LOG_FLOOR.div_ceil(12),
         small.allocs,
         large.allocs
     );
@@ -727,7 +814,7 @@ fn refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting()
  * of the file needs: without it, four green checks are equally consistent with
  * a ceiling that never refuses anything at all.
  * Input: the 256x256 LUT fixture through `try_icc_import_with` with every
- * zeroed request at or above 64 kB refused -> SIGABRT, and a
+ * zeroed request at or above the 512-byte zeroed floor refused -> SIGABRT, and a
  * `handle_alloc_error` message naming a size at or below the 524288-byte bound.
  * Mutation: handing `xf.transform` the whole plane again keeps the abort but
  * moves the size in that message to 786432, past the bound, which reddens the
@@ -736,7 +823,7 @@ fn refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting()
 #[test]
 #[cfg_attr(miri, ignore)]
 fn refusing_what_moxcms_still_allocates_itself_ends_the_process() {
-    let out = spawn("import", DIM, "refuse-zeroed", LOG_FLOOR);
+    let out = spawn("import", DIM, "refuse-zeroed", ZEROED_LOG_FLOOR);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let context = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
@@ -747,10 +834,16 @@ fn refusing_what_moxcms_still_allocates_itself_ends_the_process() {
     assert!(
         !out.status.success(),
         "refusing the buffer moxcms allocates for itself returned instead of \
-         aborting. If moxcms has adopted its own `try_vec!` in the katana \
-         `md*` stages, that is issue #693 landing upstream: bump the pin in \
-         Cargo.toml, widen the `# Allocation` claim in src/colour.rs, and turn \
-         this check into one that asserts the Err.\n{context}"
+         aborting. Check the local cause first: if \
+         `ICC_TRANSFORM_CHUNK_PIXELS` dropped below {} pixels, the katana \
+         intermediate stopped clearing this file's {ZEROED_LOG_FLOOR}-byte \
+         zeroed floor, so the ceiling was never offered it and the child had \
+         nothing to die on. Only once that is ruled out does this mean moxcms \
+         adopted its own `try_vec!` in the katana `md*` stages, which is issue \
+         #693 landing upstream: bump the pin in Cargo.toml, widen the \
+         `# Allocation` claim in src/colour.rs, and turn this check into one \
+         that asserts the Err.\n{context}",
+        ZEROED_LOG_FLOOR.div_ceil(12)
     );
     #[cfg(unix)]
     {
