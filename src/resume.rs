@@ -292,9 +292,10 @@ pub struct JobMetadata {
     /// Coordinates of every tile that has been successfully written and
     /// flushed since the job started.
     ///
-    /// Uses the [`tile_coord_vec_serde`] adapter because [`TileCoord`] in
+    /// Serialised through a local adapter, because [`TileCoord`] in
     /// `crate::planner` does not itself implement [`Serialize`] /
-    /// [`Deserialize`].
+    /// [`Deserialize`]; each coord goes on the wire as a small
+    /// `{ level, col, row }` object.
     #[serde(with = "tile_coord_vec_serde")]
     pub completed_tiles: Vec<TileCoord>,
     /// Level indices that have been fully completed (every tile in the level
@@ -442,8 +443,8 @@ pub(super) mod tile_coord_vec_serde {
 /// that makes it unsafe to resume.
 ///
 /// A checkpoint whose `plan_hash` disagrees with the current plan is *not*
-/// reported here: that divergence is detected at the resume gate
-/// ([`verify_checkpoint_contract`]) and surfaced to callers as
+/// reported here: that divergence is detected at the resume gate and surfaced
+/// to callers as
 /// [`crate::engine::EngineError::PlanHashMismatch`], which carries the
 /// additional format-change context a fixed-field checkpoint error could not.
 ///
@@ -1076,9 +1077,9 @@ impl FromIterator<TileCoord> for CompletedTileSet {
 /// geometry so that resuming a checkpoint whose contract differs is rejected
 /// with [`crate::engine::EngineError::PlanHashMismatch`] instead of silently
 /// mixing two incompatible outputs on disk. The [`format`](Self::format) is
-/// *not* hashed — it is compared separately by [`verify_checkpoint_contract`]
-/// so a transparent sink wrapper that cannot report the format does not break
-/// a legitimate resume.
+/// *not* hashed; it is compared separately at the resume gate, so a
+/// transparent sink wrapper that cannot report the format does not break a
+/// legitimate resume.
 ///
 /// Build one with [`PlanContract::from_engine`] so that the value derived at
 /// checkpoint-write time and the value derived at the resume gate agree for
@@ -1087,9 +1088,8 @@ impl FromIterator<TileCoord> for CompletedTileSet {
 pub struct PlanContract<'a> {
     /// Tile encoding the sink commits to, when it has one. `None` for sinks
     /// that do not pin a single on-disk format. Recorded in the checkpoint
-    /// (see [`JobMetadata::content_format`]) and compared by
-    /// [`verify_checkpoint_contract`], but deliberately excluded from
-    /// [`compute_plan_hash`].
+    /// (see [`JobMetadata::content_format`]) and compared at the resume gate,
+    /// but deliberately excluded from [`compute_plan_hash`].
     pub format: Option<TileFormat>,
     /// Background RGB used to pad edge tiles.
     pub background_rgb: [u8; 3],
@@ -1147,8 +1147,8 @@ impl<'a> PlanContract<'a> {
 /// [`crate::sink::TileSink::content_format`]. Baking the format into this
 /// hash would then flip a bit purely because a wrapper was added or removed,
 /// spuriously rejecting a valid checkpoint. A genuine format change is caught
-/// separately by [`verify_checkpoint_contract`], which compares the format
-/// recorded in the checkpoint against the live sink's.
+/// separately at the resume gate, which compares the format recorded in the
+/// checkpoint against the live sink's.
 pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> String {
     // Domain separator — ties this hash to a specific canonicalisation so
     // the same bytes cannot accidentally match some other hash contract.

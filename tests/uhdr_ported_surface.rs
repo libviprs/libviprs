@@ -177,6 +177,7 @@ fn end_of_first_jpeg(bytes: &[u8]) -> usize {
  * loader vips chose, on every one.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn is_uhdr_agrees_with_the_loader_vips_chose_on_every_fixture() {
     let o = oracle();
     let files = o["records"]["detection_two_stage_gate"]["files"]
@@ -227,6 +228,7 @@ fn is_uhdr_agrees_with_the_loader_vips_chose_on_every_fixture() {
  * MPF-only gate wrong.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn mpf_graft_is_the_positive_control_for_the_negative_direction() {
     let bytes = fixture("mpf-graft.jpg");
 
@@ -281,6 +283,7 @@ fn mpf_graft_is_the_positive_control_for_the_negative_direction() {
  * gain map, respectively.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn an_ordinary_jpeg_stays_jpeg_and_a_uhdr_file_does_not() {
     let plain = decode_bytes(&fixture("plain.jpg")).expect("plain.jpg decodes");
     assert!(
@@ -320,6 +323,7 @@ fn an_ordinary_jpeg_stays_jpeg_and_a_uhdr_file_does_not() {
  * `icc-profile-data` field matches the captured header.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_loaded_header_matches_the_captured_vipsheader_output() {
     let o = oracle();
     let header = &o["records"]["uhdrsave_writes_this_container"]["header"];
@@ -382,6 +386,7 @@ fn the_loaded_header_matches_the_captured_vipsheader_output() {
  * equal, bit for bit.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn v2y_8_matches_the_pinned_oracle_table() {
     let o = oracle();
     let hex: String = o["records"]["uhdr2scRGB_base_linearisation"]["v2Y_8_le_f32_hex"]
@@ -439,6 +444,7 @@ fn v2y_8_matches_the_pinned_oracle_table() {
  * `min_boost_half` -> Output: libvips's floats, exactly.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_mono_path_reproduces_the_oracle_floats_exactly() {
     let o = oracle();
     let record = &o["records"]["uhdr2scRGB_mono_gainmap"];
@@ -506,6 +512,7 @@ fn the_mono_path_reproduces_the_oracle_floats_exactly() {
  * ulp, and NOT bit-exact, so the bound cannot silently become redundant.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_two_powf_cases_are_within_a_measured_ulp_bound() {
     let o = oracle();
     let record = &o["records"]["uhdr2scRGB_mono_gainmap"];
@@ -572,6 +579,7 @@ fn the_two_powf_cases_are_within_a_measured_ulp_bound() {
  * floats exactly, and different from the mono answer.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_three_band_path_linearises_the_gain_map_and_the_mono_path_does_not() {
     let o = oracle();
     let mono_record = &o["records"]["uhdr2scRGB_mono_gainmap"];
@@ -661,6 +669,7 @@ fn the_three_band_path_linearises_the_gain_map_and_the_mono_path_does_not() {
  * zeroed -> Output: libvips's zeros and `NaN`s, in the right places.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn degenerate_metadata_reproduces_the_captured_zeros_and_nans() {
     let o = oracle();
     let mono = &o["records"]["uhdr2scRGB_mono_gainmap"];
@@ -990,6 +999,7 @@ fn the_transform_refuses_what_vips_refuses() {
  * resampled codes and its scRGB floats.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest() {
     let o = oracle();
     let record = &o["records"]["uhdr2scRGB_gainmap_resize"];
