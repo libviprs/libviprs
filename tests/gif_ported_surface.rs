@@ -67,6 +67,7 @@ fn save_options_are_constructible_downstream() {
 /// of what they write reproduces the pixels, because GIF's LZW is exactly
 /// lossless once the palette fits.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_from_outside_the_crate() {
     let source = sample();
     let encoded = source.encode_gif(gif::SaveOptions::default()).unwrap();
