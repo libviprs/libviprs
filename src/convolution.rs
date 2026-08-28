@@ -977,8 +977,10 @@ fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize
 /// change reads on `sobel` and on `gaussblur` (issue #575). Nor does
 /// [`Raster::try_compass`] any more: it folds each result into its combine
 /// off that result's own bytes (issue #790). What is left on this function
-/// is the two correlations, which compare a template against the image at
-/// every offset and so read the whole of both operands per output sample.
+/// is the two correlations' **template**, which they read whole at every
+/// output sample and which is bounded by the operand a caller passes rather
+/// than by the image. Their image operand goes through [`RowWindow`] like the
+/// traversal's (issue #791).
 fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let fmt = r.format();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
@@ -1264,6 +1266,133 @@ fn compact_taps<C: Copy + Default + PartialEq>(
     taps
 }
 
+/// A rolling `f64` window over a raster's rows, for a traversal that runs
+/// output rows in order and reads the source rows around the one it is on.
+///
+/// Widening the whole source to `f64` first is eight bytes a sample where a
+/// uchar carries one, and it was where the convolution module's memory went:
+/// 384 MB of a 464 MiB peak on a 4000x4000 `Rgb8` integer `conv` over a 48 MB
+/// input (issue #575). Nothing needs it whole. A window of
+/// `span = min(h, lead + trail + 1)` rows is enough, and each source row is
+/// widened exactly once on the way past.
+///
+/// Source row `r` lives at slot `r % span`, which is what [`RowWindow::slot`]
+/// answers. **The residency argument is the whole correctness of it.** Output
+/// row `y` reads clamped source rows `[max(0, y - lead), min(h - 1, y + trail)]`,
+/// an interval of at most `span` values, so no two of them share a residue mod
+/// `span` and none can evict another. [`RowWindow::advance`] fills up to
+/// `min(y + trail, h - 1)` before row `y` runs, and widening row `r` evicts row
+/// `r - span`, which sits below that interval's floor.
+///
+/// Two callers share it: [`Scan`], where `lead` and `trail` come off the mask
+/// height, and the two correlations, where they come off the template's
+/// (issue #791). Both walk `y` upwards and neither ever looks back further
+/// than `lead`.
+struct RowWindow<'a> {
+    /// The source bytes, read one row at a time on the way past.
+    data: &'a [u8],
+    /// Bytes per sample in `data`: 1, 2 or 4, the three carriers
+    /// [`samples_f64`] widens.
+    depth: usize,
+    /// `span` source rows widened to `f64`, source row `r` at slot
+    /// `r % span`.
+    window: Vec<f64>,
+    /// How many source rows `window` holds.
+    span: usize,
+    /// The next source row [`RowWindow::advance`] will widen. Advancing to a
+    /// row already resident is free, so the total work stays at one widening
+    /// per source row however tall the mask or template is.
+    next: usize,
+    /// The furthest row **below** the output row a read reaches, which is how
+    /// far ahead of `y` the window has to be filled.
+    trail: usize,
+    /// Source rows.
+    h: usize,
+    /// Samples in one source row, which is one window slot.
+    row_stride: usize,
+}
+
+impl<'a> RowWindow<'a> {
+    /// Reserve a window big enough for a traversal that reads `lead` rows
+    /// above and `trail` rows below the output row it is on.
+    ///
+    /// The reservation goes through [`try_buffer`], so a host that cannot
+    /// serve it gets [`RasterError::AllocationFailed`] rather than
+    /// `handle_alloc_error` and an aborted process. The error names the
+    /// source raster and not the window, because that is what a caller
+    /// holding it has.
+    ///
+    /// A raster cannot be zero-height (`RasterError::ZeroDimension`), so the
+    /// span is at least one row and the residue arithmetic has no division by
+    /// zero in it.
+    fn new(src: &'a Raster, lead: usize, trail: usize) -> Result<RowWindow<'a>, RasterError> {
+        let h = src.height() as usize;
+        let row_stride = src.width() as usize * src.format().channels();
+        let span = (lead + trail + 1).min(h);
+        let mut window = try_buffer::<f64>(src.width(), src.height(), span * row_stride)?;
+        window.resize(span * row_stride, 0.0);
+        Ok(RowWindow {
+            data: src.data(),
+            depth: src.format().bytes_per_channel(),
+            window,
+            span,
+            next: 0,
+            trail,
+            h,
+            row_stride,
+        })
+    }
+
+    /// Where source row `row` sits in the window, as a sample offset.
+    #[inline]
+    fn slot(&self, row: usize) -> usize {
+        (row % self.span) * self.row_stride
+    }
+
+    /// The widened rows, indexed from a [`RowWindow::slot`] base.
+    #[inline]
+    fn samples(&self) -> &[f64] {
+        &self.window
+    }
+
+    /// Widen every source row output row `y` reaches that is not resident
+    /// yet, which is every row up to `min(y + trail, h - 1)`.
+    ///
+    /// This is [`samples_f64`] one row at a time, over the same three carriers
+    /// and producing the same values; the widening moved here rather than
+    /// changing.
+    fn advance(&mut self, y: usize) {
+        let (data, depth, stride) = (self.data, self.depth, self.row_stride);
+        let last = (y + self.trail).min(self.h - 1);
+        while self.next <= last {
+            let start = self.next * stride;
+            let base = (self.next % self.span) * stride;
+            let row = &mut self.window[base..base + stride];
+            match depth {
+                1 => {
+                    for (out, &b) in row.iter_mut().zip(&data[start..start + stride]) {
+                        *out = b as f64;
+                    }
+                }
+                2 => {
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let p = (start + i) * 2;
+                        *out = u16::from_ne_bytes([data[p], data[p + 1]]) as f64;
+                    }
+                }
+                _ => {
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let p = (start + i) * 4;
+                        *out = f32::from_ne_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                            as f64;
+                    }
+                }
+            }
+            self.next += 1;
+        }
+    }
+}
+
 /// Everything one traversal shares across the masks it carries: a rolling
 /// window of the source widened to `f64`, the output geometry, and the
 /// two clamped index tables that replace per-tap edge arithmetic.
@@ -1280,51 +1409,19 @@ fn compact_taps<C: Copy + Default + PartialEq>(
 /// (the 90-degree rotation of a non-square mask, for one) share one pair
 /// of tables.
 ///
-/// # Why the window is a window
+/// # The rows it reads from
 ///
-/// This used to widen the **whole** source up front, eight bytes a sample
-/// where a uchar carries one, and that made it the largest allocation in
-/// the module by a wide margin: at 4000x4000 `Rgb8` it was 384 MB of a
-/// 464 MiB peak over a 48 MB input, and `conv` cost 10.1 times the image
-/// it was handed (issue #575).
-///
-/// Nothing needed it whole. The traversal runs output rows in order and
-/// an output row only reads the source rows its own taps reach, so the
-/// window holds `span = min(h, oy + ty + 1)` rows and each source row is
-/// widened exactly once on the way past. Source row `r` lives at slot
-/// `r % span` and `ytab` names that slot instead of an absolute offset,
-/// so the inner loop is the same code reading the same values in the same
-/// order and no arithmetic moved.
-///
-/// The residency argument is the whole correctness of it. Output row `y`
-/// reads clamped source rows `[max(0, y - oy), min(h - 1, y + ty)]`, an
-/// interval of at most `span` values, so no two of them share a residue
-/// mod `span` and none can evict another. [`Scan::advance`] fills up to
-/// `min(y + ty, h - 1)` before row `y` runs, and widening row `r` evicts
-/// row `r - span`, which sits below that interval's floor.
+/// [`RowWindow`] holds `min(h, mask height)` source rows widened to `f64`
+/// rather than the whole image, and `ytab` names a **window slot** instead of
+/// an absolute offset, which is what keeps [`Scan::add_tap`] the same code
+/// reading the same values in the same order (issue #575). The residency
+/// argument and the measurement are on `RowWindow`.
 struct Scan<'a> {
-    /// The source bytes, read one row at a time on the way past.
-    data: &'a [u8],
-    /// Bytes per sample in `data`: 1, 2 or 4, the three carriers
-    /// [`samples_f64`] widens.
-    depth: usize,
-    /// `span` source rows widened to `f64`, source row `r` at slot
-    /// `r % span`.
-    window: Vec<f64>,
-    /// How many source rows `window` holds.
-    span: usize,
-    /// The next source row [`Scan::advance`] will widen. Advancing to a
-    /// row already resident is free, so the total work stays at one
-    /// widening per source row however tall the mask is.
-    next: usize,
-    /// The furthest row **below** the output row a tap reaches, which is
-    /// how far ahead of `y` the window has to be filled.
-    trail: usize,
+    /// The source rows this traversal can currently reach, widened.
+    rows: RowWindow<'a>,
     w: usize,
     h: usize,
     channels: usize,
-    /// Samples in one source row, which is one window slot.
-    row_stride: usize,
     origin: (usize, usize),
     ytab: Vec<usize>,
     xtab: Vec<usize>,
@@ -1356,77 +1453,26 @@ impl<'a> Scan<'a> {
         }
         let (w, h) = (src.width() as usize, src.height() as usize);
         let channels = src.format().channels();
-        let row_stride = w * channels;
         let oy = masks.iter().map(|m| m.h / 2).max().unwrap_or(0);
         let ox = masks.iter().map(|m| m.w / 2).max().unwrap_or(0);
         let ty = masks.iter().map(|m| m.h - 1 - m.h / 2).max().unwrap_or(0);
         let tx = masks.iter().map(|m| m.w - 1 - m.w / 2).max().unwrap_or(0);
-        // A raster cannot be zero-height (`RasterError::ZeroDimension`), so
-        // the span is at least one row and the residue arithmetic below has
-        // no division by zero in it.
-        let span = (oy + ty + 1).min(h);
+        let rows = RowWindow::new(src, oy, ty)?;
         let ytab = (0..h + oy + ty)
-            .map(|t| (clamp_coord(t as i64 - oy as i64, src.height()) % span) * row_stride)
+            .map(|t| rows.slot(clamp_coord(t as i64 - oy as i64, src.height())))
             .collect();
         let xtab = (0..w + ox + tx)
             .map(|t| clamp_coord(t as i64 - ox as i64, src.width()) * channels)
             .collect();
-        // Named for the raster whose convolution failed rather than for the
-        // window, because that is what a caller holding the error has.
-        let mut window = try_buffer::<f64>(src.width(), src.height(), span * row_stride)?;
-        window.resize(span * row_stride, 0.0);
         Ok(Scan {
-            data: src.data(),
-            depth: src.format().bytes_per_channel(),
-            window,
-            span,
-            next: 0,
-            trail: ty,
+            rows,
             w,
             h,
             channels,
-            row_stride,
             origin: (oy, ox),
             ytab,
             xtab,
         })
-    }
-
-    /// Widen every source row output row `y` reaches that is not resident
-    /// yet, which is every row up to `min(y + ty, h - 1)`.
-    ///
-    /// This is [`samples_f64`] one row at a time, over the same three
-    /// carriers and producing the same values; the widening moved here
-    /// rather than changing.
-    fn advance(&mut self, y: usize) {
-        let (data, depth, stride) = (self.data, self.depth, self.row_stride);
-        let last = (y + self.trail).min(self.h - 1);
-        while self.next <= last {
-            let start = self.next * stride;
-            let base = (self.next % self.span) * stride;
-            let row = &mut self.window[base..base + stride];
-            match depth {
-                1 => {
-                    for (out, &b) in row.iter_mut().zip(&data[start..start + stride]) {
-                        *out = b as f64;
-                    }
-                }
-                2 => {
-                    for (i, out) in row.iter_mut().enumerate() {
-                        let p = (start + i) * 2;
-                        *out = u16::from_ne_bytes([data[p], data[p + 1]]) as f64;
-                    }
-                }
-                _ => {
-                    for (i, out) in row.iter_mut().enumerate() {
-                        let p = (start + i) * 4;
-                        *out = f32::from_ne_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
-                            as f64;
-                    }
-                }
-            }
-            self.next += 1;
-        }
     }
 
     /// The half-open span of output columns for which tap column `tx`
@@ -1464,7 +1510,7 @@ impl<'a> Scan<'a> {
         mut fma: impl FnMut(&mut A, C, f64),
     ) {
         let (lo, hi, start) = self.interior(tx);
-        let (samples, xtab) = (&self.window[..], &self.xtab[..]);
+        let (samples, xtab) = (self.rows.samples(), &self.xtab[..]);
         for x in 0..lo {
             let col = xtab[x + tx];
             for band in 0..self.channels {
@@ -1515,7 +1561,7 @@ impl<'a> Scan<'a> {
         let mut acc: [Vec<f64>; M] = std::array::from_fn(|_| vec![0.0f64; stride]);
         let mut idx = 0;
         for y in 0..self.h {
-            self.advance(y);
+            self.rows.advance(y);
             for ((row, mask), &seed) in acc.iter_mut().zip(taps).zip(&init) {
                 row.fill(seed);
                 for t in mask {
@@ -1547,7 +1593,7 @@ impl<'a> Scan<'a> {
         let mut acc: [Vec<i64>; M] = std::array::from_fn(|_| vec![0i64; stride]);
         let mut idx = 0;
         for y in 0..self.h {
-            self.advance(y);
+            self.rows.advance(y);
             for (row, mask) in acc.iter_mut().zip(taps) {
                 row.fill(0);
                 for t in mask {
@@ -2278,9 +2324,13 @@ impl Raster {
         let (w, h) = (self.width(), self.height());
         let (tw, th) = (template.width() as usize, template.height() as usize);
         let n_pels = (tw * th) as f64;
-        let input = samples_f64(self)?;
+        // The template is read whole at every output sample, so it is widened
+        // whole; the image is read as a sliding window of `th` rows, so it is
+        // not (issue #791).
         let refs = samples_f64(template)?;
         let row_stride = w as usize * channels;
+        let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
+        let mut rows = RowWindow::new(self, ay as usize, th - 1 - ay as usize)?;
 
         // Pre-generate: per-band template mean and
         // sqrt(sum((ref - mean)^2)) (vips_spcor_pre_generate).
@@ -2300,19 +2350,25 @@ impl Raster {
             c1[b] = sum2.sqrt();
         }
 
-        let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
-        let mut out = try_buffer::<f64>(w, h, input.len())?;
-        out.resize(input.len(), 0.0);
+        // Straight into the output raster's bytes. This used to fill a whole
+        // `Vec<f64>` in output order and then hand it to `raster_from_f64`,
+        // which walked it once: eight bytes a sample for a buffer written and
+        // read in the same order, on top of the four the raster itself carries
+        // (issue #791).
+        let fmt = float_format(channels);
+        let mut data = alloc_op_output(w, h, fmt)?;
         for y in 0..h as i64 {
+            rows.advance(y as usize);
+            let input = rows.samples();
             for x in 0..w as i64 {
                 for b in 0..channels {
                     // Mean of the input window under the template.
                     let mut sum1 = 0.0;
                     for j in 0..th as i64 {
-                        let sy = clamp_coord(y + j - ay, h);
+                        let sy = rows.slot(clamp_coord(y + j - ay, h));
                         for i in 0..tw as i64 {
                             let sx = clamp_coord(x + i - ax, w);
-                            sum1 += input[sy * row_stride + sx * channels + b];
+                            sum1 += input[sy + sx * channels + b];
                         }
                     }
                     let imean = sum1 / n_pels;
@@ -2322,10 +2378,10 @@ impl Raster {
                     let mut sum2 = 0.0;
                     let mut sum3 = 0.0;
                     for j in 0..th as i64 {
-                        let sy = clamp_coord(y + j - ay, h);
+                        let sy = rows.slot(clamp_coord(y + j - ay, h));
                         for i in 0..tw as i64 {
                             let sx = clamp_coord(x + i - ax, w);
-                            let ip = input[sy * row_stride + sx * channels + b];
+                            let ip = input[sy + sx * channels + b];
                             let rp = refs[(j as usize * tw + i as usize) * channels + b];
                             let t = ip - imean;
                             sum2 += t * t;
@@ -2336,12 +2392,15 @@ impl Raster {
                     let c2 = c1[b] * sum2.sqrt();
                     // A constant reference (or window) is regarded as
                     // uncorrelated.
-                    let cc = if c2 == 0.0 { 0.0 } else { sum3 / c2 };
-                    out[y as usize * row_stride + x as usize * channels + b] = cc;
+                    let cc: f64 = if c2 == 0.0 { 0.0 } else { sum3 / c2 };
+                    let o = y as usize * row_stride + x as usize * channels + b;
+                    data[o * 4..o * 4 + 4].copy_from_slice(&(cc as f32).to_ne_bytes());
                 }
             }
         }
-        Ok(raster_from_f64(self, w, h, channels, &out)?)
+        let mut out = Raster::from_op_output(w, h, fmt, data)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Spatial correlation (libvips `vips_spcor`): each output pixel is
@@ -2368,10 +2427,12 @@ impl Raster {
         let channels = check_correlation_bands(self, template)?;
         let (w, h) = (self.width(), self.height());
         let (tw, th) = (template.width() as usize, template.height() as usize);
-        let input = samples_f64(self)?;
+        // Same split as `try_spcor`: the template whole, the image as a
+        // sliding window of `th` rows (issue #791).
         let refs = samples_f64(template)?;
         let row_stride = w as usize * channels;
         let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
+        let mut rows = RowWindow::new(self, ay as usize, th - 1 - ay as usize)?;
 
         // vips__formatalike: any float input switches both sides to the
         // float path (f32 accumulation, CORR_FLOAT); two unsigned inputs
@@ -2379,42 +2440,48 @@ impl Raster {
         // CORR_INT).
         let float_path = self.format().is_float() || template.format().is_float();
 
-        let mut out = try_buffer::<f64>(w, h, input.len())?;
-        out.resize(input.len(), 0.0);
+        // Straight into the output raster's bytes, for the reason `try_spcor`
+        // gives (issue #791).
+        let fmt = float_format(channels);
+        let mut data = alloc_op_output(w, h, fmt)?;
         for y in 0..h as i64 {
+            rows.advance(y as usize);
+            let input = rows.samples();
             for x in 0..w as i64 {
                 for b in 0..channels {
                     let o = y as usize * row_stride + x as usize * channels + b;
                     if float_path {
                         let mut sum = 0.0f32;
                         for j in 0..th as i64 {
-                            let sy = clamp_coord(y + j - ay, h);
+                            let sy = rows.slot(clamp_coord(y + j - ay, h));
                             for i in 0..tw as i64 {
                                 let sx = clamp_coord(x + i - ax, w);
                                 let dif = refs[(j as usize * tw + i as usize) * channels + b]
                                     as f32
-                                    - input[sy * row_stride + sx * channels + b] as f32;
+                                    - input[sy + sx * channels + b] as f32;
                                 sum += dif * dif;
                             }
                         }
-                        out[o] = sum as f64;
+                        data[o * 4..o * 4 + 4].copy_from_slice(&sum.to_ne_bytes());
                     } else {
                         let mut sum = 0u32;
                         for j in 0..th as i64 {
-                            let sy = clamp_coord(y + j - ay, h);
+                            let sy = rows.slot(clamp_coord(y + j - ay, h));
                             for i in 0..tw as i64 {
                                 let sx = clamp_coord(x + i - ax, w);
                                 let t = refs[(j as usize * tw + i as usize) * channels + b] as i64
-                                    - input[sy * row_stride + sx * channels + b] as i64;
+                                    - input[sy + sx * channels + b] as i64;
                                 sum = sum.wrapping_add((t * t) as u32);
                             }
                         }
-                        out[o] = sum as f64;
+                        data[o * 4..o * 4 + 4].copy_from_slice(&(sum as f32).to_ne_bytes());
                     }
                 }
             }
         }
-        Ok(raster_from_f64(self, w, h, channels, &out)?)
+        let mut out = Raster::from_op_output(w, h, fmt, data)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Fast correlation (libvips `vips_fastcor`): each output pixel is the
