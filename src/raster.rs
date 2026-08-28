@@ -169,16 +169,17 @@ pub(crate) fn alloc_op_output(
     height: u32,
     format: PixelFormat,
 ) -> Result<Vec<u8>, RasterError> {
-    let size = buffer_len(width, height, format.bytes_per_pixel())?;
-    let mut data: Vec<u8> = Vec::new();
-    data.try_reserve_exact(size)
-        .map_err(|_| RasterError::AllocationFailed {
-            width,
-            height,
-            bytes: size,
-        })?;
-    data.resize(size, 0);
-    Ok(data)
+    // One byte of `T = u8` per byte of the pixel, so `try_plane_filled` prices
+    // and reports exactly what this function used to compute for itself: the
+    // `SizeOverflow` it raises carries `format.bytes_per_pixel()` as its `bpp`
+    // and the `AllocationFailed` carries the same byte count (issue #696).
+    try_plane_filled(
+        PLANE_OP_OUTPUT,
+        width,
+        height,
+        format.bytes_per_pixel(),
+        0u8,
+    )
 }
 
 /// Compute `width * height * bpp` as a `usize`, checking for overflow.
@@ -250,42 +251,6 @@ pub(crate) fn decode_alloc_bytes(width: u32, height: u32, bands: u64, sample_byt
         .saturating_mul(u64::from(height))
         .saturating_mul(bands)
         .saturating_mul(sample_bytes)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Per-thread ceiling, in bytes, on the [`Raster::try_f32_samples`] sample
-    /// buffer.
-    ///
-    /// Defaults to `u64::MAX` (no ceiling), so an ordinary run bounds the
-    /// widening only by what the allocator will serve, exactly as
-    /// [`alloc_op_output`] does. [`with_f32_samples_alloc_cap`] lowers it so a
-    /// test can reach the fallible branch at a raster it can actually build: a
-    /// float raster whose sample buffer genuinely exhausts the allocator is far
-    /// past the [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch
-    /// is otherwise unreachable from a test (issue #627). This is the same hook
-    /// #460 added to `arithmetic`'s scratch allocation, for the same reason.
-    static F32_SAMPLES_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
-}
-
-/// Test-only hook: run `f` with the calling thread's
-/// [`Raster::try_f32_samples`] allocation ceiling lowered to `max_bytes`,
-/// restoring the previous ceiling afterwards, including on unwind.
-///
-/// The ceiling is thread-local, so tests running in parallel do not perturb one
-/// another. Both it and this helper compile only under `cfg(test)`, so nothing
-/// test-support reaches a production build and the crate's public surface is
-/// unchanged.
-#[cfg(test)]
-pub(crate) fn with_f32_samples_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
-    struct Restore(u64);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            F32_SAMPLES_ALLOC_CAP.with(|c| c.set(self.0));
-        }
-    }
-    let _restore = Restore(F32_SAMPLES_ALLOC_CAP.with(|c| c.replace(max_bytes)));
-    f()
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,42 +1094,12 @@ impl Raster {
             });
         }
         let chunks = self.data.as_chunks::<4>().0;
-        let bytes = chunks.len().saturating_mul(size_of::<f32>());
-        // Test-only: over a lowered per-thread ceiling, ask for a reservation
-        // the allocator has to refuse, so the fallible branch is reachable at
-        // a raster a test can actually build. A float raster whose samples
-        // genuinely exhaust the allocator is far past the
-        // [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch is
-        // otherwise unreachable from a test (issue #627).
-        //
-        // The ceiling deliberately does *not* return early. Returning here
-        // would answer before the reservation below ever ran, which leaves
-        // `try_reserve_exact` and an infallible `reserve_exact`
-        // indistinguishable to every test: that is #696's first bullet, and it
-        // is how #689's fourteen guards came to pass with their fallibility
-        // reverted. Driving the real reservation instead keeps the thing under
-        // test on the path.
-        //
-        // This and the thread-local it reads compile only under `cfg(test)`,
-        // so a production widening asks for exactly `chunks.len()` and is
-        // bounded solely by the allocator, exactly as `alloc_op_output` is.
-        #[cfg(test)]
-        let request = if bytes as u64 > F32_SAMPLES_ALLOC_CAP.with(Cell::get) {
-            // Past `isize::MAX` bytes, which `try_reserve_exact` refuses as a
-            // capacity overflow without troubling the allocator.
-            usize::MAX / size_of::<f32>()
-        } else {
-            chunks.len()
-        };
-        #[cfg(not(test))]
-        let request = chunks.len();
-        let mut out: Vec<f32> = Vec::new();
-        out.try_reserve_exact(request)
-            .map_err(|_| RasterError::AllocationFailed {
-                width: self.width,
-                height: self.height,
-                bytes,
-            })?;
+        // The widening is a plane like any other, so it reserves through the
+        // one funnel rather than through a fourth copy of it with a fourth
+        // ceiling of its own (issue #696). `chunks.len()` is already the
+        // element count, so this is the length form.
+        let mut out: Vec<f32> =
+            try_plane_len(PLANE_F32_SAMPLES, self.width, self.height, chunks.len())?;
         out.extend(chunks.iter().map(|&c| f32::from_ne_bytes(c)));
         Ok(out)
     }
@@ -2478,7 +2413,7 @@ mod tests {
      * a plain `.collect()`, which is exactly that abort, and it is the widening
      * `try_sharpen` and `try_canny`'s float arm sit on, so a `try_` signature
      * there was not actually fallible.
-     * Works by lowering the per-thread ceiling with `with_f32_samples_alloc_cap`
+     * Works by lowering the per-thread ceiling at that one site
      * so the branch is reachable at a raster small enough to build; a float
      * raster whose samples genuinely exhaust the allocator is far past the
      * construction budget. The error names the raster and the size of the
@@ -2494,7 +2429,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            with_f32_samples_alloc_cap(16, || im.try_f32_samples()),
+            with_plane_cap_at(PLANE_F32_SAMPLES, 16, || im.try_f32_samples()),
             Err(RasterError::AllocationFailed {
                 width: 4,
                 height: 2,
@@ -2537,8 +2472,9 @@ mod tests {
 
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let caught =
-            std::panic::catch_unwind(|| with_f32_samples_alloc_cap(16, || im.f32_samples()));
+        let caught = std::panic::catch_unwind(|| {
+            with_plane_cap_at(PLANE_F32_SAMPLES, 16, || im.f32_samples())
+        });
         std::panic::set_hook(prev);
         assert!(
             caught.is_err(),

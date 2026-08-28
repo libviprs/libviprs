@@ -1781,6 +1781,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The crate has one fallible-plane helper instead of three private copies of
+  it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
+  `cfg(test)` probe over all of them that a check addresses **by site label**
+  rather than by position along a path (issue #696).
+
+  `arithmetic.rs`, `convolution.rs` and `colour.rs` had each grown their own
+  version of "reserve `len` elements fallibly and report
+  `RasterError::AllocationFailed`", with three signatures and three separate
+  test ceilings. `convolution.rs`'s had no ceiling at all when it was written,
+  so that module's fallible paths could not be driven the way `colour.rs`'s
+  were; `colour.rs`'s refused the *Nth* over-ceiling request on the thread, so a
+  dozen checks that read as naming a buffer were really naming a position, told
+  apart only by the byte sizes on the path happening to be unique. Three of the
+  colour fixtures carry an extra band for no other reason, one pair of buffers
+  could not be separated at all, and a check on either side of the boundary
+  could only ever see the sites inside its own module.
+
+  What lands here: `convolution.rs` and `colour.rs` on the shared helper, with
+  `raster::alloc_op_output` and `Raster::try_f32_samples` reserving through it
+  too, so an op output and a sample widening are on the same funnel as the
+  intermediates. Every site now carries a label like
+  `colour.import.lab_staging`, and `with_plane_cap_at` starves that one buffer
+  and nothing else. Two checks that could not be written before are: the
+  export fallback's PCS plane and its device buffer are the same 768 bytes on
+  an RGB profile, and under the ordinal the first of them could be reverted to
+  an infallible `Vec::with_capacity` with the suite green, because the other
+  took the refusal and reported the same number.
+
+  The ceiling also stopped answering before the reservation. It used to return
+  early, which left `try_reserve_exact` and an infallible `reserve_exact`
+  indistinguishable to every check that drove it, and is how fourteen of #689's
+  guards came to pass with the fallibility they guarded reverted; it now
+  poisons the request instead, so the same revert turns those checks red.
+
+  `raster.rs` gains a cross-module funnel check that pins, per entry point and
+  per module, exactly how many planes a path reserves. `try_sharpen` is the row
+  it exists for: one call crosses all three modules, and its six reservations
+  are the same six image-sized allocations
+  `tests/convolution_image_sized_allocations.rs` charges to it from the
+  allocator, so between the two nothing image-sized on that path is outside the
+  fallible helper.
+
+  No public API moves and no behaviour changes: everything here is
+  `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
+  ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
+  outstanding; that file is held by another lane, so #696 stays open on it.
+
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
   stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
   keeps a `short` fixed-point copy of every mask, truncated toward zero and
