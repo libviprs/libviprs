@@ -48,16 +48,21 @@
 //!   another file. Since #781 the detector follows a call into a helper that is
 //!   test scaffolding, one file deep and to a fixed point, so
 //!   `stream_verify`'s three malformed-strip tests are seen through
-//!   `assert_strip_layout_rejected` now. It deliberately does not follow calls
-//!   into the library: `source::tests::decode_file_not_found` goes through
-//!   `decode_file`, which opens the path itself, and stays `not-detected`,
-//!   because a production function that *can* open a path is not evidence that
-//!   this caller hands it one. [`reaching_fns`] has the measurement behind
-//!   that choice.
+//!   `assert_strip_layout_rejected` now, and since #833 the helper can be a
+//!   `#[cfg(test)]` free `fn` rather than only one inside a `#[cfg(test)] mod`.
+//!   It deliberately does not follow calls into the library:
+//!   `source::tests::decode_file_not_found` goes through `decode_file`, which
+//!   opens the path itself, and stays `not-detected`, because a production
+//!   function that *can* open a path is not evidence that this caller hands it
+//!   one. [`reaching_fns`] has the measurement behind that choice, and the
+//!   section below has the six tests it costs.
 //! * filesystem access inside a library entry point that takes a `Path`. Any
 //!   `foo(path)` that opens `path` internally reads as pure to this scanner.
-//! * a filesystem call spelled through an alias (`use std::fs as f;`) or
-//!   through a crate this list does not name.
+//! * a filesystem call spelled through an alias (`use std::fs as f;`), from a
+//!   `macro_rules!` body, from a closure held in a `static`, or through a crate
+//!   this list does not name. Those three are the same shapes the process
+//!   detector misses, they share the parser, and
+//!   [`the_filesystem_detector_s_blind_spots_are_still_blind`] pins each one.
 //! * anything outside `src/` and `tests/`, which means the `fuzz/` member (a
 //!   separate crate that `cargo miri test` on this package does not build) and
 //!   the `build.rs`-less root manifest.
@@ -90,6 +95,56 @@
 //! assertion that every filesystem test is annotated is green when somebody
 //! annotates a pure test by mistake; the inventory is what makes that a new
 //! `annotated not-detected` row and a red build.
+//!
+//! # Six tests reach the filesystem through the library, and are measured
+//!
+//! Issue #765 said the ledger cannot see a test that reaches the filesystem
+//! through a helper, and counted 21 of `src/exr.rs`'s 22 tests and all 24 of
+//! `src/nifti.rs` as that shape. That was true when it was filed and #781
+//! closed it: the follower sees every one of those through `fixture()`, and
+//! `src/exr.rs`'s twenty-second test is the one that really is pure.
+//!
+//! What is left is the narrower shape the follower refuses on purpose, a test
+//! handing a real `Path` to a library entry point that opens it. **Six**, and
+//! that number is a measurement rather than a scan. I built every test binary,
+//! ran each one single threaded with `--include-ignored --nocapture --test-threads=1`
+//! under a `DYLD_INSERT_LIBRARIES` interposer on `open`, `openat`, `opendir`,
+//! `stat`, `lstat`, `access`, `mkdir`, `unlink`, `rename`, `symlink`, `link`,
+//! `rmdir`, `readlink` and `chmod`, and printed each path to stdout, which
+//! libtest brackets with its own `test NAME ...` and `ok` in that mode, so every
+//! syscall is attributed to the test that made it. 2143 tests ran, 264 touched
+//! the filesystem, and six of those 264 were in neither the inventory nor the
+//! annotated set:
+//!
+//! | test | what it opens |
+//! |---|---|
+//! | `analyze::a_pair_loads_from_either_name_and_from_the_bare_stem` | the committed `.hdr`/`.img` pair |
+//! | `analyze::decode_file_reaches_the_pair_from_the_hdr` | the same pair |
+//! | `analyze::a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened` | `no_img.hdr`, then the sibling that is not there |
+//! | `colour::icc_typed_errors` | `/nonexistent/profile.icc` |
+//! | `pdf::pdf_info_with_password_passes_through_open_error` | `/nonexistent/secret.pdf` |
+//! | `pdf::password_and_dpi_extract_return_a_clean_typed_error` | the same |
+//!
+//! The last three are the sharp half. They pass a path that does not exist and
+//! assert on the error, which reads like a test that never reaches disk, and
+//! the `open` still happens: Miri refuses the syscall before the kernel gets to
+//! answer `NotFound`, so the run ends there rather than in the assertion. That
+//! is the same shape as `source::tests::decode_file_not_found`, which has
+//! carried the annotation since long before any of this and is the reason the
+//! shape is named in the list above at all.
+//!
+//! The three Analyze ones are the other half, and they cannot be written any
+//! other way: `decode_analyze_file` is a two-file entry point that resolves the
+//! `.img` from the `.hdr`'s path, so there is no buffer form of it to test. Its
+//! sibling `src/mat.rs` adds none, because all 27 of its tests take
+//! `include_bytes!`.
+//!
+//! Two limits on that number, both worth saying out loud. It covers the default
+//! feature set, which is what `cargo miri test` builds, so a test behind `avif`
+//! or `jxl` is out of scope here even though the scanner still reads it. And an
+//! interposer sees a syscall, not an intention, so it cannot find a test that
+//! would touch the filesystem on another machine; the scanner is what covers
+//! that direction.
 //!
 //! # Spawning a process, which was a refusal first
 //!
@@ -273,6 +328,12 @@ const ANCHOR_FILES: &[&str] = &[
 /// included the whole of `src/nifti.rs` once that module reached `main` while
 /// this was in flight.
 ///
+/// It went from 213 to 219 in #765's, which is a different kind of change from
+/// the two above: those swept a class the detector could see, this one adds the
+/// six tests it *cannot*, measured at runtime rather than found by reading. See
+/// the "Six tests reach the filesystem through the library" section of the
+/// module docs for the method and for why none of the six has a marker in it.
+///
 /// `merge-gate.yml` used to quote a count here ("48 annotations across seven
 /// modules", true at `f62a56a` and stale for months afterwards). It quotes none
 /// now, on purpose: an exact number in the workflow made it a file every
@@ -280,7 +341,9 @@ const ANCHOR_FILES: &[&str] = &[
 /// `tests/miri_invocation_parity.rs`.
 const EXPECTED_SRC_ANNOTATIONS: usize = 219;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
-/// least one annotation.
+/// least one annotation. #765 made it 25 by putting the first annotation in
+/// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
+/// three, were already in the set.
 const EXPECTED_SRC_MODULES: usize = 25;
 
 /// How many tests in the tree reach `std::process`.
@@ -665,13 +728,27 @@ fn process_spawning_fns(masked: &str) -> BTreeSet<String> {
     reaching_fns(masked, PROCESS_MARKERS, &|_| true)
 }
 
-/// The line ranges of every `#[cfg(test)]` module in `masked`, as inclusive
+/// The line ranges of every `#[cfg(test)]` item in `masked`, as inclusive
 /// `(first, last)` line indices.
 ///
 /// Used to answer "is this function test scaffolding" in a `src/` file. An
 /// integration test under `tests/` is all scaffolding, so it has no ranges and
 /// the predicate that uses this returns true for the whole file.
-fn cfg_test_module_ranges(masked: &str) -> Vec<(usize, usize)> {
+///
+/// It takes any item under the attribute, not only a `mod`. That is issue #833: `#[cfg(test)]` on a free `fn` is an ordinary thing to write and
+/// this tree has thirteen of them, in `src/arithmetic.rs`, `src/colour.rs`
+/// (five), `src/convolution.rs`, `src/freqfilt.rs`, `src/raster.rs` (two),
+/// `src/sink.rs` (two) and `src/source.rs`. While this only matched a `mod`,
+/// every one of them was outside the scope predicate, so a fixture reader
+/// written as one would have been invisible to the follower no matter how
+/// plainly it called `std::fs::read`. None of the thirteen touches the
+/// filesystem today, which is why widening this moved no count.
+///
+/// An item that closes with a `;` before it opens a brace (`mod tests;`, a
+/// `use`) is one line long. The `;` is only terminal at bracket depth zero,
+/// because `fn f() -> [u8; 32] {` carries one inside its signature and reading
+/// that as the end of the item is the same mistake [`fn_bodies`] documents.
+fn cfg_test_item_ranges(masked: &str) -> Vec<(usize, usize)> {
     let lines: Vec<&str> = masked.lines().collect();
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -682,11 +759,13 @@ fn cfg_test_module_ranges(masked: &str) -> Vec<(usize, usize)> {
         while j < lines.len() && lines[j].trim().starts_with("#[") {
             j += 1;
         }
-        if j >= lines.len() || !format!(" {}", lines[j]).contains(" mod ") {
+        if j >= lines.len() {
             continue;
         }
         let mut depth = 0i64;
+        let mut nesting = 0i64;
         let mut opened = false;
+        let mut ended = false;
         let mut k = j;
         while k < lines.len() {
             for ch in lines[k].chars() {
@@ -696,10 +775,16 @@ fn cfg_test_module_ranges(masked: &str) -> Vec<(usize, usize)> {
                         opened = true;
                     }
                     '}' => depth -= 1,
+                    '[' | '(' if !opened => nesting += 1,
+                    ']' | ')' if !opened => nesting -= 1,
+                    ';' if !opened && nesting == 0 => ended = true,
                     _ => {}
                 }
+                if ended {
+                    break;
+                }
             }
-            if opened && depth == 0 {
+            if ended || (opened && depth == 0) {
                 break;
             }
             k += 1;
@@ -795,7 +880,7 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
     // Filesystem helpers, but only the ones that are test scaffolding: every
     // function in an integration test, and only the `#[cfg(test)]` modules of a
     // `src/` file. See [`reaching_fns`] for what the restriction buys.
-    let ranges = cfg_test_module_ranges(&masked);
+    let ranges = cfg_test_item_ranges(&masked);
     let whole_file_is_test_scaffolding = rel.starts_with("tests/");
     let fs_reaching = reaching_fns(&masked, FS_MARKERS, &|at| {
         whole_file_is_test_scaffolding || ranges.iter().any(|(a, b)| at >= *a && at <= *b)
@@ -1612,11 +1697,11 @@ mod tests {
 /// It carries no `#[cfg_attr(miri, ignore)]`, and it used to. The annotation
 /// said "reads the repository source tree", copied off one of the four
 /// siblings that call [`scan_repo`]; this one calls [`scan_source`] on two
-/// inline `&str` fixtures and reaches nothing. Measured under a syscall
-/// interposer: zero filesystem calls here against thousands in each of those
-/// siblings, which is the positive control. Issue #832. It is one test the Miri
-/// gate can now actually run, and one row of the ledger that stopped meaning
-/// something.
+/// inline `&str` fixtures and reaches nothing. Measured under the syscall
+/// interposer described in the module docs: zero filesystem calls here against
+/// thousands in each of those siblings, which is the positive control. Issue
+/// #832. It is one test the Miri gate can now actually run, and one row of the
+/// ledger that stopped meaning something.
 #[test]
 fn the_filesystem_detector_follows_a_test_helper_but_not_the_library() {
     let integration = r#"
@@ -1858,16 +1943,16 @@ fn reads_through_a_plain_helper() {
 /// A `#[cfg(test)]` helper that is not inside a `#[cfg(test)] mod` is still
 /// test scaffolding, and the follower has to take it (issue #833).
 ///
-/// `cfg_test_module_ranges` requires the attribute to sit on a `mod`, so a free
-/// `fn` under it falls outside every range and [`reaching_fns`] filters it out
-/// of the call graph entirely. Thirteen such helpers exist in `src/` today, in
-/// `src/arithmetic.rs`, `src/colour.rs` (five), `src/convolution.rs`,
-/// `src/freqfilt.rs`, `src/raster.rs` (two), `src/sink.rs` (two) and
-/// `src/source.rs`. None of them touches the filesystem, so widening the
-/// predicate moves no count in this file and no row in the inventory, and that
-/// is luck rather than design: `freqfilt`'s `test_image` builds a raster in
-/// memory and the version of it that reads a committed fixture is the ordinary
-/// next one somebody writes.
+/// [`cfg_test_item_ranges`] used to require the attribute to sit on a `mod`, so
+/// a free `fn` under it fell outside every range and
+/// [`reaching_fns`] filtered it out of the call graph entirely. Thirteen such
+/// helpers exist in `src/` today, in `src/arithmetic.rs`, `src/colour.rs`
+/// (five), `src/convolution.rs`, `src/freqfilt.rs`, `src/raster.rs` (two),
+/// `src/sink.rs` (two) and `src/source.rs`. None of them touches the
+/// filesystem, so widening the predicate moved no count in this file and no row
+/// in the inventory, and that is luck rather than design: `freqfilt`'s
+/// `test_image` builds a raster in memory and the version of it that reads a
+/// committed fixture is the ordinary next one somebody writes.
 ///
 /// The second half is the library boundary, unchanged. Widening the *kind* of
 /// item the predicate accepts must not widen it to production code, or the 46
