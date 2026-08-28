@@ -1714,6 +1714,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy. I found that by mutating the second check away and watching the tests
   stay green.
 
+- The operations that reposition an image stamp the origin offset instead of
+  carrying the input's, matching vips (issue #721). `fliphor`, `flipver`,
+  `rot`, `wrap`, `autorot`, `conv`, `convsep`, `compass`, `gaussblur`, `sobel`,
+  `scharr`, `prewitt` and `canny` all reported the input's `xoffset` / `yoffset`
+  where vips reports a value derived from the transform. `Raster::xoffset` and
+  `Raster::yoffset` are public and both go into the `.v` header, so a pipeline
+  that flipped and saved recorded an origin saying the image was where it had
+  been before the flip.
+
+  #706 found the first instance of this split in the other direction, where
+  `extract_area` and `crop` stamp `(-left, -top)` and the six other extract ops
+  carry.
+
+  Measured against the pinned vips 8.18.6 at three image shapes per operation,
+  and for the convolving ones at nine mask shapes as well:
+
+  | op | rule |
+  |---|---|
+  | `fliphor` | `(width, 0)` |
+  | `flipver` | `(0, height)` |
+  | `rot` D90 / D180 / D270 | `(out width, 0)` / `(width, height)` / `(0, out height)` |
+  | `wrap` | `(w - w/2, h - h/2)` |
+  | `conv` | `(-(mask width / 2), -(mask height / 2))` |
+  | `convsep`, `compass`, `gaussblur` | the same rule, inherited |
+  | `sobel`, `scharr`, `prewitt` | `(-1, -1)` from the 3x3 gradient mask |
+  | `canny` | `(-1, -1)` from the 2x2 gradient mask, at every sigma |
+  | `autorot` | whichever transform it finishes on |
+
+  None of them reads the input's offsets: the same sweep from a source at
+  `0 / 0` gives byte-identical numbers, and `rot45` at all seven angles, `grid`,
+  `cast`, `gamma`, `join`, `arrayjoin`, `fwfft`, `colourspace`, `composite2`,
+  `spcor`, `fastcor` and every op in `src/bands.rs` still hand the input's
+  offsets straight back through the same `.v` writer. That last list is the
+  positive control, and it is a test rather than a remark.
+
+  **`convsep` is the cell that says what the rule is.** A 3-wide, 1-tall mask
+  stamps `0 / -1`, not the `-1 / 0` the mask itself implies, because `convsep`
+  finishes on the mask's 90-degree rotation. So there is one rule, `conv`'s, and
+  `convsep`, `compass` and `gaussblur` inherit it by composition rather than
+  each carrying a copy. `canny` is the counterexample that keeps that honest:
+  its offset follows its 2x2 gradient and not its blur, so at sigma 3 it reports
+  `-1 / -1` where `gaussblur` alone reports `0 / -5`.
+
+  **`autorot` at orientation 4 is the one cell composition gets wrong.**
+  `vips_autorot` reaches it as a 180-degree rotation followed by a horizontal
+  flip and stamps the flip's `(width, 0)`; libviprs does the same pixels in one
+  vertical flip, whose own rule is `(0, height)`. The offset is corrected there
+  rather than paying for a second pass over the image to make the composition
+  match.
+
 - Every operation in `src/bands.rs` carries the input's metadata onto its
   result: `bandjoin`, `bandjoin_const`, `bandjoin_vec`, `bandfold`,
   `bandunfold`, `bandmean`, `bandrank`, `bandand`, `bandor`, `bandeor`,
