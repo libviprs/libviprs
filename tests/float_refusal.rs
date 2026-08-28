@@ -124,7 +124,14 @@ fn join_refuses_in_its_own_type_rather_than_delegating() {
         "a float second input is refused the same way: {mixed:?}"
     );
     let mixed = float
-        .try_join(&uchar_rgb(), JoinDirection::Vertical, true, None, None, None)
+        .try_join(
+            &uchar_rgb(),
+            JoinDirection::Vertical,
+            true,
+            None,
+            None,
+            None,
+        )
         .unwrap_err();
     assert!(
         matches!(mixed, ConversionError::FloatUnsupported { op: "join" }),

@@ -317,7 +317,7 @@ fn ported_arrayjoin_call_sites() {
     let ramp = Raster::grey(4, 4, false);
     assert!(matches!(
         Raster::try_arrayjoin(&[&ramp, &mono], None, None),
-        Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" })
+        Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
     ));
 }
 
@@ -454,7 +454,7 @@ fn ported_join_call_sites() {
     let ramp = Raster::grey(4, 4, false);
     assert!(matches!(
         ramp.try_join(&c, JoinDirection::Horizontal, false, None, None, None),
-        Err(ConversionError::FloatFormatUnsupported { op: "join" })
+        Err(ConversionError::FloatUnsupported { op: "join" })
     ));
 }
 
