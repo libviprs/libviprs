@@ -52,6 +52,15 @@
 //! tree. When the backlog finally drops through the bound, this goes red once
 //! and the sentence gets rewritten once, which is the right number of times.
 //!
+//! It did, in #739. The sweep took the backlog from 138 to 4, this went red on
+//! the commit that did it, and the sentence in `merge-gate.yml` was rewritten
+//! in the same change. The bound points the other way now: the workflow says
+//! the backlog is a named handful and this refuses to let it climb back past
+//! ten without somebody revisiting that sentence. The floor it used to be is
+//! gone entirely, because a floor demands the debt exist and would go red on
+//! the change that clears it, which is the same mistake
+//! `tests/miri_ignore_convention.rs` made with `assert!(unannotated_fs > 0)`.
+//!
 //! # Why it runs under Miri
 //!
 //! Every file this reads is pulled in with `include_str!` at compile time rather
@@ -77,9 +86,9 @@ const SIGNIFICANT_ENV: [&str; 2] = ["MIRIFLAGS", "RUSTFLAGS"];
 /// The bound `merge-gate.yml` states about the unannotated backlog, and the
 /// words it states it in. Asserted rather than quoted exactly, for the reason in
 /// the module docs.
-const BACKLOG_BOUND: usize = 100;
+const BACKLOG_BOUND: usize = 10;
 /// How the workflow has to spell [`BACKLOG_BOUND`].
-const BACKLOG_PHRASE: &str = "more than a hundred unannotated filesystem-touching tests";
+const BACKLOG_PHRASE: &str = "a named handful of unannotated filesystem-touching tests";
 
 /// One Miri invocation, however it happens to be written down.
 #[derive(Debug, PartialEq, Eq)]
@@ -545,11 +554,11 @@ fn merge_gate_states_the_backlog_as_a_bound_it_still_meets() {
     let unannotated = rows.iter().filter(|(annotated, _)| !annotated).count();
 
     assert!(
-        unannotated > BACKLOG_BOUND,
-        "the unannotated backlog is down to {unannotated}, which is no longer \
-         `{BACKLOG_PHRASE}`. That sentence in `merge-gate.yml` is now false: rewrite it \
-         against the real number, and revisit `BACKLOG_BOUND` here. Reaching this point is \
-         #712 nearly finishing, which is good news."
+        unannotated <= BACKLOG_BOUND,
+        "the unannotated backlog is back up to {unannotated}, which is more than \
+         `{BACKLOG_PHRASE}` in `merge-gate.yml` can honestly be read as. Either annotate \
+         the new ones, which is what `tests/miri_ignore_convention.rs` will have told you \
+         to do already, or rewrite that sentence and revisit `BACKLOG_BOUND` here."
     );
     assert!(
         WORKFLOW.contains(BACKLOG_PHRASE),
