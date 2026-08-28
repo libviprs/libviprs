@@ -56,6 +56,52 @@
 //! op-family errors — matching only [`OpError::Raster`] silently misses the
 //! common case.
 //!
+//! # Matching float refusals: four enums, one spelling
+//!
+//! Several operations refuse a float raster rather than panicking on a 4-byte
+//! sample, and because each module owns its error type the refusal has four
+//! homes. They all spell it `FloatUnsupported { op }` as of issue #730, where
+//! [`ConversionError`] used to say `FloatFormatUnsupported`:
+//!
+//! | variant | raised by |
+//! |---|---|
+//! | [`RasterError::FloatUnsupported`] | the sample-reading raster helpers |
+//! | [`ArithmeticError::FloatUnsupported`] | the arithmetic family |
+//! | [`ExtractError::FloatUnsupported`] | `embed`, `gravity`, `insert`, `smartcrop`'s analysing strategies |
+//! | [`ConversionError::FloatUnsupported`] | `join`, `arrayjoin` |
+//!
+//! Four enums is the consequence of the per-module split above and is not
+//! something to undo: a single-family caller still wants a tight surface. What
+//! the uniform name buys is that a caller composing families through
+//! [`OpError`] writes one shape four times instead of three plus an exception:
+//!
+//! ```
+//! use libviprs::{ArithmeticError, ConversionError, ExtractError, OpError, RasterError};
+//!
+//! fn is_float_refusal(e: &OpError) -> bool {
+//!     matches!(
+//!         e,
+//!         OpError::Raster(RasterError::FloatUnsupported { .. })
+//!             | OpError::Arithmetic(ArithmeticError::FloatUnsupported { .. })
+//!             | OpError::Extract(ExtractError::FloatUnsupported { .. })
+//!             | OpError::Conversion(ConversionError::FloatUnsupported { .. })
+//!     )
+//! }
+//! ```
+//!
+//! A predicate per enum (the shape [`crate::SourceError::is_alloc_limit`] took
+//! in #686) was considered and not taken: that one composes because it collapses
+//! *five variants of one enum* onto a question, where this is one variant of
+//! each of four enums, so it would be four impls that still cannot be called
+//! through a single type without a trait. The names doing the work is cheaper
+//! and reads the same at every call site.
+//!
+//! A refusal can also be nested: `try_join` refuses float itself, so a caller
+//! sees `OpError::Conversion(ConversionError::FloatUnsupported)`, but the
+//! `try_insert` underneath would raise `ExtractError::FloatUnsupported` if it
+//! were reached. That is the same two-path shape the raster section above
+//! describes.
+//!
 //! Wrapping is transparent — [`OpError`]'s `Display` and `source` delegate to
 //! the wrapped error via `#[error(transparent)]`, so no diagnostic detail is
 //! lost in the conversion.
