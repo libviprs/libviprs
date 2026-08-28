@@ -177,6 +177,10 @@ fn charge(size: usize) {
     });
 }
 
+/// The charging itself, wrapped by [`charge`]'s depth accounting. Split out so
+/// that the depth is incremented before anything else is touched: the hazard
+/// being watched for is a thread-local access allocating, and the watch has to
+/// be armed before the first such access rather than after it.
 fn charge_inner(size: usize) {
     if size >= GLOBAL_THRESHOLD.load(Ordering::Relaxed) {
         GLOBAL_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -200,7 +204,9 @@ fn charge_inner(size: usize) {
 
 /// Release a charge. Deliberately not symmetric with [`charge`] on `COUNT`: a
 /// buffer that is allocated and dropped inside the window still cost an
-/// allocation and still counts as one.
+/// allocation and still counts as one. It carries no depth accounting either,
+/// because the recursion this file is watching for starts inside `alloc` and
+/// [`MAX_DEPTH`] is where it would show up.
 fn release(size: usize) {
     let _ = THRESHOLD.try_with(|t| {
         if size >= t.get() {
@@ -293,13 +299,14 @@ fn measure<R>(threshold: usize, f: impl FnOnce() -> R) -> (R, Cost) {
     }
     impl Drop for Restore {
         fn drop(&mut self) {
-            // Disarm before restoring anything else, and use `try_with` for the
-            // same reason every other access in this file does: this runs on
+            // Both thresholds first and adjacent, so the two counters cannot
+            // disagree about where the window ends, and then `try_with` for the
+            // same reason every other access in this file uses it: this runs on
             // the unwind path too, and a panic escaping here would be a panic
             // escaping a `Drop` during unwinding.
             GLOBAL_THRESHOLD.store(self.global_threshold, Ordering::Relaxed);
-            GLOBAL_COUNT.store(self.global_count, Ordering::Relaxed);
             let _ = THRESHOLD.try_with(|t| t.set(self.threshold));
+            GLOBAL_COUNT.store(self.global_count, Ordering::Relaxed);
             let _ = COUNT.try_with(|n| n.set(self.count));
             let _ = LIVE.try_with(|l| l.set(self.live));
             let _ = PEAK.try_with(|p| p.set(self.peak));
@@ -307,15 +314,18 @@ fn measure<R>(threshold: usize, f: impl FnOnce() -> R) -> (R, Cost) {
             let _ = MAX_DEPTH.try_with(|m| m.set(self.max_depth));
         }
     }
+    // Field initialisers run in the order written, so every counter is zeroed
+    // before either threshold is armed and the two thresholds go up adjacently.
+    // Nothing in here allocates, so the window has the same edge for both.
     let _restore = Restore {
-        threshold: THRESHOLD.with(|t| t.replace(threshold)),
         count: COUNT.with(|n| n.replace(0)),
         live: LIVE.with(|l| l.replace(0)),
         peak: PEAK.with(|p| p.replace(0)),
         trough: TROUGH.with(|m| m.replace(0)),
         max_depth: MAX_DEPTH.with(|m| m.replace(0)),
-        global_threshold: GLOBAL_THRESHOLD.swap(threshold, Ordering::Relaxed),
         global_count: GLOBAL_COUNT.swap(0, Ordering::Relaxed),
+        threshold: THRESHOLD.with(|t| t.replace(threshold)),
+        global_threshold: GLOBAL_THRESHOLD.swap(threshold, Ordering::Relaxed),
     };
     let out = f();
     let cost = Cost {
