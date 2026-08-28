@@ -56,8 +56,10 @@
 //!   The origin offset is the one field they disagree on: `extract_area` and
 //!   `crop` stamp it to `(-left, -top)` and discard the source's, matching
 //!   `vips_extract_area`, where the placement and tiling ops leave the
-//!   source's alone. `insert` is the one operation here that still drops the
-//!   metadata; its rule is a two-input merge and is not ported yet.
+//!   source's alone. `insert` is a two-input op and takes two rules (issue
+//!   #718): the header block comes from `main` alone, and the attached fields
+//!   are the union of `main`'s and `sub`'s with `main` winning a name they
+//!   share.
 //!
 //! # Smartcrop
 //!
@@ -604,28 +606,6 @@ fn expect_smartcrop(r: Result<(Raster, i32, i32), ExtractError>) -> (Raster, i32
 }
 
 impl Raster {
-    /// Carry `self`'s header block and attached fields onto an extract
-    /// result (issue #690).
-    ///
-    /// Every operation here builds its result through a constructor, and
-    /// every constructor starts from [`crate::conversion::RasterMeta::default`]
-    /// and an empty field map, so the carry has to be explicit or the
-    /// interpretation, resolution, orientation and every attachment go
-    /// missing. Measured on vips 8.18.6, `extract_area`, `crop`, `embed`,
-    /// `gravity`, `replicate`, `zoom`, `subsample` and `smartcrop` all hand
-    /// the header block and the attachments straight on, including through
-    /// the ops that rescale the pixel grid: `zoom` by 2x3 on `xres=5 yres=7`
-    /// reports 5 and 7 back rather than 10 and 21.
-    ///
-    /// The origin offset is the one field they disagree on, so
-    /// [`Raster::try_extract_area`] overwrites it after calling this; see
-    /// [`negated_origin`].
-    fn carry_extract_meta(&self, mut out: Raster) -> Raster {
-        out.meta = self.meta;
-        out.fields = self.fields.clone();
-        out
-    }
-
     /// Extract a rectangular region (libvips `extract_area`).
     ///
     /// The rectangle must lie entirely inside the image; libvips
@@ -659,7 +639,13 @@ impl Raster {
                 image_h: self.height(),
             });
         }
-        let mut out = self.carry_extract_meta(self.extract(left, top, width, height)?);
+        let mut out = self.extract(left, top, width, height)?;
+        // Measured on vips 8.18.6: `extract_area`, `crop`, `embed`, `gravity`,
+        // `replicate`, `zoom`, `subsample` and `smartcrop` all hand the header
+        // block and the attachments straight on, including through the ops that
+        // rescale the pixel grid (`zoom` by 2x3 on `xres=5 yres=7` reports 5 and
+        // 7 back, not 10 and 21). Issue #690.
+        out.carry_meta_from(self);
         // `vips_extract_area` writes `Xoffset = -left` / `Yoffset = -top` and
         // throws the source's away (`conversion.c`, `vips_extract_area_build`),
         // where the placement and tiling ops leave the source's alone. It is
@@ -815,7 +801,9 @@ impl Raster {
                 }
             }
         }
-        Ok(self.carry_extract_meta(Raster::new(width, height, fmt, out)?))
+        let mut out = Raster::new(width, height, fmt, out)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Place the image at a compass position inside a `width` x `height`
@@ -1024,7 +1012,9 @@ impl Raster {
                 out.extend_from_slice(&data[si..si + bpp]);
             }
         }
-        Ok(self.carry_extract_meta(Raster::new(ow as u32, oh as u32, self.format(), out)?))
+        let mut out = Raster::new(ow as u32, oh as u32, self.format(), out)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Insert `sub` over `self` with its top-left corner at `(x, y)`
@@ -1107,6 +1097,15 @@ impl Raster {
         }
         blit(&mut out, self, -ox, -oy);
         blit(&mut out, sub, x as i64 - ox, y as i64 - oy);
+        // Two rules, both measured on vips 8.18.6 (issue #718). The header
+        // block comes from `main` alone: an scRGB `sub` under an sRGB `main`
+        // reports sRGB, and the resolution, the offsets and the orientation
+        // are all `main`'s. The attached fields are the union of both, with
+        // `main` winning a name they share, so a profile only `sub` carries
+        // still reaches the output. I ran it both ways round rather than
+        // reading one cell.
+        out.carry_meta_from(self);
+        out.merge_fields_from(sub);
         Ok(out)
     }
 

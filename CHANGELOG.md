@@ -1648,6 +1648,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy. I found that by mutating the second check away and watching the tests
   stay green.
 
+- Every operation that builds a fresh raster carries its input's metadata onto
+  it, not just the header block: the interpretation, the resolution, the
+  offsets and the orientation as before, and now the ICC profile, the EXIF blob
+  and every attached field with them (issue #717). `cast`, `gamma`,
+  `falsecolour`, `addalpha`, `arrayjoin`, `join`, `fliphor`, `flipver`, `rot`,
+  `rot45`, `grid`, `wrap`, `fwfft`, `invfft`, `invfft_real` and `freqmult` all
+  used to copy `RasterMeta` and leave the field map behind, so a profile that
+  survived a load went missing the moment you cast the depth.
+
+  There were eighteen open-coded carries in `src/`, eleven of which wrote only
+  the first of the two lines. They now go through one `Raster::carry_meta_from`,
+  and #690's private `carry_extract_meta` folds into it. The name takes
+  `&mut self` (`out.carry_meta_from(src)`) because it reads in the direction the
+  data moves and works on a result a helper already built, where a returning
+  form puts the construction inside the carry's own argument list.
+
+  Measured against the pinned vips 8.18.6 across nineteen operations, from an
+  8x8 `rgb` source carrying `xres 5`, `yres 7`, `xoffset 11`, `yoffset 13`,
+  `orientation 6`, a `VipsRefString` and a real 3144-byte sRGB ICC profile. The
+  tag is `rgb` rather than `scrgb` on purpose: `vips gamma` on an `scrgb` or
+  `rgb16` source hands back `srgb` because it retags off the output's sample
+  format, and pinning the carry against a source that trips an unrelated retag
+  rule would measure the wrong thing.
+
+  Two cells are not a wholesale carry.
+
+  `invfft`, `invfft --real` and `freqmult` **drop the ICC profile** and keep
+  every other attachment. It is the profile specifically rather than blobs in
+  general: a second plain 48-byte `VipsBlob` attached alongside survives all
+  three. The cause is the retag those three do, not the transform:
+  `vips copy in.v out.v --interpretation b-w` removes the same profile, and
+  sweeping every interpretation shows the rule is a band-count match against
+  the profile's own colour space (a 3-channel profile is removed by `b-w`,
+  `grey16` and `cmyk` and kept by the rest; a 1-channel one is kept by `b-w`
+  and `grey16` and removed by `srgb` and `cmyk`). The general rule is issue
+  #720; these three measured cells are handled where they happen.
+
+  `new_from_image` carries the header block **without** the fields, which is
+  what its doc already claimed and is now measured rather than asserted. There
+  is no CLI for `vips_image_new_from_image`, so I called it against the same
+  8.18.6 through `ctypes` on `libvips.42.dylib`. It also drops the
+  **orientation**, which libviprs was carrying: vips holds orientation as an
+  attached field, libviprs holds it in `RasterMeta`, so it used to ride along
+  with the header block and a constant image arrived claiming the source's
+  rotation.
+
+- `Raster::try_insert` carries the metadata, where it used to hand back a
+  raster with none of it, and `join` and `arrayjoin` take the same rule (issue
+  #718). It was written down as a known gap in `src/extract.rs`'s module doc
+  and in this file, and tracked by nothing.
+
+  Two rules, both measured on vips 8.18.6 from two sources chosen to disagree
+  on every field. The header block comes from `main` alone: an scRGB `sub`
+  under an sRGB `main` reports sRGB, and the resolution, the offsets and the
+  orientation are all `main`'s. The attached fields are the **union** of both,
+  with `main` winning a name they share, so a profile only `sub` carries still
+  reaches the output. I ran it in both directions rather than reading one cell.
+
+  `vips join`, `vips arrayjoin` and `vips bandjoin` follow the same rule, so
+  `join` and `arrayjoin` merge here too and `out.fields = self.fields.clone()`
+  would have been wrong for both. `bandjoin` lives in `src/bands.rs` and is not
+  in this change.
+
+  The merge is a new `MetadataFields::merge_under` in `imageio`. Values this
+  build cannot interpret merge on the same terms, so a `.v` trailer field an
+  older build wrote still travels through an insert.
+
 - Every operation in `src/extract.rs` carries its input's metadata through to
   its result: `extract_area`, `crop`, `embed`, `gravity`, `replicate`, `zoom`,
   `subsample` and `smartcrop` all keep the interpretation, the resolution, the
@@ -1678,7 +1745,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change. Its rule is a two-input one and a different shape: the header block
   comes from `main` alone while the attached fields are the union of both with
   `main` winning a shared name, and carrying that union needs a merge on
-  `MetadataFields`, which lives in `imageio`.
+  `MetadataFields`, which lives in `imageio`. Issue #718 does that.
 
 - `Raster::try_sharpen` and `Raster::try_canny`'s float arm no longer abort the
   process when an allocation fails, and there is a new

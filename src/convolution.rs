@@ -2378,13 +2378,12 @@ impl Raster {
         // interpretation and the resolution survive the format change,
         // and so do the attachments: `vips sobel` on a jpeg carrying 186
         // bytes of `exif-data` and a 564-byte ICC profile hands both
-        // through unchanged, on either arm. Carrying them is the intended
-        // policy for new ops here. `conv`, `convsep`, `compass`,
+        // through unchanged, on either arm. `conv`, `convsep`, `compass`,
         // `gaussblur`, `spcor` and `fastcor` still return
-        // `RasterMeta::default()` and drop the fields; that is a
-        // divergence in those six, not a decision taken here.
-        out.meta = self.meta;
-        out.fields = self.fields.clone();
+        // `RasterMeta::default()` and drop the fields, where vips carries
+        // both through all six; that is issue #719 and it is not fixed
+        // here.
+        out.carry_meta_from(self);
         Ok(out)
     }
     /// Fallible form of [`Raster::sobel`], which carries the contract:
@@ -2855,11 +2854,9 @@ impl Raster {
 
         let mut out = Raster::from_op_output(w, h, fmt, data)?;
         // vips builds the result inside the input's pipeline, so the
-        // interpretation, the resolution and the attachments all survive.
-        // That is the intended policy for new ops here, and the same one
-        // the edge detectors follow.
-        out.meta = self.meta;
-        out.fields = self.fields.clone();
+        // interpretation, the resolution and the attachments all survive,
+        // the same as the edge detectors.
+        out.carry_meta_from(self);
         Ok(out)
     }
 

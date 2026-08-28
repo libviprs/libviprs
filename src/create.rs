@@ -101,7 +101,7 @@ use std::num::NonZeroU16;
 use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont, point as ab_point};
 use thiserror::Error;
 
-use crate::conversion::Interpretation;
+use crate::conversion::{Interpretation, RasterMeta};
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
 
@@ -326,13 +326,29 @@ impl Raster {
         for chunk in out.data_mut().chunks_exact_mut(pixel.len()) {
             chunk.copy_from_slice(&pixel);
         }
-        // Carry the source geometry/interpretation block only (libvips
-        // copies the header geometry). The attached fields stay empty from
-        // `Raster::zeroed`, so ICC/EXIF/filename are intentionally not
-        // inherited. Pin the resolved interpretation so it survives the
-        // band-count change even when the source left it inferred from the
-        // format.
-        out.meta = self.meta;
+        // Carry the source geometry/interpretation block only, and not
+        // through `Raster::carry_meta_from`, because this is the one op in the
+        // crate that carries the header block *without* the fields. That is
+        // measured rather than assumed: `vips_image_new_from_image` has no CLI,
+        // so I called it against the pinned 8.18.6 through `ctypes` on
+        // `libvips.42.dylib`, and from a source tagged
+        // `scrgb / xres 5 / yres 7 / xoffset 11 / yoffset 13 / orientation 6`
+        // with an attached string and a 3144-byte profile, the result reports
+        // scRGB, 5, 7, 11, 13 and **no** attached field, **no** profile and
+        // `orientation` back at 1.
+        //
+        // The orientation is why this is not just "the fields stay empty from
+        // `Raster::zeroed`": vips holds orientation as an attached field and
+        // drops it with the rest, where libviprs keeps it in `RasterMeta` and
+        // so used to carry it here (#717). Reset it to the default rather than
+        // inherit it, or a constant image the size of the source arrives
+        // claiming the source's rotation and a later `autorot` acts on it.
+        out.meta = RasterMeta {
+            orientation: RasterMeta::default().orientation,
+            ..self.meta
+        };
+        // Pin the resolved interpretation so it survives the band-count change
+        // even when the source left it inferred from the format.
         out.meta.interpretation = Some(self.interpretation());
         Ok(out)
     }

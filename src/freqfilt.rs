@@ -131,6 +131,28 @@ fn is_fourier_complex(r: &Raster) -> bool {
     r.format().channels().is_multiple_of(2) && r.interpretation() == Interpretation::Fourier
 }
 
+/// Drop the ICC profile the way the inverse transforms do, after the carry
+/// has put it there.
+///
+/// This is the one cell in the metadata carry table that is not a wholesale
+/// copy (#717). Measured on vips 8.18.6 from an 8x8 `rgb` source carrying a
+/// real 3144-byte sRGB profile: `fwfft` hands the profile on, and `invfft`,
+/// `invfft --real` and `freqmult` all report no `icc-profile-data` at all
+/// while still reporting every other attachment, including a second plain
+/// 48-byte `VipsBlob` attached alongside. So it is the profile being
+/// invalidated, not the field map being dropped.
+///
+/// The cause is the retag rather than the transform: these three land on
+/// `b-w`, and `vips copy in.v out.v --interpretation b-w` removes the same
+/// three-channel profile. That general rule (a profile survives only while
+/// the new tag's band count matches the profile's own colour space) is #720,
+/// and it belongs wherever an interpretation is stamped rather than here.
+/// This function is the three measured cells, and it should be deleted when
+/// #720 lands and covers them.
+fn drop_invalidated_profile(raster: &mut Raster) {
+    raster.remove_icc_profile();
+}
+
 /// Read every sample as `f64` in raster order (row-major, bands
 /// interleaved), whatever the depth.
 fn samples_f64(r: &Raster) -> Vec<f64> {
@@ -271,7 +293,7 @@ impl Raster {
         }
 
         let mut raster = float_raster(self.width(), self.height(), format, &out)?;
-        raster.meta = self.meta;
+        raster.carry_meta_from(self);
         raster.meta.interpretation = Some(Interpretation::Fourier);
         Ok(raster)
     }
@@ -331,10 +353,11 @@ impl Raster {
         }
 
         let mut raster = float_raster(self.width(), self.height(), format, &out)?;
-        raster.meta = self.meta;
+        raster.carry_meta_from(self);
         // Back in the spatial domain: drop the Fourier stamp (libvips
         // `invfft.c` retags the output B_W).
         raster.meta.interpretation = None;
+        drop_invalidated_profile(&mut raster);
         Ok(raster)
     }
 
@@ -380,8 +403,9 @@ impl Raster {
         }
 
         let mut raster = float_raster(self.width(), self.height(), format, &out)?;
-        raster.meta = self.meta;
+        raster.carry_meta_from(self);
         raster.meta.interpretation = None;
+        drop_invalidated_profile(&mut raster);
         Ok(raster)
     }
 
@@ -665,7 +689,7 @@ fn fourier_multiply(
 
     let format = float_format(op, bands)?;
     let mut raster = float_raster(fourier.width(), fourier.height(), format, &out)?;
-    raster.meta = fourier.meta;
+    raster.carry_meta_from(fourier);
     raster.meta.interpretation = Some(Interpretation::Fourier);
     Ok(raster)
 }

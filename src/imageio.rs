@@ -489,6 +489,39 @@ impl MetadataFields {
         Some(self.entries.remove(idx).1)
     }
 
+    /// Whether a name is carried at all, under either carrier.
+    fn contains(&self, name: &str) -> bool {
+        self.entries.iter().any(|(n, _)| n == name) || self.unknown.iter().any(|(n, _)| n == name)
+    }
+
+    /// Take `other`'s fields for every name this map does not already carry,
+    /// in `other`'s own order, leaving this map's values alone.
+    ///
+    /// This is the multi-input rule, measured on vips 8.18.6: `insert`,
+    /// `join`, `arrayjoin` and `bandjoin` put the union of both inputs'
+    /// attachments on the output and let the *first* input win a name they
+    /// share, while the header block comes from the first input alone. A
+    /// profile that only the second input carries reaches the output; a
+    /// `lane-711` both carry keeps the first one's value (#718).
+    ///
+    /// Uninterpretable `.v` trailer values merge on the same terms, so a name
+    /// this build cannot read still travels rather than being dropped because
+    /// the reader could not name it (#565). A name held under one carrier here
+    /// blocks the other carrier's copy from `other`, which is the same
+    /// "one value per name" invariant [`MetadataFields::set`] keeps.
+    pub(crate) fn merge_under(&mut self, other: &Self) {
+        for (name, value) in &other.entries {
+            if !self.contains(name) {
+                self.entries.push((name.clone(), value.clone()));
+            }
+        }
+        for (name, value) in &other.unknown {
+            if !self.contains(name) {
+                self.unknown.push((name.clone(), value.clone()));
+            }
+        }
+    }
+
     /// Record a field this build cannot interpret; see
     /// [`MetadataFields::unknown`].
     fn set_unknown(&mut self, name: &str, value: CarriedValue) {
@@ -1048,6 +1081,20 @@ impl Raster {
     pub fn set_icc_profile(&mut self, profile: &[u8]) {
         self.fields
             .set("icc-profile-data", MetadataValue::Blob(profile.to_vec()));
+    }
+
+    /// Drop the attached ICC profile, the way libvips'
+    /// `vips_image_remove(VIPS_META_ICC_NAME)` does. Removing an absent
+    /// profile is a no-op.
+    ///
+    /// Crate-private because a caller already has the same reach through
+    /// `set_typeof("icc-profile-data", 0)`; this exists so the ops that must
+    /// do it can say what they mean. The ops in question are the inverse
+    /// Fourier transforms: measured on vips 8.18.6 they retag the output
+    /// `b-w`, and a three-channel profile does not survive that retag (#717,
+    /// and the general rule is #720).
+    pub(crate) fn remove_icc_profile(&mut self) {
+        let _ = self.fields.remove("icc-profile-data");
     }
 
     /// The attached ICC profile, if any: the `icc-profile-data` blob set
