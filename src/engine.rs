@@ -87,7 +87,7 @@ pub enum EngineError {
         kind: crate::EngineKind,
         reason: &'static str,
     },
-    /// The supplied [`PyramidPlan`](crate::PyramidPlan) describes an image
+    /// The supplied [`PyramidPlan`] describes an image
     /// whose dimensions do not match the source raster it was paired with.
     /// The engine validates this at entry so a mismatch surfaces as a typed
     /// error instead of an out-of-bounds slice copy inside the tiling /
@@ -103,7 +103,7 @@ pub enum EngineError {
         source_width: u32,
         source_height: u32,
     },
-    /// The supplied [`PyramidPlan`](crate::PyramidPlan) is structurally
+    /// The supplied [`PyramidPlan`] is structurally
     /// invalid (for example, it has no levels). A plan is normally produced by
     /// [`PyramidPlanner::plan`](crate::PyramidPlanner::plan), which upholds
     /// these invariants; the engine re-checks them at entry so a malformed

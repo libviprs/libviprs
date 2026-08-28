@@ -1118,7 +1118,7 @@ impl FsSink {
         self
     }
 
-    /// Attach a [`DedupeStrategy`](crate::dedupe::DedupeStrategy) so the sink
+    /// Attach a [`DedupeStrategy`] so the sink
     /// can coalesce identical blank tiles under a shared reference.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)

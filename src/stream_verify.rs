@@ -3,7 +3,7 @@
 //! This module mirrors the byte-exact verify path in
 //! [`crate::engine::run_verify`](crate::engine) without requiring the full
 //! source raster to live in memory up front. The caller supplies a
-//! [`StripSource`](crate::streaming::StripSource); the verify walker pulls
+//! [`StripSource`]; the verify walker pulls
 //! the top pyramid level strip-by-strip, assembles it into a
 //! `canvas_width × canvas_height` raster, and then replays the monolithic
 //! engine's level-by-level downscale / tile-extract / tile-compare loop.
