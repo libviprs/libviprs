@@ -683,6 +683,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gainmap-scale-factor: 2` in the header. `quality` is clamped to 1..=100 the
   way `Raster::encode_jpeg` clamps its own.
 
+- A page model for multi-frame images (issue #564). A multi-frame image is one
+  `Raster` whose rows are a whole number of equal-height pages stacked top to
+  bottom, the layout libvips calls a toilet roll, and the split is now a
+  derived, checked value rather than an integer riding along in the metadata.
+  `Raster::page_layout`, `Raster::get_page_height`, `Raster::pages_loaded`,
+  `Raster::page`, `Raster::try_extract_page` / `Raster::extract_page` and
+  `Raster::try_set_page_height` / `Raster::set_page_height` /
+  `Raster::clear_page_height` are the surface, and the new `frames` module
+  holds `PageLayout`, `FrameDelay` and `LoopCount`.
+
+  `Raster::get_page_height` ports `vips_image_get_page_height`, sanity check
+  included: a stored `page-height` counts only when it is positive and divides
+  the raster's height exactly, and otherwise the raster is one page. Measured
+  against 8.18.6 through `ctypes` on a 4x12 image, where every divisor of 12
+  comes back as stored and 5, 7, 11, 13, 24, 100, 0 and the negatives all come
+  back as 12. So the split can never fail to tile the rows it describes, and a
+  caller sweeping `0..raster.pages_loaded()` cannot land off the end.
+
+  `Raster::pages_loaded` is **not** `Raster::get_n_pages`. The first counts the
+  pages this raster holds; the second counts the pages the file held (#635).
+  They differ whenever a loader was asked for a subset: `vips copy
+  'anim3.webp[n=2]' out.v` reports `n-pages: 3` on a raster holding two pages.
+
+  `FrameDelay` holds milliseconds and says so in the type, because the two wire
+  formats disagree: `gifsave` writes `round(ms / 10)` centiseconds with halves
+  to even (measured: `35 55 15 25` ms wrote `4 6 2 2`, `45 67 5 1` wrote
+  `4 7 0 0`), where `webpsave` writes milliseconds straight into `ANMF` and
+  instead clamps anything at or under 10 ms up to 100 ms (measured: `8 9 10 11`
+  went out as `100 100 100 11`). `LoopCount` counts plays, `0` meaning forever,
+  and carries the GIF off-by-one: the NETSCAPE2.0 block holds
+  repeats-after-the-first and a single play carries no block at all, where
+  WebP's `ANIM` chunk holds the play count unshifted.
+
 - JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
   #501). Build with `--features jp2k` and `decode_jp2k` reads both container
   forms, the RFC 3745 JP2 box structure and the bare `SOC` + `SIZ` codestream,
@@ -806,6 +839,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code is compiled: a debug build emits zero object files under
   `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
   rather than taken from `avif-parse`, which is MPL-2.0.
+
+- **`MetadataValue::IntArray`, the array variant every animated codec was
+  waiting on** (issue #787). `MetadataValue` had four variants and none of
+  them could hold a per-frame `delay`, so #572, #573, #569 and #621 all had a
+  page-geometry half they could land and a delay half they could not. It now
+  has five, and the fifth is an ordered list of `i64`.
+
+  The spelling is measured against the pinned vips 8.18.6 rather than read out
+  of the C. `vips copy 'anim3.webp[n=-1]' out.v` writes
+  `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, one space
+  after every element including the last, so that is what the writer produces
+  and it is pinned as bytes. The reader is looser, because vips's is: a
+  trailer carrying `40 60 80`, `40 60 80 ` or `  40   60   80  ` reads back as
+  the same three elements in both libraries, and an empty element list is an
+  empty array rather than a missing field.
+
+  Two answers here are libviprs's own, and both are measured:
+
+  - **an element that will not parse keeps the whole field opaque.** vips
+    hands back an *empty* array for `40 x 80` (`vipsheader -f delay` prints
+    nothing and `vips copy` writes the field back out empty), losing the two
+    elements that did parse. libviprs carries the text through untouched, the
+    same rule `gint`, `gdouble` and `VipsBlob` already follow when their text
+    will not parse.
+  - **the elements are `i64`, not `u32` or `i32`.** vips's `gint` is 32 bits
+    and wraps rather than refusing: a trailer carrying `3000000000` reads back
+    through vips as `-1294967296`, and
+    `9223372036854775807 -9223372036854775808` as `-1 0`. A narrower carrier
+    would lose data on a file libviprs did not write and could not warn about.
+
+  `Raster::get_int_array` reads one borrowed, the way `get_int` does since
+  #635, so reading a delay does not deep-copy whatever blob happens to sit
+  under the same name. `MetadataValue::as_int_array` is the panicking
+  accessor beside `as_blob`, `type_code` gets a fifth code, and `len` reports
+  the element count.
+
+  Naming the variant also releases files from the legacy JSON trailer. The
+  fallback is keyed on what is *still* carried, so a `.v` whose only
+  unnameable value was an `{"IntArray":[...]}` delay is read as a value now
+  and its rewrite comes back out as the XML vips reads. Nothing about the
+  format moved: #565's trailer already carried this exact field opaquely, and
+  #609's `#[non_exhaustive]` already made the variant additive.
 
 - **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
   versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
@@ -1518,6 +1593,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The page split no longer survives an operation that changes the raster's
+  height, and is no longer imported from a second input by a multi-input op
+  (issue #564). Both are deliberate divergences from libvips and both have a
+  measured counter-example on 8.18.6:
+
+  - `vips resize` on a four-page 4x12 roll writes a 2x6 result still claiming
+    `page-height: 3`, and `gifsave` then writes that as a **two**-frame
+    animation whose frames are two half-height frames stacked, silently.
+    `Raster::carry_meta_from` drops the split on a height change instead, so
+    the same pipeline yields a still image: the safe half of the two wrong
+    answers, and the caller can see it in `pages_loaded`.
+  - `vips join plain.v paged.v out.v horizontal`, where only the **second**
+    input is a four-page roll, produces an 8x12 output carrying
+    `page-height: 3`, `n-pages: 4` and the roll's delay array, so an unpaged
+    image silently becomes a four-frame animation.
+    `Raster::merge_fields_from` is the one name the field union does not
+    import.
+
+  Nothing in the crate attaches `page-height` yet, so this changes no current
+  behaviour; it is the contract the animated GIF, WebP and JPEG XL lanes are
+  written against.
+
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
   `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
   actually runs (issues #675, #707). Neither change makes the job pass. What
@@ -1959,6 +2056,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **Every `capture.py` under `oracle-captures/` now checks `ORACLE_PIN.json`
+  before it writes anything. Two of the fourteen did** (issue #796), both of
+  them the convolution scripts `oracle_pin.py` was factored out of. The pin
+  file said "capture.py refuses to run against a binary that disagrees with
+  it", `oracle_pin.py` opened "The oracle pin every capture.py under
+  oracle-captures/ checks", and `tests/oracle_capture_pins.rs` said "each
+  area's". All three were true for `convolution`.
+
+  #650 left a two-sided guard: the capture script stops a bad capture being
+  taken, and the Rust test stops one being kept. Only the second side existed
+  for the twelve `foreign-*` areas, so re-running any of them on a machine
+  whose vips had moved wrote a whole capture with the new version stamped
+  through it and told nobody, which is the exact failure #650 was filed for.
+  All six areas still marked `pre_pin`, the ones most likely to be re-run,
+  were in the unguarded twelve.
+
+  `every_capture_script_checks_the_oracle_pin` is what stops it coming back.
+  It reads the scripts through `include_str!` and matches at column zero,
+  because `oracle_pin.py`'s docstring shows callers the exact lines to write
+  and a substring scan would read that example as an adoption. No committed
+  capture changes: re-running `foreign-avif` with the check in reproduced its
+  `oracle.json`, `commands.sh` and all thirteen fixtures byte for byte.
+
+- **The AVIF oracle recorded a sha256 for an `rgb8.avif` that was not the file
+  in the tree** (issue #779). Two records in
+  `oracle-captures/foreign-avif/capture.py` wrote different images to
+  `fixtures/rgb8.avif`: the bit-depth carrier saved the 16-bit ramp narrowed to
+  8 bits, and the lossless-identity record then saved the 8-bit ramp over the
+  top of it. The later write won, so the carrier's row went on recording
+  `d5a55b1a…` / 323 bytes for a file that was `c1f34aad…` / 355 bytes, and its
+  `read_back` and `source_16bit` arrays described an artefact nobody could
+  open.
+
+  The narrowed image is now `fixtures/rgb8_narrowed.avif` and it is committed.
+  Re-running the capture against the pinned vips 8.18.6 reproduced
+  `d5a55b1a…` / 323 bytes exactly, so the carrier row was measured against the
+  narrowed image all along and only lost the file; the identity row was
+  measured against the committed `rgb8.avif` and was right. Of 1890 leaves in
+  that `oracle.json`, the re-run moved two, both the 8-bit row's file name, and
+  left all twelve existing fixtures byte-identical. `capture.py` now refuses to
+  write any name under `fixtures/` twice, so the next collision stops the
+  capture instead of quietly losing an artefact.
+
+  The half that matters is the guard, because nothing was looking.
+  `tests/oracle_capture_pins.rs` now hashes every committed file a capture
+  names and compares it to what was recorded, across every area: 95 rows, of
+  which exactly one disagreed. A second test reads the same defect off the JSON
+  alone, so a collision under `outputs/` or on a path outside the repository is
+  caught too, with no file to compare against. A green suite used to mean "the
+  recorded vips versions line up"; it now also means the pins describe the
+  tree.
 
 - `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
   containers whose allocation refusal is spent inside the `image` crate (issue
