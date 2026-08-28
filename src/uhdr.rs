@@ -1728,6 +1728,57 @@ mod tests {
      * Input: a payload whose gamma denominator is 0 -> Output: a typed
      * `BadMetadata`, not a `NaN`.
      */
+    /**
+     * Issue #810. `encode_uhdr` refuses a raster it cannot save, and until
+     * this test that refusal was displayed as a `uhdr2scRGB` error, so a
+     * failed **save** named the **expand** operation and named it first.
+     *
+     * The expand refusals are the positive control: they must keep saying
+     * `uhdr2scRGB`, or a fix that simply deleted the prefix everywhere would
+     * pass this test while losing the operation name altogether.
+     */
+    #[test]
+    fn the_save_refusal_names_uhdrsave_and_the_expand_refusals_name_uhdr2scrgb() {
+        let rgb = Raster::new(4, 4, PixelFormat::Rgb8, vec![0u8; 48]).unwrap();
+        let save = encode_uhdr(&rgb, &SaveOptions::default())
+            .expect_err("a 3-band uchar raster cannot be saved as Ultra HDR")
+            .to_string();
+        assert!(
+            save.starts_with("uhdrsave: "),
+            "the save refusal should name uhdrsave, got {save:?}"
+        );
+        assert!(
+            !save.contains("uhdr2scRGB"),
+            "the save refusal must not name the expand operation, got {save:?}"
+        );
+
+        let gray16 = Raster::new(4, 4, PixelFormat::Gray16, vec![0u8; 32]).unwrap();
+        let float3 = Raster::new(
+            4,
+            4,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            vec![0u8; 192],
+        )
+        .unwrap();
+        for (what, err) in [
+            (
+                "gain map",
+                uhdr_to_scrgb(&rgb, &gray16, &GainMapMetadata::default())
+                    .expect_err("bad gain map"),
+            ),
+            (
+                "base",
+                uhdr_to_scrgb(&float3, &gray16, &GainMapMetadata::default()).expect_err("bad base"),
+            ),
+        ] {
+            let text = err.to_string();
+            assert!(
+                text.starts_with("uhdr2scRGB: "),
+                "the {what} refusal should still name uhdr2scRGB, got {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_zero_denominator_is_refused_rather_than_made_infinite() {
         let mut payload = ISO_GAIN_MAP_ID.to_vec();
