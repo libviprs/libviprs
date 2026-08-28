@@ -562,6 +562,26 @@ fn negated_origin(v: u32) -> i32 {
 /// Refuse a float raster for an operation that reads samples through
 /// [`read_s`] / [`write_s`] (issue #694).
 ///
+/// **Where this sits relative to the other checks**, because the four entry
+/// points do not agree and the difference is observable. `try_embed` and
+/// `try_gravity` reject float *before* the zero-canvas check, so
+/// `try_embed(.., 0, 0, ..)` on a float raster reports `FloatUnsupported`
+/// where it used to report `EmptyArea`. `try_insert` rejects after the
+/// band-count check and `try_smartcrop` after both geometry checks.
+///
+/// That is deliberate rather than an accident of where the line went. The
+/// carrier is a property of the input the caller already holds, and the
+/// geometry is a property of the arguments they just passed, so reporting the
+/// carrier first tells them the thing they cannot fix by changing an argument.
+/// Where an op has a *cheaper* structural check that also names an input
+/// (`insert`'s band count), that one goes first, because it is the same class
+/// of answer and it is already there.
+///
+/// The predicate is [`PixelFormat::is_float`], which covers **both** spellings
+/// of a float layout, `RgbaF32` and `FloatF32(n)`. This crate has two on
+/// purpose (#531), and a guard that is right for one and wrong for the other
+/// is invisible to a suite that only builds one of them; the tests build both.
+///
 /// The split in this module is not about the operation, it is about how the
 /// operation moves pixels. `extract_area`, `crop`, `replicate`, `zoom` and
 /// `subsample` copy whole pixels byte-wise, so the sample depth never comes
@@ -584,21 +604,34 @@ fn reject_float(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
 }
 
 /// Unwrap an extract-op result for the panicking ported-test surface.
+///
+/// Most [`ExtractError`] variants do not name the failing op, so the panic
+/// prefixes `"<op>: "` for context. [`ExtractError::FloatUnsupported`] is the
+/// exception: it embeds the op in its own `Display`, so prefixing it here as
+/// well doubles the name (`"embed: embed does not support float rasters yet
+/// ..."`). That is issue #339's defect, which `expect_arith` in
+/// `arithmetic.rs` already fixes for the same variant on that side; #694
+/// mirrored the error shape and not this wrapper, so it arrived here too.
+/// That one variant is emitted verbatim; every other variant keeps the prefix.
 #[inline]
 #[track_caller]
 fn expect_extract(op: &str, r: Result<Raster, ExtractError>) -> Raster {
     match r {
         Ok(v) => v,
+        Err(e @ ExtractError::FloatUnsupported { .. }) => panic!("{e}"),
         Err(e) => panic!("{op}: {e}"),
     }
 }
 
 /// Unwrap a smartcrop result for the panicking ported-test surface.
+///
+/// Same doubling rule as [`expect_extract`].
 #[inline]
 #[track_caller]
 fn expect_smartcrop(r: Result<(Raster, i32, i32), ExtractError>) -> (Raster, i32, i32) {
     match r {
         Ok(v) => v,
+        Err(e @ ExtractError::FloatUnsupported { .. }) => panic!("{e}"),
         Err(e) => panic!("smartcrop: {e}"),
     }
 }
@@ -2539,12 +2572,28 @@ mod tests {
     // -- float refusal (issue #694) -------------------------------------------------------
 
     /// A float raster of `bands` bands filled with a ramp, the carrier an EXR,
-    /// FITS or `.v` decode hands back.
+    /// FITS or `.v` decode hands back, spelled `FloatF32(n)`.
     fn floatf(bands: u16, w: u32, h: u32) -> Raster {
         let n = (w * h) as usize * bands as usize;
         let data: Vec<u8> = (0..n).flat_map(|v| (v as f32).to_ne_bytes()).collect();
         let fmt = PixelFormat::FloatF32(std::num::NonZeroU16::new(bands).expect("bands"));
         Raster::new(w, h, fmt, data).expect("float fixture")
+    }
+
+    /// The same four-band float layout spelled `RgbaF32`, which is what
+    /// [`PixelFormat::canonical`] produces and what a decoded RGBA EXR hands
+    /// back.
+    ///
+    /// This crate has two spellings of every float layout on purpose (#531),
+    /// so a predicate that is right for one and wrong for the other is the
+    /// interesting way to get `reject_float` wrong, and it is invisible to a
+    /// suite that only ever builds `FloatF32(n)`. Narrowing the guard to
+    /// `matches!(fmt, PixelFormat::FloatF32(_))` leaves the whole library
+    /// suite green and puts `RgbaF32` back to panicking out of a `Result`.
+    fn rgbaf32(w: u32, h: u32) -> Raster {
+        let n = (w * h) as usize * 4;
+        let data: Vec<u8> = (0..n).flat_map(|v| (v as f32).to_ne_bytes()).collect();
+        Raster::new(w, h, PixelFormat::RgbaF32, data).expect("rgbaf32 fixture")
     }
 
     /// Issue #694. The four entry points that read samples through
@@ -2611,6 +2660,19 @@ mod tests {
                 "insert float main",
                 im.try_insert(&rgb(2, 2, vec![1u8; 12]), 1, 1, false, None),
             ),
+            // The other spelling of the same layout. See `rgbaf32`.
+            (
+                "embed rgbaf32",
+                rgbaf32(8, 8).try_embed(1, 1, 12, 12, Extend::White, None),
+            ),
+            (
+                "gravity rgbaf32",
+                rgbaf32(8, 8).try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None),
+            ),
+            (
+                "insert rgbaf32",
+                rgbaf32(8, 8).try_insert(&rgbaf32(2, 2), 1, 1, false, None),
+            ),
         ];
         for (name, got) in cases {
             assert!(
@@ -2656,6 +2718,101 @@ mod tests {
                 .unwrap_or_else(|e| panic!("smartcrop {interesting:?} is pure geometry: {e}"));
             assert_eq!(out.format(), im.format(), "smartcrop {interesting:?}");
         }
+
+        // And on the alpha carrier, which is the only way to reach the
+        // `premultiply()` branch above the strategy switch. A three-band
+        // fixture never takes it, so "the four pure-geometry strategies take a
+        // float raster unchanged" was untested for the case that actually has
+        // a premultiply in front of it.
+        let alpha = rgbaf32(8, 8);
+        for premultiplied in [false, true] {
+            let (out, _, _) = alpha
+                .try_smartcrop(4, 4, SmartcropInteresting::Centre, premultiplied)
+                .unwrap_or_else(|e| panic!("smartcrop centre on RgbaF32 ({premultiplied}): {e}"));
+            assert_eq!(out.format(), PixelFormat::RgbaF32);
+        }
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            assert!(
+                matches!(
+                    alpha.try_smartcrop(4, 4, interesting, false),
+                    Err(ExtractError::FloatUnsupported { .. })
+                ),
+                "smartcrop {interesting:?} on RgbaF32"
+            );
+        }
+    }
+
+    /// Issue #694. The kernel's `debug_assert` fires, so the sentence saying
+    /// it is what holds the guard rather than a comment is itself held.
+    ///
+    /// `embed_impl` takes the guard on trust because the refusal has to name
+    /// the public operation and the kernel cannot see which of its two callers
+    /// came in. Deleting the assert leaves the suite green, since there is no
+    /// third caller today, so without this the claim was exactly the shape
+    /// #700 was filed about. The release net is still `write_s`'s own panic,
+    /// so nothing is weaker than before either way.
+    #[test]
+    #[should_panic(expected = "callers must reject a float raster first")]
+    fn embed_impl_asserts_its_callers_rejected_float_first() {
+        let _ = floatf(3, 8, 8).embed_impl(1, 1, 12, 12, Extend::Black, None);
+    }
+
+    /// Issue #694 against #339. The panicking forms do not double the op name.
+    ///
+    /// `expect_extract` prefixes `"<op>: "` because most `ExtractError`
+    /// variants do not say which operation failed. `FloatUnsupported` does, so
+    /// prefixing it too gave `"embed: embed does not support float rasters
+    /// yet"`. `arithmetic.rs` already fixed exactly this for its own
+    /// `FloatUnsupported` and named #339 while doing it; #694 mirrored the
+    /// error shape and not the wrapper, so the defect arrived here with it.
+    #[test]
+    fn the_panicking_forms_do_not_say_the_op_twice() {
+        let im = floatf(3, 8, 8);
+        for (op, call) in [
+            (
+                "embed",
+                Box::new(move || {
+                    floatf(3, 8, 8).embed(1, 1, 12, 12, Extend::Black, None);
+                }) as Box<dyn FnOnce()>,
+            ),
+            (
+                "gravity",
+                Box::new(move || {
+                    floatf(3, 8, 8).gravity(CompassDirection::Centre, 12, 12);
+                }),
+            ),
+            (
+                "insert",
+                Box::new(move || {
+                    floatf(3, 8, 8).insert(&floatf(3, 2, 2), 1, 1, false);
+                }),
+            ),
+            (
+                "smartcrop",
+                Box::new(move || {
+                    floatf(3, 8, 8).smartcrop(4, 4, SmartcropInteresting::Entropy);
+                }),
+            ),
+        ] {
+            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+                .expect_err("must panic");
+            let text = msg
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| msg.downcast_ref::<&str>().map(ToString::to_string))
+                .expect("panic payload is a string");
+            assert_eq!(
+                text.matches(&format!("{op} does not support float"))
+                    .count()
+                    + text.matches(&format!("{op}: ")).count(),
+                1,
+                "the op name must appear once, got {text:?}"
+            );
+        }
+        drop(im);
     }
 
     /// Issue #694. The refusal names the operation, so a caller reading the
