@@ -2801,6 +2801,7 @@ mod tests {
      * pixels and header geometry.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_v_and_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -2833,6 +2834,7 @@ mod tests {
      * absent after `save_stripped`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_webp_round_trips_losslessly_and_honours_strip() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -2867,6 +2869,7 @@ mod tests {
      */
     #[test]
     #[cfg(feature = "jxl")]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -2906,6 +2909,7 @@ mod tests {
      * `SaveError::UnsupportedExtension`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_error_lists_exactly_the_wired_extensions() {
         let dir = tempfile::tempdir().unwrap();
         let im = rgb_2x2();
@@ -2965,6 +2969,7 @@ mod tests {
      * pixels (PNG is lossless), and unknown extensions error.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_png_and_unknown_extension() {
         let dir = tempfile::tempdir().unwrap();
         let im = rgb_2x2();
@@ -2988,6 +2993,7 @@ mod tests {
      * segment scan.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jpeg_keeps_and_strips_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
@@ -3017,6 +3023,7 @@ mod tests {
      * header's filename slot.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sets_filename() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("named.v");

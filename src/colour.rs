@@ -4486,6 +4486,7 @@ mod tests {
      * result is tagged sRGB-device, and the output profile is attached.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn icc_transform_to_display_p3() {
         let dir = tempfile::tempdir().unwrap();
         let p3_bytes = ColorProfile::new_display_p3().encode().unwrap();

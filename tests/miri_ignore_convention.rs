@@ -1181,8 +1181,7 @@ fn no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions() {
     // it happens to cover. This pins the whole population.
     let touching = tests.iter().filter(|t| t.touches_fs).count();
     assert_eq!(
-        touching,
-        EXPECTED_FS_TOUCHING_TESTS,
+        touching, EXPECTED_FS_TOUCHING_TESTS,
         "the detector found {touching} filesystem-touching tests, not \
          {EXPECTED_FS_TOUCHING_TESTS}. Adding or removing one is fine, but move the \
          constant in the same change, because the assertion above is satisfied by a \

@@ -1006,6 +1006,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_none_round_trips_bit_exact() {
         let im = ramp_gray8(64, 64);
         let dir = tempfile::tempdir().unwrap();
@@ -1018,6 +1019,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_deflate_round_trips_bit_exact() {
         let im = ramp_gray8(64, 64);
         let dir = tempfile::tempdir().unwrap();
@@ -1030,6 +1032,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_lzw_smaller_than_none() {
         let im = ramp_gray8(128, 128);
         let dir = tempfile::tempdir().unwrap();
@@ -1052,6 +1055,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_gray16_deflate_round_trips_via_decode_tiff_page() {
         let im = ramp_gray16(48, 32);
         let dir = tempfile::tempdir().unwrap();
@@ -1070,6 +1074,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_rgb8_deflate_round_trips_via_decode_tiff_page() {
         let im = ramp_rgb8(48, 32);
         let dir = tempfile::tempdir().unwrap();
@@ -1088,6 +1093,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_rgba16_deflate_round_trips_via_decode_tiff_page() {
         let im = ramp_rgba16(48, 32);
         let dir = tempfile::tempdir().unwrap();
@@ -1106,6 +1112,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_rgba16_lzw_round_trips_via_decode_tiff_page() {
         let im = ramp_rgba16(48, 32);
         let dir = tempfile::tempdir().unwrap();
@@ -1151,6 +1158,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn tiff_page_count_and_decode_tiff_page_on_multipage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.tif");
@@ -1176,6 +1184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_zero_is_the_first_image() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.tif");
@@ -1186,6 +1195,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_rejects_a_page_past_the_end() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.tif");
@@ -1211,6 +1221,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_attaches_the_page_count() {
         let dir = tempfile::tempdir().unwrap();
         let multi = dir.path().join("multi.tif");
@@ -1309,6 +1320,7 @@ mod tests {
      * Input: a 4x4 gray8 TIFF relabelled 100000x100000, default limits.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_rejects_declared_geometry_over_the_pixel_ceiling() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bomb.tif");
@@ -1333,6 +1345,7 @@ mod tests {
      * Input: a 4x4 gray8 TIFF relabelled 100000000x4, default limits.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_rejects_an_axis_over_the_coord_ceiling() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wide.tif");
@@ -1360,6 +1373,7 @@ mod tests {
      * file size.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_bounds_the_pixel_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("budget.tif");
@@ -1441,6 +1455,7 @@ mod tests {
      * Input: a 64x64 gray8 TIFF with max_alloc_bytes = 8.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_tiff_page_bounds_the_file_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("body.tif");
@@ -1482,6 +1497,7 @@ mod tests {
      * max_pages 2 then 100.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn tiff_page_count_stops_at_the_page_ceiling() {
         let mut bytes = multipage_gray8_fixture(3);
         let nexts = ifd_next_pointer_offsets(&bytes);
@@ -1519,6 +1535,7 @@ mod tests {
      * count and the page decode.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_page_ceiling_is_inclusive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("three.tif");
@@ -1572,6 +1589,7 @@ mod tests {
      * Input: a three-page fixture and a 100000x100000 liar.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_default_entry_points_delegate_to_the_default_limits() {
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("good.tif");
@@ -1597,6 +1615,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_jpeg_is_unsupported_stub() {
         let im = ramp_gray8(8, 8);
         let dir = tempfile::tempdir().unwrap();
@@ -1607,6 +1626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_ccitt_is_unsupported_stub() {
         let im = ramp_gray8(8, 8);
         let dir = tempfile::tempdir().unwrap();
@@ -1615,6 +1635,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_jp2k_is_unsupported_stub() {
         let im = ramp_gray8(8, 8);
         let dir = tempfile::tempdir().unwrap();
@@ -1623,6 +1644,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_bigtiff_is_unsupported_stub() {
         let im = ramp_gray8(8, 8);
         let dir = tempfile::tempdir().unwrap();
@@ -1632,6 +1654,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_tiled_is_unsupported_stub() {
         let im = ramp_gray8(8, 8);
         let dir = tempfile::tempdir().unwrap();
@@ -1676,6 +1699,7 @@ mod tests {
     /// extra samples, which the `tiff` crate's `colortype()` rejects) must
     /// round-trip losslessly, back to `Multi8(5)` with identical samples.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_multiband8_round_trips_bit_exact() {
         let im = ramp_multi8(6, 4, 5);
         assert_eq!(im.format(), PixelFormat::with_channels(5, 1).unwrap());
@@ -1694,6 +1718,7 @@ mod tests {
     /// extra sample, decoded by the `tiff` crate as `Multiband{num_samples:2}`)
     /// must round-trip back to `Multi8(2)`.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_tiff_multiband_two_band_round_trips() {
         let im = ramp_multi8(5, 3, 2);
         assert_eq!(im.format(), PixelFormat::with_channels(2, 1).unwrap());

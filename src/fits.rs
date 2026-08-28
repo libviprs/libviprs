@@ -1906,6 +1906,7 @@ mod tests {
      * any of them.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fuzz")

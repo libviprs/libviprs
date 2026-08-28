@@ -1858,6 +1858,7 @@ mod checkpoint_durability_tests {
     // here guarantees no periodic flush fired, isolating the error-path
     // flush as the only way the two completed tiles can reach disk.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn interrupted_resume_run_persists_completed_tiles() {
         let dir = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -1935,6 +1936,7 @@ mod checkpoint_durability_tests {
     // completed tiles, and the count must be bounded to within one cadence
     // interval of the crash point.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn config_checkpoint_every_bounds_resume_rework() {
         let dir = tempfile::tempdir().unwrap();
         // 32x32 @ 4px tiles => top level 8x8 = 64 tiles, plus coarser levels;
@@ -2106,6 +2108,7 @@ mod checkpoint_durability_tests {
     /// never set it), so `recorder.files` was zero. GREEN after: the builder
     /// arms durability tracking and the checkpoint barrier fsyncs every tile.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_run_has_single_checkpoint_writer() {
         use crate::sink::{FsSink, TileFormat};
         use std::sync::Arc;
@@ -2655,6 +2658,7 @@ mod live_resume_bookkeeping_tests {
     /// and subtracts the skipped tiles' bytes, so `levels_completed` is
     /// complete and a no-op resume reports `bytes_written == 0`.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_advances_levels_and_excludes_skipped_bytes() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -2862,6 +2866,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// resumed must reproduce the same `blank_references` map, checksum table
     /// and 1-byte-placeholder layout as a clean single-run reference.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn crash_resume_dedupe_checksum_reproduces_uninterrupted_manifest() {
         let src = blank_heavy_source();
         let plan = blank_plan();
@@ -2935,6 +2940,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// Resume + sink-level dedupe on a fresh directory now runs (the #450
     /// stopgap is gone).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_plus_sink_dedupe_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -2956,6 +2962,7 @@ mod resume_dedupe_checksum_seeding_tests {
 
     /// Resume + engine-level dedupe (`EngineBuilder::with_dedupe`) now runs.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_plus_engine_dedupe_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -2977,6 +2984,7 @@ mod resume_dedupe_checksum_seeding_tests {
 
     /// Resume + per-tile checksums now runs.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_plus_checksum_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3000,6 +3008,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// Resume with NEITHER dedupe nor checksums stays supported and keeps
     /// short-circuiting skipped tiles (no seeding work).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_without_dedupe_or_checksum_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3020,6 +3029,7 @@ mod resume_dedupe_checksum_seeding_tests {
 
     /// A NON-resume run (Overwrite) with dedupe is unaffected.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn non_resume_dedupe_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3043,6 +3053,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// Verify mode (read-only) with dedupe is unaffected. Seeds a pyramid first
     /// so Verify has something to audit.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_dedupe_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3111,6 +3122,7 @@ mod run_lock_wiring_tests {
     // `prepare_resume_state`, fails fast with `ResumeError::Locked`, and the
     // sentinel survives because the guarded wipe never executes.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn overwrite_is_refused_while_the_output_dir_is_locked() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3160,6 +3172,7 @@ mod run_lock_wiring_tests {
     // for the next run. A successful Overwrite takes and drops the lock; a fresh
     // `RunLock::acquire` on the same directory afterwards must therefore succeed.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn run_releases_the_lock_when_it_finishes() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3193,6 +3206,7 @@ mod run_lock_wiring_tests {
     // would have locked the free `out/` dir and proceeded (RED); post-fix it
     // collides on `cp/` and fails fast (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn run_locks_the_checkpoint_dir_not_the_sink_dir_when_they_differ() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -3267,6 +3281,7 @@ mod run_lock_wiring_tests {
     // destroyed the sentinel. Post-fix (GREEN): the run also locks `out/`,
     // collides, and fails fast before any wipe.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn overwrite_is_refused_while_the_sink_dir_is_locked_with_distinct_checkpoint_root() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -3328,6 +3343,7 @@ mod run_lock_wiring_tests {
     // closed — and together with the direction-one test above proves mutual
     // exclusion across the two dirs in BOTH directions.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn overwrite_is_refused_while_the_checkpoint_dir_is_locked_with_distinct_sink_dir() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -3395,6 +3411,7 @@ mod run_lock_wiring_tests {
     // canonical-key dedup collapses the aliases to a single lock and the run
     // completes.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn distinct_spelling_of_the_sink_dir_as_checkpoint_root_does_not_self_lock() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3526,6 +3543,7 @@ mod resume_side_effect_tests {
     // log. The plan-hash gate therefore runs before the run lock (whose
     // acquisition creates `.libviprs-job.lock`) and before any engine work.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn refused_plan_hash_mismatch_leaves_the_directory_untouched() {
         let out = tempfile::tempdir().unwrap();
         let source = gradient_source(64, 64);
@@ -3621,6 +3639,7 @@ mod resume_side_effect_tests {
     // resume bookkeeping) may differ; everything else, including the absence
     // of stray lock or temp files, is compared byte for byte.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn crash_and_resume_at_concurrency_four_matches_a_clean_run_byte_for_byte() {
         let source = gradient_source(96, 64);
         let plan = PyramidPlanner::new(96, 64, 32, 0, Layout::DeepZoom)
@@ -3715,6 +3734,7 @@ mod resume_wrapper_forwarding_tests {
     // commits to JPEG. Overriding `inner_sink()` closes that silent gap for
     // every bookkeeping hook at once, not just the ones remembered by hand.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_aware_sink_forwards_content_format() {
         let dir = tempfile::tempdir().unwrap();
         let plan = PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
@@ -3736,6 +3756,7 @@ mod resume_wrapper_forwarding_tests {
     // the inner sink's format through the single `inner_sink()` hook rather
     // than through a per-method forward that a future edit could drop.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_aware_sink_forwards_checkpoint_root() {
         let dir = tempfile::tempdir().unwrap();
         let plan = PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
@@ -3818,6 +3839,7 @@ mod checkpoint_root_public_optin_tests {
     /// redundant: the wrapper genuinely hides the on-disk root from the
     /// engine.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_through_opaque_wrapper_requires_and_honors_explicit_root() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3851,6 +3873,7 @@ mod checkpoint_root_public_optin_tests {
     /// threads it into an attached policy that carries no root of its own.
     /// This is the exact field the issue proposed retiring.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn engine_config_checkpoint_root_drives_verify_through_opaque_wrapper() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3874,6 +3897,7 @@ mod checkpoint_root_public_optin_tests {
     /// explicit root even though the wrapper hides the sink's directory,
     /// and a second run over the same root must skip every recorded tile.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_through_opaque_wrapper_uses_explicit_root() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();

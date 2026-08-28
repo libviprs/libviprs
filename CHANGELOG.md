@@ -1264,6 +1264,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The filesystem half of the Miri convention is enforced rather than recorded:
+  134 tests across 28 files carry `#[cfg_attr(miri, ignore)]` that did not, and
+  `tests/miri_ignore_convention.rs` now refuses any filesystem-touching test
+  that is neither annotated nor named in a four-entry exception list (issues
+  #712, #739).
+
+  #711 took `-Zmiri-disable-isolation` off the job. Under isolation a
+  filesystem call is an unsupported operation and Miri ends the whole session
+  on the first one rather than failing that test, so the 138 rows
+  `tests/miri_fs_test_inventory.txt` carried as `unannotated fs-detected` ceased
+  to be recorded debt and became 138 ways to take the gate down. Measured on
+  `bd4bb1d`, `cargo +nightly-2026-08-20 miri test --test workspace_layout` died
+  on `fuzz_crate_is_a_member_of_the_root_workspace` having run nothing.
+
+  The guard's own floor had to go with it. It ended with
+  `assert!(unannotated_fs > 0)` and a message saying that if the count ever
+  reached zero the ledger had stopped being a ledger, which is a floor that
+  goes red on the change that clears the debt. It is now a refusal with an
+  exception list, checked in both directions: a filesystem test that is neither
+  annotated nor named fails, and a named entry that is no longer an unannotated
+  filesystem test fails too, so the list cannot rot into decoration. It carries
+  four names, all in `src/resample.rs`, which had four pull requests open
+  against it while the sweep ran; issue #756 carries them.
+
+  This does not make the `miri` job report, and the reason is worth writing
+  down because it is the half of #675 nobody had measured. `cargo miri test`
+  runs the `--lib` target first and libtest runs it in sorted order, so the
+  first two tests of the whole invocation are
+  `arithmetic::proptests::every_try_method_in_the_module_is_in_the_sweep` and
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster`. Neither
+  touches the filesystem, so no annotation sweep can reach them, and the second
+  is the proptest already measured at over twenty minutes without finishing.
+  The unannotated filesystem tests were never the first wall of the whole-suite
+  run, they were the first wall of every target after it.
+
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
   `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
   actually runs (issues #675, #707). Neither change makes the job pass. What
@@ -1302,14 +1337,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, measured, and would be a defensible answer; the backend pin is simply
   the smaller of the two changes.
 
-  What the job does now is abort on the first filesystem test that has no
-  `#[cfg_attr(miri, ignore)]`. `tests/miri_fs_test_inventory.txt` still records
-  more than a hundred of those, and annotating them is #712. Whether the suite
-  then fits inside `timeout-minutes: 90` is open, and one measurement says not
-  to assume it will: the single proptest
+  What the job did after this change was abort on the first filesystem test
+  that had no `#[cfg_attr(miri, ignore)]`, of which
+  `tests/miri_fs_test_inventory.txt` recorded 138. Annotating them is #712 and
+  #739, below. Whether the suite then fits inside `timeout-minutes: 90` was
+  open, and one measurement said not to assume it would: the single proptest
   `arithmetic::proptests::no_try_method_panics_on_a_float_raster` ran over
   twenty minutes under the interpreter without finishing, and it touches no
-  filesystem, so no annotation sweep will ever reach it.
+  filesystem, so no annotation sweep will ever reach it. That is the one that
+  turned out to decide the answer.
 
   Three claims in that workflow file were false when I got here and are gone.
   It said Miri "cannot run on the dev machine", which was true of the reason

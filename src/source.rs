@@ -2235,6 +2235,7 @@ mod tests {
      * filesystem round-trip (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_from_disk() {
         let png = create_test_png(8, 8);
 
@@ -2876,6 +2877,7 @@ mod tests {
      * `Gray8` raster from `decode_file` and `decode_bytes`, right way up.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fits_reaches_its_codec_from_both_entry_points() {
         let raster = Raster::new(4, 1, PixelFormat::Gray8, vec![3, 1, 4, 1]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -2921,6 +2923,7 @@ mod tests {
      * `AllocLimitExceeded { what: "image file body" }` from the second.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_bounds_the_whole_file_read() {
         let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -2977,6 +2980,7 @@ mod tests {
      * `AllocLimitExceeded { needed_bytes: n }`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_file_body_ceiling_is_inclusive() {
         let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3100,6 +3104,7 @@ mod tests {
      * Output: the 16x16 raster, decoded.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_file_body_ceiling_leaves_the_streaming_path_alone() {
         let png = create_test_png(16, 16);
         let dir = tempfile::tempdir().unwrap();
@@ -3121,6 +3126,7 @@ mod tests {
      * first pixel at the half-bit value vips prints.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn radiance_reaches_its_codec_from_both_entry_points() {
         let mut file = Vec::new();
         file.extend_from_slice(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 6\n");
@@ -3459,6 +3465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sequential_matches_decode_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seq.v");
@@ -3473,6 +3480,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_with_shrink_reduces_dimensions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.v");
