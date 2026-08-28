@@ -33,9 +33,12 @@ use crate::raster::Raster;
 /// ported foreign cell exercises.
 ///
 /// Every field is optional and defaults to `None`, so callers set only the
-/// options they need with struct-update syntax
-/// (`MagickLoadOptions { n: Some(-1), ..Default::default() }`).
+/// options they need: `MagickLoadOptions::default().with_n(Some(-1))`. The
+/// struct is `#[non_exhaustive]`, the same shape as
+/// [`DecodeLimits`](crate::source::DecodeLimits), so a later `density` or
+/// `page` sibling is not a breaking change (issue #630).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MagickLoadOptions {
     /// Rendering density passed to the delegate (libvips `density`), for
     /// vector inputs such as SVG. A higher density rasterises at a larger

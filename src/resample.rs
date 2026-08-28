@@ -667,7 +667,15 @@ fn sinc_filter(x: f64) -> f64 {
 
 /// Options for [`Raster::try_affine_with`], mirroring the optional
 /// arguments of `vips_affine`.
+///
+/// `#[non_exhaustive]` and `Default`, the same shape as
+/// [`DecodeLimits`](crate::source::DecodeLimits): start from
+/// [`AffineOptions::default`] and set what you need with the `with_*`
+/// builders. `vips_affine` grows optional arguments, so this one will grow
+/// fields, and taking the struct literal away now is what stops that being a
+/// breaking change later (issue #630).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct AffineOptions {
     /// Horizontal output displacement (`odx`).
     pub odx: f64,
@@ -776,7 +784,14 @@ impl AffineOptions {
 
 /// Options for [`Raster::try_resize_with`], mirroring the optional
 /// arguments of `vips_resize`.
+///
+/// `#[non_exhaustive]` and `Default`, the same shape as
+/// [`DecodeLimits`](crate::source::DecodeLimits): start from
+/// [`ResizeOptions::default`] and set what you need with the `with_*`
+/// builders, e.g. `ResizeOptions::default().with_vscale(Some(0.5))`
+/// (issue #630).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ResizeOptions {
     /// Vertical scale factor; the horizontal scale when `None`.
     pub vscale: Option<f64>,

@@ -165,10 +165,14 @@ pub enum Keep {
 
 /// Options for [`Raster::encode_webp`] (libvips `webpsave` / `webpsave_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `webp::SaveOptions { compression, ..Default::default() }` and later
-/// fields can be added without a breaking change.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from
+/// [`SaveOptions::default`] and set what you need with the `with_*` builders,
+/// e.g. `webp::SaveOptions::default().with_keep(webp::Keep::None)`. That is
+/// what makes "later fields can be added without a breaking change" true
+/// rather than merely written down (issue #630).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// How to compress. Defaults to [`Compression::Lossless`], the only
     /// mode with an encoder behind it.

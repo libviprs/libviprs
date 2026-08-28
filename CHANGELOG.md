@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Every public options struct is `#[non_exhaustive]` and grows a `with_*`
+  builder setter per field, so a downstream struct literal no longer compiles
+  (issue #630). Ten types: `gif::SaveOptions`, `jp2k::SaveOptions`,
+  `jxl::SaveOptions`, `radiance::SaveOptions`, `uhdr::SaveOptions`,
+  `webp::SaveOptions`, `SvgOptions`, `AffineOptions`, `ResizeOptions` and
+  `MagickLoadOptions`.
+
+  Five of them carried a doc line promising that later fields could be added
+  without a breaking change, and two went further and said they were
+  *deliberately* not `#[non_exhaustive]` so `..Default::default()` would keep
+  working downstream. Half of that was true and the half that mattered was not:
+  a `..Default::default()` literal does survive a new field, an exhaustive one
+  stops compiling with `E0063`, and the docs advertised the exhaustive spelling.
+  So the guarantee held only for callers who happened to pick the other form,
+  with nothing making them.
+
+  The crate proved it against itself: four integration tests were called
+  `save_options_are_constructible_downstream`, each built its options both ways,
+  and integration tests compile as an external crate. Measured on this tree,
+  adding one field to the five save-options structs breaks eight of their twelve
+  construction sites with `E0063`. `#[non_exhaustive]` refuses all twelve up
+  front instead, which is the trade: one break now, before 0.5.0 and at a time
+  somebody picks, against a break later at a time nobody does.
+
+  **Migration.** Start from `default()` and chain a setter per field:
+
+  ```rust
+  // before
+  let o = gif::SaveOptions { interlaced: true, ..Default::default() };
+  let r = ResizeOptions { vscale: Some(0.5), ..ResizeOptions::default() };
+
+  // after
+  let o = gif::SaveOptions::default().with_interlaced(true);
+  let r = ResizeOptions::default().with_vscale(Some(0.5));
+  ```
+
+  Reading a field is unchanged; only construction moves. `DecodeLimits` has had
+  this shape since it was written and is where it comes from.
+
+  Measured downstream cost inside this workspace: 12 sites in this repo's own
+  `tests/`, all migrated here, plus three outside it, all `ResizeOptions`, in
+  `libviprs-cli` (`src/ops/resample.rs`) and `libviprs-tests`
+  (`tests/resample_nearest_alpha.rs`,
+  `tests/resample_premultiplied_alpha_reference.rs`). Both are path
+  dependencies, so they need the one-line change above; `libviprs-cli#46` and
+  `libviprs-tests#181` carry the exact sites.
+
+  `tests/non_exhaustive_options.rs` holds the attribute on all ten and
+  exercises every setter from outside the crate, so a setter that goes missing
+  fails to compile rather than failing quietly. `jp2k::SaveOptions` is the
+  tenth: it landed in #783 while this was in flight, carrying the same promise
+  word for word, which is how a rule with no check behind it spreads.
+
 - `Raster::encode_jp2k(quality: u8, lossless: bool)` and
   `Raster::encode_jp2k_chroma(quality, lossless, subsample)` are **gone**,
   replaced by `Raster::encode_jp2k(options: jp2k::SaveOptions)` and its new

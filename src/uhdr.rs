@@ -1200,7 +1200,14 @@ pub fn from_container(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sour
 }
 
 /// Options for [`encode_uhdr`].
+///
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from [`SaveOptions::default`] and set what you need
+/// with the `with_*` builders, e.g.
+/// `uhdr::SaveOptions::default().with_quality(95)`. A struct literal would
+/// compile today and stop the day a field lands (issue #630).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// JPEG quality for both halves, 1..=100. libvips defaults `uhdrsave`
     /// to 75 and so does [`SaveOptions::default`].

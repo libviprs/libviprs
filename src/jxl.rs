@@ -407,14 +407,18 @@ pub enum Compression {
 
 /// Options for [`Raster::encode_jxl`] (libvips `jxlsave` / `jxlsave_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `jxl::SaveOptions { compression, ..Default::default() }` and later
-/// fields can be added without a breaking change.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from
+/// [`SaveOptions::default`] and set what you need with the `with_*` builders,
+/// e.g. `jxl::SaveOptions::default().with_compression(compression)`. That is
+/// what makes "later fields can be added without a breaking change" true
+/// rather than merely written down (issue #630).
 ///
 /// There is no `keep` field, unlike [`crate::webp::SaveOptions`]: the
 /// encoder writes a bare codestream with no box container, so there is
 /// nowhere for an ICC profile, an EXIF block or an XMP packet to go.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// How to compress. Defaults to [`Compression::Lossless`], the only
     /// mode with an encoder behind it.

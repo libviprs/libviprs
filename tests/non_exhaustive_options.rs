@@ -7,21 +7,26 @@
 //! Five of these structs carried a doc line promising that later fields could
 //! be added without a breaking change, and two of them went further and said
 //! they were *deliberately* not `#[non_exhaustive]` so a downstream
-//! `..Default::default()` would keep working. For a plain struct with all-public
-//! fields that promise is false: the day a field lands, every downstream crate
-//! that named the fields exhaustively stops compiling with `E0063`, and
-//! `..Default::default()` does not save it because the struct-update form still
-//! has to name the struct's own fields it does set.
+//! `..Default::default()` would keep working. Be precise about what was false
+//! there, because half of it was true. A `..Default::default()` literal does
+//! survive a new field; an exhaustive one does not, and stops compiling with
+//! `E0063`. The promise was made about the type, and the docs advertised the
+//! exhaustive spelling, so it held only for callers who happened to pick the
+//! other one and nothing made them.
 //!
-//! The crate proved it against itself. Four integration tests were called
+//! The crate proved that against itself. Four integration tests were called
 //! `save_options_are_constructible_downstream` and each constructed its options
-//! exhaustively, twice. Integration tests compile as an external crate, so those
-//! four were exactly the downstream callers the promise was made to, and they
-//! were the ones it would have broken.
+//! exhaustively as well as with the update form. Integration tests compile as an
+//! external crate, so those four were exactly the downstream callers the promise
+//! was made to, and measured on this tree, adding one field to the five save
+//! options structs breaks eight of their twelve construction sites with `E0063`.
+//! `#[non_exhaustive]` refuses all twelve up front instead, which is the trade:
+//! one break now, at a time somebody picks, against a break later at a time
+//! nobody does.
 //!
 //! `DecodeLimits` in `src/source.rs` already had the shape that delivers the
 //! promise instead of stating it: `#[non_exhaustive]`, `Default`, and a `with_*`
-//! setter per field. This holds the other nine to it.
+//! setter per field. This holds the other ten to it.
 //!
 //! # What it asserts
 //!
@@ -44,16 +49,22 @@
 //! every file under `src/`. Both turn this into a mandatory-edit hotspot in a
 //! repository whose batching rule is that no two pull requests touch the same
 //! file, which is the trap `merge-gate.yml`'s test count already fell into
-//! (see `tests/miri_invocation_parity.rs`). The nine files here are the ones
-//! that have an options struct, and the count assertion catches a tenth added
-//! to any of them.
+//! (see `tests/miri_invocation_parity.rs`). The ten files here are the ones
+//! that have an options struct, and
+//! [`the_options_struct_inventory_is_complete_for_the_files_it_covers`] catches
+//! one more added to any of them.
+//!
+//! That limit is not hypothetical: `src/jp2k.rs` arrived from #783 while this
+//! was being written, carrying the same promise word for word, and it is in the
+//! list because the composition check found it, not because anything here
+//! would have.
 //!
 //! Every file arrives through `include_str!` at compile time, so there is no
 //! filesystem access to isolate and no `#[cfg_attr(miri, ignore)]` is needed.
 
 use libviprs::{
-    AffineOptions, Extend, MagickLoadOptions, ReduceKernel, ResizeOptions, SvgOptions, gif, jxl,
-    radiance, uhdr, webp,
+    AffineOptions, Extend, MagickLoadOptions, ReduceKernel, ResizeOptions, SvgOptions, gif, jp2k,
+    jxl, radiance, uhdr, webp,
 };
 
 /// Each module source, and the options structs it declares.
@@ -61,7 +72,7 @@ use libviprs::{
 /// The pairing is the assertion: a struct named here that the file does not
 /// declare fails, and a `pub struct *Options` the file declares that is not
 /// named here fails too.
-const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 9] = [
+const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 10] = [
     (
         "src/gif.rs",
         include_str!("../src/gif.rs"),
@@ -70,6 +81,11 @@ const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 9] = [
     (
         "src/jxl.rs",
         include_str!("../src/jxl.rs"),
+        &["SaveOptions"],
+    ),
+    (
+        "src/jp2k.rs",
+        include_str!("../src/jp2k.rs"),
         &["SaveOptions"],
     ),
     (
@@ -203,6 +219,13 @@ fn jxl_save_options_build_through_setters() {
     let o = jxl::SaveOptions::default().with_compression(jxl::Compression::Lossless);
     assert_eq!(o.compression, jxl::Compression::Lossless);
     assert_eq!(jxl::SaveOptions::default(), o);
+}
+
+#[test]
+fn jp2k_save_options_build_through_setters() {
+    let o = jp2k::SaveOptions::default().with_compression(jp2k::Compression::Lossless);
+    assert_eq!(o.compression, jp2k::Compression::Lossless);
+    assert_eq!(jp2k::SaveOptions::default(), o);
 }
 
 #[test]

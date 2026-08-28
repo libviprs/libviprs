@@ -124,15 +124,17 @@ pub const MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Options for [`decode_svg`] (libvips `svgload` / `svgload_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `svg::SvgOptions { dpi: 144.0, ..Default::default() }`. Deliberately not
-/// `#[non_exhaustive]`, which would block that spelling from outside the
-/// crate and defeat the point of an options struct; the same call the WebP
-/// lane made for [`crate::webp::SaveOptions`].
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from [`SvgOptions::default`] and set what you need
+/// with the `with_*` builders, e.g. `svg::SvgOptions::default().with_dpi(144.0)`.
+/// The struct-literal spelling this used to advertise was the thing that would
+/// have broken downstream the day a field landed, which is the whole of
+/// issue #630; the same call now holds for [`crate::webp::SaveOptions`].
 ///
 /// The defaults are vips's defaults: `dpi` 72.0 and `scale` 1.0
 /// (`svgload.c:838-839`), `unlimited` false (`svgload.c:817`).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct SvgOptions {
     /// Render at this DPI (libvips `dpi`, default 72.0).
     ///

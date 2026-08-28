@@ -268,9 +268,12 @@ pub enum RadianceError {
 /// Options for [`Raster::encode_radiance`] and [`Raster::save_radiance`]
 /// (libvips `radsave` / `radsave_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `radiance::SaveOptions { exposure: Some(2.0), ..Default::default() }`
-/// and later fields can be added without a breaking change.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from
+/// [`SaveOptions::default`] and set what you need with the `with_*` builders,
+/// e.g. `radiance::SaveOptions::default().with_exposure(Some(2.0))`. That is
+/// what makes "later fields can be added without a breaking change" true
+/// rather than merely written down (issue #630).
 ///
 /// Both fields are `None` by default, meaning "take the value from the
 /// raster's own `rad-expos` / `rad-aspect` field, and fall back to `1.0`".
@@ -278,6 +281,7 @@ pub enum RadianceError {
 /// `.hdr` that libviprs loaded and saved keeps the header scalars it came
 /// with. `Some(v)` overrides both.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// The `EXPOSURE=` header value.
     pub exposure: Option<f64>,
