@@ -1036,33 +1036,51 @@ mod tests {
     );
 }
 
-/// A trait method declaration has no body, and consuming forward from one would
-/// swallow the next function whole, which would attribute that function's
-/// spawn to the wrong name and, worse, hide it.
+/// A trait method declaration has no body, and consuming forward from one runs
+/// into whatever comes next. That would file the *next* function's spawn under
+/// the declaration's name, and every caller of the trait method would then be
+/// flagged for a spawn it never makes.
+///
+/// The parser starts a fresh body at every `fn` header, so nothing is ever
+/// hidden by this; the cost is entirely spurious annotations. This pins that it
+/// does not happen, and it is the check that caught my first attempt at the
+/// fixture, which stayed green with the skip removed because the declaration
+/// and the function it swallowed shared a name.
 #[test]
-fn the_fn_body_parser_skips_a_bodyless_declaration() {
+fn a_bodyless_declaration_does_not_borrow_the_next_function_s_spawn() {
     let src = r#"
 trait Runner {
     fn run(&self) -> String;
 }
 
-fn run(x: usize) -> usize {
+fn spawns() -> String {
     let _ = Command::new("true").status();
-    x
+    String::new()
+}
+
+struct R;
+
+impl Runner for R {
+    fn run(&self) -> String {
+        String::new()
+    }
 }
 
 mod tests {
     #[test]
-    fn calls_run() {
-        assert_eq!(run(1), 1);
+    fn calls_only_the_trait_method() {
+        assert!(R.run().is_empty());
     }
 }
 "#;
     let found = scan_source("fixture.rs", src);
     assert_eq!(
-        found.iter().map(|t| t.spawns_process).collect::<Vec<_>>(),
-        vec![true],
-        "the declaration must not shadow the real `run`, got {found:?}"
+        found
+            .iter()
+            .map(|t| (t.name.as_str(), t.spawns_process))
+            .collect::<Vec<_>>(),
+        vec![("calls_only_the_trait_method", false)],
+        "the declaration above `spawns` must not take its `Command::new` with it"
     );
 }
 

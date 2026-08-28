@@ -2111,6 +2111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the intermediate passes the 512 KiB bound this module advertises. Both ends
   are one named number, and a chunk outside the window now fails saying so
   rather than sending the reader upstream to bump a moxcms pin.
+
 - `cargo +nightly miri test` gets past `tests/dependency_policy.rs` (issue #714).
   It used to die there on the first test that shells out, with `unsupported
   operation: can't call foreign function `fork``, and Miri ends the whole session
