@@ -12,7 +12,7 @@
 //! surface plus the extension dispatch every format shares.
 
 use libviprs::source::{DecodeLimits, SourceError};
-use libviprs::{GifError, PixelFormat, Raster, decode_gif, gif};
+use libviprs::{GifError, PixelFormat, Raster, decode_gif, decode_gif_with, gif};
 
 /// A 12x9 raster of four repeating colours, well inside a GIF palette.
 fn sample() -> Raster {
@@ -36,6 +36,42 @@ fn decode_gif_is_public_and_expands_the_palette() {
     assert_eq!(raster.interpretation(), libviprs::Interpretation::Srgb);
     assert_eq!(raster.get_int("n-pages"), Some(1));
     assert_eq!(raster.get_int("palette"), Some(1));
+}
+
+/// The windowed decode entry point and its options struct both resolve from
+/// outside the crate, and asking a one-frame file for a second page is the
+/// typed refusal rather than a clamp.
+#[test]
+fn decode_gif_with_is_public_and_refuses_a_page_the_file_lacks() {
+    let bytes = sample().encode_gif(gif::SaveOptions::default()).unwrap();
+
+    let first = decode_gif_with(&bytes, DecodeLimits::default(), gif::LoadOptions::default())
+        .expect("a still GIF loads at the defaults");
+    assert_eq!((first.width(), first.height()), (12, 9));
+    assert_eq!(first.pages_loaded(), 1);
+    assert_eq!(first.get_int_array("delay"), Some(&[0i64][..]));
+
+    let every = decode_gif_with(
+        &bytes,
+        DecodeLimits::default(),
+        gif::LoadOptions::default().with_n(-1),
+    )
+    .expect("every page of a still is the one page");
+    assert_eq!(every.pages_loaded(), 1);
+
+    let err = decode_gif_with(
+        &bytes,
+        DecodeLimits::default(),
+        gif::LoadOptions::default().with_page(1),
+    )
+    .expect_err("a one-frame file has no page 1");
+    assert!(
+        matches!(
+            err,
+            SourceError::Gif(GifError::BadPageNumber { frames: 1, .. })
+        ),
+        "{err:?}"
+    );
 }
 
 /// The options struct is a `#[non_exhaustive]`, `Default`, module-scoped type
