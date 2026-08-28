@@ -564,9 +564,10 @@ impl Manifest {
     /// Serialize and write this manifest to `path`, creating parent
     /// directories as needed.
     ///
-    /// The write is atomic (staged `.tmp` sibling + rename via
-    /// [`crate::resume::atomic_write`]) so a crash mid-write cannot leave a
-    /// torn manifest, and the two on-disk copies cannot diverge (issue #124).
+    /// The write is atomic: the JSON is staged into a uniquely named `.tmp`
+    /// sibling, flushed, and renamed over `path`, so a crash mid-write cannot
+    /// leave a torn manifest and the two on-disk copies cannot diverge
+    /// (issue #124).
     pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
         let json = self.to_json_string()?;
         crate::resume::atomic_write(path, json.as_bytes())?;
@@ -931,6 +932,7 @@ mod tests {
     /// (RED); after it the atomic rename replaces the file cleanly (GREEN).
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn write_to_atomically_replaces_a_read_only_manifest() {
         use std::os::unix::fs::PermissionsExt;
 

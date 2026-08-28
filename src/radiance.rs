@@ -2016,6 +2016,7 @@ mod tests {
      * decode reporting `rad-expos` 4.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_radiance_writes_a_file_decode_radiance_reads_back() {
         let px: Vec<[f32; 3]> = (0..6).map(|i| [1.0, i as f32 / 8.0, 0.25]).collect();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2106,6 +2107,7 @@ mod tests {
      * any of them.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fuzz")
