@@ -1665,6 +1665,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tag there, because a three-channel profile under a `b-w` tag is removed by
   a rule about the retag rather than about these ops (issue #720).
 
+  `sharpen` is **not** one of the six and does not change here. It blurs through
+  `convsep` on a LabS intermediate, so it looks like it should inherit this, but
+  its output metadata comes from the `colourspace` on the way back, which issue
+  #717 already carries. I had that the wrong way round until the mutation sweep
+  said so, and there is a test that says which change it belongs to.
+
   The origin offsets are **not** fixed by this. `conv`, `convsep`, `compass` and
   `gaussblur` stamp a mask-relative origin (`-1 / -1` for a 3x3, `-2 / -2` for a
   5x5, `0 / -1` for a separable 1x3) that does not depend on the input's at all,

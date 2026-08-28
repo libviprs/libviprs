@@ -555,3 +555,49 @@ fn every_convolution_op_carries_the_metadata() {
         assert_eq!(out.icc_profile(), Some(PROFILE), "{name} ICC profile");
     }
 }
+
+/// Issue #717, not #719, and I had that the wrong way round until the mutation
+/// sweep said so.
+///
+/// `sharpen` blurs through `convsep` on a LabS intermediate and comes back
+/// through `colourspace`, so I expected it to inherit #719's carry. It does
+/// not: its output metadata comes from that final `colourspace`, which
+/// `src/colour.rs` already carries, so this test is green on the branch point
+/// and survives all three of #719's mutations. It is a pin on a compound op
+/// rather than evidence for that change, and saying so is the point of leaving
+/// it here.
+///
+/// Measured on vips 8.18.6 from an `srgb` source (`vips sharpen` refuses an
+/// `rgb` one: "no known route from 'labs' to 'rgb'"): the output reports sRGB,
+/// xres 5, orientation 6, `lane-717` and the profile, with the offsets carried
+/// verbatim at 11 / 13 rather than stamped. So `sharpen` is one of the ops that
+/// carries the offset, unlike the four that convolve directly (#721).
+#[test]
+fn sharpen_carries_through_its_final_colourspace() {
+    let data: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5 % 251) as u8).collect();
+    let im = Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap();
+    let mut im = im
+        .copy()
+        .interpretation(Interpretation::Srgb)
+        .xres(5.0)
+        .yres(7.0)
+        .xoffset(11)
+        .yoffset(13)
+        .orientation(6)
+        .build();
+    im.set_field(LANE, MetadataValue::Str("carried".to_string()));
+    im.set_icc_profile(PROFILE);
+
+    let out = im.try_sharpen(1.0, 1.0, 2.0).unwrap();
+
+    assert_eq!(out.interpretation(), Interpretation::Srgb, "interpretation");
+    assert_eq!(out.xres(), 5.0, "xres");
+    assert_eq!(out.orientation(), 6, "orientation");
+    assert_eq!((out.xoffset(), out.yoffset()), (11, 13), "offsets carried");
+    assert_eq!(
+        out.get_field(LANE),
+        Some(MetadataValue::Str("carried".to_string())),
+        "attached string"
+    );
+    assert_eq!(out.icc_profile(), Some(PROFILE), "ICC profile");
+}
