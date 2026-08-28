@@ -1736,6 +1736,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every `capture.py` under `oracle-captures/` now checks `ORACLE_PIN.json`
+  before it writes anything. Two of the fourteen did** (issue #796), both of
+  them the convolution scripts `oracle_pin.py` was factored out of. The pin
+  file said "capture.py refuses to run against a binary that disagrees with
+  it", `oracle_pin.py` opened "The oracle pin every capture.py under
+  oracle-captures/ checks", and `tests/oracle_capture_pins.rs` said "each
+  area's". All three were true for `convolution`.
+
+  #650 left a two-sided guard: the capture script stops a bad capture being
+  taken, and the Rust test stops one being kept. Only the second side existed
+  for the twelve `foreign-*` areas, so re-running any of them on a machine
+  whose vips had moved wrote a whole capture with the new version stamped
+  through it and told nobody, which is the exact failure #650 was filed for.
+  All six areas still marked `pre_pin`, the ones most likely to be re-run,
+  were in the unguarded twelve.
+
+  `every_capture_script_checks_the_oracle_pin` is what stops it coming back.
+  It reads the scripts through `include_str!` and matches at column zero,
+  because `oracle_pin.py`'s docstring shows callers the exact lines to write
+  and a substring scan would read that example as an adoption. No committed
+  capture changes: re-running `foreign-avif` with the check in reproduced its
+  `oracle.json`, `commands.sh` and all thirteen fixtures byte for byte.
+
 - **The AVIF oracle recorded a sha256 for an `rgb8.avif` that was not the file
   in the tree** (issue #779). Two records in
   `oracle-captures/foreign-avif/capture.py` wrote different images to
