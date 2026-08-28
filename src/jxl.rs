@@ -18,7 +18,10 @@
 //! measured numbers. Without it every entry point below still exists,
 //! still compiles and still has the same signature; each one returns a
 //! typed refusal naming the feature instead of doing the work, so a
-//! caller's code does not change shape with the build.
+//! caller's code does not change shape with the build. [`JxlError`] and
+//! the [`SourceError::Jxl`] variant carrying it are declared in both
+//! builds for the same reason, and
+//! [`JxlError::FeatureNotEnabled`] is the arm the feature-off build takes.
 //!
 //! # Operations
 //!
@@ -143,7 +146,8 @@
 //!   default `jxl_color::NullCms` refuses every transform
 //!   (`jxl-color-0.11.0/src/cms.rs:47-57`, reached through
 //!   `jxl-render-0.12.4/src/lib.rs:184`), and jxl-oxide's own `lcms2` and
-//!   `moxcms` integrations are optional and both off here. Carrying the
+//!   `moxcms` integrations are optional and both off here.
+//!   [`JxlError::CmykNotSupported`] is the refusal. Carrying the
 //!   inks through untouched means a CMYK route into
 //!   [`crate::colour`], which does hold a black channel
 //!   ([`Interpretation::Cmyk`](crate::conversion::Interpretation::Cmyk),
@@ -163,6 +167,17 @@
 //! [`crate::radiance`], [`crate::gif`] and [`crate::webp`]: a decoder's
 //! failures come from untrusted bytes, so a panicking spelling would have
 //! no honest caller.
+//!
+//! The loader's refusals are [`JxlError`], reached through
+//! [`SourceError::Jxl`], which is the shape
+//! [`ExrError`](crate::exr::ExrError),
+//! [`FitsError`](crate::fits::FitsError),
+//! [`GifError`](crate::gif::GifError) and
+//! [`RadianceError`](crate::radiance::RadianceError) already use. The
+//! encoder's stay on the shared [`EncodeError`] spine, which is where
+//! [`crate::gif`], [`crate::radiance`] and [`crate::fits`] leave their
+//! save refusals too, so JPEG XL does not become the one codec here with
+//! a third convention (issue #634).
 
 use std::path::Path;
 
@@ -171,6 +186,7 @@ use std::num::NonZeroU16;
 
 #[cfg(feature = "jxl")]
 use jxl_oxide::{AllocTracker, AuxBoxData, InitializeResult, JxlImage};
+use thiserror::Error;
 #[cfg(feature = "jxl")]
 use zune_core::bit_depth::BitDepth;
 #[cfg(feature = "jxl")]
@@ -188,7 +204,9 @@ use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jxl")]
 use crate::pixel::PixelFormat;
-use crate::raster::Raster;
+use crate::raster::{Raster, RasterError};
+#[cfg(feature = "jxl")]
+use crate::raster::{buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The smallest width or height [`Raster::encode_jxl`] will encode.
@@ -208,6 +226,192 @@ pub const MIN_DIMENSION: u32 = 2;
 /// the JPEG one for the same image.
 #[cfg(feature = "jxl")]
 const EXIF_PREFIX: &[u8] = b"Exif\0\0";
+
+/// Errors from the JPEG XL loader.
+///
+/// Every variant except [`JxlError::Raster`] and [`JxlError::Decode`]
+/// describes a specific thing this build will not carry, which is what
+/// makes them worth typing: the fuzz corpus in `fuzz/corpus/fuzz_jxl/`
+/// asserts on the variant, not on a message.
+///
+/// The enum, and the [`SourceError::Jxl`] variant that carries it, are
+/// declared whether or not the **`jxl`** feature is on, so a caller's
+/// `match` has the same arms in either build and none of them names a type
+/// that is not there. What changes is which arms are reachable: without the
+/// feature the only one is [`JxlError::FeatureNotEnabled`], and with it
+/// that is the only one that never fires.
+///
+/// The encoder does not report through here. [`Raster::encode_jxl`] and
+/// [`Raster::save_jxl`] stay on the shared [`EncodeError`] spine, which is
+/// where [`crate::gif`], [`crate::radiance`] and [`crate::fits`] leave
+/// their save refusals too; this enum is the loader's, the way
+/// [`ExrError`](crate::exr::ExrError) and
+/// [`FitsError`](crate::fits::FitsError) are.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum JxlError {
+    /// The crate was built without the **`jxl`** feature, so there is no
+    /// decoder behind [`decode_jxl`] at all.
+    ///
+    /// Reported instead of a missing symbol or a panic: every entry point
+    /// in this module exists at the same signature in both builds, so a
+    /// caller's code does not change shape with the feature. This is the
+    /// only variant a build without the feature can produce, and it is the
+    /// one variant a build *with* it never produces, which is what makes
+    /// "this build has no JPEG XL" distinguishable from "these bytes are
+    /// not JPEG XL" without reading a message.
+    #[error("jxl: JPEG XL decoding is not available in this build (enable the `jxl` feature)")]
+    FeatureNotEnabled,
+    /// `jxl-oxide` refused the bitstream: a bad signature, a malformed
+    /// header, a broken entropy stream, an unreadable box.
+    ///
+    /// This is the untyped tail, for the reason [`ExrError::Decode`] is
+    /// one: JPEG XL is a bitstream parser, an entropy coder, a modular
+    /// predictor tree, a VarDCT inverse transform and an ISOBMFF box
+    /// reader across thirteen crates, and reproducing that taxonomy here
+    /// would be a second decoder. The message is `jxl-oxide`'s own, which
+    /// carries its whole source chain inline (`jxl-render-0.12.4/src/error.rs:54-74`
+    /// writes the inner error into every arm), so nothing is lost by
+    /// flattening it to a string here.
+    ///
+    /// [`ExrError::Decode`]: crate::exr::ExrError::Decode
+    #[error("jxl: {message}")]
+    Decode {
+        /// The underlying decoder failure, rendered through its `Display`.
+        message: String,
+    },
+    /// The bytes ran out before the decoder had what it needed, named by
+    /// what was still missing.
+    ///
+    /// Distinct from [`JxlError::Decode`] because the two-phase feed makes
+    /// truncation its own answer rather than a parse failure: `jxl-oxide`
+    /// says `NeedMoreData` instead of erroring, so a stream that simply
+    /// stops is not malformed, it is short.
+    #[error("jxl: the stream ended early, before {expected}")]
+    Truncated {
+        /// What the decoder was still waiting for.
+        expected: &'static str,
+    },
+    /// The file carries a black ink channel, so it is CMYK rather than
+    /// something this loader has a carrier and a tag for.
+    ///
+    /// Neither of the two ways out is wired. Converting the inks means an
+    /// ICC transform, and `jxl-oxide` only runs one when a
+    /// `ColorManagementSystem` has been handed to `JxlImage::set_cms` at
+    /// runtime; this build hands it none and neither of the crate's own
+    /// `lcms2` and `moxcms` integrations is enabled, so the default
+    /// `jxl_color::NullCms` refuses every transform
+    /// (`jxl-color-0.11.0/src/cms.rs:47-57`, installed at
+    /// `jxl-render-0.12.4/src/lib.rs:184`). Carrying the inks through
+    /// untouched means a CMYK route into [`crate::colour`], which does
+    /// hold a black channel but has no edge from this loader. So the
+    /// refusal is a wiring gap and not a capability the crate lacks.
+    ///
+    /// libjxl counts the `Black` channel as an extra channel instead, so
+    /// `jxlload.c:698-737` tags such a file `srgb` with four bands, which
+    /// is not what those four bands are.
+    #[error(
+        "jxl: this build cannot decode a {pixel_format} JPEG XL: converting the inks \
+         needs an ICC transform and no ColorManagementSystem is installed on the \
+         decoder, so jxl-oxide's default NullCms refuses one; carrying them through \
+         untouched needs a CMYK route into `crate::colour`, which this loader does \
+         not have yet"
+    )]
+    CmykNotSupported {
+        /// The colour space `jxl-oxide` reports, `Cmyk` or `Cmyka`.
+        pixel_format: String,
+    },
+    /// The declared channel count has no
+    /// [`PixelFormat`](crate::pixel::PixelFormat) carrier.
+    ///
+    /// Defensive: `jxl_oxide::PixelFormat` names at most five channels
+    /// today, so nothing `jxl-oxide` can report reaches this. It exists
+    /// because the carrier is chosen from a number rather than from an
+    /// enum, and a band count of zero or one above the
+    /// [`FloatF32`](crate::pixel::PixelFormat::FloatF32) ceiling would
+    /// otherwise be a panic or a zero-sized buffer.
+    #[error(
+        "jxl: a JPEG XL with {channels} channels has no raster carrier; a raster holds 1 to {max} bands"
+    )]
+    UnsupportedChannelCount {
+        /// The channel count the header declared.
+        channels: u32,
+        /// The ceiling, `u16::MAX`.
+        max: u32,
+    },
+    /// The rendered frame carries a different number of channels than the
+    /// header declared.
+    ///
+    /// Defensive, and load-bearing: the header's count is what the
+    /// allocation budget below was spent on and what the output buffer is
+    /// sized for, so a frame that disagrees would be written into a buffer
+    /// sized for something else.
+    #[error(
+        "jxl: the header declared {declared} channels and the rendered frame carries {rendered}"
+    )]
+    ChannelCountMismatch {
+        /// The channel count the image header declared.
+        declared: u32,
+        /// The channel count the rendered frame produced.
+        rendered: u32,
+    },
+    /// Decoding the declared geometry would allocate more than
+    /// [`DecodeLimits::max_alloc_bytes`].
+    ///
+    /// Priced from the header alone, before a byte of frame data is fed
+    /// in, which is the point of splitting the feed in two: a JPEG XL
+    /// header declares its geometry in a handful of bytes and the body is
+    /// entropy-coded, so the file is no guide to the frame's size. The
+    /// pixel ceiling does not imply this one, since a pixel count sees
+    /// neither the band count nor the sample depth: a 1-gigapixel
+    /// `max_pixels` still permits an 8 GiB `Rgba16` frame.
+    #[error(
+        "jxl: decoding {width}x{height}x{channels} needs {needed} bytes, above the \
+         {max_alloc_bytes}-byte decode allocation budget"
+    )]
+    AllocLimitExceeded {
+        /// The declared frame width.
+        width: u32,
+        /// The declared frame height.
+        height: u32,
+        /// The declared channel count, colour channels plus alpha.
+        channels: u32,
+        /// Bytes the decoded raster would need.
+        needed: u64,
+        /// The budget in force, [`DecodeLimits::max_alloc_bytes`].
+        max_alloc_bytes: u64,
+    },
+    /// `jxl-oxide`'s own allocation tracker refused a request from inside
+    /// the decoder.
+    ///
+    /// Separate from [`JxlError::AllocLimitExceeded`] because it is a
+    /// different check finding a different thing: that one prices the
+    /// output frame from the header before the decoder has reserved
+    /// anything, while this one is the `jxl_oxide::AllocTracker` handed to
+    /// the builder refusing an *internal* buffer part-way through the decode,
+    /// where the size is `jxl-oxide`'s business and is not reported out.
+    /// A file can trip either without tripping the other, so collapsing
+    /// them would lose which ceiling actually bit.
+    ///
+    /// The refusal arrives as a `jxl_grid::OutOfMemory` boxed behind one
+    /// or two enum layers (`jxl_render::Error::Buffer`,
+    /// `jxl_frame::Error::Buffer`); walking the source chain for it is
+    /// what keeps an over-budget file off [`JxlError::Decode`], which
+    /// would report it as a corrupt one. `jxl-grid` is named directly in
+    /// `Cargo.toml` for exactly that downcast.
+    #[error(
+        "jxl: the decoder's allocation tracker refused a buffer against the \
+         {max_alloc_bytes}-byte decode allocation budget; raise \
+         DecodeLimits::max_alloc_bytes"
+    )]
+    DecoderAllocLimitExceeded {
+        /// The budget in force, [`DecodeLimits::max_alloc_bytes`].
+        max_alloc_bytes: u64,
+    },
+    /// Constructing the decoded [`Raster`] failed.
+    #[error(transparent)]
+    Raster(#[from] RasterError),
+}
 
 /// How the JPEG XL encoder compresses pixels (libvips `jxlsave`'s
 /// `lossless` flag plus its `Q` and `distance` factors, folded into one
@@ -266,28 +470,44 @@ pub struct SaveOptions {
 ///
 /// A multi-frame file decodes to **frame 0 only**, at one frame's size, and
 /// carries `n-pages` set to the number of frames the original had, which is
-/// what a default `vips jxlload` does (`jxlload.c:743-751`) and is readable
-/// through [`Raster::get_n_pages`]. Reading every frame is issue #621 and
-/// needs the page model from #564; until then `n-pages` is the signal that
-/// frames were left behind.
+/// what a default `vips jxlload` does (`jxlload.c:743-751`). Reading every
+/// frame is issue #621 and needs the page model from #564; until then
+/// `n-pages` is the signal that frames were left behind.
+///
+/// [`Raster::get_n_pages`] reads it back for anything under 10,000 frames.
+/// At or above that it reports `1`, because it ports
+/// `vips_image_get_n_pages`'s sanity ceiling whole (issue #635). Nothing
+/// here caps the count on the way in, so a file with that many frames
+/// attaches its real length and the raw value stays readable through
+/// [`Raster::get_field`].
 ///
 /// # Errors
 ///
-/// * [`SourceError::Io`] with [`std::io::ErrorKind::Unsupported`] when the
-///   crate was built without the `jxl` feature, which is the shape
-///   [`crate::svg`] uses for the same situation. Every bullet below needs
-///   the feature to be reachable at all.
-/// * [`SourceError::Decode`] wrapping the codec's own error for a
-///   malformed or truncated bitstream, for a CMYK colour space this build
-///   cannot convert, or `image`'s
-///   [`LimitErrorKind::InsufficientMemory`](image::error::LimitErrorKind)
-///   when the frame buffer would exceed [`DecodeLimits::max_alloc_bytes`].
+/// Every JPEG XL refusal arrives as [`SourceError::Jxl`] wrapping a
+/// [`JxlError`]; the two ceilings below are the shared ones every codec in
+/// the crate reports the same way.
+///
+/// * [`JxlError::FeatureNotEnabled`] when the crate was built without the
+///   `jxl` feature. Every bullet below needs the feature to be reachable
+///   at all.
+/// * [`JxlError::Decode`] for a malformed bitstream, and
+///   [`JxlError::Truncated`] when the bytes simply run out, either before
+///   the header is complete or before the first frame is.
+/// * [`JxlError::CmykNotSupported`] for a file with a black ink channel.
+/// * [`JxlError::AllocLimitExceeded`] when the frame the header declares
+///   would exceed [`DecodeLimits::max_alloc_bytes`], and
+///   [`JxlError::DecoderAllocLimitExceeded`] when `jxl-oxide`'s own
+///   tracker refuses an internal buffer against the same budget.
+/// * [`JxlError::UnsupportedChannelCount`] and
+///   [`JxlError::ChannelCountMismatch`] for a channel count with no
+///   carrier and for a rendered frame that disagrees with its header, both
+///   defensive.
+/// * [`JxlError::Raster`] when the decoded frame cannot be wrapped
+///   (a zero-sized canvas).
 /// * [`SourceError::CoordLimitExceeded`] when either declared axis exceeds
 ///   [`DecodeLimits::max_coord`].
 /// * [`SourceError::DimensionLimitExceeded`] when `width * height` exceeds
 ///   [`DecodeLimits::max_pixels`].
-/// * [`SourceError::Raster`] when the decoded frame cannot be wrapped
-///   (a zero-sized canvas).
 pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     decode(bytes, limits)
 }
@@ -307,11 +527,16 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // declared geometry, and feed the frame data afterwards. Feeding the
     // whole buffer first would reserve for the frame before either ceiling
     // had been consulted, which is the bug #567 found in the WebP path.
-    let consumed = uninit.feed_bytes(bytes).map_err(decode_error)?;
-    let mut image = match uninit.try_init().map_err(decode_error)? {
+    let consumed = uninit
+        .feed_bytes(bytes)
+        .map_err(|e| decode_error(e, limits))?;
+    let mut image = match uninit.try_init().map_err(|e| decode_error(e, limits))? {
         InitializeResult::Initialized(image) => image,
         InitializeResult::NeedMoreData(_) => {
-            return Err(truncated("the image header is incomplete"));
+            return Err(JxlError::Truncated {
+                expected: "the end of the image header",
+            }
+            .into());
         }
     };
 
@@ -325,20 +550,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // be, so the allocation budget can refuse the file before the decoder
     // reserves anything for it.
     let jxl_format = image.pixel_format();
-    if jxl_format.has_black() {
-        return Err(SourceError::Decode(image::ImageError::Decoding(
-            image::error::DecodingError::new(
-                format_hint(),
-                format!(
-                    "this build cannot decode a {jxl_format:?} JPEG XL: converting the inks \
-                     needs an ICC transform and no ColorManagementSystem is installed on \
-                     jxl-oxide, so its default NullCms refuses one; carrying them through \
-                     untouched needs a CMYK route into `crate::colour`, which this loader \
-                     does not have yet"
-                ),
-            ),
-        )));
-    }
+    check_colour_space(jxl_format)?;
 
     // The sample carrier, chosen the way `jxlload.c:936-942` chooses one:
     // any float anywhere in the samples makes the whole image float,
@@ -359,20 +571,56 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // thing from inside the decoder, but only once the frame data has been
     // fed in and only as an advisory; this is the ceiling with a typed
     // error behind it, and it is the same one the WebP path reports.
-    let samples = (width as usize)
-        .saturating_mul(height as usize)
-        .saturating_mul(bands as usize);
-    let bytes_needed = (samples as u64).saturating_mul(format.bytes_per_channel() as u64);
-    if bytes_needed > limits.max_alloc_bytes {
-        return Err(SourceError::Decode(image::ImageError::Limits(
-            image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
-        )));
+    //
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632). This one used to saturate in `usize`, which makes the
+    // answer depend on the target's pointer width: on a 32-bit target the
+    // sample count pins at `u32::MAX` before the sample size is applied,
+    // so no frame can ever be priced above `u32::MAX * sample_bytes`, or
+    // about 16 GiB, however large the header says it is. Reaching that
+    // wants `max_pixels` above 2^32 and `max_alloc_bytes` above ~8.6 GB,
+    // both far past their defaults, on a target with a 4 GiB address
+    // space, so no such decode was ever going to succeed either way: what
+    // differs is which typed refusal the caller gets, and FITS and OpenEXR
+    // answer the budget where this one answered the allocator.
+    // `decode_alloc_bytes` widens every multiplicand to `u64` first, which
+    // is the rule `raster::buffer_len` states and the reason it uses
+    // `checked_mul`.
+    let bytes_needed = decode_alloc_bytes(
+        width,
+        height,
+        u64::from(bands),
+        format.bytes_per_channel() as u64,
+    );
+    if limits.exceeds_alloc_budget(bytes_needed) {
+        return Err(JxlError::AllocLimitExceeded {
+            width,
+            height,
+            channels: bands,
+            needed: bytes_needed,
+            max_alloc_bytes: limits.max_alloc_bytes,
+        }
+        .into());
     }
+    // `samples` sizes the frame buffer below, and clearing the budget
+    // above is not what makes it safe to compute. `max_alloc_bytes` is a
+    // `u64` a caller sets, so on a 32-bit target a 65536x65536x1 frame
+    // under a 16 GiB budget passes the check and *then* pins a `usize`
+    // sample count at `u32::MAX`, which is the same pointer-width bug one
+    // line higher wearing a different hat. `buffer_len` computes the same
+    // widened product and checks the narrowing, so the count is right by
+    // construction rather than by a precondition nothing enforces.
+    let samples = buffer_len(width, height, bands as usize).map_err(JxlError::Raster)?;
 
-    image.feed_bytes(&bytes[consumed..]).map_err(decode_error)?;
-    image.finalize().map_err(decode_error)?;
+    image
+        .feed_bytes(&bytes[consumed..])
+        .map_err(|e| decode_error(e, limits))?;
+    image.finalize().map_err(|e| decode_error(e, limits))?;
     if image.num_loaded_keyframes() == 0 {
-        return Err(truncated("no complete frame"));
+        return Err(JxlError::Truncated {
+            expected: "the first complete frame",
+        }
+        .into());
     }
 
     let frames = u32::try_from(image.num_loaded_keyframes()).unwrap_or(u32::MAX);
@@ -383,22 +631,12 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         _ => None,
     };
 
-    let render = image.render_frame(0).map_err(decode_error)?;
+    let render = image.render_frame(0).map_err(|e| decode_error(e, limits))?;
     let mut stream = render.stream();
     // The header said how many bands there would be and the budget was
     // spent on that number, so a stream that disagrees is refused rather
     // than silently written into a buffer sized for something else.
-    if stream.channels() != bands {
-        return Err(SourceError::Decode(image::ImageError::Decoding(
-            image::error::DecodingError::new(
-                format_hint(),
-                format!(
-                    "the header declared {bands} channels and the rendered frame has {}",
-                    stream.channels()
-                ),
-            ),
-        )));
-    }
+    check_channel_count(bands, stream.channels())?;
 
     let data = match format.bytes_per_channel() {
         1 => {
@@ -418,7 +656,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         }
     };
 
-    let mut raster = Raster::new(width, height, format, data)?;
+    let mut raster = Raster::new(width, height, format, data).map_err(JxlError::Raster)?;
     // Tagged rather than inferred: `Interpretation::for_format` reads the
     // band count, and a two-band greyscale-plus-alpha JXL has one colour
     // channel while a four-band float one has three. Only the colour
@@ -441,24 +679,21 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         MetadataValue::Int(i64::from(bits_per_sample)),
     );
     if frames > 1 {
-        raster
-            .fields
-            .set("n-pages", MetadataValue::Int(i64::from(frames)));
+        raster.set_n_pages(frames);
     }
     Ok(raster)
 }
 
-/// The `jxl`-feature-off body of [`decode_jxl`]: the same typed
-/// `Unsupported` [`crate::svg`] reports without `svg`, so a caller
-/// compiled either way sees one signature and one error type and can tell
-/// "this build has no JPEG XL" from "these bytes are not JPEG XL".
+/// The `jxl`-feature-off body of [`decode_jxl`]: the one [`JxlError`]
+/// variant this build can produce, so a caller compiled either way sees
+/// one signature and one error type and can tell "this build has no JPEG
+/// XL" from "these bytes are not JPEG XL" by the variant rather than by
+/// the message. [`crate::svg`] reports an `Unsupported` I/O error for the
+/// same situation because it has no error enum of its own to put it on.
 #[cfg(not(feature = "jxl"))]
 fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     let _ = (bytes, limits);
-    Err(SourceError::Io(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "JPEG XL decoding is not available in this build (enable the `jxl` feature)",
-    )))
+    Err(JxlError::FeatureNotEnabled.into())
 }
 
 impl Raster {
@@ -581,41 +816,39 @@ fn encode_to_save(err: EncodeError) -> SaveError {
     }
 }
 
-/// The format hint every decode error carries. `image` 0.25 has no JPEG XL
-/// variant, so the name is spelled out rather than faked as another format.
-#[cfg(feature = "jxl")]
-fn format_hint() -> image::error::ImageFormatHint {
-    image::error::ImageFormatHint::Name("JPEG XL".to_owned())
-}
-
-/// Map the codec's decode failure onto the shared decode error.
+/// Map the codec's decode failure onto [`JxlError`].
 ///
 /// `jxl-oxide` boxes every failure into one `dyn Error`, including the I/O
 /// ones, so unlike the WebP path there is no truncation variant to keep
-/// separate; everything wraps the way the `image` facade wraps a malformed
-/// bitstream.
+/// separate here; everything a parse can go wrong with lands on
+/// [`JxlError::Decode`], and the message carries the whole chain because
+/// every arm of `jxl-oxide`'s own `Display` writes its inner error inline.
 ///
 /// The one failure that is not a malformed bitstream is the allocation
 /// budget: the [`AllocTracker`] handed to the builder reports a refusal as
 /// a `jxl_grid::OutOfMemory`, arriving boxed behind one or two enum layers
 /// (`jxl_render::Error::Buffer`, `jxl_frame::Error::Buffer`). Walking the
-/// source chain for it is what keeps a budget refusal on the same typed
-/// variant the WebP and `image`-facade paths report, rather than reporting
-/// an over-budget file as a corrupt one. `jxl-grid` is named directly in
+/// source chain for it is what keeps a budget refusal on
+/// [`JxlError::DecoderAllocLimitExceeded`] rather than reporting an
+/// over-budget file as a corrupt one. `jxl-grid` is named directly in
 /// `Cargo.toml` for exactly this downcast; if `jxl-oxide` ever moves to a
 /// semver-incompatible `jxl-grid` the two copies stop unifying and the
 /// downcast quietly stops matching, which is why
-/// `decode_limits_are_enforced_on_the_declared_geometry` pins the mapping.
+/// `decode_limits_are_enforced_on_the_declared_geometry` pins the mapping
+/// on the variant rather than on `is_err`.
 #[cfg(feature = "jxl")]
-fn decode_error(err: Box<dyn std::error::Error + Send + Sync + 'static>) -> SourceError {
+fn decode_error(
+    err: Box<dyn std::error::Error + Send + Sync + 'static>,
+    limits: DecodeLimits,
+) -> JxlError {
     if is_out_of_memory(err.as_ref()) {
-        return SourceError::Decode(image::ImageError::Limits(
-            image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
-        ));
+        return JxlError::DecoderAllocLimitExceeded {
+            max_alloc_bytes: limits.max_alloc_bytes,
+        };
     }
-    SourceError::Decode(image::ImageError::Decoding(
-        image::error::DecodingError::new(format_hint(), err),
-    ))
+    JxlError::Decode {
+        message: err.to_string(),
+    }
 }
 
 /// Whether an error, or anything in its source chain, is the allocation
@@ -632,16 +865,36 @@ fn is_out_of_memory(err: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// A decode error for a bitstream that ended early, named by what was still
-/// missing.
+/// Refuse a colour space this loader has no carrier and no tag for, which
+/// today means any file with a black ink channel.
+///
+/// A seam rather than an inline `if`, because nothing in this build can
+/// write a CMYK JPEG XL to test it against (`vips jxlsave` converts a
+/// `cmyk` image to sRGB on the way in), so the refusal is reachable from a
+/// test only through the function.
 #[cfg(feature = "jxl")]
-fn truncated(what: &str) -> SourceError {
-    SourceError::Decode(image::ImageError::Decoding(
-        image::error::DecodingError::new(
-            format_hint(),
-            format!("the JPEG XL stream ended early: {what}"),
-        ),
-    ))
+fn check_colour_space(format: jxl_oxide::PixelFormat) -> Result<(), JxlError> {
+    if format.has_black() {
+        return Err(JxlError::CmykNotSupported {
+            pixel_format: format!("{format:?}"),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a rendered frame whose channel count is not the one the header
+/// declared and the allocation budget was spent on.
+///
+/// A seam for the same reason as [`check_colour_space`]: `jxl-oxide`
+/// renders what the header said, so the disagreement is not reachable from
+/// a file, and a check nothing can exercise is a check nobody notices
+/// breaking.
+#[cfg(feature = "jxl")]
+fn check_channel_count(declared: u32, rendered: u32) -> Result<(), JxlError> {
+    if declared != rendered {
+        return Err(JxlError::ChannelCountMismatch { declared, rendered });
+    }
+    Ok(())
 }
 
 /// Whether a declared bit depth stores floating-point samples
@@ -660,18 +913,13 @@ fn is_float_sample(depth: jxl_oxide::image::BitDepth) -> bool {
 /// float arm is spelled separately because a four-band float canonicalises
 /// to [`PixelFormat::RgbaF32`] rather than to `FloatF32(4)`.
 #[cfg(feature = "jxl")]
-fn carrier(bands: u32, is_float: bool, bits_per_sample: u32) -> Result<PixelFormat, SourceError> {
-    let n = u16::try_from(bands)
-        .ok()
-        .and_then(NonZeroU16::new)
-        .ok_or_else(|| {
-            SourceError::Decode(image::ImageError::Decoding(
-                image::error::DecodingError::new(
-                    format_hint(),
-                    format!("a JPEG XL with {bands} channels has no raster carrier"),
-                ),
-            ))
-        })?;
+fn carrier(bands: u32, is_float: bool, bits_per_sample: u32) -> Result<PixelFormat, JxlError> {
+    let n = u16::try_from(bands).ok().and_then(NonZeroU16::new).ok_or(
+        JxlError::UnsupportedChannelCount {
+            channels: bands,
+            max: u16::MAX as u32,
+        },
+    )?;
     Ok(match (is_float, bits_per_sample, n.get()) {
         (true, _, 4) => PixelFormat::RgbaF32,
         (true, _, _) => PixelFormat::FloatF32(n),
@@ -876,6 +1124,36 @@ mod tests {
         0xd5, 0x19, 0x0d, 0x8c, 0x54, 0xeb, 0x22, 0x34, 0xc8, 0xa1, 0xca, 0x5f, 0xba, 0x9f, 0x80,
         0xff, 0x48, 0xd9, 0x1b, 0x70, 0x57, 0x2e, 0x34, 0xc4, 0xee, 0xfe, 0xc8, 0xb6, 0x1c, 0xb4,
         0x32, 0x73, 0x2a, 0x7f, 0x03, 0xe0, 0x4d, 0xb4, 0x21, 0x41, 0x11, 0x10,
+    ];
+
+    /// `vips jxlsave --lossless --page-height 3 --strip` on a 4x15
+    /// toilet roll of five flat greys: FIVE 4x3 frames as a bare
+    /// codestream. vips 8.18.6 reports `n-pages: 5` and loads 4x3.
+    ///
+    /// Five is the point, for the reason `ANIM3` cannot carry: three is
+    /// also that fixture's band count and one of its axes, so a wrong
+    /// number under `n-pages` would read as right (issue #635).
+    #[cfg(feature = "jxl")]
+    const ANIM5: [u8; 272] = [
+        0xff, 0x0a, 0x10, 0x30, 0xc1, 0x00, 0x72, 0x02, 0x00, 0x13, 0xf8, 0xff, 0xff, 0xff, 0x1f,
+        0x04, 0xa8, 0x00, 0xf3, 0x43, 0x13, 0x00, 0x80, 0x0a, 0x95, 0x51, 0xc6, 0x0d, 0x5e, 0xce,
+        0xf5, 0x7c, 0xf9, 0xa1, 0xc3, 0x62, 0xda, 0xc6, 0x75, 0x86, 0xb6, 0xda, 0xb6, 0xb0, 0x84,
+        0xb1, 0xd9, 0x5e, 0x18, 0x24, 0x24, 0x94, 0x13, 0x7d, 0x33, 0xc6, 0x20, 0x50, 0x49, 0x02,
+        0x00, 0x13, 0xf8, 0xff, 0xff, 0xff, 0x1f, 0x04, 0xac, 0x00, 0xf3, 0x43, 0x13, 0x00, 0x80,
+        0x0a, 0x95, 0x51, 0xc6, 0x0d, 0x5e, 0xce, 0xf5, 0x7c, 0xf9, 0xa1, 0xc3, 0x62, 0xda, 0xc6,
+        0x75, 0x86, 0xb6, 0xda, 0xb6, 0xb0, 0x84, 0xb1, 0xd9, 0x5e, 0x18, 0x24, 0x24, 0x9c, 0x24,
+        0x54, 0x36, 0x43, 0x31, 0x48, 0x54, 0x92, 0x00, 0x00, 0x13, 0xf8, 0xff, 0xff, 0xff, 0x1f,
+        0x04, 0xac, 0x00, 0xf3, 0x43, 0x13, 0x00, 0x80, 0x0a, 0x95, 0x51, 0xc6, 0x0d, 0x5e, 0xce,
+        0xf5, 0x7c, 0xf9, 0xa1, 0xc3, 0x62, 0xda, 0xc6, 0x75, 0x86, 0xb6, 0xda, 0xb6, 0xb0, 0x84,
+        0xb1, 0xd9, 0x5e, 0x18, 0x24, 0x24, 0x1c, 0x25, 0x94, 0x36, 0xf3, 0x60, 0x90, 0xa8, 0x24,
+        0x01, 0x00, 0x13, 0xf8, 0xff, 0xff, 0xff, 0x1f, 0x04, 0xac, 0x00, 0xf3, 0x43, 0x13, 0x00,
+        0x80, 0x0a, 0x95, 0x51, 0xc6, 0x0d, 0x5e, 0xce, 0xf5, 0x7c, 0xf9, 0xa1, 0xc3, 0x62, 0xda,
+        0xc6, 0x75, 0x86, 0xb6, 0xda, 0xb6, 0xb0, 0x84, 0xb1, 0xd9, 0x5e, 0x18, 0x24, 0x24, 0x1c,
+        0x25, 0x94, 0x36, 0x73, 0x64, 0x90, 0xa8, 0x24, 0x01, 0x00, 0x13, 0xf8, 0xff, 0xff, 0xff,
+        0x3f, 0x01, 0xac, 0x00, 0xf3, 0x43, 0x13, 0x00, 0x80, 0x0a, 0x95, 0x51, 0xc6, 0x0d, 0x5e,
+        0xce, 0xf5, 0x7c, 0xf9, 0xa1, 0xc3, 0x62, 0xda, 0xc6, 0x75, 0x86, 0xb6, 0xda, 0xb6, 0xb0,
+        0x84, 0xb1, 0xd9, 0x5e, 0x18, 0x24, 0x24, 0x1c, 0x25, 0x94, 0x36, 0xc3, 0x67, 0x10, 0xa8,
+        0x24, 0x01,
     ];
 
     /// A hand-built container: the [`LOSSLESS_RGB`] codestream plus an
@@ -1289,6 +1567,31 @@ mod tests {
     }
 
     /**
+     * Tests what the number under `n-pages` actually counts, which is the
+     * question issue #635 was filed on: the frames in the original file and
+     * nothing else. The test above cannot answer it, because `ANIM3` has
+     * three frames, three bands and a height of three, so a loader that
+     * attached the wrong one of those would still read as right. Works by
+     * decoding a five-frame codestream, whose count collides with no other
+     * number the raster carries.
+     * Input: `ANIM5` -> Output: 4x3 with 3 bands, `get_n_pages() == 5`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn n_pages_counts_the_frames_in_the_file_and_nothing_else() {
+        let raster = decode_bytes_with_limits(&ANIM5, DecodeLimits::default())
+            .expect("the five-frame codestream decodes");
+        assert_eq!((raster.width(), raster.height()), (4, 3));
+        assert_eq!(raster.bands(), 3);
+        assert_eq!(
+            raster.get_n_pages(),
+            5,
+            "n-pages is the frame count of the original, not the band count, \
+             not an axis, and not the one page that was loaded"
+        );
+    }
+
+    /**
      * Tests the EXIF fix-up, which is the one metadata transform on this
      * path: a JPEG XL `Exif` box holds a big-endian 4-byte offset and no
      * `Exif\0\0` prefix, so the loader has to skip the first and restore
@@ -1468,8 +1771,8 @@ mod tests {
      * variant.
      * Input: `ANIM3` under `max_coord = 2`, under `max_pixels = 4`, and
      * under `max_alloc_bytes = 8` -> Output: `CoordLimitExceeded` and
-     * `DimensionLimitExceeded` naming 4x3, and `InsufficientMemory` for the
-     * frame buffer.
+     * `DimensionLimitExceeded` naming 4x3, and a `JxlError` allocation
+     * variant carrying the budget.
      */
     #[cfg(feature = "jxl")]
     #[test]
@@ -1494,13 +1797,155 @@ mod tests {
         ));
         // The allocation budget is separate: 12 pixels are inside every
         // pixel ceiling above and still need 36 bytes of frame buffer.
+        // Which of the two allocation variants answers is not a detail to
+        // wave at, and on this file it is the decoder's tracker rather
+        // than the crate's pre-check: the same budget is handed to
+        // `jxl-oxide`'s `AllocTracker`, which is live from the first
+        // `feed_bytes`, and 8 bytes is under even the working buffers a
+        // 4x3 header needs. The pre-check answers instead once the
+        // declared frame is large next to that working set, which
+        // `the_declared_frame_is_priced_before_the_frame_data_is_fed_in`
+        // pins. Measured, not assumed: the two swap over between the two
+        // tests, and an assertion that took either would pass whichever
+        // way round it went.
         let starved = DecodeLimits::default().with_max_alloc_bytes(8);
         let err = decode_jxl(&ANIM3, starved).expect_err("8 bytes is not a 4x3 RGB frame");
         assert!(
             matches!(
                 err,
-                SourceError::Decode(image::ImageError::Limits(ref l))
-                    if matches!(l.kind(), image::error::LimitErrorKind::InsufficientMemory)
+                SourceError::Jxl(JxlError::DecoderAllocLimitExceeded { max_alloc_bytes: 8 })
+            ),
+            "{err:?}"
+        );
+    }
+
+    /**
+     * Tests the crate's own allocation pre-check, the one priced from the
+     * declared header geometry before a byte of frame data is fed in, and
+     * pins it as a variant distinct from the decoder's own tracker. The
+     * two split on the ratio between the declared frame and `jxl-oxide`'s
+     * working set rather than on the budget alone: measured on this
+     * decoder, a 4x3 file answers `DecoderAllocLimitExceeded` at every
+     * budget under its 36-byte frame, while a 512x512 one answers
+     * `AllocLimitExceeded` at every budget under its 786432-byte frame,
+     * because the header-phase working buffers are small next to it.
+     * Without a case on this side of that line the pre-check would be
+     * unreachable code that no test would notice losing.
+     * Input: a 512x512 `Rgb8` raster round-tripped through the encoder,
+     * decoded under `max_alloc_bytes = 256 KiB` -> Output:
+     * `JxlError::AllocLimitExceeded` naming 512x512x3 and 786432 bytes
+     * against the 262144-byte budget, and a clean decode once the budget
+     * clears the frame.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_declared_frame_is_priced_before_the_frame_data_is_fed_in() {
+        let big = Raster::zeroed(512, 512, PixelFormat::Rgb8).unwrap();
+        let bytes = big.encode_jxl(SaveOptions::default()).unwrap();
+        let needed = 512u64 * 512 * 3;
+
+        let starved = DecodeLimits::default().with_max_alloc_bytes(256 * 1024);
+        let err = decode_jxl(&bytes, starved).expect_err("256 KiB is not a 512x512 RGB frame");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::AllocLimitExceeded {
+                    width: 512,
+                    height: 512,
+                    channels: 3,
+                    needed: n,
+                    max_alloc_bytes: 262_144,
+                }) if n == needed
+            ),
+            "{err:?}"
+        );
+        // The refusal names the knob rather than leaving the caller to
+        // guess which of the ceilings bit.
+        let message = err.to_string();
+        assert!(message.contains("786432"), "{message}");
+        assert!(message.contains("262144"), "{message}");
+
+        // And the same file decodes once the budget covers the frame, so
+        // the refusal is the budget and not the bytes.
+        let roomy = DecodeLimits::default().with_max_alloc_bytes(4 * 1024 * 1024);
+        let back = decode_jxl(&bytes, roomy).expect("a 4 MiB budget holds a 512x512 RGB frame");
+        assert_eq!((back.width(), back.height()), (512, 512));
+    }
+
+    /**
+     * Tests that the frame pre-check bites at exactly the byte the declared
+     * frame costs, and not one byte either side. The case above refuses at
+     * 256 KiB against a 768 KiB frame, which a price wrong by a factor
+     * would also refuse; only the exact pair below pins the arithmetic and
+     * the `>` in the comparison.
+     * One byte short of the frame the pre-check answers and names the
+     * price. At exactly the frame it does not, and that is what proves the
+     * comparison is `>` and not `>=`: the refusal that arrives instead is
+     * `jxl-oxide`'s own tracker, which holds the same budget and is still
+     * carrying its header-phase buffers when the frame is asked for. So
+     * the accepting half of this boundary is not reachable through the
+     * decoder, and asserting a clean decode there would be asserting the
+     * tracker's ceiling rather than this one.
+     * Input: the same 512x512 `Rgb8` file at `max_alloc_bytes` 786431 then
+     * 786432 -> Output: `AllocLimitExceeded { needed: 786432 }`, then
+     * `DecoderAllocLimitExceeded`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_frame_budget_bites_at_exactly_the_declared_price() {
+        let big = Raster::zeroed(512, 512, PixelFormat::Rgb8).unwrap();
+        let bytes = big.encode_jxl(SaveOptions::default()).unwrap();
+        let price = 512u64 * 512 * 3;
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(price - 1);
+        let err = decode_jxl(&bytes, short).expect_err("786431 bytes is one short of the frame");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::AllocLimitExceeded {
+                    width: 512,
+                    height: 512,
+                    channels: 3,
+                    needed: 786_432,
+                    max_alloc_bytes: 786_431,
+                })
+            ),
+            "{err:?}"
+        );
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(price);
+        let err = decode_jxl(&bytes, exact).expect_err("the decoder needs room of its own too");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::DecoderAllocLimitExceeded {
+                    max_alloc_bytes: 786_432
+                })
+            ),
+            "a frame priced at exactly the budget must clear the pre-check, so the \
+             only refusal left is the decoder's own tracker: {err:?}"
+        );
+
+        // And again on a carrier wider than a byte, because an 8-bit frame
+        // cannot tell the sample size apart from 1: dropping
+        // `bytes_per_channel()` from the price leaves the 512x512 `Rgb8`
+        // case above answering exactly the same thing. A 256x256 `Rgb16`
+        // frame is 393216 bytes and only half that without it.
+        let deep = Raster::zeroed(256, 256, PixelFormat::Rgb16).unwrap();
+        let deep_bytes = deep.encode_jxl(SaveOptions::default()).unwrap();
+        let deep_price = 256u64 * 256 * 3 * 2;
+        let short = DecodeLimits::default().with_max_alloc_bytes(deep_price - 1);
+        let err = decode_jxl(&deep_bytes, short).expect_err("393215 bytes is one short");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jxl(JxlError::AllocLimitExceeded {
+                    width: 256,
+                    height: 256,
+                    channels: 3,
+                    needed: 393_216,
+                    max_alloc_bytes: 393_215,
+                })
             ),
             "{err:?}"
         );
@@ -1514,24 +1959,143 @@ mod tests {
      * both are exercised. Works by feeding the decoder prefixes of both
      * container forms, a signature with no codestream behind it, and an
      * empty buffer.
-     * Input: five malformed buffers -> Output: an `Err` from each, and
-     * never a raster.
+     * Input: five malformed buffers -> Output: the `JxlError` variant
+     * named beside each, and never a raster. Each expectation is the
+     * variant rather than `is_err`, because `Decode` and `Truncated` are
+     * different answers to different questions and a test that took
+     * either would not notice one turning into the other.
      */
     #[cfg(feature = "jxl")]
     #[test]
     fn malformed_input_is_refused_with_a_typed_error() {
-        for (name, bytes) in [
-            ("truncated in the codestream header", &LOSSLESS_RGB[..6]),
-            ("truncated in the frame body", &LOSSLESS_RGB[..40]),
-            ("container signature only", &META_OFF0[..12]),
-            ("container with no codestream", &META_OFF0[..32]),
-            ("empty", &[][..]),
+        // `Truncated` is the answer when `jxl-oxide` asks for more bytes
+        // rather than refusing what it has, which is what a prefix of a
+        // well-formed file produces; `Decode` is the answer when the bytes
+        // it has are wrong.
+        for (name, bytes, expect_truncated) in [
+            (
+                "truncated in the codestream header",
+                &LOSSLESS_RGB[..6],
+                true,
+            ),
+            ("truncated in the frame body", &LOSSLESS_RGB[..40], true),
+            ("container signature only", &META_OFF0[..12], true),
+            ("container with no codestream", &META_OFF0[..32], true),
+            ("empty", &[][..], true),
         ] {
+            let err = decode_jxl(bytes, DecodeLimits::default())
+                .expect_err(&format!("{name} should not decode"));
+            match err {
+                SourceError::Jxl(JxlError::Truncated { expected }) => {
+                    assert!(expect_truncated, "{name} reported Truncated: {expected}");
+                    assert!(
+                        expected == "the end of the image header"
+                            || expected == "the first complete frame",
+                        "{name} named {expected}"
+                    );
+                }
+                SourceError::Jxl(JxlError::Decode { ref message }) => {
+                    assert!(!expect_truncated, "{name} reported Decode: {message}");
+                }
+                other => panic!("{name} should be a typed JxlError, got {other:?}"),
+            }
+        }
+    }
+
+    /**
+     * Tests the CMYK refusal, which is the one colour space this loader
+     * turns away, through the seam it is checked at. It cannot be reached
+     * from a file: nothing in this build writes a CMYK JPEG XL, because
+     * `vips jxlsave` converts a `cmyk` image to sRGB on the way in, so the
+     * check would otherwise be untested code guarding an untestable case.
+     * Works by handing `check_colour_space` every `jxl_oxide::PixelFormat`
+     * there is and asserting which ones carry a black ink channel.
+     * Input: the six `jxl_oxide::PixelFormat` values -> Output: `Ok` for
+     * the four without black, `JxlError::CmykNotSupported` naming the
+     * space for `Cmyk` and `Cmyka`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_black_ink_channel_is_refused_by_name() {
+        use jxl_oxide::PixelFormat as JxlPixelFormat;
+
+        for ok in [
+            JxlPixelFormat::Gray,
+            JxlPixelFormat::Graya,
+            JxlPixelFormat::Rgb,
+            JxlPixelFormat::Rgba,
+        ] {
+            assert!(check_colour_space(ok).is_ok(), "{ok:?} has no black ink");
+        }
+
+        for (space, name) in [
+            (JxlPixelFormat::Cmyk, "Cmyk"),
+            (JxlPixelFormat::Cmyka, "Cmyka"),
+        ] {
+            let err = check_colour_space(space).expect_err("a black channel is refused");
             assert!(
-                decode_jxl(bytes, DecodeLimits::default()).is_err(),
-                "{name} should not decode"
+                matches!(&err, JxlError::CmykNotSupported { pixel_format } if pixel_format == name),
+                "{err:?}"
+            );
+            // The message says why, not just that: both routes out are
+            // named so a caller knows this is a wiring gap rather than a
+            // capability the crate lacks.
+            let message = err.to_string();
+            assert!(message.contains("ColorManagementSystem"), "{message}");
+            assert!(message.contains("NullCms"), "{message}");
+            assert!(message.contains("crate::colour"), "{message}");
+        }
+    }
+
+    /**
+     * Tests the two defensive refusals no file can reach, so they are
+     * pinned by something rather than by nothing: a channel count with no
+     * raster carrier, and a rendered frame that disagrees with the header
+     * the allocation budget was priced against. `jxl_oxide::PixelFormat`
+     * names at most five channels and renders what the header declared, so
+     * neither is reachable through `decode_jxl` today; both exist because
+     * the alternative to the check is a panic or a buffer sized for the
+     * wrong image.
+     * Input: 0 and 65536 channels, and a 3-against-4 channel disagreement
+     * -> Output: `JxlError::UnsupportedChannelCount` naming the count and
+     * the 65535-band ceiling, and `JxlError::ChannelCountMismatch` naming
+     * both sides.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_defensive_channel_checks_report_their_own_variants() {
+        for bands in [0u32, u32::from(u16::MAX) + 1] {
+            let err = carrier(bands, false, 8)
+                .err()
+                .unwrap_or_else(|| panic!("{bands} bands should have no raster carrier"));
+            assert!(
+                matches!(
+                    err,
+                    JxlError::UnsupportedChannelCount {
+                        channels,
+                        max: 65535
+                    } if channels == bands
+                ),
+                "{err:?}"
             );
         }
+        // Every count `jxl-oxide` can actually report does have a carrier.
+        for bands in 1..=5u32 {
+            assert!(carrier(bands, false, 8).is_ok(), "{bands} bands");
+        }
+
+        assert!(check_channel_count(3, 3).is_ok());
+        let err = check_channel_count(3, 4).expect_err("3 declared is not 4 rendered");
+        assert!(
+            matches!(
+                err,
+                JxlError::ChannelCountMismatch {
+                    declared: 3,
+                    rendered: 4
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     /**
@@ -1587,30 +2151,29 @@ mod tests {
      * naming the capability, so a caller compiled either way gets one
      * shape and can match on the failure instead of hitting a missing
      * symbol. It also pins which error each entry point reports, because
-     * they are deliberately not the same one: the decoder reports the
-     * `Unsupported` I/O error `crate::svg` reports without `svg`, and the
+     * they are deliberately not the same one: the decoder reports
+     * `JxlError::FeatureNotEnabled` through `SourceError::Jxl`, the one
+     * variant of that enum a feature-on build never produces, and the
      * encoders report the `EncodeError::Unsupported` every format with no
      * encoder in this build reports, so a caller matching on the encode
      * spine does not have to learn a second variant.
      * Input: the 71-byte `LOSSLESS_RGB` capture and the 4x3 ramp ->
-     * Output: `SourceError::Io` with `ErrorKind::Unsupported` naming JPEG
-     * XL, `EncodeError::Unsupported { format: "jxl" }`, and a `SaveError`
-     * carrying the same wording.
+     * Output: `SourceError::Jxl(JxlError::FeatureNotEnabled)` naming JPEG
+     * XL and the feature, `EncodeError::Unsupported { format: "jxl" }`,
+     * and a `SaveError` carrying the same wording.
      */
     #[test]
     #[cfg(not(feature = "jxl"))]
     fn without_the_feature_every_entry_point_is_a_typed_refusal() {
         let err = decode_jxl(&LOSSLESS_RGB, DecodeLimits::default()).unwrap_err();
-        match err {
-            SourceError::Io(ref io) => {
-                assert_eq!(io.kind(), std::io::ErrorKind::Unsupported);
-                assert!(
-                    err.to_string().contains("JPEG XL") && err.to_string().contains("`jxl`"),
-                    "the refusal names the format and the feature, got {err}"
-                );
-            }
-            other => panic!("expected a typed Io(Unsupported), got {other:?}"),
-        }
+        assert!(
+            matches!(err, SourceError::Jxl(JxlError::FeatureNotEnabled)),
+            "expected the feature-off variant, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("JPEG XL") && err.to_string().contains("`jxl`"),
+            "the refusal names the format and the feature, got {err}"
+        );
 
         let raster = ramp_rgb();
         let err = raster.encode_jxl(SaveOptions::default()).unwrap_err();
@@ -1672,7 +2235,16 @@ mod tests {
             if name.starts_with("valid-") {
                 assert!(result.is_ok(), "{name} should decode: {:?}", result.err());
             } else if name.starts_with("rejected-") {
-                assert!(result.is_err(), "{name} should not decode");
+                // The variant, not `is_err`: every seeded rejection is a
+                // JPEG XL refusal and must arrive on `JxlError`, so a
+                // seed that started failing for some unrelated reason
+                // (an I/O error, a shared ceiling) shows up here rather
+                // than passing quietly.
+                let err = result.expect_err(&format!("{name} should not decode"));
+                assert!(
+                    matches!(err, SourceError::Jxl(_)),
+                    "{name} should be a typed JxlError, got {err:?}"
+                );
             } else {
                 assert!(
                     name.starts_with("nocrash-"),

@@ -116,7 +116,7 @@
 use crate::codec::EncodeError;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::Raster;
+use crate::raster::{Raster, buffer_len, decode_alloc_bytes};
 use crate::source::{DecodeLimits, SourceError};
 use std::io::Cursor;
 use std::path::Path;
@@ -293,8 +293,18 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    let needed = u64::from(width) * u64::from(height) * bands as u64;
-    if needed > limits.max_alloc_bytes {
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632). This one used to be a plain `*`, safe only because a
+    // GIF states its logical screen in `u16` and so cannot reach a product
+    // a `u64` will not hold; nothing in the expression said so, and the
+    // three codecs that copied the shape do not have that guarantee.
+    // `decode_alloc_bytes` saturates, so the guarantee is no longer load
+    // bearing. The typed variant is this module's own, built from
+    // `exceeds_alloc_budget`'s answer rather than retagged off a
+    // `SourceError` whose `what` label no caller could ever see; #632
+    // deferred collapsing the per-format variants and #686 carries it.
+    let needed = decode_alloc_bytes(width, height, bands as u64, 1);
+    if limits.exceeds_alloc_budget(needed) {
         return Err(GifError::AllocLimitExceeded {
             width,
             height,
@@ -308,7 +318,12 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and
     // never paints the background colour, which is why `vips getpoint`
     // reports `0 0 0` at a corner the header calls blue.
-    let mut data = vec![0u8; width as usize * height as usize * bands];
+    // Through `buffer_len` rather than a plain `usize` product for the
+    // same reason the price goes through `decode_alloc_bytes`: clearing
+    // the budget says the byte count fits a `u64`, which on a 32-bit
+    // target is not the same as fitting the address space, and a caller
+    // can raise `max_alloc_bytes` past 4 GiB there.
+    let mut data = vec![0u8; buffer_len(width, height, bands).map_err(GifError::Raster)?];
     let frame = decoder
         .next_frame_info()
         .map_err(decode_error)?
@@ -358,7 +373,7 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     };
     let mut raster = Raster::new(width, height, format, data).map_err(GifError::Raster)?;
     raster.meta.interpretation = Some(crate::conversion::Interpretation::Srgb);
-    raster.set_field("n-pages", MetadataValue::Int(i64::from(scan.frames)));
+    raster.set_n_pages(scan.frames);
     raster.set_field("loop", MetadataValue::Int(scan.loop_count));
     raster.set_field("palette", MetadataValue::Int(1));
     if scan.colours > 0 {
@@ -1048,6 +1063,41 @@ mod tests {
     }
 
     /**
+     * Tests what the number under `n-pages` actually counts, which is the
+     * question issue #635 was filed on: the frames in the file and nothing
+     * else. The test above uses three frames, which is also the band count
+     * a GIF with no transparency expands to, so a loader that attached the
+     * wrong number would still read as right there. Works by assembling a
+     * FIVE-frame GIF on a 4x4 screen with a five-entry palette, so the
+     * expected count matches neither axis, nor either band count, nor the
+     * one frame that was loaded.
+     * Input: a 4x4 GIF with five frames -> Output: frame zero's pixels and
+     * `get_n_pages() == 5`.
+     */
+    #[test]
+    fn n_pages_counts_the_frames_in_the_file_and_nothing_else() {
+        let palette = [
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 0, 255],
+            [0, 255, 0],
+            [255, 255, 0],
+        ];
+        let frames: Vec<Frame> = (0..5u8).map(|f| Frame::full(4, 4, vec![f; 16])).collect();
+        let bytes = fixture((4, 4), &palette, 0, Some(0), &frames);
+
+        let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
+        assert_eq!(&raster.data()[..3], &[0, 0, 0], "frame zero is index 0");
+        assert_eq!((raster.width(), raster.height()), (4, 4));
+        assert_eq!(
+            raster.get_n_pages(),
+            5,
+            "n-pages is the frame count, not an axis, a band count, or the \
+             one frame that was loaded"
+        );
+    }
+
+    /**
      * Tests that the GIF encoder produces bytes the decoder reads back
      * unchanged when the raster already fits in the palette. GIF's LZW is
      * exactly lossless, so this is a byte-for-byte equality and not a
@@ -1623,6 +1673,40 @@ mod tests {
             }
             other => panic!("expected AllocLimitExceeded, got {other:?}"),
         }
+    }
+
+    /**
+     * Tests that the allocation budget bites at exactly the byte the
+     * declared canvas costs, and not one byte either side. The case above
+     * refuses at a budget of four against a price of forty-eight, which a
+     * price wrong by a factor would also refuse; this one cannot pass
+     * unless the price is exact.
+     * Input: the 4x4 opaque fixture at `max_alloc_bytes` 48 then 47 ->
+     * Output: a clean 4x4 three-band decode, then `AllocLimitExceeded
+     * { needed: 48 }`.
+     */
+    #[test]
+    fn the_canvas_budget_bites_at_exactly_the_declared_price() {
+        let bytes = opaque_fixture();
+        let exact = DecodeLimits::default().with_max_alloc_bytes(48);
+        let raster = decode_gif(&bytes, exact).expect("48 bytes is exactly a 4x4 RGB canvas");
+        assert_eq!((raster.width(), raster.height()), (4, 4));
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+
+        let short = DecodeLimits::default().with_max_alloc_bytes(47);
+        let err = decode_gif(&bytes, short).expect_err("47 bytes is one short of the canvas");
+        assert!(
+            matches!(
+                err,
+                SourceError::Gif(GifError::AllocLimitExceeded {
+                    width: 4,
+                    height: 4,
+                    needed: 48,
+                    max_alloc_bytes: 47,
+                })
+            ),
+            "{err:?}"
+        );
     }
 
     /**

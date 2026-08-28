@@ -470,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // `tempfile::tempdir` needs a real mkdir, which Miri isolation blocks
     fn hash_file_matches_in_memory_hash_for_both_algos() {
         let dir = tempfile::tempdir().unwrap();
         // Larger than the 64 KiB streaming chunk to exercise multiple reads.
@@ -483,6 +484,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // `tempfile::tempdir` needs a real mkdir, which Miri isolation blocks
     fn hash_file_reports_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.raw");
@@ -491,6 +493,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // writes real tiles to a tempdir, which Miri isolation blocks
     fn verify_output_reports_tile_mismatch_in_report_not_as_error() {
         // The "real condition" the removed `VerifyError::Mismatch` variant was
         // meant to represent: a tile whose on-disk bytes do not hash to the
