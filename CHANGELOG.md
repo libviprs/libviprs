@@ -2546,6 +2546,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top, gets one row fewer for a 16-bit histogram. Bars still grow from the
   bottom.
 
+- **Every operation in `crate::resample` carries the input's metadata onto its
+  output** (issue #789). `resize`, `shrink`, `shrinkh`, `shrinkv`, `reduce`,
+  `reduceh`, `reducev`, `affine`, `similarity`, `rotate`, `mapim` and
+  `thumbnail_image` all built their result with a bare `Raster::new` and
+  carried nothing: no interpretation, no resolution, no orientation, no ICC
+  profile and no field a caller attached. vips carries all of them, measured on
+  8.18.6 across two image shapes and fifteen ops.
+
+  The resolution is carried **verbatim** rather than rescaled with the factor,
+  which is what vips does and what #690 already measured for `zoom` and
+  `subsample`.
+
+  It is not only tags. #664 made the premultiply bracket read the
+  interpretation on a float carrier, because scRGB's alpha maximum is 1.0 where
+  sRGB's is 255, so while the tag was being dropped `resize(0.5).resize(0.5)`
+  read a different alpha ceiling on the second call from the first. An 8x8
+  `RgbaF32` chequerboard resized to half, twice, differed in 33 of 256 output
+  bytes on the tag alone, with both outputs coming back untagged.
+
+  `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
+  restamps they carried to work around this, which also removes two
+  image-sized clones from the linear and ICC thumbnail pipelines.
+
 - `EncodeError::Unsupported`'s own documentation no longer names four formats
   this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
   JPEG-XL and JP2K as "genuinely-external formats that have no mature pure-Rust
