@@ -1154,6 +1154,7 @@ mod tests {
      * bytes in file order.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_uint8_ramp_loads_the_reference_voxels() {
         let raster = decoded("dt2_uint8.nii");
         assert_eq!((raster.width(), raster.height()), (2, 3));
@@ -1173,6 +1174,7 @@ mod tests {
      * 33152, 33666, 34180, 34694, 35208, 35722.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_uint16_ramp_is_reassembled_in_the_files_byte_order() {
         let raster = decoded("dt512_uint16.nii");
         assert_eq!((raster.width(), raster.height()), (2, 3));
@@ -1202,6 +1204,7 @@ mod tests {
      * `dt512_uint16.nii` gives.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_big_endian_uint16_array_is_swapped_into_host_order() {
         let mut be = fixture("endian_nifti1_int16_be.nii");
         assert_eq!(
@@ -1237,6 +1240,7 @@ mod tests {
      * over bytes 128..145 and 2x3 `Rgba8` over bytes 128..151, both sRGB.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn rgb24_and_rgba32_carry_interleaved_bands() {
         let rgb = decoded("dt128_rgb24.nii");
         assert_eq!((rgb.width(), rgb.height()), (2, 3));
@@ -1269,6 +1273,7 @@ mod tests {
      * `data_hex_after_load`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn non_finite_float_samples_are_rewritten_to_zero() {
         let raster = decoded("float_float32.nii");
         assert_eq!((raster.width(), raster.height()), (4, 2));
@@ -1311,6 +1316,7 @@ mod tests {
      * byte-identical rasters.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_two_byte_orders_load_to_identical_memory() {
         let le = decoded("float_float32.nii");
         let be = decoded("float_float32_be.nii");
@@ -1337,6 +1343,7 @@ mod tests {
      * `dim[2] * .. * dim[rank]` high, and `width * height` voxels.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn every_axis_above_the_second_folds_into_the_height() {
         let cases = [
             ("dim_rank1_6.nii", 6, 1),
@@ -1377,6 +1384,7 @@ mod tests {
      * something else.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_version_check_needs_348_bytes_and_not_one_fewer() {
         for name in [
             "bad_empty.nii",
@@ -1420,6 +1428,7 @@ mod tests {
      * `nifti_header_version` of -1 for all four.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_sentinel_and_the_magic_have_to_agree_about_the_version() {
         for name in ["bad_sizeof0.nii", "bad_sizeof349.nii"] {
             assert!(
@@ -1462,6 +1471,7 @@ mod tests {
      * Input: four fixtures -> Output: the byte order each one loads in.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dim0_decides_the_byte_order_and_the_sentinel_is_only_a_fallback() {
         let cases = [
             ("bad_sizeof_swapped.nii", Endian::Little),
@@ -1612,6 +1622,7 @@ mod tests {
      * `AnalyzeDialect`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_magic_that_is_not_niftis_is_the_analyze_dialect() {
         for name in [
             "bad_magic.nii",
@@ -1650,6 +1661,7 @@ mod tests {
      * Input: `n2_magic_tail_mangled.nii` -> Output: NIfTI-2, recognised.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_nifti2_magic_tail_is_never_checked() {
         for name in ["n2_magic_tail_mangled.nii", "n2_magic_tail_partial.nii"] {
             let bytes = fixture(name);
@@ -1686,6 +1698,7 @@ mod tests {
      * Output: `PairedHeader`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_two_file_header_says_where_its_voxels_are() {
         for name in ["pair_n1.hdr", "pair_n2.hdr", "nii_with_ni1_magic.nii"] {
             assert!(
@@ -1717,6 +1730,7 @@ mod tests {
      * verdict for each.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_rank_and_extent_repairs_are_not_uniform() {
         let rank0 = decoded("dimedge_dim0_zero.nii");
         assert_eq!(
@@ -1775,6 +1789,7 @@ mod tests {
      * `DimensionLimitExceeded`; with the ceilings lifted, `TruncatedData`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_teravoxel_volume_is_refused_before_anything_is_allocated() {
         match refused("dimedge_dim_all_32767.nii") {
             SourceError::CoordLimitExceeded {
@@ -1834,6 +1849,7 @@ mod tests {
      * Output: refused at 5, decoded at 6.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_allocation_budget_is_spent_on_the_declared_geometry() {
         let bytes = fixture("dt2_uint8.nii");
         let exact = decode_nifti(&bytes, DecodeLimits::default().with_max_alloc_bytes(6))
@@ -1866,6 +1882,7 @@ mod tests {
      * which is what the oracle reports as `iname_offset` for each.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn vox_offset_is_truncated_down_and_floored_at_the_header() {
         let cases = [
             ("bad_voxoff_neg.nii", 348),
@@ -1899,6 +1916,7 @@ mod tests {
      * Input: `dt2_uint8.nii` with `bitpix` 64 -> Output: the same raster.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn bitpix_is_decoration() {
         let plain = decoded("dt2_uint8.nii");
         let mut poked = fixture("dt2_uint8.nii");
@@ -1927,6 +1945,7 @@ mod tests {
      * unscaled ramp, with both values attached.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn scl_slope_and_inter_are_carried_but_never_applied() {
         let mut poked = fixture("dt2_uint8.nii");
         poke_f32(&mut poked, 112, 2.0);
@@ -1956,6 +1975,7 @@ mod tests {
      * variant and the code each one reports.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn every_datatype_without_a_carrier_is_refused_by_name() {
         let carried = [
             ("dt256_int8.nii", 256i16, "INT8"),
@@ -2024,6 +2044,7 @@ mod tests {
      * `TruncatedData` naming the offset, what was there and what was needed.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_short_voxel_array_is_refused_rather_than_zero_filled() {
         let full = fixture("dt2_uint8.nii");
         for missing in 1..=6usize {
@@ -2067,6 +2088,7 @@ mod tests {
      * `nifti-dim[N]` fields still say `4 2 3 2 2`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_metadata_carries_the_axes_the_flattening_collapsed() {
         let raster = decoded("dim_rank4_2x3x2x2.nii");
         assert_eq!((raster.width(), raster.height()), (2, 12));
@@ -2103,6 +2125,7 @@ mod tests {
      * naming INT16, not INT64.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn a_big_endian_nifti2_header_is_read_in_its_own_byte_order() {
         for (name, endian) in [
             ("endian_nifti2_int16_be.nii", Endian::Big),

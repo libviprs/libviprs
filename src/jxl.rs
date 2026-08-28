@@ -150,7 +150,7 @@
 //!   [`JxlError::CmykNotSupported`] is the refusal. Carrying the
 //!   inks through untouched means a CMYK route into
 //!   [`crate::colour`], which does hold a black channel
-//!   ([`Interpretation::Cmyk`](crate::conversion::Interpretation::Cmyk),
+//!   ([`Interpretation::Cmyk`],
 //!   the naive ink model and profiled CMYK through
 //!   [`Raster::icc_import`](crate::Raster::icc_import)) but has no edge
 //!   from this loader. So the refusal is a wiring gap and not a
@@ -322,7 +322,7 @@ pub enum JxlError {
         pixel_format: String,
     },
     /// The declared channel count has no
-    /// [`PixelFormat`](crate::pixel::PixelFormat) carrier.
+    /// [`PixelFormat`] carrier.
     ///
     /// Defensive: `jxl_oxide::PixelFormat` names at most five channels
     /// today, so nothing `jxl-oxide` can report reaches this. It exists
@@ -2164,6 +2164,7 @@ mod tests {
      */
     #[test]
     #[cfg(not(feature = "jxl"))]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn without_the_feature_every_entry_point_is_a_typed_refusal() {
         let err = decode_jxl(&LOSSLESS_RGB, DecodeLimits::default()).unwrap_err();
         assert!(
@@ -2212,6 +2213,7 @@ mod tests {
      */
     #[cfg(feature = "jxl")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fuzz")

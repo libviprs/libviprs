@@ -89,6 +89,7 @@ fn root_workspace_contains_both_crates() {
 /// (reproducible builds, libviprs#286). The workspace lockfile is the single
 /// source of truth for that resolution.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock"))
         .expect("workspace Cargo.lock must exist at the repo root");

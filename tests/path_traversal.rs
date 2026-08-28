@@ -30,6 +30,7 @@ fn write_manifest(pyramid: &std::path::Path, per_tile: serde_json::Value) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn verify_rejects_parent_directory_traversal() {
     let parent = tempfile::tempdir().unwrap();
     let pyramid = parent.path().join("pyramid");
@@ -52,6 +53,7 @@ fn verify_rejects_parent_directory_traversal() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn verify_rejects_absolute_path() {
     let parent = tempfile::tempdir().unwrap();
     let pyramid = parent.path().join("pyramid");
@@ -69,6 +71,7 @@ fn verify_rejects_absolute_path() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn verify_accepts_wellformed_relative_tile() {
     let parent = tempfile::tempdir().unwrap();
     let pyramid = parent.path().join("pyramid");
@@ -89,6 +92,7 @@ fn verify_accepts_wellformed_relative_tile() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn verify_streams_large_tile_without_buffering_whole_file() {
     let parent = tempfile::tempdir().unwrap();
     let pyramid = parent.path().join("pyramid");
@@ -161,6 +165,7 @@ fn write_readable_svg(dir: &std::path::Path) -> std::path::PathBuf {
 /// way. Measured, not assumed.
 #[test]
 #[cfg(feature = "svg")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn svg_image_href_does_not_read_a_readable_file_off_disk() {
     use libviprs::{SvgOptions, decode_svg};
 
@@ -184,6 +189,7 @@ fn svg_image_href_does_not_read_a_readable_file_off_disk() {
 /// climbs out of it to find the file.
 #[test]
 #[cfg(feature = "svg")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn svg_image_href_does_not_follow_a_relative_traversal_off_disk() {
     use libviprs::{SvgOptions, decode_svg};
 
@@ -217,6 +223,7 @@ fn svg_image_href_does_not_follow_a_relative_traversal_off_disk() {
 /// existence oracle.
 #[test]
 #[cfg(feature = "svg")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one() {
     use libviprs::{SvgOptions, decode_svg};
 
@@ -258,6 +265,7 @@ fn svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one() {
 /// nothing was drawn at all.
 #[test]
 #[cfg(feature = "svg")]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn svg_image_href_renders_nothing_at_all() {
     use libviprs::{SvgOptions, decode_svg};
 

@@ -711,6 +711,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
+  `decode_analyze_file` takes either half of the pair or the bare stem and
+  resolves the other, `analyze::decode_analyze` takes the two buffers, and a
+  `.hdr` becomes a live row in the content sniffer so `decode_file` loads an
+  Analyze image without being told what it is. There is no save half: `vips`
+  registers no `analyzesave`.
+
+  **The decode seam grew a route kind for it**, which is the part of this
+  worth reading. Analyze is the only container in the crate that is
+  inherently two files: a `.hdr` has a geometry and no pixels, an `.img` has
+  pixels and no geometry, and `Decoder::Native(fn(&[u8], DecodeLimits))`
+  cannot express either. The route table now has a `Paired` kind carrying two
+  function pointers, one the file entry point calls with the path and one the
+  buffer entry point calls with the header half alone; the alternatives, a
+  path-only entry point with no sniff row and a sniff row that always
+  refuses, both leave `decode_file` unable to load an Analyze image at all,
+  which is the format's whole normal use.
+
+  `decode_bytes` on a `.hdr` therefore reports
+  `AnalyzeError::PixelsAreInASiblingFile`, after validating the header in
+  full, so a malformed one still reports its malformation. And one divergence
+  falls out that is unavoidable rather than chosen: `vips` loads `fred.img`
+  as well, because its `is_a` rewrites whatever name it is handed, and a
+  content sniff has nothing to look at in a raw pixel array.
+  `decode_analyze_file` takes all three names, so only the sniffing entry
+  point is narrower.
+
+  **Big-endian, always, with no flag and no escape hatch.** Every field of
+  the 348-byte header and every pixel of the `.img` is big-endian whatever
+  the host is; a little-endian `.hdr` is refused because its `sizeof_hdr`
+  reads back as 0x5C010000. This is the single most likely thing for a port
+  on a little-endian host to get backwards and both halves are pinned.
+
+  The rest of the measured contract: the rank is `dim[0]` and must be 2..=7,
+  the width is `dim[1]` and the height is `dim[2]` multiplied by every extent
+  up to the rank, so a volume flattens into a toilet roll with nothing but
+  the `dsr-image_dimension.dim[]` metadata recording that it was ever 3-D.
+  `vox_offset` is parsed, attached and then ignored, so the pixels come from
+  byte 0 of the `.img` on every file that sets one. `bitpix` is attached and
+  never consulted. `DT_RGB` is the only multi-band datatype and its `.img` is
+  interleaved, not planar. A short `.img` is an error and a long one is not.
+
+  63 `dsr-<section>.<member>` metadata fields and the 348-byte `dsr` blob are
+  attached, with both of `getstr`'s traps reproduced: an 80-byte `descrip`
+  loses its last byte to `g_strlcpy`'s size argument, and every byte that is
+  not printable ASCII becomes `@`, which is lossy and not reversible. The
+  capture's own prose states that second rule with an `||` where its measured
+  data needs an `&&`; that is issue #797, fixed in the same wave.
+
+  Three of the nine datatypes `analyzeload` reads have a carrier here
+  (`DT_UNSIGNED_CHAR`, `DT_FLOAT`, `DT_RGB`) and the rest are refused **by
+  name**: `DT_SIGNED_SHORT` and `DT_SIGNED_INT` need #516, `DT_DOUBLE` needs
+  #518, and `DT_COMPLEX` has no carrier and no issue. `DT_SIGNED_SHORT` is
+  what most real Analyze volumes use, so it is the refusal a caller meets
+  first.
+
+  One deliberate divergence, the same one `matload` carries: a zero or
+  negative dimension is refused rather than clamped to 1 by GObject's
+  property range check, which in vips leaves the load exiting 0 with a
+  silently wrong geometry.
+
+  The declared geometry is priced against every `DecodeLimits` ceiling
+  **before the `.img` is opened**, because a 348-byte header can declare
+  1.07 gigapixels in front of a six-byte image, so a header that prices past
+  the budget costs no second read.
+
+  No new dependency.
+
+- **MATLAB level 5 (`.mat`) load** (issues #510, #640, #763). `decode_mat`
+  reads the first variable of rank 1, 2 or 3 out of a MAT-5 container, in
+  either byte order, bare or inside a `miCOMPRESSED` zlib element, and `.mat`
+  becomes a live row in the content sniffer so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: `vips` registers no `matsave`.
+
+  **The sniff is the shipped binary's, not the C source's**, and that is the
+  sharp edge of this port. `vips__mat_ismat` in the reference checkout reads
+  ten bytes and compares them with `MATLAB 5.0`; the 8.18.6 dylib that
+  shipped reads 128 and validates the version word and the endian indicator
+  as well, and the 8.18.4 it replaced did not (issue #650). A port written
+  from the source would claim `MATLAB 5.1`, `matlab 5.0`, `MATLAB_5.0`, a
+  file with a bogus endian indicator and a 127-byte file, all of which
+  8.18.6 refuses. The whole predicate lands as two route-table rows, because
+  the version and the indicator are one four-byte constant per byte order and
+  the 128-byte length floor falls out of the offset.
+
+  The container is a transpose and a de-planarisation, not a copy.
+  `mat2vips_get_header` takes the height from `dims[0]` and the width from
+  `dims[1]`, so a MATLAB 2x3 becomes a 3x2 image and element `(r, c)` is
+  pixel `(c, r)`; rank 3 makes `dims[2]` the band count and the file holds
+  the planes one after another where a libviprs raster is interleaved.
+
+  The behaviours a spec reading gets wrong are the point. One variable loads
+  and there is no way to pick it. The rank filter runs in the search loop and
+  the class check runs *after* it, so a loadable `uint8` variable behind an
+  `int64` one fails outright. The logical flag is read and ignored. And
+  read-info validates the array-flags, dimensions and name subelements and
+  never the data one, so a file truncated mid-element reports a full header
+  and fails only at the pixels.
+
+  Four deliberate divergences, all refusals where `matload` carries on.
+  A complex array is refused: vips never reads the complex bit and memcpys
+  out of a `mat_complex_split_t`, so its pixels are the raw bytes of two heap
+  addresses and change from run to run under ASLR. A non-positive dimension
+  is refused rather than clamped to 1 by GObject. A band count other than 1,
+  3 or 4 is refused rather than pushed onto a multiband carrier the decode
+  path does not produce. And a stored element type that does not match the
+  array class is refused rather than widened.
+
+  Three of the eight classes `matload` reads have a carrier here (`mxUINT8`,
+  `mxUINT16`, `mxSINGLE`) and the other five are refused **by name** with the
+  issue that would add the carrier: `mxINT8`, `mxINT16` and `mxINT32` need
+  #516, `mxUINT32` needs #517, and `mxDOUBLE`, which is what MATLAB writes
+  unless told otherwise, needs #518.
+
+  The allocation budget matters twice here rather than once.
+  `dims_100000x100000.mat` declares ten gigapixels behind eight bytes of
+  data, so the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved; and a
+  `miCOMPRESSED` element's inflated size is not declared anywhere in the
+  container, so every inflate stops at `max_alloc_bytes` and is refused
+  rather than grown past it.
+
+  No new dependency. `flate2` was already a required dependency of this
+  crate, and nothing else in the format needs one.
+
+- `UhdrError::BadSaveInput`, so `uhdr::encode_uhdr`'s input refusal names the
+  operation that actually failed (issue #810). It reused `UhdrError::BadInput`,
+  whose Display is `uhdr2scRGB: {reason}`, so a failed **save** reported the
+  **expand** operation and reported it first:
+  `uhdr2scRGB: uhdrsave needs a 3-band float image, got Rgb8`. It now reads
+  `uhdrsave: needs a 3-band float image, got Rgb8`. `UhdrError` is
+  `#[non_exhaustive]`, so a caller with a wildcard arm is unaffected; a caller
+  matching `BadInput` to catch a save refusal moves to the new variant.
+
 - `Raster::encode_uhdr(quality)` and `Raster::encode_uhdr_gainmap_scale(quality,
   scale_factor)` **write an Ultra HDR container** instead of returning
   `EncodeError::Unsupported` (issue #757). #508 landed the writer in
@@ -1646,6 +1781,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `src/resample.rs` records a fourth deliberate quantisation divergence from
+  stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
+  keeps a `short` fixed-point copy of every mask, truncated toward zero and
+  **not renormalised**, and the reduce generators read it on both integer
+  carriers. This module keeps the `f64` masks. Nothing about the behaviour
+  moves; what lands is the measurement, three tests, and the argument in the
+  module header, so the gap can neither grow nor quietly vanish.
+
+  The short version of why: a constant image survives `reduce` here and does
+  not survive it in libvips. Over a 32x32 constant 65535 `ushort`, six of
+  fifteen kernel-by-shrink cells come back short on 8.18.6, `lanczos3` at
+  shrink 4 by 128 of 65535. Against the convolution evaluated in compensated
+  arithmetic at the same table offset, this module's mean absolute error is
+  0.2558 of a level on the 16-bit carrier and libvips' is 10.1088, one-directional
+  at a signed mean of -5.81, and libvips is the closer of the two on 0 of 43889
+  interior samples.
+
+- No test in the tree reaches the filesystem without `#[cfg_attr(miri, ignore)]`
+  any more, and `UNANNOTATED_FS_EXCEPTIONS` is empty (issue #756).
+
+  The four that were left are in `src/resample.rs`, which had four pull requests
+  open against it while #739's sweep ran and so was the one module the sweep
+  could not touch. Those merged, so these are annotated and their four rows in
+  `tests/miri_fs_test_inventory.txt` flip to `annotated`. The file now records
+  272 `annotated fs-detected` and 14 `annotated not-detected` tests, and nothing
+  else.
+
+  Emptying the list cost one further edit and no change to any assertion, which
+  is the difference between an exception list and the floor it replaced. The
+  floor, `assert!(unannotated_fs > 0)`, would have gone red here and demanded
+  rewriting. What did go red, on purpose, is
+  `merge_gate_states_the_backlog_as_a_bound_it_still_meets`: it has a separate
+  arm for zero, because at zero the bound holds and `merge-gate.yml`'s sentence
+  about a named handful of unannotated tests becomes false with nothing to catch
+  it. That sentence is rewritten, once, and the failure named it.
+
+- The Miri filesystem detector follows a call into a test helper, one file deep
+  and to a fixed point, and 73 more tests over nine files carry
+  `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
+  population when the change was written; the other 34 are `src/nifti.rs`,
+  `tests/uhdr_ported_surface.rs` and `tests/page_model.rs`, which reached `main`
+  while it was in flight and were caught by the new detector on the merge rather
+  than by a re-read.
+
+  `tests/page_model.rs` is the one worth naming, because its own module doc had
+  written the gap down and deferred it: "three tests here reach the filesystem
+  to read `src/`, and none carries `#[cfg_attr(miri, ignore)]` ... it belongs in
+  that lane's sweep rather than here". It is one test, not three. The other two
+  it counted go through `encode_vips` and `decode_bytes`, which are in memory,
+  and through string literals declared inline. The detector was right about
+  those and the note was not; it now says what was measured.
+
+  It read one function body and stopped, which the guard's module docs listed as
+  a known blind spot without ever measuring it. Measured: on the tree where
+  every inventory row was annotated,
+  `cargo +nightly-2026-08-20 miri test --test exr_ported_surface` still died in
+  one second on `channel_names_and_compression_are_readable_downstream`, which
+  calls `sample()` six lines above it, whose body is `std::fs::read(path)`. The
+  same shape killed `tests/n_pages_meaning.rs`.
+
+  `process_spawning_fns` had already solved this for `std::process`, so it
+  becomes `reaching_fns`, parameterised on the marker list and on a scope
+  predicate. The filesystem arm passes a predicate that accepts only test
+  scaffolding: every function in an integration test, and only the
+  `#[cfg(test)]` modules of a `src/` file. That restriction is the interesting
+  part and it is measured rather than argued: with every function in scope, the
+  way the process arm has it, the follower finds 85 unannotated tests over
+  eleven files; with only scaffolding in scope it finds 39 over six. The
+  difference is almost all one arm, `src/colour.rs` reading an ICC profile off
+  disk inside the library, which would have marked all 23 colour tests that
+  reach the loader whether or not any of them passes it a path.
+
+  The `annotated not-detected` class halves as a result, from 22 rows to 13:
+  those were annotations the detector could not have asked for, and nine of them
+  it can now. What is left is the library boundary and the helper in another
+  file.
+
+- The filesystem half of the Miri convention is enforced rather than recorded:
+  134 tests across 28 files carry `#[cfg_attr(miri, ignore)]` that did not, and
+  `tests/miri_ignore_convention.rs` now refuses any filesystem-touching test
+  that is neither annotated nor named in a four-entry exception list (issues
+  #712, #739).
+
+  #711 took `-Zmiri-disable-isolation` off the job. Under isolation a
+  filesystem call is an unsupported operation and Miri ends the whole session
+  on the first one rather than failing that test, so the 138 rows
+  `tests/miri_fs_test_inventory.txt` carried as `unannotated fs-detected` ceased
+  to be recorded debt and became 138 ways to take the gate down. Measured on
+  `bd4bb1d`, `cargo +nightly-2026-08-20 miri test --test workspace_layout` died
+  on `fuzz_crate_is_a_member_of_the_root_workspace` having run nothing.
+
+  The guard's own floor had to go with it. It ended with
+  `assert!(unannotated_fs > 0)` and a message saying that if the count ever
+  reached zero the ledger had stopped being a ledger, which is a floor that
+  goes red on the change that clears the debt. It is now a refusal with an
+  exception list, checked in both directions: a filesystem test that is neither
+  annotated nor named fails, and a named entry that is no longer an unannotated
+  filesystem test fails too, so the list cannot rot into decoration. It carries
+  four names, all in `src/resample.rs`, which had four pull requests open
+  against it while the sweep ran; issue #756 carries them.
+
+  This does not make the `miri` job report, and the reason is worth writing
+  down because it is the half of #675 nobody had measured. `cargo miri test`
+  runs the `--lib` target first and libtest runs it in sorted order, so the
+  first two tests of the whole invocation are
+  `arithmetic::proptests::every_try_method_in_the_module_is_in_the_sweep` and
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster`. Neither
+  touches the filesystem, so no annotation sweep can reach them, and the second
+  is the proptest already measured at over twenty minutes without finishing.
+  The unannotated filesystem tests were never the first wall of the whole-suite
+  run, they were the first wall of every target after it.
+
+- The doc gate denies `rustdoc::private_intra_doc_links`, and the 33 public doc
+  comments that pointed at `pub(crate)` items no longer do (issue #697). That
+  lint is warn-by-default and neither invocation denied it, so a public doc
+  comment could link to a private helper, rustdoc would silently drop the link
+  and render it as inert bracketed text on docs.rs, and both `make doc` and the
+  CI docs job stayed green while publishing a dead pointer.
+
+  At `9b1ade6` that had happened 33 times across 13 files: `sink.rs` 7,
+  `source.rs` 6, `resume.rs` 5, two each in `colour.rs`, `dedupe.rs`,
+  `encode_tiff.rs`, `engine.rs` and `gif.rs`, one each in `composite.rs`,
+  `manifest.rs`, `pdf.rs`, `raster.rs` and `streaming_mapreduce.rs`. Every
+  target is a private helper, a crate-internal constant or a `pub(crate)`
+  cache, and none of them is worth making public just to satisfy a link, so
+  each site inlines the sentence the public reader needed and keeps the
+  identifier in plain backticks for anyone reading the source. `cargo doc
+  --no-deps --all-features` goes from 47 warnings to 13, the remaining 13 all
+  being `rustdoc::redundant_explicit_links` (issue #795).
+
+  `tests/doc_link_gate.rs` holds the `Makefile` recipe and the `ci.yml` docs
+  job to the same deny set and the same `cargo doc` arguments, so tightening
+  one file alone fails there rather than quietly un-mirroring the local gate,
+  and it holds the docs job's own `name:` to naming every lint it denies.
+
+- The doc gate denies `rustdoc::redundant_explicit_links` too, and the 13 links
+  that carried a redundant explicit target no longer do (issue #795). Each was
+  written `[`Foo`](crate::path::Foo)` where the label alone already resolves to
+  the same destination, in `engine_builder.rs` (4), `engine.rs` (2), `jxl.rs`
+  (2) and one each in `draw.rs`, `sink.rs`, `sink_object_store.rs`,
+  `stream_verify.rs` and `verify.rs`.
+
+  Nothing rendered wrong, so this is not a rendering fix. It is that 13 standing
+  warnings is a floor which hides the fourteenth, and a warning stream nobody
+  reads is not a gate: that is exactly how the 33 private links above
+  accumulated unnoticed. `cargo doc --no-deps --all-features` is now **silent**,
+  so anything it prints is new.
+
+
 - `spcor` and `fastcor` stopped widening the whole image and stopped
   materialising their results twice. Both read the image as a sliding window of
   the template's rows, which is the same access pattern the convolution
@@ -1769,14 +2053,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, measured, and would be a defensible answer; the backend pin is simply
   the smaller of the two changes.
 
-  What the job does now is abort on the first filesystem test that has no
-  `#[cfg_attr(miri, ignore)]`. `tests/miri_fs_test_inventory.txt` still records
-  more than a hundred of those, and annotating them is #712. Whether the suite
-  then fits inside `timeout-minutes: 90` is open, and one measurement says not
-  to assume it will: the single proptest
+  What the job did after this change was abort on the first filesystem test
+  that had no `#[cfg_attr(miri, ignore)]`, of which
+  `tests/miri_fs_test_inventory.txt` recorded 138. Annotating them is #712 and
+  #739, below. Whether the suite then fits inside `timeout-minutes: 90` was
+  open, and one measurement said not to assume it would: the single proptest
   `arithmetic::proptests::no_try_method_panics_on_a_float_raster` ran over
   twenty minutes under the interpreter without finishing, and it touches no
-  filesystem, so no annotation sweep will ever reach it.
+  filesystem, so no annotation sweep will ever reach it. That is the one that
+  turned out to decide the answer.
 
   Three claims in that workflow file were false when I got here and are gone.
   It said Miri "cannot run on the dev machine", which was true of the reason
@@ -2172,6 +2457,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `EncodeError::Unsupported`'s own documentation no longer names four formats
+  this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
+  JPEG-XL and JP2K as "genuinely-external formats that have no mature pure-Rust
+  encoder", which made the variant's *contract* wrong rather than merely stale:
+  `crate::uhdr` has written an Ultra HDR container since #508 with no new
+  dependency at all, `crate::fits` hand-rolls FITS, and `crate::jxl` and
+  `crate::jp2k` carry real pure-Rust codecs behind their features. The type's
+  own doc block carried the same list.
+
+  A new guard, `the_unsupported_doc_lists_name_no_format_this_build_encodes`,
+  extracts both lists from the source and probes each named format by calling
+  its encoder, so "this build encodes it" is measured rather than declared and
+  the lists cannot drift again.
 
 - **Every `capture.py` under `oracle-captures/` now checks `ORACLE_PIN.json`
   before it writes anything. Two of the fourteen did** (issue #796), both of

@@ -67,6 +67,7 @@ fn save_options_are_constructible_downstream() {
 /// The lossless encoder is a true identity from outside the crate too,
 /// through both the buffer entry point and the file one.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_exactly() {
     let original = ramp();
     let bytes = original.encode_webp(webp::SaveOptions::default()).unwrap();
@@ -88,6 +89,7 @@ fn encode_and_save_round_trip_exactly() {
 /// `.webp` is a live row in both shared dispatchers, and the content
 /// sniffer routes the bytes back without help from the filename.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_shared_dispatchers_carry_webp() {
     let original = ramp();
     let dir = tempfile::tempdir().unwrap();

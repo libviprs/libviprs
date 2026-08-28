@@ -95,6 +95,7 @@
 //! **See also:** the [interactive CLI documentation](https://libviprs.org/cli/)
 //! bundles every public knob into runnable examples.
 
+pub mod analyze;
 pub mod arithmetic;
 pub mod avif;
 pub mod bands;
@@ -135,6 +136,7 @@ mod loom_checkpoint_dedupe;
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
+pub mod mat;
 pub mod matrix;
 pub mod morphology;
 pub mod mosaicing;
@@ -287,6 +289,16 @@ pub use fits::{FitsError, decode_fits};
 // There is no encoder half, and there is no libvips half either: the pinned
 // build reports `NIfTI load/save with libnifti: false` (issue #510).
 pub use nifti::{NiftiError, decode_nifti};
+// `decode_mat` is re-exported for the reason `decode_nifti` is: it is the
+// direct entry point for a caller who already knows the bytes are a MATLAB
+// level 5 file. There is no encoder half, because libvips registers no
+// `matsave` (issue #510).
+pub use mat::{MatError, decode_mat};
+// `decode_analyze_file` is re-exported rather than `decode_analyze`, because
+// Analyze is a `.hdr` plus an `.img` and the path-taking half is the one a
+// caller who already knows the format actually wants. The buffer-pair and
+// filename-resolving halves stay behind `libviprs::analyze::` (issue #764).
+pub use analyze::{AnalyzeError, decode_analyze_file};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
