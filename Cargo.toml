@@ -72,6 +72,31 @@ flate2 = "1"
 # `gif-0.14.2/src/lib.rs:113` is a crate-level `#![cfg(feature = "std")]`.
 # The `std` feature is not optional here, it is the whole library.
 gif = { version = "0.14", default-features = false, features = ["std"] }
+# Pure-Rust JPEG 2000 decoder (MIT OR Apache-2.0), the load half of issue
+# #501. It is the cheapest codec dependency in this manifest by a wide
+# margin: with `default-features = false` it has **no dependencies at all**,
+# so it is +1 lock entry against `svg`'s +29 and `jxl`'s +21, and it is
+# `#![forbid(unsafe_code)]` on top of that.
+#
+# Chosen over the three C routes (`openjpeg-sys`, and `jpeg2k` / `jp2k` /
+# `jpeg2000` which wrap it) because epic #520's premise is a format wave
+# reachable without new heavy C dependencies, and over `openjp2` (a c2rust
+# port of OpenJPEG, 422 `unsafe` blocks) because this one reads untrusted
+# bytes. Measured against the 27 fixtures in `oracle-captures/foreign-jp2k`:
+# it decodes all 22 valid ones and refuses all 5 malformed ones with a typed
+# error, which is the same verdict `vips jp2kload` gives on each.
+#
+# `default-features = false` drops `simd`, `image` and `logging`. `simd` is
+# the interesting one: it pulls `fearless_simd` (+1 more entry) and is the
+# crate's ONLY source of unsafe, its own docs saying that turning it off
+# "eliminate[s] any usage of unsafe in this crate as well as its
+# dependencies". A JPEG 2000 decoder eats untrusted bytes, so this build
+# takes the safe one and pays the speed. `image` would pull `moxcms` into
+# the decoder to colour-manage internally, and colour management here
+# belongs to `crate::colour`, not to a loader.
+hayro-jpeg2000 = { version = "0.4.0", default-features = false, features = [
+    "std",
+] }
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -161,6 +186,42 @@ lopdf = "0.36"
 # LUT engine so LUT-based (non-matrix-shaper) device profiles transform
 # too, keeping icc_import honest for arbitrary profiles.
 moxcms = { version = "0.8.1", features = ["any_to_any"] }
+# Pure-Rust translation of OpenJPEG's libopenjp2 (BSD-2-Clause), the save
+# half of issue #501. Also +1 lock entry: it has no dependencies either.
+#
+# It is here for the encoder and nothing else; `crate::jp2k` decodes through
+# `hayro-jpeg2000` above. That split is `crate::jxl`'s exactly, where
+# `jxl-oxide` decodes and `zune-jpegxl` encodes, and it is drawn on the same
+# line: the crate that reads attacker-controlled bytes is the one with
+# `forbid(unsafe_code)`, and the encoder only ever sees a `Raster` this
+# crate already owns.
+#
+# The three alternatives were measured rather than reasoned about, because
+# JPEG 2000 encoders that write a plausible container and a wrong codestream
+# are common:
+#
+# * `justjp2` 0.1.1 is 0 `unsafe` and looks ideal until you run it. Its own
+#   `lossless: true` round trip is NOT lossless (measured: ±2 counts on an
+#   8-bit ramp), `hayro-jpeg2000` refuses its output with
+#   `InvalidBitplaneCount`, and OpenJPEG 2.5.4 through `vips jp2kload`
+#   decodes it to a flat mid-grey, every coefficient gone. Three decoders,
+#   three different answers, one of them itself.
+# * `pure_jpeg2k` 2.0.0 encodes one unsigned 16-bit component, one tile,
+#   which is neither RGB nor CMYK nor 8-bit, so it cannot stand in for
+#   `jp2ksave` at all.
+# * `openjp2` 0.6.1 encodes correctly but its only in-memory stream
+#   constructor is `Stream::new_custom`, whose read/write/skip/seek hooks are
+#   raw `extern "C"` function pointers over `*mut c_void`. The safe
+#   `StreamInner::new_writer` is `pub(crate)`. Taking it would have put the
+#   first `unsafe` block in `src/` into this crate, which today has none.
+#
+# This one's `Encoder::encode(&Image, &EncodeOptions) -> Result<Vec<u8>>` is
+# safe, in-memory and needs no callbacks, and its output is verified against
+# the reference C rather than trusted: measured, `vips jp2kload` (linking
+# libopenjp2 2.5.4) reads back what it writes **bit for bit** for 8-bit RGB,
+# 16-bit greyscale and 4-band CMYK. The `unsafe` inside it (269 sites, a
+# faithful translation of the C) stays inside it.
+openjpeg2-pure = { package = "openjpeg2-pure-rs", version = "0.1.1" }
 # Direct git dependency on the libviprs/pdfium-render fork, pinned to an
 # immutable `rev` (the pin paragraph below) whose provenance is the
 # consolidated `libviprs/integration` branch. That branch is the consolidated
@@ -423,6 +484,33 @@ serde = []
 # production callers have no use for a sink that deliberately sleeps, and
 # shipping it unconditionally invites accidental use. Adds no dependencies.
 test-util = []
+# Gates the JPEG 2000 loader and encoder in [`crate::jp2k`]: the real bodies
+# of `decode_jp2k`, `Raster::encode_jp2k` and `Raster::save_jp2k`. With the
+# feature off every one of them still exists, still compiles and keeps its
+# signature; each returns a typed refusal the way `crate::jxl` does without
+# `jxl`, so nothing about the public API moves.
+#
+# Non-default for the same reason as `svg` and `jxl` above, and **not** for
+# the same price. Measured with `cargo generate-lockfile` on a clean tree,
+# 288 packages before and 290 after: **+2 lock entries, and both of them are
+# the two crates themselves**, because neither has a single dependency of
+# its own. `svg` costs +29 and `jxl` costs +21. Nothing here reaches
+# `tracing`, so the second argument that put `jxl` behind a flag (an
+# unconditional `tracing` in the default graph of a crate whose own
+# `tracing` feature is opt-in) does not apply at all: `cargo tree -e normal
+# -i tracing --features jp2k` still prints "nothing to print".
+#
+# What is left is the compile, which is the argument `svg` made on its own:
+# 9.7k lines of decoder and 36.9k lines of translated encoder is real build
+# time, and nobody who does not read or write JPEG 2000 should pay it.
+#
+# Neither crate compiles C, declares a `links` key, runs a build script or
+# carries a `-sys` suffix. `hayro-jpeg2000` is `#![forbid(unsafe_code)]` at
+# the settings this build uses; the encoder's `unsafe` is a faithful
+# translation of the OpenJPEG C and stays inside the dependency. See the two
+# `[workspace.dependencies]` comments above for why these two crates and not
+# the six other JPEG 2000 crates on crates.io.
+jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 
 [dependencies]
 ab_glyph = { workspace = true }
@@ -430,12 +518,14 @@ blake3 = { workspace = true }
 exr = { workspace = true }
 flate2 = { workspace = true }
 gif = { workspace = true }
+hayro-jpeg2000 = { workspace = true, optional = true }
 image = { workspace = true }
 image-webp = { workspace = true }
 jxl-grid = { workspace = true, optional = true }
 jxl-oxide = { workspace = true, optional = true }
 lopdf = { workspace = true }
 moxcms = { workspace = true }
+openjpeg2-pure = { workspace = true, optional = true }
 pdfium-render = { workspace = true, optional = true }
 resvg = { workspace = true, optional = true }
 rustfft = { workspace = true }
