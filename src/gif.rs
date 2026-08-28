@@ -288,7 +288,7 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // `bands` is what the canvas actually costs, four with a transparent index
     // and three without, which is the count fifteen lines up and the count the
     // refusal reports.
-    limits.check_image_alloc("GIF canvas", width, height, bands as u32, 1)?;
+    limits.check_image_alloc("GIF canvas", width, height, bands as u64, 1)?;
 
     // The canvas starts fully transparent and stays that way outside the
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and

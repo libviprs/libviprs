@@ -69,7 +69,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also stays, because it is `jxl-oxide`'s own tracker refusing an internal
   buffer at a size it does not report out, and a file can trip either without
   tripping the other. `is_alloc_limit` covers all three so a caller does not
-  have to know the split.
+  have to know the split, and it answers the same in a build with or without
+  the `jxl` feature, since that variant exists in both.
+
+  **What `is_alloc_limit` deliberately says no to**, since one of them looks
+  like a false negative: `DimensionLimitExceeded` and `PageLimitExceeded` are
+  different ceilings, and so is
+  `SourceError::Raster(RasterError::ByteBudgetExceeded)`, which
+  `Raster::ppm_load`, `csv_load` and `matrix_load` return through this same
+  enum with a message reading "needs N bytes, exceeding the M-byte allocation
+  budget". That M is `DEFAULT_MAX_ALLOC_BYTES`, the raster construction
+  ceiling, not `DecodeLimits::max_alloc_bytes`, so raising the decode limit
+  does nothing about it. The predicate's whole test is "does raising
+  `max_alloc_bytes` fix this", and all three fail it.
 
   `geometry` is an `Option` rather than three flat fields because the
   whole-file read prices a file's length on disk, which says nothing about the

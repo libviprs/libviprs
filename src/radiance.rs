@@ -358,8 +358,8 @@ pub fn decode_radiance(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sou
         "Radiance pixel buffer",
         width,
         height,
-        BANDS as u32,
-        SAMPLE_BYTES as u32,
+        BANDS as u64,
+        SAMPLE_BYTES as u64,
     )?;
 
     // Through `buffer_len` rather than a plain `usize` product for the

@@ -41,6 +41,7 @@
 //! and that is asserted here too so the split is a decision on the record
 //! rather than a gap.
 
+use libviprs::jxl::JxlError;
 use libviprs::source::{DecodeLimits, decode_bytes_with_limits};
 use libviprs::{PixelFormat, Raster, SourceError};
 use std::io::Cursor;
@@ -454,6 +455,51 @@ fn is_alloc_limit_catches_every_shape_the_budget_refuses_in() {
     assert!(
         !by_width.is_alloc_limit(),
         "the width ceiling arrives in the image shape but is a different knob: {by_width:?}"
+    );
+
+    // The third control, and the one that looks most like a false negative
+    // until you read what it says. `Raster::ppm_load`, `csv_load` and
+    // `matrix_load` are public decode entry points returning this same enum,
+    // and an over-large declared geometry comes back as
+    // `Raster(ByteBudgetExceeded)` whose message reads "needs N bytes,
+    // exceeding the M-byte allocation budget". That budget is
+    // `DEFAULT_MAX_ALLOC_BYTES`, the raster construction ceiling, not
+    // `DecodeLimits::max_alloc_bytes`, so raising the decode limit does
+    // nothing about it and `is_alloc_limit` must say no.
+    let by_construction =
+        Raster::ppm_load(b"P6\n60000 60000\n255\n").expect_err("60000 squared RGB8 is 10.8 GB");
+    assert!(
+        by_construction.to_string().contains("allocation budget"),
+        "this control is only meaningful if it reads like an allocation refusal: {by_construction}"
+    );
+    assert!(
+        !by_construction.is_alloc_limit(),
+        "the raster construction budget is a different ceiling with a different \
+         remedy: {by_construction:?}"
+    );
+}
+
+/// Issue #686. `is_alloc_limit` answers the same for the same value whether or
+/// not the `jxl` feature is on.
+///
+/// `JxlError` and `DecoderAllocLimitExceeded` are declared unconditionally, and
+/// #634 promises a caller's `match` has the same arms in either build. The
+/// predicate's arm was `#[cfg(feature = "jxl")]`, so this exact value answered
+/// `false` without the feature and `true` with it. Features are additive, so
+/// one crate in a workspace turning `jxl` on would silently change another
+/// crate's error handling.
+///
+/// Built by hand rather than decoded, on purpose. The `jxl` row in
+/// `priced_by_libviprs` is 16x16 so it trips the declared-geometry check, which
+/// means `DecoderAllocLimitExceeded` is not reachable through any decode in
+/// this file, and it must be asserted in the build that has no decoder at all.
+#[test]
+fn is_alloc_limit_does_not_depend_on_the_jxl_feature() {
+    let err = SourceError::Jxl(JxlError::DecoderAllocLimitExceeded { max_alloc_bytes: 8 });
+    assert!(
+        err.is_alloc_limit(),
+        "the decoder's own allocation tracker is the budget refusing the file, \
+         in either build: {err:?}"
     );
 }
 

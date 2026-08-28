@@ -436,25 +436,17 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // and what the decoder allocates for.
     let declared = header.channels.list.len();
     //
-    // The `u32` narrowing saturates rather than wrapping, and saturating is
-    // the safe direction here because the price only goes up. It is also
-    // unreachable in any way that matters, and the reason is worth writing
-    // down rather than leaving to a reader: `declared` counts entries in a
-    // channel list `exr` has already parsed into memory, so a count above
-    // `u32::MAX` would need the reader to have allocated four billion
-    // `Channel` descriptions first. If it somehow got here, the reported
-    // `bands` would be a floor rather than the true count, and the price is
-    // already saturated to `u64::MAX` by `decode_alloc_bytes`, which
-    // `exceeds_alloc_budget` refuses under every budget including "no limit".
-    // So the refusal stays correct; only the number in the message would
-    // understate.
-    let declared_bands = u32::try_from(declared).unwrap_or(u32::MAX);
+    // `declared as u64` is lossless on every target this builds for, and it is
+    // the count that prices the frame. The `u32` narrowing that used to be
+    // here saturated the price *down*, which is the one direction that can
+    // turn a refusal into a decode; it now happens inside `check_image_alloc`
+    // and only to the geometry the message reports.
     limits.check_image_alloc(
         "OpenEXR sample buffers",
         width,
         height,
-        declared_bands,
-        SAMPLE_BYTES as u32,
+        declared as u64,
+        SAMPLE_BYTES as u64,
     )?;
 
     // `non_parallel` is not an optimisation choice, it is the contract:

@@ -647,8 +647,8 @@ fn decode_current_image<R: Read + Seek>(
         "TIFF page pixel buffer",
         width,
         height,
-        channels as u32,
-        u32::from(bit_depth).div_ceil(8),
+        channels as u64,
+        u64::from(bit_depth).div_ceil(8),
     )?;
     let orientation = read_tiff_orientation(decoder);
     let result = decoder.read_image().map_err(tiff_decode_err)?;

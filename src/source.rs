@@ -395,10 +395,7 @@ pub enum SourceError {
     #[error(
         "{what}{} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
          allocation ceiling; raise DecodeLimits::max_alloc_bytes",
-        match geometry {
-            Some(g) => format!(" {}x{}x{}", g.width, g.height, g.bands),
-            None => String::new(),
-        }
+        ShowGeometry(*geometry)
     )]
     AllocLimitExceeded {
         /// What the allocation was for, e.g. `"TIFF file body"` or
@@ -455,10 +452,22 @@ impl SourceError {
     ///
     /// Raising `max_alloc_bytes` is the response to all three, which is what
     /// makes one predicate the right shape rather than a convenience over
-    /// unrelated things. It does **not** cover
-    /// [`SourceError::DimensionLimitExceeded`] or
-    /// [`SourceError::PageLimitExceeded`]: those are different ceilings with
-    /// different remedies.
+    /// unrelated things. It is the *whole* test: a shape that is not fixed by
+    /// raising that one knob is not this.
+    ///
+    /// So it does **not** cover [`SourceError::DimensionLimitExceeded`] or
+    /// [`SourceError::PageLimitExceeded`], which are different ceilings with
+    /// different remedies, and it does not cover
+    /// `SourceError::Raster(RasterError::ByteBudgetExceeded)` either. That
+    /// last one is worth naming because it *looks* like this: it says "needs N
+    /// bytes, exceeding the M-byte allocation budget" and
+    /// [`Raster::ppm_load`](crate::raster::Raster::ppm_load),
+    /// `csv_load` and `matrix_load` all return it through this same enum. But
+    /// the budget it names is
+    /// [`DEFAULT_MAX_ALLOC_BYTES`](crate::raster::DEFAULT_MAX_ALLOC_BYTES),
+    /// the raster **construction** ceiling, not
+    /// [`DecodeLimits::max_alloc_bytes`], and raising the decode limit does
+    /// nothing about it. There is a negative control on it.
     ///
     /// # Example
     ///
@@ -475,9 +484,35 @@ impl SourceError {
             SourceError::Decode(image::ImageError::Limits(e)) => {
                 matches!(e.kind(), image::error::LimitErrorKind::InsufficientMemory)
             }
-            #[cfg(feature = "jxl")]
+            // Deliberately NOT `#[cfg(feature = "jxl")]`. `JxlError` and this
+            // variant are declared unconditionally so that "a caller's `match`
+            // has the same arms in either build" (issue #634), and gating the
+            // arm broke that promise for the predicate: the identical value
+            // answered `false` without the feature and `true` with it. Features
+            // are additive, so one crate in a workspace turning `jxl` on would
+            // silently change another crate's error handling.
             SourceError::Jxl(crate::jxl::JxlError::DecoderAllocLimitExceeded { .. }) => true,
             _ => false,
+        }
+    }
+}
+
+/// Writes `" WxHxB"` for a geometry and nothing at all for `None`.
+///
+/// The point is the "nothing at all". `SourceError::AllocLimitExceeded`'s
+/// message is built by `thiserror` in a `Display` impl, and the obvious
+/// spelling there is a `format!` producing a `String`. That puts a heap
+/// allocation on the path that formats an **allocation-refusal** error, which
+/// is exactly where the host is least likely to serve one, and cuts against
+/// the abort-freedom work in #627, #672 and #685. This writes straight into
+/// the formatter instead.
+struct ShowGeometry(Option<DeclaredGeometry>);
+
+impl std::fmt::Display for ShowGeometry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(g) => write!(f, " {}x{}x{}", g.width, g.height, g.bands),
+            None => Ok(()),
         }
     }
 }
@@ -833,6 +868,17 @@ impl DecodeLimits {
     /// multiplying and saturates rather than wrapping. Handing it a product
     /// a caller already narrowed would give that up.
     ///
+    /// They are `u64` for the same reason. Every saturation in this area goes
+    /// **up**, to `u64::MAX`, which `exceeds_alloc_budget` treats as a sentinel
+    /// refusal, so a caller who lifts every ceiling still gets refused rather
+    /// than served a wrapped price. Narrowing a band count on the way in would
+    /// saturate the price *down* instead, which is the one direction that
+    /// turns a refusal into a decode. Only the geometry the refusal
+    /// **reports** narrows to `u32`, and it saturates there because
+    /// [`DeclaredGeometry`] holds a `u32`; a count that large understates in
+    /// the message and cannot change the verdict, because the price it came
+    /// from has already saturated.
+    ///
     /// Returns the price on success, since several callers size a buffer
     /// from the same number straight afterwards.
     pub(crate) fn check_image_alloc(
@@ -840,22 +886,17 @@ impl DecodeLimits {
         what: &'static str,
         width: u32,
         height: u32,
-        bands: u32,
-        sample_bytes: u32,
+        bands: u64,
+        sample_bytes: u64,
     ) -> Result<u64, SourceError> {
-        let needed_bytes = crate::raster::decode_alloc_bytes(
-            width,
-            height,
-            u64::from(bands),
-            u64::from(sample_bytes),
-        );
+        let needed_bytes = crate::raster::decode_alloc_bytes(width, height, bands, sample_bytes);
         if self.exceeds_alloc_budget(needed_bytes) {
             return Err(SourceError::AllocLimitExceeded {
                 what,
                 geometry: Some(DeclaredGeometry {
                     width,
                     height,
-                    bands,
+                    bands: u32::try_from(bands).unwrap_or(u32::MAX),
                 }),
                 needed_bytes,
                 max_alloc_bytes: self.max_alloc_bytes,

@@ -575,8 +575,8 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         "JPEG XL frame buffer",
         width,
         height,
-        bands,
-        format.bytes_per_channel() as u32,
+        u64::from(bands),
+        format.bytes_per_channel() as u64,
     )?;
     // `samples` sizes the frame buffer below, and clearing the budget
     // above is not what makes it safe to compute. `max_alloc_bytes` is a

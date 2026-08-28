@@ -788,8 +788,8 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
         "FITS pixel buffer",
         width,
         height,
-        u32::from(bands),
-        carrier.sample_bytes() as u32,
+        u64::from(bands),
+        carrier.sample_bytes() as u64,
     )?;
 
     let data_start = offset + unit.len;
