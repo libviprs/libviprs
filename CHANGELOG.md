@@ -1247,10 +1247,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
-  `-Zmiri-disable-isolation`, and `make miri` is now a real local mirror of it
-  (issues #675, #707). Neither change makes the job pass. What they change is
-  that it fails in a couple of minutes with something to act on, instead of
-  running to the 90 minute ceiling and reporting `cancelled`.
+  `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
+  actually runs (issues #675, #707). Neither change makes the job pass. What
+  they change is that it fails in a couple of minutes with something to act on,
+  instead of running to the 90 minute ceiling and reporting `cancelled`.
 
   The flag was added with the claim that it was not a coverage loss, on the
   reasoning that only *unannotated* filesystem tests stop aborting the run so
@@ -1259,34 +1259,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the ceiling, so the job covered nothing at all. Three consecutive dispatched
   runs died at 90 minutes, and the run before the ceiling existed went 4h13m.
 
+  `make miri` could not run at all before this. It was missing `-A deprecated`,
+  so it died on the denied `AtomicU64::fetch_update` rename under nightly
+  (#643), and it invoked the floating `+nightly`, which on the machine this was
+  written on resolves to 1.96.0-nightly, below the crate's 1.97 MSRV, so cargo
+  refused to build before Miri was reached. It now takes a `MIRI_TOOLCHAIN`
+  that defaults to a dated nightly, and checks whatever it resolves to against
+  the MSRV read out of `Cargo.toml`, so a toolchain that cannot work says so in
+  one line instead of printing the MSRV refusal once per target.
+
   `RUSTFLAGS` gains `--cfg sha2_backend="soft"`, which pins sha2's portable
-  backend. Without it the run reaches `vld1q_u32(&K32[0])` in sha2's aarch64
-  NEON path and aborts about 30 seconds in on a Stacked Borrows violation, a 16
-  byte load through a `&u32` whose retag covers four. That shape is on file
-  against Miri itself as rust-lang/miri#3900, closed as not planned, so it is
-  Stacked Borrows being stricter than the model that eventually lands rather
-  than something that can go wrong at runtime. `-Zmiri-tree-borrows` also
-  clears it, measured, and is not used because it would change the aliasing
-  model all 1572 tests are checked against to route around one dependency.
-  Pinning the backend has the side benefit of making the run deterministic:
-  otherwise `cpufeatures` picks the backend at runtime and the interpreter sees
-  different instructions on aarch64 than on the hosted x86_64 runner.
+  backend. Under Miri, `cpufeatures` compiles to `cpufeatures-0.3.1/src/miri.rs`
+  and chooses nothing at runtime: the detection macro becomes
+  `cfg!(all(target_feature = ...))` and the probe a constant `false`, so sha2's
+  backend is fixed at compile time by the target's baseline features. Per
+  `rustc --print cfg`, `aarch64-apple-darwin` carries `target_feature="sha2"`
+  and `x86_64-unknown-linux-gnu` carries none of `sha`, `ssse3` or `sse4.1`. So
+  the pin is what keeps the run off sha2's NEON path locally, where it reaches
+  `vld1q_u32(&K32[0])` and aborts about 30 seconds in on a Stacked Borrows
+  violation, a 16 byte load through a `&u32` whose retag covers four; and on
+  the hosted x86_64 runner it changes nothing, because the portable backend was
+  already what got compiled. That shape is on file against Miri itself as
+  rust-lang/miri#3900, closed as not planned. `-Zmiri-tree-borrows` clears it
+  too, measured, and would be a defensible answer; the backend pin is simply
+  the smaller of the two changes.
 
   What the job does now is abort on the first filesystem test that has no
-  `#[cfg_attr(miri, ignore)]`, of which `tests/miri_fs_test_inventory.txt`
-  still records 141. Annotating them is #712. Whether the suite then fits
-  inside `timeout-minutes: 90` is still open, and nothing measured so far is
-  close to answering it.
+  `#[cfg_attr(miri, ignore)]`. `tests/miri_fs_test_inventory.txt` still records
+  more than a hundred of those, and annotating them is #712. Whether the suite
+  then fits inside `timeout-minutes: 90` is open, and one measurement says not
+  to assume it will: the single proptest
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster` ran over
+  twenty minutes under the interpreter without finishing, and it touches no
+  filesystem, so no annotation sweep will ever reach it.
 
   Three claims in that workflow file were false when I got here and are gone.
-  It said Miri "cannot run on the dev machine", which stopped being true when a
-  nightly past the 1.97 MSRV was installed. It said the tree carries 48
-  annotations across seven modules, where the inventory records 53 across
-  eight. And it said dropping the isolation flag was a coverage win.
-  `tests/miri_invocation_parity.rs` now holds the workflow to both counts, to
-  keeping the isolation flag off, to pinning the sha2 backend, and to running
-  the same command with the same environment as the `Makefile`, so the mirror
-  cannot quietly stop mirroring.
+  It said Miri "cannot run on the dev machine", which was true of the reason
+  given and stopped being true of the conclusion. It said the tree carries 48
+  annotations across seven modules, where the inventory recorded 53 across
+  eight. And it said dropping the isolation flag was a coverage win. It now
+  quotes no count at all: `tests/miri_invocation_parity.rs` holds it to a bound
+  and sends the reader to the inventory for the number, because quoting the
+  live figure made an unrelated workflow file a mandatory edit for every pull
+  request that adds a filesystem test.
+
+  `tests/miri_invocation_parity.rs` also holds the two invocations to the same
+  command and the same `MIRIFLAGS`/`RUSTFLAGS`, merged across every scope they
+  can arrive from: the workflow, job and step `env:` blocks on one side, and
+  file-level make variables on the other. It compares the command rather than
+  the compiler, which it cannot: the hosted job resolves
+  `dtolnay/rust-toolchain@nightly` on the day and the local mirror pins a date,
+  so a local green is evidence about the crate rather than a prediction of the
+  hosted run.
 
 - Every edit that adds a format to `src/source.rs` is checked by `cargo build`
   now, where two of the six used to fail silently (issue #633). It is still
