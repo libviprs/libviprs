@@ -1736,6 +1736,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   band routes through a premultiply into FLOAT first, so neither ever sees the
   fixed point. Three tests pin those carriers so the new path cannot spread.
 
+- `affine`, `mapim` and `resize` are now byte-identical to
+  `vips affine --interpolate bicubic` on a **float** raster too, and on any
+  raster with an alpha band (issue #705). `bicubic_float<T>` sums each of the
+  four rows through `cubic_float<T>` and combines them through `cubic_float<T>`
+  again, and that helper returns `T`. Its arithmetic is `double` either way, so
+  with `T = float` all five sums are computed in `f64` and narrowed to `f32` on
+  the way out. This module accumulated in `f64` and narrowed once at the store.
+
+  The issue asked for the accumulation *order*, and that turned out to be a red
+  herring worth exactly zero bits: flat 16-term `f64` and row-then-column `f64`
+  are bit-identical, 0 of 1764 samples apart on a random 24x24, and both miss
+  the binary by the same 1.5259e-05 in the same 356 samples. Adding the per-row
+  narrowing takes that to 0 of 1764.
+
+  An alpha band comes along because `vips_affine_build` premultiplies into a
+  FLOAT image before it resamples, so an `Rgba16` raster takes the narrowing as
+  well. That is worth about 3 samples in 480 on real data, always on a rounding
+  boundary, and an `Rgba8` raster cannot see it at all because an 8-bit quantum
+  swallows an `f32` ulp whole.
+
+  Nothing else moves: the 16- and 32-bit integer carriers reach
+  `bicubic_float<double>`, which narrows nothing, and `BILINEAR_FLOAT`, `lbb`
+  and `nohalo` are one expression with a single narrowing at the store and were
+  already bit-exact.
+
 - `affine_interpolators_match_libvips_oracle` explained its 1-byte `bilinear`
   allowance as "a single `.5` rounding tie". It is not: `SWITCH_INTERPOLATE`
   sends `uchar` and `ushort` rasters to `BILINEAR_INT`, whose four weights are
