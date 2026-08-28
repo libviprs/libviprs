@@ -3833,16 +3833,16 @@ mod tests {
         );
     }
 
-    /// #575: the whole-image widenings that are left are still reserved
-    /// fallibly, which after this change nothing else holds.
+    /// #575, #790: the whole-image widenings that are left are still reserved
+    /// fallibly, which after those two changes nothing else holds.
     ///
-    /// [`Raster::try_compass`] widens each of its `times` results to combine
-    /// them and the two correlations widen both operands, because all three
-    /// read every operand at the same output sample and so have no row window
-    /// to keep. The traversal's guard moved onto the window with the
-    /// traversal, and that left [`samples_f64`]'s own reservation asserted by
-    /// nothing at all: putting `let out: Vec<f64> = ....collect(); Ok(out)`
-    /// back inside it leaves every other test in the crate green.
+    /// The two correlations widen both operands, because they compare the
+    /// template against the image at every offset and read the whole template
+    /// per output sample. [`Raster::try_compass`] no longer widens anything:
+    /// #790 folds each result into the combine off its own bytes, so what its
+    /// arm of this test pins now is that the combine accumulator still goes
+    /// through [`try_buffer`] and that the number of reservations one compass
+    /// makes is three and not seven.
     ///
     /// The count is the load-bearing half for compass, for the reason
     /// `sharpen_scratch_planes_are_fallible_not_aborting` gives: `.collect()`
@@ -3866,9 +3866,9 @@ mod tests {
         let (ok, calls) = with_conv_buffer_probe(u64::MAX, compass);
         assert!(ok.is_ok());
         assert_eq!(
-            calls, 6,
-            "two traversals reserve a window each, then each of the two results is widened and \
-             the combine reserves twice"
+            calls, 3,
+            "two traversals reserve a window each and the combine reserves its accumulator; \
+             nothing widens a result and nothing materialises the clipped samples"
         );
 
         let (spcor, calls) = with_conv_buffer_probe(u64::MAX, || im.try_spcor(&template));

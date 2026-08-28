@@ -590,8 +590,8 @@ const BUDGETS: &[Budget] = &[
         carrier: "Rgb8",
         src: rgb8,
         run: |src| src.try_compass(&box3(), 4, Angle45::D45, Combine::Max, Precision::Integer),
-        allocs: 11,
-        live_per_pixel: 159,
+        allocs: 6,
+        live_per_pixel: 39,
     },
     Budget {
         op: "try_sharpen",
