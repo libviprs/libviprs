@@ -545,6 +545,7 @@ mod tests {
     /// the file back yields exactly [`Raster::encode_to_buffer`]'s bytes and
     /// decodes to the original raster.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn file_target_writes_and_reads_back_identical_bytes() {
         let raster = sample_raster();
         let expected = raster.encode_to_buffer("png").unwrap();
@@ -575,6 +576,7 @@ mod tests {
 
     /// `from_file` records the path; `new` leaves the filename unset.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn source_filename_reflects_construction() {
         let bytes = sample_raster().encode_to_buffer("png").unwrap();
         let source = Source::new(&bytes[..]);

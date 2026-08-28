@@ -644,7 +644,7 @@ impl DeclaredGeometry {
 /// | Field | `image` raster path | native `.v` reader | TIFF page readers |
 /// |---|---|---|---|
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
-/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
+/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in the shared `decode_reader` path, re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
 /// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read, and on the pixel body itself, priced from the declared header geometry (issue #710) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
@@ -674,7 +674,8 @@ impl DeclaredGeometry {
 /// rejected inside the `image` crate via [`image::Limits`], so it arrives as
 /// [`SourceError::Decode`] wrapping [`image::ImageError::Limits`] — **not**
 /// [`SourceError::CoordLimitExceeded`], which is reserved for the
-/// `max_coord` check applied by [`decode_reader`] / the `.v` reader. Because
+/// `max_coord` check applied by the shared `decode_reader` path and the `.v`
+/// reader. Because
 /// the default `max_width` / `max_height` (65,535) sit far below the default
 /// `max_coord` (10,000,000), a raster dimension between those bounds trips
 /// the `image::Limits` path first; `CoordLimitExceeded` is what you see once
@@ -703,7 +704,7 @@ pub struct DecodeLimits {
     /// per decode on the declared header geometry — before any pixel
     /// allocation — by **every** decoder: the native `.v` reader and the
     /// `image`-crate raster path (PNG/JPEG/TIFF) alike, both routing
-    /// through [`DecodeLimits::check_coord`] and returning
+    /// through one shared `check_coord` helper on this struct and returning
     /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This is
     /// the sole coordinate-ceiling knob: it replaced an earlier
     /// process-global whose races under concurrent jobs made the ceiling
@@ -1004,7 +1005,8 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 ///
 /// The decode is served through a process-global, bounded-LRU load cache
-/// (see [`LoadCache`]): the first load of a path is decoded from disk and
+/// (mirroring libvips' bounded, LRU-evicted operation cache): the first load
+/// of a path is decoded from disk and
 /// cached, and every later call returns that cached raster even if the
 /// file has since changed on disk. Use [`decode_file_with_options`] with
 /// `revalidate = true` to force a re-read, or [`Raster::invalidate`] to
@@ -1023,7 +1025,7 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// since changed on disk. With `revalidate = true` the cache lookup is
 /// skipped, the file is re-read and decoded fresh, and the cache entry for
 /// `path` is refreshed so subsequent plain [`decode_file`] calls see the
-/// new image. See [`LoadCache`] for the caching contract and its
+/// new image. See [`decode_file`] for the caching contract and its
 /// libvips-binding rationale.
 ///
 /// # Errors
@@ -1068,7 +1070,7 @@ impl Raster {
     /// memory) has nothing cached under a path, so this is a no-op for it.
     /// The recorded filename is canonicalized to the same identity the load
     /// keyed off, so invalidation reliably drops the entry even when this
-    /// raster's filename spells the path differently. See [`LoadCache`] for
+    /// raster's filename spells the path differently. See [`decode_file`] for
     /// the caching contract.
     pub fn invalidate(&mut self) {
         if let Some(MetadataValue::Str(filename)) = self.fields.get("filename") {
@@ -2613,6 +2615,7 @@ mod tests {
      * filesystem round-trip (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_from_disk() {
         let png = create_test_png(8, 8);
 
@@ -3600,6 +3603,7 @@ mod tests {
      * `Gray8` raster from `decode_file` and `decode_bytes`, right way up.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fits_reaches_its_codec_from_both_entry_points() {
         let raster = Raster::new(4, 1, PixelFormat::Gray8, vec![3, 1, 4, 1]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3645,6 +3649,7 @@ mod tests {
      * `AllocLimitExceeded { what: "image file body" }` from the second.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_bounds_the_whole_file_read() {
         let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3701,6 +3706,7 @@ mod tests {
      * `AllocLimitExceeded { needed_bytes: n }`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_file_body_ceiling_is_inclusive() {
         let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
         let file = raster.encode_fits().unwrap();
@@ -3824,6 +3830,7 @@ mod tests {
      * Output: the 16x16 raster, decoded.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_file_body_ceiling_leaves_the_streaming_path_alone() {
         let png = create_test_png(16, 16);
         let dir = tempfile::tempdir().unwrap();
@@ -3845,6 +3852,7 @@ mod tests {
      * first pixel at the half-bit value vips prints.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn radiance_reaches_its_codec_from_both_entry_points() {
         let mut file = Vec::new();
         file.extend_from_slice(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 6\n");
@@ -4183,6 +4191,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sequential_matches_decode_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seq.v");
@@ -4197,6 +4206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_with_shrink_reduces_dimensions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.v");
