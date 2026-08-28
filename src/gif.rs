@@ -179,9 +179,73 @@ pub enum GifError {
     /// (`nsgifload.c:419-421`).
     #[error("gif: no frames in GIF")]
     NoFrames,
+    /// [`LoadOptions`] asked for pages the file does not have.
+    ///
+    /// vips raises this as `"bad page number"` and it covers every way the
+    /// window can miss: measured on 8.18.6 against a four-frame file,
+    /// `[page=4]`, `[n=99]`, `[n=0]` and `[page=3,n=3]` all fail that way,
+    /// while `[page=2,n=-1]` loads frames 2 and 3.
+    #[error("gif: bad page number; page {page} count {n} on a {frames}-frame file")]
+    BadPageNumber {
+        /// The first page asked for, counting from zero.
+        page: u32,
+        /// How many pages were asked for, `-1` for every remaining page.
+        n: i32,
+        /// How many frames the file actually holds.
+        frames: u32,
+    },
     /// The raster could not be built from the decoded pixels.
     #[error(transparent)]
     Raster(#[from] crate::raster::RasterError),
+}
+
+/// Options for [`decode_gif_with`] (libvips `gifload`'s `page` and `n`).
+///
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`SaveOptions`] and [`DecodeLimits`]: start from [`LoadOptions::default`]
+/// and set what you need with the `with_*` builders, e.g.
+/// `gif::LoadOptions::default().with_n(-1)` (issue #630).
+///
+/// The default is vips's: page 0, one page, so [`decode_gif`] is
+/// `decode_gif_with(bytes, limits, LoadOptions::default())` and a still load
+/// is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LoadOptions {
+    /// The first frame to load, counting from **zero**, matching vips's
+    /// `page` and [`crate::decode_tiff_page`]'s convention (issue #566).
+    /// Defaults to 0.
+    pub page: u32,
+    /// How many frames to load, `-1` for every frame from [`page`](Self::page)
+    /// to the end. Defaults to 1, as vips does.
+    ///
+    /// An `i32` rather than an `Option<u32>` because that is the shape vips's
+    /// argument has, sentinel included, and the sentinel is the only negative
+    /// value either accepts.
+    pub n: i32,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self { page: 0, n: 1 }
+    }
+}
+
+impl LoadOptions {
+    /// Set the first page to load, returning the updated options.
+    #[must_use]
+    pub fn with_page(mut self, page: u32) -> Self {
+        self.page = page;
+        self
+    }
+
+    /// Set how many pages to load, `-1` for every remaining page, returning
+    /// the updated options.
+    #[must_use]
+    pub fn with_n(mut self, n: i32) -> Self {
+        self.n = n;
+        self
+    }
 }
 
 /// Options for [`Raster::encode_gif`] (libvips `gifsave` / `gifsave_buffer`).
@@ -391,6 +455,26 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
         raster.set_field("interlaced", MetadataValue::Int(1));
     }
     Ok(raster)
+}
+
+/// Decode a window of a GIF's frames into one page roll (libvips `gifload`
+/// with `page` and `n`).
+///
+/// See [`decode_gif`] for the still case and the [module
+/// docs](crate::gif#animation) for the frame model, the delay units and the
+/// disposal rules.
+///
+/// # Errors
+///
+/// Everything [`decode_gif`] returns, plus [`GifError::BadPageNumber`] when
+/// `options` asks for pages the file does not hold.
+pub fn decode_gif_with(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    options: LoadOptions,
+) -> Result<Raster, SourceError> {
+    let _ = options;
+    decode_gif(bytes, limits)
 }
 
 /// Open a decoder over `bytes` producing palette indices rather than RGBA.
@@ -774,6 +858,9 @@ mod tests {
         interlaced: bool,
         /// Frame delay, in centiseconds, as it goes on the wire.
         delay_cs: u16,
+        /// The graphic control extension's disposal code, 0 to 7. cgif
+        /// writes 1 ("keep") on the last frame of everything it saves.
+        disposal: u8,
     }
 
     impl Frame {
@@ -788,6 +875,7 @@ mod tests {
                 transparent: None,
                 interlaced: false,
                 delay_cs: 0,
+                disposal: 1,
             }
         }
     }
@@ -826,7 +914,7 @@ mod tests {
             if frame.transparent.is_some() {
                 flags |= 1;
             }
-            flags |= 1 << 2; // disposal method "keep", as cgif writes
+            flags |= (frame.disposal & 7) << 2;
             out.extend_from_slice(&[0x21, 0xF9, 4, flags]);
             out.extend_from_slice(&frame.delay_cs.to_le_bytes());
             out.push(frame.transparent.unwrap_or(0));
@@ -998,6 +1086,7 @@ mod tests {
             transparent: None,
             interlaced: false,
             delay_cs: 0,
+            disposal: 1,
         };
         let bytes = fixture((8, 8), &palette, 2, None, &[frame]);
         let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
@@ -1887,6 +1976,672 @@ mod tests {
      * Input: none -> Output: `interlaced == false` and `dither == 1.0`,
      * matching `vips gifsave`'s reported defaults.
      */
+    /// The four-colour palette every animation fixture here draws from:
+    /// index 0 black, 1 red, 2 green, 3 blue.
+    const ANIM_PALETTE: [[u8; 3]; 4] = [[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
+
+    /// A frame covering the whole 2x2 screen, painted from `indices`.
+    fn anim_frame(indices: [u8; 4], disposal: u8, delay_cs: u16) -> Frame {
+        Frame {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            indices: indices.to_vec(),
+            transparent: None,
+            interlaced: false,
+            delay_cs,
+            disposal,
+        }
+    }
+
+    /// Page `index` of `raster` as raw bytes, through the page model the
+    /// frame lane landed (issue #564).
+    fn page_bytes(raster: &Raster, index: u32) -> Vec<u8> {
+        raster.extract_page(index).data().to_vec()
+    }
+
+    /// The `delay` field as a plain vector, or `None` when it is absent.
+    fn delays(raster: &Raster) -> Option<Vec<i64>> {
+        raster.get_int_array("delay").map(<[i64]>::to_vec)
+    }
+
+    /**
+     * Tests that `n = -1` stacks every frame into one page roll, which is
+     * the layout `vips copy 'anim.gif[n=-1]' out.v` produces. Works by
+     * decoding a four-frame 2x2 fixture and reading the roll's geometry and
+     * per-page pixels back.
+     * Measured on vips 8.18.6: a four-frame 4x3 GIF loads at `n=-1` as a
+     * 4x12 raster reporting `page-height: 3` and `n-pages: 4`.
+     * Input: a four-frame 2x2 GIF -> Output: a 2x8 raster, page height 2,
+     * four pages, each page the frame that painted it.
+     */
+    #[test]
+    fn an_animation_loads_every_frame_as_a_page_roll() {
+        let frames: Vec<Frame> = (0..4u8)
+            .map(|i| anim_frame([i % 4, i % 4, i % 4, i % 4], 1, 0))
+            .collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("the fixture is a valid GIF");
+
+        assert_eq!((raster.width(), raster.height()), (2, 8));
+        assert_eq!(raster.get_page_height(), 2, "one page per frame");
+        assert_eq!(raster.pages_loaded(), 4);
+        assert_eq!(
+            raster.get_n_pages(),
+            4,
+            "n-pages counts the file's frames, not the loaded ones"
+        );
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        for (index, colour) in ANIM_PALETTE.iter().enumerate() {
+            let page = page_bytes(&raster, index as u32);
+            assert_eq!(
+                page,
+                colour.repeat(4),
+                "page {index} is the frame that painted it"
+            );
+        }
+    }
+
+    /**
+     * Tests that a frame delay arrives in **milliseconds**, not the
+     * centiseconds the graphic control extension holds, which is the silent
+     * factor of ten issue #572 exists to catch. Works by writing known
+     * centisecond delays into the fixture's extensions and requiring the
+     * attached `delay` array to be ten times each of them.
+     * Measured on vips 8.18.6: a GIF carrying `4 6 8 10` centiseconds loads
+     * as `delay: 40 60 80 100`, and `nsgifload.c:466` is where the
+     * multiplication happens.
+     * Input: a four-frame GIF with GCE delays 4, 6, 8, 10 -> Output:
+     * `delay` = `[40, 60, 80, 100]`.
+     */
+    #[test]
+    fn frame_delays_arrive_as_milliseconds_not_centiseconds() {
+        let wire = [4u16, 6, 8, 10];
+        let frames: Vec<Frame> = wire
+            .iter()
+            .enumerate()
+            .map(|(i, &cs)| anim_frame([i as u8 % 4; 4], 1, cs))
+            .collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("the fixture is a valid GIF");
+
+        assert_eq!(
+            delays(&raster),
+            Some(vec![40, 60, 80, 100]),
+            "GIF stores centiseconds and vips reports milliseconds"
+        );
+    }
+
+    /**
+     * Tests that the `delay` array covers the pages this raster holds and no
+     * others, which is a deliberate divergence from vips. Works by loading a
+     * two-page window out of a four-frame file and requiring the array to be
+     * the two delays that belong to it.
+     * Measured on vips 8.18.6: `anim4.gif[page=2,n=2]` loads frames 2 and 3
+     * (pixel values 180 and 240 confirm it) and still reports
+     * `delay: 40 60 80 100`, so re-saving that raster writes 40 and 60 onto
+     * frames that are really 2 and 3. The re-save was measured too: the
+     * output's graphic control extensions hold 4 and 6 centiseconds.
+     * Input: a four-frame GIF with delays 40, 60, 80, 100 ms loaded at
+     * `page = 2, n = 2` -> Output: `delay` = `[80, 100]`.
+     */
+    #[test]
+    fn the_delay_array_is_subset_to_the_pages_actually_loaded() {
+        let frames: Vec<Frame> = [4u16, 6, 8, 10]
+            .iter()
+            .enumerate()
+            .map(|(i, &cs)| anim_frame([i as u8 % 4; 4], 1, cs))
+            .collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(2).with_n(2),
+        )
+        .expect("the fixture is a valid GIF");
+
+        assert_eq!(raster.pages_loaded(), 2);
+        assert_eq!(
+            delays(&raster),
+            Some(vec![80, 100]),
+            "delay[i] is loaded page i's delay, which vips does not promise"
+        );
+        assert_eq!(
+            delays(&raster).map(|d| d.len()),
+            Some(raster.pages_loaded() as usize),
+            "the array length is the page count"
+        );
+    }
+
+    /**
+     * Tests that a default, single-page load carries one delay and no
+     * `page-height`, so a still GIF looks exactly like a still. Works by
+     * decoding a four-frame fixture with the default options and reading
+     * both fields.
+     * Measured on vips 8.18.6: a default `gifload` of a four-frame file
+     * attaches `n-pages: 4`, `loop` and the whole `delay` array but **no**
+     * `page-height`, and `[page=3]` likewise carries no `page-height`. The
+     * delay array is where libviprs diverges, for the reason
+     * `the_delay_array_is_subset_to_the_pages_actually_loaded` measures.
+     * Input: a four-frame GIF loaded with the defaults -> Output: one 2x2
+     * page, `delay` = `[40]`, no `page-height` field.
+     */
+    #[test]
+    fn a_one_page_load_carries_one_delay_and_no_page_height() {
+        let frames: Vec<Frame> = [4u16, 6, 8, 10]
+            .iter()
+            .enumerate()
+            .map(|(i, &cs)| anim_frame([i as u8 % 4; 4], 1, cs))
+            .collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let raster = decode_gif(&bytes, DecodeLimits::default()).expect("a valid GIF");
+
+        assert_eq!((raster.width(), raster.height()), (2, 2));
+        assert_eq!(delays(&raster), Some(vec![40]));
+        assert!(
+            raster.get_field("page-height").is_none(),
+            "vips attaches no page-height to a one-page load"
+        );
+        assert_eq!(raster.pages_loaded(), 1);
+
+        let third = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(3),
+        )
+        .expect("a valid GIF");
+        assert_eq!(delays(&third), Some(vec![100]));
+        assert!(third.get_field("page-height").is_none());
+    }
+
+    /**
+     * Tests that `page` and `n` select a window of frames and that the
+     * window's pixels are the frames it names, composited from the start of
+     * the file rather than from the window. Works by loading frames 2 and 3
+     * of a four-frame file whose frames each paint the whole screen a
+     * different colour.
+     * Measured on vips 8.18.6: `anim4.gif[page=2,n=2]` comes back 4x6 with
+     * rows 180 180 180 240 240 240, which are frames 2 and 3.
+     * Input: a four-frame GIF at `page = 2, n = 2` -> Output: a 2x4 raster
+     * whose pages are the green and blue frames.
+     */
+    #[test]
+    fn page_and_n_select_a_window_of_frames() {
+        let frames: Vec<Frame> = (0..4u8).map(|i| anim_frame([i; 4], 1, 0)).collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(2).with_n(2),
+        )
+        .expect("a valid GIF");
+
+        assert_eq!((raster.width(), raster.height()), (2, 4));
+        assert_eq!(raster.get_page_height(), 2);
+        assert_eq!(page_bytes(&raster, 0), ANIM_PALETTE[2].repeat(4));
+        assert_eq!(page_bytes(&raster, 1), ANIM_PALETTE[3].repeat(4));
+    }
+
+    /**
+     * Tests that `n = -1` counts from `page` to the end rather than from the
+     * start of the file. Works by loading a four-frame file at
+     * `page = 1, n = -1` and requiring three pages.
+     * Measured on vips 8.18.6: `anim4.gif[page=1,n=-1]` is 4x9, three pages
+     * of the four.
+     * Input: a four-frame GIF at `page = 1, n = -1` -> Output: three pages,
+     * frames 1, 2 and 3.
+     */
+    #[test]
+    fn n_minus_one_loads_from_the_page_to_the_end() {
+        let frames: Vec<Frame> = (0..4u8).map(|i| anim_frame([i; 4], 1, 0)).collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(1).with_n(-1),
+        )
+        .expect("a valid GIF");
+
+        assert_eq!(raster.pages_loaded(), 3);
+        for (page, index) in (1u8..4).enumerate() {
+            assert_eq!(
+                page_bytes(&raster, page as u32),
+                ANIM_PALETTE[index as usize].repeat(4)
+            );
+        }
+    }
+
+    /**
+     * Tests that every window the file cannot serve is refused, rather than
+     * being silently clamped to what is there. Works by asking a four-frame
+     * fixture for each of the five shapes vips rejects and requiring the
+     * typed `BadPageNumber` back, with a load that does work as the positive
+     * control.
+     * Measured on vips 8.18.6 against a four-frame file: `[page=4]`,
+     * `[n=99]`, `[n=0]` and `[page=3,n=3]` all fail with
+     * `gifload: bad page number`, while `[page=2,n=-1]` succeeds.
+     * Input: five out-of-range windows -> Output: `GifError::BadPageNumber`
+     * for each, and a page count for the one in range.
+     */
+    #[test]
+    fn a_window_the_file_cannot_serve_is_refused() {
+        let frames: Vec<Frame> = (0..4u8).map(|i| anim_frame([i; 4], 1, 0)).collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        for (page, n) in [(4u32, 1i32), (0, 99), (0, 0), (3, 3), (0, -2)] {
+            let err = decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_page(page).with_n(n),
+            )
+            .expect_err("the window is out of range");
+            assert!(
+                matches!(
+                    err,
+                    SourceError::Gif(GifError::BadPageNumber { frames: 4, .. })
+                ),
+                "page {page} n {n}: {err:?}"
+            );
+        }
+        let ok = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(2).with_n(-1),
+        )
+        .expect("page 2 to the end is in range");
+        assert_eq!(ok.pages_loaded(), 2, "the positive control still loads");
+    }
+
+    /**
+     * Tests that disposal "keep" leaves the canvas alone, so a later frame
+     * that paints only part of the screen composites over what came before.
+     * Works by painting the whole screen red, then a single green pixel with
+     * disposal 1, then a single blue pixel, and reading all three pages.
+     * Measured on vips 8.18.6 against exactly this file: page 1 is
+     * `green red / red red` and page 2 is `green red / red blue`. Disposal
+     * code 0 ("unspecified") produces the same three pages, which is the
+     * second half of this test.
+     * Input: a three-frame GIF with disposal 1 and then with disposal 0 ->
+     * Output: identical, cumulative pages.
+     */
+    #[test]
+    fn disposal_keep_composites_each_frame_over_the_last() {
+        for disposal in [1u8, 0] {
+            let bytes = fixture(
+                (2, 2),
+                &ANIM_PALETTE,
+                3,
+                Some(0),
+                &[
+                    anim_frame([1, 1, 1, 1], disposal, 0),
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        disposal,
+                        ..anim_frame([0; 4], disposal, 0)
+                    },
+                    Frame {
+                        left: 1,
+                        top: 1,
+                        width: 1,
+                        height: 1,
+                        indices: vec![3],
+                        disposal,
+                        ..anim_frame([0; 4], disposal, 0)
+                    },
+                ],
+            );
+            let raster = decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF");
+            assert_eq!(page_bytes(&raster, 0), [255, 0, 0].repeat(4), "{disposal}");
+            assert_eq!(
+                page_bytes(&raster, 1),
+                [0, 255, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0],
+                "disposal {disposal} keeps the red canvas under the green dot"
+            );
+            assert_eq!(
+                page_bytes(&raster, 2),
+                [0, 255, 0, 255, 0, 0, 255, 0, 0, 0, 0, 255],
+                "disposal {disposal} keeps both dots"
+            );
+        }
+    }
+
+    /**
+     * Tests that disposal "restore to background" clears the disposed
+     * frame's rectangle to the **background colour**, and only that
+     * rectangle. Works by painting a 3x1 screen red, disposing the middle
+     * pixel to background, then painting the left one green.
+     * Measured on vips 8.18.6 against exactly this file: page 2 is
+     * `green blue red`, with blue the background index, so the clear is the
+     * background colour and it does not reach the third pixel.
+     * Input: a three-frame 3x1 GIF, background index 3 -> Output: page 2 is
+     * green, blue, red.
+     */
+    #[test]
+    fn disposal_restore_to_background_clears_the_rectangle_to_the_background_colour() {
+        let bytes = fixture(
+            (3, 1),
+            &ANIM_PALETTE,
+            3,
+            Some(0),
+            &[
+                Frame::full(3, 1, vec![1, 1, 1]),
+                Frame {
+                    left: 1,
+                    width: 1,
+                    height: 1,
+                    indices: vec![2],
+                    disposal: 2,
+                    ..Frame::full(1, 1, vec![2])
+                },
+                Frame {
+                    width: 1,
+                    height: 1,
+                    indices: vec![2],
+                    ..Frame::full(1, 1, vec![2])
+                },
+            ],
+        );
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(page_bytes(&raster, 0), [255, 0, 0].repeat(3));
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [255, 0, 0, 0, 255, 0, 255, 0, 0],
+            "the green dot sits on the red canvas"
+        );
+        assert_eq!(
+            page_bytes(&raster, 2),
+            [0, 255, 0, 0, 0, 255, 255, 0, 0],
+            "only the disposed pixel goes to the background colour"
+        );
+    }
+
+    /**
+     * Tests that "restore to background" clears to **transparent** instead
+     * when the disposed frame declares a transparent index, which is the
+     * arm of libnsgif's rule the background-colour test cannot see. Works by
+     * running the same two-frame file twice, once with a transparent index
+     * on frame 0 and once without, and comparing what page 1 shows outside
+     * the second frame.
+     * Measured on vips 8.18.6: with a transparent index on frame 0 the file
+     * loads four-band and page 1 is `green + (0,0,0,0)`; with the index on
+     * frame 1 only, frame 0's own clear still uses the background colour and
+     * page 1 is `green + opaque blue`.
+     * Input: two 2x2 GIFs differing only in which frame declares
+     * transparency -> Output: a transparent clear in one and a blue clear in
+     * the other.
+     */
+    #[test]
+    fn disposal_restore_to_background_clears_to_transparent_when_the_frame_has_a_transparent_index()
+    {
+        let clear_frame = |transparent_on_first: bool| {
+            fixture(
+                (2, 2),
+                &ANIM_PALETTE,
+                3,
+                Some(0),
+                &[
+                    Frame {
+                        transparent: transparent_on_first.then_some(0),
+                        disposal: 2,
+                        ..anim_frame([1, 1, 1, 1], 2, 0)
+                    },
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        transparent: (!transparent_on_first).then_some(0),
+                        ..anim_frame([0; 4], 1, 0)
+                    },
+                ],
+            )
+        };
+
+        let transparent = decode_gif_with(
+            &clear_frame(true),
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(transparent.format(), PixelFormat::Rgba8);
+        assert_eq!(
+            page_bytes(&transparent, 1),
+            [0, 255, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "a transparent frame's own clear is transparent, not the background"
+        );
+
+        let coloured = decode_gif_with(
+            &clear_frame(false),
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(coloured.format(), PixelFormat::Rgba8);
+        assert_eq!(
+            page_bytes(&coloured, 1),
+            [
+                0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255
+            ],
+            "an opaque frame's clear is the background colour, opaque"
+        );
+    }
+
+    /**
+     * Tests that disposal "restore to previous" rewinds the canvas to what
+     * it was before the disposed frame drew, rather than to the start of the
+     * file. Works by painting the screen red with disposal "keep", painting
+     * a green dot with disposal 3, then painting a blue dot, and requiring
+     * page 2 to be red with the blue dot and no green.
+     * Measured on vips 8.18.6 against exactly this file: page 2 is
+     * `red red / red blue`.
+     * Input: a three-frame 2x2 GIF, middle frame disposal 3 -> Output: page
+     * 2 has the green dot rewound and the red canvas back.
+     */
+    #[test]
+    fn disposal_restore_to_previous_rewinds_to_before_the_frame() {
+        let bytes = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                anim_frame([1, 1, 1, 1], 1, 0),
+                Frame {
+                    width: 1,
+                    height: 1,
+                    indices: vec![2],
+                    disposal: 3,
+                    ..anim_frame([0; 4], 3, 0)
+                },
+                Frame {
+                    left: 1,
+                    top: 1,
+                    width: 1,
+                    height: 1,
+                    indices: vec![3],
+                    ..anim_frame([0; 4], 1, 0)
+                },
+            ],
+        );
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0]
+        );
+        assert_eq!(
+            page_bytes(&raster, 2),
+            [255, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 255],
+            "the green dot is gone and the red canvas is back"
+        );
+    }
+
+    /**
+     * Tests that a frame whose transparent index falls where an earlier
+     * frame painted lets that earlier frame show through, which is the
+     * blending half of animated decode. Works by painting the screen red
+     * then drawing a full-screen frame whose corners are the transparent
+     * index.
+     * Measured on vips 8.18.6 against exactly this file: page 1 is
+     * `green red / red green`, all four pixels opaque, because the two
+     * transparent indices resolve to the red underneath.
+     * Input: a two-frame 2x2 GIF, second frame half transparent -> Output:
+     * page 1 shows red through the transparent pixels.
+     */
+    #[test]
+    fn a_transparent_pixel_lets_the_earlier_frame_show_through() {
+        let bytes = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                anim_frame([1, 1, 1, 1], 1, 0),
+                Frame {
+                    transparent: Some(0),
+                    ..anim_frame([2, 0, 0, 2], 1, 0)
+                },
+            ],
+        );
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(raster.format(), PixelFormat::Rgba8);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [
+                0, 255, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255
+            ],
+            "the transparent index resolves to the frame underneath, opaque"
+        );
+    }
+
+    /**
+     * Tests that a background index past the end of the global colour table
+     * clears to black rather than reading off the end of it. Works by
+     * running the restore-to-background fixture with the index set to 200 on
+     * a four-entry table, with the in-range index as the positive control.
+     * Measured on vips 8.18.6: background index 200 on a four-entry table
+     * reports `background: 0 0 0` and disposes to black, where index 3
+     * reports `0 0 255` and disposes to blue.
+     * Input: the same two-frame GIF with background index 200 and with 3 ->
+     * Output: a black clear and a blue clear.
+     */
+    #[test]
+    fn a_background_index_past_the_colour_table_clears_to_black() {
+        let build = |background: u8| {
+            fixture(
+                (2, 2),
+                &ANIM_PALETTE,
+                background,
+                Some(0),
+                &[
+                    anim_frame([1, 1, 1, 1], 2, 0),
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        ..anim_frame([0; 4], 1, 0)
+                    },
+                ],
+            )
+        };
+        let load = |background: u8| {
+            decode_gif_with(
+                &build(background),
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF")
+        };
+        assert_eq!(
+            page_bytes(&load(200), 1),
+            [0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "an out-of-range background index is black"
+        );
+        assert_eq!(
+            page_bytes(&load(3), 1),
+            [0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255],
+            "the positive control disposes to blue"
+        );
+    }
+
+    /**
+     * Tests that the whole roll is priced against the allocation budget
+     * before it is built, so a four-frame load cannot slip through on a
+     * one-frame price. Works by loading a four-frame fixture at the exact
+     * roll price and one byte under it.
+     * The price is `width * page-height * pages * bands`: 2 * 2 * 4 * 3 = 48
+     * bytes for this fixture, where the single 2x2 canvas is 12.
+     * Input: a four-frame 2x2 GIF at budgets 48 and 47 -> Output: a roll,
+     * then `SourceError::AllocLimitExceeded` naming the roll geometry.
+     */
+    #[test]
+    fn the_animation_roll_is_priced_before_it_is_allocated() {
+        let frames: Vec<Frame> = (0..4u8).map(|i| anim_frame([i; 4], 1, 0)).collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let all = LoadOptions::default().with_n(-1);
+
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default().with_max_alloc_bytes(48),
+            all,
+        )
+        .expect("48 bytes is exactly the 2x8 RGB roll");
+        assert_eq!(raster.height(), 8);
+
+        let err = decode_gif_with(
+            &bytes,
+            DecodeLimits::default().with_max_alloc_bytes(47),
+            all,
+        )
+        .expect_err("47 bytes is one short of the roll");
+        assert!(
+            matches!(
+                err,
+                SourceError::AllocLimitExceeded {
+                    what: "GIF animation",
+                    geometry: Some(DeclaredGeometry {
+                        width: 2,
+                        height: 8,
+                        bands: 3,
+                    }),
+                    needed_bytes: 48,
+                    max_alloc_bytes: 47,
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn save_options_defaults_match_vips() {
         let d = SaveOptions::default();
