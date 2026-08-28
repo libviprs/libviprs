@@ -2075,6 +2075,49 @@ mod tests {
         );
     }
 
+    /**
+     * Tests the whole `hist_equal` chain against libvips, which is the
+     * end-to-end control on the histogram width: the chain is
+     * `maplut(hist_norm(hist_cum(hist_find)))` and `hist_equal` fuses it,
+     * so it has to be sized by the same rule `hist_find` is (issue #823).
+     * Works by equalising each case libvips was measured on and comparing
+     * every output sample, with the 8-bit cases alongside as the control
+     * that the fixed-256 path is untouched.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6:
+     * `uchar [7, 7, 7] -> [255, 255, 255]`,
+     * `ushort [7, 7, 7] -> [7, 7, 7]`,
+     * `ushort [4096, 4096, 9] -> [4096, 4096, 1365]`,
+     * `uchar [0, 128, 255] -> [85, 170, 255]`,
+     * `ushort [0, 1000, 65535] -> [21845, 43690, 65535]`.
+     * The two constant rows are the pair that matters: a constant 8-bit
+     * band equalises to 255 and a constant 16-bit band equalises to
+     * **itself**, because the table is only as wide as the value present.
+     */
+    #[test]
+    fn hist_equal_matches_vips() {
+        for (vals, want) in [
+            (vec![7u16, 7, 7], vec![7.0, 7.0, 7.0]),
+            (vec![4096, 4096, 9], vec![4096.0, 4096.0, 1365.0]),
+            (vec![0, 1000, 65535], vec![21845.0, 43690.0, 65535.0]),
+        ] {
+            let n = u32::try_from(vals.len()).unwrap();
+            let eq = gray16(n, 1, &vals).hist_equal();
+            assert_eq!(eq.format(), PixelFormat::Gray16);
+            let got: Vec<f64> = (0..n).map(|x| eq.getpoint(x, 0)[0]).collect();
+            assert_eq!(got, want, "16-bit hist_equal of {vals:?}");
+        }
+        for (vals, want) in [
+            (vec![7u8, 7, 7], vec![255.0, 255.0, 255.0]),
+            (vec![0, 128, 255], vec![85.0, 170.0, 255.0]),
+        ] {
+            let n = u32::try_from(vals.len()).unwrap();
+            let eq = gray(n, 1, vals.clone()).hist_equal();
+            assert_eq!(eq.format(), PixelFormat::Gray8);
+            let got: Vec<f64> = (0..n).map(|x| eq.getpoint(x, 0)[0]).collect();
+            assert_eq!(got, want, "8-bit hist_equal of {vals:?}");
+        }
+    }
+
     /// hist_equal maps each band with its own LUT: a band that is already
     /// full-range keeps its extremes while a narrow band spreads.
     #[test]
