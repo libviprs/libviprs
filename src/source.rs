@@ -2591,7 +2591,7 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 32] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 37] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -2697,6 +2697,25 @@ mod tests {
                 b"SIMPLE  =                    T",
                 Some(SniffedFormat::Fits),
             ),
+            // AVIF's signature sits at offset 4 with nothing pinned at 0,
+            // because bytes 0..4 are the `ftyp` box's own size. The three
+            // near-misses below are the ones that matter: HEIC and the
+            // image-sequence brand are deliberately not claimed, and a box
+            // whose type is `JXL ` rather than `ftyp` is JPEG XL even though
+            // it shares AVIF's shape.
+            (
+                "avif",
+                b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00",
+                Some(SniffedFormat::Avif),
+            ),
+            (
+                "avif with a 12-byte ftyp box",
+                b"\x00\x00\x00\x0cftypavif\x00\x00\x00\x00",
+                Some(SniffedFormat::Avif),
+            ),
+            ("heic is not avif", b"\x00\x00\x00\x20ftypheic", None),
+            ("avis is not avif", b"\x00\x00\x00\x20ftypavis", None),
+            ("ftyp with no brand", b"\x00\x00\x00\x20ftyp", None),
             ("fits free format", b"SIMPLE=T", None),
             ("fits without the keyword padding", b"SIMPLE = T", None),
             ("fits truncated", b"SIMPLE  ", None),
