@@ -851,3 +851,50 @@ fn every_recorded_fixture_hash_matches_the_committed_file() {
          checked too.)"
     );
 }
+
+/// No two records in one capture hash the same name differently (issue #779).
+///
+/// This is the same defect read off the JSON alone, with no filesystem
+/// involved, and it reaches three things the check above cannot. It sees a
+/// collision under `outputs/`, which is scratch nobody commits and nothing
+/// else can compare. It sees one on a path that leaves the captures
+/// altogether. And it fires in a fresh clone that has not run a single
+/// `capture.py`, because the contradiction is already written down: before
+/// this was fixed, `foreign-avif` said `fixtures/rgb8.avif` was `d5a55b1a…`
+/// in one record and `c1f34aad…` in another, and no more evidence than that
+/// was needed to know one of them was wrong.
+///
+/// Two records describing the SAME file with the same hash is fine and stays
+/// fine. The tree has none today, and it should not need one: what is being
+/// refused is the contradiction, not the sharing.
+#[test]
+fn no_two_records_hash_one_name_differently() {
+    let mut claims: BTreeMap<(String, String), BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for record in named_file_hashes() {
+        claims
+            .entry((record.area.clone(), record.named.replace('\\', "/")))
+            .or_default()
+            .entry(record.recorded.clone())
+            .or_default()
+            .push(record.label());
+    }
+    let contradictions: Vec<String> = claims
+        .iter()
+        .filter(|(_, hashes)| hashes.len() > 1)
+        .map(|((area, named), hashes)| {
+            let sides: Vec<String> = hashes
+                .iter()
+                .map(|(hash, rows)| format!("{} says {hash}", rows.join(" and ")))
+                .collect();
+            format!("{area} {named}: {}", sides.join("; "))
+        })
+        .collect();
+    assert!(
+        contradictions.is_empty(),
+        "one capture records two different hashes for one name, so at least \
+         one of those records describes a file that no longer exists:\n  {}\n\
+         The later write wins on disk. Give the earlier record its own \
+         fixture name and re-run that area's capture.py.",
+        contradictions.join("\n  ")
+    );
+}

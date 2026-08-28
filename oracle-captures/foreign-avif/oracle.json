@@ -47,11 +47,12 @@
         "10": "ushort / rgb16",
         "12": "ushort / rgb16"
       },
+      "why_the_8_bit_fixture_is_not_called_rgb8": "Because `fixtures/rgb8.avif` is record 2's file, saved from the 8-BIT ramp, and this row is the 16-bit ramp narrowed to 8. They are different images and they used to share the name: this row wrote first, record 2 overwrote it, and this row went on recording the sha256 and the byte count of a file that was no longer in the tree (#779). fixtures/rgb8_narrowed.avif is that file, under a name nothing else claims. capture.py now refuses to write any fixture name twice, so the next collision stops the capture instead of quietly losing an artefact.",
       "why_it_matters": "A port that decodes 10-bit AVIF into u8, or into u16 rescaled to full 0..65535 range, passes every header assertion (4x3, 3 bands, ushort, rgb16, bits-per-sample 10) and produces wrong pixels everywhere. The carrier is u16 and the scale is `value << (16 - bits)`.",
       "c_reference": "heifload.c:748-761 picks the format and interpretation from `bits_per_pixel > 8` and nothing else; heifload.c:1000-1016 does the byte swap and the shift; vips__heif_chroma at heifload.c:296-310 is what asks libheif for RRGGBB_BE above 8 bits.",
       "by_bitdepth": {
         "8": {
-          "fixture": "fixtures/rgb8.avif",
+          "fixture": "fixtures/rgb8_narrowed.avif",
           "sha256": "d5a55b1a4a56ec66c0cfcd573424f3b7efa4ebd1c529e18f3538f6603909f932",
           "bytes": 323,
           "saved_with": "--bitdepth 8 --lossless --keep none",
@@ -66,7 +67,7 @@
             "yoffset": "0",
             "xres": "1",
             "yres": "1",
-            "filename": "fixtures/rgb8.avif",
+            "filename": "fixtures/rgb8_narrowed.avif",
             "vips-loader": "heifload",
             "heif-primary": "0",
             "n-pages": "1",
