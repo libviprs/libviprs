@@ -118,6 +118,7 @@ annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_not
 annotated   not-detected tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
 annotated   not-detected tests/miri_ignore_convention.rs::no_process_spawning_test_can_run_under_miri
 annotated   not-detected tests/miri_ignore_convention.rs::the_annotated_set_stays_the_size_it_is_documented_to_be
+annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
 annotated   not-detected tests/pdfium_source_audit.rs::audit_gate_accepts_patched_core
 annotated   not-detected tests/workspace_layout.rs::root_workspace_contains_both_crates
 unannotated fs-detected  src/colour.rs::icc_transform_to_display_p3

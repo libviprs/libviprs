@@ -2699,6 +2699,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bilinear, nohalo and lbb keep the exact offset, because none of them reads a
   table in libvips either.
 
+- Untracked the two compiled Python files under `oracle-captures/`,
+  `foreign-analyze/__pycache__/capture.cpython-314.pyc` and the matching
+  `foreign-mat` one (issue #681). They are build artefacts of the capture
+  scripts next to them, tied to CPython 3.14, and nothing reads them.
+
+  The ordering is the part worth writing down. #673 adds an
+  `oracle-captures/.gitignore` that ignores `__pycache__/`, and an ignore rule
+  does nothing at all to a path that is already in the index. So that file
+  landing on its own would have left both of these exactly where they were and
+  stopped `git status` mentioning them, which is worse than either half by
+  itself. `git rm --cached` is what actually moves them, and it keeps the
+  working copies, so nobody loses a cache they were using.
+
+  `tests/oracle_capture_pins.rs` now asks git what it tracks under
+  `oracle-captures/` and fails on anything ending in `.pyc` or `.pyo` or
+  sitting under a `__pycache__/`. It has to ask git rather than walk the
+  directory, because the question is about the index and the filesystem cannot
+  answer it either way round: `git rm --cached` leaves the file on disk, and a
+  fresh clone does not have it whether or not anyone ran that command, so a
+  walk would go green in CI for a reason unrelated to the fix. The listing is
+  the thing that can come back empty and take the guard with it, so the test
+  anchors on capture scripts it knows are tracked before it reads anything into
+  an absence.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
