@@ -1616,6 +1616,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one file alone fails there rather than quietly un-mirroring the local gate,
   and it holds the docs job's own `name:` to naming every lint it denies.
 
+- The doc gate denies `rustdoc::redundant_explicit_links` too, and the 13 links
+  that carried a redundant explicit target no longer do (issue #795). Each was
+  written `[`Foo`](crate::path::Foo)` where the label alone already resolves to
+  the same destination, in `engine_builder.rs` (4), `engine.rs` (2), `jxl.rs`
+  (2) and one each in `draw.rs`, `sink.rs`, `sink_object_store.rs`,
+  `stream_verify.rs` and `verify.rs`.
+
+  Nothing rendered wrong, so this is not a rendering fix. It is that 13 standing
+  warnings is a floor which hides the fourteenth, and a warning stream nobody
+  reads is not a gate: that is exactly how the 33 private links above
+  accumulated unnoticed. `cargo doc --no-deps --all-features` is now **silent**,
+  so anything it prints is new.
+
 
 - `spcor` and `fastcor` stopped widening the whole image and stopped
   materialising their results twice. Both read the image as a sliding window of
