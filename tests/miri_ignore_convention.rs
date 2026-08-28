@@ -278,10 +278,10 @@ const ANCHOR_FILES: &[&str] = &[
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 209;
+const EXPECTED_SRC_ANNOTATIONS: usize = 213;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation.
-const EXPECTED_SRC_MODULES: usize = 23;
+const EXPECTED_SRC_MODULES: usize = 24;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -326,19 +326,18 @@ const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 18;
 /// on: the old form demanded the debt still exist and would have gone red on
 /// the change that cleared it.
 ///
-/// It is not empty today for a scheduling reason rather than a technical one.
-/// `src/resample.rs` was held by the lane resolving #692, #704, #705, #732,
-/// #733 and #736, with four pull requests open against that one file, while
-/// #739's sweep ran across the other 28. Annotating these four here would have
-/// been four hand-resolved conflicts in a module this change has no other
-/// business in. Issue #756 carries them, and this list is how they stay
-/// visible instead of becoming a quiet gap in an otherwise-enforced rule.
-const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[
-    "src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box",
-    "src/resample.rs::thumbnail_file_and_buffer_agree",
-    "src/resample.rs::thumbnail_free_fn_fits_the_width_box",
-    "src/resample.rs::thumbnail_unknown_profile_is_typed_error",
-];
+/// It is empty, and it got there the way the shape predicts. #739 left four
+/// names in it, all in `src/resample.rs`, because that file was held by the
+/// lane resolving #692, #704, #705, #732, #733 and #736 with four pull requests
+/// open against it. Those merged, #756 annotated the four, and emptying this
+/// cost nothing else: the assertion reads the list rather than depending on it,
+/// so no arm of the guard had to change. That is the whole difference between
+/// an exception list and the floor it replaced.
+///
+/// Keep it empty. A name added here is a test that can end the entire Miri
+/// session on its first syscall, so it wants a reason that survives review and
+/// an issue to carry it, which is what #756 was.
+const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 
 /// How many tests in the tree the filesystem detector finds, annotated or not.
 ///
