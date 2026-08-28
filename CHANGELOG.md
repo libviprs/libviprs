@@ -1736,6 +1736,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The AVIF oracle recorded a sha256 for an `rgb8.avif` that was not the file
+  in the tree** (issue #779). Two records in
+  `oracle-captures/foreign-avif/capture.py` wrote different images to
+  `fixtures/rgb8.avif`: the bit-depth carrier saved the 16-bit ramp narrowed to
+  8 bits, and the lossless-identity record then saved the 8-bit ramp over the
+  top of it. The later write won, so the carrier's row went on recording
+  `d5a55b1a…` / 323 bytes for a file that was `c1f34aad…` / 355 bytes, and its
+  `read_back` and `source_16bit` arrays described an artefact nobody could
+  open.
+
+  The narrowed image is now `fixtures/rgb8_narrowed.avif` and it is committed.
+  Re-running the capture against the pinned vips 8.18.6 reproduced
+  `d5a55b1a…` / 323 bytes exactly, so the carrier row was measured against the
+  narrowed image all along and only lost the file; the identity row was
+  measured against the committed `rgb8.avif` and was right. Of 1890 leaves in
+  that `oracle.json`, the re-run moved two, both the 8-bit row's file name, and
+  left all twelve existing fixtures byte-identical. `capture.py` now refuses to
+  write any name under `fixtures/` twice, so the next collision stops the
+  capture instead of quietly losing an artefact.
+
+  The half that matters is the guard, because nothing was looking.
+  `tests/oracle_capture_pins.rs` now hashes every committed file a capture
+  names and compares it to what was recorded, across every area: 95 rows, of
+  which exactly one disagreed. A second test reads the same defect off the JSON
+  alone, so a collision under `outputs/` or on a path outside the repository is
+  caught too, with no file to compare against. A green suite used to mean "the
+  recorded vips versions line up"; it now also means the pins describe the
+  tree.
+
 - `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
   containers whose allocation refusal is spent inside the `image` crate (issue
   #782). It has not been one since #686: WebP is decoded by libviprs, prices its
