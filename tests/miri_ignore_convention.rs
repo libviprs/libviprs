@@ -278,7 +278,15 @@ const EXPECTED_SRC_MODULES: usize = 8;
 /// the other seven, which is the failure this constant exists to catch. It
 /// caught my own miscount the first time I ran it: I wrote eleven, having
 /// forgotten the six that arrived with #693 in the commit underneath this one.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 17;
+///
+/// It then caught a second one, which is the better advertisement: #701 added
+/// `no_compiled_python_is_tracked_under_oracle_captures`, which shells out to
+/// `git ls-files`, and both PRs were green on their own branches. The count
+/// only moved when they landed together, and it is the eighteenth here for
+/// exactly that reason. This is a count that two file-disjoint changes can
+/// both be right about and still break, so move it in the same change that
+/// moves the population.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 18;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
