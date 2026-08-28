@@ -276,6 +276,40 @@ fn bins_for(kind: SampleKind) -> usize {
     }
 }
 
+/// The width libvips gives a histogram of `kind` whose largest bin index
+/// is `max_bin`.
+///
+/// `uchar` is the only format with a fixed table: it is 256 wide even for
+/// an image whose largest sample is 3. Every other format is sized to the
+/// data, `max_bin + 1`, with [`bins_for`] as the ceiling rather than the
+/// answer.
+///
+/// Measured on `/opt/homebrew/bin/vips` 8.18.6, `vips hist_find` widths:
+/// `ushort` `[0]` gives 1, `[0, 1000]` gives 1001, `[4096, 4096, 9]` gives
+/// 4097 and `[0, 1000, 65535]` gives 65536, while `uchar` `[3, 0]` and
+/// `uchar` `[255, 0]` both give 256.
+///
+/// The signed one-byte kind joins `U8`, because a `char` image histograms
+/// 256 wide: the `VipsStatisticClass` input cast has already turned it into
+/// a `uchar` by the time the table is sized. The 32-bit kinds join the
+/// data-sized group for the matching reason, since the same cast turns them
+/// into `ushort`.
+///
+/// This is deliberately *not* [`bins_for`], which answers a different
+/// question and must keep answering it: `hist_find_ndim` uses it as the
+/// value **range** it scales samples by, and measurement says that range is
+/// the depth's and not the data's. A `ushort` `[0, 5, 10]` and a `uchar`
+/// `[0, 5, 10]` both put all three samples in bin 0 at `--bins 10`.
+#[inline]
+fn hist_width(kind: SampleKind, max_bin: u32) -> usize {
+    match kind {
+        SampleKind::U8 | SampleKind::I8 => bins_for(kind),
+        SampleKind::U16 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            (max_bin as usize + 1).min(bins_for(kind))
+        }
+    }
+}
+
 /// The canonical format for a band count and sample kind, or a typed error.
 fn format_for(bands: usize, kind: SampleKind) -> Result<PixelFormat, HistogramError> {
     PixelFormat::with_kind(bands, kind).ok_or(HistogramError::TooManyBands { bands })
@@ -295,13 +329,18 @@ fn hist_len(r: &Raster) -> Result<usize, HistogramError> {
 }
 
 /// Full-precision per-band value histograms of an image.
+///
+/// Every band's table is the same width, taken from the largest bin index
+/// anywhere in the image, which is what libvips does: a two-band `ushort`
+/// image whose bands max at 10 and 5000 histograms 5001 wide over both
+/// bands. See [`hist_width`].
 fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
     let fmt = r.format();
     let bands = fmt.channels();
     let kind = fmt.kind();
-    let bins = bins_for(kind);
     let n = r.width() as usize * r.height() as usize;
     let data = r.data();
+    let bins = hist_width(kind, max_bin(data, kind, n * bands));
     let mut hists = vec![vec![0u64; bins]; bands];
     for i in 0..n {
         for (b, hist) in hists.iter_mut().enumerate() {
@@ -309,6 +348,19 @@ fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
         }
     }
     hists
+}
+
+/// The largest bin index over the first `count` flat samples of `data`.
+///
+/// Zero for an empty run, which gives a one-element histogram rather than
+/// an empty one; libvips does the same for an all-zero image, measured: a
+/// `ushort` `[0]` histograms 1 wide.
+#[inline]
+fn max_bin(data: &[u8], kind: SampleKind, count: usize) -> u32 {
+    (0..count)
+        .map(|i| read_flat(data, kind, i))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Row count for a [`Raster::hist_plot`] bar graph of `values`.
@@ -367,7 +419,10 @@ impl Raster {
     /// Compute the per-band value histogram, like `vips_hist_find` with the
     /// default `band` of -1.
     ///
-    /// The result is a 256x1 (8-bit input) or 65536x1 (16-bit input) image
+    /// The result is a `bins`x1 image, 256 wide for an 8-bit input and
+    /// `max + 1` wide (capped at 65536) for a 16-bit one, where `max` is
+    /// the largest sample anywhere in the image; see `hist_width` for the
+    /// libvips sweep behind that (issue #803). The result is an image
     /// with the input's band count: sample `(v, 0)` of band `b` is the
     /// number of band-`b` samples equal to `v`. Counts are written as
     /// 16-bit samples and saturate at `65535` (see the module notes on
@@ -379,8 +434,8 @@ impl Raster {
     /// allocation budget (only possible for extreme band counts).
     pub fn try_hist_find(&self) -> Result<Raster, HistogramError> {
         let bands = self.format().channels();
-        let bins = bins_for(self.format().kind());
         let hists = per_band_hist(self);
+        let bins = hists.first().map_or(1, Vec::len);
         let out_fmt = format_for(bands, SampleKind::U16)?;
         let mut out = Raster::zeroed(bins as u32, 1, out_fmt)?;
         let buf = out.data_mut();
@@ -406,7 +461,10 @@ impl Raster {
     /// Compute the value histogram of one band, like `vips_hist_find` with
     /// an explicit `band`.
     ///
-    /// The result is a one-band 256x1 or 65536x1 image; see
+    /// The result is a one-band image sized by **this band's** largest
+    /// sample, not the image's: on a 16-bit image whose band 0 maxes at 10
+    /// and band 1 at 5000, `hist_find_band(0)` is 11 wide and
+    /// `hist_find_band(1)` is 5001, matching libvips (issue #803). See
     /// [`Raster::try_hist_find`] for the count semantics.
     ///
     /// # Errors
@@ -418,9 +476,15 @@ impl Raster {
             return Err(HistogramError::InvalidBand { band, bands });
         }
         let kind = self.format().kind();
-        let bins = bins_for(kind);
         let n = self.width() as usize * self.height() as usize;
         let data = self.data();
+        // This band's own maximum, not the image's: `vips hist_find --band 0`
+        // on a two-band image whose bands max at 10 and 5000 gives 11.
+        let widest = (0..n)
+            .map(|i| read_flat(data, kind, i * bands + band as usize))
+            .max()
+            .unwrap_or(0);
+        let bins = hist_width(kind, widest);
         let mut hist = vec![0u64; bins];
         for i in 0..n {
             hist[read_flat(data, kind, i * bands + band as usize) as usize] += 1;
@@ -448,10 +512,11 @@ impl Raster {
     /// `vips_hist_find_indexed` with the default `sum` combine.
     ///
     /// For every pixel, the sample values of `self` are added to the output
-    /// element selected by the corresponding `index` pixel. The result has
-    /// one element per possible index value (256x1 for an 8-bit index,
-    /// 65536x1 for 16-bit) and the input's band count. Sums are written as
-    /// 16-bit samples and saturate at `65535`.
+    /// element selected by the corresponding `index` pixel. The result is
+    /// sized from the **index** image the same way [`Raster::try_hist_find`]
+    /// is sized from its input, 256 elements for an 8-bit index and
+    /// `max + 1` for a 16-bit one, and carries the input's band count. Sums
+    /// are written as 16-bit samples and saturate at `65535`.
     ///
     /// # Errors
     ///
@@ -477,10 +542,11 @@ impl Raster {
         let bands = self.format().channels();
         let kind = self.format().kind();
         let idx_kind = index.format().kind();
-        let bins = bins_for(idx_kind);
         let n = self.width() as usize * self.height() as usize;
         let data = self.data();
         let idx_data = index.data();
+        // Sized from the index image, which is the one being binned.
+        let bins = hist_width(idx_kind, max_bin(idx_data, idx_kind, n));
         let mut sums = vec![0u64; bins * bands];
         for i in 0..n {
             let slot = read_flat(idx_data, idx_kind, i) as usize;
