@@ -393,19 +393,19 @@ impl MetadataValue {
     }
 
     /// The type code returned by [`Raster::get_typeof`] for this value:
-    /// 1 int, 2 double, 3 string, 4 blob. These are libviprs codes (the
-    /// C library returns GObject `GType` numbers); the ported call sites
-    /// only distinguish zero (absent) from non-zero (present).
+    /// 1 int, 2 double, 3 string, 4 blob, 5 int array. These are libviprs
+    /// codes (the C library returns GObject `GType` numbers); the ported call
+    /// sites only distinguish zero (absent) from non-zero (present).
+    ///
+    /// Zero is not a code here, it is [`Raster::get_typeof`]'s answer for a
+    /// field that is not there, so every variant has to have one of its own.
     pub fn type_code(&self) -> u64 {
         match self {
             Self::Int(_) => 1,
             Self::Double(_) => 2,
             Self::Str(_) => 3,
             Self::Blob(_) => 4,
-            // Placeholder so the additive half compiles; the fix gives the
-            // array its own code. 0 is what `get_typeof` reports for a field
-            // that is not there, so the tests name it as absent.
-            Self::IntArray(_) => 0,
+            Self::IntArray(_) => 5,
         }
     }
 
@@ -416,21 +416,23 @@ impl MetadataValue {
     ///   cell, for example the 564-byte ICC profile of `sample.jpg` read
     ///   through magick).
     /// * [`MetadataValue::Str`]: the number of UTF-8 bytes in the string.
+    /// * [`MetadataValue::IntArray`]: the number of elements, which is the
+    ///   frame count for a `delay`.
     /// * [`MetadataValue::Int`] / [`MetadataValue::Double`]: `1`, a scalar
     ///   is a single-element field.
     pub fn len(&self) -> usize {
         match self {
             Self::Blob(b) => b.len(),
             Self::Str(s) => s.len(),
-            // Placeholder: the array counts as one value until the fix
-            // teaches this its element count.
-            Self::Int(_) | Self::Double(_) | Self::IntArray(_) => 1,
+            Self::IntArray(v) => v.len(),
+            Self::Int(_) | Self::Double(_) => 1,
         }
     }
 
     /// Whether this value has zero length; see [`MetadataValue::len`]. A
     /// scalar [`MetadataValue::Int`] or [`MetadataValue::Double`] is never
-    /// empty (its length is `1`).
+    /// empty (its length is `1`); a [`MetadataValue::IntArray`] with no
+    /// elements is, and that is a value vips writes rather than an error.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -1181,8 +1183,10 @@ impl Raster {
         match name {
             "width" | "height" | "bands" | "format" | "coding" | "interpretation" | "xoffset"
             | "yoffset" | "xres" | "yres" | "orientation" => None,
-            // Placeholder until the fix: nothing hands back an array yet.
-            _other => None,
+            other => match self.fields.get(other) {
+                Some(MetadataValue::IntArray(v)) => Some(v.as_slice()),
+                _ => None,
+            },
         }
     }
 
@@ -1606,10 +1610,51 @@ fn xml_field_of(value: &MetadataValue) -> (&'static str, Cow<'_, str>) {
         MetadataValue::Double(d) => (GTYPE_DOUBLE, Cow::Owned(format!("{d:?}"))),
         MetadataValue::Str(s) => (GTYPE_STRING, Cow::Borrowed(s.as_str())),
         MetadataValue::Blob(b) => (GTYPE_BLOB, Cow::Owned(base64_encode(b))),
-        // Placeholder: the type name is settled and measured, the element
-        // text is not written yet. The fix fills it.
-        MetadataValue::IntArray(_) => (GTYPE_ARRAY_INT, Cow::Borrowed("")),
+        MetadataValue::IntArray(v) => (GTYPE_ARRAY_INT, Cow::Owned(int_array_text(v))),
     }
+}
+
+/// The character data vips writes for a `VipsArrayInt`: every element
+/// followed by one space, the last one included.
+///
+/// The trailing separator is not a stray. Measured on the pinned 8.18.6,
+/// `vips copy 'anim3.webp[n=-1]' out.v` writes
+/// `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, because
+/// vips's save transform appends after each value rather than joining
+/// between them. Nothing in this crate's own round trip can see the
+/// difference, since [`parse_int_array_text`] ignores the trailing
+/// whitespace either way, which is exactly why it is pinned as bytes.
+fn int_array_text(values: &[i64]) -> String {
+    let mut out = String::new();
+    for v in values {
+        out.push_str(&v.to_string());
+        out.push(' ');
+    }
+    out
+}
+
+/// Parse the character data of a `VipsArrayInt` field.
+///
+/// Whitespace-separated decimals, and **all or nothing**: an element that
+/// will not parse as an `i64` gives `None`, so the caller carries the whole
+/// field opaquely rather than handing back the elements that happened to
+/// work. That is the same rule `gint`, `gdouble` and `VipsBlob` already
+/// follow in [`read_vips_xml_trailer`], and it is a deliberate divergence
+/// from vips, which hands back an **empty** array for `40 x 80` and loses
+/// the two elements that parsed (measured on 8.18.6: `vipsheader -f delay`
+/// prints nothing and `vips copy` writes the field back out empty).
+///
+/// An empty element list is an empty array, not a refusal: vips writes and
+/// reads that, so a `.v` carrying one has to survive a rewrite here.
+///
+/// The elements are `i64` where vips's `gint` is 32 bits. vips wraps rather
+/// than refusing (measured: `3000000000` reads back as `-1294967296`), so a
+/// narrower carrier here would lose data on a file libviprs did not write
+/// and could not warn about.
+fn parse_int_array_text(text: &str) -> Option<Vec<i64>> {
+    text.split_whitespace()
+        .map(|t| t.parse::<i64>().ok())
+        .collect()
 }
 
 /// Whether [`push_xml_field`] escapes the text it is given or writes it out
@@ -2219,6 +2264,7 @@ fn read_vips_xml_trailer(trailer: &[u8], raster: &mut Raster) {
             GTYPE_DOUBLE => value.trim().parse::<f64>().ok().map(MetadataValue::Double),
             GTYPE_STRING => Some(MetadataValue::Str(value)),
             GTYPE_BLOB => base64_decode(value.trim()).map(MetadataValue::Blob),
+            GTYPE_ARRAY_INT => parse_int_array_text(&value).map(MetadataValue::IntArray),
             _ => None,
         };
         match known {
@@ -3946,12 +3992,20 @@ mod tests {
 
     /// Every [`MetadataValue`] variant survives the XML round trip, including
     /// the awkward numbers: a negative and a 64-bit integer, a double that
-    /// has no short decimal, one that needs an exponent, a negative zero, and
-    /// a blob holding all 256 byte values.
+    /// has no short decimal, one that needs an exponent, a negative zero, a
+    /// blob holding all 256 byte values, and an int array with a negative
+    /// element, a 64-bit one and no elements at all.
     ///
     /// The doubles are compared exactly on purpose. A tolerance would pass on
     /// a writer that threw away digits, and throwing away digits is the whole
     /// failure mode a text encoding of a float has.
+    ///
+    /// The variant list here is hand-maintained, and it is the one place that
+    /// matters. `xml_field_of`, `type_code` and `len` all match on the enum,
+    /// so the compiler makes a sixth variant impossible to forget in those
+    /// three; the **reader** has a `_ => None` fallthrough and would carry a
+    /// new variant opaquely for ever without a word. This test is what
+    /// notices.
     #[test]
     fn v_trailer_xml_round_trips_every_metadata_variant() {
         let mut im = rgb_2x2().copy().orientation(8).build();
@@ -3965,6 +4019,8 @@ mod tests {
             "bytes",
             MetadataValue::Blob((0..=255u8).collect::<Vec<_>>()),
         );
+        im.set_field("delay", MetadataValue::IntArray(vec![40, -5, i64::MAX]));
+        im.set_field("no-delay", MetadataValue::IntArray(Vec::new()));
 
         let back = decode_bytes(&im.encode_vips().unwrap()).unwrap();
         assert_eq!(back.orientation(), 8);
@@ -3984,6 +4040,15 @@ mod tests {
         assert_eq!(
             back.get_field("bytes").unwrap().as_blob(),
             (0..=255u8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(vec![40, -5, i64::MAX]))
+        );
+        assert_eq!(
+            back.get_field("no-delay"),
+            Some(MetadataValue::IntArray(Vec::new())),
+            "an empty array is a value, not a dropped field"
         );
         // The blob went out as base64 rather than as anything binary.
         let bytes = im.encode_vips().unwrap();
