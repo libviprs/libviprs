@@ -642,6 +642,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PixelFormat::kind()` and the `SampleKind` enum it returns (`U8`, `U16`,
+  `F32`), plus `PixelFormat::with_kind()` alongside `with_channels()` (issue
+  #607). Reach for `kind()` whenever the question is how to *interpret* a
+  sample, and keep `bytes_per_channel()` for a stride or a buffer size.
+
+  Byte width has been standing in for sample kind throughout the crate, and it
+  cannot: four bytes means `f32` today and would mean `u32` under a uint
+  carrier (issue #517) or `i32` under the signed ones (issue #516). A `match`
+  keyed on the width needs a trailing `_` arm, and that arm reads a four-byte
+  integer as a float without a word from the compiler. `SampleKind` gives the
+  question one answer that a new carrier cannot slip past: every mapping off
+  it is a total match.
+
+  `SampleKind` also carries the per-kind constants the sample code used to
+  keep private copies of: `bytes()`, `is_float()`, `max_value()`,
+  `hist_bins()`, and `promote()`, which is the `vips__formatalike` order for
+  a two-image op whose inputs disagree. `max_value()` and `hist_bins()` are
+  `Option`, and `None` on `F32` is a statement rather than a gap: a float
+  carrier has no depth-implied ceiling and no value-indexed bin table.
+
+  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer name
+  a byte width at all: no `bytes_per_channel()`, and no `with_channels()`
+  either, since handing a width *back* to the constructor is the same
+  ambiguity in the other direction. Nothing they do changes; what changes is that
+  their sample readers and writers now fail to compile, rather than silently
+  misread, the day a carrier arrives. The other 22 modules still key on the
+  width and are tracked separately.
+
+  `SampleKind` lives at `libviprs::pixel::SampleKind`.
+
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
   reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
@@ -1718,6 +1748,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing held it before, because those tables pin their own size and what their
   rows report, and neither of those sees a format moving out of one and leaving
   its description behind.
+
+- **`profile`'s docs claimed its 16-bit saturating output matched "the libvips
+  `ushort` output". libvips emits `VIPS_FORMAT_INT`** (issue #759), measured on
+  8.18.6 for every one of the eight input formats. The word matters more than
+  it looks: `INT` is the *signed* 32-bit carrier, so `profile` is a payoff of
+  the signed carriers (issue #516), not of the uint one (issue #517).
+
+  Two neighbouring claims were under-specified in the same direction and are
+  corrected with the measured tables. `project` promotes to `UINT` for the
+  unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float ones,
+  so it needs both carrier families rather than just uint. The histogram
+  module's "libvips stores counts in 32-bit unsigned samples" swept in
+  `hist_find_indexed`, which emits `DOUBLE` for every input format and either
+  `combine` mode, and `hist_cum`, which follows its input across all four.
+
+  No value or format changes here: the saturation at `65535` stays until a
+  wider carrier lands. What changes is that the claims now have checks under
+  them. `profile` and `project` had no assertion on their output format
+  anywhere in the crate and `profile` had no saturation test at all, which is
+  how the wrong sentence survived. Six counter ops get a format pin and two
+  get a ceiling pin carrying the measured vips answer beside the libviprs one.
 
 - The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
   body it copies out of the file, priced from the declared header geometry
