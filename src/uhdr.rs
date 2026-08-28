@@ -461,6 +461,18 @@ pub enum UhdrError {
         /// Which rule was broken.
         reason: String,
     },
+    /// [`encode_uhdr`] was handed a raster it cannot save. The input must be
+    /// 3-band `f32` holding linear-light scRGB, which is what a gain map is
+    /// computed from.
+    ///
+    /// This is a separate variant from [`UhdrError::BadInput`] rather than a
+    /// second user of it, because the two name different operations and the
+    /// message says which (issue #810).
+    #[error("uhdrsave: {reason}")]
+    BadSaveInput {
+        /// Which rule was broken.
+        reason: String,
+    },
     /// The raster carries no gain map, so there is nothing to expand.
     ///
     /// libvips reaches the same case and exits **printing nothing**:
@@ -1375,16 +1387,13 @@ fn splice_after_soi(jpeg: &[u8], segments: &[u8]) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// [`UhdrError::BadInput`] if `scrgb` is not 3-band `f32`, or
+/// [`UhdrError::BadSaveInput`] if `scrgb` is not 3-band `f32`, or
 /// [`UhdrError::Jpeg`] if either half fails to encode.
 pub fn encode_uhdr(scrgb: &Raster, options: &SaveOptions) -> Result<Vec<u8>, UhdrError> {
     let bands = scrgb.format().channels();
     if !matches!(scrgb.format(), PixelFormat::FloatF32(_)) || bands != 3 {
-        return Err(UhdrError::BadInput {
-            reason: format!(
-                "uhdrsave needs a 3-band float image, got {:?}",
-                scrgb.format()
-            ),
+        return Err(UhdrError::BadSaveInput {
+            reason: format!("needs a 3-band float image, got {:?}", scrgb.format()),
         });
     }
     let (width, height) = (scrgb.width(), scrgb.height());
