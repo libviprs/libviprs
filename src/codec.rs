@@ -142,6 +142,95 @@ pub enum TiffCompression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::Raster;
+
+    /// Issue #758. This module's two prose lists name the formats whose
+    /// encoders answer [`EncodeError::Unsupported`], and the second one is the
+    /// documentation for the variant itself, so a name on it that this build
+    /// can actually encode makes the variant's contract wrong rather than
+    /// merely stale.
+    ///
+    /// The "can encode" half is **measured here** by calling the entry point,
+    /// not declared in a table, so the guard tracks the tree rather than
+    /// someone's memory of it.
+    #[test]
+    fn the_unsupported_doc_lists_name_no_format_this_build_encodes() {
+        let src = include_str!("codec.rs");
+        let list_after = |anchor: &str| -> Vec<String> {
+            let at = src
+                .find(anchor)
+                .unwrap_or_else(|| panic!("the doc anchor {anchor:?} moved"));
+            let rest = &src[at + anchor.len()..];
+            let end = rest.find(')').expect("the list is parenthesised");
+            rest[..end]
+                .replace("///", " ")
+                .replace("//!", " ")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != "...")
+                .collect()
+        };
+        let named: Vec<String> = [
+            list_after("formats that require an external C\n/// library ("),
+            list_after("have no mature pure-Rust encoder ("),
+        ]
+        .concat();
+        // The extraction is the thing most likely to rot into a vacuous pass,
+        // so pin that it found both lists and that they still name the two
+        // formats nothing in this tree encodes.
+        assert!(
+            named.len() >= 6,
+            "only extracted {named:?} from the two doc lists"
+        );
+        for must in ["HEIF/AVIF", "magick"] {
+            assert!(
+                named.iter().any(|n| n == must),
+                "expected {must} on a list, got {named:?}"
+            );
+        }
+
+        let rgb = Raster::new(4, 4, crate::pixel::PixelFormat::Rgb8, vec![128u8; 48]).unwrap();
+        let scrgb = Raster::new(
+            4,
+            4,
+            crate::pixel::PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            (0..48)
+                .flat_map(|i| (i as f32 / 48.0).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        // Each probe runs the encoder, so `encodes` is a measurement.
+        let probes: [(&str, bool); 5] = [
+            ("FITS", rgb.encode_fits().is_ok()),
+            (
+                "UHDR",
+                crate::uhdr::encode_uhdr(&scrgb, &crate::uhdr::SaveOptions::default()).is_ok(),
+            ),
+            ("HEIF/AVIF", rgb.encode_heif(50, "av1").is_ok()),
+            (
+                "JP2K",
+                rgb.encode_jp2k(crate::jp2k::SaveOptions::default()).is_ok(),
+            ),
+            ("magick", rgb.magicksave_buffer(".png").is_ok()),
+        ];
+        // Both directions have to be represented or a probe list that always
+        // answered the same way would pass vacuously.
+        assert!(
+            probes.iter().any(|p| p.1) && probes.iter().any(|p| !p.1),
+            "the probes must cover both a format this build encodes and one it \
+             does not, got {probes:?}"
+        );
+        let wrong: Vec<&str> = probes
+            .iter()
+            .filter(|(name, encodes)| *encodes && named.iter().any(|n| n == name))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "{wrong:?} are named in this module's Unsupported doc lists, and \
+             this build encodes every one of them"
+        );
+    }
 
     #[test]
     fn jpeg_subsample_has_the_three_cell_variants() {
