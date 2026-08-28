@@ -1543,6 +1543,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Every operation in `src/extract.rs` carries its input's metadata through to
+  its result: `extract_area`, `crop`, `embed`, `gravity`, `replicate`, `zoom`,
+  `subsample` and `smartcrop` all keep the interpretation, the resolution, the
+  orientation and every attached field, where each of them used to hand back a
+  raster rebuilt from a default header block and an empty field map (issue
+  #690). An ICC profile, an EXIF blob and the colour tag survived a load and
+  then went missing the moment you cropped.
+
+  It turned load-bearing with #667, which makes `Extend::White` ink from the
+  interpretation. `embed(.., White)` painted the right ink and then handed back
+  a raster that no longer said what it was, so embedding that result a second
+  time inked it differently: an scRGB source came back 1, and its own output
+  came back 255.
+
+  The origin offset is the one field the operations disagree on, so it is not a
+  verbatim carry. `vips_extract_area` writes `Xoffset = -left` and
+  `Yoffset = -top` and throws the source's away, while the placement and tiling
+  ops leave the source's alone, and `smartcrop` inherits the crop rule by being
+  `extract_area` underneath. Measured on the pinned vips 8.18.6 by sweeping
+  `left` over 0/1/3/4 against `top` over 0/2/5, and `embed`'s `x` over 0/2/-2
+  against `y` over 0/3/-3, rather than by reading one cell.
+
+  `zoom` and `subsample` do **not** rescale the resolution with the pixel grid,
+  which is the part worth measuring rather than assuming: `zoom` by 2x3 on
+  `xres=5 yres=7` reports 5 and 7 back, not 10 and 21.
+
+  `Raster::try_insert` still drops the metadata and is deliberately not in this
+  change. Its rule is a two-input one and a different shape: the header block
+  comes from `main` alone while the attached fields are the union of both with
+  `main` winning a shared name, and carrying that union needs a merge on
+  `MetadataFields`, which lives in `imageio`.
+
 - `Raster::try_sharpen` and `Raster::try_canny`'s float arm no longer abort the
   process when an allocation fails, and there is a new
   `Raster::try_f32_samples` for the widening they sit on (issue #627).
