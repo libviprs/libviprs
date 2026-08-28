@@ -66,8 +66,8 @@
 //! from the first input alone. Issue #718.
 
 use libviprs::{
-    Angle, Angle45, CompositeMode, Interpretation, JoinDirection, MetadataValue, PixelFormat,
-    Precision, Raster,
+    Angle, Angle45, Combine, CompositeMode, Interpretation, JoinDirection, Kernel, MetadataValue,
+    PixelFormat, Precision, Raster,
 };
 
 /// The attached string the carry is read through. Named for the issue so a
@@ -459,4 +459,145 @@ fn new_from_image_carries_the_header_block_without_the_fields() {
     assert_eq!(out.orientation(), 1, "orientation is not carried");
     assert_eq!(out.get_field(LANE), None, "attached string is not carried");
     assert_eq!(out.icc_profile(), None, "profile is not carried");
+}
+
+/// Issue #719. The six convolution ops that finish on `raster_from_f64` /
+/// `raster_from_i64` or on `rasters_from` used to hand back
+/// `RasterMeta::default()` and an empty field map, so they lost the header
+/// block *and* the attachments, where the eleven sites in #717 lost only the
+/// attachments.
+///
+/// `src/convolution.rs` said so in a comment inside `try_sobel` and nothing
+/// tracked it.
+///
+/// Measured on vips 8.18.6 from the same 8x8 `rgb` source, `xres 5`,
+/// `orientation 6`, `lane-711` and a real 3144-byte sRGB profile:
+///
+/// ```text
+/// op                    format      interp  xres  ori  lane-711  icc
+/// conv 3x3              float, 3b   RGB     5     6    carried   3144
+/// conv 5x5              float, 3b   RGB     5     6    carried   3144
+/// convsep 1x3           float, 3b   RGB     5     6    carried   3144
+/// compass 3x3           float, 3b   RGB     5     6    carried   3144
+/// gaussblur sigma 1     uchar, 3b   RGB     5     6    carried   3144
+/// gaussblur sigma 3     uchar, 3b   RGB     5     6    carried   3144
+/// ```
+///
+/// `spcor` and `fastcor` want a one-band input, so those two ran against an
+/// 8x8 `b-w` source carrying a real 2020-byte **grey** profile, and both hand
+/// the 2020 bytes on with `lane-711`, `xres` and the orientation. The profile
+/// has to match the tag there: a 3-channel profile under a `b-w` tag is
+/// removed by the rule in #720, which is about the retag and not about these
+/// ops.
+///
+/// The origin offsets are **not** asserted here. `conv`, `convsep`, `compass`
+/// and `gaussblur` stamp a mask-relative origin (`-1 / -1` for a 3x3,
+/// `-2 / -2` for a 5x5, `0 / -1` for a separable 1x3) that does not depend on
+/// the input's offsets at all, where `spcor` and `fastcor` pass the input's
+/// through. That is issue #721, it is the same shape for `flip`, `rot` and
+/// `wrap`, and it is not fixed here; asserting the offsets now would pin
+/// behaviour this change deliberately leaves wrong.
+#[test]
+fn every_convolution_op_carries_the_metadata() {
+    let im = tagged_source();
+    let template = Raster::new(3, 3, PixelFormat::Rgb8, vec![9u8; 27]).unwrap();
+    let box3 = Kernel {
+        data: vec![vec![1.0; 3]; 3],
+        scale: 9.0,
+    };
+    let sep = Kernel {
+        data: vec![vec![1.0, 1.0, 1.0]],
+        scale: 3.0,
+    };
+
+    for (name, out) in [
+        ("conv float", im.try_conv(&box3, Precision::Float).unwrap()),
+        (
+            "conv integer",
+            im.try_conv(&box3, Precision::Integer).unwrap(),
+        ),
+        ("convsep", im.try_convsep(&sep, Precision::Float).unwrap()),
+        (
+            "compass max",
+            im.try_compass(&box3, 2, Angle45::D45, Combine::Max, Precision::Float)
+                .unwrap(),
+        ),
+        (
+            "compass sum",
+            im.try_compass(&box3, 2, Angle45::D45, Combine::Sum, Precision::Integer)
+                .unwrap(),
+        ),
+        (
+            "gaussblur",
+            im.try_gaussblur(1.0, 0.2, Precision::Float).unwrap(),
+        ),
+        (
+            "gaussblur below the copy threshold",
+            im.try_gaussblur(0.1, 0.2, Precision::Float).unwrap(),
+        ),
+        ("spcor", im.try_spcor(&template).unwrap()),
+        ("fastcor", im.try_fastcor(&template).unwrap()),
+    ] {
+        assert_eq!(out.interpretation(), Interpretation::Rgb, "{name} interp");
+        assert_eq!(out.xres(), 5.0, "{name} xres");
+        assert_eq!(out.yres(), 7.0, "{name} yres");
+        assert_eq!(out.orientation(), 6, "{name} orientation");
+        assert_eq!(
+            out.get_field(LANE),
+            Some(MetadataValue::Str("carried".to_string())),
+            "{name} attached string"
+        );
+        assert_eq!(
+            out.get_field(PLAIN_BLOB),
+            Some(MetadataValue::Blob(vec![1, 2, 3])),
+            "{name} attached blob"
+        );
+        assert_eq!(out.icc_profile(), Some(PROFILE), "{name} ICC profile");
+    }
+}
+
+/// Issue #717, not #719, and I had that the wrong way round until the mutation
+/// sweep said so.
+///
+/// `sharpen` blurs through `convsep` on a LabS intermediate and comes back
+/// through `colourspace`, so I expected it to inherit #719's carry. It does
+/// not: its output metadata comes from that final `colourspace`, which
+/// `src/colour.rs` already carries, so this test is green on the branch point
+/// and survives all three of #719's mutations. It is a pin on a compound op
+/// rather than evidence for that change, and saying so is the point of leaving
+/// it here.
+///
+/// Measured on vips 8.18.6 from an `srgb` source (`vips sharpen` refuses an
+/// `rgb` one: "no known route from 'labs' to 'rgb'"): the output reports sRGB,
+/// xres 5, orientation 6, `lane-717` and the profile, with the offsets carried
+/// verbatim at 11 / 13 rather than stamped. So `sharpen` is one of the ops that
+/// carries the offset, unlike the four that convolve directly (#721).
+#[test]
+fn sharpen_carries_through_its_final_colourspace() {
+    let data: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5 % 251) as u8).collect();
+    let im = Raster::new(8, 8, PixelFormat::Rgb8, data).unwrap();
+    let mut im = im
+        .copy()
+        .interpretation(Interpretation::Srgb)
+        .xres(5.0)
+        .yres(7.0)
+        .xoffset(11)
+        .yoffset(13)
+        .orientation(6)
+        .build();
+    im.set_field(LANE, MetadataValue::Str("carried".to_string()));
+    im.set_icc_profile(PROFILE);
+
+    let out = im.try_sharpen(1.0, 1.0, 2.0).unwrap();
+
+    assert_eq!(out.interpretation(), Interpretation::Srgb, "interpretation");
+    assert_eq!(out.xres(), 5.0, "xres");
+    assert_eq!(out.orientation(), 6, "orientation");
+    assert_eq!((out.xoffset(), out.yoffset()), (11, 13), "offsets carried");
+    assert_eq!(
+        out.get_field(LANE),
+        Some(MetadataValue::Str("carried".to_string())),
+        "attached string"
+    );
+    assert_eq!(out.icc_profile(), Some(PROFILE), "ICC profile");
 }
