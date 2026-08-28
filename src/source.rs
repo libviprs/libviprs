@@ -308,6 +308,17 @@ pub enum SourceError {
     /// build has no pixel format for; the variant says which.
     #[error(transparent)]
     Fits(#[from] crate::fits::FitsError),
+    /// A malformed or unreadable Ultra HDR container, raised by
+    /// [`crate::uhdr::decode_uhdr`]. Ultra HDR is a gain-map JPEG pair
+    /// rather than a codec, so libviprs parses the container itself over
+    /// the `image` crate's JPEG decoder (see [`crate::uhdr`]) and its
+    /// failures arrive as the module's own typed
+    /// [`UhdrError`](crate::uhdr::UhdrError). That matters here more than
+    /// most: "these bytes are a perfectly good JPEG that is not Ultra HDR"
+    /// and "this gain map is corrupt" are different answers, and only a
+    /// typed variant tells them apart without matching on a message.
+    #[error(transparent)]
+    Uhdr(#[from] crate::uhdr::UhdrError),
     /// A malformed or unsupported JPEG XL file, raised by
     /// [`crate::jxl::decode_jxl`]. libviprs decodes JPEG XL through
     /// `jxl-oxide` rather than through the `image` facade, which has no
@@ -323,6 +334,29 @@ pub enum SourceError {
     /// bytes are not JPEG XL" without reading a message (issue #634).
     #[error(transparent)]
     Jxl(#[from] crate::jxl::JxlError),
+    /// A malformed or unreachable NIfTI file. libviprs decodes NIfTI
+    /// itself rather than through any crate (see [`crate::nifti`]), so its
+    /// failures arrive as the codec's own typed
+    /// [`NiftiError`](crate::nifti::NiftiError) rather than as an opaque
+    /// string. As with FITS, that matters here because a NIfTI file can be
+    /// perfectly well formed and still declare a sample type this build has
+    /// no pixel format for; the variant says which.
+    #[error(transparent)]
+    Nifti(#[from] crate::nifti::NiftiError),
+    /// An AVIF could not be read; see [`crate::avif::AvifError`].
+    #[error(transparent)]
+    Avif(#[from] crate::avif::AvifError),
+    /// A malformed or unsupported JPEG 2000 file. libviprs decodes JPEG 2000
+    /// through `hayro-jpeg2000` and reads the box structure and the `SIZ` /
+    /// `COD` markers itself, so a refusal arrives as the codec's own typed
+    /// [`Jp2kError`](crate::jp2k::Jp2kError) rather than as an opaque string.
+    ///
+    /// Declared whether or not the **`jp2k`** feature is on. Without the
+    /// feature the only [`Jp2kError`](crate::jp2k::Jp2kError) it can carry is
+    /// [`FeatureNotEnabled`](crate::jp2k::Jp2kError::FeatureNotEnabled), so a
+    /// caller's `match` has the same arms in either build (issue #634).
+    #[error(transparent)]
+    Jp2k(#[from] crate::jp2k::Jp2kError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -444,11 +478,17 @@ impl SourceError {
     ///   buffer against [`DecodeLimits::max_alloc_bytes`] itself;
     /// * [`SourceError::Decode`] carrying an `image` `LimitError` of kind
     ///   `InsufficientMemory`, which is the same ceiling spent inside the
-    ///   `image` crate's own decoder for JPEG, PNG, single-image TIFF and
-    ///   WebP;
+    ///   `image` crate's own decoder for JPEG, PNG and single-image TIFF;
     /// * [`JxlError::DecoderAllocLimitExceeded`](crate::jxl::JxlError::DecoderAllocLimitExceeded),
     ///   `jxl-oxide`'s internal allocation tracker refusing a buffer whose
     ///   size it does not report out.
+    ///
+    /// The second bullet named WebP as a fourth until issue #782. It has not
+    /// been one since #686: WebP is decoded by libviprs rather than by the
+    /// `image` crate, it prices its own frame, and it reports the first bullet
+    /// with the geometry attached. The list is pinned to the tables in
+    /// `tests/decode_alloc_refusal_shape.rs` now, so it cannot drift off them
+    /// again.
     ///
     /// Raising `max_alloc_bytes` is the response to all three, which is what
     /// makes one predicate the right shape rather than a convenience over
@@ -589,7 +629,7 @@ impl DeclaredGeometry {
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
 /// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
-/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read (`.v`'s own uncompressed body is sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read, and on the pixel body itself, priced from the declared header geometry (issue #710) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
 ///
 /// The single-axis [`max_coord`](Self::max_coord) and total
@@ -600,8 +640,8 @@ impl DeclaredGeometry {
 /// The format decoders libviprs owns outright take the same
 /// [`DecodeLimits`] and apply `max_coord`, `max_pixels` and
 /// `max_alloc_bytes` in that order before reserving a frame:
-/// [`crate::gif::decode_gif`], [`crate::webp::decode_webp`], and the TIFF
-/// page readers. [`max_alloc_bytes`](Self::max_alloc_bytes) is the one that
+/// [`crate::gif::decode_gif`], [`crate::webp::decode_webp`], the native `.v`
+/// reader, and the TIFF page readers. [`max_alloc_bytes`](Self::max_alloc_bytes) is the one that
 /// catches a frame `max_pixels` waves through, since a pixel count sees
 /// neither the band count nor the sample depth.
 ///
@@ -1074,7 +1114,7 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
 /// is also exactly how many bytes `image`'s own `with_guessed_format` reads,
 /// so the fallback in [`reader_for`] never sees more of a file than
 /// [`sniff`] did.
-const SNIFF_HEAD_LEN: usize = 16;
+const SNIFF_HEAD_LEN: usize = 348;
 
 /// The ISOBMFF signature box that opens a boxed JPEG XL file: a 12-byte box
 /// whose type is `JXL ` and whose payload is the `\r\n\x87\n` line-ending
@@ -1115,12 +1155,62 @@ enum Magic {
         /// The bytes at `tag_at`.
         tag: &'static [u8],
     },
+    /// The head carries `bytes` at offset `at`, with **no constraint at
+    /// offset 0**. AVIF's `ftypavif` is the only one: bytes 0..4 are the
+    /// `ftyp` box's own size, which is file-specific and carries no
+    /// signature, so this cannot be a `Prefix` and cannot be a `Split`
+    /// either (a `Split` still pins its prefix at offset 0).
+    At {
+        /// Where `bytes` starts.
+        at: usize,
+        /// The signature bytes at `at`.
+        bytes: &'static [u8],
+    },
     /// The head's whole first line is exactly these bytes, CR- or
     /// LF-terminated. Radiance's `#?RADIANCE` is the only one:
     /// `vips__rad_israd` (`radiance.c:568-577`) reads the first line and
     /// compares it in full, so the near-miss `#?RGBE` is not Radiance and
     /// neither is `#?RADIANCEX`.
     Line(&'static [u8]),
+    /// The buffer opens with `prefix` **and** satisfies `confirm`, a
+    /// predicate over as much of it as [`sniff`] was handed.
+    ///
+    /// Every other arm here decides a container from its leading bytes.
+    /// This one exists because Ultra HDR cannot be decided that way by
+    /// anyone: a UHDR file is a JPEG, byte for byte, until the gain map
+    /// that follows the base image's `EOI`. libvips has the same problem
+    /// and solves it the same way, with `uhdrload`'s `is_a` mapping the
+    /// whole file rather than sniffing a header.
+    ///
+    /// Two consequences, and both are load bearing. A structural row
+    /// **cannot** be matched from the `SNIFF_HEAD_LEN` bytes the file entry
+    /// point reads, so it must be declared before the row that shadows it
+    /// and it is reached from disk only through that row's whole-file read
+    /// and the re-sniff in [`decode_bytes_with_limits`]. And `confirm` runs
+    /// on every buffer that clears `prefix`, so it must allocate nothing;
+    /// [`crate::uhdr::is_uhdr`] walks markers without a `Vec` for exactly
+    /// this reason.
+    Structural {
+        /// The leading bytes every candidate shares, tested first so
+        /// `confirm` never runs on a buffer that cannot match.
+        prefix: &'static [u8],
+        /// The deep test.
+        confirm: fn(&[u8]) -> bool,
+        /// A buffer this row accepts, so the route-table tests can probe it
+        /// without a hand-kept table of sample bytes -- which is the thing
+        /// [`Route`] retired (issue #633).
+        ///
+        /// Read only by [`Magic::shortest_head`], which is `cfg(test)`, so
+        /// the field is genuinely dead in a release build. Kept on the row
+        /// anyway rather than moved into the test module: a probe kept
+        /// beside the tests is a second hand-maintained table, which is the
+        /// failure mode this shape exists to remove.
+        #[cfg_attr(
+            not(test),
+            expect(dead_code, reason = "read only by the cfg(test) shortest_head")
+        )]
+        sample: fn() -> Vec<u8>,
+    },
 }
 
 impl Magic {
@@ -1157,6 +1247,10 @@ impl Magic {
                     && head.starts_with(prefix)
                     && head[tag_at..tag_at + tag.len()] == *tag
             }
+            Self::At { at, bytes } => {
+                debug_assert!(!bytes.is_empty(), "an empty At constrains nothing");
+                head.len() >= at + bytes.len() && head[at..at + bytes.len()] == *bytes
+            }
             Self::Line(magic) => {
                 debug_assert!(
                     !magic.is_empty(),
@@ -1165,6 +1259,15 @@ impl Magic {
                 head.len() > magic.len()
                     && head.starts_with(magic)
                     && matches!(head[magic.len()], b'\n' | b'\r')
+            }
+            Self::Structural {
+                prefix, confirm, ..
+            } => {
+                debug_assert!(
+                    !prefix.is_empty(),
+                    "an empty Structural prefix runs confirm on everything"
+                );
+                head.starts_with(prefix) && confirm(head)
             }
         }
     }
@@ -1189,7 +1292,13 @@ impl Magic {
                 head[tag_at..].copy_from_slice(tag);
                 head
             }
+            Self::At { at, bytes } => {
+                let mut head = vec![0u8; at + bytes.len()];
+                head[at..].copy_from_slice(bytes);
+                head
+            }
             Self::Line(magic) => [magic, b"\n"].concat(),
+            Self::Structural { sample, .. } => sample(),
         }
     }
 }
@@ -1272,6 +1381,12 @@ struct Route {
 pub(crate) enum SniffedFormat {
     /// Native libvips `.v`, either byte order.
     Vips,
+    /// Ultra HDR: a base JPEG, a gain-map JPEG after it, and the MPF and
+    /// ISO 21496-1 markers that tie them together. Declared **before**
+    /// [`Self::Jpeg`] because it shares JPEG's magic bytes and
+    /// [`sniff`] takes the first match, which is how libvips orders
+    /// `uhdrload` (priority 100) against `jpegload` (priority 50).
+    Uhdr,
     /// JPEG (JFIF/EXIF), `FF D8 FF`.
     Jpeg,
     /// PNG, `89 P N G 0D 0A 1A 0A`.
@@ -1291,6 +1406,17 @@ pub(crate) enum SniffedFormat {
     Fits,
     /// OpenEXR, `76 2F 31 01`.
     OpenExr,
+    /// NIfTI, in either version and either byte order: a `sizeof_hdr` of
+    /// 348 or 540 at offset 0, plus the version's own magic, at 344 for
+    /// NIfTI-1 and at 4 for NIfTI-2.
+    Nifti,
+    /// AVIF, the `ftyp` box type at offset 4 followed by the major brand
+    /// `avif`. Still images only, and deliberately not the other nine
+    /// brands libheif's magic list accepts; see [`crate::avif`].
+    Avif,
+    /// JPEG 2000, in either of its two containers: the RFC 3745 JP2
+    /// signature box, or the bare codestream's `SOC` + `SIZ` pair.
+    Jp2k,
 }
 
 impl SniffedFormat {
@@ -1307,7 +1433,8 @@ impl SniffedFormat {
     /// invariants held for the wrong reason.
     const fn next(self) -> Option<Self> {
         match self {
-            Self::Vips => Some(Self::Jpeg),
+            Self::Vips => Some(Self::Uhdr),
+            Self::Uhdr => Some(Self::Jpeg),
             Self::Jpeg => Some(Self::Png),
             Self::Png => Some(Self::Tiff),
             Self::Tiff => Some(Self::Gif),
@@ -1316,7 +1443,10 @@ impl SniffedFormat {
             Self::Jxl => Some(Self::Radiance),
             Self::Radiance => Some(Self::Fits),
             Self::Fits => Some(Self::OpenExr),
-            Self::OpenExr => None,
+            Self::OpenExr => Some(Self::Nifti),
+            Self::Nifti => Some(Self::Avif),
+            Self::Avif => Some(Self::Jp2k),
+            Self::Jp2k => None,
         }
     }
 
@@ -1330,8 +1460,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 10] = {
-        let mut all = [Self::Vips; 10];
+    pub(crate) const ALL: [Self; 14] = {
+        let mut all = [Self::Vips; 14];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1473,6 +1603,127 @@ impl SniffedFormat {
             Self::OpenExr => Route {
                 magics: &[Magic::Prefix(&crate::exr::MAGIC)],
                 decoder: Decoder::Native(crate::exr::decode_exr),
+            },
+            // The only structural row in the table, and the only one that
+            // shares another row's magic bytes. Both come from the format:
+            // an Ultra HDR file *is* a JPEG until the gain map after the
+            // base image's `EOI`, so no leading-byte pattern can separate
+            // the two and `is_uhdr` has to walk the markers. See
+            // [`Magic::Structural`] for how the file entry point still
+            // reaches it, and [`crate::uhdr`] for the gate itself.
+            //
+            // Native because the container is two JPEGs plus metadata that
+            // neither the `image` facade nor any crate models, and it needs
+            // the bytes addressable end to end: the gain map is found by
+            // walking from the base's `EOI`, which is at the far end of the
+            // file from the header.
+            Self::Uhdr => Route {
+                magics: &[Magic::Structural {
+                    prefix: b"\xff\xd8\xff",
+                    confirm: crate::uhdr::is_uhdr,
+                    sample: crate::uhdr::smallest_container,
+                }],
+                decoder: Decoder::Native(crate::uhdr::decode_uhdr),
+            },
+            // `image` has no NIfTI route, and neither has the pinned vips:
+            // that build reports `NIfTI load/save with libnifti: false` and
+            // registers no `niftiload`, which is why [`crate::nifti`] is
+            // measured against `nifti_clib` instead (issue #510). It reads
+            // the file whole because the header declares a volume and the
+            // voxels start at a `vox_offset` the header names, so the
+            // decode seeks inside the same bytes it sniffed.
+            //
+            // Six signatures, because the format has six spellings of its
+            // own front: two versions, two byte orders and, on NIfTI-1, the
+            // paired `ni1` form as well as the single-file `n+1`. The
+            // paired rows are here on purpose, for the same reason the
+            // `Jxl` row stays live without the `jxl` feature: a `.hdr` from
+            // a pair reaching `decode_nifti` gets "the voxels are in a
+            // sibling .img", where falling through to [`reader_for`] would
+            // say "these bytes are not an image", which is a different and
+            // wrong answer. The NIfTI-2 pair needs no separate byte-order
+            // row because its sentinel and magic are adjacent and the magic
+            // is never swapped.
+            Self::Nifti => Route {
+                magics: &[
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_LE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_BE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_LE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_BE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_LE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_BE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_LE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_BE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_PAIR,
+                    },
+                ],
+                decoder: Decoder::Native(crate::nifti::decode_nifti),
+            },
+            // `image` has no AVIF route this build can use: its `avif`
+            // feature is encode-only (`ravif`), and its `avif-native`
+            // decode feature is `dav1d-sys`, a C library that has to be
+            // installed on the machine, which CONTRIBUTING.md clause 2
+            // excludes outright. [`crate::avif`] hand-rolls the ISOBMFF
+            // walk and drives the pure-Rust `rav1d` behind the `avif`
+            // feature. It reads the file whole because the container's
+            // `iloc` addresses payload bytes by absolute file offset, so
+            // the item extents are only reachable with the whole file
+            // resident.
+            Self::Avif => Route {
+                magics: &[Magic::At {
+                    at: 4,
+                    bytes: crate::avif::MAGIC_AT_4,
+                }],
+                decoder: Decoder::Native(crate::avif::decode_avif),
+            },
+            // `image` has no JPEG 2000 route at all, so this row was never
+            // anything but a native one; [`crate::jp2k`] drives
+            // `hayro-jpeg2000` directly (issue #501). It reads the file whole
+            // because it makes two passes over the same bytes: one that walks
+            // the JP2 boxes and the `SIZ` / `COD` markers for the sign bit,
+            // the subsampling factors, the tile geometry and the raw ICC
+            // payload, and one that decodes.
+            //
+            // The row stays live without the `jp2k` feature, on purpose, for
+            // the reason the JPEG XL row does: `decode_jp2k` then reports
+            // "this build has no JPEG 2000", where falling through to
+            // [`reader_for`] would report "these bytes are not an image".
+            Self::Jp2k => Route {
+                magics: &[
+                    Magic::Prefix(crate::jp2k::JP2_SIGNATURE),
+                    Magic::Prefix(crate::jp2k::CODESTREAM_SIGNATURE),
+                ],
+                decoder: Decoder::Native(crate::jp2k::decode_jp2k),
             },
         }
     }
@@ -1640,9 +1891,10 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// other container libviprs recognises is read into memory whole, through a
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
-/// That is native `.v`, JPEG, GIF, WebP, JPEG XL, Radiance HDR, FITS and
-/// OpenEXR: each one either parses its own container end to end or makes a
-/// second pass over the same bytes for metadata.
+/// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
+/// FITS, OpenEXR, NIfTI, AVIF and JPEG 2000: each one either parses its own
+/// container end to end or makes a second pass over the same bytes for
+/// metadata.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -2464,17 +2716,44 @@ mod tests {
                     "{format:?} declares {magic:?}, which no buffer can fail to match, \
                      so it would shadow every row declared after it"
                 );
-                assert!(
-                    head.len() <= SNIFF_HEAD_LEN,
-                    "{format:?} needs {} bytes to decide {magic:?}, more than the \
-                     {SNIFF_HEAD_LEN} a file entry point reads, so it is unreachable from disk",
-                    head.len()
-                );
                 assert_eq!(
                     sniff(&head),
                     Some(format),
                     "{magic:?} does not sniff back to {format:?}"
                 );
+                if matches!(magic, Magic::Structural { .. }) {
+                    // A structural row is by definition not decidable from
+                    // the head, so the claim above cannot be made about it
+                    // -- and the replacement claim is the sharper one. It
+                    // must NOT match on the head, because the row it
+                    // shadows (JPEG, for Ultra HDR) has to keep every
+                    // ordinary file of that container; and the file entry
+                    // point reaches it anyway, through that row's
+                    // whole-file read and the re-sniff in
+                    // `decode_bytes_with_limits`, which
+                    // `both_entry_points_agree_on_every_container_in_the_route_table`
+                    // proves over this same probe.
+                    let head_only = &head[..head.len().min(SNIFF_HEAD_LEN)];
+                    assert_ne!(
+                        sniff(head_only),
+                        Some(format),
+                        "{format:?} matched {magic:?} from {SNIFF_HEAD_LEN} head bytes, so it \
+                         would steal every file of the container it shadows"
+                    );
+                    assert!(
+                        head.len() > SNIFF_HEAD_LEN,
+                        "{format:?} decides {magic:?} inside {SNIFF_HEAD_LEN} bytes, so it does \
+                         not need to be a structural row at all"
+                    );
+                } else {
+                    assert!(
+                        head.len() <= SNIFF_HEAD_LEN,
+                        "{format:?} needs {} bytes to decide {magic:?}, more than the \
+                         {SNIFF_HEAD_LEN} a file entry point reads, so it is unreachable from \
+                         disk",
+                        head.len()
+                    );
+                }
             }
         }
     }
@@ -2546,7 +2825,48 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 32] = [
+        // NIfTI is the one container whose signature does not fit in a
+        // hand-written literal: NIfTI-1 puts its magic at byte 344, so a
+        // probe is 348 bytes long. These come out of the oracle capture
+        // rather than being spelled out, which also means they are real
+        // files rather than my idea of one (issue #510).
+        const NIFTI_1_LE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "dt2_uint8.nii"
+        ));
+        const NIFTI_1_BE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "endian_nifti1_int16_be.nii"
+        ));
+        const NIFTI_2_LE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "ver_n2_single.nii"
+        ));
+        const NIFTI_2_BE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "endian_nifti2_int16_be.nii"
+        ));
+        const NIFTI_1_PAIR: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "pair_n1.hdr"
+        ));
+        const NIFTI_2_PAIR: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "pair_n2.hdr"
+        ));
+        // A 348-byte header with the right sentinel and an all-zero magic.
+        // The reference reads it as the Analyze 7.5 dialect and decides the
+        // container from the filename, which is not something a content
+        // sniff can do, so libviprs does not claim it.
+        const NIFTI_ANALYZE_DIALECT: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "magic_zero_analyze.nii"
+        ));
+        // Owned, because the Ultra HDR probe is a real container this build
+        // writes rather than a byte-string literal: the row's signature is
+        // structural, so there is no literal to write.
+        let uhdr = crate::uhdr::smallest_container();
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 52] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -2652,12 +2972,106 @@ mod tests {
                 b"SIMPLE  =                    T",
                 Some(SniffedFormat::Fits),
             ),
+            // AVIF's signature sits at offset 4 with nothing pinned at 0,
+            // because bytes 0..4 are the `ftyp` box's own size. The three
+            // near-misses below are the ones that matter: HEIC and the
+            // image-sequence brand are deliberately not claimed, and a box
+            // whose type is `JXL ` rather than `ftyp` is JPEG XL even though
+            // it shares AVIF's shape.
+            (
+                "avif",
+                b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00",
+                Some(SniffedFormat::Avif),
+            ),
+            (
+                "avif with a 12-byte ftyp box",
+                b"\x00\x00\x00\x0cftypavif\x00\x00\x00\x00",
+                Some(SniffedFormat::Avif),
+            ),
+            ("heic is not avif", b"\x00\x00\x00\x20ftypheic", None),
+            ("avis is not avif", b"\x00\x00\x00\x20ftypavis", None),
+            ("ftyp with no brand", b"\x00\x00\x00\x20ftyp", None),
             ("fits free format", b"SIMPLE=T", None),
             ("fits without the keyword padding", b"SIMPLE = T", None),
             ("fits truncated", b"SIMPLE  ", None),
+            // NIfTI has six spellings of its own front: two versions, two
+            // byte orders, and on each version a single-file and a paired
+            // magic. All six route to the same container, and the paired
+            // ones on purpose: `decode_nifti` then says "the voxels are in
+            // a sibling .img" rather than leaving the file to report "these
+            // bytes are not an image".
+            ("nifti-1 single le", NIFTI_1_LE, Some(SniffedFormat::Nifti)),
+            ("nifti-1 single be", NIFTI_1_BE, Some(SniffedFormat::Nifti)),
+            ("nifti-2 single le", NIFTI_2_LE, Some(SniffedFormat::Nifti)),
+            ("nifti-2 single be", NIFTI_2_BE, Some(SniffedFormat::Nifti)),
+            (
+                "nifti-1 pair header",
+                NIFTI_1_PAIR,
+                Some(SniffedFormat::Nifti),
+            ),
+            (
+                "nifti-2 pair header",
+                NIFTI_2_PAIR,
+                Some(SniffedFormat::Nifti),
+            ),
+            // The sentinel alone is not enough: this file has a valid
+            // 348-byte sizeof_hdr and no NIfTI magic at all.
+            (
+                "nifti sentinel without a magic",
+                NIFTI_ANALYZE_DIALECT,
+                None,
+            ),
+            // One byte short of the magic, so a 348-byte signature cannot
+            // be decided.
+            ("nifti-1 truncated to 347", &NIFTI_1_LE[..347], None),
+            // JPEG 2000 is the second container here with two unrelated
+            // magics: the RFC 3745 signature box and the bare codestream's
+            // `SOC` + `SIZ` pair, which `jp2ksave` never writes and
+            // `jp2kload` still reads.
+            (
+                "jp2 signature box",
+                b"\x00\x00\x00\x0cjP  \r\n\x87\nftypjp2 ",
+                Some(SniffedFormat::Jp2k),
+            ),
+            (
+                "jp2k bare codestream",
+                b"\xff\x4f\xff\x51\x00\x2f\x00\x00",
+                Some(SniffedFormat::Jp2k),
+            ),
+            // The signature box decided from 11 bytes would be a guess, and
+            // its first four bytes are the same box length JPEG XL's
+            // signature box carries, so a sniff that stopped at the length
+            // would answer the wrong container.
+            (
+                "jp2 signature truncated",
+                b"\x00\x00\x00\x0cjP  \r\n\x87",
+                None,
+            ),
+            // `SOC` alone is not the pair: a codestream opens `FF 4F FF 51`
+            // and `FF 4F` followed by anything else is not JPEG 2000.
+            ("soc without siz", b"\xff\x4f\xff\x52\x00\x00", None),
+            // And the JPEG XL signature box, which shares the first four
+            // bytes, must still be JPEG XL rather than JPEG 2000.
+            (
+                "jxl box is not jp2",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a",
+                Some(SniffedFormat::Jxl),
+            ),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
+            // Both directions of the one row that shares another row's
+            // magic bytes. A whole Ultra HDR container is Uhdr; its first
+            // SNIFF_HEAD_LEN bytes -- which is all the file entry point
+            // ever sniffs -- are indistinguishable from any JPEG and must
+            // stay Jpeg, or every ordinary JPEG on disk would route to the
+            // Ultra HDR decoder.
+            ("ultra hdr", &uhdr, Some(SniffedFormat::Uhdr)),
+            (
+                "ultra hdr, head only",
+                &uhdr[..SNIFF_HEAD_LEN],
+                Some(SniffedFormat::Jpeg),
+            ),
         ];
         for (name, head, expected) in cases {
             assert_eq!(sniff(head), expected, "sniff disagreed on {name}");
@@ -2691,22 +3105,24 @@ mod tests {
      * `priced_by_libviprs` row, or wraps a crate that refuses internally the
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
-     * Input: `SniffedFormat::ALL.len()` -> Output: 10, which is what the two
-     * tables plus the one documented exclusion account for.
+     * Input: `SniffedFormat::ALL.len()` -> Output: 14, which is what the two
+     * tables account for between them, with no exclusions left.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            10,
+            14,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 10 are: 6 self-priced (gif, radiance, fits, openexr, jxl, \
-             and webp which joined them in #686), 3 refused inside the image crate \
-             (jpeg, png, tiff), and .v, which applies no allocation budget at all and \
-             is issue #710"
+             count. Today the 14 are: 11 self-priced (gif, radiance, fits, openexr, \
+             jxl, webp which joined them in #686, uhdr which joined them in #508 and \
+             prices two images rather than one, .v which joined them in #710, nifti \
+             which joined them in #510, avif which joined them in #605, and jp2k \
+             which joined them in #501) and 3 refused inside the image crate (jpeg, \
+             png, tiff). There are no exclusions left"
         );
     }
 
@@ -2828,6 +3244,19 @@ mod tests {
                 // The facade flattens the channel set `crate::exr` needs
                 // (issue #504).
                 SniffedFormat::OpenExr => Kind::Native,
+                // Two concatenated JPEGs plus MPF and ISO 21496-1 metadata.
+                // No crate models the container, and the gain map is found
+                // by walking from the base image's `EOI` (issue #508).
+                SniffedFormat::Uhdr => Kind::Native,
+                // Neither `image` nor the pinned vips has a NIfTI route at
+                // all (issue #510).
+                SniffedFormat::Nifti => Kind::Native,
+                // Native because the container's `iloc` addresses payload
+                // bytes by absolute file offset, so the whole file has to be
+                // resident before an item's extents can be gathered.
+                SniffedFormat::Avif => Kind::Native,
+                // `image` has no JPEG 2000 route at all (issue #501).
+                SniffedFormat::Jp2k => Kind::Native,
             }
         }
 
@@ -2864,6 +3293,34 @@ mod tests {
             vec![SniffedFormat::Png, SniffedFormat::Tiff],
             "decode_file_with_limits' doc tells callers PNG and TIFF are the only \
              containers that stream; move the doc and this list together"
+        );
+
+        // The same doc paragraph names the other half by hand, and only the
+        // streaming half above had a check behind it. The NIfTI row (#510)
+        // went in with that sentence left saying eight containers, the
+        // suite stayed green, and the prose was wrong for a whole PR.
+        let whole_file: Vec<SniffedFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter(|format| format.decodes_from_memory())
+            .collect();
+        assert_eq!(
+            whole_file,
+            vec![
+                SniffedFormat::Vips,
+                SniffedFormat::Uhdr,
+                SniffedFormat::Jpeg,
+                SniffedFormat::Gif,
+                SniffedFormat::WebP,
+                SniffedFormat::Jxl,
+                SniffedFormat::Radiance,
+                SniffedFormat::Fits,
+                SniffedFormat::OpenExr,
+                SniffedFormat::Nifti,
+                SniffedFormat::Avif,
+                SniffedFormat::Jp2k,
+            ],
+            "decode_file_with_limits' doc names every container it reads whole, in \
+             this order; move the doc and this list together"
         );
     }
 
