@@ -972,15 +972,7 @@ fn tile_count(size: u32, origin: u32, tile: u32) -> u32 {
 
 /// The `jp2k`-feature-on body of [`decode_jp2k`].
 #[cfg(feature = "jp2k")]
-#[allow(unreachable_code, clippy::allow_attributes)]
 fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    // ISSUE #501, RED COMMIT. There is no decoder here yet, so every test
-    // above that decodes a fixture fails on the assertion it names rather
-    // than on a missing symbol. The next commit deletes these two lines.
-    return Err(Jp2kError::Decode {
-        message: "the JPEG 2000 decoder is not written yet".to_owned(),
-    }
-    .into());
     use hayro_jpeg2000::{DecodeSettings, DecoderContext, Image as Jp2kImage};
 
     // Pass one over the bytes: the box structure and the main header, for the
@@ -1309,12 +1301,7 @@ fn decode_error(error: hayro_jpeg2000::DecodeError) -> Jp2kError {
 
 /// The `jp2k`-feature-on body of [`Raster::encode_jp2k`].
 #[cfg(feature = "jp2k")]
-#[allow(unreachable_code, clippy::allow_attributes)]
 fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
-    // ISSUE #501, RED COMMIT. See `decode` above.
-    return Err(EncodeError::encode(
-        "the JPEG 2000 encoder is not written yet",
-    ));
     use openjpeg2_pure::{EncodeOptions, Encoder, Format, Image, ImageComponent};
 
     let SaveOptions { compression } = options;

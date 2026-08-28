@@ -148,6 +148,7 @@ println!(
 | `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |
 | `svg` | off | Enables the SVG rasteriser behind `decode_svg`. Costs 29 crates (`resvg` and its tree), which is why it is opt-in; without it `decode_svg` returns a typed `Unsupported`. |
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
+| `jp2k` | off | Enables the JPEG 2000 loader and encoder: `decode_jp2k`, `Raster::encode_jp2k`, `Raster::save_jp2k`, and the `.jp2` / `.j2k` rows in the content sniffer. Costs **2 crates** (`hayro-jpeg2000` and `openjpeg2-pure-rs`, neither of which has a dependency of its own), so what it buys back is compile time rather than crate count; without it every entry point still exists and returns a typed refusal. |
 
 ## Requirements
 
