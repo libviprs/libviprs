@@ -1870,6 +1870,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn pdf_info_with_password_passes_through_open_error() {
         // A missing/unreadable file must surface its real open error, not the
         // password-protected message, even when a password is supplied.
@@ -1895,6 +1896,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn password_and_dpi_extract_return_a_clean_typed_error() {
         let bogus = Path::new("/nonexistent/secret.pdf");
         // A missing file surfaces its real error folded into the decode error,
