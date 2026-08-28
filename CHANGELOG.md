@@ -1622,6 +1622,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
+  now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster
+  with no alpha band (issue #704). `vips_interpolate_bicubic_interpolate` sends
+  that carrier to `bicubic_unsigned_int_tab`, which reads
+  `vips_bicubic_matrixi` (the Catmull-Rom coefficients truncated to 12-bit
+  fixed point) and accumulates as integers a row at a time, closing each row
+  and the column combine with `unsigned_fixed_round`. This module evaluated the coefficients in
+  `f64` at the grid offset #668 put them on, which is the last systematic
+  divergence on that path.
+
+  **This is deliberately less accurate, and that is the trade.** Against
+  Catmull-Rom evaluated at the true sub-pixel offset in exact rational
+  arithmetic, over 17814 interior samples of random `uchar` images, the mean
+  absolute error goes from 0.4371 LSB to 0.4798 and the worst case stays at
+  1 LSB. Some samples move the other way: vips is the closer of the two on
+  1355 of those 17814. The error both spellings already share from #668's
+  1/64 offset grid is 0.44 LSB, ten times the difference this makes.
+
+  What it buys is a gate that can see a regression. The bicubic allowance in
+  `affine_interpolators_match_libvips_oracle` goes from 30 bytes at delta 1 to
+  **zero**, joining `nohalo` and `lbb`, so a future 1-LSB drift on this path
+  goes red instead of landing inside a tolerance. That is the failure #668
+  itself documented: a false comment plus a tolerance wide enough to absorb it
+  is how a 2.3-magnitude divergence survived.
+
+  It is one carrier, not "the integer carriers". `USHORT` and `SHORT` take
+  `bicubic_unsigned_int32_tab`, which reads the `double` table, and an alpha
+  band routes through a premultiply into FLOAT first, so neither ever sees the
+  fixed point. Three tests pin those carriers so the new path cannot spread.
+
+- `affine_interpolators_match_libvips_oracle` explained its 1-byte `bilinear`
+  allowance as "a single `.5` rounding tie". It is not: `SWITCH_INTERPOLATE`
+  sends `uchar` and `ushort` rasters to `BILINEAR_INT`, whose four weights are
+  12-bit fixed point as well. Modelling that reproduces the binary exactly and
+  modelling a tie does not. The comment now says so and issue #733 carries the
+  measurement.
+
 - `try_embed`, `try_gravity`, `try_insert` and `smartcrop`'s `Entropy` and
   `Attention` strategies return a new `ExtractError::FloatUnsupported` on a
   float raster instead of **panicking** out of a `Result` signature
