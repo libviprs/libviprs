@@ -1761,6 +1761,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `nohalo` are one expression with a single narrowing at the store and were
   already bit-exact.
 
+- The `resample` module docs said `Extend::White` diverges on an alpha raster
+  because `vips_affine` "premultiplies into a float image before it paints that
+  border", so `FILL_LINE(float, ...)` runs and the byte `memset` never does.
+  That is not what happens (issue #692). `vips_affine_build` embeds **before**
+  it premultiplies, so the ink is memset into the raster's own domain either
+  way. What moves the value is that the premultiply pair does not cancel on that
+  pixel: `vips_premultiply` takes a clipped alpha into its multiplier and
+  `vips_unpremultiply` takes the raw one into its reciprocal, so a border pixel
+  whose every band holds the same ink `E` comes back as `clip(E, 0, max_alpha)`.
+
+  **The divergence stays**, and that is now a decision with numbers behind it
+  rather than a to-do. The border follows whichever ceiling the premultiply
+  bracket uses, and this module's is the depth's on an unsigned carrier
+  (issue #664), so the two answers differ only where a tag's ceiling sits below
+  its carrier's depth: three cells out of eleven measured, all of them a 16-bit
+  raster wearing an 8-bit tag. Adopting vips' ceiling to close them costs the
+  whole image, not the border: `vips affine` on a constant-25000 `ushort` RGBA
+  tagged `srgb` returns **255 for every interior sample**, tagged `scrgb` it
+  returns 1, and with alpha 65535 a colour of 25000 comes back as 97. Clipping
+  only the border fill instead would fix the pure-ink pixel and leave every
+  blended one wrong, because the two premultiplied spaces are scaled
+  differently.
+
+  Both halves are pinned now: the agreeing cells so the divergence is bounded
+  to those three rather than assumed, and the interior round-trip so the price
+  of the other reading is a number.
+
 - `affine_interpolators_match_libvips_oracle` explained its 1-byte `bilinear`
   allowance as "a single `.5` rounding tie". It is not: `SWITCH_INTERPOLATE`
   sends `uchar` and `ushort` rasters to `BILINEAR_INT`, whose four weights are
