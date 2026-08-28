@@ -1823,6 +1823,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allocator, so between the two nothing image-sized on that path is outside the
   fallible helper.
 
+  One thing the mutation pass turned up while the funnel was being written, and
+  it is fixed here rather than filed: `try_plane_filled` fills to a length
+  computed from the geometry and its doc has said since it was
+  `alloc_colour_plane_filled` that this is a contract and not `capacity()`,
+  because `Vec::try_reserve_exact` may hand back more room than asked for. On
+  this allocator at these sizes it never does, so `out.resize(out.capacity(),
+  fill)` passed all eighty-one allocation checks in the crate. The probe now has
+  an over-reserve knob that makes the allocator's licence happen on purpose, and
+  the substitution goes red.
+
   No public API moves and no behaviour changes: everything here is
   `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
   ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
