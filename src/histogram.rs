@@ -161,11 +161,22 @@ fn expect_hist<T>(op: &str, r: Result<T, HistogramError>) -> T {
 // Sample-level helpers
 // ---------------------------------------------------------------------------
 
-/// Read the flat `i`-th sample as `u32` (native byte order for
-/// [`SampleKind::U16`], matching [`crate::raster_ops`]). Unsigned kinds
+/// Read the flat `i`-th sample as a `u32` bin index (native byte order for
+/// the multi-byte kinds, matching [`crate::raster_ops`]). Integer kinds
 /// only: the [`SampleKind::F32`] arm panics rather than misreading float
 /// bytes as `u16` pairs, which is what the histogram ops did before the
 /// float formats existed.
+///
+/// This is the read a `VipsStatisticClass` op performs *after* its input
+/// cast, which is why the signed and 32-bit arms fold rather than widen: a
+/// negative sample indexes bin zero and a sample past 65535 indexes the
+/// last bin of the 16-bit table. Both are measured, not read out of the C,
+/// and the measurements are on [`SampleKind::hist_bins`].
+///
+/// It doubles as the read for a histogram's own counts, which is exact for
+/// every carrier the crate has because a count is non-negative and
+/// saturates at 65535 anyway (issue #532). A wider count carrier needs the
+/// two reads separated.
 ///
 /// The match is over the kind and has no wildcard, so a carrier added to
 /// [`SampleKind`] is a compile error here instead of a silent misread
@@ -175,13 +186,36 @@ fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
     match kind {
         SampleKind::U8 => data[i] as u32,
         SampleKind::U16 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
+        // A signed sample is folded through the unsigned kind of the same
+        // width, saturating, so every negative sample indexes bin zero.
+        // That is what libvips does and it is observable rather than read
+        // out of the C: on 8.18.6 a `char` image of `[-128, -1, 0, 127]`
+        // histograms to `bin 0 = 3`, `bin 127 = 1`. It is the
+        // `VipsStatisticClass` input cast, not a signed bin table.
+        SampleKind::I8 => (data[i] as i8).max(0) as u32,
+        SampleKind::I16 => i16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]).max(0) as u32,
+        // The 32-bit kinds have no value-indexed table of their own
+        // (`SampleKind::hist_bins` is `None` for both) and libvips casts
+        // them into `ushort` before counting, measured: a `uint` image
+        // whose largest sample is 70000 gives a 65536-wide histogram.
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ])
+        .min(u32::from(u16::MAX)),
+        SampleKind::I32 => i32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ])
+        .clamp(0, i32::from(i16::MAX) * 2 + 1) as u32,
         SampleKind::F32 => panic!(
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
-            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
-        }
     }
 }
 
@@ -197,30 +231,49 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
             data[i * 2] = b[0];
             data[i * 2 + 1] = b[1];
         }
+        // Counts are non-negative, so only the ceiling can bind and the
+        // signed kinds saturate at their positive end. Sourced from
+        // `SampleKind::max_value` rather than re-spelling 127 / 32767 /
+        // 2147483647 here.
+        SampleKind::I8 => data[i] = v.min(0x7F) as u8,
+        SampleKind::I16 => {
+            let b = (v.min(0x7FFF) as u16).to_ne_bytes();
+            data[i * 2] = b[0];
+            data[i * 2 + 1] = b[1];
+        }
+        SampleKind::U32 => data[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes()),
+        SampleKind::I32 => {
+            data[i * 4..i * 4 + 4].copy_from_slice(&v.min(0x7FFF_FFFF).to_ne_bytes());
+        }
         SampleKind::F32 => panic!(
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
-            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
-        }
     }
 }
 
-/// Number of histogram bins for an unsigned sample kind: 256 or 65536.
+/// Number of histogram bins for an integer sample kind: 256 or 65536.
 ///
-/// Delegates to [`SampleKind::hist_bins`], which is the crate's one
-/// exhaustive answer, and turns its `None` into the same "no float
-/// rasters yet" panic [`read_flat`] raises. A carrier added to
-/// [`SampleKind`] gets its bin count there, once, rather than here.
+/// Reads [`SampleKind::hist_bins`] where the kind has a table of its own,
+/// so a carrier added to [`SampleKind`] gets its bin count there rather
+/// than here. The 32-bit kinds have no table of their own and libvips does
+/// not build one: it casts the input into `ushort` first, measured on
+/// 8.18.6, so the table stays 65536 wide and [`read_flat`] performs the
+/// matching saturation. `F32` keeps the "no float rasters yet" panic.
 #[inline]
 fn bins_for(kind: SampleKind) -> usize {
-    kind.hist_bins().unwrap_or_else(|| {
-        panic!(
+    match kind {
+        SampleKind::U8 | SampleKind::I8 | SampleKind::U16 | SampleKind::I16 => kind
+            .hist_bins()
+            .expect("the 8- and 16-bit kinds have a bin table"),
+        SampleKind::U32 | SampleKind::I32 => {
+            SampleKind::U16.hist_bins().expect("U16 has a bin table")
+        }
+        SampleKind::F32 => panic!(
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
-        )
-    })
+        ),
+    }
 }
 
 /// The canonical format for a band count and sample kind, or a typed error.
@@ -703,13 +756,18 @@ impl Raster {
         // unreachable in practice: `read_flat` above panics on it for any
         // non-empty histogram, and `hist_len` rejects the empty shape.
         let height = match kind {
+            // `uchar` is the only format libvips gives a fixed plot height,
+            // measured on 8.18.6: a `uchar` histogram of `[0, 5]` plots 256
+            // rows high while the same values as `char`, `ushort`, `short`,
+            // `uint` or `int` plot 5. So the signed one-byte kind belongs
+            // with the data-driven group and not with `U8`.
             SampleKind::U8 => 256,
-            SampleKind::U16 | SampleKind::F32 => {
-                values.iter().copied().max().unwrap_or(0) as usize + 1
-            }
-            SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
-                todo!("the signed and 32-bit sample kinds (issues #516, #517)")
-            }
+            SampleKind::U16
+            | SampleKind::I8
+            | SampleKind::I16
+            | SampleKind::U32
+            | SampleKind::I32
+            | SampleKind::F32 => values.iter().copied().max().unwrap_or(0) as usize + 1,
         };
         let mut out = Raster::zeroed(n as u32, height as u32, PixelFormat::Gray8)?;
         let buf = out.data_mut();
@@ -1309,6 +1367,16 @@ mod tests {
      */
     #[test]
     fn write_flat_saturates_into_every_integer_kind() {
+        // The stored bit pattern, read back without going through
+        // `read_flat`, which folds a 32-bit sample into the 16-bit bin
+        // table and so cannot see a count above 65535.
+        fn stored(buf: &[u8]) -> u32 {
+            match buf.len() {
+                1 => u32::from(buf[0]),
+                2 => u32::from(u16::from_ne_bytes([buf[0], buf[1]])),
+                _ => u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            }
+        }
         for kind in [
             SampleKind::U8,
             SampleKind::I8,
@@ -1321,15 +1389,55 @@ mod tests {
             let mut buf = vec![0u8; kind.bytes()];
             write_flat(&mut buf, kind, 0, u32::MAX);
             assert_eq!(
-                read_flat(&buf, kind, 0),
+                stored(&buf),
                 ceiling,
                 "{kind:?} did not saturate at its ceiling"
             );
             write_flat(&mut buf, kind, 0, 5);
             assert_eq!(
-                read_flat(&buf, kind, 0),
+                stored(&buf),
                 5,
                 "{kind:?} did not write an in-range count through"
+            );
+        }
+        // The control on `stored` itself: on the two carried unsigned
+        // kinds it agrees with `read_flat`, so it is reading the same
+        // bytes the module does.
+        let mut two = vec![0u8; 2];
+        write_flat(&mut two, SampleKind::U16, 0, 4_242);
+        assert_eq!(stored(&two), read_flat(&two, SampleKind::U16, 0));
+    }
+
+    /**
+     * Tests that the bin-index read performs the same input cast a
+     * `VipsStatisticClass` op performs, folding a 32-bit sample into the
+     * 16-bit bin table rather than indexing past its end.
+     * Works by storing samples either side of 65535 and asserting the
+     * index, with an in-range value alongside so the fold cannot pass as a
+     * constant, and by asserting the index never reaches `bins_for`.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: a `uint` image whose
+     * largest sample is 70000 gives a **65536**-wide histogram, so the
+     * sample was saturated into `ushort` before it was counted.
+     * Input: U32 70000 -> 65535; U32 1000 -> 1000; I32 -7 -> 0.
+     */
+    #[test]
+    fn read_flat_folds_a_32_bit_sample_into_the_16_bit_bin_table() {
+        for (kind, stored, index) in [
+            (SampleKind::U32, 70_000i64, 65_535u32),
+            (SampleKind::U32, 1_000, 1_000),
+            (SampleKind::U32, i64::from(u32::MAX), 65_535),
+            (SampleKind::I32, -7, 0),
+            (SampleKind::I32, 1_000, 1_000),
+            (SampleKind::I32, i64::from(i32::MAX), 65_535),
+        ] {
+            let mut buf = vec![0u8; 4];
+            buf.copy_from_slice(&(stored as i32).to_ne_bytes());
+            let got = read_flat(&buf, kind, 0);
+            assert_eq!(got, index, "{kind:?} folded {stored} into the wrong bin");
+            assert!(
+                (got as usize) < bins_for(kind),
+                "{kind:?} indexed past the {} bins it declares",
+                bins_for(kind)
             );
         }
     }
