@@ -1038,8 +1038,9 @@ fn the_annotated_set_stays_the_size_it_is_documented_to_be() {
         src_annotated.len(),
         EXPECTED_SRC_ANNOTATIONS,
         "`src/` carries {} annotated tests, not {EXPECTED_SRC_ANNOTATIONS}. Adding or \
-         removing one is fine, but update `EXPECTED_SRC_ANNOTATIONS` and the count quoted \
-         in `merge-gate.yml` with it. Modules involved: {modules:?}",
+         removing one is fine, but move `EXPECTED_SRC_ANNOTATIONS` in the same change. \
+         `merge-gate.yml` deliberately quotes no count, so it needs no edit for this. \
+         Modules involved: {modules:?}",
         src_annotated.len()
     );
     assert_eq!(
