@@ -148,6 +148,7 @@ fn record_float(v: f64) -> serde_json::Value {
 /// answer when this goes red is how far the rot spread, not which name sorts
 /// first.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn every_oracle_capture_is_strict_json() {
     let mut bad = Vec::new();
     for path in oracle_files() {
@@ -242,6 +243,7 @@ fn the_three_recorded_tokens_are_distinct_and_survive_a_round_trip() {
 /// the token must not have quietly turned an infinity into a string nobody
 /// decodes, or into the `0.0` that sits next to it in the same row.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_repaired_captures_still_record_a_real_infinity_and_a_real_nan() {
     let radiance: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(repo_root().join("oracle-captures/foreign-radiance/oracle.json"))
