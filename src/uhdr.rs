@@ -38,7 +38,7 @@
 //!   (`fixtures/no-iso-gainmap.jpg`).
 //!
 //! [`is_uhdr`] implements the chooser's gate, both stages, because that is
-//! the question [`crate::source::sniff`] is asking: not "could a decoder
+//! the question `crate::source::sniff` is asking: not "could a decoder
 //! make something of this" but "which loader does this file belong to".
 //! `has_mpf` alone would claim `fixtures/mpf-graft.jpg`, an ordinary JPEG
 //! with an MPF segment grafted on and no gain map anywhere, and that file
@@ -54,7 +54,7 @@
 //! `jpegload`'s 50 and lets content decide.
 //!
 //! libviprs spells that priority as declaration order in
-//! [`SniffedFormat`](crate::source::SniffedFormat), so the `Uhdr` row sits
+//! `SniffedFormat` (see [`crate::source`]), so the `Uhdr` row sits
 //! *before* `Jpeg`, and the row's signature is a structural predicate over
 //! the whole buffer rather than a leading-byte pattern. See
 //! [`crate::source`] for how the file entry point still reaches it: the
@@ -72,9 +72,9 @@
 //! # Decode limits
 //!
 //! A UHDR file holds **two** images, so both are priced. The base and the
-//! gain map each go through [`DecodeLimits::check_coord`],
-//! [`DecodeLimits::check_pixels`] and
-//! [`DecodeLimits::check_image_alloc`], from geometry read out of each
+//! gain map each go through `DecodeLimits::check_coord`,
+//! `DecodeLimits::check_pixels` and
+//! `DecodeLimits::check_image_alloc`, from geometry read out of each
 //! image's own `SOF` marker *before* either is decoded. Pricing only the
 //! base would let a 1x1 base carry a 60000x60000 gain map.
 
@@ -1342,7 +1342,7 @@ fn splice_after_soi(jpeg: &[u8], segments: &[u8]) -> Vec<u8> {
 /// libvips `uhdrsave`.
 ///
 /// `scrgb` must be 3-band `f32`. The base image is the input clamped to the
-/// SDR range and encoded through the inverse of [`V2Y_8`]; the gain map
+/// SDR range and encoded through the inverse of the `v2Y_8` table; the gain map
 /// carries what was clipped.
 ///
 /// # This is not byte-compatible with libuhdr, and nothing could be
