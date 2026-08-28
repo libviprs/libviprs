@@ -1732,6 +1732,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy. I found that by mutating the second check away and watching the tests
   stay green.
 
+- `Raster::extract` carries its input's metadata, and so do the pyramid
+  downscale and the padded-tile path, so every tile of an engine run keeps the
+  interpretation, the resolution, the orientation and the attached fields
+  (issue #740). `Raster::extract` is the crate's physical crop: `src/engine.rs`
+  and `src/streaming.rs` call it per tile and per strip, and
+  `Raster::extract_area` is built on it and was the only one of the two that
+  carried, since #690.
+
+  It is not cosmetic, and it is only visible on the float carriers. #664 makes
+  the premultiply bracket take its alpha ceiling from the interpretation on
+  float and from the storage depth on unsigned, so a float raster that lost its
+  tag brackets against 255 rather than 1.0. A 32x32 `RgbaF32` tagged `ScRgb`,
+  cropped 16x16 through each method and then `resize(0.5)`, differs in **98 of
+  1024 bytes**, and an explicitly `Srgb`-retagged copy of the same pixels
+  differs by exactly the same 98, so the loss is precisely equivalent to a
+  retag. The same fixture as `Rgba8` differs in **0 of 256**, which is the trap:
+  measuring this on the obvious 8-bit carrier reports no effect.
+
+  Three more sites had to carry for the engine to keep it end to end:
+  `resize::downscale_half` and `downscale_to`, which build every pyramid level
+  below the first, and the three padded-tile constructions in
+  `engine::extract_tile`, which build a tile from a fresh background buffer.
+  Without those, only the top two levels of a pyramid carried anything. vips
+  agrees: `shrink`, `reduce` and `resize` all hand the whole block on, and none
+  of them rescales the resolution with the pixel grid.
+
+  **A correction to the issue.** It says a pyramid of a *float* scRGB source
+  through the region entry point would not match a whole-image one. That is not
+  reachable: the engine refuses a float source outright with
+  `RasterError::FloatUnsupported { op: "downscale_half" }`, so the pixel
+  divergence above is a public-API consequence and not a pyramid one. What the
+  pyramid lost was the metadata, on every tile.
+
+  The origin offset is **carried** here, not stamped. `extract_area` still
+  stamps `(-left, -top)` to match `vips_extract_area` (#690), and `extract` is
+  not that operation: it is the physical crop, vips has no method it
+  corresponds to, and a pyramid tile is not a crop of a larger image in the
+  sense `Xoffset` means. Stamping there would have put a non-zero origin into
+  every tile header on an analogy rather than a measurement.
+
+  The cost is one bounded copy of the attached fields per crop, per downscale
+  and per padded tile, which for an ICC profile is a real allocation that was
+  not there before. Measured across four image sizes, it is **O(tiles), not
+  O(pixels)**: 3.22 profile copies per tile at 32x32 falling to 2.04 at
+  256x256, while the pixel count grows 64x. At a realistic 256px tile a
+  1024x1024 run makes 78 copies of a 3144-byte profile, about 4% of the bytes of
+  a single tile buffer.
+
 - `Raster::try_join`'s float guard and its documentation say what they are for
   (issue #730). The comment claimed the placement path underneath panics on
   4-byte samples, which stopped being true when #694 moved that guard into
