@@ -841,6 +841,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declaring a 65535x65535 frame on a 1x1 screen used to allocate 4 GiB
   through a budget that had only seen the 3-byte screen.
 
+- **Animated WebP and animated JPEG XL load** (issues #569, #621).
+  `webp::decode_webp_with` and `jxl::decode_jxl_with` take a `LoadOptions`
+  carrying libvips's `page` and `n`, decode the frames asked for and stack
+  them into one toilet-roll raster with the page geometry #564's model
+  derives. `decode_webp` and `decode_jxl` are those functions at their
+  default, which is page 0 and one frame, so nothing about the still path
+  moved. `n` is an `Option<u32>` rather than vips's `-1`-means-all `i32`,
+  because a negative page count is not a page count.
+
+  An animation now carries `page-height` (when more than one page was
+  loaded), `delay` as a `MetadataValue::IntArray` of milliseconds, `loop`,
+  and the `gif-delay` / `gif-loop` compatibility fields vips attaches beside
+  them. `n-pages` still counts the pages of the *file*, as #635 pinned it.
+
+  **The delay array is subset to the pages actually loaded, and vips's is
+  not.** Measured on 8.18.6, `vipsheader -f delay 'anim4.webp[page=1,n=2]'`
+  prints the file's whole `45 67 200 12` onto a raster holding pages 1 and
+  2. Nothing on that raster records the offset, so that array cannot be
+  lined up with the pages that are there and a saver reading it writes the
+  wrong two delays, silently. Here `delay[i]` is the delay of loaded page
+  `i` and `delay.len() == pages_loaded()` always holds.
+
+  **Both formats are read-only and that is a decision, not an oversight.**
+  No pure-Rust encoder writes a WebP `ANIM`/`ANMF` or a JPEG XL animation
+  header, so an animation can be loaded and transformed and not saved back
+  in its own format. `encode_webp` and `encode_jxl` write the first page of
+  a roll rather than refusing it, because those are exactly the bytes a
+  caller who extracted page 0 would have handed them; animated GIF is the
+  format in this crate with a pure-Rust animated encoder behind it.
+
+- `SourceError::PageOutOfRange` is the typed refusal for a `page` or
+  `page + n` naming pages a file does not have, shared by the animated
+  loaders (issues #569, #621). Distinct from `SourceError::PageLimitExceeded`,
+  which is the configured ceiling rather than the file's own count. vips
+  refuses the same requests, with `webp: bad page number`, and clamps none of
+  them: `[page=4]`, `[page=2,n=5]` and `[n=0]` on a four-page file all fail
+  there too.
+
 - **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
   `decode_analyze_file` takes either half of the pair or the bare stem and
   resolves the other, `analyze::decode_analyze` takes the two buffers, and a
@@ -2874,6 +2912,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
+
+- **Animated WebP frames after the first no longer decode one grey level
+  low.** `image-webp` 0.2.4 runs its approximate alpha blend on fully opaque
+  pixels, where libwebp explicitly does not (`demux/anim_decode.c`,
+  `BlendPixelRowNonPremult`, which tests `src_alpha != 0xff` before blending).
+  With `src_a = 255` the approximation is `(s * 255 * ((1 << 24) / 255)) >> 24`,
+  which is `s - 1` for every `s` from 1 to 255, so every opaque channel of a
+  blended frame came back one low. `vips webpsave` writes frame 0 with
+  blending off and every later frame with it on, so a four-page roll read back
+  `74 20 38` where `vips rawsave 'x.webp[n=-1]'` read `75 21 39`, on every
+  page but the first.
+
+  libviprs now switches blending off on the frames that provably carry no
+  transparency before handing the bytes to the decoder: a `VP8 ` frame is
+  lossy and has no alpha channel, and a `VP8L` frame declares one in its
+  `alpha_is_used` header bit. Blending a fully opaque frame is the identity,
+  so clearing the bit cannot change the image and it routes the decoder onto
+  its exact copy path. The input is cloned only when there is a frame to
+  rewrite.
+
+  What is left is a frame that declares alpha *and* asks to be blended, where
+  the opaque pixels inside it are still one low. `vips webpsave` does not
+  write that combination (a transparent roll comes out with blending off on
+  every frame, measured), so no oracle fixture reaches it, and it is written
+  down at `disable_blending_on_opaque_frames` rather than hidden.
 
 - `EncodeError::Unsupported`'s own documentation no longer names four formats
   this crate encodes (issue #758). The variant's doc listed UHDR, FITS,

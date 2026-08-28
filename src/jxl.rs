@@ -83,11 +83,28 @@
 //!   or `height <= 1` outright, so libviprs has a floor vips does not and
 //!   it is [`MIN_DIMENSION`]. The refusal names the floor rather than
 //!   letting the dependency's `ZeroDimension("width")` reach the caller.
-//! * **An animation loads frame 0 and says so.** A default `vips jxlload`
-//!   reads one frame and sets `n-pages` to the count in the original
-//!   (`jxlload.c:743-751`); the 4x9 toilet roll needs `[n=-1]`.
-//!   [`decode_jxl`] matches that default exactly. Reading every frame is
-//!   issue #621 and waits on the page model in #564.
+//! * **A multi-frame file loads frame 0 by default and every frame on
+//!   request.** A default `vips jxlload` reads one frame and sets
+//!   `n-pages` to the count in the original (`jxlload.c:743-751`);
+//!   [`decode_jxl`] matches that default exactly and [`decode_jxl_with`]
+//!   takes the `page` and `n` that ask for more, stacking the pages into
+//!   the toilet-roll layout [`crate::frames`] describes (issue #621).
+//! * **A multipage document is not an animation, and JPEG XL is the only
+//!   format here where those differ.** `jxlsave --page-height` on a roll
+//!   with no `delay` writes frames whose duration is the `0xffffffff`
+//!   sentinel, and `jxlload` on the result attaches the page geometry and
+//!   no `delay` and no `loop` at all. The same roll saved as WebP comes
+//!   back with `delay: 100 100 100`, because WebP has no document form and
+//!   `webpsave` had to invent durations. [`decode_jxl_with`] reads the
+//!   sentinel and answers as vips does.
+//! * **Animated JPEG XL can be read and never written.** `zune-jpegxl`
+//!   writes one frame and has no animation header at all, so
+//!   [`SaveOptions`] has nowhere to spell a delay or a loop count and
+//!   [`Raster::encode_jxl`] writes the **first page** of a roll rather
+//!   than a multi-frame file. The asymmetry is deliberate, it is the same
+//!   one [`crate::webp`] has, and the escape hatch is the same: animated
+//!   GIF is the format in this crate with a pure-Rust animated encoder
+//!   behind it.
 //! * **`icc-profile-data` is the profile the pixels are in, and is always
 //!   present.** `jxlload.c:955-985` asks libjxl for
 //!   `JXL_COLOR_PROFILE_TARGET_DATA`, which synthesises a profile when the
@@ -200,7 +217,7 @@ use crate::codec::EncodeError;
 #[cfg(feature = "jxl")]
 use crate::conversion::Interpretation;
 #[cfg(feature = "jxl")]
-use crate::frames::FrameDelay;
+use crate::frames::{FrameDelay, LoopCount};
 #[cfg(feature = "jxl")]
 use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
@@ -209,6 +226,8 @@ use crate::pixel::PixelFormat;
 #[cfg(feature = "jxl")]
 use crate::raster::buffer_len;
 use crate::raster::{Raster, RasterError};
+#[cfg(feature = "jxl")]
+use crate::source::resolve_page_range;
 use crate::source::{DecodeLimits, SourceError};
 
 /// The smallest width or height [`Raster::encode_jxl`] will encode.
@@ -503,9 +522,10 @@ impl Default for LoadOptions {
 ///
 /// A multi-frame file decodes to **frame 0 only**, at one frame's size, and
 /// carries `n-pages` set to the number of frames the original had, which is
-/// what a default `vips jxlload` does (`jxlload.c:743-751`). Reading every
-/// frame is issue #621 and needs the page model from #564; until then
-/// `n-pages` is the signal that frames were left behind.
+/// what a default `vips jxlload` does (`jxlload.c:743-751`).
+/// [`decode_jxl_with`] is the same loader with the `page` and `n` that read
+/// more than one, and it is where the animation-versus-document question
+/// is answered.
 ///
 /// [`Raster::get_n_pages`] reads it back for anything under 10,000 frames.
 /// At or above that it reports `1`, because it ports
@@ -548,19 +568,67 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
 /// Decode JPEG XL bytes, choosing which frames of a multi-frame file to
 /// read (libvips `jxlload_buffer` with `page` and `n`).
 ///
-/// STUB: still reads frame 0 only. Issue #621.
+/// `options.page` is the first keyframe, zero-based, and `options.n` is how
+/// many to read from there, `None` meaning every one to the end of the
+/// file. The pages are stacked top to bottom into a single raster in the
+/// toilet-roll layout [`crate::frames`] describes. [`decode_jxl`] is this
+/// function at [`LoadOptions::default`].
+///
+/// # Three kinds of file, and what each one carries
+///
+/// JPEG XL is the only format in this crate where "more than one frame"
+/// and "an animation" are different questions, and the answer decides
+/// which fields come back. All three were measured on vips 8.18.6.
+///
+/// | file | `n-pages` / `page-height` | `delay` / `loop` / `gif-delay` |
+/// |---|---|---|
+/// | a still | absent | absent |
+/// | a multipage **document** (`jxlsave --page-height`, no delay) | attached | **absent** |
+/// | an animation (the roll carried a `delay`) | attached | attached |
+///
+/// The document and the animation are told apart by the frame headers: a
+/// document's frames all carry the `0xffffffff` duration, and the
+/// `frame_millis` conversion is where that is read. This is the correction issue
+/// #621 asked for, and it is the whole of it: the `0xffffffff` sentinel
+/// never becomes a `-1` in a metadata field, because vips attaches no
+/// field at all for a document.
+///
+/// A **WebP** save of the same delay-less roll does attach `delay: 100 100
+/// 100` and `loop: 0`, because WebP has no document form and `webpsave`
+/// had to invent durations. The two loaders disagree because the two
+/// containers do, not because they read the same thing differently.
+///
+/// # Where this diverges from vips, deliberately
+///
+/// **The delay array is subset to the pages actually loaded**, exactly as
+/// [`crate::webp::decode_webp_with`] does and for the same reason:
+/// measured, `vipsheader -f delay 'anim4.jxl[page=1,n=2]'` prints the
+/// file's whole `45 67 200 12` onto a raster holding pages 1 and 2, and
+/// nothing on that raster records the offset. Here `delay.len() ==
+/// pages_loaded()` always holds.
+///
+/// `gif-loop` is **not** attached, and that is not an omission: measured,
+/// `jxlload` attaches `gif-delay` and no `gif-loop`, where `webpload`
+/// attaches both.
+///
+/// # Errors
+///
+/// As [`decode_jxl`], plus [`SourceError::PageOutOfRange`] when `page` is
+/// past the last keyframe, when `page + n` runs off the end, or when `n`
+/// is `Some(0)`; vips refuses all three with `jxlload: bad page number`
+/// and clamps none of them. The [`DecodeLimits`] ceilings are checked
+/// against the **roll** rather than one frame.
 pub fn decode_jxl_with(
     bytes: &[u8],
     options: LoadOptions,
     limits: DecodeLimits,
 ) -> Result<Raster, SourceError> {
-    let _ = options;
-    decode(bytes, limits)
+    decode(bytes, options, limits)
 }
 
-/// The `jxl`-feature-on body of [`decode_jxl`].
+/// The `jxl`-feature-on body of [`decode_jxl_with`].
 #[cfg(feature = "jxl")]
-fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+fn decode(bytes: &[u8], options: LoadOptions, limits: DecodeLimits) -> Result<Raster, SourceError> {
     // The decoder's own budget, which is what stops a bomb before the
     // header geometry is even readable. `jxl-oxide` documents it as
     // advisory rather than strict, so the frame buffer is checked against
@@ -671,7 +739,25 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         .into());
     }
 
-    let frames = u32::try_from(image.num_loaded_keyframes()).unwrap_or(u32::MAX);
+    let file_pages = u32::try_from(image.num_loaded_keyframes()).unwrap_or(u32::MAX);
+    let pages = resolve_page_range("JPEG XL", options.page, options.n, file_pages)?;
+    let loaded = pages.end - pages.start;
+
+    // The ceilings again, this time on the roll the pages will be stacked
+    // into. Widened to `u64` before multiplying, and saturated back only
+    // because every ceiling this feeds is far below `u32::MAX`, so a
+    // saturated height is refused whatever the true one was.
+    let roll_height = u32::try_from(u64::from(height) * u64::from(loaded)).unwrap_or(u32::MAX);
+    limits.check_coord(width, roll_height)?;
+    limits.check_pixels(width, roll_height)?;
+    limits.check_image_alloc(
+        "JPEG XL frame buffer",
+        width,
+        roll_height,
+        u64::from(bands),
+        format.bytes_per_channel() as u64,
+    )?;
+
     let icc = image.rendered_icc();
     let exif = exif_blob(&image);
     let xmp = match image.aux_boxes().first_xml() {
@@ -679,32 +765,100 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         _ => None,
     };
 
-    let render = image.render_frame(0).map_err(|e| decode_error(e, limits))?;
-    let mut stream = render.stream();
-    // The header said how many bands there would be and the budget was
-    // spent on that number, so a stream that disagrees is refused rather
-    // than silently written into a buffer sized for something else.
-    check_channel_count(bands, stream.channels())?;
+    // Milliseconds per *file* frame, so the animation-or-document question
+    // is answered by the whole file rather than by whichever pages were
+    // asked for. `None` everywhere means every frame carries the multipage
+    // sentinel, which is a document; the loaded slice is taken after.
+    let per_frame: Option<Vec<Option<FrameDelay>>> = image
+        .image_header()
+        .metadata
+        .animation
+        .as_ref()
+        .map(|animation| {
+            (0..file_pages)
+                .map(|index| {
+                    image.frame_header(index as usize).and_then(|header| {
+                        frame_millis(
+                            header.duration,
+                            animation.tps_numerator,
+                            animation.tps_denominator,
+                        )
+                    })
+                })
+                .collect()
+        });
+    let plays = image
+        .image_header()
+        .metadata
+        .animation
+        .as_ref()
+        .map(|animation| LoopCount::from_plays(animation.num_loops));
+    let animated = per_frame
+        .as_ref()
+        .is_some_and(|delays| delays.iter().any(Option::is_some));
 
-    let data = match format.bytes_per_channel() {
-        1 => {
-            let mut buf = vec![0u8; samples];
-            stream.write_to_buffer(&mut buf);
-            buf
+    let sample_bytes = format.bytes_per_channel();
+    let frame_bytes =
+        samples
+            .checked_mul(sample_bytes)
+            .ok_or(SourceError::DimensionLimitExceeded {
+                width,
+                height: roll_height,
+                max_pixels: limits.max_pixels,
+            })?;
+    let roll_bytes =
+        frame_bytes
+            .checked_mul(loaded as usize)
+            .ok_or(SourceError::DimensionLimitExceeded {
+                width,
+                height: roll_height,
+                max_pixels: limits.max_pixels,
+            })?;
+    let mut data = vec![0u8; roll_bytes];
+    // One scratch buffer for the whole roll rather than one per frame: the
+    // 16-bit and float carriers have to be written as typed samples and
+    // then narrowed to bytes, and reusing the buffer keeps a forty-frame
+    // load from allocating forty times.
+    let mut scratch16 = Vec::new();
+    let mut scratch32 = Vec::new();
+    for (slot, index) in pages.clone().enumerate() {
+        let offset = slot * frame_bytes;
+        let render = image
+            .render_frame(index as usize)
+            .map_err(|e| decode_error(e, limits))?;
+        let mut stream = render.stream();
+        // The header said how many bands there would be and the budget was
+        // spent on that number, so a stream that disagrees is refused
+        // rather than silently written into a buffer sized for something
+        // else. Checked on every page, because a later frame is a later
+        // chance to disagree.
+        check_channel_count(bands, stream.channels())?;
+        match sample_bytes {
+            1 => {
+                stream.write_to_buffer(&mut data[offset..offset + frame_bytes]);
+            }
+            2 => {
+                scratch16.clear();
+                scratch16.resize(samples, 0u16);
+                stream.write_to_buffer(&mut scratch16);
+                let (out, _) = data[offset..offset + frame_bytes].as_chunks_mut::<2>();
+                for (sample, out) in scratch16.iter().zip(out) {
+                    *out = sample.to_ne_bytes();
+                }
+            }
+            _ => {
+                scratch32.clear();
+                scratch32.resize(samples, 0f32);
+                stream.write_to_buffer(&mut scratch32);
+                let (out, _) = data[offset..offset + frame_bytes].as_chunks_mut::<4>();
+                for (sample, out) in scratch32.iter().zip(out) {
+                    *out = sample.to_ne_bytes();
+                }
+            }
         }
-        2 => {
-            let mut buf = vec![0u16; samples];
-            stream.write_to_buffer(&mut buf);
-            buf.into_iter().flat_map(u16::to_ne_bytes).collect()
-        }
-        _ => {
-            let mut buf = vec![0f32; samples];
-            stream.write_to_buffer(&mut buf);
-            buf.into_iter().flat_map(f32::to_ne_bytes).collect()
-        }
-    };
+    }
 
-    let mut raster = Raster::new(width, height, format, data).map_err(JxlError::Raster)?;
+    let mut raster = Raster::new(width, roll_height, format, data).map_err(JxlError::Raster)?;
     // Tagged rather than inferred: `Interpretation::for_format` reads the
     // band count, and a two-band greyscale-plus-alpha JXL has one colour
     // channel while a four-band float one has three. Only the colour
@@ -726,8 +880,43 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         "bits-per-sample",
         MetadataValue::Int(i64::from(bits_per_sample)),
     );
-    if frames > 1 {
-        raster.set_n_pages(frames);
+    if file_pages > 1 {
+        raster.set_n_pages(file_pages);
+    }
+    if loaded > 1 {
+        // Only when there is more than one page, which is what vips does:
+        // measured, `vipsheader -f page-height 'x.jxl[page=1]'` reports
+        // the field is not there and `[n=2]` reports 3. The setter refuses
+        // a height that does not divide the roll, so a miscount fails
+        // loudly rather than writing a split the reader would discard.
+        raster.try_set_page_height(height)?;
+    }
+    if animated {
+        // Only an animation gets these. A multipage document carries the
+        // page geometry above and none of this, which is the whole of what
+        // issue #621 asked; `MULTIPAGE_DURATION` says how it is told apart.
+        let delays: Vec<i64> = per_frame
+            .as_ref()
+            .expect("`animated` is only true when the durations were read")
+            [pages.start as usize..pages.end as usize]
+            .iter()
+            .map(|delay| i64::from(delay.unwrap_or_default().millis()))
+            .collect();
+        if let Some(&first) = delays.first() {
+            let centiseconds = FrameDelay::from_millis(first as u32).to_centiseconds();
+            raster
+                .fields
+                .set("gif-delay", MetadataValue::Int(i64::from(centiseconds)));
+        }
+        // Subset to the pages actually loaded; the entry point says why.
+        raster.fields.set("delay", MetadataValue::IntArray(delays));
+        if let Some(plays) = plays {
+            raster
+                .fields
+                .set("loop", MetadataValue::Int(i64::from(plays.plays())));
+        }
+        // No `gif-loop`. `jxlload` attaches `gif-delay` and not that one,
+        // where `webpload` attaches both; measured, and asserted.
     }
     Ok(raster)
 }
@@ -739,8 +928,8 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
 /// the message. [`crate::svg`] reports an `Unsupported` I/O error for the
 /// same situation because it has no error enum of its own to put it on.
 #[cfg(not(feature = "jxl"))]
-fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    let _ = (bytes, limits);
+fn decode(bytes: &[u8], options: LoadOptions, limits: DecodeLimits) -> Result<Raster, SourceError> {
+    let _ = (bytes, options, limits);
     Err(JxlError::FeatureNotEnabled.into())
 }
 
@@ -1001,16 +1190,46 @@ fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
     }
 }
 
+/// The duration a JPEG XL frame header carries when the file is a
+/// **multipage document** rather than an animation.
+///
+/// Measured on the pinned vips 8.18.6 through `jxl-oxide`: `vips jxlsave
+/// --page-height 3` on a roll with no `delay` writes an animation header
+/// (1000 ticks per second, 0 loops) and puts this value in every frame's
+/// `duration`, and `vips jxlload` on the result attaches `n-pages` and
+/// `page-height` and **no `delay` and no `loop`**. So the sentinel issue
+/// #621 worried would map onto a negative delay never reaches a metadata
+/// field at all: the answer for a document is that the animation fields
+/// are absent, not that a delay is -1, and
+/// [`FrameDelay`](crate::frames::FrameDelay) being unsigned costs nothing.
+#[cfg(feature = "jxl")]
+const MULTIPAGE_DURATION: u32 = 0xffff_ffff;
+
 /// The milliseconds a frame lasts, given its `duration` in ticks and the
 /// animation header's ticks-per-second rate, or `None` when the duration is
 /// not one.
 ///
-/// STUB: issue #621.
+/// `None` for [`MULTIPAGE_DURATION`], which marks a page of a document
+/// rather than a frame of an animation, and for a zero `tps_numerator`,
+/// which is not a rate and would otherwise divide by zero on a malformed
+/// header.
+///
+/// The arithmetic is `ticks * 1000 * tps_denominator / tps_numerator`,
+/// widened to `u64` and saturated back, with the multiplication before the
+/// division so a rate slower than a kilohertz does not floor to zero. The
+/// only rate the oracle writes is 1000/1, where a tick *is* a millisecond
+/// and every rounding rule agrees; the truncation on the last step is
+/// therefore visible only on a file no encoder reachable from here
+/// produces, and it is written down rather than measured.
 #[cfg(feature = "jxl")]
-#[allow(dead_code)]
 fn frame_millis(ticks: u32, tps_numerator: u32, tps_denominator: u32) -> Option<FrameDelay> {
-    let _ = (ticks, tps_numerator, tps_denominator);
-    None
+    if ticks == MULTIPAGE_DURATION || tps_numerator == 0 {
+        return None;
+    }
+    let millis = u64::from(ticks) * 1000 * u64::from(tps_denominator) / u64::from(tps_numerator);
+    Some(FrameDelay::from_millis(
+        u32::try_from(millis).unwrap_or(u32::MAX),
+    ))
 }
 
 /// The `exif-data` blob for an image, or `None` when there is no readable
@@ -2536,10 +2755,19 @@ mod tests {
         // multiplication has to come before the division or this answers
         // 0.
         assert_eq!(frame_millis(3, 10, 1), Some(FrameDelay::from_millis(300)));
-        // And a rate with a denominator: 1000/1001 ticks per second is the
-        // NTSC rate, where one tick is 1.001 ms.
+        // And a rate with a denominator. 30000/1001 ticks per second is
+        // NTSC's 29.97 fps, where one tick is 1001000/30000 ms and the
+        // last step truncates 33.36 to 33.
         assert_eq!(
-            frame_millis(1000, 1000, 1001),
+            frame_millis(1, 30000, 1001),
+            Some(FrameDelay::from_millis(33))
+        );
+        // Thirty of those ticks is 1001 ms, which is the check that the
+        // multiplication happens before the division: dividing the rate
+        // first gives 30000/1001 = 29 in integers and then 30 * 1000 / 29
+        // = 1034, and dividing the ticks first gives 0.
+        assert_eq!(
+            frame_millis(30, 30000, 1001),
             Some(FrameDelay::from_millis(1001))
         );
         // The sentinel that marks a multipage document rather than an
@@ -2577,7 +2805,7 @@ mod tests {
         )
         .expect("frames 1 and 2 exist");
         assert_eq!((raster.width(), raster.height()), (4, 6));
-        assert_eq!(raster.data(), &ANIM4_ROLL[12..36]);
+        assert_eq!(raster.data(), &ANIM4_ROLL[36..108]);
         assert_eq!(raster.pages_loaded(), 2);
         assert_eq!(raster.get_page_height(), 3);
         // Measured: `vipsheader -f delay 'x.jxl[page=1,n=2]'` prints
@@ -2753,9 +2981,17 @@ mod tests {
      * and not against one frame. Works by setting each ceiling so one
      * frame fits and four do not, with the single-frame load as the
      * positive control.
-     * Input: `ANIM4_DELAY` under `max_pixels = 40` and under a 100-byte
-     * allocation budget -> Output: a typed refusal for the roll and a
-     * successful single-frame load under the same ceiling.
+     * Input: `ANIM4_DELAY` under `max_pixels = 40` and `max_coord = 6` ->
+     * Output: a typed refusal for the roll and a successful single-frame
+     * load under the same ceiling.
+     *
+     * `max_alloc_bytes` is deliberately not swept here, and the reason is
+     * worth writing down rather than leaving as a gap: this roll is 144
+     * bytes and one frame is 36, and `jxl-oxide`'s own `AllocTracker`
+     * refuses to decode anything at all under a budget that small, so a
+     * budget between the two numbers fails the positive control before it
+     * ever reaches the roll. The `check_image_alloc` call it would
+     * exercise takes the same `roll_height` the two ceilings below do.
      */
     #[cfg(feature = "jxl")]
     #[test]
@@ -2773,19 +3009,11 @@ mod tests {
             "four frames do not"
         );
 
-        let alloc = DecodeLimits::default().with_max_alloc_bytes(100);
-        assert!(decode_jxl_with(&ANIM4_DELAY, LoadOptions::default(), alloc).is_ok());
-        let err = decode_jxl_with(&ANIM4_DELAY, all_pages(), alloc)
-            .expect_err("144 bytes is over a 100-byte budget");
-        assert!(
-            matches!(
-                err,
-                SourceError::AllocLimitExceeded {
-                    needed_bytes: 144,
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
+        let coord = DecodeLimits::default().with_max_coord(6);
+        assert!(decode_jxl_with(&ANIM4_DELAY, LoadOptions::default(), coord).is_ok());
+        assert!(matches!(
+            decode_jxl_with(&ANIM4_DELAY, all_pages(), coord),
+            Err(SourceError::CoordLimitExceeded { height: 12, .. })
+        ));
     }
 }

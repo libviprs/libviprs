@@ -624,19 +624,30 @@ impl std::fmt::Display for ShowGeometry {
 /// loaders take the same two arguments and have to answer them the same way;
 /// a loader that clamped where its neighbour refused would be a difference no
 /// caller could see coming.
-// Dead until the two loaders call it, one commit along; the tests below
-// are what make this commit red.
-#[allow(dead_code)]
 pub(crate) fn resolve_page_range(
     format: &'static str,
     page: u32,
     n: Option<u32>,
     pages: u32,
 ) -> Result<std::ops::Range<u32>, SourceError> {
-    // STUB: the crate loads exactly one page today, so that is what this
-    // reports whatever it is asked. Issues #569 and #621.
-    let _ = (format, n, pages);
-    Ok(page..page.saturating_add(1))
+    // `saturating_sub` rather than a plain subtraction guarded by the
+    // `page >= pages` test below: the guard runs after this line, so an
+    // unsaturated `pages - page` would already have panicked in a debug
+    // build on the very request the guard exists to refuse.
+    let count = n.unwrap_or_else(|| pages.saturating_sub(page));
+    // `saturating_add` for the same reason on the other side: a
+    // `Some(u32::MAX)` count would wrap `page + count` back under `pages`
+    // and turn a refusal into an accepted range.
+    let end = page.saturating_add(count);
+    if count == 0 || page >= pages || end > pages {
+        return Err(SourceError::PageOutOfRange {
+            format,
+            page,
+            end,
+            pages,
+        });
+    }
+    Ok(page..end)
 }
 
 /// The geometry a decoder priced a frame from, reported by
@@ -4311,7 +4322,8 @@ mod tests {
         // animation: `vipsheader 'roll4.webp[page=1,n=-1]'` reports 4x9,
         // which is three 4x3 pages, and `[page=2,n=5]` fails with
         // `webp: bad page number` rather than loading the two that exist.
-        let accepted: [((u32, Option<u32>), std::ops::Range<u32>); 6] = [
+        type Request = (u32, Option<u32>);
+        let accepted: [(Request, std::ops::Range<u32>); 6] = [
             ((0, Some(1)), 0..1),
             ((0, None), 0..4),
             ((1, None), 1..4),
@@ -4327,7 +4339,7 @@ mod tests {
             );
         }
 
-        let refused: [(u32, Option<u32>); 5] = [
+        let refused: [Request; 5] = [
             (4, Some(1)),
             (5, Some(1)),
             (4, None),
