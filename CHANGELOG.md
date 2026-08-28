@@ -1527,11 +1527,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The Miri filesystem detector follows a call into a test helper, one file deep
-  and to a fixed point, and 72 more tests over eight files carry
+  and to a fixed point, and 73 more tests over nine files carry
   `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
-  population when the change was written; the other 33 are `src/nifti.rs` and
-  `tests/uhdr_ported_surface.rs`, which reached `main` while it was in flight
-  and were caught by the new detector on the merge rather than by a re-read.
+  population when the change was written; the other 34 are `src/nifti.rs`,
+  `tests/uhdr_ported_surface.rs` and `tests/page_model.rs`, which reached `main`
+  while it was in flight and were caught by the new detector on the merge rather
+  than by a re-read.
+
+  `tests/page_model.rs` is the one worth naming, because its own module doc had
+  written the gap down and deferred it: "three tests here reach the filesystem
+  to read `src/`, and none carries `#[cfg_attr(miri, ignore)]` ... it belongs in
+  that lane's sweep rather than here". It is one test, not three. The other two
+  it counted go through `encode_vips` and `decode_bytes`, which are in memory,
+  and through string literals declared inline. The detector was right about
+  those and the note was not; it now says what was measured.
 
   It read one function body and stopped, which the guard's module docs listed as
   a known blind spot without ever measuring it. Measured: on the tree where
