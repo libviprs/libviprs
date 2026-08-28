@@ -1726,9 +1726,8 @@ fn raster_from_bytes(
     tag: Interpretation,
 ) -> Result<Raster, RasterError> {
     let mut out = Raster::from_op_output(width, height, format_for(channels, depth), buf)?;
-    out.meta = like.meta;
+    out.carry_meta_from(like);
     out.meta.interpretation = Some(tag);
-    out.fields = like.fields.clone();
     Ok(out)
 }
 

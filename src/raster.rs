@@ -509,6 +509,54 @@ impl Raster {
         })
     }
 
+    /// Carry `src`'s metadata onto this raster: the header block
+    /// (interpretation, resolution, offsets, orientation) **and** the attached
+    /// fields (ICC profile, EXIF blob, anything a caller set).
+    ///
+    /// Every operation that builds its result from a fresh buffer starts from
+    /// `RasterMeta::default()` and an empty field map, so without this the
+    /// output is untagged and unattached. libvips builds its results inside
+    /// the input's pipeline and copies both halves, so this is the default
+    /// behaviour an op has to *opt out of* rather than opt in to.
+    ///
+    /// It was eighteen open-coded copies of the same two lines before #717,
+    /// eleven of which only wrote the first one and silently dropped every
+    /// attachment. Routing them through one method is what makes "did this op
+    /// carry the metadata" a question with one answer.
+    ///
+    /// # Where an op differs
+    ///
+    /// Call this first and then overwrite the one field that differs, the way
+    /// `try_extract_area` stamps `-left` / `-top` after the carry (#690) and
+    /// `try_falsecolour` stamps `Srgb`. Doing it the other way round loses the
+    /// stamp.
+    ///
+    /// This is `out.carry_meta_from(src)` and not `src.carry_meta(out) ->
+    /// Raster` on purpose: it reads in the direction the data moves, and it
+    /// works on a result a helper already built, where the returning form
+    /// forces the construction inside the carry's own argument list.
+    ///
+    /// The `fields.clone()` allocates infallibly. It is a bounded copy (an
+    /// attachment, not a plane) for the same reason [`Raster::try_clone`]
+    /// gives, and it is the same residue.
+    pub(crate) fn carry_meta_from(&mut self, src: &Raster) {
+        self.meta = src.meta;
+        self.fields = src.fields.clone();
+    }
+
+    /// Merge `other`'s attached fields **under** this raster's, so a name they
+    /// share keeps the value already here.
+    ///
+    /// The multi-input ops need this. Measured on vips 8.18.6, `insert`,
+    /// `join`, `arrayjoin` and `bandjoin` all take the header block from the
+    /// first input alone and the attached fields from both, first input
+    /// winning a collision (#718). So they carry from `main` and then merge
+    /// `sub` on top of that, and a profile that only `sub` has still reaches
+    /// the output.
+    pub(crate) fn merge_fields_from(&mut self, other: &Raster) {
+        self.fields.merge_under(&other.fields);
+    }
+
     /// Create a raster filled with zeros.
     ///
     /// Allocates a buffer of the correct size and fills it with `0u8`. Useful
