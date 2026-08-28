@@ -350,6 +350,7 @@ mod tests {
 /// the one function, whose docs say what the count has to be, or writes the
 /// key down and lands here.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn exactly_one_source_file_names_the_shared_key() {
     let namers: Vec<String> = non_test_bodies()
         .into_iter()
@@ -375,6 +376,7 @@ fn exactly_one_source_file_names_the_shared_key() {
 /// one says who reaches it. Both have to hold, because a writer could route
 /// through `set_n_pages` correctly and still be counting the wrong thing.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn only_the_four_page_counting_loaders_attach_it() {
     let bodies = non_test_bodies();
 
@@ -413,6 +415,7 @@ fn only_the_four_page_counting_loaders_attach_it() {
 /// caller who trusted it. The document's page count is `PdfInfo::page_count`
 /// instead.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn a_count_that_is_not_a_page_count_gets_its_own_key() {
     let bodies = non_test_bodies();
 

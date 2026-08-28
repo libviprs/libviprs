@@ -1854,6 +1854,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn pdf_info_with_password_reports_encrypted_as_unsupported() {
         // A genuinely encrypted document (one carrying an /Encrypt dictionary)
         // opened with a non-empty password reports the typed
@@ -1883,6 +1884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn pdf_info_with_password_ignores_password_on_unencrypted_doc() {
         // A normal, readable document is not mislabelled as password-protected
         // just because a password was supplied.
@@ -1905,6 +1907,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn extract_page_image_with_password_reports_encrypted_as_unsupported() {
         // An encrypted document opened with a password folds to the typed
         // password-protected capability error.
@@ -1935,6 +1938,7 @@ mod tests {
     /// the function reports an unsupported-capability decode error instead.
     #[cfg(feature = "pdfium")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn extract_page_image_with_background_applies_clear_colour() {
         // A 100x100pt page whose sole content is a 10x10pt black square in the
         // bottom-left corner. Every other region is unpainted, so pdfium's
@@ -2033,6 +2037,7 @@ mod tests {
     /// loudly with a typed invalid-input decode error (see #87).
     #[cfg(feature = "pdfium")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn extract_page_image_with_background_rejects_over_length_slice() {
         let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
         let (_dir, path) = save_doc(doc);
@@ -2079,6 +2084,7 @@ mod tests {
     /// feature both entry points report an unsupported-capability decode error.
     #[cfg(feature = "pdfium")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn typed_background_matches_slice_form() {
         let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
         let (_dir, path) = save_doc(doc);

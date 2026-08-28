@@ -3626,6 +3626,7 @@ mod tests {
     /// B proceeds concurrently (GREEN).
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_distinct_content_promotes_without_serialising() {
         use std::time::Duration;
 
@@ -3680,6 +3681,7 @@ mod tests {
     /// vacuous (no locking at all).
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_same_content_serialises_on_promote_shard() {
         use std::time::Duration;
 
@@ -3987,6 +3989,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_groups_retention_is_occurrence_independent() {
         let drive = |dups: u32| -> usize {
             let (_dir, base, sink) = dedupe_sink_for_promote_tests();
