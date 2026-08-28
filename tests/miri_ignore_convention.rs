@@ -63,16 +63,22 @@
 //!
 //! # Spawning a process, which is a refusal rather than a row
 //!
-//! Everything above is a ledger. The filesystem rows record the tree and let an
-//! `unannotated fs-detected` test stand, because `merge-gate.yml` runs Miri
-//! with `-Zmiri-disable-isolation` and an isolated-away filesystem call comes
-//! back rather than aborting.
+//! Everything above is a ledger, and it was written when
+//! `merge-gate.yml` ran Miri with `-Zmiri-disable-isolation`: a filesystem call
+//! came back rather than aborting, so an `unannotated fs-detected` test could
+//! stand. **#711 removed that flag**, and under isolation such a test now ends
+//! the run with `unsupported operation: \`open\` not available when isolation
+//! is enabled`. Measured on `800c699`, plain `main`,
+//! `cargo miri test --test workspace_layout` dies on
+//! `fuzz_crate_is_a_member_of_the_root_workspace` before running anything. The
+//! 138 `unannotated fs-detected` rows across 29 files are all now gate-killers
+//! and none of them is this file's to annotate; that is issue #739.
 //!
-//! `std::process` is different in kind. Miri supports process spawning on no
-//! target and under no flag, so the first test that shells out ends the entire
-//! run with `unsupported operation: can't call foreign function \`fork\``, and
-//! `-Zmiri-disable-isolation` does nothing about it. Measured on `120acb6`,
-//! `cargo +nightly miri test --test dependency_policy` died on
+//! `std::process` was different in kind before that change and is merely
+//! *worse* after it. Miri supports process spawning on no target and under no
+//! flag, so no `MIRIFLAGS` setting has ever made a spawning test survivable,
+//! where the filesystem class was survivable until last week. Measured on
+//! `120acb6`, `cargo +nightly miri test --test dependency_policy` died on
 //! `every_links_key_is_on_the_allowlist` before running anything else in the
 //! tree (issue #714).
 //!
@@ -986,14 +992,21 @@ fn the_annotated_set_stays_the_size_it_is_documented_to_be() {
 /// Every test that reaches `std::process` must be ignored under Miri. This is
 /// an assertion rather than an inventory row, and the difference is the point.
 ///
-/// The filesystem rows are a ledger because `-Zmiri-disable-isolation` lets an
-/// unannotated filesystem test run. Nothing lets a process spawn run: Miri
-/// supports it on no target and under no flag, so the first one it reaches ends
-/// the whole session with `unsupported operation: can't call foreign function
-/// \`fork\`` and reports as a Miri failure rather than as a missing annotation.
-/// Measured on `120acb6` with `nightly-2026-08-20`,
+/// The filesystem rows were a ledger because `-Zmiri-disable-isolation` let an
+/// unannotated filesystem test run. Nothing has ever let a process spawn run:
+/// Miri supports it on no target and under no flag, so the first one it reaches
+/// ends the whole session with `unsupported operation: can't call foreign
+/// function \`fork\`` and reports as a Miri failure rather than as a missing
+/// annotation. Measured on `120acb6` with `nightly-2026-08-20`,
 /// `cargo miri test --test dependency_policy` died on
 /// `every_links_key_is_on_the_allowlist` having run nothing else (issue #714).
+///
+/// Since #711 turned isolation on, the filesystem class aborts too, so the
+/// asymmetry this check was built around has narrowed. It has not gone: this
+/// one is enforceable today because its population is 17 and every one of them
+/// is annotated, where the filesystem population is 138 across 29 files and
+/// fixing it is issue #739. Do not widen this check to cover them; it would go
+/// red on `main` and stay red.
 #[test]
 #[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn no_process_spawning_test_can_run_under_miri() {

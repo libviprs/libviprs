@@ -2131,9 +2131,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `tests/miri_ignore_convention.rs` enforces it from here, and enforces it
   differently from the filesystem convention it was built for. The filesystem
-  rows are a ledger: an `unannotated fs-detected` test is allowed to stand,
-  because isolation makes its call come back rather than abort. A spawning test
-  is a flat refusal, because there is no configuration in which it runs.
+  rows were a ledger: an `unannotated fs-detected` test was allowed to stand,
+  because `-Zmiri-disable-isolation` made its call come back rather than abort.
+  A spawning test is a flat refusal, because there is no configuration in which
+  it runs.
+
+  #711 removed that flag after this was written, so the filesystem class aborts
+  now too and the asymmetry has narrowed. It has not gone. This class is
+  enforceable today because its population is 17 and all 17 are annotated; the
+  filesystem population is 138 tests over 29 files, 8 of them `src/` modules,
+  and that is issue #739 rather than something to fold in here. Measured on
+  `800c699` with nothing applied, `cargo miri test --test workspace_layout`
+  aborts on its first test, so the suite has not reached a second target since
+  #711 landed.
 
   The detector had to learn to follow a call to see any of them, since not one
   of the ten spells `Command::new` in its own body: they call `cells()`, which
