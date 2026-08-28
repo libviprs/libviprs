@@ -103,6 +103,28 @@ pub enum ExtractError {
     /// A requested width or height is zero.
     #[error("area width and height must be greater than zero")]
     EmptyArea,
+    /// An extract operation that reads and writes individual samples was
+    /// given a float raster.
+    ///
+    /// `embed`, `gravity`, `insert` and `smartcrop`'s `Entropy` and
+    /// `Attention` strategies copy samples through an unsigned 8/16-bit
+    /// path, so a float carrier has nowhere to land; cast to an unsigned
+    /// format first. They used to **panic** out of a `Result` signature
+    /// instead (issue #694), which is the shape [`ArithmeticError`] already
+    /// fixed for `recomb` and `stdif` in #631, and this mirrors it.
+    ///
+    /// The rest of this module takes a float raster unchanged, because it
+    /// copies whole pixels byte-wise rather than reading samples:
+    /// `extract_area`, `crop`, `replicate`, `zoom`, `subsample`, and
+    /// `smartcrop`'s four pure-geometry strategies (`Centre`, `Low`, `High`,
+    /// `All`).
+    ///
+    /// [`ArithmeticError`]: crate::arithmetic::ArithmeticError::FloatUnsupported
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatUnsupported {
+        /// The operation that refused, e.g. `"embed"`.
+        op: &'static str,
+    },
     /// A zoom, subsample, or replicate factor is zero.
     #[error("factor must be greater than zero")]
     ZeroFactor,
@@ -2411,6 +2433,167 @@ mod tests {
             Err(ExtractError::UnknownDirection { .. })
         ));
     }
+    // -- float refusal (issue #694) -------------------------------------------------------
+
+    /// A float raster of `bands` bands filled with a ramp, the carrier an EXR,
+    /// FITS or `.v` decode hands back.
+    fn floatf(bands: u16, w: u32, h: u32) -> Raster {
+        let n = (w * h) as usize * bands as usize;
+        let data: Vec<u8> = (0..n).flat_map(|v| (v as f32).to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(std::num::NonZeroU16::new(bands).expect("bands"));
+        Raster::new(w, h, fmt, data).expect("float fixture")
+    }
+
+    /// Issue #694. The four entry points that read samples through
+    /// [`read_s`] / [`write_s`] return a typed refusal on a float raster
+    /// instead of panicking out of a `Result` signature.
+    ///
+    /// The issue names `try_embed` and `try_gravity`. I probed all of
+    /// `src/extract.rs` and it is four, plus two of `smartcrop`'s six
+    /// strategies, which is the next test.
+    ///
+    /// Every `Extend` mode is here rather than just `White`, because the panic
+    /// is in the sample copy and not in the ink: `Black`, `Copy`, `Repeat`,
+    /// `Mirror` and `Background` reach it exactly as `White` does, so a fix
+    /// that only guarded the inking path would leave five of six still
+    /// panicking.
+    #[test]
+    fn the_sample_reading_ops_refuse_a_float_raster_instead_of_panicking() {
+        let im = floatf(3, 8, 8);
+        let sub = floatf(3, 2, 2);
+        let bg = [1.0f64, 2.0, 3.0];
+        let cases: Vec<(&str, Result<Raster, ExtractError>)> = vec![
+            (
+                "embed black",
+                im.try_embed(1, 1, 12, 12, Extend::Black, None),
+            ),
+            (
+                "embed white",
+                im.try_embed(1, 1, 12, 12, Extend::White, None),
+            ),
+            ("embed copy", im.try_embed(1, 1, 12, 12, Extend::Copy, None)),
+            (
+                "embed repeat",
+                im.try_embed(1, 1, 12, 12, Extend::Repeat, None),
+            ),
+            (
+                "embed mirror",
+                im.try_embed(1, 1, 12, 12, Extend::Mirror, None),
+            ),
+            (
+                "embed background",
+                im.try_embed(1, 1, 12, 12, Extend::Background, Some(&bg)),
+            ),
+            (
+                "gravity",
+                im.try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None),
+            ),
+            ("insert", im.try_insert(&sub, 1, 1, false, None)),
+            ("insert expand", im.try_insert(&sub, 1, 1, true, None)),
+        ];
+        for (name, got) in cases {
+            assert!(
+                matches!(got, Err(ExtractError::FloatUnsupported { .. })),
+                "{name} must refuse a float raster rather than panic, got {got:?}"
+            );
+        }
+    }
+
+    /// Issue #694. `smartcrop` splits on the strategy, and a caller cannot see
+    /// that from the signature.
+    ///
+    /// `Centre`, `Low`, `High` and `All` are pure geometry, so they take a
+    /// float raster today and must keep taking it. `Entropy` pools a histogram
+    /// and `Attention` builds saliency maps, and both read samples, so both
+    /// panic. Measured, not assumed: I ran all six.
+    ///
+    /// The four that work are asserted as well as the two that do not, because
+    /// a fix that rejected float at the `try_smartcrop` entry point would make
+    /// this test's first half green by breaking four working strategies, and
+    /// nothing else in the suite would notice.
+    #[test]
+    fn smartcrop_refuses_float_only_on_the_strategies_that_read_samples() {
+        let im = floatf(3, 8, 8);
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            let got = im.try_smartcrop(4, 4, interesting, false);
+            assert!(
+                matches!(got, Err(ExtractError::FloatUnsupported { .. })),
+                "smartcrop {interesting:?} reads samples, so it must refuse a float raster"
+            );
+        }
+        for interesting in [
+            SmartcropInteresting::Centre,
+            SmartcropInteresting::Low,
+            SmartcropInteresting::High,
+            SmartcropInteresting::All,
+        ] {
+            let (out, _, _) = im
+                .try_smartcrop(4, 4, interesting, false)
+                .unwrap_or_else(|e| panic!("smartcrop {interesting:?} is pure geometry: {e}"));
+            assert_eq!(out.format(), im.format(), "smartcrop {interesting:?}");
+        }
+    }
+
+    /// Issue #694. The refusal names the operation, so a caller reading the
+    /// message knows which call to change.
+    ///
+    /// The old panic said "this extract operation", which is the whole problem
+    /// in miniature: it reached the caller as a process-visible panic out of a
+    /// `Result` signature, and it did not even say which operation.
+    #[test]
+    fn the_float_refusal_names_the_operation() {
+        let im = floatf(3, 8, 8);
+        for (want, got) in [
+            ("embed", im.try_embed(1, 1, 12, 12, Extend::Black, None)),
+            (
+                "gravity",
+                im.try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None),
+            ),
+            ("insert", im.try_insert(&floatf(3, 2, 2), 1, 1, false, None)),
+        ] {
+            let e = got.expect_err("must refuse");
+            assert!(
+                matches!(&e, ExtractError::FloatUnsupported { op } if *op == want),
+                "expected the refusal to name {want}, got {e:?}"
+            );
+            assert!(
+                e.to_string().contains(want),
+                "the message a caller prints must name the op: {e}"
+            );
+        }
+    }
+
+    /// Issue #694. The unsigned carriers are untouched, which is the control
+    /// that stops the refusal being written too wide.
+    ///
+    /// A guard that rejected by anything other than "is this float" would take
+    /// these with it, and every one of them is an op the rest of this module's
+    /// tests already exercise on 8-bit.
+    #[test]
+    fn the_unsigned_carriers_still_go_through_every_op() {
+        let im16 =
+            Raster::new(8, 8, PixelFormat::Rgb16, vec![3u8; 8 * 8 * 3 * 2]).expect("rgb16 fixture");
+        let sub16 =
+            Raster::new(2, 2, PixelFormat::Rgb16, vec![9u8; 2 * 2 * 3 * 2]).expect("sub fixture");
+        assert!(im16.try_embed(1, 1, 12, 12, Extend::White, None).is_ok());
+        assert!(
+            im16.try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None)
+                .is_ok()
+        );
+        assert!(im16.try_insert(&sub16, 1, 1, false, None).is_ok());
+        assert!(
+            im16.try_smartcrop(4, 4, SmartcropInteresting::Entropy, false)
+                .is_ok()
+        );
+        assert!(
+            im16.try_smartcrop(4, 4, SmartcropInteresting::Attention, false)
+                .is_ok()
+        );
+    }
+
     // -- metadata (issue #690) -----------------------------------------------------------
 
     /// An 8x8 `Rgb8` ramp carrying every field [`crate::conversion::RasterMeta`]
