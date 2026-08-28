@@ -2388,6 +2388,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `EncodeError::Unsupported`'s own documentation no longer names four formats
+  this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
+  JPEG-XL and JP2K as "genuinely-external formats that have no mature pure-Rust
+  encoder", which made the variant's *contract* wrong rather than merely stale:
+  `crate::uhdr` has written an Ultra HDR container since #508 with no new
+  dependency at all, `crate::fits` hand-rolls FITS, and `crate::jxl` and
+  `crate::jp2k` carry real pure-Rust codecs behind their features. The type's
+  own doc block carried the same list.
+
+  A new guard, `the_unsupported_doc_lists_name_no_format_this_build_encodes`,
+  extracts both lists from the source and probes each named format by calling
+  its encoder, so "this build encodes it" is measured rather than declared and
+  the lists cannot drift again.
+
 - **Every `capture.py` under `oracle-captures/` now checks `ORACLE_PIN.json`
   before it writes anything. Two of the fourteen did** (issue #796), both of
   them the convolution scripts `oracle_pin.py` was factored out of. The pin
