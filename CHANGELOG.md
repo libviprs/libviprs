@@ -1834,6 +1834,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
+  and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
+  `vips hist_find` of a `ushort` `[4096, 4096, 9]` gives width **4097** where
+  libviprs gave 65536: 65536 is the ceiling of the rule, not the rule. `uchar`
+  really is a fixed 256 even when the data maxes out at 3, and that half is
+  unchanged.
+
+  It follows the band selection too, which is the case a whole-image test
+  cannot separate: on a 16-bit image whose band 0 maxes at 10 and band 1 at
+  5000, `hist_find` is 5001 wide over both bands, `hist_find_band(0)` is 11 and
+  `hist_find_band(1)` is 5001. `hist_find_indexed` is sized the same way from
+  its index image.
+
+  `hist_equal` fuses `maplut(hist_norm(hist_cum(hist_find)))` into one pass and
+  was taking its table width from the depth, so it stopped being that
+  composition the moment `hist_find` moved. The visible consequence is at the
+  constant image: measured, a constant `uchar` band equalises to `255` and a
+  constant `ushort` band equalises to **itself**, because a table one value wide
+  normalises that value's single cumulative entry back to it. The doc said "a
+  constant band maps to the depth maximum" without the qualifier.
+
+  `bins_for` stays as it was, and the two functions now answer different
+  questions on purpose: `hist_find_ndim` uses it as the value **range** it
+  scales samples by, and that range is the depth's rather than the data's,
+  measured (a `ushort` `[0, 5, 10]` and a `uchar` `[0, 5, 10]` both put all
+  three samples in bin 0 at 10 bins).
+
+  **Migration.** A caller reading `hist_find`'s width, or indexing bins beyond
+  its own data's maximum, gets a narrower image for 16-bit input. `maplut`
+  already clips an out-of-range index to the last LUT entry, as libvips does,
+  so the equalisation chain absorbs the narrowing on its own.
+
 - `hist_plot` plots one row too many for every histogram that is not 8-bit
   (issue #802). Measured on vips 8.18.6, `vips hist_plot` of a `ushort`
   `[2, 0, 3]` gives a **3x3** image where libviprs gave 3x4: the height is the
