@@ -21,6 +21,7 @@
 //! | FITS | `SourceError::Fits(FitsError::AllocLimitExceeded)` |
 //! | OpenEXR | `SourceError::Exr(ExrError::AllocLimitExceeded)` |
 //! | JPEG XL | `SourceError::Jxl(JxlError::AllocLimitExceeded)` |
+//! | NIfTI | *did not exist yet; it joined self-priced in #510* |
 //!
 //! Two corrections to the table in #686, both from that run. WebP is **not**
 //! the one odd format on the `image` shape: JPEG, PNG and single-image TIFF
@@ -47,7 +48,7 @@
 //!
 //! # What this file holds
 //!
-//! The six formats where **libviprs itself** prices a declared geometry and
+//! The formats where **libviprs itself** prices a declared geometry and
 //! refuses it must all report one shape, `SourceError::AllocLimitExceeded`.
 //! The three where the `image` crate refuses keep reporting the `image` shape,
 //! and that is asserted here too so the split is a decision on the record
@@ -93,6 +94,16 @@ fn tiff_bytes() -> Vec<u8> {
 /// The OpenEXR fixture the `exr` module's own budget tests use: 8x4, four
 /// half channels, so `decode_exr` prices it at `8 * 4 * 4 * 4` = 512 bytes.
 const EXR: &[u8] = include_bytes!("../oracle-captures/foreign-exr/fixtures/rgba_half_zip.exr");
+
+/// The NIfTI fixture the `nifti` module's own budget tests use: a NIfTI-1
+/// header declaring `dim = [3, 2, 3, 1]` of `NIFTI_TYPE_UINT8`, so
+/// `decode_nifti` prices it at `2 * 3 * 1 * 1` = 6 bytes.
+///
+/// Included rather than encoded, because NIfTI is load-only here: there is no
+/// `Raster::encode_nifti` to build a fixture with, and there is no
+/// `vips niftisave` either (the pinned build has no NIfTI support at all,
+/// which is why the oracle for that module is `nifti_clib`).
+const NIFTI: &[u8] = include_bytes!("../oracle-captures/foreign-nifti/fixtures/dt2_uint8.nii");
 
 /// One container, the bytes to decode, and the price `decode_*` computes for
 /// its frame from the declared geometry.
@@ -185,6 +196,19 @@ fn priced_by_libviprs() -> Vec<Row> {
             sample_bytes: 4,
             what: "OpenEXR sample buffers",
             price: 512,
+        },
+        // NIfTI declares a whole volume in 348 bytes and then hands over a
+        // raw array, which is the decompression-bomb shape the budget
+        // exists for, so it prices the declared geometry before it reserves
+        // anything (issue #510).
+        Row {
+            format: "nifti",
+            bytes: NIFTI.to_vec(),
+            decoded: (2, 3),
+            priced_geometry: (2, 3, 1),
+            sample_bytes: 1,
+            what: "NIfTI voxel buffer",
+            price: 6,
         },
         // WebP prices its own frame from `output_buffer_size` and its own
         // declared geometry, so it belongs here and not with the three the
@@ -314,7 +338,7 @@ fn the_two_tables_account_for_every_container() {
     // JPEG XL is only compiled in behind its feature, so the self-priced table
     // is one shorter without it. Spelled out rather than hidden in a `cfg!`
     // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 8 } else { 7 };
+    let expected_self_priced = if cfg!(feature = "jxl") { 9 } else { 8 };
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
@@ -324,8 +348,8 @@ fn the_two_tables_account_for_every_container() {
     let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
     assert_eq!(
         self_priced + image_backed + jxl_absent,
-        11,
-        "the two tables must account for all eleven containers libviprs sniffs, \
+        12,
+        "the two tables must account for all twelve containers libviprs sniffs, \
          with no exclusions left; see SniffedFormat::ALL"
     );
 }

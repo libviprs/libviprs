@@ -642,6 +642,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
+  versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
+  and `.nii` becomes a live row in the content sniffer, so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: the format is load-only here, the way Analyze and MAT are
+  load-only in libvips.
+
+  **The oracle is deliberately not libvips**, and that is measured rather than
+  assumed. The pinned `vips` 8.18.6 reports `NIfTI load/save with libnifti:
+  false` and registers neither `niftiload` nor `niftisave`, so a `.nii` handed
+  to it falls through the sniffing chain to `magickload`, which guesses TGA.
+  The reference is `nifti_clib` (`v3.0.1-91-g8f72d11`, the NIH implementation
+  and the library libvips itself would have linked), captured in
+  `oracle-captures/foreign-nifti/`, which re-measures the vips half on every
+  run so a build that gains libnifti announces itself.
+
+  What that buys is the *repair* rules, which are the part of this format a
+  spec reading gets wrong. Non-finite `FLOAT32` samples are rewritten to zero
+  before a caller sees them, so an infinity or a NaN stored in a file never
+  comes back. `vox_offset` is truncated toward zero and floored at the header
+  length, so `-8` and `100` both mean 348. `bitpix` is decoration and the
+  datatype alone fixes the sample width. `scl_slope` and `scl_inter` are
+  carried and never applied, because the scaling rule lives in FSL rather than
+  in the reference. Rank 0 is a one-voxel image, a non-positive `dim[1]` is
+  refused, and a zero extent on any higher axis is silently clamped to 1.
+
+  And one where the capture's own prose was wrong and its measurements were
+  right: on NIfTI-1 the byte order comes from `dim[0]`, not from the
+  `sizeof_hdr` sentinel, with the sentinel only as a fallback. A file with
+  only its four sentinel bytes swapped loads little-endian. That prose is
+  corrected in the capture (issue #752) and the correction is held against
+  this module by a test rather than by hope.
+
+  NIfTI is a volume format and `Raster` is two-dimensional, so the axes above
+  the second fold into the height, `dim[1]` wide by `dim[2] * .. * dim[rank]`
+  high. That is `analyzeload`'s measured rule for the sibling format rather
+  than an invention, it moves no bytes, and the collapsed axes stay readable
+  as `nifti-dim[N]` metadata beside every other header field.
+
+  Five datatypes have a carrier here (`UINT8`, `UINT16`, `FLOAT32`, `RGB24`,
+  `RGBA32`) and the rest are refused **by name** through
+  `NiftiError::UnsupportedCarrier`, naming the issue that would add the
+  carrier, exactly as `crate::fits` refuses a signed BITPIX. `INT16` is the
+  most common datatype in real NIfTI files and it is one of them: it needs
+  #516. Narrowing it into 8 bits would lose data silently, which is worse than
+  failing.
+
+  The allocation budget is the interesting part rather than a checkbox. 348
+  bytes can declare a 35-teravoxel volume in front of a 12-byte payload, so
+  the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved, and the
+  refusal is the shared `SourceError::AllocLimitExceeded` rather than a sixth
+  per-format variant.
+
+  No new dependency. The whole format is a fixed-offset header and a raw
+  array, so `crate::nifti` is field offsets, a byte-order flag and a copy
+  loop; a NIfTI crate would supply the free half and leave every measured
+  repair here anyway.
+
 - `PixelFormat::kind()` and the `SampleKind` enum it returns (`U8`, `U16`,
   `F32`), plus `PixelFormat::with_kind()` alongside `with_channels()` (issue
   #607). Reach for `kind()` whenever the question is how to *interpret* a

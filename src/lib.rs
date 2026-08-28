@@ -135,6 +135,7 @@ pub(crate) mod mapreduce_hot_cache;
 pub mod matrix;
 pub mod morphology;
 pub mod mosaicing;
+pub mod nifti;
 pub mod observe;
 pub mod pdf;
 pub mod pixel;
@@ -271,6 +272,11 @@ pub use exr::{ExrError, decode_exr};
 // The parser's own ceilings stay behind `libviprs::fits::` rather than
 // crowding the crate root with three numeric constants.
 pub use fits::{FitsError, decode_fits};
+// `decode_nifti` is re-exported for the reason `decode_fits` is: it is the
+// direct entry point for a caller who already knows the bytes are a `.nii`.
+// There is no encoder half, and there is no libvips half either: the pinned
+// build reports `NIfTI load/save with libnifti: false` (issue #510).
+pub use nifti::{NiftiError, decode_nifti};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
