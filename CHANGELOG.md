@@ -1677,6 +1677,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `nohalo` are one expression with a single narrowing at the store and were
   already bit-exact.
 
+- Two more places where libvips quantises more coarsely than this module are
+  now measured, pinned and **kept** (issues #732 and #733), and the rule that
+  decided them, and that decided #704 the other way, is written into the module
+  docs. Against the exact answer in rational arithmetic, on real `affine`
+  output:
+
+  | | this module | libvips | libvips closer |
+  |---|---|---|---|
+  | #704 bicubic coefficients, `uchar` | 0.4371 LSB | 0.4798 LSB | 1355 of 17814 |
+  | #732 bicubic store, `ushort` | 0.0000 LSB | 0.4680 LSB | 0 of 1017 |
+  | #733 bilinear weights, `uchar` | 0.0000 LSB | 0.0252 LSB | 0 of 1113 |
+  | #733 bilinear weights, `ushort` | 0.0000 LSB | 6.2848 LSB | 0 of 1113 |
+
+  #704 was a coin toss taken for parity. These two are not: this module is
+  exact and libvips is not, on every sample. `bicubic_unsigned_int32_tab`
+  truncates its `double` store, a one-directional bias of -0.499 LSB that
+  darkens every resampled `ushort` image by half a level, and `BILINEAR_INT`
+  builds its four weights as 12-bit fixed point, worth up to 26 of 65535.
+
+  The pins are on a linear ramp, which both bilinear and Catmull-Rom reproduce
+  exactly, so the right answer is closed form and the tests do not have to
+  reimplement an interpolator to know it. Both directions are asserted, so the
+  divergence can neither grow nor quietly vanish.
+
 - `affine` and `mapim` convert the caller's `background` to the carrier once
   before they resample, the way `vips_affine_build` runs `vips__vector_to_ink`
   once before it embeds (issue #736). `vips_cast` clips and then truncates
