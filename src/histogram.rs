@@ -771,9 +771,10 @@ impl Raster {
     /// The output is `N` columns wide for an `N`-element histogram. 8-bit
     /// histograms plot 256 rows high whatever the counts are; every other
     /// depth plots as many rows as the largest count, floored at one. Both
-    /// halves are measured against libvips 8.18.6 rather than asserted;
-    /// see [`plot_height`], and note that the second half used to say
-    /// `max + 1` and used to say that matched libvips (issue #802).
+    /// halves are measured against libvips 8.18.6 rather than asserted, and
+    /// the sweep is recorded on the private `plot_height` helper. Note that
+    /// the second half used to say `max + 1`, and used to say that matched
+    /// libvips (issue #802).
     ///
     /// The result is a `Gray8` image: in column `x`, the bottom `hist[x]`
     /// pixels are `255` and the rest `0`, so the graph reads with its
