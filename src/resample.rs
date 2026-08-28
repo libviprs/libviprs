@@ -5154,6 +5154,234 @@ mod tests {
             .collect()
     }
 
+    /// The 32x32 reduce fixtures. Sample `i` is `(i * 53 + 17) % 251` on the
+    /// byte carrier and `(i * 3719 + 977) % 65413` on the 16-bit one, the
+    /// same coprime-stride-over-a-prime-modulus shape [`carrier_fixture`]
+    /// uses, at a size where a `reduce` stencil can sit strictly inside the
+    /// image. Both are reproducible byte for byte on the vips side through
+    /// `vips rawload`, which is how the oracle rows below were taken.
+    fn reduce_fixture(format: PixelFormat) -> Raster {
+        let n = 32 * 32usize;
+        let data: Vec<u8> = match format {
+            PixelFormat::Gray16 => (0..n)
+                .flat_map(|i| (((i * 3719 + 977) % 65413) as u16).to_ne_bytes())
+                .collect(),
+            _ => (0..n).map(|i| ((i * 53 + 17) % 251) as u8).collect(),
+        };
+        Raster::new(32, 32, format, data).unwrap()
+    }
+
+    /// The interior crop of a `reduceh … 3 --kernel linear` over
+    /// [`reduce_fixture`]: rows 0..8 of output columns 1..10. The mask is 7
+    /// points wide with a margin of 3, and the sample position is `3 * i + 1`,
+    /// so every column in that range reads a stencil strictly inside the
+    /// 32-wide input and no [`Extend`] rule is involved in the comparison.
+    fn reduce_crop(r: &Raster) -> Vec<u8> {
+        assert_eq!(
+            (r.width(), r.height()),
+            (11, 32),
+            "reduce fixture output size"
+        );
+        r.extract_area(1, 0, 9, 8).data().to_vec()
+    }
+
+    fn reduce_crop_u16(r: &Raster) -> Vec<u16> {
+        reduce_crop(r)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect()
+    }
+
+    /// Issue #777. `vips_reduce_make_mask` builds every mask twice, once in
+    /// `double` and once as a `short` fixed-point copy scaled by
+    /// `VIPS_INTERPOLATE_SCALE`, and `vips_reduceh_gen` / `vips_reducev_gen`
+    /// read the fixed-point one on **both** integer carriers. The copy is a
+    /// truncation of each coefficient toward zero and is **not renormalised**,
+    /// so its taps no longer sum to one.
+    ///
+    /// This module keeps the masks in `f64`, normalised to unit sum, and the
+    /// most direct consequence is closed form: a constant image comes back
+    /// unchanged here and does not in libvips.
+    ///
+    /// Measured on 8.18.6 over a 32x32 constant, `vips reduceh in.v out.v S
+    /// --kernel K` and the same through `reducev`, which agree cell for cell,
+    /// with `vips min` equal to `vips max` in every one so the output really
+    /// is flat:
+    ///
+    /// | kernel | shrink 2 | shrink 3 | shrink 4 |
+    /// |---|---|---|---|
+    /// | `linear` | 65535 | **65471** | 65535 |
+    /// | `cubic` | 65535 | 65535 | 65535 |
+    /// | `mitchell` | **65503** | 65535 | **65503** |
+    /// | `lanczos2` | 65535 | **65503** | 65535 |
+    /// | `lanczos3` | 65535 | **65503** | **65407** |
+    ///
+    /// on a constant of 65535. The six bold cells are up to **128 of 65535**
+    /// of pure scale error on an image with no detail in it at all.
+    ///
+    /// The `uchar` column of the same sweep is 200 for all fifteen cells, and
+    /// that is not a second measurement but the same one: the worst deficit is
+    /// `128 / 65535`, which at eight bits is `0.498` of a level, so
+    /// round-half-up absorbs it with two thousandths of a level to spare. The
+    /// test computes that rather than asserting it, since it is the reason the
+    /// byte carrier looks clean and it is very nearly not true.
+    #[test]
+    fn reduce_preserves_a_constant_where_the_vips_short_mask_does_not() {
+        // (kernel, shrink, what vips 8.18.6 returns on a constant 65535)
+        const VIPS_8_18_6: [(&str, f64, u16); 15] = [
+            ("linear", 2.0, 65535),
+            ("linear", 3.0, 65471),
+            ("linear", 4.0, 65535),
+            ("cubic", 2.0, 65535),
+            ("cubic", 3.0, 65535),
+            ("cubic", 4.0, 65535),
+            ("mitchell", 2.0, 65503),
+            ("mitchell", 3.0, 65535),
+            ("mitchell", 4.0, 65503),
+            ("lanczos2", 2.0, 65535),
+            ("lanczos2", 3.0, 65503),
+            ("lanczos2", 4.0, 65535),
+            ("lanczos3", 2.0, 65535),
+            ("lanczos3", 3.0, 65503),
+            ("lanczos3", 4.0, 65407),
+        ];
+        let flat = Raster::new(
+            32,
+            32,
+            PixelFormat::Gray16,
+            (0..32 * 32).flat_map(|_| 65535u16.to_ne_bytes()).collect(),
+        )
+        .unwrap();
+        let flat8 = Raster::constant_u8(32, 32, 200);
+
+        let mut short_cells = 0usize;
+        let mut worst_deficit = 0u16;
+        for (kernel, shrink, vips) in VIPS_8_18_6 {
+            for out in [flat.reduceh(shrink, kernel), flat.reducev(shrink, kernel)] {
+                assert!(
+                    out.data()
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .all(|b| u16::from_ne_bytes(*b) == 65535),
+                    "{kernel} at shrink {shrink} must leave a constant alone; \
+                     vips returns {vips}"
+                );
+            }
+            // The byte carrier agrees with vips, which is what makes the row
+            // above a statement about depth rather than about this module.
+            for out in [flat8.reduceh(shrink, kernel), flat8.reducev(shrink, kernel)] {
+                assert!(out.data().iter().all(|&v| v == 200));
+            }
+            if vips != 65535 {
+                short_cells += 1;
+                worst_deficit = worst_deficit.max(65535 - vips);
+            }
+        }
+        assert_eq!(
+            (short_cells, worst_deficit),
+            (6, 128),
+            "the recorded vips answers are the other half of this pin: if they \
+             stop being short, either the binary changed or the table did"
+        );
+        // Why the byte carrier cannot see it, computed rather than asserted.
+        let at_eight_bits = f64::from(worst_deficit) / 65535.0 * 255.0;
+        assert!(
+            at_eight_bits < 0.5,
+            "a deficit of {worst_deficit} in 65535 is {at_eight_bits} of a byte \
+             level, which round-half-up would no longer absorb"
+        );
+        assert!(
+            at_eight_bits > 0.49,
+            "and it is within {} of not being absorbed, which is the point",
+            0.5 - at_eight_bits
+        );
+    }
+
+    /// Issue #777, the magnitude on real content, `ushort` carrier. A constant
+    /// only shows the mask's scale error; the taps also move relative to each
+    /// other, so the error on detail is larger and signed both ways.
+    ///
+    /// Measured on 8.18.6 as `vips reduceh in.v out.v 3 --kernel linear` over
+    /// [`reduce_fixture`] rebuilt with `vips rawload`, interior crop
+    /// `[1, 0, 9, 8]`: all 72 samples differ, worst delta 55. Over the whole
+    /// 288-sample interior it is 288 of 288 at worst 55, and the worst cell in
+    /// a five-kernel by five-shrink sweep is `lanczos3` at 2.5, 224 of 224 at
+    /// worst 52.
+    #[test]
+    fn reduce_divergence_from_the_12_bit_mask_is_bounded_on_a_ushort_carrier() {
+        #[rustfmt::skip]
+        let vips_8_18_6: [u16; 72] = [
+            13980, 25126, 36272, 47418, 54939, 18878, 15507, 26653, 37800,
+            16690, 13319, 24466, 35612, 46758, 54279, 18218, 14847, 25993,
+            55716, 34188, 12659, 23805, 34951, 46097, 53618, 17557, 14187,
+            43910, 55056, 33527, 11999, 23145, 34291, 45437, 52958, 16897,
+            32103, 43249, 54395, 32867, 11338, 22485, 33631, 44777, 55923,
+            20297, 31443, 42589, 53735, 32207, 10678, 21824, 32970, 44116,
+            12115, 19636, 30782, 41929, 53075, 31546, 10018, 21164, 32310,
+            47516, 11455, 18976, 30122, 41268, 52414, 30886, 9357, 20503,
+        ];
+        let out = reduce_fixture(PixelFormat::Gray16).reduceh(3.0, "linear");
+        let (mismatches, worst) = carrier_diff(&reduce_crop_u16(&out), &vips_8_18_6);
+        assert!(
+            mismatches <= 72 && worst <= 55,
+            "ushort reduce differs from vips 8.18.6 in {mismatches} samples \
+             (worst delta {worst}); expected at most 72 samples, delta 55"
+        );
+        assert!(
+            mismatches >= 60 && worst >= 30,
+            "the short-mask divergence is supposed to be here: {mismatches} \
+             samples, worst delta {worst}. If this dropped, either #777 was \
+             adopted or the fixture stopped exercising it"
+        );
+    }
+
+    /// Issue #777, the same cell on a `uchar` carrier, which is the one
+    /// `libviprs-tests`' `cli_resample_diff` sees as a 1 in the `reduceh` and
+    /// `reducev` rows. The mask error is a fraction of 4096, so what it is
+    /// worth scales with the carrier's depth: 1 level at eight bits and up to
+    /// 55 at sixteen.
+    ///
+    /// Measured on 8.18.6 as `vips reduceh in.v out.v 3 --kernel linear` over
+    /// the byte [`reduce_fixture`], same interior crop: 12 of 72 samples
+    /// differ, every one by exactly 1. Over the whole 288-sample interior it
+    /// is 53 of 288, still every one by exactly 1.
+    #[test]
+    fn reduce_divergence_from_the_12_bit_mask_is_one_level_on_a_uchar_carrier() {
+        #[rustfmt::skip]
+        let vips_8_18_6: [u8; 72] = [
+            147, 124, 144, 122, 99, 119, 138, 116, 164,
+            127, 105, 153, 130, 150, 128, 105, 125, 144,
+            94, 114, 133, 111, 159, 122, 86, 134, 111,
+            145, 123, 100, 120, 139, 117, 165, 128, 92,
+            154, 131, 151, 129, 106, 126, 145, 123, 101,
+            134, 112, 160, 123, 87, 135, 112, 132, 151,
+            101, 121, 140, 118, 166, 129, 93, 141, 118,
+            82, 130, 107, 127, 146, 124, 102, 121, 99,
+        ];
+        let out = reduce_fixture(PixelFormat::Gray8).reduceh(3.0, "linear");
+        let got = reduce_crop(&out);
+        let (mismatches, worst) = got
+            .iter()
+            .zip(vips_8_18_6.iter())
+            .fold((0usize, 0u8), |(n, w), (&a, &b)| {
+                (n + usize::from(a != b), w.max(a.abs_diff(b)))
+            });
+        assert!(
+            mismatches <= 12 && worst <= 1,
+            "uchar reduce differs from vips 8.18.6 in {mismatches} samples \
+             (worst delta {worst}); expected at most 12 samples, delta 1"
+        );
+        assert!(
+            mismatches >= 6,
+            "the short-mask divergence is supposed to be here on the byte \
+             carrier too: {mismatches} samples. If this dropped, either #777 \
+             was adopted or the fixture stopped exercising it"
+        );
+    }
+
     /// Issue #733. `vips_interpolate_bilinear_interpolate` dispatches through
     /// `SWITCH_INTERPOLATE(BandFmt, BILINEAR_INT, BILINEAR_FLOAT)`, and `UCHAR`,
     /// `CHAR`, `USHORT` and `SHORT` all take `BILINEAR_INT`, which builds its
