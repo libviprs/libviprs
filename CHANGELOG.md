@@ -658,6 +658,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A page model for multi-frame images (issue #564). A multi-frame image is one
+  `Raster` whose rows are a whole number of equal-height pages stacked top to
+  bottom, the layout libvips calls a toilet roll, and the split is now a
+  derived, checked value rather than an integer riding along in the metadata.
+  `Raster::page_layout`, `Raster::get_page_height`, `Raster::pages_loaded`,
+  `Raster::page`, `Raster::try_extract_page` / `Raster::extract_page` and
+  `Raster::try_set_page_height` / `Raster::set_page_height` /
+  `Raster::clear_page_height` are the surface, and the new `frames` module
+  holds `PageLayout`, `FrameDelay` and `LoopCount`.
+
+  `Raster::get_page_height` ports `vips_image_get_page_height`, sanity check
+  included: a stored `page-height` counts only when it is positive and divides
+  the raster's height exactly, and otherwise the raster is one page. Measured
+  against 8.18.6 through `ctypes` on a 4x12 image, where every divisor of 12
+  comes back as stored and 5, 7, 11, 13, 24, 100, 0 and the negatives all come
+  back as 12. So the split can never fail to tile the rows it describes, and a
+  caller sweeping `0..raster.pages_loaded()` cannot land off the end.
+
+  `Raster::pages_loaded` is **not** `Raster::get_n_pages`. The first counts the
+  pages this raster holds; the second counts the pages the file held (#635).
+  They differ whenever a loader was asked for a subset: `vips copy
+  'anim3.webp[n=2]' out.v` reports `n-pages: 3` on a raster holding two pages.
+
+  `FrameDelay` holds milliseconds and says so in the type, because the two wire
+  formats disagree: `gifsave` writes `round(ms / 10)` centiseconds with halves
+  to even (measured: `35 55 15 25` ms wrote `4 6 2 2`, `45 67 5 1` wrote
+  `4 7 0 0`), where `webpsave` writes milliseconds straight into `ANMF` and
+  instead clamps anything at or under 10 ms up to 100 ms (measured: `8 9 10 11`
+  went out as `100 100 100 11`). `LoopCount` counts plays, `0` meaning forever,
+  and carries the GIF off-by-one: the NETSCAPE2.0 block holds
+  repeats-after-the-first and a single play carries no block at all, where
+  WebP's `ANIM` chunk holds the play count unshifted.
+
 - JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
   #501). Build with `--features jp2k` and `decode_jp2k` reads both container
   forms, the RFC 3745 JP2 box structure and the bare `SOC` + `SIZ` codestream,
@@ -1492,6 +1525,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- The page split no longer survives an operation that changes the raster's
+  height, and is no longer imported from a second input by a multi-input op
+  (issue #564). Both are deliberate divergences from libvips and both have a
+  measured counter-example on 8.18.6:
+
+  - `vips resize` on a four-page 4x12 roll writes a 2x6 result still claiming
+    `page-height: 3`, and `gifsave` then writes that as a **two**-frame
+    animation whose frames are two half-height frames stacked, silently.
+    `Raster::carry_meta_from` drops the split on a height change instead, so
+    the same pipeline yields a still image: the safe half of the two wrong
+    answers, and the caller can see it in `pages_loaded`.
+  - `vips join plain.v paged.v out.v horizontal`, where only the **second**
+    input is a four-page roll, produces an 8x12 output carrying
+    `page-height: 3`, `n-pages: 4` and the roll's delay array, so an unpaged
+    image silently becomes a four-frame animation.
+    `Raster::merge_fields_from` is the one name the field union does not
+    import.
+
+  Nothing in the crate attaches `page-height` yet, so this changes no current
+  behaviour; it is the contract the animated GIF, WebP and JPEG XL lanes are
+  written against.
 
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
   `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
