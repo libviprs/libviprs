@@ -1159,6 +1159,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `SampleKind` lives at `libviprs::pixel::SampleKind`.
 
+- `SampleKind` names the four sample kinds no `PixelFormat` carries yet:
+  `I8`, `I16`, `I32` and `U32` (issue #798, towards #516 and #517). Two new
+  accessors come with them, `is_signed()` and `range()`, and `max_value()` is
+  now derived from `range()` so the two cannot drift.
+
+  The point of naming them before the carriers exist is that the answers are
+  the part that has to be *measured*, and measuring costs nothing now while
+  the carriers cost a crate-wide refactor. `promote()` is the case in point.
+  It is `vips__formatalike`, swept on vips 8.18.6 with
+  `vips boolean <a> <b> out and`, whose format table maps every integer format
+  to itself so the output format is the formatalike result rather than a
+  promotion of it. Four of the 36 integer pairs are ones "the wider kind wins"
+  gets wrong: `(U8, I8)` is two one-byte kinds promoting to a **two**-byte one,
+  `(I8, U16)` and `(U16, I16)` promote to **four** bytes, and `(U32, I8)` takes
+  its sign from the one-byte operand.
+
+  `PixelFormat::with_kind()` now returns `None` for a kind no format carries,
+  rather than falling through to `with_channels(channels, kind.bytes())`, which
+  would answer `Rgb16` for three bands of `I16` and `FloatF32(3)` for three
+  bands of `U32`. That silent retag is exactly what `with_kind()` exists to
+  prevent, so it refuses instead. `with_kind()` therefore has two reasons to
+  answer `None` and a caller that needs to tell them apart has to look at the
+  kind.
+
+  `src/arithmetic.rs` and `src/histogram.rs` handle the new kinds for real
+  rather than leaving a hole. Two behaviours are worth knowing. The rounding,
+  saturating write in `arithmetic` takes its floor from `range()` instead of a
+  literal `0.0`, since zero is the right floor for only three of the six
+  integer kinds; nothing moves on the carriers that exist. And `histogram`'s
+  bin-index read *folds* rather than widens, matching the `VipsStatisticClass`
+  input cast, measured: a `char` image of `[-128, -1, 0, 127]` histograms to
+  `bin 0 = 3` and `bin 127 = 1`, and a `uint` image whose largest sample is
+  70000 gives a 65536-wide histogram.
+
+  No `PixelFormat` produces any of the four, so nothing in the crate's
+  behaviour moves. What moves is that the decisions are made, measured and
+  pinned, so the carrier work in #516 and #517 is the `PixelFormat` variant and
+  the 22 modules of #748, and not this as well.
+
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
   reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
