@@ -79,6 +79,10 @@ fn tiff_bytes() -> Vec<u8> {
 /// The OpenEXR fixture the `exr` module's own budget tests use: 8x4, four
 /// half channels, so `decode_exr` prices it at `8 * 4 * 4 * 4` = 512 bytes.
 const EXR: &[u8] = include_bytes!("../oracle-captures/foreign-exr/fixtures/rgba_half_zip.exr");
+/// AVIF has no encoder in this crate (deliberately, see `libviprs::avif`), so
+/// its row is built from a committed fixture the way the OpenEXR row is
+/// rather than by encoding a raster.
+const AVIF: &[u8] = include_bytes!("../oracle-captures/foreign-avif/fixtures/rgb8.avif");
 
 /// One container, the bytes to decode, and the price `decode_*` computes for
 /// its frame from the declared geometry.
@@ -172,6 +176,19 @@ fn priced_by_libviprs() -> Vec<Row> {
             price: 48,
         },
     ];
+    if cfg!(feature = "avif") {
+        rows.push(Row {
+            format: "avif",
+            bytes: AVIF.to_vec(),
+            decoded: (4, 3),
+            // Priced off the container's declared `ispe`, before any AV1 is
+            // decoded, which is the whole point for a compressed container.
+            priced_geometry: (4, 3, 3),
+            sample_bytes: 1,
+            what: "AVIF frame buffer",
+            price: 36,
+        });
+    }
     if cfg!(feature = "jxl") {
         rows.push(Row {
             format: "jxl",
@@ -264,21 +281,24 @@ fn the_two_tables_account_for_every_container() {
     let image_backed = priced_by_the_image_crate().len();
     let excluded_no_budget_at_all = 1; // `.v`, issue #710
 
-    // JPEG XL is only compiled in behind its feature, so the self-priced table
-    // is one shorter without it. Spelled out rather than hidden in a `cfg!`
-    // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 6 } else { 5 };
+    // JPEG XL and AVIF are each only compiled in behind their own feature, so
+    // the self-priced table is one shorter for each that is off. Spelled out
+    // rather than hidden in a `cfg!` inside the sum, because a reader has to
+    // be able to check the arithmetic.
+    let expected_self_priced =
+        5 + usize::from(cfg!(feature = "jxl")) + usize::from(cfg!(feature = "avif"));
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
     );
     assert_eq!(image_backed, 3, "the image-backed table changed size");
 
-    let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
+    let jxl_absent = usize::from(!cfg!(feature = "jxl"));
+    let avif_absent = usize::from(!cfg!(feature = "avif"));
     assert_eq!(
-        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent,
-        10,
-        "the two tables plus the documented exclusion must account for all ten \
+        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent + avif_absent,
+        11,
+        "the two tables plus the documented exclusion must account for all eleven \
          containers libviprs sniffs; see SniffedFormat::ALL"
     );
 }
