@@ -1648,6 +1648,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy. I found that by mutating the second check away and watching the tests
   stay green.
 
+- Every operation in `src/bands.rs` carries the input's metadata onto its
+  result: `bandjoin`, `bandjoin_const`, `bandjoin_vec`, `bandfold`,
+  `bandunfold`, `bandmean`, `bandrank`, `bandand`, `bandor`, `bandeor`,
+  `extract_band` and `extract_bands` all used to finish on a bare
+  `Raster::new` and hand back `RasterMeta::default()` with an empty field map
+  (issue #727). That is the last module in the crate with the defect, after
+  #717 and #719.
+
+  Measured against the pinned vips 8.18.6 from an 8x8 `rgb` source carrying
+  `xres 5`, `yres 7`, `xoffset 11`, `yoffset 13`, `orientation 6`, an attached
+  string and a real 3144-byte sRGB ICC profile. All twelve calls report the
+  whole lot back.
+
+  Two cells needed measuring rather than assuming. `bandfold` and `bandunfold`
+  reshape the pixel grid and do **not** rescale the resolution: 8x8 3-band
+  folds to 1x8 24-band and still reports `xres 5 yres 7`, and unfolds to 24x8
+  1-band reporting the same, which is the shape `zoom` and `subsample` had in
+  #690. And nothing in this module stamps the origin offset, so all twelve
+  report `11 / 13` straight through, unlike `flip`, `rot`, `wrap` and the
+  convolving ops (#721).
+
+  `bandjoin` and `bandrank` take more than one input and follow the union rule
+  #718 established: the header block comes from the first input alone and the
+  attached fields are the union of every input, the first winning a name they
+  share. `bandjoin` is measured both ways round, and reversing the arguments
+  flips the header block and the shared name while the ICC profile still
+  crosses from whichever input has one. `bandrank` is measured over three
+  sources, so the union is not a two-way merge in disguise.
+
 - `conv`, `convsep`, `compass`, `gaussblur`, `spcor` and `fastcor` carry the
   input's metadata onto their results, where all six used to hand back a raster
   built from `RasterMeta::default()` and an empty field map (issue #719). They
