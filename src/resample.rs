@@ -81,7 +81,20 @@
 //!   So the fixed point is the `uchar` arithmetic and only the `uchar`
 //!   arithmetic, and an alpha band takes the decision away from the stored
 //!   depth entirely, because `vips_affine` premultiplies into a FLOAT image
-//!   before it resamples. Porting the fixed point is a deliberate loss of
+//!   before it resamples.
+//!
+//!   The `FLOAT` row carries a second consequence, which is issue #705.
+//!   `bicubic_float<T>` sums each of the four rows through `cubic_float<T>` and
+//!   then combines them through `cubic_float<T>` again, and that helper
+//!   **returns `T`**. Its arithmetic is `double` either way, because the
+//!   coefficients are, so with `T = float` all five sums are computed in `f64`
+//!   and narrowed to `f32` on the way out, and with `T = double` nothing
+//!   narrows. This module does the same, keyed on the same carrier rule. The
+//!   accumulation *order* is not part of it: flat 16-term `f64` and
+//!   row-then-column `f64` are bit-identical here (measured 0 of 1764 apart on
+//!   a random 24x24 float raster, where both miss the binary by the same
+//!   1.5259e-05 in the same 356 samples), so it is the narrowing and not the
+//!   reassociation that closes it. Porting the fixed point is a deliberate loss of
 //!   accuracy in exchange for parity: measured against Catmull-Rom evaluated at
 //!   the true offset in exact rational arithmetic, the mean absolute error over
 //!   17814 interior samples of random `uchar` images goes from 0.4371 LSB to
@@ -151,7 +164,10 @@
 //!   `vips_unpremultiply` reads that image back, so the interpolated pixel is
 //!   quantised at the seam between them; the interpolation itself accumulates
 //!   in `f64`, which is what `BILINEAR_FLOAT` does with its `double`
-//!   coefficients (`interpolate.c:462`). The averaging resamplers —
+//!   coefficients (`interpolate.c:462`). Bicubic is the exception, and only
+//!   because the premultiply moved the carrier: `bicubic_float<float>` narrows
+//!   each row sum to `f32` (issue #705, and the per-carrier table above), so a
+//!   premultiplied raster takes that narrowing whatever its stored depth was. The averaging resamplers —
 //!   `reduce` / `reduceh` / `reducev`, `shrink` / `shrinkh` / `shrinkv`, and
 //!   `resize` — do the same: an alpha image is premultiplied once into a float
 //!   working buffer, the separable box / kernel / affine passes all run in that
@@ -1119,6 +1135,23 @@ impl TapFetch<'_> {
         !premultiply && !self.layout.is_float && self.layout.bpc == 1
     }
 
+    /// True when `vips_interpolate_bicubic_interpolate` would run
+    /// `bicubic_float<T>` with `T = float`, so each of the four row sums and
+    /// the column combine are narrowed to `f32` on the way out of
+    /// `cubic_float<T>` (issue #705).
+    ///
+    /// That is `VIPS_FORMAT_FLOAT` and `VIPS_FORMAT_COMPLEX`, plus anything
+    /// with an alpha band, because `vips_affine_build` premultiplies into a
+    /// FLOAT image before it resamples whatever the stored depth was. The
+    /// 16- and 32-bit integer carriers take `bicubic_float<double>` instead
+    /// and narrow nothing, and the `uchar` carrier never reaches this at all
+    /// (see [`bicubic_is_fixed_point`]).
+    ///
+    /// [`bicubic_is_fixed_point`]: TapFetch::bicubic_is_fixed_point
+    fn bicubic_narrows_rows(&self, premultiply: bool) -> bool {
+        premultiply || self.layout.is_float
+    }
+
     fn fill_value(&self) -> f64 {
         match self.extend {
             Extend::White => self.white,
@@ -1165,6 +1198,11 @@ struct InterpScratch {
     /// [`INTERPOLATE_SCALE`] units, `4 * bands` long and row-major. Only that
     /// path uses it; every other kernel leaves it untouched.
     rows: Vec<i64>,
+    /// The same four row sums for the floating-point bicubic path, which
+    /// carries them separately because vips rounds each one to `f32` on a
+    /// float carrier and that has to happen between the two stages
+    /// (issue #705).
+    rows_f: Vec<f64>,
 }
 
 impl InterpScratch {
@@ -1172,6 +1210,7 @@ impl InterpScratch {
         Self {
             tap: vec![0.0f64; bands],
             rows: vec![0i64; 4 * bands],
+            rows_f: vec![0.0f64; 4 * bands],
         }
     }
 }
@@ -1187,7 +1226,7 @@ fn interpolate_at(
     scratch: &mut InterpScratch,
     out: &mut [f64],
 ) {
-    let InterpScratch { tap, rows } = scratch;
+    let InterpScratch { tap, rows, rows_f } = scratch;
     let px = &mut tap[..];
     let x0 = x.floor() as i64;
     let y0 = y.floor() as i64;
@@ -1266,18 +1305,46 @@ fn interpolate_at(
             // (issue #668).
             catmull_coefficients(&mut cx, table_offset(x));
             catmull_coefficients(&mut cy, table_offset(y));
-            out.fill(0.0);
-            for (j, cyj) in cy.iter().enumerate() {
+            // `bicubic_float` runs the four rows through `cubic_float<T>` and
+            // then combines them through `cubic_float<T>` again, and that
+            // helper *returns* `T`. With `T = float` every one of those five
+            // sums is computed in `double` and narrowed to `f32` on the way
+            // out; with `T = double`, which is what the 16- and 32-bit integer
+            // carriers get from `bicubic_unsigned_int32_tab`, nothing narrows.
+            // Reassociating alone changes no bits (measured: 0 of 1764), so
+            // the narrowing is the whole of issue #705.
+            let narrow = fetch.bicubic_narrows_rows(premultiply);
+            let bands = out.len();
+            rows_f.fill(0.0);
+            for (j, row) in rows_f.chunks_exact_mut(bands).enumerate() {
+                if cy[j] == 0.0 {
+                    continue;
+                }
                 for (i, cxi) in cx.iter().enumerate() {
-                    let wgt = cyj * cxi;
-                    if wgt == 0.0 {
+                    if *cxi == 0.0 {
                         continue;
                     }
                     fetch.fetch(x0 - 1 + i as i64, y0 - 1 + j as i64, premultiply, px);
-                    for (o, p) in out.iter_mut().zip(px.iter()) {
-                        *o += wgt * p;
+                    for (r, p) in row.iter_mut().zip(px.iter()) {
+                        *r += cxi * p;
                     }
                 }
+                if narrow {
+                    for r in row.iter_mut() {
+                        *r = f64::from(*r as f32);
+                    }
+                }
+            }
+            for (b, o) in out.iter_mut().enumerate() {
+                // `cubic_float<T>` narrows the column combine too, and that
+                // narrowing is deliberately not spelled here: on a float
+                // carrier [`SampleLayout::write`] stores an `f32` anyway, and
+                // on a premultiplied one [`Raster::try_affine_with`] quantises
+                // the accumulator to `f32` at the un-premultiply seam (#664).
+                // Mutation N5 in the PR adds it back and every test stays
+                // green, which is what says the two spellings are the same
+                // bits rather than an assumption that they are.
+                *o = (0..4).map(|j| cy[j] * rows_f[j * bands + b]).sum();
             }
         }
         Interpolator::Lbb => {
@@ -4277,6 +4344,23 @@ mod tests {
         Raster::new(12, 12, format, data).unwrap()
     }
 
+    /// The three-band float twin of [`carrier_fixture`], sample `i` being
+    /// `(i * 37 + 11) % 251` as an `f32`, for the float accumulation pins
+    /// (issue #705). Three bands rather than one so the per-band loop is
+    /// exercised at the same time.
+    fn float_carrier_fixture() -> Raster {
+        let data: Vec<u8> = (0..12 * 12 * 3usize)
+            .flat_map(|i| (((i * 37 + 11) % 251) as f32).to_ne_bytes())
+            .collect();
+        Raster::new(
+            12,
+            12,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap()),
+            data,
+        )
+        .unwrap()
+    }
+
     /// The interior 6x6 crop at `[4, 4]` of the 18x15 affine, as flat
     /// samples. Every stencil that crop reads spans input x 1..8 and
     /// y 1..9, so the whole comparison is kernel arithmetic with no
@@ -4416,6 +4500,286 @@ mod tests {
         );
     }
 
+    /// Issue #705. `bicubic_float_tab<float>` reaches `bicubic_float<T>` with
+    /// `T = float`, and every row goes through `cubic_float<T>`, whose *return
+    /// type is `T`*:
+    ///
+    /// ```c
+    /// template <typename T>
+    /// static T inline cubic_float(const T one, ..., const double *cx)
+    /// {
+    ///     return cx[0] * one + cx[1] * two + cx[2] * thr + cx[3] * fou;
+    /// }
+    /// ```
+    ///
+    /// The products and the sum are `double` because the coefficients are, and
+    /// then the `return` narrows to `float`. So on a float carrier vips rounds
+    /// **each of the four row sums** to `f32` before it combines them, and
+    /// rounds the combine to `f32` as well.
+    ///
+    /// The accumulation *order* is not the cause, which is the whole point of
+    /// this test existing separately from the ordering change. Modelling flat
+    /// 16-term `f64` and row-then-column `f64` against the same binary gives
+    /// **bit-identical** output, 0 of 1764 samples apart on a random 24x24, and
+    /// both miss vips in the same 356 of 1764 by the same 1.5259e-05. Adding
+    /// the per-row `f32` narrowing takes it to 0 of 1764.
+    ///
+    /// Measured on 8.18.6 as `vips affine in.v out.v "1.3 0.2 -0.15 1.1"
+    /// --interpolate bicubic` over a three-band float ramp, interior crop
+    /// `[4, 4, 6, 6]`, and asserted **exactly**: this is a bit-for-bit pin, not
+    /// a tolerance. Before this change 16 of the 108 samples were wrong.
+    #[test]
+    fn affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier() {
+        #[rustfmt::skip]
+        let want: [f32; 108] = [
+            221.05179, 60.94549, 90.7095, 171.81142, 106.03813, 107.21296,
+            148.8833, 157.84538, 105.36776, 131.0, 26.8125, 63.8125,
+            122.80959, 152.21906, 200.63866, 94.56327, 145.91641, 141.46187,
+            117.17962, 160.57845, 114.42711, 97.89925, 148.53372, 117.20308,
+            141.41801, 179.07013, 12.738264, 55.36105, 114.84537, 144.2059,
+            168.30489, 111.80183, 160.67693, 163.968, 74.43494, 122.49891,
+            88.708, 127.681114, 178.83788, 137.05281, 162.68243, 200.89423,
+            9.306032, 45.70137, 97.95593, 109.54341, 163.6745, 149.838,
+            178.50795, 118.677635, 94.25602, 143.57538, 54.46303, 103.87227,
+            151.52507, 110.30661, 161.0822, 224.8973, 15.140279, 52.72461,
+            103.42076, 106.68581, 158.4583, 152.80048, 201.55286, 77.08958,
+            128.2253, 173.6129, 52.531086, 74.72636, 123.54618, 178.26077,
+            183.94586, 211.92632, 47.876602, 69.16237, 79.52507, 107.24806,
+            139.33195, 178.72528, 223.97078, 105.58892, 136.03918, 177.21284,
+            30.985691, 74.062935, 121.39275, 157.12605, 198.74245, 175.05026,
+            72.24145, 109.478065, 55.602993, 87.696976, 143.34001, 187.84433,
+            204.26207, 89.05573, 133.19304, 207.79547, 44.639683, 91.34048,
+            106.67966, 150.49532, 168.25237, 192.1947, 231.11996, 42.528263,
+        ];
+        let out = float_carrier_fixture().affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!(
+            carrier_crop_f32(&out),
+            want,
+            "float bicubic against vips 8.18.6"
+        );
+    }
+
+    /// Issue #705, the third guard: the plain `ushort` carrier must **not**
+    /// narrow. `bicubic_unsigned_int32_tab` calls `bicubic_float<double>`, so
+    /// `cubic_float` returns `double` there and nothing rounds between the row
+    /// sums and the combine.
+    ///
+    /// No oracle can arbitrate that one head on. An `f32` ulp at 16-bit
+    /// magnitudes is about 0.004, so it only moves a sample sitting that close
+    /// to a rounding boundary, and vips truncates its own `ushort` store where
+    /// this module rounds half up (#732), so the binary quantises the two
+    /// candidate answers differently anyway. What *can* arbitrate it is the
+    /// float carrier, which is pinned bit for bit against 8.18.6 by
+    /// [`affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier`]: run
+    /// the same numbers through both carriers and they have to **disagree**
+    /// exactly where the narrowing bites. Giving `ushort` the narrowing makes
+    /// them agree, and that is the mutation this catches.
+    ///
+    /// The fixture is `(i * 7907 + 13) % 64007`, picked out of a search over
+    /// 330 candidates because one of its 270 output samples lands within an
+    /// `f32` ulp of a rounding boundary *and* moves under narrowing the rows
+    /// alone. That second condition matters: my first fixture only moved when
+    /// the column combine narrowed, so it let a mutation that narrows only the
+    /// four row sums through, which is exactly the arm this is meant to guard.
+    ///
+    /// [`affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier`]: self::affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier
+    #[test]
+    fn affine_bicubic_keeps_full_f64_rows_on_a_ushort_carrier() {
+        let values: Vec<u32> = (0..12 * 12u32).map(|i| (i * 7907 + 13) % 64007).collect();
+        let as_u16 = Raster::new(
+            12,
+            12,
+            PixelFormat::Gray16,
+            values
+                .iter()
+                .flat_map(|v| (*v as u16).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap()
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        let as_f32 = Raster::new(
+            12,
+            12,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            values
+                .iter()
+                .flat_map(|v| (*v as f32).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap()
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+
+        let got: Vec<u16> = as_u16
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect();
+        // The float result quantised by this module's own writer rule, so the
+        // only thing left between the two runs is the accumulation.
+        let via_float: Vec<u16> = float_samples(&as_f32)
+            .iter()
+            .map(|v| (f64::from(*v) + 0.5).floor().clamp(0.0, 65535.0) as u16)
+            .collect();
+        assert_eq!(got.len(), 18 * 15, "output size");
+
+        let differ: Vec<usize> = (0..got.len()).filter(|&i| got[i] != via_float[i]).collect();
+        assert_eq!(
+            differ,
+            vec![73],
+            "the two carriers must disagree exactly where the f32 narrowing bites"
+        );
+        assert_eq!((got[73], via_float[73]), (38531, 38532));
+    }
+
+    /// Issue #705, the premultiplied half. `vips_affine_build` premultiplies
+    /// into a **FLOAT** image whenever `vips_image_hasalpha()`, so an alpha
+    /// raster takes `bicubic_float_tab<float>` and the per-row narrowing
+    /// whatever its stored depth was. Without a case here the `premultiply`
+    /// arm of `bicubic_narrows_rows` has nothing behind it: an 8-bit output
+    /// quantum swallows an `f32` ulp whole, so an `Rgba8` fixture cannot see
+    /// this at all (measured: 0 samples move over 40 random 12x12 `Rgba8`
+    /// rasters, against 28 of 40 for `Rgba16`).
+    ///
+    /// The oracle is `premultiply | affine --premultiplied | unpremultiply` on
+    /// 8.18.6 with `--max-alpha 65535`, read back as FLOAT and quantised with
+    /// this module's own round-half-up, for the reason
+    /// `resize_unsigned_bracket_matches_the_vips_oracle_on_varying_data` gives:
+    /// `vips_cast` truncates a float toward zero, so casting the oracle to
+    /// `ushort` would ask a different question. Read that way the whole 12x10
+    /// output agrees in **480 of 480** samples with the narrowing and 477 of
+    /// 480 without it.
+    ///
+    /// The three that separate them are output pixel `(0, 7)`, bands 0 to 2,
+    /// and they are on the rounding boundary, which is the only place an `f32`
+    /// ulp at 50000 can reach:
+    ///
+    /// ```text
+    /// vips float 56743.50390625  ->  56744   without the narrowing 56743
+    /// vips float 51235.5         ->  51236   without the narrowing 51235
+    /// vips float 45727.5         ->  45728   without the narrowing 45727
+    /// ```
+    ///
+    /// Row 7 of the output is pinned rather than only those three, so the test
+    /// says what the row is and not just where it bends.
+    #[test]
+    fn affine_bicubic_narrows_the_rows_when_alpha_premultiplies_to_float() {
+        let data: Vec<u8> = (0..8 * 8 * 4usize)
+            .flat_map(|i| (((i * 60013 + 977) % 65521) as u16).to_ne_bytes())
+            .collect();
+        #[rustfmt::skip]
+        let want_row7: [u16; 48] = [
+            56744, 51236, 45728, 3151, 54961, 49453, 43945, 27834,
+            24906, 19398, 13890, 36248, 17693, 12185, 6677, 45305,
+            23153, 17645, 12137, 60075, 57805, 52297, 46789, 38234,
+            52224, 46716, 41208, 20211, 14154, 8646, 2902, 36135,
+            15458, 9950, 6030, 58270, 41591, 36083, 50625, 47886,
+            46338, 40830, 48301, 31296, 59024, 53516, 37023, 12280,
+        ];
+        let out = Raster::new(8, 8, PixelFormat::Rgba16, data)
+            .unwrap()
+            .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        assert_eq!((out.width(), out.height()), (12, 10), "output size");
+        let got: Vec<u16> = out
+            .extract_area(0, 7, 12, 1)
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect();
+        assert_eq!(got, want_row7, "premultiplied Rgba16 bicubic row 7");
+    }
+
+    /// Issue #705, the over-reach guard. Only bicubic sums rows through a
+    /// `T`-returning helper. `BILINEAR_FLOAT` writes
+    /// `tq[z] = c1 * tp1[z] + c2 * tp2[z] + c3 * tp3[z] + c4 * tp4[z]` as one
+    /// expression with a single narrowing at the store, and `lbb.cpp` and
+    /// `nohalo.cpp` compute in `double` throughout and narrow once at the end
+    /// too. All three are already bit-exact against 8.18.6 on this fixture and
+    /// must stay that way: narrowing an intermediate in any of them would move
+    /// these samples by about 1e-05.
+    #[test]
+    fn affine_float_interpolators_other_than_bicubic_narrow_only_at_the_store() {
+        #[rustfmt::skip]
+        let want_bilinear: [f32; 108] = [
+            197.26852, 84.20548, 108.676674, 163.16832, 110.41781, 110.961815,
+            140.3723, 140.0685, 101.942764, 131.0, 42.5, 79.5,
+            121.6277, 134.04109, 171.04109, 98.83167, 135.83168, 135.363,
+            126.74967, 163.74966, 109.23288, 110.2416, 147.24161, 111.37671,
+            126.51567, 163.51567, 41.315067, 79.81601, 116.81601, 132.85617,
+            150.39726, 111.09402, 148.09401, 149.10274, 91.8541, 128.8541,
+            92.2629, 129.2629, 162.58904, 125.11644, 147.35034, 184.35034,
+            27.547945, 63.323326, 100.323326, 112.212326, 149.21233, 135.03734,
+            157.59467, 120.41096, 107.29574, 143.20613, 81.29452, 118.29452,
+            141.9452, 107.72884, 144.72884, 212.85617, 27.37568, 64.37568,
+            112.461624, 111.0274, 148.0274, 140.25183, 177.25183, 91.71918,
+            125.933945, 162.93394, 80.10959, 97.65069, 125.583786, 162.58379,
+            159.03378, 184.16438, 68.32239, 83.7204, 86.595894, 111.8207,
+            130.49222, 164.38356, 201.38356, 105.4589, 133.98076, 170.98076,
+            59.46575, 96.46575, 124.98762, 151.00685, 188.00685, 160.7143,
+            82.15631, 119.15631, 71.65753, 101.39773, 138.39774, 163.19862,
+            180.73973, 98.00957, 135.00957, 193.19862, 66.52345, 103.52345,
+            111.879906, 148.8799, 156.81873, 171.86348, 208.86348, 65.02008,
+        ];
+        #[rustfmt::skip]
+        let want_lbb: [f32; 108] = [
+            223.97984, 63.182693, 89.980804, 177.65471, 107.6153, 104.81888,
+            149.91078, 156.67326, 101.22427, 137.0625, 32.875, 63.8125,
+            123.63425, 152.94336, 193.15602, 88.592865, 145.86058, 139.08575,
+            118.22841, 164.37238, 113.296364, 97.041115, 148.76147, 117.54855,
+            137.64272, 185.66116, 21.03061, 55.103294, 115.21083, 145.20808,
+            163.71788, 107.58647, 164.24315, 162.95132, 70.80461, 126.090485,
+            88.235245, 126.98186, 176.27092, 136.41968, 162.69293, 205.70947,
+            14.805203, 45.779423, 98.33576, 112.73169, 162.11461, 147.71895,
+            181.09906, 119.592834, 93.7493, 149.6334, 60.88833, 102.771034,
+            149.72311, 108.11873, 160.95882, 224.178, 14.91653, 53.13271,
+            103.49911, 108.85715, 159.47243, 151.35829, 202.91455, 79.47844,
+            127.9066, 181.5277, 58.553047, 74.95804, 123.53025, 178.6542,
+            183.75572, 207.03062, 42.808277, 69.97353, 79.5257, 107.78205,
+            139.00935, 178.128, 219.92058, 105.22234, 136.24048, 180.87585,
+            37.62609, 73.83081, 120.96473, 158.00949, 196.41797, 174.71162,
+            65.08279, 112.96368, 59.87288, 86.777824, 143.21373, 187.29716,
+            199.47922, 83.86982, 133.26796, 207.85735, 45.452923, 91.88468,
+            106.17024, 150.52966, 168.45255, 191.63763, 234.06316, 43.11054,
+        ];
+        #[rustfmt::skip]
+        let want_nohalo: [f32; 108] = [
+            224.97852, 66.48908, 93.30692, 172.79782, 107.53387, 103.74632,
+            153.59686, 158.96323, 96.17205, 131.0, 23.25, 60.25,
+            122.54222, 143.90665, 200.35365, 95.67481, 150.86491, 138.24774,
+            120.79364, 166.54047, 111.22518, 100.58867, 153.37073, 115.44871,
+            136.65433, 175.45961, 15.20176, 53.12734, 115.27774, 145.08076,
+            170.37251, 111.6232, 167.74391, 158.46616, 69.20872, 126.323364,
+            89.768036, 129.33746, 191.13144, 135.12457, 160.80562, 199.78749,
+            13.108764, 49.285946, 99.760254, 105.16903, 166.1975, 145.16159,
+            185.39957, 119.98104, 88.485245, 141.9015, 52.766975, 109.648346,
+            162.18074, 104.56628, 158.36682, 223.42383, 14.497568, 53.48192,
+            105.77036, 102.13799, 158.74597, 147.92348, 209.60939, 83.47758,
+            120.97823, 169.89148, 50.86215, 78.40687, 124.20311, 186.91504,
+            181.91985, 205.4671, 45.594307, 67.353546, 76.229294, 100.768616,
+            134.20372, 172.1164, 227.43303, 103.49184, 132.25568, 175.53285,
+            32.38869, 81.44474, 127.17772, 162.42912, 204.23552, 172.94606,
+            73.97242, 111.93984, 49.92682, 75.99779, 140.74083, 179.31236,
+            211.2558, 92.12908, 139.14842, 202.32161, 38.810753, 97.05681,
+            108.59659, 156.0834, 170.3779, 189.37865, 233.43689, 46.334454,
+        ];
+        let im = float_carrier_fixture();
+        for (name, want) in [
+            ("bilinear", want_bilinear),
+            ("lbb", want_lbb),
+            ("nohalo", want_nohalo),
+        ] {
+            let out = im.affine([1.3, 0.2, -0.15, 1.1], name);
+            assert_eq!(
+                carrier_crop_f32(&out),
+                want,
+                "float {name} against vips 8.18.6"
+            );
+        }
+    }
+
     /// Issue #704, the overshoot regime. Catmull-Rom rings, so a hard edge
     /// drives the fixed-point accumulators **negative** and past the carrier's
     /// ceiling, and that is where two details of the C stop being cosmetic:
@@ -4503,9 +4867,10 @@ mod tests {
     /// move these samples by around 0.03, four orders of magnitude past the
     /// residual allowed here.
     ///
-    /// That residual is the accumulation seam issue #705 is about and this
-    /// test tightens to nothing once #705 lands: measured 3.8147e-06 on 2 of
-    /// these 36 samples today.
+    /// There is no residual to allow. The accumulation seam that used to leave
+    /// 3.8147e-06 on 2 of these 36 samples is closed by #705, so this is a
+    /// bit-for-bit pin and a 12-bit coefficient would miss it by four orders of
+    /// magnitude.
     #[test]
     fn affine_bicubic_keeps_f64_coefficients_on_a_float_carrier() {
         #[rustfmt::skip]
@@ -4521,15 +4886,10 @@ mod tests {
             core::num::NonZeroU16::new(1).unwrap(),
         ))
         .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
-        let got = carrier_crop_f32(&out);
-        let worst = got
-            .iter()
-            .zip(want.iter())
-            .map(|(g, w)| (f64::from(*g) - f64::from(*w)).abs())
-            .fold(0.0f64, f64::max);
-        assert!(
-            worst <= 4e-6,
-            "float bicubic differs from vips 8.18.6 by {worst}, expected at most 4e-6"
+        assert_eq!(
+            carrier_crop_f32(&out),
+            want,
+            "float bicubic against vips 8.18.6"
         );
     }
 
