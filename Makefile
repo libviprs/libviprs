@@ -5,11 +5,15 @@ ci: fmt clippy test doc miri loom
 	@echo ""
 	@echo "All CI checks passed."
 
-## Build the docs and fail on any broken intra-doc link (Docs job).
+## Build the docs and fail on any broken or private intra-doc link (Docs job).
 ## Runs with every feature so the gated surface resolves (issue #146).
+## `private_intra_doc_links` is warn-by-default, so a link to a `pub(crate)`
+## item renders as inert bracketed text on docs.rs and passed both gates until
+## issue #697. `tests/doc_link_gate.rs` holds this line and the workflow's
+## together.
 doc:
-	@echo "==> cargo doc (deny broken intra-doc links)"
-	RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps --all-features
+	@echo "==> cargo doc (deny broken and private intra-doc links)"
+	RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" cargo doc --no-deps --all-features
 
 ## Check formatting (Check & Lint job)
 fmt:

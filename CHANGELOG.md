@@ -1353,6 +1353,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The doc gate denies `rustdoc::private_intra_doc_links`, and the 33 public doc
+  comments that pointed at `pub(crate)` items no longer do (issue #697). That
+  lint is warn-by-default and neither invocation denied it, so a public doc
+  comment could link to a private helper, rustdoc would silently drop the link
+  and render it as inert bracketed text on docs.rs, and both `make doc` and the
+  CI docs job stayed green while publishing a dead pointer.
+
+  At `9b1ade6` that had happened 33 times across 13 files: `sink.rs` 7,
+  `source.rs` 6, `resume.rs` 5, two each in `colour.rs`, `dedupe.rs`,
+  `encode_tiff.rs`, `engine.rs` and `gif.rs`, one each in `composite.rs`,
+  `manifest.rs`, `pdf.rs`, `raster.rs` and `streaming_mapreduce.rs`. Every
+  target is a private helper, a crate-internal constant or a `pub(crate)`
+  cache, and none of them is worth making public just to satisfy a link, so
+  each site inlines the sentence the public reader needed and keeps the
+  identifier in plain backticks for anyone reading the source. `cargo doc
+  --no-deps --all-features` goes from 47 warnings to 13, the remaining 13 all
+  being `rustdoc::redundant_explicit_links` (issue #795).
+
+  `tests/doc_link_gate.rs` holds the `Makefile` recipe and the `ci.yml` docs
+  job to the same deny set and the same `cargo doc` arguments, so tightening
+  one file alone fails there rather than quietly un-mirroring the local gate,
+  and it holds the docs job's own `name:` to naming every lint it denies.
+
 - The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
   `-Zmiri-disable-isolation`, and `make miri` is now a local mirror of it that
   actually runs (issues #675, #707). Neither change makes the job pass. What
