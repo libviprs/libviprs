@@ -1417,8 +1417,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 11] = {
-        let mut all = [Self::Vips; 11];
+    pub(crate) const ALL: [Self; 12] = {
+        let mut all = [Self::Vips; 12];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1812,9 +1812,9 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// other container libviprs recognises is read into memory whole, through a
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
-/// That is native `.v`, JPEG, GIF, WebP, JPEG XL, Radiance HDR, FITS,
-/// OpenEXR and NIfTI: each one either parses its own container end to end or
-/// makes a second pass over the same bytes for metadata.
+/// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
+/// FITS, OpenEXR and NIfTI: each one either parses its own container end to
+/// end or makes a second pass over the same bytes for metadata.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -3168,6 +3168,7 @@ mod tests {
             whole_file,
             vec![
                 SniffedFormat::Vips,
+                SniffedFormat::Uhdr,
                 SniffedFormat::Jpeg,
                 SniffedFormat::Gif,
                 SniffedFormat::WebP,
