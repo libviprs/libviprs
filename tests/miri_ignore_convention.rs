@@ -265,21 +265,23 @@ const ANCHOR_FILES: &[&str] = &[
 /// Annotated tests under `src/`, pinned so a bulk change in either direction is
 /// a deliberate edit here rather than a number that quietly drifts.
 ///
-/// It went from 53 to 157 in one change, #739's sweep, and from 157 to 186 in
+/// It went from 53 to 157 in one change, #739's sweep, and from 157 to 209 in
 /// the next, #781's: the first annotated 104 filesystem tests across thirteen
 /// more `src/` modules because #711 turned Miri's isolation on and made every
-/// one of them fatal to the whole run, and the second added 29 more that the
-/// detector could not see until it followed a call into a test helper.
+/// one of them fatal to the whole run, and the second annotated everything the
+/// detector could not see until it followed a call into a test helper, which
+/// included the whole of `src/nifti.rs` once that module reached `main` while
+/// this was in flight.
 ///
 /// `merge-gate.yml` used to quote a count here ("48 annotations across seven
 /// modules", true at `f62a56a` and stale for months afterwards). It quotes none
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 186;
+const EXPECTED_SRC_ANNOTATIONS: usize = 209;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation.
-const EXPECTED_SRC_MODULES: usize = 22;
+const EXPECTED_SRC_MODULES: usize = 23;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -349,7 +351,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[
 /// and the check green. Measured, not reasoned: three such deletions are in
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 239;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 272;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

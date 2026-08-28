@@ -1389,8 +1389,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The Miri filesystem detector follows a call into a test helper, one file deep
-  and to a fixed point, and 39 more tests over six files carry
-  `#[cfg_attr(miri, ignore)]` because of it (issue #781).
+  and to a fixed point, and 72 more tests over eight files carry
+  `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
+  population when the change was written; the other 33 are `src/nifti.rs` and
+  `tests/uhdr_ported_surface.rs`, which reached `main` while it was in flight
+  and were caught by the new detector on the merge rather than by a re-read.
 
   It read one function body and stopped, which the guard's module docs listed as
   a known blind spot without ever measuring it. Measured: on the tree where
