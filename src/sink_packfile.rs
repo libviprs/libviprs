@@ -144,10 +144,10 @@ impl PackfileSink {
     ) -> Result<Self, SinkError> {
         let out_path = path.into();
 
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = out_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
         let file = File::create(&out_path)?;
