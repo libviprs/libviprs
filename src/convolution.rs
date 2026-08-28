@@ -4035,6 +4035,129 @@ mod tests {
         }
     }
 
+    /// Scalar reference for `fastcor` at one output sample: the sum of
+    /// squared differences between the template and the image window under it,
+    /// read through [`Raster::getpoint`] and so independent of how the
+    /// operation gets at its pixels.
+    fn ref_fastcor(im: &Raster, t: &Raster, x: i64, y: i64, b: usize, float: bool) -> f64 {
+        let (tw, th) = (t.width() as i64, t.height() as i64);
+        let (ax, ay) = (tw / 2, th / 2);
+        let mut fsum = 0.0f32;
+        let mut isum = 0u32;
+        for j in 0..th {
+            let sy = (y + j - ay).clamp(0, im.height() as i64 - 1) as u32;
+            for i in 0..tw {
+                let sx = (x + i - ax).clamp(0, im.width() as i64 - 1) as u32;
+                let r = t.getpoint(i as u32, j as u32)[b];
+                let p = im.getpoint(sx, sy)[b];
+                if float {
+                    let d = r as f32 - p as f32;
+                    fsum += d * d;
+                } else {
+                    let d = r as i64 - p as i64;
+                    isum = isum.wrapping_add((d * d) as u32);
+                }
+            }
+        }
+        if float {
+            f64::from(fsum)
+        } else {
+            f64::from(isum)
+        }
+    }
+
+    /// Scalar reference for `spcor` at one output sample: the normalised
+    /// cross-correlation of the template against the image window under it,
+    /// again through [`Raster::getpoint`].
+    fn ref_spcor(im: &Raster, t: &Raster, x: i64, y: i64, b: usize) -> f64 {
+        let (tw, th) = (t.width() as i64, t.height() as i64);
+        let (ax, ay) = (tw / 2, th / 2);
+        let n = (tw * th) as f64;
+        let mut rmean = 0.0;
+        for j in 0..th {
+            for i in 0..tw {
+                rmean += t.getpoint(i as u32, j as u32)[b];
+            }
+        }
+        rmean /= n;
+        let mut c1 = 0.0;
+        for j in 0..th {
+            for i in 0..tw {
+                let d = t.getpoint(i as u32, j as u32)[b] - rmean;
+                c1 += d * d;
+            }
+        }
+        let c1 = c1.sqrt();
+
+        let window = |j: i64, i: i64| {
+            let sy = (y + j - ay).clamp(0, im.height() as i64 - 1) as u32;
+            let sx = (x + i - ax).clamp(0, im.width() as i64 - 1) as u32;
+            im.getpoint(sx, sy)[b]
+        };
+        let mut imean = 0.0;
+        for j in 0..th {
+            for i in 0..tw {
+                imean += window(j, i);
+            }
+        }
+        imean /= n;
+        let (mut sum2, mut sum3) = (0.0, 0.0);
+        for j in 0..th {
+            for i in 0..tw {
+                let d = window(j, i) - imean;
+                sum2 += d * d;
+                sum3 += (t.getpoint(i as u32, j as u32)[b] - rmean) * d;
+            }
+        }
+        let c2 = c1 * sum2.sqrt();
+        if c2 == 0.0 { 0.0 } else { sum3 / c2 }
+    }
+
+    /// #791: the correlations read their image through the same row window the
+    /// convolution traversal uses, and answer the same thing the whole-image
+    /// widening answered, at **every** output sample.
+    ///
+    /// `correlation_peaks_at_match` asserts one point of one image and
+    /// `fastcor_hand_values` a 2x2, so an eviction that only bites when the
+    /// template is taller than the image, or when the image is one row, would
+    /// have gone through both. Here it is six image shapes against six
+    /// template shapes, on both operations and on both of `fastcor`'s
+    /// accumulation paths, compared against a reference that reads its pixels
+    /// with `getpoint` and so cannot share the indexing under test.
+    #[test]
+    fn the_correlation_row_window_matches_the_scalar_reference_at_every_sample() {
+        for (w, h) in [(1u32, 1u32), (1, 6), (6, 1), (2, 2), (5, 4), (7, 9)] {
+            let eight = noise_gray(w, h, 3_000 + w * 31 + h);
+            let floats = float_from(w, h, |x, y| (x * 7 + y * 13) as f32 * 0.25 - 3.0);
+            for (tw, th) in [(1u32, 1u32), (3, 3), (2, 2), (3, 5), (5, 3), (3, 9)] {
+                let t8 = noise_gray(tw, th, 4_000 + tw * 31 + th);
+                let tf = float_from(tw, th, |x, y| (x * 3 + y * 5) as f32 * 0.5 - 1.0);
+                for (im, t, float) in [(&eight, &t8, false), (&floats, &tf, true)] {
+                    let fast = im.fastcor(t);
+                    let ncc = im.spcor(t);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let want = ref_fastcor(im, t, x as i64, y as i64, 0, float);
+                            let got = fast.getpoint(x, y)[0];
+                            assert!(
+                                (got - want).abs() <= 1e-3 * want.abs().max(1.0),
+                                "fastcor {tw}x{th} template on a {w}x{h} image at ({x},{y}): \
+                                 got {got}, expected {want}"
+                            );
+                            let want = ref_spcor(im, t, x as i64, y as i64, 0);
+                            let got = ncc.getpoint(x, y)[0];
+                            assert!(
+                                (got - want).abs() <= 1e-3 * want.abs().max(1.0),
+                                "spcor {tw}x{th} template on a {w}x{h} image at ({x},{y}): \
+                                 got {got}, expected {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// #575: the rolling window answers the same image the whole-image
     /// widening did, at **every** output sample and not at four probe
     /// points.
