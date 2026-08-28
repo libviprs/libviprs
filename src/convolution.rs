@@ -1916,22 +1916,33 @@ impl Raster {
     ///
     /// [`ConvolutionError::Colour`] when the image has no LabS colourspace
     /// route (for example a 2-band multiband image), plus the
-    /// [`Kernel::try_gaussmat`] errors.
+    /// [`Kernel::try_gaussmat`] errors. The LabS round trip this opens and
+    /// closes reserves its output buffers fallibly at both ends now, so a
+    /// conversion the host cannot allocate arrives here as
+    /// [`ConvolutionError::Colour`] carrying [`ColourError::Raster`]
+    /// instead of ending the process (issue #672).
     ///
-    /// Every allocation this function makes for itself is fallible: the widening
-    /// goes through [`Raster::try_f32_samples`], the L plane and the two
-    /// separable blur passes through the module's fallible reservation helper,
-    /// and the result is the LabS raster moved rather than cloned. So an
-    /// allocation failure in any of them arrives here as
+    /// Every allocation this function makes for itself is fallible now: the
+    /// widening goes through [`Raster::try_f32_samples`], the clamped L plane
+    /// and the two separable blur passes through the module's fallible
+    /// reservation helper, and the result is the LabS raster moved rather than
+    /// cloned. So an allocation failure in any of them arrives here as
     /// [`ConvolutionError::Raster`] instead of reaching `handle_alloc_error`
     /// and ending the process (issue #627).
     ///
-    /// **One route out is still not abort-free**, and it is not in this file:
-    /// the two [`Raster::try_colourspace`] calls that open and close the LabS
-    /// round trip allocate their intermediates with a plain `vec![]`, so a
-    /// failure inside `colour.rs` still aborts. Removing the widening entirely
-    /// is #575's third item, which is still open, and the `colour.rs`
-    /// intermediates ride with it.
+    /// Together with #672 and #685 having done the same for the round trip's
+    /// own buffers, that leaves **no image-sized infallible allocation on this
+    /// path at all**, which is what the doc here used to point at in both
+    /// directions and no longer can.
+    ///
+    /// What is left is not image-sized. `colour.rs` carries the input's
+    /// attachments onto each end of the round trip with `fields.clone()`, an
+    /// embedded ICC profile among them, and that copy allocates infallibly, as
+    /// does the Gaussian mask row `mask1d` collects. One is bounded by an
+    /// attachment and the other by the mask sanity radius rather than by the
+    /// pixel count, and the first is the same residue `Raster::try_clone`
+    /// names for itself (it is crate-private, so no link). That is the only
+    /// sense in which this is still not abort-free.
     pub fn try_sharpen(&self, sigma: f64, m1: f64, m2: f64) -> Result<Raster, ConvolutionError> {
         // vips_sharpen: remember the interpretation, work in LabS.
         let old_interpretation = self.interpretation();
@@ -2793,10 +2804,16 @@ impl Raster {
     /// compile-time constant with a non-zero finite scale, so no kernel-shape
     /// variant is reachable.
     ///
-    /// Both arms are abort-free: every allocation on the path is reserved
-    /// fallibly, including the widening the float arm reads its two gradient
-    /// rasters back through, which used to `.collect()` and so end the process
-    /// on failure (issue #627).
+    /// Both arms are abort-free in the sense #575 set: every **image-sized**
+    /// allocation on the path is reserved fallibly, the widening the float arm
+    /// reads its two gradient rasters back through included, which used to
+    /// `.collect()` and so end the process on failure (issue #627).
+    ///
+    /// Smaller allocations on the path are still infallible and deliberately
+    /// out of that scope: the convolution scan's per-row accumulator and its
+    /// two clamp tables, the 2x2 gradient mask, and the `fields.clone()` that
+    /// carries the input's attachments onto the result. None of them scales
+    /// with the pixel count.
     pub fn try_canny(&self, sigma: f64, precision: Precision) -> Result<Raster, ConvolutionError> {
         let [gx, gy] = self.canny_gradient(sigma, precision)?;
         let fmt = gx.format();
