@@ -23,6 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -470,5 +471,83 @@ fn captures_parse_as_json_and_the_python_only_list_does_not_grow() {
         fixed.is_empty(),
         "{fixed:?} now parse as strict JSON; drop them from PYTHON_ONLY_JSON \
          so the list keeps meaning what it says"
+    );
+}
+
+/// Every path git tracks under `oracle-captures/`, relative to the repo root.
+///
+/// This has to ask git rather than walk the directory, because the question is
+/// what is IN THE INDEX and the filesystem cannot answer it either way round: a
+/// `git rm --cached` leaves the file on disk, and a fresh clone does not have
+/// it whether or not anyone ran that command. A walk would be green in CI for a
+/// reason unrelated to the fix.
+///
+/// The listing is the part that can come back empty and take the guard down
+/// with it, so it is anchored on files that are certainly tracked before any
+/// caller reads a conclusion into an absence. `tests/workspace_layout.rs`
+/// shells out to `cargo metadata` the same way.
+fn tracked_under_oracle_captures() -> Vec<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .args(["ls-files", "-z", "--full-name", "--", "oracle-captures"])
+        .output()
+        .expect("failed to spawn git ls-files");
+    assert!(
+        out.status.success(),
+        "git ls-files failed, so this guard has nothing to check:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let files: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).replace('\\', "/"))
+        .collect();
+
+    for anchor in [
+        "oracle-captures/convolution/capture.py",
+        "oracle-captures/foreign-analyze/capture.py",
+        "oracle-captures/foreign-mat/capture.py",
+    ] {
+        assert!(
+            files.iter().any(|f| f == anchor),
+            "git tracks {} paths under oracle-captures and {anchor} is not one \
+             of them, so this is not the listing the guard means to read",
+            files.len()
+        );
+    }
+    files
+}
+
+/// No compiled Python is tracked under `oracle-captures/` (issue #681).
+///
+/// `oracle-captures/foreign-analyze/__pycache__/capture.cpython-314.pyc` and
+/// the matching `foreign-mat` one were in the index: build artefacts of the
+/// capture scripts sitting next to them, tied to one CPython, read by nothing.
+///
+/// The reason this is a test and not just a `git rm --cached` is the ordering
+/// that made the issue worth writing down. `oracle-captures/.gitignore` ignores
+/// `__pycache__/`, and an ignore rule does nothing to a path that is already
+/// tracked. So the ignore on its own leaves both files exactly where they were
+/// AND stops `git status` mentioning them, which is worse than either half
+/// alone. Nothing about the ignore rule can notice that; this can.
+#[test]
+fn no_compiled_python_is_tracked_under_oracle_captures() {
+    let tracked = tracked_under_oracle_captures();
+    let artefacts: Vec<&String> = tracked
+        .iter()
+        .filter(|p| {
+            p.ends_with(".pyc")
+                || p.ends_with(".pyo")
+                || p.split('/').any(|component| component == "__pycache__")
+        })
+        .collect();
+    assert!(
+        artefacts.is_empty(),
+        "these are tracked under oracle-captures and are compiled Python, not \
+         evidence: {artefacts:?}. Untrack them with `git rm --cached <path>`, \
+         which keeps the working copy. oracle-captures/.gitignore only stops \
+         the NEXT one being added, it cannot untrack these."
     );
 }
