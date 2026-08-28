@@ -61,6 +61,12 @@
 //! the change that clears it, which is the same mistake
 //! `tests/miri_ignore_convention.rs` made with `assert!(unannotated_fs > 0)`.
 //!
+//! Zero is its own arm rather than a bound that trivially holds. At zero the
+//! bound passes, the phrase is still in the file, and the workflow goes on
+//! describing a handful of unannotated tests that do not exist, which is the
+//! one state where nothing checks that sentence. So zero demands a different
+//! sentence, and the transition is one red and one rewrite.
+//!
 //! # Why it runs under Miri
 //!
 //! Every file this reads is pulled in with `include_str!` at compile time rather
@@ -89,6 +95,14 @@ const SIGNIFICANT_ENV: [&str; 2] = ["MIRIFLAGS", "RUSTFLAGS"];
 const BACKLOG_BOUND: usize = 10;
 /// How the workflow has to spell [`BACKLOG_BOUND`].
 const BACKLOG_PHRASE: &str = "a named handful of unannotated filesystem-touching tests";
+/// What the workflow has to say instead once the backlog reaches zero.
+///
+/// Without this arm the zero case is the one state in which nothing checks the
+/// sentence: the bound `0 <= BACKLOG_BOUND` holds, [`BACKLOG_PHRASE`] is still
+/// in the file, and the workflow goes on describing a handful of unannotated
+/// tests that no longer exist. So the sentence has to change exactly once, when
+/// #756 lands, and this is what makes that one red rather than a silent lie.
+const CLEARED_PHRASE: &str = "every filesystem-touching test carries the annotation";
 
 /// One Miri invocation, however it happens to be written down.
 #[derive(Debug, PartialEq, Eq)]
@@ -552,6 +566,17 @@ fn the_local_mirror_does_not_run_on_the_bare_nightly() {
 fn merge_gate_states_the_backlog_as_a_bound_it_still_meets() {
     let rows = inventory_rows();
     let unannotated = rows.iter().filter(|(annotated, _)| !annotated).count();
+
+    if unannotated == 0 {
+        assert!(
+            WORKFLOW.contains(CLEARED_PHRASE),
+            "the unannotated backlog is empty, so `merge-gate.yml` saying `{BACKLOG_PHRASE}` \
+             is false. Rewrite that sentence to say `{CLEARED_PHRASE}`. This is the one \
+             deliberate red the zero transition is supposed to produce, and it is #756 \
+             landing."
+        );
+        return;
+    }
 
     assert!(
         unannotated <= BACKLOG_BOUND,
