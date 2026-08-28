@@ -838,11 +838,24 @@ impl Raster {
         })
     }
 
-    /// Extract a sub-region as a new owned `Raster`.
+    /// Extract a sub-region as a new owned `Raster`, carrying the metadata.
     ///
     /// Copies the pixel data row-by-row into a freshly allocated buffer.
     /// Use this when you need an independent `Raster` (e.g., to encode a tile
     /// to disk) rather than a borrowed view.
+    ///
+    /// The interpretation, resolution, orientation, origin offset and every
+    /// attached field come with it, the same as
+    /// [`Raster::try_extract_area`](crate::Raster::try_extract_area), which is
+    /// built on this. The one difference is the origin: `extract_area` stamps
+    /// `(-left, -top)` to match `vips_extract_area`, where this carries the
+    /// source's (issue #740).
+    ///
+    /// Carrying an attached ICC profile costs one bounded copy per crop, which
+    /// on the tiling paths is once per tile. That is a real cost and it is
+    /// measured in `tests/extract_metadata_carry.rs`; it buys correctness on
+    /// the resampling paths, where a lost interpretation changes output bytes
+    /// on the float carriers.
     ///
     /// # Errors
     ///
@@ -864,7 +877,23 @@ impl Raster {
         for row in view.rows() {
             out.extend_from_slice(row);
         }
-        Raster::new(w, h, self.format, out)
+        let mut cropped = Raster::new(w, h, self.format, out)?;
+        // The crate's physical crop, so it carries like everything else (#740).
+        // `Raster::extract_area` is built on this and used to be the only one
+        // of the two that carried, which mattered because `extract` is what
+        // `engine.rs` and `streaming.rs` call per tile and per strip: a float
+        // scRGB source cropped here lost its tag, and #664 makes the
+        // premultiply bracket read that tag on float carriers, so every
+        // resampled tile of a region run came out different from a whole-image
+        // one.
+        //
+        // The origin offset is carried, not stamped. `extract_area` stamps
+        // `(-left, -top)` because `vips_extract_area` does and #690 measured
+        // it; this is not that operation, vips has no method it corresponds to,
+        // and a pyramid tile is not a crop of a larger image in the sense
+        // `Xoffset` means. `extract_area` stamps on top of this carry.
+        cropped.carry_meta_from(self);
+        Ok(cropped)
     }
 
     /// Fallible form of [`Raster::new_from_memory`].
