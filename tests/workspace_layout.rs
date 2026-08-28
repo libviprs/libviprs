@@ -37,6 +37,7 @@ fn metadata_no_deps(manifest: &Path) -> serde_json::Value {
 /// The fuzz crate must be a member of the root workspace, not a detached
 /// cargo root with its own lockfile and its own (patch-less) resolution.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn fuzz_crate_is_a_member_of_the_root_workspace() {
     let root = repo_root();
     let meta = metadata_no_deps(&root.join("fuzz").join("Cargo.toml"));
@@ -67,6 +68,7 @@ fn fuzz_crate_is_a_member_of_the_root_workspace() {
 /// root lockfile and the single set of workspace dependency pins govern
 /// them all.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn root_workspace_contains_both_crates() {
     let root = repo_root();
     let meta = metadata_no_deps(&root.join("Cargo.toml"));

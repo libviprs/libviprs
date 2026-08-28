@@ -678,6 +678,7 @@ fn ships_native_source(manifest: &Manifest) -> bool {
 /// almost always declares one, so pinning the set to an allowlist means any
 /// new candidate has to be looked at by a human before this goes green again.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn every_links_key_is_on_the_allowlist() {
     for (cell, graph) in cells() {
         let found: BTreeSet<(&str, &str)> = graph
@@ -708,6 +709,7 @@ fn every_links_key_is_on_the_allowlist() {
 /// Present but dormant is still worth pinning: if it ever spreads to the
 /// default graph, that is a change nobody should make by accident.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn library_discovery_is_confined_to_packfile() {
     for (cell, graph) in cells() {
         let found: BTreeSet<&str> = DISCOVERY_CRATES
@@ -734,6 +736,7 @@ fn library_discovery_is_confined_to_packfile() {
 /// nothing about *which* library gets loaded, so it is a prompt to go and read
 /// the crate rather than a verdict on it.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn runtime_library_loaders_are_confined_to_the_pdfium_features() {
     for (cell, graph) in cells() {
         let found: BTreeSet<&str> = RUNTIME_LOADER_CRATES
@@ -760,6 +763,7 @@ fn runtime_library_loaders_are_confined_to_the_pdfium_features() {
 /// makes the result a superset of what really gets compiled, which is the
 /// right direction for a tripwire.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn vendored_native_code_is_only_the_documented_crates() {
     for (cell, graph) in cells() {
         let found: BTreeSet<&str> = graph
@@ -789,6 +793,7 @@ fn vendored_native_code_is_only_the_documented_crates() {
 /// documented, on one condition: it stays opt-in. The same goes for the
 /// vendored-C carve-out, `zstd-sys` under `packfile`.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn the_external_library_features_stay_opt_in() {
     for (cell, graph) in cells() {
         let asked_for_pdfium = cell.features.iter().any(|f| f.contains("pdfium"))

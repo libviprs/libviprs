@@ -47,6 +47,7 @@ fn run_audit(manifest_dir: &std::path::Path, extra: &[&str]) -> std::process::Ou
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn audit_gate_accepts_patched_core() {
     let out = run_audit(&repo_root(), &["--features", "pdfium"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -62,6 +63,7 @@ fn audit_gate_accepts_patched_core() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn audit_gate_rejects_unpatched_consumer() {
     // A minimal consumer that depends on pdfium-render the way the sibling
     // crates do today: a plain registry dependency with no [patch] fork.
@@ -102,6 +104,7 @@ fn audit_gate_rejects_unpatched_consumer() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn patchless_downstream_consumer_resolves_the_fork() {
     // Issue #149 part 2. A downstream crate that depends on libviprs the way
     // an external git/path consumer does, with no [patch.crates-io] table of
