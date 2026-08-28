@@ -4803,4 +4803,272 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------
+    // Issue #668: the sub-pixel offset quantisation
+    // -----------------------------------------------------------------
+
+    /// A single-band float raster whose samples are `(i * 37 + 11) % 251`, a
+    /// cheap deterministic sequence with enough high-frequency content that a
+    /// fraction-of-a-pixel shift in the resampling offset shows up as whole
+    /// units in the output. Every #668 fixture below is built from it, so the
+    /// pinned numbers can be regenerated from the shape alone.
+    fn offset_ramp(w: u32, h: u32) -> Raster {
+        let n = (w * h) as usize;
+        let data: Vec<u8> = (0..n)
+            .flat_map(|i| (((i * 37 + 11) % 251) as f32).to_ne_bytes())
+            .collect();
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            data,
+        )
+        .unwrap()
+    }
+
+    /// Read a float raster back as `f32` samples in row-major order.
+    fn float_samples(r: &Raster) -> Vec<f32> {
+        r.data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_ne_bytes(*b))
+            .collect()
+    }
+
+    /// Compare against a pinned oracle row with an absolute tolerance. The
+    /// tolerance is 1e-3 on data spanning 0..251, which is four orders of
+    /// magnitude below the divergences #668 is about (0.12 to 1.4) and two
+    /// above the f32 accumulation noise between two orderings of the same
+    /// convolution (up to 4.6e-5 measured).
+    fn assert_close(got: &[f32], want: &[f32], what: &str) {
+        assert_eq!(got.len(), want.len(), "{what}: sample count");
+        let mut worst = (0usize, 0.0f64);
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            let d = (f64::from(*g) - f64::from(*w)).abs();
+            if d > worst.1 {
+                worst = (i, d);
+            }
+        }
+        assert!(
+            worst.1 <= 1e-3,
+            "{what}: sample {} is {} where vips 8.18.6 gives {}, off by {}",
+            worst.0,
+            got[worst.0],
+            want[worst.0],
+            worst.1
+        );
+    }
+
+    /// Issue #668. `vips_reduceh` and `vips_reducev` never evaluate the kernel
+    /// at the true sub-pixel offset. They round it onto a 65-entry table and
+    /// look the mask up (`reduceh.cpp:270-276`, `reducev.cpp` the same five
+    /// lines):
+    ///
+    /// ```c
+    /// const int sx = X * VIPS_TRANSFORM_SCALE * 2;
+    /// const int six = sx & (VIPS_TRANSFORM_SCALE * 2 - 1);
+    /// const int tx = (six + 1) >> 1;
+    /// const double *cxf = reduceh->matrixf[tx];
+    /// ```
+    ///
+    /// `VIPS_TRANSFORM_SCALE` is 64 (`interpolate.h:109`) and the tables come
+    /// from `vips_reduce_make_mask(..., (float) x / VIPS_TRANSFORM_SCALE)`, so
+    /// the offset is a multiple of 1/64 before a single coefficient exists.
+    /// Whenever the offsets land on that grid the quantisation is invisible,
+    /// which is why every dyadic factor and 2.5 agree without it and why this
+    /// went unnoticed. At 4/3 the offsets are thirds and they do not.
+    ///
+    /// Measured on 8.18.6, `vips reduceh in.v out.v 1.3333333333333333 --gap 0`
+    /// and the `reducev` twin on the transpose, both axes giving the same 12
+    /// samples.
+    #[test]
+    fn reduce_quantises_the_sub_pixel_offset_onto_the_vips_table_grid() {
+        #[rustfmt::skip]
+        let want: [f32; 12] = [
+            17.01585, 66.51737, 115.9886, 160.9282, 233.3695, 72.89664,
+            48.0719, 114.4463, 155.2341, 233.6704, 133.9826, 34.32521,
+        ];
+        let shrink = 4.0 / 3.0;
+        let h = offset_ramp(16, 1).reduceh(shrink, "lanczos3");
+        assert_eq!((h.width(), h.height()), (12, 1), "reduceh output size");
+        assert_close(&float_samples(&h), &want, "reduceh 4/3");
+
+        let v = offset_ramp(1, 16).reducev(shrink, "lanczos3");
+        assert_eq!((v.width(), v.height()), (1, 12), "reducev output size");
+        assert_close(&float_samples(&v), &want, "reducev 4/3");
+    }
+
+    /// Issue #668. The same quantisation seen through `resize`, which is where
+    /// it was reported. `vips_resize` splits a downscale into an integer
+    /// `vips_shrink` and a residual `vips_reduce` (`resize.c:211-231` with
+    /// `gap` 2.0), and the shrink half is exact, so a resize survives exactly
+    /// when its residual reduce factor lands on the 1/64 grid.
+    ///
+    /// 0.75 of a 64-wide raster leaves a residual of 4/3 and 0.37 leaves
+    /// 2.7027, both off the grid. Measured on 8.18.6 as
+    /// `vips resize in.v out.v 0.75` on an 8x8 and `... 0.37` on a 16x16,
+    /// giving 6x6 either way.
+    #[test]
+    fn resize_matches_the_oracle_at_non_dyadic_downscales() {
+        #[rustfmt::skip]
+        let want_075: [f32; 36] = [
+            24.30509, 74.25901, 116.5843, 179.362, 220.1431, 57.59824,
+            83.55322, 130.8575, 203.9105, 231.5954, 71.85882, 64.76923,
+            142.7602, 211.4884, 99.14769, 69.8261, 74.73444, 139.4226,
+            224.9046, 97.87094, 27.30505, 91.89622, 164.8316, 225.7807,
+            103.0888, 41.04671, 113.7598, 181.8064, 158.7755, 121.0924,
+            57.02991, 125.3291, 180.6986, 184.0041, 23.96046, 41.27575,
+        ];
+        let out = offset_ramp(8, 8).resize(0.75);
+        assert_eq!((out.width(), out.height()), (6, 6), "resize 0.75 of an 8x8");
+        assert_close(&float_samples(&out), &want_075, "resize 0.75");
+
+        #[rustfmt::skip]
+        let want_037: [f32; 36] = [
+            93.11782, 150.1574, 128.6156, 115.19, 128.7295, 129.0424,
+            135.7788, 119.4614, 106.3704, 131.3192, 118.9644, 123.6912,
+            135.6535, 142.3375, 125.4933, 108.8913, 136.3413, 122.529,
+            132.3722, 119.7645, 115.8759, 133.9125, 113.9134, 131.4173,
+            133.7992, 120.6193, 119.2597, 118.8885, 137.8598, 122.573,
+            107.2291, 117.8667, 117.5502, 127.2929, 121.129, 133.1677,
+        ];
+        let out = offset_ramp(16, 16).resize(0.37);
+        assert_eq!(
+            (out.width(), out.height()),
+            (6, 6),
+            "resize 0.37 of a 16x16"
+        );
+        assert_close(&float_samples(&out), &want_037, "resize 0.37");
+    }
+
+    /// Issue #668, the upscale half. `vips_resize` enlarges with
+    /// `vips_affine` and the bicubic interpolator (`resize.c:233-305`), and
+    /// `vips_interpolate_bicubic_interpolate` rounds its offset onto the same
+    /// 65-entry grid with the same five lines (`bicubic.cpp:496-519`), so a
+    /// scale of 2 lands on halves and agrees while 1.5 lands on thirds and
+    /// does not.
+    ///
+    /// Measured on 8.18.6 as `vips resize in.v out.v 1.5` on a 4x4, and the
+    /// numbers are identical to `vips affine in.v out.v "1.5 0 0 1.5"
+    /// --interpolate bicubic --idx 0.5 --idy 0.5 --extend copy --premultiplied`,
+    /// which is what pins this on the interpolator rather than on anything
+    /// resize wraps around it.
+    #[test]
+    fn resize_matches_the_oracle_at_a_non_dyadic_upscale() {
+        #[rustfmt::skip]
+        let want: [f32; 36] = [
+            -0.5625, 5.928774, 31.93805, 56.26953, 84.52558, 122.2951,
+            28.47278, 34.96406, 60.97334, 88.4408, 107.2803, 107.4352,
+            144.2324, 150.7237, 176.733, 216.6933, 198.0198, 48.32856,
+            105.1875, 111.4869, 136.7635, 179.668, 187.2513, 106.6858,
+            66.14259, 73.01816, 100.4948, 107.3215, 117.8489, 156.415,
+            181.9022, 191.0794, 227.3439, 129.7319, 32.88796, 71.45403,
+        ];
+        let out = offset_ramp(4, 4).resize(1.5);
+        assert_eq!((out.width(), out.height()), (6, 6), "resize 1.5 of a 4x4");
+        assert_close(&float_samples(&out), &want, "resize 1.5");
+    }
+
+    /// Issue #668, the sign of the truncation. Porting the vips lines
+    /// literally is not enough, because `(int)(X * 128)` truncates toward zero
+    /// and `& 127` reads two's complement, so a negative coordinate picks the
+    /// bucket one above the one `floor` would pick. vips never meets that case
+    /// in `vips_affine_gen`: it works in the embedded space shifted by
+    /// `window_offset` (`affine.c:361-362`), where the coordinate is always
+    /// at least 1. libviprs keeps the unshifted coordinate, which goes
+    /// negative on the first output column whenever `1/scale < 0.5`, so the
+    /// quantiser has to floor rather than truncate to agree on both signs.
+    ///
+    /// This fixture is the smallest one that separates all three answers.
+    /// Measured on 8.18.6 as `vips resize in.v out.v 3 --vscale 1` on a 6x1,
+    /// against the three candidate implementations:
+    ///
+    /// ```text
+    /// exact offset, no quantisation   12 of 18 wrong, max 0.217   <- the bug
+    /// quantised with trunc and mask    1 of 18 wrong, max 0.123   <- column 1 only
+    /// quantised with floor and rem     0 of 18 wrong, max 1.9e-06
+    /// ```
+    #[test]
+    fn resize_quantises_a_negative_source_coordinate_the_way_vips_shifted_space_does() {
+        #[rustfmt::skip]
+        let want: [f32; 18] = [
+            8.6875, 8.819399, 15.17877, 27.1875, 41.18805, 54.35938,
+            66.5, 78.64062, 91.35938, 103.5, 115.6406, 128.3594,
+            140.5, 152.6406, 165.812, 179.8125, 191.8212, 198.1806,
+        ];
+        let out = offset_ramp(6, 1).resize_with(
+            3.0,
+            ResizeOptions {
+                vscale: Some(1.0),
+                ..ResizeOptions::default()
+            },
+        );
+        assert_eq!(
+            (out.width(), out.height()),
+            (18, 1),
+            "resize 3 horizontally of a 6x1"
+        );
+        assert_close(&float_samples(&out), &want, "resize 3.0, vscale 1");
+    }
+
+    /// Issue #668, the guard on the other side. Adding the quantisation must
+    /// not move a scale that was already exact, and the grid-aligned scales
+    /// are most of the ones anything else in this suite pins. `resize 0.5` of
+    /// a 64-wide raster reduces by exactly 2, whose offset is 0 at every
+    /// output position, so the table lookup and the exact evaluation are the
+    /// same mask and nothing may move. Measured on 8.18.6.
+    #[test]
+    fn resize_holds_the_grid_aligned_scales_still() {
+        #[rustfmt::skip]
+        let want: [f32; 16] = [
+            45.4882, 138.7604, 208.2614, 87.58178,
+            158.6375, 160.3354, 93.09722, 101.5202,
+            158.9667, 45.5028, 123.4247, 197.9885,
+            64.97791, 155.1446, 155.4203, 52.43541,
+        ];
+        let out = offset_ramp(8, 8).resize(0.5);
+        assert_eq!((out.width(), out.height()), (4, 4), "resize 0.5 of an 8x8");
+        assert_close(&float_samples(&out), &want, "resize 0.5");
+    }
+
+    /// Issue #668, the guard against over-reach. Only the reduce masks and the
+    /// bicubic interpolator read from a table.
+    /// `vips_interpolate_bilinear_interpolate` computes `X = x - ix` straight
+    /// from the coordinate with no table at all (`interpolate.c:538` and the
+    /// `BILINEAR_FLOAT` macro), and nohalo and lbb are nonlinear and have no
+    /// tables either. So bilinear must keep the exact offset, at a scale whose
+    /// offsets are thirds and would visibly move if it did not.
+    ///
+    /// Measured on 8.18.6 as `vips affine in.v out.v "1.5 0 0 1.5"
+    /// --interpolate bilinear --idx 0.5 --idy 0.5 --extend copy
+    /// --premultiplied` on a 4x4.
+    #[test]
+    fn affine_bilinear_keeps_the_exact_sub_pixel_offset() {
+        #[rustfmt::skip]
+        let want: [f32; 36] = [
+            11.0, 17.16667, 41.83333, 66.5, 91.16666, 115.8333,
+            35.66667, 41.83333, 66.5, 91.16666, 108.8611, 105.6389,
+            134.3333, 140.5, 165.1667, 189.8333, 179.6389, 64.86111,
+            107.5, 113.6667, 138.3333, 163.0, 166.75, 107.75,
+            80.66666, 86.83334, 111.5, 115.25, 119.0, 143.6667,
+            179.3333, 185.5, 210.1667, 130.25, 50.33333, 75.0,
+        ];
+        let out = offset_ramp(4, 4)
+            .try_affine_with(
+                [1.5, 0.0, 0.0, 1.5],
+                Interpolator::Bilinear,
+                AffineOptions {
+                    idx: 0.5,
+                    idy: 0.5,
+                    extend: Extend::Copy,
+                    premultiplied: true,
+                    ..AffineOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((out.width(), out.height()), (6, 6), "affine 1.5 of a 4x4");
+        assert_close(&float_samples(&out), &want, "affine 1.5 bilinear");
+    }
 }
