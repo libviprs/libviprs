@@ -383,11 +383,13 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
     // `memset` takes the ink as an `int` and converts it to `unsigned char`,
     // so only the low byte survives, and it lands in every byte of the sample.
     let byte = u32::from(ink as i32 as u8);
-    // Matched on the carrier rather than counted out over `bytes_per_channel()`
-    // so that adding a format is a compile error here and not a wrong ink
-    // (issue #633): a numeric fan-out is only right while the non-float depths
-    // are exactly {1, 2}, and a 4-byte unsigned carrier would quietly smear to
-    // `0x01010101`.
+    // Matched on the carrier rather than counted out over `bytes_per_channel()`,
+    // so that adding a format is a compile error here rather than a silent ink
+    // nobody checked against the oracle (the lever issue #633 landed). The
+    // numeric fan-out this replaces answered for every depth, including ones
+    // that do not exist: right by luck at 4 bytes, since vips measures `int` +
+    // scRGB as `0x01010101`, and wrong at 8, where the `u32` shift drops the
+    // high half. Neither would have failed to build.
     match format {
         // `FILL_LINE(float, ...)` writes the ink as a number, so a float
         // carrier keeps it whole.
