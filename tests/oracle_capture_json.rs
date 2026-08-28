@@ -538,6 +538,13 @@ fn json_dump_calls(code: &str) -> Vec<DumpCall> {
 /// PASS. The other direction (an inner call reading the outer call's flag)
 /// cannot happen at all: [`json_dump_calls`] gives the inner call its own
 /// brackets, so its `args` never contains the outer call's text.
+///
+/// One contrived spelling still reads as guarded and is left that way on
+/// purpose: `allow_nan=False if strict else True` contains the substring at
+/// depth 0. Nothing in the tree writes anything like it, matching the
+/// expression rather than the substring means parsing Python here, and every
+/// other way of getting the flag wrong (`allow_nan=True`, a keyword built at
+/// runtime, the flag omitted) fails in the loud direction and is caught.
 fn refuses_non_finite(args: &str) -> bool {
     let mut depth = 0usize;
     let mut top = String::with_capacity(args.len());
@@ -598,17 +605,58 @@ fn refuses_non_finite(args: &str) -> bool {
 /// is the exact failure it is here to catch.
 const EXPECTED_DUMP_CALL_SITES: usize = 20;
 
-/// Every capture script stops at the write rather than emitting a bare
+/// Every `json.dump` / `json.dumps` call site in the capture scripts passes
+/// `allow_nan=False`, so the write stops rather than emitting a bare
 /// non-finite float (issue #682).
 ///
-/// The rule is blanket: every `json.dump`/`json.dumps` in the tree passes the
-/// flag, including the two that only serialise a dict key and cannot go
-/// non-finite. An exemption needs a rule for who qualifies, and any such rule
-/// is a thing you can argue your way past six months later. This one has
-/// nothing to argue with.
+/// The rule is blanket: every call in the tree passes the flag, including the
+/// two that only serialise a dict key and cannot go non-finite. An exemption
+/// needs a rule for who qualifies, and any such rule is a thing you can argue
+/// your way past six months later. This one has nothing to argue with.
+///
+/// # What the name deliberately does not claim
+///
+/// It says *call site*, not *capture script*, because `allow_nan` only reaches
+/// a float that json serialises. A script that turns a float into text itself
+/// and hands json a string walks past this, and the flag was never going to
+/// stop it.
+///
+/// I measured how far that reaches rather than guessing, by walking every
+/// committed `oracle.json` for string leaves that spell a float, and then
+/// tracing each one back to the line that wrote it:
+///
+/// * **Non-finite by a route this cannot see: `foreign-nifti` alone, two
+///   leaves.** `capture.py:607` writes `str(v)` for a pixdim the header holds
+///   as `inf` or `nan`, which lands as lowercase `"inf"` / `"nan"` rather than
+///   the `"Infinity"` / `"NaN"` this file pins. That is the mismatch the
+///   module doc opens with, and bringing it onto one spelling means
+///   re-capturing the area, which is #650 / #673's question and not this one's.
+///   Its other fifteen non-finite string leaves are not this shape at all:
+///   four are `probe.c`'s `jnum` printing `Infinity` and `NaN` for a header
+///   float, and eleven are hand-written labels (`FLOAT_VALUES_LABELS` and the
+///   `values_packed` rows) spelling out the input bytes.
+/// * **Non-finite through the convention helper, which is the point rather
+///   than a gap:** `foreign-radiance` (one) and `foreign-uhdr` (six) go through
+///   their `json_safe`, which is #674's repair and produces exactly the pinned
+///   spelling.
+/// * **Finite floats turned into text: `foreign-uhdr` alone**, at
+///   `capture.py:672`, `repr(lut[i])` over the 256-entry `vips_v2Y_8` sRGB
+///   table so the decimals round-trip exactly. That table is
+///   `f/12.92` or `powf((f+0.055)/1.055, 2.4)` over `f` in `[0, 1]`, so it
+///   cannot go non-finite. Every other float-looking string in the tree is
+///   text something else produced: a libvips header value, a `vips getpoint`
+///   stdout, a brew version, a sigma spelled on a command line.
+///
+/// So one script writes a non-finite float outside a `json.dump` today, for a
+/// reason already written down and owned elsewhere. Widening the scan to catch
+/// it would mean deciding statically whether an arbitrary `str()`, `repr()`,
+/// f-string or `%` format receives a float and whether its result reaches the
+/// oracle. There are 394 of those constructs across the 15 scripts, so any
+/// such rule either fires on all of them or misses the next spelling, and it
+/// would be a worse guard than an honest name.
 #[test]
 #[cfg_attr(miri, ignore)] // reads the capture scripts on disk, which Miri isolation blocks
-fn every_capture_script_refuses_to_write_a_non_finite_float() {
+fn every_json_dump_call_site_refuses_a_non_finite_float() {
     let scripts = capture_scripts();
     let mut sites_by_script: Vec<(String, usize)> = Vec::new();
     let mut unguarded: Vec<String> = Vec::new();
@@ -677,7 +725,7 @@ fn every_capture_script_refuses_to_write_a_non_finite_float() {
 /// The scan really does read code and not prose, and really does answer per
 /// call.
 ///
-/// Without this, `every_capture_script_refuses_to_write_a_non_finite_float`
+/// Without this, `every_json_dump_call_site_refuses_a_non_finite_float`
 /// is a check whose fallibility nobody has looked at: a scanner that returned
 /// "guarded" for everything would pass it just as well as a correct one, and
 /// the two scripts that already set the flag both carry a COMMENT saying

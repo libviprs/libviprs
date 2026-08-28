@@ -97,7 +97,7 @@ annotated   fs-detected  src/stream_verify.rs::stream_verify_detects_raw_corrupt
 annotated   fs-detected  src/stream_verify.rs::stream_verify_happy_path_raw
 annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_unknown_algo
 annotated   fs-detected  src/stream_verify.rs::stream_verify_reports_missing_tile
-annotated   fs-detected  tests/oracle_capture_json.rs::every_capture_script_refuses_to_write_a_non_finite_float
+annotated   fs-detected  tests/oracle_capture_json.rs::every_json_dump_call_site_refuses_a_non_finite_float
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_unpatched_consumer
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_fork
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
