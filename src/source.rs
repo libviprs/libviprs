@@ -323,6 +323,15 @@ pub enum SourceError {
     /// bytes are not JPEG XL" without reading a message (issue #634).
     #[error(transparent)]
     Jxl(#[from] crate::jxl::JxlError),
+    /// A malformed or unreachable NIfTI file. libviprs decodes NIfTI
+    /// itself rather than through any crate (see [`crate::nifti`]), so its
+    /// failures arrive as the codec's own typed
+    /// [`NiftiError`](crate::nifti::NiftiError) rather than as an opaque
+    /// string. As with FITS, that matters here because a NIfTI file can be
+    /// perfectly well formed and still declare a sample type this build has
+    /// no pixel format for; the variant says which.
+    #[error(transparent)]
+    Nifti(#[from] crate::nifti::NiftiError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -1074,7 +1083,7 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
 /// is also exactly how many bytes `image`'s own `with_guessed_format` reads,
 /// so the fallback in [`reader_for`] never sees more of a file than
 /// [`sniff`] did.
-const SNIFF_HEAD_LEN: usize = 16;
+const SNIFF_HEAD_LEN: usize = 348;
 
 /// The ISOBMFF signature box that opens a boxed JPEG XL file: a 12-byte box
 /// whose type is `JXL ` and whose payload is the `\r\n\x87\n` line-ending
@@ -1291,6 +1300,10 @@ pub(crate) enum SniffedFormat {
     Fits,
     /// OpenEXR, `76 2F 31 01`.
     OpenExr,
+    /// NIfTI, in either version and either byte order: a `sizeof_hdr` of
+    /// 348 or 540 at offset 0, plus the version's own magic, at 344 for
+    /// NIfTI-1 and at 4 for NIfTI-2.
+    Nifti,
 }
 
 impl SniffedFormat {
@@ -1316,7 +1329,8 @@ impl SniffedFormat {
             Self::Jxl => Some(Self::Radiance),
             Self::Radiance => Some(Self::Fits),
             Self::Fits => Some(Self::OpenExr),
-            Self::OpenExr => None,
+            Self::OpenExr => Some(Self::Nifti),
+            Self::Nifti => None,
         }
     }
 
@@ -1330,8 +1344,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 10] = {
-        let mut all = [Self::Vips; 10];
+    pub(crate) const ALL: [Self; 11] = {
+        let mut all = [Self::Vips; 11];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1473,6 +1487,70 @@ impl SniffedFormat {
             Self::OpenExr => Route {
                 magics: &[Magic::Prefix(&crate::exr::MAGIC)],
                 decoder: Decoder::Native(crate::exr::decode_exr),
+            },
+            // `image` has no NIfTI route, and neither has the pinned vips:
+            // that build reports `NIfTI load/save with libnifti: false` and
+            // registers no `niftiload`, which is why [`crate::nifti`] is
+            // measured against `nifti_clib` instead (issue #510). It reads
+            // the file whole because the header declares a volume and the
+            // voxels start at a `vox_offset` the header names, so the
+            // decode seeks inside the same bytes it sniffed.
+            //
+            // Six signatures, because the format has six spellings of its
+            // own front: two versions, two byte orders and, on NIfTI-1, the
+            // paired `ni1` form as well as the single-file `n+1`. The
+            // paired rows are here on purpose, for the same reason the
+            // `Jxl` row stays live without the `jxl` feature: a `.hdr` from
+            // a pair reaching `decode_nifti` gets "the voxels are in a
+            // sibling .img", where falling through to [`reader_for`] would
+            // say "these bytes are not an image", which is a different and
+            // wrong answer. The NIfTI-2 pair needs no separate byte-order
+            // row because its sentinel and magic are adjacent and the magic
+            // is never swapped.
+            Self::Nifti => Route {
+                magics: &[
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_LE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_BE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_LE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_BE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_LE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_BE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_LE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_BE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_PAIR,
+                    },
+                ],
+                decoder: Decoder::Native(crate::nifti::decode_nifti),
             },
         }
     }
@@ -2546,7 +2624,44 @@ mod tests {
      */
     #[test]
     fn sniff_maps_each_magic_to_one_container() {
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 32] = [
+        // NIfTI is the one container whose signature does not fit in a
+        // hand-written literal: NIfTI-1 puts its magic at byte 344, so a
+        // probe is 348 bytes long. These come out of the oracle capture
+        // rather than being spelled out, which also means they are real
+        // files rather than my idea of one (issue #510).
+        const NIFTI_1_LE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "dt2_uint8.nii"
+        ));
+        const NIFTI_1_BE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "endian_nifti1_int16_be.nii"
+        ));
+        const NIFTI_2_LE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "ver_n2_single.nii"
+        ));
+        const NIFTI_2_BE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "endian_nifti2_int16_be.nii"
+        ));
+        const NIFTI_1_PAIR: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "pair_n1.hdr"
+        ));
+        const NIFTI_2_PAIR: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "pair_n2.hdr"
+        ));
+        // A 348-byte header with the right sentinel and an all-zero magic.
+        // The reference reads it as the Analyze 7.5 dialect and decides the
+        // container from the filename, which is not something a content
+        // sniff can do, so libviprs does not claim it.
+        const NIFTI_ANALYZE_DIALECT: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "magic_zero_analyze.nii"
+        ));
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 40] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -2655,6 +2770,36 @@ mod tests {
             ("fits free format", b"SIMPLE=T", None),
             ("fits without the keyword padding", b"SIMPLE = T", None),
             ("fits truncated", b"SIMPLE  ", None),
+            // NIfTI has six spellings of its own front: two versions, two
+            // byte orders, and on each version a single-file and a paired
+            // magic. All six route to the same container, and the paired
+            // ones on purpose: `decode_nifti` then says "the voxels are in
+            // a sibling .img" rather than leaving the file to report "these
+            // bytes are not an image".
+            ("nifti-1 single le", NIFTI_1_LE, Some(SniffedFormat::Nifti)),
+            ("nifti-1 single be", NIFTI_1_BE, Some(SniffedFormat::Nifti)),
+            ("nifti-2 single le", NIFTI_2_LE, Some(SniffedFormat::Nifti)),
+            ("nifti-2 single be", NIFTI_2_BE, Some(SniffedFormat::Nifti)),
+            (
+                "nifti-1 pair header",
+                NIFTI_1_PAIR,
+                Some(SniffedFormat::Nifti),
+            ),
+            (
+                "nifti-2 pair header",
+                NIFTI_2_PAIR,
+                Some(SniffedFormat::Nifti),
+            ),
+            // The sentinel alone is not enough: this file has a valid
+            // 348-byte sizeof_hdr and no NIfTI magic at all.
+            (
+                "nifti sentinel without a magic",
+                NIFTI_ANALYZE_DIALECT,
+                None,
+            ),
+            // One byte short of the magic, so a 348-byte signature cannot
+            // be decided.
+            ("nifti-1 truncated to 347", &NIFTI_1_LE[..347], None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -2698,15 +2843,15 @@ mod tests {
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            10,
+            11,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 10 are: 6 self-priced (gif, radiance, fits, openexr, jxl, \
-             and webp which joined them in #686), 3 refused inside the image crate \
-             (jpeg, png, tiff), and .v, which applies no allocation budget at all and \
-             is issue #710"
+             count. Today the 11 are: 7 self-priced (gif, radiance, fits, openexr, jxl, \
+             webp which joined them in #686, and nifti which joined them in #510), \
+             3 refused inside the image crate (jpeg, png, tiff), and .v, which applies \
+             no allocation budget at all and is issue #710"
         );
     }
 
@@ -2828,6 +2973,9 @@ mod tests {
                 // The facade flattens the channel set `crate::exr` needs
                 // (issue #504).
                 SniffedFormat::OpenExr => Kind::Native,
+                // Neither `image` nor the pinned vips has a NIfTI route at
+                // all (issue #510).
+                SniffedFormat::Nifti => Kind::Native,
             }
         }
 
