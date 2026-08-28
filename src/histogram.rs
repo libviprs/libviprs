@@ -1136,8 +1136,9 @@ mod tests {
 
     /**
      * Tests that this module dispatches on sample kind and never on byte
-     * width, by asserting no call to the byte-width accessor on
-     * [`PixelFormat`] survives in `src/histogram.rs`.
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/histogram.rs`.
      * Works by scanning the module's own source, compiled in with
      * `include_str!`, for the accessor's name; the needle is spelled in two
      * halves so this assertion is not itself a hit. A byte width is not a
@@ -1149,7 +1150,12 @@ mod tests {
     #[test]
     fn histogram_does_not_dispatch_on_byte_width() {
         const SRC: &str = include_str!("histogram.rs");
-        let needle = concat!("bytes_per_", "channel");
+        // Both spellings of a byte-width dispatch: reading the width off a
+        // format, and handing one back to the width-keyed constructor.
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
         // Positive control: the same scan over the same string finds a token
         // that is present, so the zero below is a real zero and not the
         // vacuous pass an empty read would give.
@@ -1157,11 +1163,14 @@ mod tests {
             SRC.contains(concat!("fn read_", "flat")),
             "positive control failed: the scan cannot see this module's source"
         );
-        assert_eq!(
-            SRC.matches(needle).count(),
-            0,
-            "{needle} is back in src/histogram.rs; dispatch on PixelFormat::kind() instead"
-        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/histogram.rs; dispatch on PixelFormat::kind() \
+                 and PixelFormat::with_kind() instead"
+            );
+        }
     }
 
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
@@ -1291,7 +1300,13 @@ mod tests {
     #[test]
     fn hist_find_indexed_16bit_index_and_bands() {
         let data: Vec<u8> = std::iter::repeat_n([4u8, 6], 6).flatten().collect();
-        let im = Raster::new(3, 2, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            3,
+            2,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let index = gray16(3, 2, &[300, 300, 300, 0, 0, 0]);
         let hist = im.hist_find_indexed(&index);
         assert_eq!(hist.width(), 65536);
@@ -1357,7 +1372,13 @@ mod tests {
         assert_eq!(hist.getpoint(0, 0), vec![1.0]);
 
         let data = vec![0u8, 255, 255, 0];
-        let im = Raster::new(2, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let hist = im.hist_find_ndim(None);
         assert_eq!((hist.width(), hist.height()), (10, 10));
         assert_eq!(hist.format(), PixelFormat::Gray16);
@@ -1384,7 +1405,7 @@ mod tests {
             })
         ));
 
-        let im = Raster::zeroed(2, 2, PixelFormat::with_channels(5, 1).unwrap()).unwrap();
+        let im = Raster::zeroed(2, 2, PixelFormat::with_kind(5, SampleKind::U8).unwrap()).unwrap();
         assert!(matches!(
             im.try_hist_find_ndim(None),
             Err(HistogramError::TooManyDimensions { bands: 5 })
@@ -1414,7 +1435,13 @@ mod tests {
     #[test]
     fn hist_cum_per_band_and_vertical() {
         let data = vec![1u8, 10, 2, 20, 3, 30];
-        let im = Raster::new(1, 3, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            1,
+            3,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let cum = im.hist_cum();
         assert_eq!((cum.width(), cum.height()), (1, 3));
         assert_eq!(cum.getpoint(0, 0), vec![1.0, 10.0]);
@@ -1461,7 +1488,13 @@ mod tests {
     #[test]
     fn hist_norm_scales_bands_independently() {
         let data = vec![0u8, 0, 5, 0, 10, 0];
-        let im = Raster::new(3, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            3,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let normed = im.hist_norm();
         assert_eq!(normed.getpoint(0, 0), vec![0.0, 0.0]);
         assert_eq!(normed.getpoint(1, 0), vec![1.0, 0.0]);
@@ -1518,7 +1551,13 @@ mod tests {
             data.push(v); // band 0: full ramp
             data.push(100 + (v % 10)); // band 1: narrow
         }
-        let im = Raster::new(256, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            256,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let eq = im.hist_equal();
         let band1 = eq.extract_band(1);
         assert!(
@@ -1557,7 +1596,13 @@ mod tests {
     #[test]
     fn hist_ismonotonic_per_band() {
         let data = vec![0u8, 9, 1, 8, 2, 7];
-        let im = Raster::new(3, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            3,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         assert!(!im.hist_ismonotonic());
     }
 
@@ -1807,7 +1852,13 @@ mod tests {
     #[test]
     fn hist_entropy_pools_bands() {
         let data = vec![1u8, 0, 0, 1];
-        let im = Raster::new(2, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         assert!((im.hist_entropy() - 1.0).abs() < 1e-12);
     }
 
@@ -1872,7 +1923,7 @@ mod tests {
         assert_eq!(rgb.maplut(&lut1).getpoint(0, 0), vec![1.0, 2.0, 3.0]);
         assert_eq!(rgb.maplut(&lut3).getpoint(0, 0), vec![1.0, 4.0, 252.0]);
 
-        let two = Raster::zeroed(1, 1, PixelFormat::with_channels(2, 1).unwrap()).unwrap();
+        let two = Raster::zeroed(1, 1, PixelFormat::with_kind(2, SampleKind::U8).unwrap()).unwrap();
         assert!(matches!(
             two.try_maplut(&lut3),
             Err(HistogramError::LutBandMismatch { image: 2, lut: 3 })
@@ -2035,7 +2086,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "do not support float rasters")]
     fn histogram_float_panics() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
         let _ = im.hist_find();
     }

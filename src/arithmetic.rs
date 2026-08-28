@@ -745,7 +745,7 @@ fn unary_map_float(r: &Raster, f: impl Fn(f64) -> f64) -> Raster {
     let fmt = r.format();
     let bands = fmt.channels();
     let in_kind = fmt.kind();
-    let out_fmt = PixelFormat::with_channels(bands, 4)
+    let out_fmt = PixelFormat::with_kind(bands, SampleKind::F32)
         .expect("band count unchanged, so the float output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
     let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
@@ -774,7 +774,7 @@ fn vec_map_float(
         });
     }
     let in_kind = fmt.kind();
-    let out_fmt = PixelFormat::with_channels(bands, 4)
+    let out_fmt = PixelFormat::with_kind(bands, SampleKind::F32)
         .expect("band count unchanged, so the float output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
     let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
@@ -796,7 +796,7 @@ fn binary_map_float(
     ensure_compatible(a, b)?;
     let (a_kind, b_kind) = (a.format().kind(), b.format().kind());
     let bands = a.format().channels();
-    let out_fmt = PixelFormat::with_channels(bands, 4)
+    let out_fmt = PixelFormat::with_kind(bands, SampleKind::F32)
         .expect("band count unchanged, so the float output format exists");
     let n = a.width() as usize * a.height() as usize * bands;
     let mut out = alloc_op_output(a.width(), a.height(), out_fmt)?;
@@ -828,7 +828,7 @@ fn complex_map(r: &Raster, f: impl Fn(f64, f64) -> (f64, f64)) -> Result<Raster,
     ensure_complex(r)?;
     let fmt = r.format();
     let (bands, kind) = (fmt.channels(), fmt.kind());
-    let out_fmt = PixelFormat::with_channels(bands, 4)
+    let out_fmt = PixelFormat::with_kind(bands, SampleKind::F32)
         .expect("band count unchanged, so the float output format exists");
     let n = r.width() as usize * r.height() as usize * bands;
     let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
@@ -847,7 +847,7 @@ fn complex_get(r: &Raster, part: usize) -> Result<Raster, ArithmeticError> {
     let pairs = ensure_complex(r)?;
     let fmt = r.format();
     let (bands, kind) = (fmt.channels(), fmt.kind());
-    let out_fmt = PixelFormat::with_channels(pairs, 4)
+    let out_fmt = PixelFormat::with_kind(pairs, SampleKind::F32)
         .expect("pair count is at least 1 and at most half the input band count");
     let pixels = r.width() as usize * r.height() as usize;
     let mut out = alloc_op_output(r.width(), r.height(), out_fmt)?;
@@ -1076,7 +1076,7 @@ fn compare_map(
 fn compare_const_map(r: &Raster, c: f64, f: impl Fn(f64, f64) -> bool) -> Raster {
     let fmt = r.format();
     let kind = fmt.kind();
-    let out_fmt = PixelFormat::with_channels(fmt.channels(), 1)
+    let out_fmt = PixelFormat::with_kind(fmt.channels(), SampleKind::U8)
         .expect("band count unchanged, so the output format exists");
     let mut out = op_output_or_panic(r.width(), r.height(), out_fmt);
     let data = r.data();
@@ -1450,7 +1450,7 @@ impl Raster {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
         let (w, h) = (self.width() as usize, self.height() as usize);
-        let out_fmt = PixelFormat::with_channels(bands, 2)
+        let out_fmt = PixelFormat::with_kind(bands, SampleKind::U16)
             .expect("band count unchanged, so the output format exists");
         let data = self.data();
 
@@ -1501,7 +1501,7 @@ impl Raster {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
         let (w, h) = (self.width() as usize, self.height() as usize);
-        let out_fmt = PixelFormat::with_channels(bands, 2)
+        let out_fmt = PixelFormat::with_kind(bands, SampleKind::U16)
             .expect("band count unchanged, so the output format exists");
         let data = self.data();
 
@@ -1728,7 +1728,7 @@ impl Raster {
     pub fn linear_uchar(&self, a: f64, b: f64) -> Raster {
         let fmt = self.format();
         let (bands, in_kind) = (fmt.channels(), fmt.kind());
-        let out_fmt = PixelFormat::with_channels(bands, 1)
+        let out_fmt = PixelFormat::with_kind(bands, SampleKind::U8)
             .expect("band count unchanged, so the 8-bit output format exists");
         let mut out = op_output_or_panic(self.width(), self.height(), out_fmt);
         let data = self.data();
@@ -3634,7 +3634,7 @@ impl Raster {
         // 65535 (an intentional, documented deviation — see the rustdoc and
         // issue #495). The u32 accumulator above keeps the binning exact; only
         // cells with >65535 votes (a >65535-pixel collinear line) saturate.
-        let out_fmt = PixelFormat::with_channels(1, 2).expect("Gray16 exists");
+        let out_fmt = PixelFormat::with_kind(1, SampleKind::U16).expect("Gray16 exists");
         let mut out = op_output_or_panic(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt);
         for (i, &v) in acc.iter().enumerate() {
             write_u32(&mut out, SampleKind::U16, i, v.min(0xFFFF));
@@ -3796,8 +3796,9 @@ mod tests {
 
     /**
      * Tests that this module dispatches on sample kind and never on byte
-     * width, by asserting no call to the byte-width accessor on
-     * [`PixelFormat`] survives in `src/arithmetic.rs`.
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/arithmetic.rs`.
      * Works by scanning the module's own source, compiled in with
      * `include_str!`, for the accessor's name; the needle is spelled in two
      * halves so this assertion is not itself a hit. A byte width is not a
@@ -3809,7 +3810,12 @@ mod tests {
     #[test]
     fn arithmetic_does_not_dispatch_on_byte_width() {
         const SRC: &str = include_str!("arithmetic.rs");
-        let needle = concat!("bytes_per_", "channel");
+        // Both spellings of a byte-width dispatch: reading the width off a
+        // format, and handing one back to the width-keyed constructor.
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
         // Positive control: the same scan over the same string finds a token
         // that is present, so the zero below is a real zero and not the
         // vacuous pass an empty read would give.
@@ -3817,11 +3823,14 @@ mod tests {
             SRC.contains(concat!("fn read_", "u32")),
             "positive control failed: the scan cannot see this module's source"
         );
-        assert_eq!(
-            SRC.matches(needle).count(),
-            0,
-            "{needle} is back in src/arithmetic.rs; dispatch on PixelFormat::kind() instead"
-        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/arithmetic.rs; dispatch on PixelFormat::kind() \
+                 and PixelFormat::with_kind() instead"
+            );
+        }
     }
 
     /// A width x height Gray8 raster from a byte vector.
@@ -3896,7 +3905,7 @@ mod tests {
     /// specific op name so callers can act on it, and no panic escapes.
     #[test]
     fn try_vec_ops_on_float_return_float_unsupported() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
 
         assert!(matches!(
@@ -3921,7 +3930,7 @@ mod tests {
     /// float-input guard (see [`sub_accepts_float_input_and_stays_float`]).
     #[test]
     fn try_binary_ops_on_float_return_float_unsupported() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let a = Raster::zeroed(2, 2, f1).unwrap();
         let b = Raster::zeroed(2, 2, f1).unwrap();
 
@@ -3954,7 +3963,7 @@ mod tests {
     /// (image-image `sub` now floats and accepts float input, issue #282).
     #[test]
     fn float_unsupported_names_op_exactly_once() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let a = Raster::zeroed(2, 2, f1).unwrap();
         let b = Raster::zeroed(2, 2, f1).unwrap();
 
@@ -4038,7 +4047,7 @@ mod tests {
     /// A 1-band float raster from `f32` sample values.
     fn grayf(w: u32, h: u32, vals: &[f32]) -> Raster {
         let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        let fmt = PixelFormat::with_channels(1, 4).unwrap();
+        let fmt = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         Raster::new(w, h, fmt, data).unwrap()
     }
 
@@ -4563,7 +4572,7 @@ mod tests {
     /// / `sub_vec` keep the integer contract.
     #[test]
     fn linear_divide_promotion_table() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im8 = gray(1, 1, vec![128]);
         let im16 = gray16(1, 1, &[1000]);
 
@@ -4575,7 +4584,7 @@ mod tests {
         let rgb = Raster::new(1, 1, PixelFormat::Rgb8, vec![1, 2, 3]).unwrap();
         assert_eq!(
             rgb.div_const(2.0).format(),
-            PixelFormat::with_channels(3, 4).unwrap()
+            PixelFormat::with_kind(3, SampleKind::F32).unwrap()
         );
 
         // linear: float unless uchar is requested.
@@ -4814,7 +4823,7 @@ mod tests {
             })
         ));
 
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let f = Raster::zeroed(2, 1, f1).unwrap();
         assert!(matches!(
             f.try_remainder(&a),
@@ -5306,7 +5315,7 @@ mod tests {
         let im = Raster::new(
             1,
             1,
-            PixelFormat::with_channels(2, 1).unwrap(),
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
             vec![100, 128],
         )
         .unwrap();
@@ -5315,7 +5324,13 @@ mod tests {
 
         let vals = [40_000u16, 32_768u16];
         let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        let im16 = Raster::new(1, 1, PixelFormat::with_channels(2, 2).unwrap(), data).unwrap();
+        let im16 = Raster::new(
+            1,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap(),
+            data,
+        )
+        .unwrap();
         let r16 = im16.premultiply();
         assert_eq!(r16.getpoint(0, 0), vec![20_000.0, 32_768.0]); // 40000*32768/65535 ~ 20000.3
     }
@@ -5369,7 +5384,7 @@ mod tests {
         let im = Raster::new(
             1,
             1,
-            PixelFormat::with_channels(2, 1).unwrap(),
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
             vec![200, 100],
         )
         .unwrap();
@@ -5706,7 +5721,13 @@ mod tests {
         for v in [100.0f32, 0.5, 100.0, 1.5] {
             data.extend_from_slice(&v.to_ne_bytes());
         }
-        let im = Raster::new(2, 1, PixelFormat::with_channels(2, 4).unwrap(), data).unwrap();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::F32).unwrap(),
+            data,
+        )
+        .unwrap();
         let pre = im.try_premultiply().expect("two-band float premultiply");
         assert_vips_f32(
             pre.getpoint(0, 0)[0],
@@ -5780,7 +5801,7 @@ mod tests {
     /// typed error rather than becoming a float panic by another route.
     #[test]
     fn float_single_band_is_still_a_typed_error() {
-        let im = Raster::zeroed(1, 1, PixelFormat::with_channels(1, 4).unwrap()).unwrap();
+        let im = Raster::zeroed(1, 1, PixelFormat::with_kind(1, SampleKind::F32).unwrap()).unwrap();
         assert!(matches!(
             im.try_premultiply(),
             Err(ArithmeticError::NoAlphaBand { bands: 1 })
@@ -5877,7 +5898,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not support float rasters")]
     fn arithmetic_float_write_panics() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
         let _ = im.add_const(1.0);
     }
@@ -5887,7 +5908,7 @@ mod tests {
     /// `deviate`, `min`/`max`, and the position scans directly.
     #[test]
     fn reductions_read_float_rasters() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let mut im = Raster::zeroed(2, 2, f1).unwrap();
         let samples: [f32; 4] = [0.5, -1.5, 2.0, 1.0];
         for (i, v) in samples.iter().enumerate() {
@@ -5911,7 +5932,10 @@ mod tests {
     fn trig_degrees_float_output() {
         let im = gray(3, 1, vec![90, 0, 45]);
         let s = im.sin();
-        assert_eq!(s.format(), PixelFormat::with_channels(1, 4).unwrap());
+        assert_eq!(
+            s.format(),
+            PixelFormat::with_kind(1, SampleKind::F32).unwrap()
+        );
         let sv = float_samples(&s);
         assert!((sv[0] - 1.0).abs() < 1e-6, "sin(90deg) = 1, got {}", sv[0]);
         assert!(sv[1].abs() < 1e-6, "sin(0deg) = 0");
@@ -6152,7 +6176,10 @@ mod tests {
         let re = gray(1, 1, vec![3]);
         let im = gray(1, 1, vec![4]);
         let z = Raster::complexform(&re, &im);
-        assert_eq!(z.format(), PixelFormat::with_channels(2, 4).unwrap());
+        assert_eq!(
+            z.format(),
+            PixelFormat::with_kind(2, SampleKind::F32).unwrap()
+        );
         assert_eq!(float_samples(&z), vec![3.0, 4.0]);
         assert_eq!(float_samples(&z.real()), vec![3.0]);
         assert_eq!(float_samples(&z.imag()), vec![4.0]);
@@ -6163,7 +6190,7 @@ mod tests {
     /// [3, 4] become [1, 3, 2, 4], and real / imag recover the halves.
     #[test]
     fn complexform_multiband_interleaving() {
-        let two = PixelFormat::with_channels(2, 1).unwrap();
+        let two = PixelFormat::with_kind(2, SampleKind::U8).unwrap();
         let re = Raster::new(1, 1, two, vec![1, 2]).unwrap();
         let im = Raster::new(1, 1, two, vec![3, 4]).unwrap();
         let z = Raster::complexform(&re, &im);

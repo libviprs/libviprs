@@ -644,8 +644,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Option`, and `None` on `F32` is a statement rather than a gap: a float
   carrier has no depth-implied ceiling and no value-indexed bin table.
 
-  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer call
-  `bytes_per_channel()` at all. Nothing they do changes; what changes is that
+  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer name
+  a byte width at all: no `bytes_per_channel()`, and no `with_channels()`
+  either, since handing a width *back* to the constructor is the same
+  ambiguity in the other direction. Nothing they do changes; what changes is that
   their sample readers and writers now fail to compile, rather than silently
   misread, the day a carrier arrives. The other 22 modules still key on the
   width and are tracked separately.
