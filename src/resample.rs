@@ -730,7 +730,15 @@ fn sinc_filter(x: f64) -> f64 {
 
 /// Options for [`Raster::try_affine_with`], mirroring the optional
 /// arguments of `vips_affine`.
+///
+/// `#[non_exhaustive]` and `Default`, the same shape as
+/// [`DecodeLimits`](crate::source::DecodeLimits): start from
+/// [`AffineOptions::default`] and set what you need with the `with_*`
+/// builders. `vips_affine` grows optional arguments, so this one will grow
+/// fields, and taking the struct literal away now is what stops that being a
+/// breaking change later (issue #630).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct AffineOptions {
     /// Horizontal output displacement (`odx`).
     pub odx: f64,
@@ -770,9 +778,83 @@ impl Default for AffineOptions {
     }
 }
 
+impl AffineOptions {
+    /// Set the horizontal output displacement (`odx`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_odx(mut self, odx: f64) -> Self {
+        self.odx = odx;
+        self
+    }
+
+    /// Set the vertical output displacement (`ody`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_ody(mut self, ody: f64) -> Self {
+        self.ody = ody;
+        self
+    }
+
+    /// Set the horizontal input displacement (`idx`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_idx(mut self, idx: f64) -> Self {
+        self.idx = idx;
+        self
+    }
+
+    /// Set the vertical input displacement (`idy`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_idy(mut self, idy: f64) -> Self {
+        self.idy = idy;
+        self
+    }
+
+    /// Set the output rectangle `[left, top, width, height]` (`oarea`),
+    /// returning the updated options. `None` uses the bounding box of the
+    /// transformed input.
+    #[must_use]
+    pub fn with_oarea(mut self, oarea: Option<[i32; 4]>) -> Self {
+        self.oarea = oarea;
+        self
+    }
+
+    /// Set how interpolation taps outside the input read (`extend`),
+    /// returning the updated options.
+    #[must_use]
+    pub fn with_extend(mut self, extend: Extend) -> Self {
+        self.extend = extend;
+        self
+    }
+
+    /// Set the background sample value (`background`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_background(mut self, background: f64) -> Self {
+        self.background = background;
+        self
+    }
+
+    /// Declare that the input already has premultiplied alpha
+    /// (`premultiplied`), returning the updated options.
+    #[must_use]
+    pub fn with_premultiplied(mut self, premultiplied: bool) -> Self {
+        self.premultiplied = premultiplied;
+        self
+    }
+}
+
 /// Options for [`Raster::try_resize_with`], mirroring the optional
 /// arguments of `vips_resize`.
+///
+/// `#[non_exhaustive]` and `Default`, the same shape as
+/// [`DecodeLimits`](crate::source::DecodeLimits): start from
+/// [`ResizeOptions::default`] and set what you need with the `with_*`
+/// builders, e.g. `ResizeOptions::default().with_vscale(Some(0.5))`
+/// (issue #630).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ResizeOptions {
     /// Vertical scale factor; the horizontal scale when `None`.
     pub vscale: Option<f64>,
@@ -789,6 +871,30 @@ impl Default for ResizeOptions {
             kernel: ReduceKernel::Lanczos3,
             gap: 2.0,
         }
+    }
+}
+
+impl ResizeOptions {
+    /// Set the vertical scale factor, returning the updated options. `None`
+    /// reuses the horizontal scale.
+    #[must_use]
+    pub fn with_vscale(mut self, vscale: Option<f64>) -> Self {
+        self.vscale = vscale;
+        self
+    }
+
+    /// Set the downsampling kernel, returning the updated options.
+    #[must_use]
+    pub fn with_kernel(mut self, kernel: ReduceKernel) -> Self {
+        self.kernel = kernel;
+        self
+    }
+
+    /// Set the reducing gap, returning the updated options.
+    #[must_use]
+    pub fn with_gap(mut self, gap: f64) -> Self {
+        self.gap = gap;
+        self
     }
 }
 
@@ -4303,6 +4409,7 @@ mod tests {
     /// The file and buffer entry points decode the same bytes and agree, and
     /// the associated `thumbnail` resolves to this inherent method.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_file_and_buffer_agree() {
         let im = portrait_290x442();
         let dir = tempfile::tempdir().unwrap();
@@ -4354,6 +4461,7 @@ mod tests {
 
     /// An unknown output profile is reported, not silently treated as sRGB.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_unknown_profile_is_typed_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.png");
@@ -6012,6 +6120,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_free_fn_fits_the_width_box() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("thumb_in.png");
@@ -6031,6 +6140,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn thumbnail_crop_free_fn_fills_and_crops_the_box() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("thumb_crop_in.png");

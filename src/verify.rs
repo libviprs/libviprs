@@ -7,7 +7,7 @@
 //! * [`raster_verify`] — walks every level via `downscale_half` against
 //!   the full in-memory source raster. Used when the caller has a
 //!   `&Raster` and picks `EngineKind::Monolithic`.
-//! * [`verify_from_strip_source`](crate::stream_verify::verify_from_strip_source)
+//! * [`verify_from_strip_source`]
 //!   — strip-driven verify for pull-based sources or when the caller
 //!   explicitly picks `EngineKind::Streaming` / `EngineKind::MapReduce`.
 //!
