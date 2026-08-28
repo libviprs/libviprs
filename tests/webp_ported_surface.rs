@@ -16,8 +16,8 @@
 //! from outside is that `Compression::Lossy { .. }` can be added later
 //! without breaking any of the code below.
 
-use libviprs::source::DecodeLimits;
-use libviprs::{PixelFormat, Raster, decode_bytes, decode_webp, webp};
+use libviprs::source::{DecodeLimits, SourceError};
+use libviprs::{PixelFormat, Raster, decode_bytes, decode_webp, decode_webp_with, webp};
 
 /// A 4x3 sRGB ramp, the same one `oracle-captures/foreign-webp` is built
 /// from, so a failure here and a failure in the unit tests point at the
@@ -125,4 +125,52 @@ fn sixteen_bit_is_refused_from_outside_the_crate() {
         .to_string();
     assert!(err.contains("Rgb16"), "{err}");
     assert!(err.contains("cast"), "{err}");
+}
+
+/// The animated entry point and its options struct resolve from outside the
+/// crate, and the option shape is the one a caller writes: struct-update
+/// syntax over a `Default` that is page 0 and one frame, not every frame
+/// (issue #569).
+#[test]
+fn the_animated_load_surface_resolves_from_outside_the_crate() {
+    let explicit = webp::LoadOptions {
+        page: 0,
+        n: Some(1),
+    };
+    assert_eq!(webp::LoadOptions::default(), explicit);
+    let all = webp::LoadOptions {
+        n: None,
+        ..Default::default()
+    };
+    assert_eq!(all.page, 0);
+
+    // A still is a one-page file, so both option shapes load it and page 1
+    // of it is a typed refusal rather than a panic or an empty raster.
+    let bytes = ramp().encode_webp(webp::SaveOptions::default()).unwrap();
+    for options in [explicit, all] {
+        let raster = decode_webp_with(&bytes, options, DecodeLimits::default()).unwrap();
+        assert_eq!((raster.width(), raster.height()), (4, 3));
+        assert_eq!(raster.pages_loaded(), 1);
+    }
+    let err = decode_webp_with(
+        &bytes,
+        webp::LoadOptions {
+            page: 1,
+            n: Some(1),
+        },
+        DecodeLimits::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SourceError::PageOutOfRange {
+                format: "WebP",
+                page: 1,
+                pages: 1,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }

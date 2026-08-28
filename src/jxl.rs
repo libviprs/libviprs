@@ -99,12 +99,13 @@
 //!   sentinel and answers as vips does.
 //! * **Animated JPEG XL can be read and never written.** `zune-jpegxl`
 //!   writes one frame and has no animation header at all, so
-//!   [`SaveOptions`] has nowhere to spell a delay or a loop count and
-//!   [`Raster::encode_jxl`] writes the **first page** of a roll rather
-//!   than a multi-frame file. The asymmetry is deliberate, it is the same
-//!   one [`crate::webp`] has, and the escape hatch is the same: animated
-//!   GIF is the format in this crate with a pure-Rust animated encoder
-//!   behind it.
+//!   [`SaveOptions`] has nowhere to spell a delay or a loop count, and a
+//!   roll handed to [`Raster::encode_jxl`] comes out as **one tall still
+//!   image** rather than a multi-frame file. Same divergence as
+//!   [`crate::webp`], pinned the same way
+//!   (`a_multi_page_roll_saved_back_is_one_tall_still`), and the same
+//!   escape hatch: animated GIF is the one format in this crate with a
+//!   pure-Rust animated encoder behind it.
 //! * **`icc-profile-data` is the profile the pixels are in, and is always
 //!   present.** `jxlload.c:955-985` asks libjxl for
 //!   `JXL_COLOR_PROFILE_TARGET_DATA`, which synthesises a profile when the
@@ -3015,5 +3016,34 @@ mod tests {
             decode_jxl_with(&ANIM4_DELAY, all_pages(), coord),
             Err(SourceError::CoordLimitExceeded { height: 12, .. })
         ));
+    }
+
+    /**
+     * Tests what saving a multi-page roll back as JPEG XL actually does,
+     * which is the read-only asymmetry made concrete: it comes out as one
+     * tall still image, where `vips jxlsave` on the same raster writes a
+     * four-frame file. Works by loading every page, encoding, and loading
+     * the result.
+     * Input: the four-page roll from `ANIM4_DELAY` -> Output: a 4x12 still
+     * whose pixels are the whole roll and which carries no `n-pages`, no
+     * `delay` and no `loop`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_multi_page_roll_saved_back_is_one_tall_still() {
+        let roll = decode_jxl_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+            .expect("the four-frame capture decodes");
+        assert_eq!(roll.pages_loaded(), 4);
+
+        let bytes = roll
+            .encode_jxl(SaveOptions::default())
+            .expect("a 4x12 Rgb8 raster encodes");
+        let back = decode_jxl(&bytes, DecodeLimits::default()).expect("it reads back");
+        assert_eq!((back.width(), back.height()), (4, 12));
+        assert_eq!(back.data(), &ANIM4_ROLL[..]);
+        assert_eq!(back.pages_loaded(), 1);
+        for field in ["n-pages", "page-height", "delay", "loop"] {
+            assert_eq!(back.get_field(field), None, "{field} on the round trip");
+        }
     }
 }

@@ -866,10 +866,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Both formats are read-only and that is a decision, not an oversight.**
   No pure-Rust encoder writes a WebP `ANIM`/`ANMF` or a JPEG XL animation
   header, so an animation can be loaded and transformed and not saved back
-  in its own format. `encode_webp` and `encode_jxl` write the first page of
-  a roll rather than refusing it, because those are exactly the bytes a
-  caller who extracted page 0 would have handed them; animated GIF is the
-  format in this crate with a pure-Rust animated encoder behind it.
+  in its own format. `encode_webp` and `encode_jxl` write a roll as **one
+  tall still image** rather than refusing it, which is a divergence from
+  `vips webpsave` and `vips jxlsave` on the same raster and is pinned as
+  one; refusing would fire on the ordinary path of loading two pages and
+  saving the result, and the pixels are a perfectly good image. A caller
+  who wants one frame uses `Raster::try_extract_page`, and a caller who
+  wants an animation saves GIF, which is the one animated format in this
+  crate with a pure-Rust encoder behind it.
 
 - `SourceError::PageOutOfRange` is the typed refusal for a `page` or
   `page + n` naming pages a file does not have, shared by the animated
