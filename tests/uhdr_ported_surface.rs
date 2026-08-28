@@ -1033,7 +1033,10 @@ fn a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest() {
     let mut wrong = Vec::new();
     for (p, pixel) in want.iter().enumerate() {
         for (i, v) in pixel.as_array().unwrap().iter().enumerate() {
-            #[expect(clippy::cast_possible_truncation, reason = "the capture holds f32 values")]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the capture holds f32 values"
+            )]
             let expected = v.as_f64().unwrap() as f32;
             if got[p * 3 + i] != expected {
                 wrong.push(format!("[{p}][{i}]: {} != {expected}", got[p * 3 + i]));

@@ -129,18 +129,27 @@ const EXIF_ID: &[u8] = b"Exif\0\0";
 /// table `uhdr2scRGB` linearises the base image through, and the same
 /// table `sRGB2scRGB` uses.
 ///
-/// **Transcribed, not computed, and that is deliberate.** The expression
-/// behind it is `f = i / 255; f <= 0.04045 ? f / 12.92f : powf((f +
-/// 0.055f) / 1.055f, 2.4f)` (`calcul_tables`, `colour/LabQ2sRGB.c`), but
-/// evaluating it does not reproduce the shipped table: the arm64 Homebrew
-/// build contracts multiply-adds the source does not show, and its `powf`
-/// differs from other libms in the last place. Recomputing the expression
-/// three different ways missed 151, 213 and 219 of the 256 entries
-/// respectively, every one by a single ulp. So these are the bytes libvips
-/// actually uses, lifted from
-/// `oracle-captures/foreign-uhdr/oracle.json`'s `v2Y_8_le_f32_hex`
-/// (issue #639, which says in as many words: "transcribe against these
-/// values, not against the expression").
+/// **Transcribed rather than computed, and the reason is portability, not
+/// arithmetic.** The expression is `f = i / 255; f <= 0.04045 ? f / 12.92f
+/// : powf((f + 0.055f) / 1.055f, 2.4f)` (`calcul_tables`,
+/// `colour/LabQ2sRGB.c`), and on this host Rust reproduces it exactly:
+/// evaluating it with that `f32` spelling matches all 256 entries, because
+/// `f32::powf` and the `powf` libvips was built against are the same arm64
+/// system libm. That agreement is a property of the host rather than of
+/// the code, and it is the whole reason the constant is written down
+/// instead of derived: a build whose libm rounds `powf` differently would
+/// silently produce a different table, and every pinned `uhdr2scRGB` value
+/// would move with it.
+///
+/// The precision is load bearing too, in a way that is easy to get
+/// backwards. Doing the same arithmetic in `f64` -- which looks more
+/// careful -- misses **214 of the 256 entries**, and computing `f` in
+/// `f32` before widening to `f64` misses 192. Every miss is a single ulp.
+/// The C is `float` throughout and a port has to be as well.
+///
+/// The bytes come from `oracle-captures/foreign-uhdr/oracle.json`'s
+/// `v2Y_8_le_f32_hex` (issue #639, which says in as many words:
+/// "transcribe against these values, not against the expression").
 ///
 /// `v2y_8_matches_the_pinned_oracle_table` re-reads that capture and
 /// compares all 256 entries, so this array cannot drift from the measured
