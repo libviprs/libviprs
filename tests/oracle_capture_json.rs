@@ -459,9 +459,12 @@ struct DumpCall {
 /// line, and a leaf is exactly where a float lives. A file-wide answer would
 /// call those two guarded while three quarters of their serialisation was not.
 ///
-/// Nesting resolves the same way. A `json.dumps` inside another call's
+/// Nesting is half resolved here. A `json.dumps` inside another call's
 /// arguments is its own site with its own brackets, so it cannot borrow the
-/// outer call's flag.
+/// outer call's flag. The opposite direction is NOT handled here and must not
+/// be read into this: the outer call's `args` still contain the inner call
+/// text in full, flag and all, which is why [`refuses_non_finite`] searches
+/// only at bracket depth 0.
 fn json_dump_calls(code: &str) -> Vec<DumpCall> {
     let b = code.as_bytes();
     let mut out = Vec::new();
@@ -511,15 +514,89 @@ fn json_dump_calls(code: &str) -> Vec<DumpCall> {
     out
 }
 
-/// Does this argument list pass `allow_nan=False`?
+/// Does this argument list pass `allow_nan=False` as an argument of ITS OWN
+/// call?
 ///
 /// Whitespace is squashed so `allow_nan = False` counts, and the argument text
 /// has already had its string interiors emptied, so nothing a capture happens
 /// to SAY can answer for what it does.
+///
+/// The depth filter is the part that stops this being a false pass. `args` is
+/// the whole text between the call's own brackets, and a nested call's
+/// arguments are inside it, so
+///
+/// ```python
+/// json.dump(o, f, default=lambda v: json.dumps(v, allow_nan=False))
+/// ```
+///
+/// carries the string while the outer `json.dump` is bare, and a bare NaN
+/// walks straight out of it. A keyword argument of this call always sits at
+/// depth 0 of this call's argument list, so dropping every bracketed group
+/// keeps every real spelling and loses exactly the borrowed ones.
+///
+/// This is the direction that matters, because it is the one that produces a
+/// PASS. The other direction (an inner call reading the outer call's flag)
+/// cannot happen at all: [`json_dump_calls`] gives the inner call its own
+/// brackets, so its `args` never contains the outer call's text.
 fn refuses_non_finite(args: &str) -> bool {
-    let squashed: String = args.chars().filter(|c| !c.is_whitespace()).collect();
-    squashed.contains("allow_nan=False")
+    let mut depth = 0usize;
+    let mut top = String::with_capacity(args.len());
+    for c in args.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            // `saturating_sub` because a call whose arguments open with a
+            // closing bracket is not something this scanner should panic on:
+            // it cannot arise from `json_dump_calls`, which matches brackets,
+            // but a future caller handing this a fragment should get a "no"
+            // rather than a crash.
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && !c.is_whitespace() => top.push(c),
+            _ => {}
+        }
+    }
+    top.contains("allow_nan=False")
 }
+
+/// How many `json.dump` / `json.dumps` call sites the capture scripts hold,
+/// across all of them.
+///
+/// The per-script floor below only catches a scanner that finds NOTHING in a
+/// file. It cannot catch one that loses some sites, and that is not a
+/// hypothetical: the first version of `code_only` blanked f-strings whole and
+/// reported 17 unguarded call sites where the tree had 18. Every per-script
+/// floor was green through that, because every script still yielded at least
+/// one. The count is what caught it, so the count belongs in the test.
+///
+/// Re-derive it with Python's own parser rather than by counting the greps,
+/// which over-count: 27 lines under `oracle-captures/` mention `json.dump` and
+/// 7 of those are prose in a docstring or a comment.
+///
+/// ```text
+/// python3 - <<'PY'
+/// import ast, pathlib
+/// n = 0
+/// for path in sorted(pathlib.Path("oracle-captures").rglob("*.py")):
+///     for node in ast.walk(ast.parse(path.read_text())):
+///         if (isinstance(node, ast.Call)
+///                 and isinstance(node.func, ast.Attribute)
+///                 and node.func.attr in ("dump", "dumps")
+///                 and isinstance(node.func.value, ast.Name)
+///                 and node.func.value.id == "json"):
+///             n += 1
+/// print(n)
+/// PY
+/// ```
+///
+/// That printed 20 on CPython 3.14.7, which is where this number comes from,
+/// and the Rust scanner agrees with it site for site. Two scripts hold four
+/// apiece (`foreign-avif` and `foreign-jp2k`, both hand-rolling an encoder),
+/// twelve hold one, and `oracle_pin.py` holds none.
+///
+/// When a capture script is legitimately added, run that walk again and put
+/// the new number here in the same commit that adds the script. Do not turn
+/// this into a `>=`: a floor cannot fire while the tree shrinks past it, which
+/// is the exact failure it is here to catch.
+const EXPECTED_DUMP_CALL_SITES: usize = 20;
 
 /// Every capture script stops at the write rather than emitting a bare
 /// non-finite float (issue #682).
@@ -570,6 +647,21 @@ fn every_capture_script_refuses_to_write_a_non_finite_float() {
              code rather than the script having none."
         );
     }
+
+    // ...and the total, which is the column the per-script floor cannot cover.
+    // A scanner that stops seeing SOME sites keeps every script above zero and
+    // walks past the loop above; it cannot walk past this. See
+    // `EXPECTED_DUMP_CALL_SITES` for how to re-derive the number.
+    let total: usize = sites_by_script.iter().map(|(_, n)| n).sum();
+    assert_eq!(
+        total, EXPECTED_DUMP_CALL_SITES,
+        "the scan found {total} json.dump/json.dumps call sites across the \
+         capture scripts, not {EXPECTED_DUMP_CALL_SITES}. If a capture script \
+         was added or removed, re-derive the number with the `ast` walk in the \
+         doc on `EXPECTED_DUMP_CALL_SITES` and update it in the same commit. \
+         If no script changed, the scanner has stopped seeing part of the \
+         tree, which is what this pin is for. Per script: {sites_by_script:?}"
+    );
 
     assert!(
         unguarded.is_empty(),
@@ -644,6 +736,23 @@ fn the_allow_nan_scan_cannot_be_satisfied_by_a_comment_or_a_docstring() {
         "the outer call is guarded"
     );
     assert!(!refuses_non_finite(&calls[1].args), "the inner call is not");
+
+    // ...and the direction that produces a false PASS, which is the one that
+    // matters: the INNER call carries the flag and the outer one does not.
+    // `args` is the whole text between the outer call's own brackets, nested
+    // calls included, so a plain substring search reads the outer call as
+    // guarded and a real bare NaN walks straight out of it.
+    let borrowed = "json.dump(o, f, default=lambda v: json.dumps(v, allow_nan=False))\n";
+    let calls = json_dump_calls(&code_only(borrowed));
+    assert_eq!(calls.len(), 2, "the inner call is its own site");
+    assert!(
+        !refuses_non_finite(&calls[0].args),
+        "the outer call borrowed the flag from the call nested in its arguments"
+    );
+    assert!(
+        refuses_non_finite(&calls[1].args),
+        "the inner call is the one that is guarded"
+    );
 
     // A string mentioning json.dump is not a call site.
     let quoted = "note = \"json.dump(o, f) writes a bare NaN\"\n";
