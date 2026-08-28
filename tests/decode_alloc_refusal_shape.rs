@@ -26,7 +26,8 @@
 //! the one odd format on the `image` shape: JPEG, PNG and single-image TIFF
 //! report exactly the same thing, because in all four the refusal is the
 //! `image` crate's own budget rather than a price libviprs computed. And the
-//! `.v` reader never consults `max_alloc_bytes` at all.
+//! `.v` reader never consults `max_alloc_bytes` at all, which is issue #710
+//! and is why `.v` is the one container missing from the tables below.
 //!
 //! # What this file holds
 //!
