@@ -2775,9 +2775,13 @@ impl Raster {
     /// arms deviate from published Sharma 2005 CIEDE2000 on hue-wrap pairs
     /// (asymmetric wrap and the antipodal `|Δh'| == 180` boundary) — by at
     /// most ~4.67 units (~1.17×) across the Sharma dataset. This is an
-    /// intentional libvips parity ceiling, not a bug. See [`de00`] for the
-    /// exact geometry and numeric detail. Use [`Raster::try_de00_sharma`]
-    /// for the textbook value instead of libvips parity.
+    /// intentional libvips parity ceiling, not a bug. The two rules agree
+    /// exactly on every non-wrapping pair (`|Δh'| < 180`) and part only on
+    /// the wrap; the worst case across that dataset is Lab
+    /// `[50,2.5,0]`/`[56,-27,-3]`, 27.23 here against Sharma's 31.90. The
+    /// full geometry lives on this module's private `de00` helper. Use
+    /// [`Raster::try_de00_sharma`] for the textbook value instead of libvips
+    /// parity.
     ///
     /// # Errors
     ///
@@ -2802,9 +2806,11 @@ impl Raster {
     /// CIEDE2000 colour difference computing the **published Sharma 2005**
     /// value (both signed hue-wrap arms) rather than the libvips parity
     /// arms of [`Raster::try_de00`]. Reproduces the full published Sharma
-    /// 2005 test dataset (34 pairs) within ~5e-5; see [`de00_sharma`] for
-    /// the exact deviation from parity (asymmetric hue-wrap pairs only;
-    /// identical elsewhere).
+    /// 2005 test dataset (34 pairs) within ~5e-5. It departs from
+    /// [`Raster::try_de00`] on hue-wrap pairs only (asymmetric wrap and the
+    /// antipodal `|Δh'| == 180` boundary) and is identical elsewhere; the
+    /// deviation is spelled out on this module's private `de00_sharma`
+    /// helper.
     ///
     /// This does not match the pinned `vips dE00` oracle and is offered
     /// only for callers who want the textbook standard.
