@@ -535,8 +535,21 @@ impl Report {
     }
 
     fn context(&self) -> String {
+        // The truncation flag rides along with every diagnostic on purpose: an
+        // ordered log that dropped its tail is still worth printing, but a
+        // reader who does not know it is partial will draw the wrong
+        // conclusion from what is missing.
+        let note = if self.truncated {
+            format!(
+                "\n(the ordered log stopped at {LOG_CAP} entries, so the tail below is \
+                 missing; MAXZEROED {} over {} zeroed requests is still exact)",
+                self.max_zeroed, self.zeroed_seen
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "--- stdout ---\n{}\n--- stderr ---\n{}",
+            "{note}\n--- stdout ---\n{}\n--- stderr ---\n{}",
             self.stdout, self.stderr
         )
     }
