@@ -1509,6 +1509,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Raster::try_sharpen` and `Raster::try_canny`'s float arm no longer abort the
+  process when an allocation fails, and there is a new
+  `Raster::try_f32_samples` for the widening they sit on (issue #627).
+
+  `Raster::f32_samples` is built on `.collect()`, and a `.collect()` sized from
+  an exact-size iterator allocates through `handle_alloc_error`, which ends the
+  process rather than returning. Nothing catches that, so both entry points
+  carried an unavoidable process exit however their signatures read. #575 had
+  taken the other nine convolution entry points abort-free and these two could
+  not follow, because the abort was not in `convolution.rs` at all.
+
+  `try_f32_samples` returns `Result<Vec<f32>, RasterError>`, reserving with
+  `try_reserve_exact` and reporting `RasterError::AllocationFailed`. Reach for
+  it wherever an allocation failure should arrive as a value. `f32_samples`
+  keeps its signature and its meaning, so no existing call has to change:
+  `None` still means only "not a float format". It now delegates to the
+  fallible form and **panics** rather than aborting if the widening fails,
+  which at least unwinds and can be caught.
+
+  `try_sharpen` also stopped cloning: the widened samples are written back in
+  place, and the LabS raster is moved into the result instead of copied, so two
+  image-sized allocations are gone rather than made fallible. Its three
+  remaining scratch planes go through the fallible reservation the rest of the
+  module uses. With #672 and #685 having done the same for the LabS round
+  trip's own buffers, no image-sized allocation on either entry point's path
+  is infallible any more. What is left is smaller than an image and stays out
+  of scope: the `fields.clone()` that carries an input's attachments onto each
+  result, an embedded ICC profile among them, and the mask, table and per-row
+  buffers the mask generator and the convolution scan build.
+
 - The six decoders that price a frame buffer from declared geometry (GIF,
   Radiance, FITS, OpenEXR, JPEG XL and the TIFF page reader) do it with one
   shared, saturating `width * height * bands * sample_bytes` and hand the answer

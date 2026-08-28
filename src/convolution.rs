@@ -297,6 +297,9 @@ use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError, alloc_op_output};
 use thiserror::Error;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// Don't allow the gaussmat/logmat mask radius to go over this
 /// (`MASK_SANITY` in `create/gaussmat.c`).
 const MASK_SANITY: u32 = 5000;
@@ -890,14 +893,70 @@ fn check_mask_param(
 /// and abort. Callers fill the returned `Vec` with `extend` or `resize`,
 /// neither of which reallocates while the reserved capacity holds.
 fn try_buffer<T>(width: u32, height: u32, len: usize) -> Result<Vec<T>, RasterError> {
+    let bytes = len.saturating_mul(size_of::<T>());
+    // Test-only: count this reservation and honour a lowered per-thread
+    // ceiling, so a test can both see that an intermediate goes through here at
+    // all and drive the fallible branch at a raster it can build. This and the
+    // thread-local it reads compile only under `cfg(test)`, so a production
+    // reservation is bounded solely by the allocator.
+    #[cfg(test)]
+    let cap = CONV_BUFFER_PROBE.with(|c| {
+        let (cap, calls) = c.get();
+        c.set((cap, calls + 1));
+        cap
+    });
+    #[cfg(test)]
+    if bytes as u64 > cap {
+        return Err(RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        });
+    }
     let mut v = Vec::new();
     v.try_reserve_exact(len)
         .map_err(|_| RasterError::AllocationFailed {
             width,
             height,
-            bytes: len.saturating_mul(size_of::<T>()),
+            bytes,
         })?;
     Ok(v)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread [`try_buffer`] probe: a ceiling in bytes on a single
+    /// reservation, and how many reservations have been made under the current
+    /// [`with_conv_buffer_probe`] call.
+    ///
+    /// The ceiling defaults to `u64::MAX`, so an ordinary run bounds an
+    /// intermediate only by what the allocator will serve. The count is what
+    /// makes a `vec![0i32; n]` put back in place of a [`try_buffer`] call
+    /// visible to a test: the two spellings differ only in what they do when
+    /// the allocation fails, which for a plane a test can actually build is
+    /// never, so nothing else distinguishes them (issue #627).
+    static CONV_BUFFER_PROBE: Cell<(u64, usize)> = const { Cell::new((u64::MAX, 0)) };
+}
+
+/// Test-only hook: run `f` with the calling thread's [`try_buffer`] ceiling
+/// lowered to `max_bytes`, returning its value alongside the number of
+/// reservations it made, and restoring the previous probe afterwards including
+/// on unwind.
+///
+/// The probe is thread-local, so tests running in parallel do not perturb one
+/// another, and it compiles only under `cfg(test)`.
+#[cfg(test)]
+fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize) {
+    struct Restore((u64, usize));
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONV_BUFFER_PROBE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(CONV_BUFFER_PROBE.with(|c| c.replace((max_bytes, 0))));
+    let value = f();
+    let calls = CONV_BUFFER_PROBE.with(|c| c.get().1);
+    (value, calls)
 }
 
 /// Read every sample of `r` as `f64`, row-major with bands interleaved.
@@ -1863,23 +1922,34 @@ impl Raster {
     /// [`ConvolutionError::Colour`] carrying [`ColourError::Raster`]
     /// instead of ending the process (issue #672).
     ///
-    /// Unlike the rest of the module's fallible entry points, this one is
-    /// still **not** abort-free, and what is left of that is on this side
-    /// of the call rather than in `colour.rs`. It widens through
-    /// [`Raster::f32_samples`], which collects infallibly, and five
-    /// image-sized buffers below are still a plain `vec![]` or a `clone`:
-    /// the clamped L plane, the two `convsep_short_pass` blur passes, the
-    /// copy of the widened samples, and the whole-raster clone the result
-    /// is written into. An allocation failure in any of those reaches
-    /// `handle_alloc_error` and ends the process instead of arriving here
-    /// at all. That is the set issue #627 tracks, and PR #669 is open
-    /// against it.
+    /// Every allocation this function makes for itself is fallible now: the
+    /// widening goes through [`Raster::try_f32_samples`], the clamped L plane
+    /// and the two separable blur passes through the module's fallible
+    /// reservation helper, and the result is the LabS raster moved rather than
+    /// cloned. So an allocation failure in any of them arrives here as
+    /// [`ConvolutionError::Raster`] instead of reaching `handle_alloc_error`
+    /// and ending the process (issue #627).
+    ///
+    /// Together with #672 and #685 having done the same for the round trip's
+    /// own buffers, that leaves **no image-sized infallible allocation on this
+    /// path at all**, which is what the doc here used to point at in both
+    /// directions and no longer can.
+    ///
+    /// What is left is not image-sized. `colour.rs` carries the input's
+    /// attachments onto each end of the round trip with `fields.clone()`, an
+    /// embedded ICC profile among them, and that copy allocates infallibly, as
+    /// does the Gaussian mask row `mask1d` collects. One is bounded by an
+    /// attachment and the other by the mask sanity radius rather than by the
+    /// pixel count, and the first is the same residue `Raster::try_clone`
+    /// names for itself (it is crate-private, so no link). That is the only
+    /// sense in which this is still not abort-free.
     pub fn try_sharpen(&self, sigma: f64, m1: f64, m2: f64) -> Result<Raster, ConvolutionError> {
         // vips_sharpen: remember the interpretation, work in LabS.
         let old_interpretation = self.interpretation();
         let labs = self.try_colourspace(Interpretation::Labs)?;
         let channels = labs.format().channels();
-        let (w, h) = (labs.width() as usize, labs.height() as usize);
+        let (rw, rh) = (labs.width(), labs.height());
+        let (w, h) = (rw as usize, rh as usize);
 
         // "We always sharpen a short, so there's no point using a float
         // mask": a separable integer Gaussian at 10% amplitude.
@@ -1893,20 +1963,31 @@ impl Raster {
 
         // vips_cast_short on the L band: the LabS codes from colourspace
         // are already rounded; clamp into the signed 16-bit range.
-        let labs_samples = labs.f32_samples().expect("LabS rasters store f32 codes");
-        let l: Vec<i32> = (0..w * h)
-            .map(|p| (labs_samples[p * channels] as f64).clamp(-32768.0, 32767.0) as i32)
-            .collect();
+        //
+        // Through the fallible widening, not `f32_samples`: that one collects,
+        // and a `.collect()` allocates through `handle_alloc_error`, which
+        // aborts rather than returning. It was the largest allocation on this
+        // path and the whole of what kept `try_sharpen` off the abort-free list
+        // (issue #627).
+        let mut samples = labs.try_f32_samples()?;
+        let mut l = try_buffer::<i32>(rw, rh, w * h)?;
+        l.extend(
+            (0..w * h).map(|p| (samples[p * channels] as f64).clamp(-32768.0, 32767.0) as i32),
+        );
 
         // Separable integer blur of L with the short clip range, exactly
         // vips_convsep at integer precision on a short image.
-        let blur_h = convsep_short_pass(&l, w, h, &mask1d, iscale, true);
-        let blurred = convsep_short_pass(&blur_h, w, h, &mask1d, iscale, false);
+        let blur_h = convsep_short_pass(&l, w, h, &mask1d, iscale, true)?;
+        let blurred = convsep_short_pass(&blur_h, w, h, &mask1d, iscale, false)?;
 
         // The vips_sharpen LUT, evaluated directly: index i = diff + 32768
         // rescales to +/- 100 as (i - 32767) / 327.67, runs the m1/m2
         // curve capped at y2/-y3, and rounds back to LabS code units.
-        let mut out_samples = labs_samples.clone();
+        //
+        // Written back over the widened samples in place. This used to clone
+        // them first, which is a second image-sized allocation for a buffer
+        // whose a/b (and extra) bands already hold exactly the values that have
+        // to survive; only the L band is ever overwritten.
         for p in 0..w * h {
             let v1 = l[p];
             let v2 = blurred[p];
@@ -1921,18 +2002,21 @@ impl Raster {
             };
             let y = y.clamp(-SHARPEN_Y3, SHARPEN_Y2);
             let adjusted = (v1 + rint(y * 327.67) as i32).clamp(0, 32767);
-            out_samples[p * channels] = adjusted as f32;
+            samples[p * channels] = adjusted as f32;
         }
 
-        // Reattach a/b (and any extra bands, untouched in out_samples) and
-        // convert back to the original interpretation.
-        let mut sharpened = labs.clone();
+        // Reattach a/b (and any extra bands, untouched in `samples`) and
+        // convert back to the original interpretation. `labs` is moved into the
+        // result rather than cloned: it is dead after the widening, and
+        // `Clone::clone` on a raster is another whole image copy that aborts on
+        // failure instead of returning.
+        let mut sharpened = labs;
         for (dst, s) in sharpened
             .data_mut()
             .as_chunks_mut::<4>()
             .0
             .iter_mut()
-            .zip(out_samples.iter())
+            .zip(samples.iter())
         {
             *dst = s.to_ne_bytes();
         }
@@ -2715,9 +2799,21 @@ impl Raster {
     /// finite value the Gaussian mask generator accepts (see
     /// [`Kernel::try_gaussmat`]), [`ConvolutionError::MaskTooLarge`] when
     /// the blur mask would exceed the libvips sanity radius, and
-    /// [`ConvolutionError::Raster`] if a result raster cannot be
-    /// allocated. The gradient mask is a compile-time constant with a
-    /// non-zero finite scale, so no kernel-shape variant is reachable.
+    /// [`ConvolutionError::Raster`] if a result raster, the polar scratch or
+    /// the float arm's widening cannot be allocated. The gradient mask is a
+    /// compile-time constant with a non-zero finite scale, so no kernel-shape
+    /// variant is reachable.
+    ///
+    /// Both arms are abort-free in the sense #575 set: every **image-sized**
+    /// allocation on the path is reserved fallibly, the widening the float arm
+    /// reads its two gradient rasters back through included, which used to
+    /// `.collect()` and so end the process on failure (issue #627).
+    ///
+    /// Smaller allocations on the path are still infallible and deliberately
+    /// out of that scope: the convolution scan's per-row accumulator and its
+    /// two clamp tables, the 2x2 gradient mask, and the `fields.clone()` that
+    /// carries the input's attachments onto the result. None of them scales
+    /// with the pixel count.
     pub fn try_canny(&self, sigma: f64, precision: Precision) -> Result<Raster, ConvolutionError> {
         let [gx, gy] = self.canny_gradient(sigma, precision)?;
         let fmt = gx.format();
@@ -2740,8 +2836,14 @@ impl Raster {
             );
             canny_thin_uchar(&polar, uw, uh, bands, &mut data);
         } else {
-            let sx = gx.f32_samples().expect("a float gradient has f32 samples");
-            let sy = gy.f32_samples().expect("a float gradient has f32 samples");
+            // The fallible widening, not `f32_samples`: that one collects, and
+            // a `.collect()` aborts the process on an allocation failure rather
+            // than returning, which is what stopped this arm being abort-free
+            // when the rest of the module went (issue #627). Both rasters come
+            // out of the float gradient stage, so `NotFloatFormat` is not
+            // reachable here; `?` covers it anyway rather than asserting it.
+            let sx = gx.try_f32_samples()?;
+            let sy = gy.try_f32_samples()?;
             let mut polar = try_buffer::<(f32, f32)>(w, h, sx.len())?;
             polar.extend(
                 sx.iter()
@@ -2841,6 +2943,15 @@ fn check_correlation_bands(image: &Raster, template: &Raster) -> Result<usize, C
 /// 16-bit domain, horizontal or vertical: the `CONV_INT` inner loop of
 /// `vips_convi_gen` with `CLIP_SHORT`, which is how `vips_sharpen` blurs
 /// the L channel (`vips_convsep` at integer precision on a short image).
+///
+/// The output plane is image-sized and `try_sharpen` calls this twice, so it
+/// comes from [`try_buffer`] rather than `vec![0i32; n]`: the macro form
+/// allocates through `handle_alloc_error` and aborts the process, which a
+/// fallible entry point cannot afford (issue #627).
+///
+/// # Errors
+///
+/// [`RasterError::AllocationFailed`] if the output plane cannot be reserved.
 fn convsep_short_pass(
     src: &[i32],
     w: usize,
@@ -2848,10 +2959,11 @@ fn convsep_short_pass(
     mask1d: &[i64],
     iscale: i64,
     horizontal: bool,
-) -> Vec<i32> {
+) -> Result<Vec<i32>, RasterError> {
     let rounding = iscale / 2;
     let half = (mask1d.len() / 2) as i64;
-    let mut out = vec![0i32; src.len()];
+    let mut out = try_buffer::<i32>(w as u32, h as u32, src.len())?;
+    out.resize(src.len(), 0);
     for y in 0..h as i64 {
         for x in 0..w as i64 {
             let mut sum = 0i64;
@@ -2870,13 +2982,14 @@ fn convsep_short_pass(
             out[y as usize * w + x as usize] = v.clamp(-32768, 32767) as i32;
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::imageio::MetadataValue;
+    use crate::raster::with_f32_samples_alloc_cap;
 
     /// Deterministic pseudo-random byte stream for synthetic images.
     fn lcg(seed: u32) -> impl FnMut() -> u8 {
@@ -3431,6 +3544,108 @@ mod tests {
         // The ordinary path still widens every sample exactly.
         let im = Raster::new(2, 1, PixelFormat::Gray8, vec![7, 9]).unwrap();
         assert_eq!(samples_f64(&im).unwrap(), vec![7.0, 9.0]);
+    }
+
+    /// #627: the `f32` widening `try_sharpen` sits on is fallible, so an
+    /// allocation the host cannot serve arrives as
+    /// [`ConvolutionError::Raster`] instead of reaching `handle_alloc_error`
+    /// and ending the process.
+    ///
+    /// #575 took nine of the eleven entry points here abort-free and
+    /// `try_sharpen` could not follow, because the abort was not in this file:
+    /// it was the `.collect()` inside [`Raster::f32_samples`]. A `try_` API
+    /// that aborts is worse than an infallible one, since a caller reasonably
+    /// reads the `Result` as covering allocation.
+    ///
+    /// The widening is reached at a buildable input through the `cfg(test)`
+    /// ceiling in `raster.rs`; a LabS raster whose samples genuinely exhaust
+    /// the allocator is far past the construction budget. The uncapped call
+    /// alongside it is what stops the ceiling passing for a guard on its own.
+    #[test]
+    fn sharpen_widening_returns_typed_error_not_abort() {
+        let im = noise_rgb(6, 4, 31);
+        let capped = with_f32_samples_alloc_cap(16, || im.try_sharpen(1.0, 1.0, 2.0));
+        // Summarised rather than `{capped:?}`, which prints the whole pixel
+        // buffer of the raster the failing case wrongly returns.
+        let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+        assert!(
+            matches!(
+                capped,
+                Err(ConvolutionError::Raster(
+                    RasterError::AllocationFailed { .. }
+                ))
+            ),
+            "an unservable sharpen widening must be a typed error, got {got:?}"
+        );
+        assert!(im.try_sharpen(1.0, 1.0, 2.0).is_ok());
+    }
+
+    /// #627: the same widening on canny's float arm, which reads the two
+    /// gradient rasters back as `f32` before the non-maximum suppression.
+    ///
+    /// The uchar arm never widens, so it stays green under the same ceiling.
+    /// That split is what pins the guard to the float arm rather than to
+    /// canny in general: canny's own default is float precision, so the arm
+    /// that used to abort is the one on the default path.
+    #[test]
+    fn canny_float_arm_widening_returns_typed_error_not_abort() {
+        let im = noise_gray(8, 8, 32);
+        let capped = with_f32_samples_alloc_cap(16, || im.try_canny(1.4, Precision::Float));
+        let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+        assert!(
+            matches!(
+                capped,
+                Err(ConvolutionError::Raster(
+                    RasterError::AllocationFailed { .. }
+                ))
+            ),
+            "an unservable canny widening must be a typed error, got {got:?}"
+        );
+        assert!(im.try_canny(1.4, Precision::Float).is_ok());
+        // sigma < 0.2 short-circuits the blur to a copy, so the gradient runs
+        // on a uchar image and the float widening is never reached.
+        assert!(
+            with_f32_samples_alloc_cap(16, || im.try_canny(0.1, Precision::Integer)).is_ok(),
+            "the uchar arm does not widen, so the ceiling must not reach it"
+        );
+    }
+
+    /// #627: the three image-sized `i32` planes `try_sharpen` builds for
+    /// itself, the clamped L band and the two separable blur passes, are
+    /// reserved through [`try_buffer`] rather than `vec![0i32; n]`.
+    ///
+    /// The count is the load-bearing half. `vec![0i32; n]` and `try_buffer`
+    /// behave identically at every size a test can build, and differ only in
+    /// what they do when the allocation fails, which is that one aborts the
+    /// process and the other returns; so putting the macro back in any one of
+    /// the three places is invisible to an assertion on the result alone. All
+    /// three planes are `w * h` `i32`s, so a byte ceiling cannot tell them
+    /// apart either, and only the count moves when one of them regresses.
+    ///
+    /// The capped call alongside it pins the other half: the failure that
+    /// reaches a caller is [`ConvolutionError::Raster`] and not an abort.
+    #[test]
+    fn sharpen_scratch_planes_are_fallible_not_aborting() {
+        let im = noise_rgb(6, 4, 33);
+
+        let (ok, calls) = with_conv_buffer_probe(u64::MAX, || im.try_sharpen(1.0, 1.0, 2.0));
+        assert!(ok.is_ok());
+        assert_eq!(
+            calls, 3,
+            "the L plane and both blur passes must each reserve fallibly"
+        );
+
+        let (capped, _) = with_conv_buffer_probe(16, || im.try_sharpen(1.0, 1.0, 2.0));
+        let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+        assert!(
+            matches!(
+                capped,
+                Err(ConvolutionError::Raster(
+                    RasterError::AllocationFailed { .. }
+                ))
+            ),
+            "an unservable sharpen plane must be a typed error, got {got:?}"
+        );
     }
 
     /// FNV-1a over a whole buffer, so a full `data()` comparison fits in
