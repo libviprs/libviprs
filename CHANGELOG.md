@@ -716,6 +716,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No new dependency. `flate2` was already a required dependency of this
   crate, and nothing else in the format needs one.
 
+- `UhdrError::BadSaveInput`, so `uhdr::encode_uhdr`'s input refusal names the
+  operation that actually failed (issue #810). It reused `UhdrError::BadInput`,
+  whose Display is `uhdr2scRGB: {reason}`, so a failed **save** reported the
+  **expand** operation and reported it first:
+  `uhdr2scRGB: uhdrsave needs a 3-band float image, got Rgb8`. It now reads
+  `uhdrsave: needs a 3-band float image, got Rgb8`. `UhdrError` is
+  `#[non_exhaustive]`, so a caller with a wildcard arm is unaffected; a caller
+  matching `BadInput` to catch a save refusal moves to the new variant.
+
+- `Raster::encode_uhdr(quality)` and `Raster::encode_uhdr_gainmap_scale(quality,
+  scale_factor)` **write an Ultra HDR container** instead of returning
+  `EncodeError::Unsupported` (issue #757). #508 landed the writer in
+  `crate::uhdr` with no new dependency and libvips reads its output back
+  (`vipsheader -a` reports `vips-loader: uhdrload`), but the documented
+  `Raster` surface still refused, so a caller was told this build cannot write
+  Ultra HDR while the crate demonstrably could.
+
+  The input is a **3-band `f32`** raster holding linear-light scRGB, which is
+  what a gain map is computed from. Anything else is
+  `EncodeError::InvalidParameter` naming the format it got, not `Unsupported`:
+  the build can write the format, this raster is the wrong shape for it, and
+  those are different answers. libvips gates on the interpretation tag instead
+  and it does not buy correctness there. Measured on 8.18.6: a 1-band scRGB
+  float image saves as an all-black container, and a `uchar` scRGB image is
+  re-linearised on the way in, so a constant 128 comes back as 0.2137 rather
+  than 0.502.
+
+  `scale_factor` is the libvips `gainmap-scale-factor` and is refused outside
+  1..=128. libvips declares that same range and then silently substitutes the
+  default: `--gainmap-scale-factor 0` and `--gainmap-scale-factor 200` both
+  exit 0 and write the same 2630 bytes as the plain call, with
+  `gainmap-scale-factor: 2` in the header. `quality` is clamped to 1..=100 the
+  way `Raster::encode_jpeg` clamps its own.
+
 - A page model for multi-frame images (issue #564). A multi-frame image is one
   `Raster` whose rows are a whole number of equal-height pages stacked top to
   bottom, the layout libvips calls a toilet roll, and the split is now a
@@ -872,6 +906,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code is compiled: a debug build emits zero object files under
   `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
   rather than taken from `avif-parse`, which is MPL-2.0.
+
+- **`MetadataValue::IntArray`, the array variant every animated codec was
+  waiting on** (issue #787). `MetadataValue` had four variants and none of
+  them could hold a per-frame `delay`, so #572, #573, #569 and #621 all had a
+  page-geometry half they could land and a delay half they could not. It now
+  has five, and the fifth is an ordered list of `i64`.
+
+  The spelling is measured against the pinned vips 8.18.6 rather than read out
+  of the C. `vips copy 'anim3.webp[n=-1]' out.v` writes
+  `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, one space
+  after every element including the last, so that is what the writer produces
+  and it is pinned as bytes. The reader is looser, because vips's is: a
+  trailer carrying `40 60 80`, `40 60 80 ` or `  40   60   80  ` reads back as
+  the same three elements in both libraries, and an empty element list is an
+  empty array rather than a missing field.
+
+  Two answers here are libviprs's own, and both are measured:
+
+  - **an element that will not parse keeps the whole field opaque.** vips
+    hands back an *empty* array for `40 x 80` (`vipsheader -f delay` prints
+    nothing and `vips copy` writes the field back out empty), losing the two
+    elements that did parse. libviprs carries the text through untouched, the
+    same rule `gint`, `gdouble` and `VipsBlob` already follow when their text
+    will not parse.
+  - **the elements are `i64`, not `u32` or `i32`.** vips's `gint` is 32 bits
+    and wraps rather than refusing: a trailer carrying `3000000000` reads back
+    through vips as `-1294967296`, and
+    `9223372036854775807 -9223372036854775808` as `-1 0`. A narrower carrier
+    would lose data on a file libviprs did not write and could not warn about.
+
+  `Raster::get_int_array` reads one borrowed, the way `get_int` does since
+  #635, so reading a delay does not deep-copy whatever blob happens to sit
+  under the same name. `MetadataValue::as_int_array` is the panicking
+  accessor beside `as_blob`, `type_code` gets a fifth code, and `len` reports
+  the element count.
+
+  Naming the variant also releases files from the legacy JSON trailer. The
+  fallback is keyed on what is *still* carried, so a `.v` whose only
+  unnameable value was an `{"IntArray":[...]}` delay is read as a value now
+  and its rewrite comes back out as the XML vips reads. Nothing about the
+  format moved: #565's trailer already carried this exact field opaquely, and
+  #609's `#[non_exhaustive]` already made the variant additive.
 
 - **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
   versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
@@ -1584,6 +1660,201 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- No test in the tree reaches the filesystem without `#[cfg_attr(miri, ignore)]`
+  any more, and `UNANNOTATED_FS_EXCEPTIONS` is empty (issue #756).
+
+  The four that were left are in `src/resample.rs`, which had four pull requests
+  open against it while #739's sweep ran and so was the one module the sweep
+  could not touch. Those merged, so these are annotated and their four rows in
+  `tests/miri_fs_test_inventory.txt` flip to `annotated`. The file now records
+  272 `annotated fs-detected` and 14 `annotated not-detected` tests, and nothing
+  else.
+
+  Emptying the list cost one further edit and no change to any assertion, which
+  is the difference between an exception list and the floor it replaced. The
+  floor, `assert!(unannotated_fs > 0)`, would have gone red here and demanded
+  rewriting. What did go red, on purpose, is
+  `merge_gate_states_the_backlog_as_a_bound_it_still_meets`: it has a separate
+  arm for zero, because at zero the bound holds and `merge-gate.yml`'s sentence
+  about a named handful of unannotated tests becomes false with nothing to catch
+  it. That sentence is rewritten, once, and the failure named it.
+
+- The Miri filesystem detector follows a call into a test helper, one file deep
+  and to a fixed point, and 73 more tests over nine files carry
+  `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
+  population when the change was written; the other 34 are `src/nifti.rs`,
+  `tests/uhdr_ported_surface.rs` and `tests/page_model.rs`, which reached `main`
+  while it was in flight and were caught by the new detector on the merge rather
+  than by a re-read.
+
+  `tests/page_model.rs` is the one worth naming, because its own module doc had
+  written the gap down and deferred it: "three tests here reach the filesystem
+  to read `src/`, and none carries `#[cfg_attr(miri, ignore)]` ... it belongs in
+  that lane's sweep rather than here". It is one test, not three. The other two
+  it counted go through `encode_vips` and `decode_bytes`, which are in memory,
+  and through string literals declared inline. The detector was right about
+  those and the note was not; it now says what was measured.
+
+  It read one function body and stopped, which the guard's module docs listed as
+  a known blind spot without ever measuring it. Measured: on the tree where
+  every inventory row was annotated,
+  `cargo +nightly-2026-08-20 miri test --test exr_ported_surface` still died in
+  one second on `channel_names_and_compression_are_readable_downstream`, which
+  calls `sample()` six lines above it, whose body is `std::fs::read(path)`. The
+  same shape killed `tests/n_pages_meaning.rs`.
+
+  `process_spawning_fns` had already solved this for `std::process`, so it
+  becomes `reaching_fns`, parameterised on the marker list and on a scope
+  predicate. The filesystem arm passes a predicate that accepts only test
+  scaffolding: every function in an integration test, and only the
+  `#[cfg(test)]` modules of a `src/` file. That restriction is the interesting
+  part and it is measured rather than argued: with every function in scope, the
+  way the process arm has it, the follower finds 85 unannotated tests over
+  eleven files; with only scaffolding in scope it finds 39 over six. The
+  difference is almost all one arm, `src/colour.rs` reading an ICC profile off
+  disk inside the library, which would have marked all 23 colour tests that
+  reach the loader whether or not any of them passes it a path.
+
+  The `annotated not-detected` class halves as a result, from 22 rows to 13:
+  those were annotations the detector could not have asked for, and nine of them
+  it can now. What is left is the library boundary and the helper in another
+  file.
+
+- The filesystem half of the Miri convention is enforced rather than recorded:
+  134 tests across 28 files carry `#[cfg_attr(miri, ignore)]` that did not, and
+  `tests/miri_ignore_convention.rs` now refuses any filesystem-touching test
+  that is neither annotated nor named in a four-entry exception list (issues
+  #712, #739).
+
+  #711 took `-Zmiri-disable-isolation` off the job. Under isolation a
+  filesystem call is an unsupported operation and Miri ends the whole session
+  on the first one rather than failing that test, so the 138 rows
+  `tests/miri_fs_test_inventory.txt` carried as `unannotated fs-detected` ceased
+  to be recorded debt and became 138 ways to take the gate down. Measured on
+  `bd4bb1d`, `cargo +nightly-2026-08-20 miri test --test workspace_layout` died
+  on `fuzz_crate_is_a_member_of_the_root_workspace` having run nothing.
+
+  The guard's own floor had to go with it. It ended with
+  `assert!(unannotated_fs > 0)` and a message saying that if the count ever
+  reached zero the ledger had stopped being a ledger, which is a floor that
+  goes red on the change that clears the debt. It is now a refusal with an
+  exception list, checked in both directions: a filesystem test that is neither
+  annotated nor named fails, and a named entry that is no longer an unannotated
+  filesystem test fails too, so the list cannot rot into decoration. It carries
+  four names, all in `src/resample.rs`, which had four pull requests open
+  against it while the sweep ran; issue #756 carries them.
+
+  This does not make the `miri` job report, and the reason is worth writing
+  down because it is the half of #675 nobody had measured. `cargo miri test`
+  runs the `--lib` target first and libtest runs it in sorted order, so the
+  first two tests of the whole invocation are
+  `arithmetic::proptests::every_try_method_in_the_module_is_in_the_sweep` and
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster`. Neither
+  touches the filesystem, so no annotation sweep can reach them, and the second
+  is the proptest already measured at over twenty minutes without finishing.
+  The unannotated filesystem tests were never the first wall of the whole-suite
+  run, they were the first wall of every target after it.
+
+- The doc gate denies `rustdoc::private_intra_doc_links`, and the 33 public doc
+  comments that pointed at `pub(crate)` items no longer do (issue #697). That
+  lint is warn-by-default and neither invocation denied it, so a public doc
+  comment could link to a private helper, rustdoc would silently drop the link
+  and render it as inert bracketed text on docs.rs, and both `make doc` and the
+  CI docs job stayed green while publishing a dead pointer.
+
+  At `9b1ade6` that had happened 33 times across 13 files: `sink.rs` 7,
+  `source.rs` 6, `resume.rs` 5, two each in `colour.rs`, `dedupe.rs`,
+  `encode_tiff.rs`, `engine.rs` and `gif.rs`, one each in `composite.rs`,
+  `manifest.rs`, `pdf.rs`, `raster.rs` and `streaming_mapreduce.rs`. Every
+  target is a private helper, a crate-internal constant or a `pub(crate)`
+  cache, and none of them is worth making public just to satisfy a link, so
+  each site inlines the sentence the public reader needed and keeps the
+  identifier in plain backticks for anyone reading the source. `cargo doc
+  --no-deps --all-features` goes from 47 warnings to 13, the remaining 13 all
+  being `rustdoc::redundant_explicit_links` (issue #795).
+
+  `tests/doc_link_gate.rs` holds the `Makefile` recipe and the `ci.yml` docs
+  job to the same deny set and the same `cargo doc` arguments, so tightening
+  one file alone fails there rather than quietly un-mirroring the local gate,
+  and it holds the docs job's own `name:` to naming every lint it denies.
+
+- The doc gate denies `rustdoc::redundant_explicit_links` too, and the 13 links
+  that carried a redundant explicit target no longer do (issue #795). Each was
+  written `[`Foo`](crate::path::Foo)` where the label alone already resolves to
+  the same destination, in `engine_builder.rs` (4), `engine.rs` (2), `jxl.rs`
+  (2) and one each in `draw.rs`, `sink.rs`, `sink_object_store.rs`,
+  `stream_verify.rs` and `verify.rs`.
+
+  Nothing rendered wrong, so this is not a rendering fix. It is that 13 standing
+  warnings is a floor which hides the fourteenth, and a warning stream nobody
+  reads is not a gate: that is exactly how the 33 private links above
+  accumulated unnoticed. `cargo doc --no-deps --all-features` is now **silent**,
+  so anything it prints is new.
+
+
+- `spcor` and `fastcor` stopped widening the whole image and stopped
+  materialising their results twice. Both read the image as a sliding window of
+  the template's rows, which is the same access pattern the convolution
+  traversal has, so both now share its row window; and both filled a whole
+  `Vec<f64>` in output order only to hand it to a builder that walked it once,
+  so both write into the output raster directly instead. At 4000x4000 `Rgb8`
+  with a 32x32 template, `spcor` peaks at 238 MiB rather than 967 MiB, 5.2 times
+  the input rather than 21, and `fastcor` reads the same. No output byte moves
+  (issue #791).
+
+  What is left whole is the **template**, which both read in full at every
+  output sample. That one is bounded by the operand a caller passes rather than
+  by the image.
+
+- `compass` stopped keeping a widened copy of every result. It convolves
+  `times` times and combines the absolute results, and it used to widen each of
+  those results to `f64` first and hold all `times` widenings live at once, to
+  read each sample once. That made it the most expensive operation in the crate:
+  at 4000x4000 `Rgb8` with a 3x3 box mask and `Combine::Max`, the libvips
+  default `times = 2` peaked at 1.61 GiB over a 48 MB input, 36 times what it
+  was handed, and `times = 4` at 2.42 GiB (issue #790).
+
+  Each result is folded into the accumulator off its own bytes now, and the
+  integer branch builds its output raster from an iterator rather than from a
+  whole `Vec<i64>` of clipped samples. `times = 2` peaks at 556 MiB and
+  `times = 4` at 647 MiB, so 12x and 14x, and no output byte moves.
+
+  Holding every result is inherent to `vips_compass` and is what is left:
+  `times * bands` bytes a pixel, bounded by the `1..=1000` range the operation
+  already enforced on `times`.
+
+- Convolution stopped widening the whole image. `conv`, `convsep`, `gaussblur`,
+  `compass`, `sobel`, `scharr`, `prewitt` and canny's gradient stage all run one
+  shared traversal, and that traversal used to decode the entire source to `f64`
+  before it started: eight bytes a sample where a uchar carries one, which made
+  it the largest allocation in the crate. It keeps a rolling window of the rows
+  the mask actually reaches instead, `min(h, mask height)` of them, each source
+  row widened exactly once on the way past (issue #575).
+
+  Measured on a 4000x4000 `Rgb8` input, release, peak resident set:
+
+  | operation | before | after |
+  |---|---|---|
+  | `conv`, 3x3 box, integer | 464 MiB, 10.1x the input | 98 MiB, 2.1x |
+  | `conv`, 3x3 box, float, `Rgb16` | 693 MiB, 7.6x | 327 MiB, 3.6x |
+  | `sobel` | 464 MiB, 10.1x | 98 MiB, 2.1x |
+  | `gaussblur`, sigma 3, integer | 510 MiB | 145 MiB |
+
+  Not one output byte moves. The window holds the same values in the same
+  order and the accumulation is untouched, so every pinned oracle capture and
+  every FNV hash in the module reads exactly what it read before.
+
+  The allocation counts moved with it: a `conv` at integer precision now makes
+  **one** image-sized allocation, its own output, and `canny` makes eight rather
+  than eleven. `tests/convolution_image_sized_allocations.rs` (renamed from
+  `sharpen_canny_image_sized_allocations.rs`, since the budgets are no longer
+  only those two) pins all sixteen rows at two image sizes.
+
+  `Raster::try_compass` is the one operation that did not move, because its
+  combine reads all `times` results at the same sample and so has no row window
+  to keep. It has a row in the budget file saying so, at 159 bytes a pixel over
+  a three-byte-a-pixel input, and an issue of its own.
+
 - The page split no longer survives an operation that changes the raster's
   height, and is no longer imported from a second input by a multi-input op
   (issue #564). Both are deliberate divergences from libvips and both have a
@@ -1644,14 +1915,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, measured, and would be a defensible answer; the backend pin is simply
   the smaller of the two changes.
 
-  What the job does now is abort on the first filesystem test that has no
-  `#[cfg_attr(miri, ignore)]`. `tests/miri_fs_test_inventory.txt` still records
-  more than a hundred of those, and annotating them is #712. Whether the suite
-  then fits inside `timeout-minutes: 90` is open, and one measurement says not
-  to assume it will: the single proptest
+  What the job did after this change was abort on the first filesystem test
+  that had no `#[cfg_attr(miri, ignore)]`, of which
+  `tests/miri_fs_test_inventory.txt` recorded 138. Annotating them is #712 and
+  #739, below. Whether the suite then fits inside `timeout-minutes: 90` was
+  open, and one measurement said not to assume it would: the single proptest
   `arithmetic::proptests::no_try_method_panics_on_a_float_raster` ran over
   twenty minutes under the interpreter without finishing, and it touches no
-  filesystem, so no annotation sweep will ever reach it.
+  filesystem, so no annotation sweep will ever reach it. That is the one that
+  turned out to decide the answer.
 
   Three claims in that workflow file were false when I got here and are gone.
   It said Miri "cannot run on the dev machine", which was true of the reason
@@ -2047,6 +2319,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **Every `capture.py` under `oracle-captures/` now checks `ORACLE_PIN.json`
+  before it writes anything. Two of the fourteen did** (issue #796), both of
+  them the convolution scripts `oracle_pin.py` was factored out of. The pin
+  file said "capture.py refuses to run against a binary that disagrees with
+  it", `oracle_pin.py` opened "The oracle pin every capture.py under
+  oracle-captures/ checks", and `tests/oracle_capture_pins.rs` said "each
+  area's". All three were true for `convolution`.
+
+  #650 left a two-sided guard: the capture script stops a bad capture being
+  taken, and the Rust test stops one being kept. Only the second side existed
+  for the twelve `foreign-*` areas, so re-running any of them on a machine
+  whose vips had moved wrote a whole capture with the new version stamped
+  through it and told nobody, which is the exact failure #650 was filed for.
+  All six areas still marked `pre_pin`, the ones most likely to be re-run,
+  were in the unguarded twelve.
+
+  `every_capture_script_checks_the_oracle_pin` is what stops it coming back.
+  It reads the scripts through `include_str!` and matches at column zero,
+  because `oracle_pin.py`'s docstring shows callers the exact lines to write
+  and a substring scan would read that example as an adoption. No committed
+  capture changes: re-running `foreign-avif` with the check in reproduced its
+  `oracle.json`, `commands.sh` and all thirteen fixtures byte for byte.
 
 - **The AVIF oracle recorded a sha256 for an `rgb8.avif` that was not the file
   in the tree** (issue #779). Two records in
