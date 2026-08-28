@@ -15,7 +15,7 @@
 //! | JPEG | `SourceError::Decode(image Limits)` |
 //! | PNG | `SourceError::Decode(image Limits)` |
 //! | TIFF | `SourceError::Decode(image Limits)` |
-//! | WebP | `SourceError::Decode(image Limits)` |
+//! | WebP | `SourceError::Decode(image Limits)`, fabricated by hand |
 //! | GIF | `SourceError::Gif(GifError::AllocLimitExceeded)` |
 //! | Radiance | `SourceError::Radiance(RadianceError::AllocLimitExceeded)` |
 //! | FITS | `SourceError::Fits(FitsError::AllocLimitExceeded)` |
@@ -24,10 +24,14 @@
 //!
 //! Two corrections to the table in #686, both from that run. WebP is **not**
 //! the one odd format on the `image` shape: JPEG, PNG and single-image TIFF
-//! report exactly the same thing, because in all four the refusal is the
-//! `image` crate's own budget rather than a price libviprs computed. And the
-//! `.v` reader never consults `max_alloc_bytes` at all, which is issue #710
-//! and is why `.v` is the one container missing from the tables below.
+//! report exactly the same thing. But the four are not alike underneath. In
+//! JPEG, PNG and TIFF the ceiling is spent inside `image`'s own decoder
+//! through `Limits::reserve`, so there is no libviprs price and no declared
+//! geometry to report. WebP had both and threw them away to look like the
+//! other three, so it moves onto the shared shape and the three do not.
+//!
+//! And the `.v` reader never consults `max_alloc_bytes` at all, which is issue
+//! #710 and is why `.v` is the one container missing from the tables below.
 //!
 //! # What this file holds
 //!
@@ -113,9 +117,10 @@ fn priced_by_libviprs() -> Vec<Row> {
             format: "gif",
             bytes: rgb8(4).encode_gif(Default::default()).expect("gif fixture"),
             decoded: (4, 4),
-            // Four bands: the canvas the decoder allocates is RGBA whatever
-            // the palette holds, and 4 * 4 * 4 = 64 is the number the price
-            // below can only be explained by.
+            // Four bands because this fixture carries a transparent index, so
+            // the canvas is RGBA and 4 * 4 * 4 = 64. An opaque GIF is priced
+            // at three. The band count is what the canvas costs, not a
+            // constant.
             priced_geometry: (4, 4, 4),
             sample_bytes: 1,
             what: "GIF canvas",
@@ -149,6 +154,21 @@ fn priced_by_libviprs() -> Vec<Row> {
             sample_bytes: 4,
             what: "OpenEXR sample buffers",
             price: 512,
+        },
+        // WebP prices its own frame from `output_buffer_size` and its own
+        // declared geometry, so it belongs here and not with the three the
+        // `image` crate refuses. It used to fabricate an `image` `LimitError`
+        // to look like them, which is the confusion #686 exists to remove.
+        Row {
+            format: "webp",
+            bytes: rgb8(4)
+                .encode_webp(Default::default())
+                .expect("webp fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: "WebP frame buffer",
+            price: 48,
         },
     ];
     if cfg!(feature = "jxl") {
@@ -196,17 +216,6 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             sample_bytes: 1,
             what: "",
             price: 36,
-        },
-        Row {
-            format: "webp",
-            bytes: rgb8(4)
-                .encode_webp(Default::default())
-                .expect("webp fixture"),
-            decoded: (4, 4),
-            priced_geometry: (4, 4, 3),
-            sample_bytes: 1,
-            what: "",
-            price: 48,
         },
     ]
 }
@@ -306,10 +315,11 @@ fn the_message_names_the_buffer_and_the_geometry_it_priced() {
 /// one that could be written before the fix; this is the half that needs the
 /// `geometry` field to exist.
 ///
-/// The GIF row is the one worth reading: it declares three bands in the file
-/// and prices four, because the canvas the decoder allocates is RGBA whatever
-/// the palette holds. The reported band count is the one that was **priced**,
-/// which is the only one that explains the number next to it.
+/// The OpenEXR row is the one worth reading: the file declares sixteen
+/// channels in the AOV case and a successful decode hands back four, because
+/// the decoder builds a buffer for every declared channel and the selection
+/// keeps four. The reported band count is the one that was **priced**, which
+/// is the only one that explains the number next to it.
 #[test]
 fn the_shape_carries_the_geometry_and_the_label_as_typed_fields() {
     for row in priced_by_libviprs() {
@@ -388,6 +398,24 @@ fn is_alloc_limit_catches_every_shape_the_budget_refuses_in() {
     assert!(
         !by_coord.is_alloc_limit(),
         "the coordinate ceiling is a different knob: {by_coord:?}"
+    );
+
+    // And the one that actually guards the `kind()` check. `max_width` and
+    // `max_height` are pushed down into `image::Limits` too, so they come back
+    // as the *same* `SourceError::Decode(ImageError::Limits(..))` shape with a
+    // `DimensionError` kind. Without the `kind()` match `is_alloc_limit` would
+    // answer true for them, and the two controls above would not notice,
+    // because both produce libviprs's own variants and fall through the
+    // catch-all arm without ever reaching the `Decode` one.
+    let by_width = decode_bytes_with_limits(&big, DecodeLimits::default().with_max_width(1))
+        .expect_err("one pixel wide is not a 4x4 image");
+    assert!(
+        matches!(by_width, SourceError::Decode(image::ImageError::Limits(_))),
+        "this control is only meaningful if it reaches the image shape: {by_width:?}"
+    );
+    assert!(
+        !by_width.is_alloc_limit(),
+        "the width ceiling arrives in the image shape but is a different knob: {by_width:?}"
     );
 }
 

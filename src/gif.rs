@@ -285,8 +285,9 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // own, one of five variants re-tagging the same refusal, which #686
     // collapsed onto `SourceError::AllocLimitExceeded`.
     //
-    // `bands` is the canvas the decoder allocates, four bands whatever the
-    // palette holds, so that is the band count the refusal reports.
+    // `bands` is what the canvas actually costs, four with a transparent index
+    // and three without, which is the count fifteen lines up and the count the
+    // refusal reports.
     limits.check_image_alloc("GIF canvas", width, height, bands as u32, 1)?;
 
     // The canvas starts fully transparent and stays that way outside the

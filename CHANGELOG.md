@@ -29,24 +29,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Migration.** Match `SourceError::AllocLimitExceeded { .. }` where you
   matched any of the five, or call `err.is_alloc_limit()` and stop matching.
-  Field renames are `needed` to `needed_bytes`, and `width` / `height` /
-  `bands` / `channels` move inside `geometry`. The `what` label says which
-  buffer was refused: `"GIF canvas"`, `"FITS pixel buffer"`,
-  `"OpenEXR sample buffers"`, `"Radiance pixel buffer"`,
-  `"JPEG XL frame buffer"`, `"TIFF page pixel buffer"`, `"image file body"`.
+  `needed` becomes `needed_bytes`, and `width` / `height` / `bands` /
+  `channels` move inside `geometry`. Both that struct and the enum are
+  `#[non_exhaustive]`, so a destructuring match needs `..` in two places and
+  the compiler error if you forget will not obviously say why:
 
-  **Two things this does not do, both measured rather than assumed.** JPEG,
-  PNG, single-image TIFF and WebP still report
-  `SourceError::Decode(image::ImageError::Limits(..))`, because in all four the
-  refusal is the `image` crate's own budget spent inside its decoder, with no
-  libviprs price behind it and no declared geometry to attach. #686 called WebP
-  the one odd format on that shape; it is four, and WebP reaches it
-  deliberately so it refuses the same frames as its three siblings.
-  `JxlError::DecoderAllocLimitExceeded` also stays, because it is
-  `jxl-oxide`'s own tracker refusing an internal buffer at a size it does not
-  report out, and a file can trip either without tripping the other.
-  `is_alloc_limit` covers all three so a caller does not have to know the
-  split.
+  ```rust
+  Err(SourceError::AllocLimitExceeded {
+      geometry: Some(DeclaredGeometry { width, height, .. }),
+      needed_bytes,
+      ..
+  }) => ...
+  ```
+
+  `DeclaredGeometry::new` builds one, so a caller can still construct the
+  error in their own tests.
+
+  The `what` label says which buffer was refused: `"GIF canvas"`,
+  `"FITS pixel buffer"`, `"OpenEXR sample buffers"`,
+  `"Radiance pixel buffer"`, `"JPEG XL frame buffer"`,
+  `"WebP frame buffer"`, `"TIFF page pixel buffer"`, `"TIFF file body"`,
+  `"image file body"`. It is a human-readable label rather than a
+  compatibility promise: the wording may change and new decoders add new
+  labels, so branch on `geometry` or on the variant, never on the string.
+
+  **WebP comes along too**, which is what #686 asked for and what I initially
+  got wrong. It looked like one of four formats reporting the `image` crate's
+  shape, but the four are not alike underneath: JPEG, PNG and single-image
+  TIFF are refused inside `image`'s own decoder through `Limits::reserve`, so
+  there is genuinely no libviprs price and no declared geometry behind them.
+  WebP had both, from `decoder.dimensions()` and
+  `decoder.output_buffer_size()`, and fabricated an `image::ImageError` to
+  look like the other three. Since the frames refused are set by the
+  comparison and not by the error type, that consistency was costing a caller
+  the geometry and the price and buying nothing.
+
+  **Two things this does not do.** JPEG, PNG and single-image TIFF keep the
+  `image` shape, for the reason above. `JxlError::DecoderAllocLimitExceeded`
+  also stays, because it is `jxl-oxide`'s own tracker refusing an internal
+  buffer at a size it does not report out, and a file can trip either without
+  tripping the other. `is_alloc_limit` covers all three so a caller does not
+  have to know the split.
 
   `geometry` is an `Option` rather than three flat fields because the
   whole-file read prices a file's length on disk, which says nothing about the

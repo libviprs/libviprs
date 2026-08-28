@@ -403,6 +403,12 @@ pub enum SourceError {
     AllocLimitExceeded {
         /// What the allocation was for, e.g. `"TIFF file body"` or
         /// `"GIF canvas"`.
+        ///
+        /// A human-readable label for the message, **not** part of the
+        /// compatibility promise: the wording may change in any release and
+        /// new decoders add new labels. Branch on
+        /// [`geometry`](DeclaredGeometry) or on the variant, never on this
+        /// string.
         what: &'static str,
         /// The declared geometry the price was computed from, where the
         /// refusal priced an image. `None` where it priced a byte count with
@@ -486,8 +492,11 @@ impl SourceError {
 /// against what they expected the file to hold.
 ///
 /// The band count is the one the *header declares*, which is not always the
-/// band count of the raster a successful decode would have produced: GIF
-/// prices a four-band RGBA canvas whatever the file's palette holds.
+/// band count of the raster a successful decode would have produced. OpenEXR
+/// is the case that shows it: the decoder builds a full-resolution buffer for
+/// every channel the header declares, so a file declaring sixteen channels and
+/// selecting four is priced at sixteen and reports sixteen, while a successful
+/// decode of it hands back four bands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeclaredGeometry {
@@ -497,6 +506,25 @@ pub struct DeclaredGeometry {
     pub height: u32,
     /// Declared band count.
     pub bands: u32,
+}
+
+impl DeclaredGeometry {
+    /// Build a geometry.
+    ///
+    /// The struct is `#[non_exhaustive]` so that a fourth field can be added
+    /// without breaking a caller who reads the three, and that is exactly what
+    /// stops a caller building one with a struct literal. Without this they
+    /// could construct the degenerate `geometry: None` form of
+    /// [`SourceError::AllocLimitExceeded`] and never the interesting one,
+    /// which would make the variant untestable from outside the crate.
+    #[must_use]
+    pub const fn new(width: u32, height: u32, bands: u32) -> Self {
+        Self {
+            width,
+            height,
+            bands,
+        }
+    }
 }
 
 /// Resource limits applied to a single image decode.
