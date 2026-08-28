@@ -3,11 +3,11 @@
 //!
 //! The ported foreign and connection cells reference a set of encoders and
 //! decoders for formats that have no mature pure-Rust implementation yet
-//! (HEIF/AVIF, Ultra HDR, the ImageMagick delegate, OpenSlide, and the
-//! libvips `fail_on` strictness knob). JPEG 2000 left this list in issue
-//! #501, which replaced its two stubs with [`crate::jp2k`]. This
-//! module supplies those symbols so the cells compile and pin the typed error
-//! path:
+//! (HEIF/AVIF, the ImageMagick delegate, OpenSlide, and the libvips
+//! `fail_on` strictness knob). Two formats have left this list: JPEG 2000 in
+//! issue #501, which replaced its two stubs with [`crate::jp2k`], and Ultra
+//! HDR in issue #757, whose two stubs now run [`crate::uhdr`]. This module
+//! supplies the rest so the cells compile and pin the typed error path:
 //!
 //! * The deferred **encoders** on [`Raster`] return
 //!   [`EncodeError::Unsupported`] naming the format, so a call site asserts on
@@ -132,29 +132,69 @@ impl Raster {
         Err(EncodeError::unsupported("heif"))
     }
 
-    /// Encode as Ultra HDR (gain-map JPEG; libvips `uhdrsave`).
+    /// Encode as Ultra HDR (gain-map JPEG; libvips `uhdrsave`), with the
+    /// libvips default gain-map scale factor of 2.
+    ///
+    /// This is **not** a stub. It runs [`crate::uhdr::encode_uhdr`], which
+    /// #508 landed with no new dependency: an Ultra HDR container is two
+    /// ordinary JPEGs plus MPF and ISO 21496-1 marker segments, so the
+    /// already-required JPEG codec writes both halves.
+    ///
+    /// `self` must be a **3-band `f32`** raster holding linear-light scRGB,
+    /// which is what a gain map is computed from. `quality` is clamped to
+    /// 1..=100 by [`crate::uhdr::encode_uhdr`], the way
+    /// [`Raster::encode_jpeg`] clamps its own.
     ///
     /// # Errors
     ///
-    /// Always [`EncodeError::Unsupported`]: Ultra HDR encoding needs an
-    /// external `libultrahdr` path.
+    /// [`EncodeError::InvalidParameter`] if the raster is not 3-band `f32`,
+    /// or [`EncodeError::Encode`] if either JPEG half fails to encode.
     pub fn encode_uhdr(&self, quality: u8) -> Result<Vec<u8>, EncodeError> {
-        let _ = quality;
-        Err(EncodeError::unsupported("uhdr"))
+        self.encode_uhdr_gainmap_scale(quality, crate::uhdr::SaveOptions::default().gain_map_shrink)
     }
 
-    /// Encode as Ultra HDR with an explicit gain-map scale factor.
+    /// Encode as Ultra HDR with an explicit gain-map scale factor (libvips
+    /// `gainmap-scale-factor`): how much smaller than the base image the
+    /// gain map is, per axis. 1 keeps it full size, 2 is what libuhdr writes
+    /// and what [`Raster::encode_uhdr`] uses.
+    ///
+    /// # The range, and why an out-of-range factor is refused here
+    ///
+    /// libvips declares the property as 1..=128 and then, measured on
+    /// 8.18.6, silently substitutes the default for anything outside it:
+    /// `vips uhdrsave in.v out.jpg --gainmap-scale-factor 0` and
+    /// `--gainmap-scale-factor 200` both exit 0 and write the same 2630
+    /// bytes as the plain call, with `gainmap-scale-factor: 2` in the
+    /// header. A caller cannot act on that, so this refuses instead, the
+    /// same call #508 made about the silent `vips_image_get_gainmap`
+    /// failure.
     ///
     /// # Errors
     ///
-    /// Always [`EncodeError::Unsupported`]; see [`Raster::encode_uhdr`].
+    /// [`EncodeError::InvalidParameter`] if `scale_factor` is outside
+    /// 1..=128 or the raster is not 3-band `f32`, or
+    /// [`EncodeError::Encode`] if either JPEG half fails to encode.
     pub fn encode_uhdr_gainmap_scale(
         &self,
         quality: u8,
         scale_factor: u32,
     ) -> Result<Vec<u8>, EncodeError> {
-        let _ = (quality, scale_factor);
-        Err(EncodeError::unsupported("uhdr"))
+        if !(1..=128).contains(&scale_factor) {
+            return Err(EncodeError::InvalidParameter(format!(
+                "uhdr gain-map scale factor must be 1..=128, got {scale_factor}"
+            )));
+        }
+        crate::uhdr::encode_uhdr(
+            self,
+            &crate::uhdr::SaveOptions {
+                quality,
+                gain_map_shrink: scale_factor,
+            },
+        )
+        .map_err(|e| match e {
+            crate::uhdr::UhdrError::BadInput { reason } => EncodeError::InvalidParameter(reason),
+            other => EncodeError::encode(other),
+        })
     }
 
     /// Encode via the ImageMagick/GraphicsMagick delegate to a buffer in the
@@ -384,6 +424,28 @@ mod tests {
         Raster::new(w, h, PixelFormat::Rgb8, data).unwrap()
     }
 
+    /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling, so the
+    /// gain map it produces is not degenerate.
+    fn scrgb_ramp(w: u32, h: u32) -> Raster {
+        let mut px: Vec<f32> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = f64::from(x) / f64::from(w - 1);
+                let s = f64::from(y) / f64::from(h - 1);
+                px.push((0.02 + 6.0 * t * s) as f32);
+                px.push((0.5 * (1.0 - t) + 3.0 * s) as f32);
+                px.push((1.5 * t + 0.25) as f32);
+            }
+        }
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            px.into_iter().flat_map(f32::to_ne_bytes).collect(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn encode_heif_reports_unsupported_naming_the_format() {
         let im = rgb_raster(4, 4);
@@ -403,13 +465,136 @@ mod tests {
                 "heif",
             ),
             (im.encode_heif_tune(50, "av1", "ssim").unwrap_err(), "heif"),
-            (im.encode_uhdr(75).unwrap_err(), "uhdr"),
-            (im.encode_uhdr_gainmap_scale(75, 4).unwrap_err(), "uhdr"),
         ] {
             match err {
                 EncodeError::Unsupported { format: got } => assert_eq!(got, format),
                 other => panic!("expected Unsupported, got {other:?}"),
             }
+        }
+    }
+
+    /// Issue #757. `crate::uhdr` has written a container libvips reads back
+    /// since #508, so this entry point stops refusing and encodes. The bytes
+    /// go through the crate's own two-stage detection gate and are expanded
+    /// again, which is what says they are a real Ultra HDR file rather than
+    /// any two JPEGs stuck together.
+    #[test]
+    fn encode_uhdr_writes_a_container_that_reads_back() {
+        let src = scrgb_ramp(16, 16);
+        let bytes = src.encode_uhdr(75).expect("a 3-band float raster encodes");
+        assert!(
+            crate::uhdr::is_uhdr(&bytes),
+            "the bytes must satisfy the two-stage Ultra HDR gate"
+        );
+        let back = crate::uhdr::from_container(&bytes, crate::source::DecodeLimits::default())
+            .expect("the container expands again");
+        assert_eq!((back.width(), back.height()), (16, 16));
+        assert_eq!(back.meta.interpretation, Some(crate::Interpretation::ScRgb));
+    }
+
+    /// Issue #757. The gain-map scale factor is the libvips
+    /// `gainmap-scale-factor`, so it has to reach the writer rather than be
+    /// swallowed. A full-size gain map costs more bytes than a half-size one
+    /// over the same pixels, which is the cheapest observable saying the
+    /// argument is used at all.
+    #[test]
+    fn encode_uhdr_gainmap_scale_reaches_the_writer() {
+        let src = scrgb_ramp(32, 32);
+        let half = src.encode_uhdr_gainmap_scale(90, 2).expect("shrink 2");
+        let full = src.encode_uhdr_gainmap_scale(90, 1).expect("shrink 1");
+        assert!(
+            full.len() > half.len(),
+            "a full-size gain map should cost more than a half-size one, got {} against {}",
+            full.len(),
+            half.len()
+        );
+        // And the plain form is the shrink-2 default rather than some third
+        // thing, which is what `SaveOptions::default` and `uhdrsave` both say.
+        assert_eq!(src.encode_uhdr(90).expect("default"), half);
+    }
+
+    /// Issue #757. The one real decision in that issue is the input contract.
+    /// `uhdr::encode_uhdr` computes a gain map from linear-light scRGB, so a
+    /// raster that is not 3-band `f32` is refused, and the refusal is
+    /// [`EncodeError::InvalidParameter`] rather than
+    /// [`EncodeError::Unsupported`]: this build *can* write Ultra HDR and
+    /// this raster is the wrong shape for it, which is a different answer.
+    #[test]
+    fn encode_uhdr_refuses_a_raster_that_is_not_three_band_float() {
+        let rgb = rgb_raster(8, 8);
+        let err = rgb.encode_uhdr(75).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::InvalidParameter(_)),
+            "expected InvalidParameter, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Rgb8"),
+            "the refusal should name what it got, given {err}"
+        );
+        // A one-band float raster is refused for the same reason, so the gate
+        // is on the whole format and not only on the sample type.
+        let mono = Raster::new(
+            4,
+            4,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(1).unwrap()),
+            vec![0u8; 4 * 4 * 4],
+        )
+        .unwrap();
+        assert!(matches!(
+            mono.encode_uhdr(75).unwrap_err(),
+            EncodeError::InvalidParameter(_)
+        ));
+    }
+
+    /// Issue #757. `quality` is a `u8` and libvips' `Q` is 1..=100, and the
+    /// doc says the out-of-range ends clamp rather than refuse, which is what
+    /// [`Raster::encode_jpeg`] does. Without this the clamp is a claim with
+    /// nothing behind it, and it lives one call away in
+    /// [`crate::uhdr::encode_uhdr`] rather than here.
+    #[test]
+    fn encode_uhdr_clamps_the_quality_to_the_libvips_range() {
+        let src = scrgb_ramp(8, 8);
+        assert_eq!(
+            src.encode_uhdr(0).expect("0 clamps"),
+            src.encode_uhdr(1).expect("1")
+        );
+        assert_eq!(
+            src.encode_uhdr(200).expect("200 clamps"),
+            src.encode_uhdr(100).expect("100")
+        );
+        // Positive control: the two ends are not the same bytes, so the
+        // assertions above are not comparing everything against everything.
+        assert_ne!(
+            src.encode_uhdr(1).expect("1"),
+            src.encode_uhdr(100).expect("100")
+        );
+    }
+
+    /// Issue #757. libvips declares `gainmap-scale-factor` as 1..=128 and
+    /// then, measured on 8.18.6, **silently substitutes the default** for
+    /// anything outside it: `vips uhdrsave in.v out.jpg
+    /// --gainmap-scale-factor 0` and `--gainmap-scale-factor 200` both exit 0
+    /// and write the same 2630 bytes as the plain call, with
+    /// `gainmap-scale-factor: 2` in the header. #508 already declined to
+    /// reproduce one silent libvips failure in this area, so an out-of-range
+    /// factor is a typed refusal here.
+    #[test]
+    fn encode_uhdr_refuses_a_scale_factor_outside_the_libvips_range() {
+        let src = scrgb_ramp(8, 8);
+        for bad in [0u32, 129, u32::MAX] {
+            let err = src.encode_uhdr_gainmap_scale(75, bad).unwrap_err();
+            assert!(
+                matches!(err, EncodeError::InvalidParameter(_)),
+                "scale factor {bad} should be refused, got {err:?}"
+            );
+        }
+        // Both ends of the declared range are accepted, so this is a range
+        // check and not a blanket one.
+        for good in [1u32, 128] {
+            assert!(
+                src.encode_uhdr_gainmap_scale(75, good).is_ok(),
+                "scale factor {good} is inside the libvips range"
+            );
         }
     }
 
