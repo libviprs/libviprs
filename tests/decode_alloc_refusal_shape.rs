@@ -79,9 +79,21 @@ const EXR: &[u8] = include_bytes!("../oracle-captures/foreign-exr/fixtures/rgba_
 struct Row {
     format: &'static str,
     bytes: Vec<u8>,
-    /// `width`, `height`, `bands` as the decoder reads them out of the header,
-    /// and the byte price that follows from them.
-    geometry: (u32, u32, u32),
+    /// The geometry a clean decode produces, which is what the row checks the
+    /// budget-lifted control against.
+    decoded: (u32, u32),
+    /// `width`, `height`, `bands` as the decoder **prices** them, which is not
+    /// always what the raster ends up holding: GIF prices a four-band RGBA
+    /// canvas for a file whose palette is three bands, and OpenEXR prices
+    /// every channel the header declares rather than the four the selection
+    /// keeps.
+    priced_geometry: (u32, u32, u32),
+    /// Bytes per sample in that price.
+    sample_bytes: u64,
+    /// The `what` label the refusal names the buffer with, empty where the
+    /// refusal is not libviprs's own.
+    what: &'static str,
+    /// `width * height * bands * sample_bytes`.
     price: u64,
 }
 
@@ -98,31 +110,43 @@ fn priced_by_libviprs() -> Vec<Row> {
     let mut rows = vec![
         Row {
             format: "gif",
-            bytes: rgb8(2)
-                .crop(0, 0, 2, 2)
-                .encode_gif(Default::default())
-                .expect("gif fixture"),
-            geometry: (2, 2, 4),
-            price: 16,
+            bytes: rgb8(4).encode_gif(Default::default()).expect("gif fixture"),
+            decoded: (4, 4),
+            // Four bands: the canvas the decoder allocates is RGBA whatever
+            // the palette holds, and 4 * 4 * 4 = 64 is the number the price
+            // below can only be explained by.
+            priced_geometry: (4, 4, 4),
+            sample_bytes: 1,
+            what: "GIF canvas",
+            price: 64,
         },
         Row {
             format: "radiance",
             bytes: float_rgb()
                 .encode_radiance(Default::default())
                 .expect("radiance fixture"),
-            geometry: (4, 3, 3),
+            decoded: (4, 3),
+            priced_geometry: (4, 3, 3),
+            sample_bytes: 4,
+            what: "Radiance pixel buffer",
             price: 144,
         },
         Row {
             format: "fits",
             bytes: gray8().encode_fits().expect("fits fixture"),
-            geometry: (4, 3, 1),
+            decoded: (4, 3),
+            priced_geometry: (4, 3, 1),
+            sample_bytes: 1,
+            what: "FITS pixel buffer",
             price: 12,
         },
         Row {
             format: "openexr",
             bytes: EXR.to_vec(),
-            geometry: (8, 4, 4),
+            decoded: (8, 4),
+            priced_geometry: (8, 4, 4),
+            sample_bytes: 4,
+            what: "OpenEXR sample buffers",
             price: 512,
         },
     ];
@@ -132,7 +156,10 @@ fn priced_by_libviprs() -> Vec<Row> {
             bytes: rgb8(16)
                 .encode_jxl(Default::default())
                 .expect("jxl fixture"),
-            geometry: (16, 16, 3),
+            decoded: (16, 16),
+            priced_geometry: (16, 16, 3),
+            sample_bytes: 1,
+            what: "JPEG XL frame buffer",
             price: 768,
         });
     }
@@ -145,19 +172,28 @@ fn priced_by_the_image_crate() -> Vec<Row> {
         Row {
             format: "jpeg",
             bytes: rgb8(4).encode_jpeg(90).expect("jpeg fixture"),
-            geometry: (4, 4, 3),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: "",
             price: 48,
         },
         Row {
             format: "png",
             bytes: rgb8(4).encode_png(6).expect("png fixture"),
-            geometry: (4, 4, 3),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: "",
             price: 48,
         },
         Row {
             format: "tiff",
             bytes: tiff_bytes(),
-            geometry: (4, 3, 3),
+            decoded: (4, 3),
+            priced_geometry: (4, 3, 3),
+            sample_bytes: 1,
+            what: "",
             price: 36,
         },
         Row {
@@ -165,7 +201,10 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             bytes: rgb8(4)
                 .encode_webp(Default::default())
                 .expect("webp fixture"),
-            geometry: (4, 4, 3),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: "",
             price: 48,
         },
     ]
@@ -178,7 +217,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
 /// row has to decode cleanly with the budget lifted, at the geometry the row
 /// claims.
 fn refuse(row: &Row) -> SourceError {
-    let (w, h, _) = row.geometry;
+    let (w, h) = row.decoded;
     let open = DecodeLimits::default().with_max_alloc_bytes(u64::MAX);
     let ok = decode_bytes_with_limits(&row.bytes, open)
         .unwrap_or_else(|e| panic!("{} must decode with the budget lifted: {e}", row.format));
@@ -237,7 +276,7 @@ fn the_message_names_the_buffer_and_the_geometry_it_priced() {
     for row in priced_by_libviprs() {
         let err = refuse(&row);
         let shown = format!("{err}");
-        let (w, h, bands) = row.geometry;
+        let (w, h, bands) = row.priced_geometry;
         let want = format!("{w}x{h}x{bands}");
         if !shown.contains(&want) {
             wrong.push(format!(
@@ -256,6 +295,98 @@ fn the_message_names_the_buffer_and_the_geometry_it_priced() {
         wrong.is_empty(),
         "the refusal message must say what was priced and how (issue #686):\n  {}",
         wrong.join("\n  ")
+    );
+}
+
+/// Issue #686. And the typed fields carry what the five per-format variants
+/// carried, so nothing a caller could read is lost in the merge.
+///
+/// The sibling above asserts the same thing through `Display`, and it is the
+/// one that could be written before the fix; this is the half that needs the
+/// `geometry` field to exist.
+///
+/// The GIF row is the one worth reading: it declares three bands in the file
+/// and prices four, because the canvas the decoder allocates is RGBA whatever
+/// the palette holds. The reported band count is the one that was **priced**,
+/// which is the only one that explains the number next to it.
+#[test]
+fn the_shape_carries_the_geometry_and_the_label_as_typed_fields() {
+    for row in priced_by_libviprs() {
+        let err = refuse(&row);
+        let SourceError::AllocLimitExceeded {
+            what,
+            geometry,
+            needed_bytes,
+            max_alloc_bytes,
+        } = err
+        else {
+            panic!("{}: not the shared shape: {err:?}", row.format);
+        };
+        let g = geometry.unwrap_or_else(|| {
+            panic!(
+                "{}: a decoder that priced a declared geometry must report it",
+                row.format
+            )
+        });
+        assert_eq!(
+            (g.width, g.height, g.bands),
+            row.priced_geometry,
+            "{} reports a geometry that is not the one it priced",
+            row.format
+        );
+        assert_eq!(
+            u64::from(g.width) * u64::from(g.height) * u64::from(g.bands) * row.sample_bytes,
+            needed_bytes,
+            "{}: the reported geometry must be the one the price came from",
+            row.format
+        );
+        assert_eq!(needed_bytes, row.price, "{} price", row.format);
+        assert_eq!(
+            max_alloc_bytes,
+            row.price - 1,
+            "{} must report the ceiling in force",
+            row.format
+        );
+        assert_eq!(what, row.what, "{} label", row.format);
+        assert!(
+            format!("{err}").contains(what),
+            "{}: the label must reach the message a caller prints",
+            row.format
+        );
+    }
+}
+
+/// Issue #686. And one call catches every shape the budget can refuse in, so
+/// a caller does not have to know the split at all.
+#[test]
+fn is_alloc_limit_catches_every_shape_the_budget_refuses_in() {
+    for row in priced_by_libviprs()
+        .iter()
+        .chain(&priced_by_the_image_crate())
+    {
+        let err = refuse(row);
+        assert!(
+            err.is_alloc_limit(),
+            "{}: is_alloc_limit must answer for every container: {err:?}",
+            row.format
+        );
+    }
+
+    // And it does not answer for the ceilings that are not this one. Both of
+    // these are refusals a caller fixes by raising a *different* knob, so a
+    // predicate that swept them in would be worse than the seven match arms.
+    let big = rgb8(4).encode_png(6).expect("png fixture");
+    let by_pixels = decode_bytes_with_limits(&big, DecodeLimits::default().with_max_pixels(1))
+        .expect_err("one pixel is not a 4x4 image");
+    assert!(
+        !by_pixels.is_alloc_limit(),
+        "the pixel ceiling is a different knob: {by_pixels:?}"
+    );
+    let by_coord = decode_bytes_with_limits(&big, DecodeLimits::default().with_max_coord(1))
+        .expect_err("one pixel wide is not a 4x4 image");
+    assert!(
+        !by_coord.is_alloc_limit(),
+        "the coordinate ceiling is a different knob: {by_coord:?}"
     );
 }
 

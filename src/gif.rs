@@ -116,7 +116,7 @@
 use crate::codec::EncodeError;
 use crate::imageio::{MetadataValue, SaveError};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, buffer_len, decode_alloc_bytes};
+use crate::raster::{Raster, buffer_len};
 use crate::source::{DecodeLimits, SourceError};
 use std::io::Cursor;
 use std::path::Path;
@@ -179,25 +179,6 @@ pub enum GifError {
     /// (`nsgifload.c:419-421`).
     #[error("gif: no frames in GIF")]
     NoFrames,
-    /// Decoding the declared geometry would allocate more than
-    /// [`DecodeLimits::max_alloc_bytes`].
-    ///
-    /// A GIF is LZW-compressed, so a small file can declare a very large
-    /// logical screen; this is the budget that bounds it.
-    #[error(
-        "gif: decoding {width}x{height} needs {needed} bytes, above the \
-         {max_alloc_bytes}-byte decode allocation budget"
-    )]
-    AllocLimitExceeded {
-        /// The declared logical screen width.
-        width: u32,
-        /// The declared logical screen height.
-        height: u32,
-        /// Bytes the decoded raster would occupy.
-        needed: u64,
-        /// The budget from [`DecodeLimits::max_alloc_bytes`].
-        max_alloc_bytes: u64,
-    },
     /// The raster could not be built from the decoded pixels.
     #[error(transparent)]
     Raster(#[from] crate::raster::RasterError),
@@ -276,7 +257,7 @@ struct FileScan {
 ///
 /// * [`SourceError::Gif`] wrapping [`GifError::Decode`] for bytes that are
 ///   not a GIF or that are malformed, [`GifError::NoFrames`] for a file with
-///   no frames, or [`GifError::AllocLimitExceeded`] when the declared
+///   no frames, or [`SourceError::AllocLimitExceeded`] when the declared
 ///   geometry is over [`DecodeLimits::max_alloc_bytes`].
 /// * [`SourceError::CoordLimitExceeded`] when either axis exceeds
 ///   [`DecodeLimits::max_coord`].
@@ -299,20 +280,14 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // a `u64` will not hold; nothing in the expression said so, and the
     // three codecs that copied the shape do not have that guarantee.
     // `decode_alloc_bytes` saturates, so the guarantee is no longer load
-    // bearing. The typed variant is this module's own, built from
-    // `exceeds_alloc_budget`'s answer rather than retagged off a
-    // `SourceError` whose `what` label no caller could ever see; #632
-    // deferred collapsing the per-format variants and #686 carries it.
-    let needed = decode_alloc_bytes(width, height, bands as u64, 1);
-    if limits.exceeds_alloc_budget(needed) {
-        return Err(GifError::AllocLimitExceeded {
-            width,
-            height,
-            needed,
-            max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+    // bearing. The price, the comparison and now the reporting are all the
+    // crate's: this used to build a `GifError::AllocLimitExceeded` of its
+    // own, one of five variants re-tagging the same refusal, which #686
+    // collapsed onto `SourceError::AllocLimitExceeded`.
+    //
+    // `bands` is the canvas the decoder allocates, four bands whatever the
+    // palette holds, so that is the band count the refusal reports.
+    limits.check_image_alloc("GIF canvas", width, height, bands as u32, 1)?;
 
     // The canvas starts fully transparent and stays that way outside the
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and
@@ -750,7 +725,7 @@ fn encode_error_from_gif(err: gif::EncodingError) -> EncodeError {
 mod tests {
     use super::*;
     use crate::pixel::PixelFormat;
-    use crate::source::{DecodeLimits, decode_bytes};
+    use crate::source::{DeclaredGeometry, DecodeLimits, decode_bytes};
 
     /// One frame of a hand-assembled GIF fixture.
     struct Frame {
@@ -1654,7 +1629,7 @@ mod tests {
      * Input: a 4x4 fixture decoded under a 1-pixel coordinate ceiling, then
      * under a 4-byte allocation budget -> Output:
      * `SourceError::CoordLimitExceeded` and
-     * `GifError::AllocLimitExceeded`, both before the raster is built.
+     * `SourceError::AllocLimitExceeded`, both before the raster is built.
      */
     #[test]
     fn the_decode_budget_is_checked_before_the_canvas_is_allocated() {
@@ -1668,8 +1643,8 @@ mod tests {
         }
         let starved = DecodeLimits::default().with_max_alloc_bytes(4);
         match decode_gif(&bytes, starved) {
-            Err(SourceError::Gif(GifError::AllocLimitExceeded { needed, .. })) => {
-                assert_eq!(needed, 4 * 4 * 3);
+            Err(SourceError::AllocLimitExceeded { needed_bytes, .. }) => {
+                assert_eq!(needed_bytes, 4 * 4 * 3);
             }
             other => panic!("expected AllocLimitExceeded, got {other:?}"),
         }
@@ -1698,12 +1673,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Gif(GifError::AllocLimitExceeded {
-                    width: 4,
-                    height: 4,
-                    needed: 48,
+                SourceError::AllocLimitExceeded {
+                    what: "GIF canvas",
+                    geometry: Some(DeclaredGeometry {
+                        width: 4,
+                        height: 4,
+                        bands: 3,
+                    }),
+                    needed_bytes: 48,
                     max_alloc_bytes: 47,
-                })
+                }
             ),
             "{err:?}"
         );

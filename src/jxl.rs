@@ -204,9 +204,9 @@ use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jxl")]
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError};
 #[cfg(feature = "jxl")]
-use crate::raster::{buffer_len, decode_alloc_bytes};
+use crate::raster::buffer_len;
+use crate::raster::{Raster, RasterError};
 use crate::source::{DecodeLimits, SourceError};
 
 /// The smallest width or height [`Raster::encode_jxl`] will encode.
@@ -355,36 +355,10 @@ pub enum JxlError {
         /// The channel count the rendered frame produced.
         rendered: u32,
     },
-    /// Decoding the declared geometry would allocate more than
-    /// [`DecodeLimits::max_alloc_bytes`].
-    ///
-    /// Priced from the header alone, before a byte of frame data is fed
-    /// in, which is the point of splitting the feed in two: a JPEG XL
-    /// header declares its geometry in a handful of bytes and the body is
-    /// entropy-coded, so the file is no guide to the frame's size. The
-    /// pixel ceiling does not imply this one, since a pixel count sees
-    /// neither the band count nor the sample depth: a 1-gigapixel
-    /// `max_pixels` still permits an 8 GiB `Rgba16` frame.
-    #[error(
-        "jxl: decoding {width}x{height}x{channels} needs {needed} bytes, above the \
-         {max_alloc_bytes}-byte decode allocation budget"
-    )]
-    AllocLimitExceeded {
-        /// The declared frame width.
-        width: u32,
-        /// The declared frame height.
-        height: u32,
-        /// The declared channel count, colour channels plus alpha.
-        channels: u32,
-        /// Bytes the decoded raster would need.
-        needed: u64,
-        /// The budget in force, [`DecodeLimits::max_alloc_bytes`].
-        max_alloc_bytes: u64,
-    },
     /// `jxl-oxide`'s own allocation tracker refused a request from inside
     /// the decoder.
     ///
-    /// Separate from [`JxlError::AllocLimitExceeded`] because it is a
+    /// Separate from [`SourceError::AllocLimitExceeded`] because it is a
     /// different check finding a different thing: that one prices the
     /// output frame from the header before the decoder has reserved
     /// anything, while this one is the `jxl_oxide::AllocTracker` handed to
@@ -494,7 +468,7 @@ pub struct SaveOptions {
 ///   [`JxlError::Truncated`] when the bytes simply run out, either before
 ///   the header is complete or before the first frame is.
 /// * [`JxlError::CmykNotSupported`] for a file with a black ink channel.
-/// * [`JxlError::AllocLimitExceeded`] when the frame the header declares
+/// * [`SourceError::AllocLimitExceeded`] when the frame the header declares
 ///   would exceed [`DecodeLimits::max_alloc_bytes`], and
 ///   [`JxlError::DecoderAllocLimitExceeded`] when `jxl-oxide`'s own
 ///   tracker refuses an internal buffer against the same budget.
@@ -583,25 +557,27 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // space, so no such decode was ever going to succeed either way: what
     // differs is which typed refusal the caller gets, and FITS and OpenEXR
     // answer the budget where this one answered the allocator.
-    // `decode_alloc_bytes` widens every multiplicand to `u64` first, which
-    // is the rule `raster::buffer_len` states and the reason it uses
-    // `checked_mul`.
-    let bytes_needed = decode_alloc_bytes(
+    // `check_image_alloc` widens every multiplicand to `u64` before
+    // multiplying, which is the rule `raster::buffer_len` states and the
+    // reason it uses `checked_mul`. The price, the comparison and now the
+    // reporting are all the crate's: this used to build a
+    // `JxlError::AllocLimitExceeded` of its own, one of five variants
+    // re-tagging the same refusal, which #686 collapsed onto
+    // `SourceError::AllocLimitExceeded`.
+    //
+    // `JxlError::DecoderAllocLimitExceeded` deliberately did **not** come
+    // along. It is a different ceiling finding a different thing: this one
+    // prices the output frame from the header before the decoder has
+    // reserved anything, that one is `jxl-oxide`'s own tracker refusing an
+    // internal buffer part-way through, at a size it does not report out. A
+    // file can trip either without tripping the other.
+    limits.check_image_alloc(
+        "JPEG XL frame buffer",
         width,
         height,
-        u64::from(bands),
-        format.bytes_per_channel() as u64,
-    );
-    if limits.exceeds_alloc_budget(bytes_needed) {
-        return Err(JxlError::AllocLimitExceeded {
-            width,
-            height,
-            channels: bands,
-            needed: bytes_needed,
-            max_alloc_bytes: limits.max_alloc_bytes,
-        }
-        .into());
-    }
+        bands,
+        format.bytes_per_channel() as u32,
+    )?;
     // `samples` sizes the frame buffer below, and clearing the budget
     // above is not what makes it safe to compute. `max_alloc_bytes` is a
     // `u64` a caller sets, so on a 32-bit target a 65536x65536x1 frame
@@ -1013,6 +989,8 @@ mod tests {
     // Named explicitly rather than taken from the glob: the parent's
     // import is behind the feature and `ramp_rgb` is not.
     use crate::pixel::PixelFormat;
+    #[cfg(feature = "jxl")]
+    use crate::source::DeclaredGeometry;
     #[cfg(feature = "jxl")]
     use crate::source::decode_bytes_with_limits;
 
@@ -1833,7 +1811,7 @@ mod tests {
      * unreachable code that no test would notice losing.
      * Input: a 512x512 `Rgb8` raster round-tripped through the encoder,
      * decoded under `max_alloc_bytes = 256 KiB` -> Output:
-     * `JxlError::AllocLimitExceeded` naming 512x512x3 and 786432 bytes
+     * `SourceError::AllocLimitExceeded` naming 512x512x3 and 786432 bytes
      * against the 262144-byte budget, and a clean decode once the budget
      * clears the frame.
      */
@@ -1849,13 +1827,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Jxl(JxlError::AllocLimitExceeded {
-                    width: 512,
-                    height: 512,
-                    channels: 3,
-                    needed: n,
+                SourceError::AllocLimitExceeded {
+                    what: "JPEG XL frame buffer",
+                    geometry: Some(DeclaredGeometry {
+                        width: 512,
+                        height: 512,
+                        bands: 3,
+                    }),
+                    needed_bytes: n,
                     max_alloc_bytes: 262_144,
-                }) if n == needed
+                } if n == needed
             ),
             "{err:?}"
         );
@@ -1902,13 +1883,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Jxl(JxlError::AllocLimitExceeded {
-                    width: 512,
-                    height: 512,
-                    channels: 3,
-                    needed: 786_432,
+                SourceError::AllocLimitExceeded {
+                    what: "JPEG XL frame buffer",
+                    geometry: Some(DeclaredGeometry {
+                        width: 512,
+                        height: 512,
+                        bands: 3,
+                    }),
+                    needed_bytes: 786_432,
                     max_alloc_bytes: 786_431,
-                })
+                }
             ),
             "{err:?}"
         );
@@ -1939,13 +1923,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceError::Jxl(JxlError::AllocLimitExceeded {
-                    width: 256,
-                    height: 256,
-                    channels: 3,
-                    needed: 393_216,
+                SourceError::AllocLimitExceeded {
+                    what: "JPEG XL frame buffer",
+                    geometry: Some(DeclaredGeometry {
+                        width: 256,
+                        height: 256,
+                        bands: 3,
+                    }),
+                    needed_bytes: 393_216,
                     max_alloc_bytes: 393_215,
-                })
+                }
             ),
             "{err:?}"
         );

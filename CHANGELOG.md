@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Catching "the decode allocation budget refused this file" takes one call
+  instead of seven match arms. `GifError::AllocLimitExceeded`,
+  `FitsError::AllocLimitExceeded`, `ExrError::AllocLimitExceeded`,
+  `RadianceError::AllocLimitExceeded` and `JxlError::AllocLimitExceeded` are
+  **gone**, collapsed onto `SourceError::AllocLimitExceeded`, which grows a
+  `geometry: Option<DeclaredGeometry>` field carrying the width, height and
+  band count the five used to carry separately (issue #686). There is a new
+  `SourceError::is_alloc_limit()` that answers for every shape the budget can
+  refuse in.
+
+  #632 put one price and one comparison behind every declared-geometry
+  decoder. That left five variants doing nothing but re-tagging a refusal
+  computed elsewhere, in two field vocabularies (`needed` against
+  `needed_bytes`, `channels` against `bands`), which is the cheapest they will
+  ever be to delete. They now all go through one
+  `DecodeLimits::check_image_alloc`, and so does the TIFF page reader, which
+  reported no geometry before and reports its page's now.
+
+  **Migration.** Match `SourceError::AllocLimitExceeded { .. }` where you
+  matched any of the five, or call `err.is_alloc_limit()` and stop matching.
+  Field renames are `needed` to `needed_bytes`, and `width` / `height` /
+  `bands` / `channels` move inside `geometry`. The `what` label says which
+  buffer was refused: `"GIF canvas"`, `"FITS pixel buffer"`,
+  `"OpenEXR sample buffers"`, `"Radiance pixel buffer"`,
+  `"JPEG XL frame buffer"`, `"TIFF page pixel buffer"`, `"image file body"`.
+
+  **Two things this does not do, both measured rather than assumed.** JPEG,
+  PNG, single-image TIFF and WebP still report
+  `SourceError::Decode(image::ImageError::Limits(..))`, because in all four the
+  refusal is the `image` crate's own budget spent inside its decoder, with no
+  libviprs price behind it and no declared geometry to attach. #686 called WebP
+  the one odd format on that shape; it is four, and WebP reaches it
+  deliberately so it refuses the same frames as its three siblings.
+  `JxlError::DecoderAllocLimitExceeded` also stays, because it is
+  `jxl-oxide`'s own tracker refusing an internal buffer at a size it does not
+  report out, and a file can trip either without tripping the other.
+  `is_alloc_limit` covers all three so a caller does not have to know the
+  split.
+
+  `geometry` is an `Option` rather than three flat fields because the
+  whole-file read prices a file's length on disk, which says nothing about the
+  geometry declared inside it. Reporting `0x0x0` there would have been a lie
+  in a field a caller reads.
+
 - `resize`, `shrink`, `reduce` and `affine` take the premultiply bracket's
   alpha ceiling from the raster's interpretation instead of from its storage
   depth, so a float raster tagged `ScRgb` brackets against `1.0` and one tagged

@@ -24,7 +24,6 @@ fn assert_gif_error_non_exhaustive(v: &GifError) {
     match v {
         GifError::Decode { .. } => {}
         GifError::NoFrames => {}
-        GifError::AllocLimitExceeded { .. } => {}
         GifError::Raster(_) => {}
         _ => {}
     }
@@ -42,7 +41,6 @@ fn assert_exr_error_non_exhaustive(v: &ExrError) {
         ExrError::NoChannels => {}
         ExrError::DimensionOutOfBounds { .. } => {}
         ExrError::TooManyChannels { .. } => {}
-        ExrError::AllocLimitExceeded { .. } => {}
         ExrError::PartMismatch { .. } => {}
         ExrError::ChannelSizeMismatch { .. } => {}
         ExrError::Raster(_) => {}
@@ -62,7 +60,6 @@ fn assert_fits_error_non_exhaustive(v: &FitsError) {
         FitsError::BadAxisCount { .. } => {}
         FitsError::HighDimensionNotEmpty { .. } => {}
         FitsError::DimensionOutOfBounds { .. } => {}
-        FitsError::AllocLimitExceeded { .. } => {}
         FitsError::TruncatedData { .. } => {}
         FitsError::UnsupportedBitpix { .. } => {}
         FitsError::UnsupportedCarrier { .. } => {}
@@ -88,7 +85,6 @@ fn assert_jxl_error_non_exhaustive(v: &JxlError) {
         JxlError::CmykNotSupported { .. } => {}
         JxlError::UnsupportedChannelCount { .. } => {}
         JxlError::ChannelCountMismatch { .. } => {}
-        JxlError::AllocLimitExceeded { .. } => {}
         JxlError::DecoderAllocLimitExceeded { .. } => {}
         JxlError::Raster(_) => {}
         _ => {}
@@ -103,7 +99,6 @@ fn assert_radiance_error_non_exhaustive(v: &RadianceError) {
         RadianceError::TruncatedHeader { .. } => {}
         RadianceError::BadResolution { .. } => {}
         RadianceError::DimensionOutOfBounds { .. } => {}
-        RadianceError::AllocLimitExceeded { .. } => {}
         RadianceError::ScanlineLengthMismatch { .. } => {}
         RadianceError::ScanlineOverrun { .. } => {}
         RadianceError::RunawayRepeat { .. } => {}

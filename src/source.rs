@@ -372,30 +372,43 @@ pub enum SourceError {
     /// page readers for both their own file body and the pixel buffer a
     /// page decodes into.
     ///
-    /// It is not the only shape the decode budget refuses a file in, so a
-    /// handler matching this variant alone catches one of seven. Five
-    /// formats price their frame against the same
-    /// [`DecodeLimits::max_alloc_bytes`] through the same shared
-    /// arithmetic and then report a variant of their own instead of this
-    /// one:
-    /// [`GifError::AllocLimitExceeded`](crate::gif::GifError::AllocLimitExceeded),
-    /// [`FitsError::AllocLimitExceeded`](crate::fits::FitsError::AllocLimitExceeded),
-    /// [`ExrError::AllocLimitExceeded`](crate::exr::ExrError::AllocLimitExceeded),
-    /// [`JxlError::AllocLimitExceeded`](crate::jxl::JxlError::AllocLimitExceeded)
-    /// and
-    /// [`RadianceError::AllocLimitExceeded`](crate::radiance::RadianceError::AllocLimitExceeded).
-    /// WebP is a seventh shape again: it prices off the decoder's own
-    /// output buffer size rather than a declared-geometry product, and
-    /// reports [`SourceError::Decode`] carrying an `image` `LimitError`.
-    /// Collapsing the six onto this variant is a breaking change to five
-    /// public enums, deferred out of issue #632 and carried by issue #686.
+    /// This is the shape **every decoder that prices a frame itself** uses.
+    /// GIF, FITS, OpenEXR, Radiance and JPEG XL each used to report an
+    /// `AllocLimitExceeded` of their own, five variants re-tagging a refusal
+    /// computed by the same shared arithmetic; they were collapsed onto this
+    /// one in issue #686, and [`geometry`](DeclaredGeometry) is what carries
+    /// the width, height and band count they used to carry individually.
+    ///
+    /// It is still not the only shape the budget can refuse a file in, and
+    /// the remainder is a real distinction rather than a leftover. JPEG,
+    /// PNG, single-image TIFF and WebP are refused by the `image` crate's own
+    /// budget from inside its decoder, and arrive as [`SourceError::Decode`]
+    /// carrying an `image` `LimitError`; there is no libviprs price behind
+    /// them and no declared geometry to report. JPEG XL can also trip
+    /// `jxl-oxide`'s internal allocation tracker, which reports
+    /// [`JxlError::DecoderAllocLimitExceeded`](crate::jxl::JxlError::DecoderAllocLimitExceeded)
+    /// because it is a different ceiling biting on a buffer whose size the
+    /// decoder does not report out.
+    ///
+    /// Use [`SourceError::is_alloc_limit`] to catch all three in one call
+    /// rather than matching them.
     #[error(
-        "{what} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
-         allocation ceiling; raise DecodeLimits::max_alloc_bytes"
+        "{what}{} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
+         allocation ceiling; raise DecodeLimits::max_alloc_bytes",
+        match geometry {
+            Some(g) => format!(" {}x{}x{}", g.width, g.height, g.bands),
+            None => String::new(),
+        }
     )]
     AllocLimitExceeded {
-        /// What the allocation was for, e.g. `"TIFF file body"`.
+        /// What the allocation was for, e.g. `"TIFF file body"` or
+        /// `"GIF canvas"`.
         what: &'static str,
+        /// The declared geometry the price was computed from, where the
+        /// refusal priced an image. `None` where it priced a byte count with
+        /// no image behind it, which is the whole-file read: a file's length
+        /// on disk says nothing about what geometry it declares inside.
+        geometry: Option<DeclaredGeometry>,
         /// The number of bytes that single buffer would have taken.
         needed_bytes: u64,
         /// The ceiling in force, [`DecodeLimits::max_alloc_bytes`].
@@ -414,6 +427,76 @@ pub enum SourceError {
         /// the whole point of the ceiling.
         max_pages: u32,
     },
+}
+
+impl SourceError {
+    /// Whether this is the decode allocation budget refusing the file.
+    ///
+    /// Answers in one call what issue #686 found took seven match arms. The
+    /// budget can bite in three places and they are genuinely different
+    /// checks, so they stay three variants and this is the predicate over
+    /// them:
+    ///
+    /// * [`SourceError::AllocLimitExceeded`], every decoder that prices a
+    ///   buffer against [`DecodeLimits::max_alloc_bytes`] itself;
+    /// * [`SourceError::Decode`] carrying an `image` `LimitError` of kind
+    ///   `InsufficientMemory`, which is the same ceiling spent inside the
+    ///   `image` crate's own decoder for JPEG, PNG, single-image TIFF and
+    ///   WebP;
+    /// * [`JxlError::DecoderAllocLimitExceeded`](crate::jxl::JxlError::DecoderAllocLimitExceeded),
+    ///   `jxl-oxide`'s internal allocation tracker refusing a buffer whose
+    ///   size it does not report out.
+    ///
+    /// Raising `max_alloc_bytes` is the response to all three, which is what
+    /// makes one predicate the right shape rather than a convenience over
+    /// unrelated things. It does **not** cover
+    /// [`SourceError::DimensionLimitExceeded`] or
+    /// [`SourceError::PageLimitExceeded`]: those are different ceilings with
+    /// different remedies.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use libviprs::SourceError;
+    /// fn is_too_big(err: &SourceError) -> bool {
+    ///     err.is_alloc_limit()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn is_alloc_limit(&self) -> bool {
+        match self {
+            SourceError::AllocLimitExceeded { .. } => true,
+            SourceError::Decode(image::ImageError::Limits(e)) => {
+                matches!(e.kind(), image::error::LimitErrorKind::InsufficientMemory)
+            }
+            #[cfg(feature = "jxl")]
+            SourceError::Jxl(crate::jxl::JxlError::DecoderAllocLimitExceeded { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
+/// The geometry a decoder priced a frame from, reported by
+/// [`SourceError::AllocLimitExceeded`].
+///
+/// Every declared-geometry decoder prices its frame as
+/// `width * height * bands * sample_bytes`, and these are the first three of
+/// those four. The sample size is not reported separately because the price
+/// already carries it and the three fields here are what a caller can compare
+/// against what they expected the file to hold.
+///
+/// The band count is the one the *header declares*, which is not always the
+/// band count of the raster a successful decode would have produced: GIF
+/// prices a four-band RGBA canvas whatever the file's palette holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredGeometry {
+    /// Declared width in pixels.
+    pub width: u32,
+    /// Declared height in pixels.
+    pub height: u32,
+    /// Declared band count.
+    pub bands: u32,
 }
 
 /// Resource limits applied to a single image decode.
@@ -674,13 +757,14 @@ impl DecodeLimits {
     }
 
     /// Enforce [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) on a
-    /// single buffer a decoder is about to reserve, named by `what`.
+    /// single buffer a decoder is about to reserve, named by `what`, where
+    /// the size is a byte count with no image behind it.
     ///
-    /// The label only reaches a caller through a decoder that propagates
-    /// this `SourceError` as it stands, which is the whole-file read and
-    /// the TIFF page readers. The five formats carrying their own
-    /// `AllocLimitExceeded` build their own message and so take
-    /// [`exceeds_alloc_budget`](Self::exceeds_alloc_budget) instead.
+    /// That is the whole-file read: a file's length on disk says nothing
+    /// about the geometry it declares inside, so the refusal carries no
+    /// geometry. A decoder pricing a frame from a declared width, height and
+    /// band count calls [`check_image_alloc`](Self::check_image_alloc)
+    /// instead, which is the same ceiling reported with those three attached.
     ///
     /// `check_pixels` cannot stand in for either: it counts pixels and so
     /// sees neither the band count nor the sample depth, and the default
@@ -696,11 +780,60 @@ impl DecodeLimits {
         if self.exceeds_alloc_budget(needed_bytes) {
             return Err(SourceError::AllocLimitExceeded {
                 what,
+                geometry: None,
                 needed_bytes,
                 max_alloc_bytes: self.max_alloc_bytes,
             });
         }
         Ok(())
+    }
+
+    /// Price a frame from the geometry a header declares and enforce
+    /// [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) on it, reporting
+    /// the geometry alongside the price.
+    ///
+    /// One call where every declared-geometry decoder used to spell out
+    /// [`decode_alloc_bytes`](crate::raster::decode_alloc_bytes), then
+    /// [`exceeds_alloc_budget`](Self::exceeds_alloc_budget), then a variant
+    /// of its own. #632 put the price and the comparison behind one
+    /// implementation each; this puts the reporting behind one too, which is
+    /// what stops the five drifting apart again (issue #686).
+    ///
+    /// `bands` and `sample_bytes` are separate arguments rather than one
+    /// bytes-per-pixel product because the message says the band count, and
+    /// because `decode_alloc_bytes` widens each multiplicand to `u64` before
+    /// multiplying and saturates rather than wrapping. Handing it a product
+    /// a caller already narrowed would give that up.
+    ///
+    /// Returns the price on success, since several callers size a buffer
+    /// from the same number straight afterwards.
+    pub(crate) fn check_image_alloc(
+        self,
+        what: &'static str,
+        width: u32,
+        height: u32,
+        bands: u32,
+        sample_bytes: u32,
+    ) -> Result<u64, SourceError> {
+        let needed_bytes = crate::raster::decode_alloc_bytes(
+            width,
+            height,
+            u64::from(bands),
+            u64::from(sample_bytes),
+        );
+        if self.exceeds_alloc_budget(needed_bytes) {
+            return Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry: Some(DeclaredGeometry {
+                    width,
+                    height,
+                    bands,
+                }),
+                needed_bytes,
+                max_alloc_bytes: self.max_alloc_bytes,
+            });
+        }
+        Ok(needed_bytes)
     }
 }
 
@@ -1390,6 +1523,7 @@ pub(crate) fn read_file_bounded(
     if read > cap {
         return Err(SourceError::AllocLimitExceeded {
             what,
+            geometry: None,
             needed_bytes: read,
             max_alloc_bytes: cap,
         });
@@ -1783,6 +1917,7 @@ mod tests {
             no_limit.check_alloc("saturated price", saturated),
             Err(SourceError::AllocLimitExceeded {
                 what: "saturated price",
+                geometry: None,
                 needed_bytes: u64::MAX,
                 max_alloc_bytes: u64::MAX,
             })
@@ -2710,10 +2845,15 @@ mod tests {
         match decode_file_with_limits(&sparse, limits) {
             Err(SourceError::AllocLimitExceeded {
                 what,
+                geometry,
                 needed_bytes,
                 max_alloc_bytes,
             }) => {
                 assert_eq!(what, "image file body");
+                assert_eq!(
+                    geometry, None,
+                    "a file length is not a geometry, so the refusal must not invent one"
+                );
                 assert_eq!(needed_bytes, apparent);
                 assert_eq!(max_alloc_bytes, 65_536);
             }
@@ -2753,6 +2893,7 @@ mod tests {
                 decode_file_with_limits(&path, one_short),
                 Err(SourceError::AllocLimitExceeded {
                     what: "image file body",
+                    geometry: None,
                     needed_bytes,
                     max_alloc_bytes,
                 }) if needed_bytes == n && max_alloc_bytes == n - 1
@@ -2823,10 +2964,12 @@ mod tests {
         match refused {
             Err(SourceError::AllocLimitExceeded {
                 what,
+                geometry,
                 needed_bytes,
                 max_alloc_bytes,
             }) => {
                 assert_eq!(what, "image file body");
+                assert_eq!(geometry, None, "a file length is not a geometry");
                 assert_eq!(
                     needed_bytes,
                     cap + 1,
