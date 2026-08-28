@@ -21,6 +21,7 @@
 //! | FITS | `SourceError::Fits(FitsError::AllocLimitExceeded)` |
 //! | OpenEXR | `SourceError::Exr(ExrError::AllocLimitExceeded)` |
 //! | JPEG XL | `SourceError::Jxl(JxlError::AllocLimitExceeded)` |
+//! | NIfTI | *did not exist yet; it joined self-priced in #510* |
 //!
 //! JPEG 2000 is not in that table because it did not exist when it was
 //! measured: it landed in #501 on the shared shape from its first commit, and
@@ -34,16 +35,30 @@
 //! geometry to report. WebP had both and threw them away to look like the
 //! other three, so it moves onto the shared shape and the three do not.
 //!
-//! And the `.v` reader never consults `max_alloc_bytes` at all, which is issue
-//! #710 and is why `.v` is the one container missing from the tables below.
+//! And the `.v` reader consulted `max_alloc_bytes` nowhere at all, which was
+//! the third correction and became issue #710. It does now, so `.v` has a row
+//! in the first table rather than a comment saying why it has none:
+//! `decode_vips_bytes` prices its pixel buffer from the declared header
+//! geometry through the same `DecodeLimits::check_image_alloc` as every other
+//! self-priced container.
+//!
+//! What was wrong there was the contract rather than the safety. `.v` is not a
+//! decompression-bomb vector: the reader refuses a header promising more pixel
+//! data than the file physically holds, so the allocation was already bounded
+//! by the input length. But a caller who set `max_alloc_bytes` did not get it
+//! on one container out of ten, and the two entry points disagreed about the
+//! same run of bytes: `decode_file_with_limits` refuses an over-budget `.v` at
+//! the bounded whole-file read, while `decode_bytes_with_limits` served it.
 //!
 //! # What this file holds
 //!
-//! The five formats where **libviprs itself** prices a declared geometry and
+//! The formats where **libviprs itself** prices a declared geometry and
 //! refuses it must all report one shape, `SourceError::AllocLimitExceeded`.
-//! The four where the `image` crate refuses keep reporting the `image` shape,
+//! The three where the `image` crate refuses keep reporting the `image` shape,
 //! and that is asserted here too so the split is a decision on the record
-//! rather than a gap.
+//! rather than a gap. Three, not four: WebP left that side in #686, and the
+//! prose here and in `SourceError::is_alloc_limit`'s doc went on saying four
+//! until #782.
 
 use libviprs::jxl::JxlError;
 use libviprs::source::{DecodeLimits, decode_bytes_with_limits};
@@ -83,6 +98,20 @@ fn tiff_bytes() -> Vec<u8> {
 /// The OpenEXR fixture the `exr` module's own budget tests use: 8x4, four
 /// half channels, so `decode_exr` prices it at `8 * 4 * 4 * 4` = 512 bytes.
 const EXR: &[u8] = include_bytes!("../oracle-captures/foreign-exr/fixtures/rgba_half_zip.exr");
+/// AVIF has no encoder in this crate (deliberately, see `libviprs::avif`), so
+/// its row is built from a committed fixture the way the OpenEXR row is
+/// rather than by encoding a raster.
+const AVIF: &[u8] = include_bytes!("../oracle-captures/foreign-avif/fixtures/rgb8.avif");
+
+/// The NIfTI fixture the `nifti` module's own budget tests use: a NIfTI-1
+/// header declaring `dim = [3, 2, 3, 1]` of `NIFTI_TYPE_UINT8`, so
+/// `decode_nifti` prices it at `2 * 3 * 1 * 1` = 6 bytes.
+///
+/// Included rather than encoded, because NIfTI is load-only here: there is no
+/// `Raster::encode_nifti` to build a fixture with, and there is no
+/// `vips niftisave` either (the pinned build has no NIfTI support at all,
+/// which is why the oracle for that module is `nifti_clib`).
+const NIFTI: &[u8] = include_bytes!("../oracle-captures/foreign-nifti/fixtures/dt2_uint8.nii");
 
 /// One container, the bytes to decode, and the price `decode_*` computes for
 /// its frame from the declared geometry.
@@ -118,6 +147,22 @@ struct Row {
 /// at a budget of 1.
 fn priced_by_libviprs() -> Vec<Row> {
     let mut rows = vec![
+        // libviprs's own container, and the last one to get the budget.
+        // `decode_vips_bytes` applied `max_coord` and `max_pixels` and then
+        // went straight to the pixel copy, so a 36-byte raster decoded clean
+        // under a 35-byte ceiling (issue #710). The price is the declared
+        // geometry's product, which is also exactly the byte range the reader
+        // copies out of the file, so the row's `price` holds those two
+        // spellings together from outside the crate.
+        Row {
+            format: "v",
+            bytes: rgb8(4).encode_vips().expect("v fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: ".v pixel buffer",
+            price: 48,
+        },
         Row {
             format: "gif",
             bytes: rgb8(4).encode_gif(Default::default()).expect("gif fixture"),
@@ -160,6 +205,19 @@ fn priced_by_libviprs() -> Vec<Row> {
             what: "OpenEXR sample buffers",
             price: 512,
         },
+        // NIfTI declares a whole volume in 348 bytes and then hands over a
+        // raw array, which is the decompression-bomb shape the budget
+        // exists for, so it prices the declared geometry before it reserves
+        // anything (issue #510).
+        Row {
+            format: "nifti",
+            bytes: NIFTI.to_vec(),
+            decoded: (2, 3),
+            priced_geometry: (2, 3, 1),
+            sample_bytes: 1,
+            what: "NIfTI voxel buffer",
+            price: 6,
+        },
         // WebP prices its own frame from `output_buffer_size` and its own
         // declared geometry, so it belongs here and not with the three the
         // `image` crate refuses. It used to fabricate an `image` `LimitError`
@@ -175,7 +233,38 @@ fn priced_by_libviprs() -> Vec<Row> {
             what: "WebP frame buffer",
             price: 48,
         },
+        // Ultra HDR is the only row here that prices **two** images: a
+        // container holds a base JPEG and a gain-map JPEG, and both go
+        // through `check_image_alloc` from their own SOF before either is
+        // decoded. The base is priced first, so this row's refusal is the
+        // base's; `uhdr_prices_the_gain_map_as_well_as_the_base` in
+        // `tests/uhdr_ported_surface.rs` is the one that pins the other
+        // half, with a budget that admits the base and refuses the gain
+        // map. Pricing only the base would let a 1x1 base smuggle in a
+        // 60000x60000 gain map (issue #508).
+        Row {
+            format: "uhdr",
+            bytes: libviprs::uhdr::smallest_container(),
+            decoded: (8, 8),
+            priced_geometry: (8, 8, 3),
+            sample_bytes: 1,
+            what: "Ultra HDR base image",
+            price: 192,
+        },
     ];
+    if cfg!(feature = "avif") {
+        rows.push(Row {
+            format: "avif",
+            bytes: AVIF.to_vec(),
+            decoded: (4, 3),
+            // Priced off the container's declared `ispe`, before any AV1 is
+            // decoded, which is the whole point for a compressed container.
+            priced_geometry: (4, 3, 3),
+            sample_bytes: 1,
+            what: "AVIF frame buffer",
+            price: 36,
+        });
+    }
     if cfg!(feature = "jxl") {
         rows.push(Row {
             format: "jxl",
@@ -277,33 +366,37 @@ fn refuse(row: &Row) -> SourceError {
 /// Neither half is sufficient alone: this one catches a row deleted here, that
 /// one catches a container added there.
 ///
-/// `.v` is the one container in neither table, deliberately, because it
-/// applies no allocation budget at all. That is issue #710 and the count below
-/// says so rather than leaving a reader to wonder whether it was forgotten.
+/// Every container has a row now. `.v` was the one in neither table, because
+/// it applied no allocation budget at all, and closing #710 is what let the
+/// exclusion term below be deleted rather than kept as a documented hole.
 #[test]
 fn the_two_tables_account_for_every_container() {
     let self_priced = priced_by_libviprs().len();
     let image_backed = priced_by_the_image_crate().len();
-    let excluded_no_budget_at_all = 1; // `.v`, issue #710
 
-    // JPEG XL and JPEG 2000 are only compiled in behind their features, so the
-    // self-priced table is shorter without either. Spelled out rather than
-    // hidden in a `cfg!` inside the sum, because a reader has to be able to
-    // check the arithmetic.
-    let jxl_absent = usize::from(!cfg!(feature = "jxl"));
-    let jp2k_absent = usize::from(!cfg!(feature = "jp2k"));
-    let expected_self_priced = 7 - jxl_absent - jp2k_absent;
+    // JPEG XL, AVIF and JPEG 2000 are each only compiled in behind their own
+    // feature, so the self-priced table is one shorter for each that is off.
+    // Spelled out rather than hidden in a `cfg!` inside the sum, because a
+    // reader has to be able to check the arithmetic. The 8 unconditional rows
+    // are gif, radiance, fits, openexr, webp, uhdr, .v and nifti.
+    let expected_self_priced = 8
+        + usize::from(cfg!(feature = "jxl"))
+        + usize::from(cfg!(feature = "avif"))
+        + usize::from(cfg!(feature = "jp2k"));
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
     );
     assert_eq!(image_backed, 3, "the image-backed table changed size");
 
+    let absent_features = usize::from(!cfg!(feature = "jxl"))
+        + usize::from(!cfg!(feature = "avif"))
+        + usize::from(!cfg!(feature = "jp2k"));
     assert_eq!(
-        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent + jp2k_absent,
-        11,
-        "the two tables plus the documented exclusion must account for all eleven \
-         containers libviprs sniffs; see SniffedFormat::ALL"
+        self_priced + image_backed + absent_features,
+        14,
+        "the two tables must account for all fourteen containers libviprs sniffs, \
+         with no exclusions left; see SniffedFormat::ALL"
     );
 }
 
@@ -527,18 +620,23 @@ fn is_alloc_limit_does_not_depend_on_the_jxl_feature() {
     );
 }
 
-/// Issue #686. The four formats the `image` crate refuses keep reporting the
+/// Issue #686. The three formats the `image` crate refuses keep reporting the
 /// `image` shape, and this is here so that is a decision rather than a gap.
 ///
-/// They are not a mechanical move. In all four the ceiling is spent inside
+/// They are not a mechanical move. In all three the ceiling is spent inside
 /// `image`'s own decoder through `Limits::reserve`, so there is no libviprs
-/// price to report and no declared geometry to attach; WebP reaches the same
-/// error deliberately, from its own pre-check, so that it refuses the same
-/// frames as its three siblings and says the same thing about them.
+/// price to report and no declared geometry to attach.
+///
+/// WebP was a fourth here until #686 moved it, and this doc went on saying so
+/// until #782. It still refuses the same *frames* as its three siblings, which
+/// is the part that was always true and is why the pre-check exists; what it no
+/// longer does is say the same *thing* about them, because it has a price and a
+/// declared geometry and reports both.
 ///
 /// This is what a caller still does about WebP, which #686 asks to be spelled
-/// out: exactly what they do about JPEG, PNG and TIFF, and
-/// [`SourceError::is_alloc_limit`] covers all four without them having to know.
+/// out: exactly what they do about JPEG, PNG and TIFF, because
+/// [`SourceError::is_alloc_limit`] covers all four shapes without them having
+/// to know which side of the split a container is on.
 #[test]
 fn the_image_backed_decoders_still_report_the_image_shape() {
     for row in priced_by_the_image_crate() {
@@ -553,4 +651,183 @@ fn the_image_backed_decoders_still_report_the_image_shape() {
             row.format
         );
     }
+}
+
+/// Issue #710. The `.v` budget prices the pixel body at the header's declared
+/// sample depth, which is neither the file's length nor one byte per sample.
+///
+/// The `.v` row in `priced_by_libviprs` cannot see either mistake, and that is
+/// why this exists rather than being folded into the table. Its fixture is
+/// `Rgb8`, so a price that assumed one byte per sample would be the same
+/// number; and a price taken from the whole slice would still refuse at
+/// `price - 1`, because the file is longer than the body it holds. `.v` is the
+/// only container in either table whose body is a plain copy out of a longer
+/// file, and the only one carrying 2- and 4-byte samples, so both mistakes are
+/// live here and nowhere else.
+///
+/// The second half is the one that says what the budget means: at the body's
+/// price exactly, a file three times that long decodes. `max_alloc_bytes`
+/// bounds what the decoder allocates, not what the caller handed it. That is
+/// the whole difference between `check_image_alloc` and the bounded whole-file
+/// read `decode_file_with_limits` does first.
+#[test]
+fn the_v_budget_prices_the_declared_body_and_not_the_file() {
+    // 4x3 Rgb16: 24 samples of two bytes, so the body is 72 bytes.
+    let data: Vec<u8> = (0..72u32).map(|v| v as u8).collect();
+    let raster = Raster::new(4, 3, PixelFormat::Rgb16, data).expect("rgb16 fixture");
+    let bytes = raster.encode_vips().expect("v fixture");
+    assert!(
+        bytes.len() > 72,
+        "the fixture has to be longer than its body for this test to say \
+         anything, and it is {} bytes",
+        bytes.len()
+    );
+
+    let err = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(71))
+        .expect_err("a 72-byte body must be refused under a 71-byte ceiling");
+    let SourceError::AllocLimitExceeded {
+        what,
+        geometry,
+        needed_bytes,
+        ..
+    } = err
+    else {
+        panic!("not the shared shape: {err:?}");
+    };
+    assert_eq!(what, ".v pixel buffer", "label");
+    assert_eq!(
+        needed_bytes, 72,
+        "the price is width * height * bands * the declared sample depth"
+    );
+    let g = geometry.expect("a decoder that priced a declared geometry must report it");
+    assert_eq!((g.width, g.height, g.bands), (4, 3, 3), "reported geometry");
+
+    let ok = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(72))
+        .expect("a 72-byte body must decode under a 72-byte ceiling");
+    assert_eq!((ok.width(), ok.height()), (4, 3));
+    assert_eq!(ok.format(), PixelFormat::Rgb16);
+}
+
+/// Issue #710. A `.v` band count with no `PixelFormat` is still a format
+/// error, not an allocation refusal, however tight the budget is.
+///
+/// This pins an ordering decision rather than a behaviour: the budget check
+/// sits after `PixelFormat::with_channels` in `decode_vips_bytes`, so a header
+/// declaring more bands than a `PixelFormat` can hold comes back the way it
+/// always did. Moving the check one line earlier answers `AllocLimitExceeded`
+/// for the same file, which is a worse answer, because raising
+/// `max_alloc_bytes` would not make the file readable.
+///
+/// It takes a budget of 1 to see at all. At the default ceiling a 4x4 raster
+/// of 70000 bands is 1.1 MB and neither order refuses it, so the two spellings
+/// are indistinguishable and this test would be green either way.
+#[test]
+fn an_unrepresentable_v_band_count_is_a_format_error_not_a_budget_one() {
+    let mut bytes = rgb8(4).encode_vips().expect("v fixture");
+    // Offset 12 is the band count, and 70000 is past `u16::MAX`, which is
+    // where `PixelFormat::with_channels` gives up.
+    bytes[12..16].copy_from_slice(&70_000i32.to_ne_bytes());
+
+    let err = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(1))
+        .expect_err("70000 bands is not a representable PixelFormat");
+    assert!(
+        matches!(err, SourceError::VipsFormat(ref m) if m.contains("70000")),
+        "an unrepresentable band count must stay a format error even under a \
+         budget that would also refuse it: {err:?}"
+    );
+
+    // The positive control: the same file under the same budget is genuinely
+    // over it, so the assertion above is about which check fires first and not
+    // about the file being fine.
+    let representable = rgb8(4).encode_vips().expect("v fixture");
+    let over = decode_bytes_with_limits(
+        &representable,
+        DecodeLimits::default().with_max_alloc_bytes(1),
+    )
+    .expect_err("48 bytes is over a 1-byte ceiling");
+    assert!(
+        over.is_alloc_limit(),
+        "the control must reach the budget: {over:?}"
+    );
+}
+
+/// `src/source.rs` as text, so a claim its docs make about *this* file's split
+/// can be checked from here.
+///
+/// `include_str!` rather than a read at runtime, deliberately: it costs nothing
+/// at run time, and a test that opened a path would need a
+/// `#[cfg_attr(miri, ignore)]` and a row in `tests/miri_fs_test_inventory.txt`,
+/// which is a shared count two lanes can move at once.
+const SOURCE_RS: &str = include_str!("../src/source.rs");
+
+/// Issue #782. WebP is not one of the containers the `image` crate refuses,
+/// and `SourceError::is_alloc_limit`'s own doc said it was.
+///
+/// #709 moved WebP off the `image` shape and onto
+/// `SourceError::AllocLimitExceeded`, and left three prose sites describing the
+/// world before the move. The public one is the bullet list a caller reads to
+/// decide what to match, which still listed WebP beside JPEG, PNG and TIFF.
+///
+/// Nothing caught it because nothing here pins what is **not** in the
+/// image-backed table. `the_two_tables_account_for_every_container` pins its
+/// size and `the_image_backed_decoders_still_report_the_image_shape` pins what
+/// its rows report, so a format moving out of it and leaving its description
+/// behind is invisible to both.
+///
+/// Measured on `ed958d5`: WebP refused at `price - 1` comes back as
+/// `AllocLimitExceeded { what: "WebP frame buffer", geometry: Some(4x4x3),
+/// needed_bytes: 48, max_alloc_bytes: 47 }`, and it cannot come back as
+/// anything else, because WebP is a `Native` row in the route table and the
+/// `image` crate never decodes one.
+#[test]
+fn the_image_shape_doc_names_exactly_the_containers_that_report_it() {
+    let bullet = SOURCE_RS
+        .split("`image` `LimitError` of kind")
+        .nth(1)
+        .expect("is_alloc_limit's doc has a bullet for the image LimitError shape")
+        .split(';')
+        .next()
+        .expect("that bullet ends at its semicolon");
+
+    for row in priced_by_the_image_crate() {
+        let named = row.format.to_uppercase();
+        assert!(
+            bullet.contains(&named),
+            "{named} reports the image shape but the is_alloc_limit doc does not \
+             name it: {bullet:?}"
+        );
+    }
+    assert!(
+        !bullet.contains("WebP"),
+        "WebP has priced its own frame and reported SourceError::AllocLimitExceeded \
+         since #686, so the is_alloc_limit doc must not list it among the containers \
+         the image crate refuses (issue #782): {bullet:?}"
+    );
+
+    // And the executable half, so the doc is not the only thing saying it.
+    assert!(
+        !priced_by_the_image_crate()
+            .iter()
+            .any(|r| r.format == "webp"),
+        "WebP left the image-backed table in #686"
+    );
+    let webp = priced_by_libviprs()
+        .into_iter()
+        .find(|r| r.format == "webp")
+        .expect("WebP is a self-priced row");
+    let err = refuse(&webp);
+    assert!(
+        !matches!(err, SourceError::Decode(image::ImageError::Limits(_))),
+        "WebP must not report the image crate's own refusal: {err:?}"
+    );
+    assert!(
+        matches!(
+            err,
+            SourceError::AllocLimitExceeded {
+                what: "WebP frame buffer",
+                ..
+            }
+        ),
+        "WebP prices its own frame and names it: {err:?}"
+    );
 }

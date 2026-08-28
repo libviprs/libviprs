@@ -986,7 +986,9 @@ DOC = {
 }
 
 with open(os.path.join(ROOT, "oracle.json"), "w") as f:
-    json.dump(DOC, f, indent=1, sort_keys=False)
+    # allow_nan=False so a non-finite measurement stops the capture here
+    # rather than writing a file nobody outside Python can parse (#682).
+    json.dump(DOC, f, indent=1, sort_keys=False, allow_nan=False)
     f.write("\n")
 with open(os.path.join(ROOT, "commands.sh"), "w") as f:
     f.write("\n".join(COMMANDS) + "\n")

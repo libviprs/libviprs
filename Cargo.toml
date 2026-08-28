@@ -308,6 +308,36 @@ rustfft = "6"
 # instead of silently rendering as nothing (issue #587 characterises how far
 # that lands from vips). The whole dependency sits behind the non-default
 # `svg` feature, so the +29 crates are opt-in.
+# Pure-Rust AV1 decoder (BSD-2-Clause), a port of dav1d, used by
+# `decode_avif` behind the `avif` feature. It is the only AV1 decoder that
+# clears CONTRIBUTING.md's dependency rule: `image`'s own AVIF decode feature
+# is `avif-native`, which is `dav1d-sys` and needs a libdav1d installed on the
+# machine (clause 2), and `libavif-sys` is the same shape. `image`'s `avif`
+# feature is encode-only and is not what this needs.
+#
+# `default-features = false` drops `asm`, which is what keeps this inside the
+# rule. With `asm` on, `build.rs` runs `nasm-rs` on x86_64, and `nasm` is an
+# assembler somebody has to install; with it off the whole `mod asm` in that
+# build script is `#[cfg(feature = "asm")]` and nothing native is compiled at
+# all. Measured, with a positive control: a debug build of this crate emits
+# zero `.o` and zero `.a` files under `target/debug/build/rav1d-*`, while
+# `blake3` in the same tree emits `blake3_neon.o` and `libblake3_neon.a`.
+# `cc` and `nasm-rs` are still unconditional build-dependencies of `rav1d` and
+# so are still lock entries; `cc` is free (CONTRIBUTING.md notes it is in
+# every graph on every target already) and `nasm-rs` is dormant, the same
+# shape as `pkg-config` under `packfile`.
+#
+# `bitdepth_8` and `bitdepth_16` have to be named explicitly. They are default
+# features, so `default-features = false` turns them BOTH off, and without
+# them `rav1d` compiles but can decode nothing. The 10- and 12-bit fixtures in
+# `oracle-captures/foreign-avif` are what need `bitdepth_16`.
+#
+# MSRV is fine: `rav1d` declares `rust-version = "1.79"`, well under this
+# crate's 1.97.
+rav1d = { version = "1.1", default-features = false, features = [
+	"bitdepth_8",
+	"bitdepth_16",
+] }
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -428,6 +458,28 @@ tracing = ["dep:tracing"]
 # with no `build.rs` C compile and no `-sys` crate, so enabling it does not put
 # a C toolchain in the build, but nobody who does not rasterise SVG should pay
 # for the compile.
+# Gates the AVIF still-image loader in [`crate::avif`] and the real body of
+# the AV1 decode inside `decode_avif`. With the feature off the entry point
+# still exists, still compiles and keeps its signature, and still runs the
+# container parse, the codec check and all three decode limits; only the AV1
+# decode itself is missing, and it reports that as a typed refusal the way
+# `crate::jxl` does without `jxl`.
+#
+# Non-default for the same reason as `svg` and `jxl` above, and it is the
+# cheapest of the three: +16 lock entries, measured, taking the lockfile from
+# 288 to 304 and the normal dependency graph of this crate from 119 to 134
+# (`cargo tree -p libviprs -e normal`). Compare +21 for `jxl` and +29 for
+# `svg`. Fifteen are `rav1d` and its runtime tree (`atomig`, `parking_lot`,
+# `strum`, `zerocopy` and their tails); the sixteenth is `nasm-rs`, a
+# build-dependency that never runs, see the note over `rav1d` above.
+#
+# Every one is pure Rust and none is a `-sys` crate, so enabling it does not
+# put a C toolchain or a system library in the build. It does put `rav1d` in
+# the `vendored_native` set of `tests/dependency_policy.rs`, because that
+# check is static (ships native source AND has a build script able to compile
+# it) and `rav1d` ships the dav1d assembly whether or not `asm` is on.
+# CONTRIBUTING.md clause 3 allows exactly that and lists it by name.
+avif = ["dep:rav1d"]
 svg = ["dep:resvg"]
 # Gates the JPEG XL loader and encoder in [`crate::jxl`]: the real bodies of
 # `decode_jxl`, `Raster::encode_jxl` and `Raster::save_jxl`, the `.jxl` row in
@@ -527,6 +579,7 @@ lopdf = { workspace = true }
 moxcms = { workspace = true }
 openjpeg2-pure = { workspace = true, optional = true }
 pdfium-render = { workspace = true, optional = true }
+rav1d = { workspace = true, optional = true }
 resvg = { workspace = true, optional = true }
 rustfft = { workspace = true }
 serde = { workspace = true }

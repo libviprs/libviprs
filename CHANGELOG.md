@@ -25,6 +25,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it never did anything either way.
 
 
+- `ConversionError::FloatFormatUnsupported` is renamed
+  `ConversionError::FloatUnsupported` (issue #730). Three of the crate's four
+  float-refusal variants already spelled it that way
+  (`RasterError::FloatUnsupported`, `ArithmeticError::FloatUnsupported`,
+  `ExtractError::FloatUnsupported`), and the odd one out meant a caller asking
+  "did this refuse a float raster" had to carry an exception in the one
+  `matches!` they wanted. The enum is `#[non_exhaustive]`, so a caller with a
+  wildcard arm is unaffected; a caller matching the variant by name renames it.
+
+  Four enums is not the thing being fixed: each module owning its error type is
+  what gives a single-family caller a tight surface. A predicate per enum, the
+  shape `SourceError::is_alloc_limit` took in #686, was considered and not
+  taken: that one composes because it collapses five variants of *one* enum onto
+  a question, where this is one variant of each of four, so it would be four
+  impls that still cannot be called through a single type without a trait. The
+  set is now written down in one place, `src/error.rs`'s `OpError` module doc,
+  next to the existing note on matching raster failures.
+
 - Catching "the decode allocation budget refused this file" takes one call
   instead of seven match arms. `GifError::AllocLimitExceeded`,
   `FitsError::AllocLimitExceeded`, `ExrError::AllocLimitExceeded`,
@@ -728,6 +746,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameter behind it (#768); and more than four bands is refused on the way
   out because the loader cannot read it back, though `jp2ksave` writes it
   (#769).
+
+- AVIF still-image load, behind a new non-default **`avif`** feature
+  (issue #605). Build with `--features avif` and `decode_avif` reads an AV1
+  keyframe out of an ISOBMFF container, with alpha from an `auxl`-linked
+  auxiliary item, at 8, 10 and 12 bits; `.avif` becomes a live row in the
+  content sniffer, matching `ftyp` + the major brand `avif` at offset 4.
+
+  **It is deliberately not `heifload` parity, and the module says so at its
+  own entry point.** `heifload` also reads HEVC, AVC and JPEG payloads and
+  `heifsave` writes HEVC by default, so this covers one of four inputs and
+  none of the default output. An HEVC payload is refused by name rather than
+  as a generic parse failure, because that is the wall issue #498 closed on
+  and it has not moved. There is no save side and none is deferred: no
+  pure-Rust AV1 encoder is worth shipping in a pyramiding engine.
+
+  Pixels match vips exactly rather than approximately, which almost nothing
+  else in the foreign-format roadmap can claim. AV1 decode is bit-exact by
+  specification, and the colour step that is *not* fixed by any specification
+  is pinned against `oracle-captures/foreign-avif` frame by frame. That step
+  turned out to need two implementations: libheif reaches 4:4:4 and 4:2:0
+  through different arithmetic, float with round-to-nearest for one and 8.8
+  fixed point for the other, and measured over 1024 pixels each way the wrong
+  one is wrong on 103 and 124 pixels respectively, always by exactly one.
+  Chroma is upsampled nearest-neighbour, deeper bit depths left-justify the
+  way `heifload` does, and a monochrome AVIF still returns three bands.
+  Colour encodings that nothing in the tree can measure, which is 4:2:2,
+  limited range, BT.709 and BT.601 above 8 bits, are refused rather than
+  approximated.
+
+  The decoder is `rav1d` (BSD-2-Clause), +16 lock entries, cheaper than `jxl`
+  at +21 and `svg` at +29. It is taken with `default-features = false` so its
+  `asm` feature stays off, which means no assembler is required and no native
+  code is compiled: a debug build emits zero object files under
+  `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
+  rather than taken from `avif-parse`, which is MPL-2.0.
+
+- **NIfTI (`.nii`) load** (issues #510, #641). `decode_nifti` reads both
+  versions of the single-file form, NIfTI-1 and NIfTI-2, in either byte order,
+  and `.nii` becomes a live row in the content sniffer, so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: the format is load-only here, the way Analyze and MAT are
+  load-only in libvips.
+
+  **The oracle is deliberately not libvips**, and that is measured rather than
+  assumed. The pinned `vips` 8.18.6 reports `NIfTI load/save with libnifti:
+  false` and registers neither `niftiload` nor `niftisave`, so a `.nii` handed
+  to it falls through the sniffing chain to `magickload`, which guesses TGA.
+  The reference is `nifti_clib` (`v3.0.1-91-g8f72d11`, the NIH implementation
+  and the library libvips itself would have linked), captured in
+  `oracle-captures/foreign-nifti/`, which re-measures the vips half on every
+  run so a build that gains libnifti announces itself.
+
+  What that buys is the *repair* rules, which are the part of this format a
+  spec reading gets wrong. Non-finite `FLOAT32` samples are rewritten to zero
+  before a caller sees them, so an infinity or a NaN stored in a file never
+  comes back. `vox_offset` is truncated toward zero and floored at the header
+  length, so `-8` and `100` both mean 348. `bitpix` is decoration and the
+  datatype alone fixes the sample width. `scl_slope` and `scl_inter` are
+  carried and never applied, because the scaling rule lives in FSL rather than
+  in the reference. Rank 0 is a one-voxel image, a non-positive `dim[1]` is
+  refused, and a zero extent on any higher axis is silently clamped to 1.
+
+  And one where the capture's own prose was wrong and its measurements were
+  right: on NIfTI-1 the byte order comes from `dim[0]`, not from the
+  `sizeof_hdr` sentinel, with the sentinel only as a fallback. A file with
+  only its four sentinel bytes swapped loads little-endian. That prose is
+  corrected in the capture (issue #752) and the correction is held against
+  this module by a test rather than by hope.
+
+  NIfTI is a volume format and `Raster` is two-dimensional, so the axes above
+  the second fold into the height, `dim[1]` wide by `dim[2] * .. * dim[rank]`
+  high. That is `analyzeload`'s measured rule for the sibling format rather
+  than an invention, it moves no bytes, and the collapsed axes stay readable
+  as `nifti-dim[N]` metadata beside every other header field.
+
+  Five datatypes have a carrier here (`UINT8`, `UINT16`, `FLOAT32`, `RGB24`,
+  `RGBA32`) and the rest are refused **by name** through
+  `NiftiError::UnsupportedCarrier`, naming the issue that would add the
+  carrier, exactly as `crate::fits` refuses a signed BITPIX. `INT16` is the
+  most common datatype in real NIfTI files and it is one of them: it needs
+  #516. Narrowing it into 8 bits would lose data silently, which is worse than
+  failing.
+
+  The allocation budget is the interesting part rather than a checkbox. 348
+  bytes can declare a 35-teravoxel volume in front of a 12-byte payload, so
+  the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved, and the
+  refusal is the shared `SourceError::AllocLimitExceeded` rather than a sixth
+  per-format variant.
+
+  No new dependency. The whole format is a fixed-offset header and a raw
+  array, so `crate::nifti` is field offsets, a byte-order flag and a copy
+  loop; a NIfTI crate would supply the free half and leave every measured
+  repair here anyway.
+
+- `PixelFormat::kind()` and the `SampleKind` enum it returns (`U8`, `U16`,
+  `F32`), plus `PixelFormat::with_kind()` alongside `with_channels()` (issue
+  #607). Reach for `kind()` whenever the question is how to *interpret* a
+  sample, and keep `bytes_per_channel()` for a stride or a buffer size.
+
+  Byte width has been standing in for sample kind throughout the crate, and it
+  cannot: four bytes means `f32` today and would mean `u32` under a uint
+  carrier (issue #517) or `i32` under the signed ones (issue #516). A `match`
+  keyed on the width needs a trailing `_` arm, and that arm reads a four-byte
+  integer as a float without a word from the compiler. `SampleKind` gives the
+  question one answer that a new carrier cannot slip past: every mapping off
+  it is a total match.
+
+  `SampleKind` also carries the per-kind constants the sample code used to
+  keep private copies of: `bytes()`, `is_float()`, `max_value()`,
+  `hist_bins()`, and `promote()`, which is the `vips__formatalike` order for
+  a two-image op whose inputs disagree. `max_value()` and `hist_bins()` are
+  `Option`, and `None` on `F32` is a statement rather than a gap: a float
+  carrier has no depth-implied ceiling and no value-indexed bin table.
+
+  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer name
+  a byte width at all: no `bytes_per_channel()`, and no `with_channels()`
+  either, since handing a width *back* to the constructor is the same
+  ambiguity in the other direction. Nothing they do changes; what changes is that
+  their sample readers and writers now fail to compile, rather than silently
+  misread, the day a carrier arrives. The other 22 modules still key on the
+  width and are tracked separately.
+
+  `SampleKind` lives at `libviprs::pixel::SampleKind`.
 
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
@@ -1793,6 +1935,207 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
+  containers whose allocation refusal is spent inside the `image` crate (issue
+  #782). It has not been one since #686: WebP is decoded by libviprs, prices its
+  own frame, and reports `SourceError::AllocLimitExceeded` with the declared
+  geometry attached. The predicate itself was right the whole time, so nothing a
+  caller wrote against it breaks; the bullet list beside it sent anyone matching
+  by shape to the wrong arm.
+
+  The list is pinned to the tables in `tests/decode_alloc_refusal_shape.rs` now.
+  Nothing held it before, because those tables pin their own size and what their
+  rows report, and neither of those sees a format moving out of one and leaving
+  its description behind.
+
+- **`profile`'s docs claimed its 16-bit saturating output matched "the libvips
+  `ushort` output". libvips emits `VIPS_FORMAT_INT`** (issue #759), measured on
+  8.18.6 for every one of the eight input formats. The word matters more than
+  it looks: `INT` is the *signed* 32-bit carrier, so `profile` is a payoff of
+  the signed carriers (issue #516), not of the uint one (issue #517).
+
+  Two neighbouring claims were under-specified in the same direction and are
+  corrected with the measured tables. `project` promotes to `UINT` for the
+  unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float ones,
+  so it needs both carrier families rather than just uint. The histogram
+  module's "libvips stores counts in 32-bit unsigned samples" swept in
+  `hist_find_indexed`, which emits `DOUBLE` for every input format and either
+  `combine` mode, and `hist_cum`, which follows its input across all four.
+
+  No value or format changes here: the saturation at `65535` stays until a
+  wider carrier lands. What changes is that the claims now have checks under
+  them. `profile` and `project` had no assertion on their output format
+  anywhere in the crate and `profile` had no saturation test at all, which is
+  how the wrong sentence survived. Six counter ops get a format pin and two
+  get a ceiling pin carrying the measured vips answer beside the libviprs one.
+
+- The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
+  body it copies out of the file, priced from the declared header geometry
+  through the same `DecodeLimits::check_image_alloc` every other self-priced
+  decoder uses (issue #710). It applied `max_coord` and `max_pixels` and then
+  nothing else, so a 36-byte raster decoded clean under a 35-byte ceiling and
+  `.v` was the one container out of ten where setting the budget bought a
+  caller nothing.
+
+  **`.v` was never a decompression-bomb vector**, and that is worth saying
+  because the obvious reading is wrong. The reader refuses a header promising
+  more pixel data than the file physically holds, so the allocation was already
+  bounded by the input length, and no crafted small file ever got past it. What
+  was missing was the contract, in two visible ways. `Raster::new`'s 8 GiB
+  construction budget was the only ceiling in force, fifteen times the 512 MiB
+  decode default. And the two decode entry points disagreed about the same run
+  of bytes: `decode_file_with_limits` spends the budget on the bounded
+  whole-file read, `decode_bytes_with_limits` has no file to spend it on.
+  Measured before the change:
+
+  ```text
+  bytes 4x4 budget=47 (price 48) -> Ok((4, 4))
+  file  4x4 budget=47 (price 48) -> Err(AllocLimitExceeded {
+      what: "image file body", needed_bytes: 112, max_alloc_bytes: 47 })
+  ```
+
+  **What changes for a caller.** Only `decode_bytes_with_limits` and
+  `decode_bytes`, and only on a `.v` whose pixel body is over the budget. The
+  file entry points cannot change: a `.v` file is always its 64-byte header
+  plus the body plus any trailer, so a budget under the body's price is under
+  the file's length too and the whole-file read refuses first. On the in-memory
+  path a `.v` body over `max_alloc_bytes` now comes back as
+  `SourceError::AllocLimitExceeded { what: ".v pixel buffer", .. }` with the
+  declared geometry attached, where it used to decode. At the 512 MiB default
+  that is a `.v` over half a gigabyte handed to the crate as bytes.
+
+- `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
+  now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster
+  with no alpha band (issue #704). `vips_interpolate_bicubic_interpolate` sends
+  that carrier to `bicubic_unsigned_int_tab`, which reads
+  `vips_bicubic_matrixi` (the Catmull-Rom coefficients truncated to 12-bit
+  fixed point) and accumulates as integers a row at a time, closing each row
+  and the column combine with `unsigned_fixed_round`. This module evaluated the coefficients in
+  `f64` at the grid offset #668 put them on, which is the last systematic
+  divergence on that path.
+
+  **This is deliberately less accurate, and that is the trade.** Against
+  Catmull-Rom evaluated at the true sub-pixel offset in exact rational
+  arithmetic, over 17814 interior samples of random `uchar` images, the mean
+  absolute error goes from 0.4371 LSB to 0.4798 and the worst case stays at
+  1 LSB. Some samples move the other way: vips is the closer of the two on
+  1355 of those 17814. The error both spellings already share from #668's
+  1/64 offset grid is 0.44 LSB, ten times the difference this makes.
+
+  What it buys is a gate that can see a regression. The bicubic allowance in
+  `affine_interpolators_match_libvips_oracle` goes from 30 bytes at delta 1 to
+  **zero**, joining `nohalo` and `lbb`, so a future 1-LSB drift on this path
+  goes red instead of landing inside a tolerance. That is the failure #668
+  itself documented: a false comment plus a tolerance wide enough to absorb it
+  is how a 2.3-magnitude divergence survived.
+
+  It is one carrier, not "the integer carriers". `USHORT` and `SHORT` take
+  `bicubic_unsigned_int32_tab`, which reads the `double` table, and an alpha
+  band routes through a premultiply into FLOAT first, so neither ever sees the
+  fixed point. Three tests pin those carriers so the new path cannot spread.
+
+- `affine`, `mapim` and `resize` are now byte-identical to
+  `vips affine --interpolate bicubic` on a **float** raster too, and on any
+  raster with an alpha band (issue #705). `bicubic_float<T>` sums each of the
+  four rows through `cubic_float<T>` and combines them through `cubic_float<T>`
+  again, and that helper returns `T`. Its arithmetic is `double` either way, so
+  with `T = float` all five sums are computed in `f64` and narrowed to `f32` on
+  the way out. This module accumulated in `f64` and narrowed once at the store.
+
+  The issue asked for the accumulation *order*, and that turned out to be a red
+  herring worth exactly zero bits: flat 16-term `f64` and row-then-column `f64`
+  are bit-identical, 0 of 1764 samples apart on a random 24x24, and both miss
+  the binary by the same 1.5259e-05 in the same 356 samples. Adding the per-row
+  narrowing takes that to 0 of 1764.
+
+  An alpha band comes along because `vips_affine_build` premultiplies into a
+  FLOAT image before it resamples, so an `Rgba16` raster takes the narrowing as
+  well. That is worth about 3 samples in 480 on real data, always on a rounding
+  boundary, and an `Rgba8` raster cannot see it at all because an 8-bit quantum
+  swallows an `f32` ulp whole.
+
+  Nothing else moves: the 16- and 32-bit integer carriers reach
+  `bicubic_float<double>`, which narrows nothing, and `BILINEAR_FLOAT`, `lbb`
+  and `nohalo` are one expression with a single narrowing at the store and were
+  already bit-exact.
+
+- Two more places where libvips quantises more coarsely than this module are
+  now measured, pinned and **kept** (issues #732 and #733), and the rule that
+  decided them, and that decided #704 the other way, is written into the module
+  docs. Against the exact answer in rational arithmetic, on real `affine`
+  output:
+
+  | | this module | libvips | libvips closer |
+  |---|---|---|---|
+  | #704 bicubic coefficients, `uchar` | 0.4371 LSB | 0.4798 LSB | 1355 of 17814 |
+  | #732 bicubic store, `ushort` | 0.0000 LSB | 0.4680 LSB | 0 of 1017 |
+  | #733 bilinear weights, `uchar` | 0.0000 LSB | 0.0252 LSB | 0 of 1113 |
+  | #733 bilinear weights, `ushort` | 0.0000 LSB | 6.2848 LSB | 0 of 1113 |
+
+  #704 was a coin toss taken for parity. These two are not: this module is
+  exact and libvips is not, on every sample. `bicubic_unsigned_int32_tab`
+  truncates its `double` store, a one-directional bias of -0.499 LSB that
+  darkens every resampled `ushort` image by half a level, and `BILINEAR_INT`
+  builds its four weights as 12-bit fixed point, worth up to 26 of 65535.
+
+  The pins are on a linear ramp, which both bilinear and Catmull-Rom reproduce
+  exactly, so the right answer is closed form and the tests do not have to
+  reimplement an interpolator to know it. Both directions are asserted, so the
+  divergence can neither grow nor quietly vanish.
+
+- `affine` and `mapim` convert the caller's `background` to the carrier once
+  before they resample, the way `vips_affine_build` runs `vips__vector_to_ink`
+  once before it embeds (issue #736). `vips_cast` clips and then truncates
+  toward zero on an integer carrier and narrows on a float one, so every tap
+  past the edge and every output pixel outside the transformed input is already
+  a carrier value in vips; this module carried the raw `f64` into both.
+
+  It was worth up to **75 of 255** on a byte carrier: `--background 400.9` is
+  ink 255 in vips and 400.9 in a `f64` convolution, and the difference survives
+  wherever the ink is weighted against real pixels. Measured over a 6x6
+  constant with five interpolators and three carriers, the whole table is now 0
+  differences except the two cells that belong to other issues (#732, #733) and
+  two float samples in a degenerate constant-ramp fixture that land exactly on
+  an `f32` rounding midpoint.
+
+  Callers passing an in-range integral background see no change. A fractional
+  one now truncates rather than rounding, and an out-of-range one clips, which
+  is what vips does and what the docs claimed the module already did.
+
+- The `resample` module docs said `Extend::White` diverges on an alpha raster
+  because `vips_affine` "premultiplies into a float image before it paints that
+  border", so `FILL_LINE(float, ...)` runs and the byte `memset` never does.
+  That is not what happens (issue #692). `vips_affine_build` embeds **before**
+  it premultiplies, so the ink is memset into the raster's own domain either
+  way. What moves the value is that the premultiply pair does not cancel on that
+  pixel: `vips_premultiply` takes a clipped alpha into its multiplier and
+  `vips_unpremultiply` takes the raw one into its reciprocal, so a border pixel
+  whose every band holds the same ink `E` comes back as `clip(E, 0, max_alpha)`.
+
+  **The divergence stays**, and that is now a decision with numbers behind it
+  rather than a to-do. The border follows whichever ceiling the premultiply
+  bracket uses, and this module's is the depth's on an unsigned carrier
+  (issue #664), so the two answers differ only where a tag's ceiling sits below
+  its carrier's depth: three cells out of eleven measured, all of them a 16-bit
+  raster wearing an 8-bit tag. Adopting vips' ceiling to close them costs the
+  whole image, not the border: `vips affine` on a constant-25000 `ushort` RGBA
+  tagged `srgb` returns **255 for every interior sample**, tagged `scrgb` it
+  returns 1, and with alpha 65535 a colour of 25000 comes back as 97. Clipping
+  only the border fill instead would fix the pure-ink pixel and leave every
+  blended one wrong, because the two premultiplied spaces are scaled
+  differently.
+
+  Both halves are pinned now: the agreeing cells so the divergence is bounded
+  to those three rather than assumed, and the interior round-trip so the price
+  of the other reading is a number.
+
+- `affine_interpolators_match_libvips_oracle` explained its 1-byte `bilinear`
+  allowance as "a single `.5` rounding tie". It is not: `SWITCH_INTERPOLATE`
+  sends `uchar` and `ushort` rasters to `BILINEAR_INT`, whose four weights are
+  12-bit fixed point as well. Modelling that reproduces the binary exactly and
+  modelling a tie does not. The comment now says so and issue #733 carries the
+  measurement.
+
 - `try_embed`, `try_gravity`, `try_insert` and `smartcrop`'s `Entropy` and
   `Attention` strategies return a new `ExtractError::FloatUnsupported` on a
   float raster instead of **panicking** out of a `Result` signature
@@ -1818,6 +2161,288 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depths, so a float `sub` under an unsigned `main` reaches the same sample
   copy. I found that by mutating the second check away and watching the tests
   stay green.
+
+- `Raster::extract` carries its input's metadata, and so do the pyramid
+  downscale and the padded-tile path, so every tile of an engine run keeps the
+  interpretation, the resolution, the orientation and the attached fields
+  (issue #740). `Raster::extract` is the crate's physical crop: `src/engine.rs`
+  and `src/streaming.rs` call it per tile and per strip, and
+  `Raster::extract_area` is built on it and was the only one of the two that
+  carried, since #690.
+
+  It is not cosmetic, and it is only visible on the float carriers. #664 makes
+  the premultiply bracket take its alpha ceiling from the interpretation on
+  float and from the storage depth on unsigned, so a float raster that lost its
+  tag brackets against 255 rather than 1.0. A 32x32 `RgbaF32` tagged `ScRgb`,
+  cropped 16x16 through each method and then `resize(0.5)`, differs in **98 of
+  1024 bytes**, and an explicitly `Srgb`-retagged copy of the same pixels
+  differs by exactly the same 98, so the loss is precisely equivalent to a
+  retag. The same fixture as `Rgba8` differs in **0 of 256**, which is the trap:
+  measuring this on the obvious 8-bit carrier reports no effect.
+
+  Three more sites had to carry for the engine to keep it end to end:
+  `resize::downscale_half` and `downscale_to`, which build every pyramid level
+  below the first, and the three padded-tile constructions in
+  `engine::extract_tile`, which build a tile from a fresh background buffer.
+  Without those, only the top two levels of a pyramid carried anything. vips
+  agrees: `shrink`, `reduce` and `resize` all hand the whole block on, and none
+  of them rescales the resolution with the pixel grid.
+
+  **A correction to the issue.** It says a pyramid of a *float* scRGB source
+  through the region entry point would not match a whole-image one. That is not
+  reachable: the engine refuses a float source outright with
+  `RasterError::FloatUnsupported { op: "downscale_half" }`, so the pixel
+  divergence above is a public-API consequence and not a pyramid one. What the
+  pyramid lost was the metadata, on every tile.
+
+  The origin offset is **carried** here, not stamped. `extract_area` still
+  stamps `(-left, -top)` to match `vips_extract_area` (#690), and `extract` is
+  not that operation: it is the physical crop, vips has no method it
+  corresponds to, and a pyramid tile is not a crop of a larger image in the
+  sense `Xoffset` means. Stamping there would have put a non-zero origin into
+  every tile header on an analogy rather than a measurement.
+
+  The cost is one bounded copy of the attached fields per crop, per downscale
+  and per padded tile, which for an ICC profile is a real allocation that was
+  not there before. Measured across four image sizes, it is **O(tiles), not
+  O(pixels)**: 3.22 profile copies per tile at 32x32 falling to 2.04 at
+  256x256, while the pixel count grows 64x. At a realistic 256px tile a
+  1024x1024 run makes 78 copies of a 3144-byte profile, about 4% of the bytes of
+  a single tile buffer.
+
+- `Raster::try_join`'s float guard and its documentation say what they are for
+  (issue #730). The comment claimed the placement path underneath panics on
+  4-byte samples, which stopped being true when #694 moved that guard into
+  `try_insert`. The guard stays, because without it a float input surfaces as
+  `ConversionError::Extract(ExtractError::FloatUnsupported { op: "insert" })`,
+  naming an operation the caller did not call; with it they get
+  `ConversionError::FloatUnsupported { op: "join" }`. It runs before the
+  delegation, so `try_insert`'s refusal is unreachable from `join`.
+
+  `try_join`'s rustdoc lists the variants delegated from `try_insert`, including
+  ones that are not reachable, because "a `#[non_exhaustive]` match should expect
+  them". `ExtractError::FloatUnsupported` was missing from that list by the
+  module's own rule, and is now in it.
+
+  `try_arrayjoin`'s guard is **not** the same animal, and its comment used to say
+  it was: `arrayjoin` blits its cells with `read_flat` / `write_flat` itself
+  rather than delegating, so nothing underneath it would catch a float and
+  removing that guard restores a panic rather than changing an error type.
+
+- An attached ICC profile is dropped when the interpretation is retagged to a
+  space it cannot describe, matching vips (issue #720). `try_colourspace(Bw)`
+  used to hand back a one-band grey raster with a three-channel RGB profile
+  still attached, and the next `icc_transform` read that profile as if it
+  described the samples.
+
+  Measured against the pinned vips 8.18.6 on three **real** profiles, sRGB
+  (3144 bytes), Generic Gray (2020) and Generic CMYK (55280), against every
+  interpretation. The rule is the band count the new tag implies versus the
+  profile's own colour space: `b-w` and `grey16` imply one, `cmyk` four, and
+  everything else three. Swapping the profile swaps which targets lose it,
+  which is what makes it a rule rather than a list of unlucky interpretations.
+
+  It reads the **tag** and not the image. `vips bandmean` and
+  `vips extract_band 0` both take a three-band `scrgb` raster to one band,
+  leave the tag alone, and keep the three-channel profile, so an
+  implementation comparing the profile against `format().channels()` would be
+  wrong.
+
+  Setting the interpretation through `Raster::set_field` still keeps the
+  profile, and that split is vips's rather than a gap:
+  `vipsedit --interpretation b-w` keeps it and `vips copy --interpretation b-w`
+  drops it. A header write describes what the file already holds, so
+  revalidating there would drop a profile the file legitimately carries; the
+  decoders assign the tag directly for the same reason.
+
+  A profile this build cannot read is kept: the colour space lives at bytes
+  16..20 of the ICC header, and a blob too short to hold one, or carrying a
+  signature this build does not know, has no verdict. Dropping an attachment
+  because the parser could not reach one is worse than keeping one that may
+  not apply, and it is the same call `imageio` makes for `.v` trailer values it
+  cannot interpret (#565).
+
+  `invfft`, `invfft_real` and `freqmult` still drop the profile through an
+  explicit call rather than through the general rule, and that is now written
+  down with its reason: libviprs tags them `None` where vips tags them `B_W`,
+  so the rule looks at `Multiband` (three channels) and keeps what vips drops.
+
+- The operations that reposition an image stamp the origin offset instead of
+  carrying the input's, matching vips (issue #721). `fliphor`, `flipver`,
+  `rot`, `wrap`, `autorot`, `conv`, `convsep`, `compass`, `gaussblur`, `sobel`,
+  `scharr`, `prewitt` and `canny` all reported the input's `xoffset` / `yoffset`
+  where vips reports a value derived from the transform. `Raster::xoffset` and
+  `Raster::yoffset` are public and both go into the `.v` header, so a pipeline
+  that flipped and saved recorded an origin saying the image was where it had
+  been before the flip.
+
+  #706 found the first instance of this split in the other direction, where
+  `extract_area` and `crop` stamp `(-left, -top)` and the six other extract ops
+  carry.
+
+  Measured against the pinned vips 8.18.6 at three image shapes per operation,
+  and for the convolving ones at nine mask shapes as well:
+
+  | op | rule |
+  |---|---|
+  | `fliphor` | `(width, 0)` |
+  | `flipver` | `(0, height)` |
+  | `rot` D90 / D180 / D270 | `(out width, 0)` / `(width, height)` / `(0, out height)` |
+  | `wrap` | `(w - w/2, h - h/2)` |
+  | `conv` | `(-(mask width / 2), -(mask height / 2))` |
+  | `convsep`, `compass`, `gaussblur` | the same rule, inherited |
+  | `sobel`, `scharr`, `prewitt` | `(-1, -1)` from the 3x3 gradient mask |
+  | `canny` | `(-1, -1)` from the 2x2 gradient mask, at every sigma |
+  | `autorot` | whichever transform it finishes on |
+
+  None of them reads the input's offsets: the same sweep from a source at
+  `0 / 0` gives byte-identical numbers, and `rot45` at all seven angles, `grid`,
+  `cast`, `gamma`, `join`, `arrayjoin`, `fwfft`, `colourspace`, `composite2`,
+  `spcor`, `fastcor` and every op in `src/bands.rs` still hand the input's
+  offsets straight back through the same `.v` writer. That last list is the
+  positive control, and it is a test rather than a remark.
+
+  **`convsep` is the cell that says what the rule is.** A 3-wide, 1-tall mask
+  stamps `0 / -1`, not the `-1 / 0` the mask itself implies, because `convsep`
+  finishes on the mask's 90-degree rotation. So there is one rule, `conv`'s, and
+  `convsep`, `compass` and `gaussblur` inherit it by composition rather than
+  each carrying a copy. `canny` is the counterexample that keeps that honest:
+  its offset follows its 2x2 gradient and not its blur, so at sigma 3 it reports
+  `-1 / -1` where `gaussblur` alone reports `0 / -5`.
+
+  **`autorot` at orientation 4 is the one cell composition gets wrong.**
+  `vips_autorot` reaches it as a 180-degree rotation followed by a horizontal
+  flip and stamps the flip's `(width, 0)`; libviprs does the same pixels in one
+  vertical flip, whose own rule is `(0, height)`. The offset is corrected there
+  rather than paying for a second pass over the image to make the composition
+  match.
+
+- Every operation in `src/bands.rs` carries the input's metadata onto its
+  result: `bandjoin`, `bandjoin_const`, `bandjoin_vec`, `bandfold`,
+  `bandunfold`, `bandmean`, `bandrank`, `bandand`, `bandor`, `bandeor`,
+  `extract_band` and `extract_bands` all used to finish on a bare
+  `Raster::new` and hand back `RasterMeta::default()` with an empty field map
+  (issue #727). That is the last module in the crate with the defect, after
+  #717 and #719.
+
+  Measured against the pinned vips 8.18.6 from an 8x8 `rgb` source carrying
+  `xres 5`, `yres 7`, `xoffset 11`, `yoffset 13`, `orientation 6`, an attached
+  string and a real 3144-byte sRGB ICC profile. All twelve calls report the
+  whole lot back.
+
+  Two cells needed measuring rather than assuming. `bandfold` and `bandunfold`
+  reshape the pixel grid and do **not** rescale the resolution: 8x8 3-band
+  folds to 1x8 24-band and still reports `xres 5 yres 7`, and unfolds to 24x8
+  1-band reporting the same, which is the shape `zoom` and `subsample` had in
+  #690. And nothing in this module stamps the origin offset, so all twelve
+  report `11 / 13` straight through, unlike `flip`, `rot`, `wrap` and the
+  convolving ops (#721).
+
+  `bandjoin` and `bandrank` take more than one input and follow the union rule
+  #718 established: the header block comes from the first input alone and the
+  attached fields are the union of every input, the first winning a name they
+  share. `bandjoin` is measured both ways round, and reversing the arguments
+  flips the header block and the shared name while the ICC profile still
+  crosses from whichever input has one. `bandrank` is measured over three
+  sources, so the union is not a two-way merge in disguise.
+
+- `conv`, `convsep`, `compass`, `gaussblur`, `spcor` and `fastcor` carry the
+  input's metadata onto their results, where all six used to hand back a raster
+  built from `RasterMeta::default()` and an empty field map (issue #719). They
+  lost the interpretation, the resolution, the offsets and the orientation as
+  well as every attachment, which is a step worse than the sites #717 fixed.
+  `try_sobel` named the six in a comment and nothing tracked it.
+
+  Measured against the pinned vips 8.18.6 from an 8x8 `rgb` source carrying
+  `xres 5`, `yres 7`, `orientation 6`, an attached string and a real 3144-byte
+  sRGB ICC profile: `conv` at 3x3 and 5x5, `convsep` at 1x3, `compass` at 3x3
+  and `gaussblur` at sigma 1 and 3 all report the tag, the resolution, the
+  orientation, the string and the 3144 bytes back. `spcor` and `fastcor` want a
+  one-band input, so those two were measured on a `b-w` source carrying a real
+  2020-byte grey profile and hand all of it on as well. The profile has to match
+  the tag there, because a three-channel profile under a `b-w` tag is removed by
+  a rule about the retag rather than about these ops (issue #720).
+
+  `sharpen` is **not** one of the six and does not change here. It blurs through
+  `convsep` on a LabS intermediate, so it looks like it should inherit this, but
+  its output metadata comes from the `colourspace` on the way back, which issue
+  #717 already carries. I had that the wrong way round until the mutation sweep
+  said so, and there is a test that says which change it belongs to.
+
+  The origin offsets are **not** fixed by this. `conv`, `convsep`, `compass` and
+  `gaussblur` stamp a mask-relative origin (`-1 / -1` for a 3x3, `-2 / -2` for a
+  5x5, `0 / -1` for a separable 1x3) that does not depend on the input's at all,
+  and now that they carry, they carry the input's instead of stamping. That is
+  issue #721, it is the same shape `flip`, `rot` and `wrap` have, and the test
+  deliberately asserts nothing about the offsets so it does not pin behaviour
+  this change leaves wrong.
+
+- Every operation that builds a fresh raster carries its input's metadata onto
+  it, not just the header block: the interpretation, the resolution, the
+  offsets and the orientation as before, and now the ICC profile, the EXIF blob
+  and every attached field with them (issue #717). `cast`, `gamma`,
+  `falsecolour`, `addalpha`, `arrayjoin`, `join`, `fliphor`, `flipver`, `rot`,
+  `rot45`, `grid`, `wrap`, `fwfft`, `invfft`, `invfft_real` and `freqmult` all
+  used to copy `RasterMeta` and leave the field map behind, so a profile that
+  survived a load went missing the moment you cast the depth.
+
+  There were eighteen open-coded carries in `src/`, eleven of which wrote only
+  the first of the two lines. They now go through one `Raster::carry_meta_from`,
+  and #690's private `carry_extract_meta` folds into it. The name takes
+  `&mut self` (`out.carry_meta_from(src)`) because it reads in the direction the
+  data moves and works on a result a helper already built, where a returning
+  form puts the construction inside the carry's own argument list.
+
+  Measured against the pinned vips 8.18.6 across nineteen operations, from an
+  8x8 `rgb` source carrying `xres 5`, `yres 7`, `xoffset 11`, `yoffset 13`,
+  `orientation 6`, a `VipsRefString` and a real 3144-byte sRGB ICC profile. The
+  tag is `rgb` rather than `scrgb` on purpose: `vips gamma` on an `scrgb` or
+  `rgb16` source hands back `srgb` because it retags off the output's sample
+  format, and pinning the carry against a source that trips an unrelated retag
+  rule would measure the wrong thing.
+
+  Two cells are not a wholesale carry.
+
+  `invfft`, `invfft --real` and `freqmult` **drop the ICC profile** and keep
+  every other attachment. It is the profile specifically rather than blobs in
+  general: a second plain 48-byte `VipsBlob` attached alongside survives all
+  three. The cause is the retag those three do, not the transform:
+  `vips copy in.v out.v --interpretation b-w` removes the same profile, and
+  sweeping every interpretation shows the rule is a band-count match against
+  the profile's own colour space (a 3-channel profile is removed by `b-w`,
+  `grey16` and `cmyk` and kept by the rest; a 1-channel one is kept by `b-w`
+  and `grey16` and removed by `srgb` and `cmyk`). The general rule is issue
+  #720; these three measured cells are handled where they happen.
+
+  `new_from_image` carries the header block **without** the fields, which is
+  what its doc already claimed and is now measured rather than asserted. There
+  is no CLI for `vips_image_new_from_image`, so I called it against the same
+  8.18.6 through `ctypes` on `libvips.42.dylib`. It also drops the
+  **orientation**, which libviprs was carrying: vips holds orientation as an
+  attached field, libviprs holds it in `RasterMeta`, so it used to ride along
+  with the header block and a constant image arrived claiming the source's
+  rotation.
+
+- `Raster::try_insert` carries the metadata, where it used to hand back a
+  raster with none of it, and `join` and `arrayjoin` take the same rule (issue
+  #718). It was written down as a known gap in `src/extract.rs`'s module doc
+  and in this file, and tracked by nothing.
+
+  Two rules, both measured on vips 8.18.6 from two sources chosen to disagree
+  on every field. The header block comes from `main` alone: an scRGB `sub`
+  under an sRGB `main` reports sRGB, and the resolution, the offsets and the
+  orientation are all `main`'s. The attached fields are the **union** of both,
+  with `main` winning a name they share, so a profile only `sub` carries still
+  reaches the output. I ran it in both directions rather than reading one cell.
+
+  `vips join`, `vips arrayjoin` and `vips bandjoin` follow the same rule, so
+  `join` and `arrayjoin` merge here too and `out.fields = self.fields.clone()`
+  would have been wrong for both. `bandjoin` lives in `src/bands.rs` and is not
+  in this change.
+
+  The merge is a new `MetadataFields::merge_under` in `imageio`. Values this
+  build cannot interpret merge on the same terms, so a `.v` trailer field an
+  older build wrote still travels through an insert.
 
 - Every operation in `src/extract.rs` carries its input's metadata through to
   its result: `extract_area`, `crop`, `embed`, `gravity`, `replicate`, `zoom`,
@@ -1849,7 +2474,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change. Its rule is a two-input one and a different shape: the header block
   comes from `main` alone while the attached fields are the union of both with
   `main` winning a shared name, and carrying that union needs a merge on
-  `MetadataFields`, which lives in `imageio`.
+  `MetadataFields`, which lives in `imageio`. Issue #718 does that.
 
 - `Raster::try_sharpen` and `Raster::try_canny`'s float arm no longer abort the
   process when an allocation fails, and there is a new
@@ -2803,6 +3428,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Bilinear, nohalo and lbb keep the exact offset, because none of them reads a
   table in libvips either.
+
+- Untracked the two compiled Python files under `oracle-captures/`,
+  `foreign-analyze/__pycache__/capture.cpython-314.pyc` and the matching
+  `foreign-mat` one (issue #681). They are build artefacts of the capture
+  scripts next to them, tied to CPython 3.14, and nothing reads them.
+
+  The ordering is the part worth writing down. #673 adds an
+  `oracle-captures/.gitignore` that ignores `__pycache__/`, and an ignore rule
+  does nothing at all to a path that is already in the index. So that file
+  landing on its own would have left both of these exactly where they were and
+  stopped `git status` mentioning them, which is worse than either half by
+  itself. `git rm --cached` is what actually moves them, and it keeps the
+  working copies, so nobody loses a cache they were using.
+
+  `tests/oracle_capture_pins.rs` now asks git what it tracks under
+  `oracle-captures/` and fails on anything ending in `.pyc` or `.pyo` or
+  sitting under a `__pycache__/`. It has to ask git rather than walk the
+  directory, because the question is about the index and the filesystem cannot
+  answer it either way round: `git rm --cached` leaves the file on disk, and a
+  fresh clone does not have it whether or not anyone ran that command, so a
+  walk would go green in CI for a reason unrelated to the fix. The listing is
+  the thing that can come back empty and take the guard with it, so the test
+  anchors on capture scripts it knows are tracked before it reads anything into
+  an absence.
+
+- Every `json.dump` and `json.dumps` in `oracle-captures/` now passes
+  `allow_nan=False`, so a capture that measures a non-finite value stops at the
+  write instead of putting a bare `NaN`, `Infinity` or `-Infinity` into a file
+  no strict parser will read (issue #682). Two of the twenty call sites already
+  had it, both from #674. The other eighteen are across twelve scripts.
+
+  Nothing was broken. Every committed capture parses strictly today, which is
+  what #674 fixed. The problem is where the failure lands: `json.dump` writes
+  the bare literal by default and Python's own `json.load` reads it straight
+  back, so a capture round-trips perfectly on the machine that took it and only
+  falls over for a reader in another language, months later, in a file nobody
+  suspects. The flag moves that to the moment somebody runs `python3
+  capture.py`, which costs a re-run and no investigation.
+
+  It is eighteen call sites and not twelve because `foreign-avif` and
+  `foreign-jp2k` hand-roll an encoder that keeps a leaf array on one line, and a
+  leaf is exactly where a float lives. Guarding only their top-level dump would
+  have left every pixel row unguarded. The rule is blanket for the same reason,
+  down to the two calls that only serialise a dict key: an exemption needs a
+  rule for who qualifies, and any such rule is something to argue past later.
+
+  No `oracle.json` changed. I drove each area's committed writer over its own
+  parsed capture with the flag on, including the two hand-rolled encoders, and
+  all fourteen come back byte for byte identical, so nothing in the tree was
+  passing a non-finite float to begin with.
+
+  `tests/oracle_capture_json.rs` holds it shut. It blanks Python comments and
+  the insides of string literals first, then finds each `json.dump(` in what is
+  left and reads that call's own bracketed argument list, so prose cannot answer
+  for code and a file with one guarded call out of four still fails, with the
+  line number of the one that is missing it. F-string fields count as code,
+  because `foreign-jp2k` keeps one of its four dumps inside one. A companion
+  test feeds the scanner a source whose only `allow_nan=False` is in a docstring
+  and a comment and fails if that reads as guarded.
 
 ## [0.4.0] — 2026-07-20
 

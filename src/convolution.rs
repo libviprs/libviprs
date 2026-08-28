@@ -1009,6 +1009,7 @@ fn float_format(channels: usize) -> PixelFormat {
 /// `sobel()` panic on a legal 16-bit input above ~4 GiB, because the float
 /// intermediate is four times the source (issue #575).
 fn raster_from_f64(
+    src: &Raster,
     w: u32,
     h: u32,
     channels: usize,
@@ -1020,7 +1021,9 @@ fn raster_from_f64(
     for (out, &v) in data.as_chunks_mut::<4>().0.iter_mut().zip(samples) {
         *out = (v as f32).to_ne_bytes();
     }
-    Raster::from_op_output(w, h, fmt, data)
+    let mut out = Raster::from_op_output(w, h, fmt, data)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Build an unsigned raster in `fmt` from already-clipped integer samples.
@@ -1028,6 +1031,7 @@ fn raster_from_f64(
 /// Same [`alloc_op_output`] / [`Raster::from_op_output`] pair as
 /// [`raster_from_f64`], for the same reason (issue #575).
 fn raster_from_i64(
+    src: &Raster,
     w: u32,
     h: u32,
     fmt: PixelFormat,
@@ -1044,7 +1048,9 @@ fn raster_from_i64(
             *out = (v as u16).to_ne_bytes();
         }
     }
-    Raster::from_op_output(w, h, fmt, data)
+    let mut out = Raster::from_op_output(w, h, fmt, data)?;
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Clamp a mask-relative coordinate to the image, replicating edge pixels
@@ -1415,6 +1421,25 @@ impl Scan {
     }
 }
 
+/// The origin offset a convolution stamps on its output: the mask's centre,
+/// negated (issue #721).
+///
+/// Measured on vips 8.18.6 across nine mask shapes and three image shapes:
+/// `conv` with a mask `mw` wide and `mh` tall reports
+/// `(-(mw / 2), -(mh / 2))`, and never the input's own offsets. `convsep`,
+/// `compass` and `gaussblur` inherit the rule through the convolutions they
+/// run rather than having one each, which is what `convsep` proves: a 3-wide,
+/// 1-tall mask stamps `0 / -1` and not the `-1 / 0` the mask itself implies,
+/// because the pass it finishes on uses the mask's 90-degree rotation.
+///
+/// The saturating conversion is belt and braces. A `DenseKernel` is bounded by
+/// the mask sanity radius long before `i32` comes into it, so unlike
+/// `conversion::origin` this branch is not reachable; it is here so the
+/// arithmetic cannot be the thing that is wrong if that bound ever moves.
+fn mask_origin(half: usize) -> i32 {
+    -i32::try_from(half).unwrap_or(i32::MAX)
+}
+
 /// `M` output buffers of one raster each, from the fallible
 /// [`alloc_op_output`].
 fn out_buffers<const M: usize>(
@@ -1431,6 +1456,7 @@ fn out_buffers<const M: usize>(
 
 /// Wrap `M` finished output buffers as rasters.
 fn rasters_from<const M: usize>(
+    src: &Raster,
     w: u32,
     h: u32,
     fmt: PixelFormat,
@@ -1438,7 +1464,9 @@ fn rasters_from<const M: usize>(
 ) -> Result<[Raster; M], RasterError> {
     let mut built: [Option<Raster>; M] = std::array::from_fn(|_| None);
     for (slot, data) in built.iter_mut().zip(buffers) {
-        *slot = Some(Raster::from_op_output(w, h, fmt, data)?);
+        let mut raster = Raster::from_op_output(w, h, fmt, data)?;
+        raster.carry_meta_from(src);
+        *slot = Some(raster);
     }
     Ok(built.map(|r| r.expect("every slot was just filled")))
 }
@@ -1490,6 +1518,24 @@ fn conv_raster_n<const M: usize>(
     masks: [&DenseKernel; M],
     precision: Precision,
 ) -> Result<[Raster; M], ConvolutionError> {
+    let mut out = conv_planes(src, masks, precision)?;
+    // Each output gets its own mask's origin, which is what makes canny's
+    // two-mask call and `compass`'s loop right without either of them
+    // knowing the rule. See [`mask_origin`].
+    for (raster, mask) in out.iter_mut().zip(masks) {
+        raster.meta.xoffset = mask_origin(mask.w / 2);
+        raster.meta.yoffset = mask_origin(mask.h / 2);
+    }
+    Ok(out)
+}
+
+/// The traversal itself, without the origin stamp [`conv_raster_n`] puts on
+/// top of it.
+fn conv_planes<const M: usize>(
+    src: &Raster,
+    masks: [&DenseKernel; M],
+    precision: Precision,
+) -> Result<[Raster; M], ConvolutionError> {
     let scan = Scan::new(src, &masks)?;
     let (w, h) = (src.width(), src.height());
     let channels = src.format().channels();
@@ -1508,7 +1554,7 @@ fn conv_raster_n<const M: usize>(
                     buf[i * 4..i * 4 + 4].copy_from_slice(&(v as f32).to_ne_bytes());
                 }
             });
-            Ok(rasters_from(w, h, fmt, out)?)
+            Ok(rasters_from(src, w, h, fmt, out)?)
         }
         Precision::Integer => {
             let ints: [IntKernel; M] = std::array::from_fn(|m| intize(masks[m]));
@@ -1535,7 +1581,7 @@ fn conv_raster_n<const M: usize>(
                         buf[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
                     }
                 });
-                Ok(rasters_from(w, h, fmt, out)?)
+                Ok(rasters_from(src, w, h, fmt, out)?)
             } else {
                 // CONV_INT: i64 accumulation, (sum + scale/2) / scale with
                 // C truncating division, then the offset, then the clip
@@ -1573,7 +1619,7 @@ fn conv_raster_n<const M: usize>(
                         }
                     });
                 }
-                Ok(rasters_from(w, h, fmt, out)?)
+                Ok(rasters_from(src, w, h, fmt, out)?)
             }
         }
     }
@@ -1820,8 +1866,14 @@ impl Raster {
         }
 
         let fmt = results[0].format();
+        // The combine carries from the convolution rather than from `self`, so
+        // it picks up the mask-relative origin those stamped: measured `-1/-1`
+        // for a 3x3 and `-2/-2` for a 5x5 (#721). Everything else in the block
+        // is identical either way, because each `results[i]` already carries
+        // `self`'s.
+        let like = &results[0];
         if fmt.is_float() {
-            Ok(raster_from_f64(w, h, channels, &combined)?)
+            Ok(raster_from_f64(like, w, h, channels, &combined)?)
         } else {
             // Unsigned inputs stay unsigned for Max; Sum promotes one
             // depth (vips_sum promotes uchar sums; libviprs tops out at 16
@@ -1834,7 +1886,7 @@ impl Raster {
             let max = depth_max(out_fmt);
             let mut vals = try_buffer::<i64>(w, h, n)?;
             vals.extend(combined.iter().map(|&v| (v as i64).min(max)));
-            Ok(raster_from_i64(w, h, out_fmt, &vals)?)
+            Ok(raster_from_i64(like, w, h, out_fmt, &vals)?)
         }
     }
 
@@ -2120,7 +2172,7 @@ impl Raster {
                 }
             }
         }
-        Ok(raster_from_f64(w, h, channels, &out)?)
+        Ok(raster_from_f64(self, w, h, channels, &out)?)
     }
 
     /// Spatial correlation (libvips `vips_spcor`): each output pixel is
@@ -2193,7 +2245,7 @@ impl Raster {
                 }
             }
         }
-        Ok(raster_from_f64(w, h, channels, &out)?)
+        Ok(raster_from_f64(self, w, h, channels, &out)?)
     }
 
     /// Fast correlation (libvips `vips_fastcor`): each output pixel is the
@@ -2385,13 +2437,16 @@ impl Raster {
         // interpretation and the resolution survive the format change,
         // and so do the attachments: `vips sobel` on a jpeg carrying 186
         // bytes of `exif-data` and a 564-byte ICC profile hands both
-        // through unchanged, on either arm. Carrying them is the intended
-        // policy for new ops here. `conv`, `convsep`, `compass`,
-        // `gaussblur`, `spcor` and `fastcor` still return
-        // `RasterMeta::default()` and drop the fields; that is a
-        // divergence in those six, not a decision taken here.
-        out.meta = self.meta;
-        out.fields = self.fields.clone();
+        // through unchanged, on either arm. Every op in this module does
+        // the same now (#719).
+        out.carry_meta_from(self);
+        // These three drive the shared traversal directly rather than going
+        // through `conv_raster_n`, so they stamp the origin themselves. The
+        // gradient mask is 3x3, giving `-1 / -1`, which is what `vips sobel`,
+        // `vips scharr` and `vips prewitt` all report at 5x6, 7x3 and 8x8
+        // (#721).
+        out.meta.xoffset = mask_origin(dense.w / 2);
+        out.meta.yoffset = mask_origin(dense.h / 2);
         Ok(out)
     }
     /// Fallible form of [`Raster::sobel`], which carries the contract:
@@ -2866,12 +2921,12 @@ impl Raster {
         }
 
         let mut out = Raster::from_op_output(w, h, fmt, data)?;
-        // vips builds the result inside the input's pipeline, so the
-        // interpretation, the resolution and the attachments all survive.
-        // That is the intended policy for new ops here, and the same one
-        // the edge detectors follow.
-        out.meta = self.meta;
-        out.fields = self.fields.clone();
+        // From `gx` rather than from `self`, which is the same metadata by a
+        // longer route (`gx` came off `conv_raster_n` over the blur, which
+        // came off `self`) *except* for the origin. Canny's offset follows its
+        // 2x2 gradient and not its blur: measured `-1 / -1` at sigma 1, 1.4
+        // and 3, where `gaussblur` alone at sigma 3 stamps `0 / -5` (#721).
+        out.carry_meta_from(&gx);
         Ok(out)
     }
 

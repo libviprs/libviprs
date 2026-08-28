@@ -693,8 +693,7 @@ impl Raster {
             write_scaled(odata, out_bpc, p * out_ch + colour, ao, out_max);
         }
 
-        out.meta = self.meta;
-        out.fields = self.fields.clone();
+        out.carry_meta_from(self);
         // The result inherits the base's metadata, but when a genuine-16
         // input drove the write-back onto the 0..65535 scale (`out_max`, only
         // for an integer output container — see the `out_is_genuine16` gate),
@@ -707,11 +706,11 @@ impl Raster {
         // stamped genuine-16 (the gate excludes it), so a float raster keeps
         // the base interpretation and is never mis-tagged as USHORT.
         if out_is_genuine16 {
-            out.meta.interpretation = Some(if colour == 1 {
+            out.set_interpretation(Some(if colour == 1 {
                 Interpretation::Grey16
             } else {
                 Interpretation::Rgb16
-            });
+            }));
         }
         Ok(out)
     }
