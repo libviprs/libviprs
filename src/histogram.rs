@@ -989,13 +989,22 @@ impl Raster {
     /// the composition `hist_find`, `hist_cum`, `hist_norm`, `maplut`
     /// performs, computed here with full-precision `u64` counts so image
     /// size never saturates. The output keeps the input's size and format.
-    /// A constant band maps to the depth maximum (its cumulative
-    /// distribution jumps straight to 1).
+    ///
+    /// `bins` is the width `hist_find` would give, so it follows the data
+    /// for a 16-bit image and is a fixed 256 for an 8-bit one; taking it
+    /// from the depth instead made this stop being the composition it
+    /// documents itself as (issue #823). The visible consequence is at the
+    /// constant image: a constant 8-bit band maps to `255`, and a constant
+    /// 16-bit band maps to **itself**, because a table one value wide
+    /// normalises that value's single cumulative entry back to it. Both
+    /// are measured against libvips 8.18.6.
     pub fn hist_equal(&self) -> Raster {
         let fmt = self.format();
         let bands = fmt.channels();
         let kind = fmt.kind();
-        let bins = bins_for(kind);
+        let data_all = self.data();
+        let n_all = self.width() as usize * self.height() as usize * bands;
+        let bins = hist_width(kind, max_bin(data_all, kind, n_all));
         let n = self.width() as usize * self.height() as usize;
         let data = self.data();
         let mut out = vec![0u8; data.len()];
