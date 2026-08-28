@@ -95,6 +95,7 @@
 //! **See also:** the [interactive CLI documentation](https://libviprs.org/cli/)
 //! bundles every public knob into runnable examples.
 
+pub mod analyze;
 pub mod arithmetic;
 pub mod avif;
 pub mod bands;
@@ -293,6 +294,11 @@ pub use nifti::{NiftiError, decode_nifti};
 // level 5 file. There is no encoder half, because libvips registers no
 // `matsave` (issue #510).
 pub use mat::{MatError, decode_mat};
+// `decode_analyze_file` is re-exported rather than `decode_analyze`, because
+// Analyze is a `.hdr` plus an `.img` and the path-taking half is the one a
+// caller who already knows the format actually wants. The buffer-pair and
+// filename-resolving halves stay behind `libviprs::analyze::` (issue #764).
+pub use analyze::{AnalyzeError, decode_analyze_file};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
