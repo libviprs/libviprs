@@ -225,6 +225,15 @@
 //! are cgif-specific palette-reuse and frame-coalescing machinery with no
 //! pure-Rust equivalent and are not modelled.
 //!
+//! Nor are `gifsave`'s `keep`, `profile` and `background`, and those three
+//! share one reason: the encoder here writes no metadata at all. There is no
+//! EXIF, XMP or ICC block in the output, so `keep` has nothing to select
+//! between and `profile` has nothing to embed; and the logical screen
+//! descriptor's background index is always 0, which is the reserved
+//! transparent entry when there is one, so `background` has nothing to point
+//! at. The load side does read the stored index, for the restore-to-background
+//! disposal.
+//!
 //! Every entry point here is fallible. Load failures arrive as
 //! [`GifError`] through [`SourceError`], save failures as [`EncodeError`];
 //! there is no panicking twin, matching the rest of the codec surface.
