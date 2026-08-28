@@ -707,6 +707,73 @@ impl Default for AffineOptions {
     }
 }
 
+impl AffineOptions {
+    /// Set the horizontal output displacement (`odx`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_odx(mut self, odx: f64) -> Self {
+        self.odx = odx;
+        self
+    }
+
+    /// Set the vertical output displacement (`ody`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_ody(mut self, ody: f64) -> Self {
+        self.ody = ody;
+        self
+    }
+
+    /// Set the horizontal input displacement (`idx`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_idx(mut self, idx: f64) -> Self {
+        self.idx = idx;
+        self
+    }
+
+    /// Set the vertical input displacement (`idy`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_idy(mut self, idy: f64) -> Self {
+        self.idy = idy;
+        self
+    }
+
+    /// Set the output rectangle `[left, top, width, height]` (`oarea`),
+    /// returning the updated options. `None` uses the bounding box of the
+    /// transformed input.
+    #[must_use]
+    pub fn with_oarea(mut self, oarea: Option<[i32; 4]>) -> Self {
+        self.oarea = oarea;
+        self
+    }
+
+    /// Set how interpolation taps outside the input read (`extend`),
+    /// returning the updated options.
+    #[must_use]
+    pub fn with_extend(mut self, extend: Extend) -> Self {
+        self.extend = extend;
+        self
+    }
+
+    /// Set the background sample value (`background`), returning the updated
+    /// options.
+    #[must_use]
+    pub fn with_background(mut self, background: f64) -> Self {
+        self.background = background;
+        self
+    }
+
+    /// Declare that the input already has premultiplied alpha
+    /// (`premultiplied`), returning the updated options.
+    #[must_use]
+    pub fn with_premultiplied(mut self, premultiplied: bool) -> Self {
+        self.premultiplied = premultiplied;
+        self
+    }
+}
+
 /// Options for [`Raster::try_resize_with`], mirroring the optional
 /// arguments of `vips_resize`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -726,6 +793,30 @@ impl Default for ResizeOptions {
             kernel: ReduceKernel::Lanczos3,
             gap: 2.0,
         }
+    }
+}
+
+impl ResizeOptions {
+    /// Set the vertical scale factor, returning the updated options. `None`
+    /// reuses the horizontal scale.
+    #[must_use]
+    pub fn with_vscale(mut self, vscale: Option<f64>) -> Self {
+        self.vscale = vscale;
+        self
+    }
+
+    /// Set the downsampling kernel, returning the updated options.
+    #[must_use]
+    pub fn with_kernel(mut self, kernel: ReduceKernel) -> Self {
+        self.kernel = kernel;
+        self
+    }
+
+    /// Set the reducing gap, returning the updated options.
+    #[must_use]
+    pub fn with_gap(mut self, gap: f64) -> Self {
+        self.gap = gap;
+        self
     }
 }
 

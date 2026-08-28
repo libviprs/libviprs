@@ -194,6 +194,31 @@ impl Default for SvgOptions {
     }
 }
 
+impl SvgOptions {
+    /// Set the render DPI, returning the updated options.
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: f64) -> Self {
+        self.dpi = dpi;
+        self
+    }
+
+    /// Set the output scale factor, returning the updated options.
+    #[must_use]
+    pub fn with_scale(mut self, scale: f64) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Lift libviprs's [`MAX_INPUT_BYTES`] input-size gate, returning the
+    /// updated options. It does not lift [`DecodeLimits`]; see
+    /// [`SvgOptions::unlimited`].
+    #[must_use]
+    pub fn with_unlimited(mut self, unlimited: bool) -> Self {
+        self.unlimited = unlimited;
+        self
+    }
+}
+
 /// Rasterise an SVG document from bytes (libvips `svgload_buffer`).
 ///
 /// Uses [`DecodeLimits::default`] as the output-geometry budget; see

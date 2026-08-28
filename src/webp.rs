@@ -178,6 +178,23 @@ pub struct SaveOptions {
     pub keep: Keep,
 }
 
+impl SaveOptions {
+    /// Set the compression mode, returning the updated options.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Set which attached metadata is carried into the file, returning the
+    /// updated options.
+    #[must_use]
+    pub fn with_keep(mut self, keep: Keep) -> Self {
+        self.keep = keep;
+        self
+    }
+}
+
 /// Decode WebP bytes into an 8-bit [`Raster`] (libvips `webpload_buffer`
 /// at its default `n = 1`).
 ///

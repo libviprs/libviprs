@@ -48,6 +48,29 @@ pub struct MagickLoadOptions {
     pub n: Option<i32>,
 }
 
+impl MagickLoadOptions {
+    /// Set the delegate rendering density, returning the updated options.
+    #[must_use]
+    pub fn with_density(mut self, density: Option<&'static str>) -> Self {
+        self.density = density;
+        self
+    }
+
+    /// Set the first page to load, returning the updated options.
+    #[must_use]
+    pub fn with_page(mut self, page: Option<i32>) -> Self {
+        self.page = page;
+        self
+    }
+
+    /// Set how many pages to load, returning the updated options.
+    #[must_use]
+    pub fn with_n(mut self, n: Option<i32>) -> Self {
+        self.n = n;
+        self
+    }
+}
+
 /// Build a [`DecodeError`] that names a decode capability the pure-Rust build
 /// does not provide yet. The message carries `what` so the ported cells and
 /// the in-crate tests can assert on the format name.
