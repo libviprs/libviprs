@@ -4533,6 +4533,85 @@ mod tests {
         }
     }
 
+    /// #790: the combine reads each result off its own bytes, so it has one
+    /// decode per carrier depth, and each has to be exercised on **values**
+    /// rather than only on the output format.
+    ///
+    /// Nothing here did. `compass_matches_manual_combination` runs float
+    /// precision on a `Gray8` input, so its results are float and only the
+    /// 4-byte decode is reached, and `compass_integer_formats` asserts formats
+    /// and never a sample. Dropping the high byte of the 2-byte decode left
+    /// both of them green, which the mutation pass on #790 found.
+    ///
+    /// The 16-bit fixture spans well past 255 on purpose: a 2-byte decode that
+    /// reads only the low byte is exactly right on every sample below 256.
+    #[test]
+    fn compass_combines_each_integer_carrier_off_its_own_bytes() {
+        let sobel = Kernel {
+            data: vec![
+                vec![1.0, 2.0, 1.0],
+                vec![0.0, 0.0, 0.0],
+                vec![-1.0, -2.0, -1.0],
+            ],
+            scale: 1.0,
+        };
+        let sobel45 = Kernel {
+            data: rot45_kernel(&sobel.data, Angle45::D45),
+            scale: 1.0,
+        };
+        let eight = noise_gray(9, 7, 41);
+        let sixteen = gray16_from(9, 7, |x, y| ((x * 7919 + y * 20011) % 65536) as u16);
+        for im in [eight, sixteen] {
+            let a = im.conv(&sobel, Precision::Integer);
+            let b = im.conv(&sobel45, Precision::Integer);
+            let max = im.compass(&sobel, 2, Angle45::D45, Combine::Max, Precision::Integer);
+            let sum = im.compass(&sobel, 2, Angle45::D45, Combine::Sum, Precision::Integer);
+            let ceiling = f64::from(depth_max(sum.format()) as u32);
+            for y in 0..im.height() {
+                for x in 0..im.width() {
+                    let (pa, pb) = (a.getpoint(x, y)[0], b.getpoint(x, y)[0]);
+                    assert_eq!(
+                        max.getpoint(x, y)[0],
+                        pa.max(pb),
+                        "{:?} Max at ({x},{y})",
+                        im.format()
+                    );
+                    assert_eq!(
+                        sum.getpoint(x, y)[0],
+                        (pa + pb).min(ceiling),
+                        "{:?} Sum at ({x},{y})",
+                        im.format()
+                    );
+                }
+            }
+        }
+    }
+
+    /// #790: the combine seeds from the first round's response rather than
+    /// folding it into the zeroed accumulator, which is only observable over a
+    /// non-finite sample.
+    ///
+    /// Every finite sample makes the two identical, because `0` is the
+    /// identity of both combines over an absolute value. `f64::max` is not
+    /// symmetric in `NaN` though: it answers the *other* operand, so folding
+    /// round 0 into a zero seed reads `0` where seeding from it reads `NaN`.
+    /// That is what the old code did, one whole `f64` copy of every result
+    /// ago, and it is what this keeps.
+    #[test]
+    fn compass_seeds_the_combine_from_the_first_round_and_not_from_zero() {
+        let im = float_from(2, 1, |x, _| if x == 0 { f32::NAN } else { 4.0 });
+        let identity = Kernel {
+            data: vec![vec![1.0]],
+            scale: 1.0,
+        };
+        let out = im.compass(&identity, 1, Angle45::D45, Combine::Max, Precision::Float);
+        assert!(
+            out.getpoint(0, 0)[0].is_nan(),
+            "one round of |NaN| is NaN, not the zero the accumulator started at"
+        );
+        assert_eq!(out.getpoint(1, 0), vec![4.0]);
+    }
+
     /// compass at integer precision keeps the unsigned format for Max and
     /// widens for Sum.
     #[test]
