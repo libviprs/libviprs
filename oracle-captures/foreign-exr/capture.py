@@ -338,7 +338,10 @@ def main():
         "records": records,
     }
 
-    (HERE / "oracle.json").write_text(json.dumps(oracle, indent=2) + "\n")
+    # allow_nan=False so a non-finite measurement stops the capture here
+    # rather than writing a file nobody outside Python can parse (#682).
+    (HERE / "oracle.json").write_text(
+        json.dumps(oracle, indent=2, allow_nan=False) + "\n")
     (HERE / "commands.sh").write_text(
         "#!/bin/sh\n"
         "# Every command capture.py ran, in order. Regenerate with\n"

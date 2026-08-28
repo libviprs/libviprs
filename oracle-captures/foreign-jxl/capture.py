@@ -474,6 +474,10 @@ with open(os.path.join(ROOT, "oracle.json"), "w") as f:
         },
         f,
         indent=2,
+        # allow_nan=False so a non-finite measurement stops the
+        # capture here rather than writing a file nobody outside
+        # Python can parse (#682).
+        allow_nan=False,
     )
     f.write("\n")
 
