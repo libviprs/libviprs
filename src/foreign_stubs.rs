@@ -33,9 +33,12 @@ use crate::raster::Raster;
 /// ported foreign cell exercises.
 ///
 /// Every field is optional and defaults to `None`, so callers set only the
-/// options they need with struct-update syntax
-/// (`MagickLoadOptions { n: Some(-1), ..Default::default() }`).
+/// options they need: `MagickLoadOptions::default().with_n(Some(-1))`. The
+/// struct is `#[non_exhaustive]`, the same shape as
+/// [`DecodeLimits`](crate::source::DecodeLimits), so a later `density` or
+/// `page` sibling is not a breaking change (issue #630).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MagickLoadOptions {
     /// Rendering density passed to the delegate (libvips `density`), for
     /// vector inputs such as SVG. A higher density rasterises at a larger
@@ -46,6 +49,29 @@ pub struct MagickLoadOptions {
     pub page: Option<i32>,
     /// Number of pages/frames to load (libvips `n`); `-1` loads all of them.
     pub n: Option<i32>,
+}
+
+impl MagickLoadOptions {
+    /// Set the delegate rendering density, returning the updated options.
+    #[must_use]
+    pub fn with_density(mut self, density: Option<&'static str>) -> Self {
+        self.density = density;
+        self
+    }
+
+    /// Set the first page to load, returning the updated options.
+    #[must_use]
+    pub fn with_page(mut self, page: Option<i32>) -> Self {
+        self.page = page;
+        self
+    }
+
+    /// Set how many pages to load, returning the updated options.
+    #[must_use]
+    pub fn with_n(mut self, n: Option<i32>) -> Self {
+        self.n = n;
+        self
+    }
 }
 
 /// Build a [`DecodeError`] that names a decode capability the pure-Rust build

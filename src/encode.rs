@@ -810,6 +810,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jpeg_and_png_write_decodable_files() {
         let im = rgb8(20, 12, |x, y| [(x * 10) as u8, (y * 12) as u8, 77]);
         let dir = tempfile::tempdir().unwrap();
