@@ -143,15 +143,42 @@ fn join_refuses_in_its_own_type_rather_than_delegating() {
 /// still the thing that stops a panic, because `arrayjoin` blits the cells with
 /// `read_flat` / `write_flat` itself rather than delegating to `try_insert`.
 ///
-/// So the two guards look identical and are not, and the comments now say
-/// which is which.
+/// The band counts have to **match** for that to be true, and getting this
+/// wrong is how I nearly shipped the claim unverified. With a 3-band and a
+/// 4-band input, removing the guard gives `BandCountMismatch` and no panic,
+/// because the band check runs first. With two 4-band inputs it reaches
+/// `read_flat`, whose `bpc == 4` arm is a `panic!` (`src/conversion.rs:313`).
+/// So the fixture here is deliberately 4-band on both sides: it is the only
+/// shape that sits on the panicking path.
 #[test]
 fn arrayjoin_refuses_float_with_nothing_underneath_it() {
     let float = float_rgb();
-    let err = Raster::try_arrayjoin(&[&uchar_rgb(), &float], Some(2), None).unwrap_err();
+    let uchar4 = Raster::new(4, 4, PixelFormat::Rgba8, vec![3u8; 4 * 4 * 4]).unwrap();
+    assert_eq!(
+        float.format().channels(),
+        uchar4.format().channels(),
+        "the band counts must match or the band check refuses first"
+    );
+
+    let err = Raster::try_arrayjoin(&[&uchar4, &float], Some(2), None).unwrap_err();
     assert!(
         matches!(err, ConversionError::FloatUnsupported { op: "arrayjoin" }),
         "arrayjoin names itself: {err:?}"
+    );
+
+    // All-float too, so the guard is not reading only the second input.
+    let err = Raster::try_arrayjoin(&[&float, &float], Some(2), None).unwrap_err();
+    assert!(
+        matches!(err, ConversionError::FloatUnsupported { op: "arrayjoin" }),
+        "arrayjoin refuses an all-float list the same way: {err:?}"
+    );
+
+    // And the earlier refusal really does pre-empt it, which is why the
+    // fixture above is shaped the way it is.
+    let err = Raster::try_arrayjoin(&[&uchar_rgb(), &float], Some(2), None).unwrap_err();
+    assert!(
+        matches!(err, ConversionError::FloatUnsupported { op: "arrayjoin" }),
+        "the guard still runs before the band check: {err:?}"
     );
 }
 

@@ -1822,8 +1822,15 @@ impl Raster {
         //
         // Unlike `try_join`, this really is the thing that stops a panic:
         // `arrayjoin` blits the cells itself rather than delegating to
-        // `try_insert`, so there is no second guard underneath it. Removing
-        // it would restore the panic rather than change an error type.
+        // `try_insert`, so there is no second guard underneath it. Removing it
+        // reaches `read_flat`'s `bpc == 4` arm, which is a `panic!`.
+        //
+        // With one caveat worth writing down, because the obvious test fixture
+        // misses it: that is only true once the band counts agree. A 3-band and
+        // a 4-band input are refused by the band check below before any sample
+        // is read, so an unguarded `arrayjoin` returns `BandCountMismatch`
+        // there rather than panicking. The panicking path needs matching band
+        // counts, and the test uses them.
         //
         // Float input is not exotic: `space_depth` maps Lab, Lch, OkLab,
         // OkLCh, XYZ, scRGB and Yxy all to F32, so a `colourspace` result is
