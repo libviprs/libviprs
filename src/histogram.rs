@@ -47,14 +47,32 @@
 //!   return [`HistogramError::NotAHistogram`] otherwise. Element order is
 //!   identical for both orientations (row-major data with interleaved
 //!   bands), and outputs preserve the input's orientation.
-//! * **Count depth.** libvips stores counts in 32-bit unsigned samples;
-//!   [`PixelFormat`] has no depth wider than 16 bits, so every op that
-//!   produces counts or sums writes 16-bit samples and saturates at
-//!   `65535`. This is the documented contract until a wider sample depth
-//!   lands. Operations that consume pixel-value distributions internally
-//!   ([`Raster::hist_equal`], [`Raster::hist_local`], [`Raster::percent`])
-//!   compute full-precision `u64` histograms directly from the image and
-//!   are exact regardless of image size.
+//! * **Count depth.** [`PixelFormat`] has no unsigned depth wider than 16
+//!   bits, so every op that produces counts or sums writes 16-bit samples
+//!   and saturates at `65535`. This is the documented contract until a
+//!   wider sample kind lands. Operations that consume pixel-value
+//!   distributions internally ([`Raster::hist_equal`],
+//!   [`Raster::hist_local`], [`Raster::percent`]) compute full-precision
+//!   `u64` histograms directly from the image and are exact regardless of
+//!   image size.
+//!
+//!   **The ceiling is a deviation and any image over 256x256 reaches it**,
+//!   because these are pixel counters. What libvips emits instead is not
+//!   one format, measured on 8.18.6 (issue #759):
+//!
+//!   | op | vips output format |
+//!   |---|---|
+//!   | `hist_find`, `hist_find_ndim` | `UINT`, whatever the input |
+//!   | `hist_find_indexed` | `DOUBLE`, whatever the input and either `combine` |
+//!   | `hist_cum` | `UINT` / `INT` / `FLOAT` / `DOUBLE`, following the input |
+//!
+//!   So closing this needs more than the uint carrier of issue #517: the
+//!   signed carriers of #516 for `hist_cum` on a signed input, and a
+//!   double one, which is why #518 being closed matters here. Reading the
+//!   libvips source will mislead you on `hist_find`: for a
+//!   `VipsStatisticClass` the per-op `format_table` is an **input cast**
+//!   table (`statistic.c`), not the output format, which is set separately
+//!   to `UINT` in `hist_find.c`.
 //! * **Bins.** 8-bit images histogram into 256 bins, 16-bit images into
 //!   65536 bins, indexed by the raw sample value.
 //! * **Bands.** `hist_find`, `hist_cum`, `hist_norm`, `hist_equal`,
@@ -1175,6 +1193,108 @@ mod tests {
 
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /**
+     * Tests the carrier every counting histogram op writes, so the module
+     * doc's claims about count depth have a check behind them and a wider
+     * carrier lands as a red test at each op that must change.
+     * Works by asserting the output `PixelFormat` of `hist_find`,
+     * `hist_find_band`, `hist_find_indexed`, `hist_find_ndim` and
+     * `hist_cum` on an 8-bit input, covering both the per-band and the
+     * pooled shapes.
+     * Measured on vips 8.18.6: `hist_find`, `hist_find_ndim` and
+     * `hist_cum` (on an unsigned input) emit `VIPS_FORMAT_UINT`, while
+     * `hist_find_indexed` emits `DOUBLE` for every input format and either
+     * `combine` mode, which the module doc used to sweep into "32-bit
+     * unsigned" (issue #759).
+     * Input: a 4x4 Gray8 image -> Output: Gray16 from all five.
+     */
+    #[test]
+    fn counting_ops_carry_16_bit_samples() {
+        let im = gray(4, 4, (0u8..16).collect());
+        assert_eq!(im.hist_find().format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find_band(0).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find_indexed(&im).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find_ndim(Some(4)).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find().hist_cum().format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that `write_flat` saturates into the kind rather than
+     * truncating, which is the contract its callers that do not pre-clamp
+     * rely on.
+     * Works by writing an over-ceiling value at each unsigned kind and
+     * reading it back through `read_flat`. Mutation found this one too:
+     * every op-level caller reaching `write_flat` today either goes
+     * through `sat16` or is bounded by an index, so dropping this clamp
+     * left all 60 histogram tests green even though a truncating write
+     * would turn 65536 into 0.
+     * Input: 300 at U8 and 70000 at U16 -> Output: 255 and 65535.
+     */
+    #[test]
+    fn write_flat_saturates_into_the_kind() {
+        let mut one = [0u8; 1];
+        write_flat(&mut one, SampleKind::U8, 0, 300);
+        assert_eq!(read_flat(&one, SampleKind::U8, 0), 255);
+
+        let mut two = [0u8; 2];
+        write_flat(&mut two, SampleKind::U16, 0, 70_000);
+        assert_eq!(read_flat(&two, SampleKind::U16, 0), 65_535);
+
+        // A value inside the kind is written through unchanged, so the
+        // saturations above are a clamp and not a constant.
+        write_flat(&mut one, SampleKind::U8, 0, 7);
+        assert_eq!(read_flat(&one, SampleKind::U8, 0), 7);
+        write_flat(&mut two, SampleKind::U16, 0, 4_242);
+        assert_eq!(read_flat(&two, SampleKind::U16, 0), 4_242);
+    }
+
+    /**
+     * Tests `sat16` at the narrowing it owns, which the whole-op saturation
+     * test above cannot reach.
+     * Works by calling it directly with counts either side of the 16-bit
+     * ceiling and at the top of `u64`. Mutation showed why this is needed:
+     * two independent clamps produce the op's observable 65535, `sat16`
+     * here and `write_flat`'s `v.min(65535)`, so breaking either one alone
+     * leaves `hist_find_saturates_a_count_past_the_16_bit_ceiling` green.
+     * They are not redundant, they cover different ranges: `sat16` guards
+     * the `u64` to `u32` narrowing, which only a count above 4.29e9 can
+     * cross and which needs a four-billion-pixel image to reach through the
+     * op. Calling it directly costs nothing.
+     * Input: 0, 65535, 65536, u64::MAX -> Output: 0, 65535, 65535, 65535.
+     */
+    #[test]
+    fn sat16_clamps_at_the_ceiling_and_across_the_u32_narrowing() {
+        assert_eq!(sat16(0), 0);
+        assert_eq!(sat16(65_535), 65_535);
+        assert_eq!(sat16(65_536), 65_535);
+        // Above `u32::MAX`, where a bare `as u32` would wrap to 4294967295
+        // and `write_flat`'s clamp would then have nothing to catch.
+        assert_eq!(sat16(u64::MAX), 65_535);
+        assert_eq!(sat16(u64::from(u32::MAX) + 1), 65_535);
+    }
+
+    /**
+     * Tests that `hist_find` saturates a bin count past 65535 rather than
+     * wrapping, the deviation the 16-bit carrier forces.
+     * Works by histogramming a 256x256 single-valued image, whose one
+     * populated bin holds 65536 samples, one past the ceiling. That is the
+     * smallest square image that overflows it, and it is 64 KiB.
+     * Measured on vips 8.18.6, whose `UINT` output holds the true value: a
+     * 300x300 single-valued image gives `vips max` of `90000` on the
+     * histogram. libviprs reports the `65535` asserted here (issue #759).
+     * Input: 256x256 all-7 -> Output: bin 7 is 65535, not 65536.
+     */
+    #[test]
+    fn hist_find_saturates_a_count_past_the_16_bit_ceiling() {
+        let im = gray(256, 256, vec![7u8; 256 * 256]);
+        let h = im.hist_find();
+        assert_eq!(h.getpoint(7, 0), vec![65535.0]);
+        // The bins either side stay at zero, so the saturation above is a
+        // real count and not every bin reading full.
+        assert_eq!(h.getpoint(6, 0), vec![0.0]);
+        assert_eq!(h.getpoint(8, 0), vec![0.0]);
     }
 
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
