@@ -192,11 +192,13 @@ impl SampleKind {
     /// True for the signed integer kinds and for `F32`. This is the
     /// assumption issue #607 names as the expensive half of #516: the
     /// crate's integer paths clamp into `0..=max`, and that floor is a
-    /// property of the kind rather than of arithmetic.
-    ///
-    /// TODO(#516): the signed kinds answer `false` here.
+    /// property of the kind rather than of arithmetic. Where the floor
+    /// itself is wanted, read it off [`SampleKind::range`].
     pub fn is_signed(self) -> bool {
-        false
+        match self {
+            Self::U8 | Self::U16 | Self::U32 => false,
+            Self::I8 | Self::I16 | Self::I32 | Self::F32 => true,
+        }
     }
 
     /// The inclusive value range an integer sample of this kind can hold,
@@ -204,11 +206,24 @@ impl SampleKind {
     ///
     /// The signed counterpart of [`SampleKind::max_value`], and the one to
     /// reach for when the floor matters: a saturating write into a signed
-    /// carrier clamps at the low end too.
+    /// carrier clamps at the low end too, and `0` is only the right floor
+    /// for three of the six integer kinds.
     ///
-    /// TODO(#516): the low end is derived from the width, not the sign.
+    /// `None` on `F32` says the same thing [`SampleKind::max_value`]'s
+    /// `None` says: a float carrier's meaningful range comes from its
+    /// [`Interpretation`](crate::conversion::Interpretation), not from the
+    /// sample kind.
     pub fn range(self) -> Option<(i64, i64)> {
-        self.max_value().map(|hi| (0, i64::from(hi)))
+        let range = match self {
+            Self::U8 => (0, 0xFF),
+            Self::I8 => (i64::from(i8::MIN), i64::from(i8::MAX)),
+            Self::U16 => (0, 0xFFFF),
+            Self::I16 => (i64::from(i16::MIN), i64::from(i16::MAX)),
+            Self::U32 => (0, 0xFFFF_FFFF),
+            Self::I32 => (i64::from(i32::MIN), i64::from(i32::MAX)),
+            Self::F32 => return None,
+        };
+        Some(range)
     }
 
     /// The largest value an integer sample of this kind can hold, or `None`
@@ -220,47 +235,97 @@ impl SampleKind {
     /// is why [`crate::arithmetic`]'s premultiply bracket takes its
     /// `max_alpha` from the tag rather than from the depth.
     pub fn max_value(self) -> Option<u32> {
-        match self {
-            Self::U8 | Self::I8 => Some(0xFF),
-            Self::U16 | Self::I16 => Some(0xFFFF),
-            Self::U32 | Self::I32 => Some(0xFFFF_FFFF),
-            Self::F32 => None,
-        }
+        // Every integer kind's ceiling fits a `u32`, including
+        // `I32`'s 2147483647, so this stays the convenient spelling for the
+        // unsigned paths. `range` is the total answer and this is derived
+        // from it, so the two cannot drift.
+        self.range()
+            .map(|(_, hi)| u32::try_from(hi).expect("every sample kind's ceiling fits a u32"))
     }
 
     /// The kind that carries both `self` and `other` losslessly: the
-    /// promotion libvips calls `vips__formatalike`, restricted to the
-    /// carriers this crate has.
+    /// promotion libvips calls `vips__formatalike`.
     ///
-    /// `F32` wins over both unsigned kinds and `U16` wins over `U8`, which
-    /// is what a two-image arithmetic op needs when its inputs disagree.
+    /// `F32` wins over every integer kind, and among the integers the
+    /// answer is the narrowest kind that holds both operands' whole ranges.
+    /// That is what a two-image arithmetic op needs when its inputs
+    /// disagree.
     ///
     /// The match is over the *pair*, deliberately, and not over
-    /// [`SampleKind::bytes`]: byte width cannot order the carriers, because
-    /// a four-byte integer and a four-byte float are the same width and
-    /// promote in opposite directions. Adding a kind leaves three pairs
-    /// uncovered here and so fails to compile, which is the point (issue
-    /// #607).
+    /// [`SampleKind::bytes`]. Byte width cannot order the kinds, and there
+    /// are two independent reasons rather than one: a four-byte integer and
+    /// a four-byte float are the same width and promote in opposite
+    /// directions, and a signed kind paired with an unsigned one of the
+    /// same or greater width promotes to something **wider than either**.
+    /// Adding a kind leaves pairs uncovered here and so fails to compile,
+    /// which is the point (issue #607).
+    ///
+    /// # The measured table
+    ///
+    /// Swept on `/opt/homebrew/bin/vips` 8.18.6 with
+    /// `vips boolean <a> <b> out and`, whose format table maps every
+    /// integer format to itself, so the output format *is* the formatalike
+    /// result. The float column was taken with `vips multiply`
+    /// (`FLOAT -> FLOAT`), and the two probes agree everywhere they
+    /// overlap.
+    ///
+    /// |  | `U8` | `I8` | `U16` | `I16` | `U32` | `I32` |
+    /// |---|---|---|---|---|---|---|
+    /// | `U8`  | `U8`  | `I16` | `U16` | `I16` | `U32` | `I32` |
+    /// | `I8`  | `I16` | `I8`  | `I32` | `I16` | `I32` | `I32` |
+    /// | `U16` | `U16` | `I32` | `U16` | `I32` | `U32` | `I32` |
+    /// | `I16` | `I16` | `I16` | `I32` | `I16` | `I32` | `I32` |
+    /// | `U32` | `U32` | `I32` | `U32` | `I32` | `U32` | `I32` |
+    /// | `I32` | `I32` | `I32` | `I32` | `I32` | `I32` | `I32` |
+    ///
+    /// Four of those cells are the ones "the wider kind wins" misses:
+    /// `(U8, I8)` is two one-byte kinds promoting to a two-byte one,
+    /// `(I8, U16)` and `(U16, I16)` are two-byte-or-less pairs promoting to
+    /// four bytes, and `(U32, I8)` takes its sign from the one-byte
+    /// operand.
     pub fn promote(self, other: Self) -> Self {
-        // TODO(#516, #517): "the wider kind wins, unsigned by default" is
-        // not the `vips__formatalike` order.
-        if self.is_float() || other.is_float() {
-            return Self::F32;
-        }
-        if self.bytes() >= other.bytes() {
-            self
-        } else {
-            other
-        }
+        use SampleKind::{F32, I8, I16, I32, U8, U16, U32};
+        #[rustfmt::skip]
+        let promoted = match (self, other) {
+            (F32, _) | (_, F32) => F32,
+            (U8, U8) => U8,
+            (I8, I8) => I8,
+            (U8, U16) | (U16, U8) | (U16, U16) => U16,
+            (U8, I8) | (U8, I16) | (I8, U8) | (I8, I16)
+            | (I16, U8) | (I16, I8) | (I16, I16) => I16,
+            (U8, U32) | (U16, U32) | (U32, U8) | (U32, U16) | (U32, U32) => U32,
+            (U8, I32) | (I8, U16) | (I8, U32) | (I8, I32)
+            | (U16, I8) | (U16, I16) | (U16, I32)
+            | (I16, U16) | (I16, U32) | (I16, I32)
+            | (U32, I8) | (U32, I16) | (U32, I32)
+            | (I32, U8) | (I32, I8) | (I32, U16) | (I32, I16)
+            | (I32, U32) | (I32, I32) => I32,
+        };
+        promoted
     }
 
     /// The number of histogram bins that covers every value of this kind
-    /// exactly once, or `None` for a float kind.
+    /// exactly once, or `None` where a value-indexed table is not the right
+    /// shape.
     ///
-    /// 256 for `U8` and 65536 for `U16`, matching the bin counts
-    /// [`crate::histogram`] uses and the ones libvips picks in
-    /// `hist_find.c`. `F32` is `None` because a float histogram needs a
-    /// range and a bin width, not a value-indexed table.
+    /// 256 for the one-byte kinds and 65536 for the two-byte ones, matching
+    /// the bin counts [`crate::histogram`] uses and the ones libvips picks
+    /// in `hist_find.c`.
+    ///
+    /// `F32` is `None` because a float histogram needs a range and a bin
+    /// width, not a value-indexed table. `U32` and `I32` are `None` for the
+    /// sibling reason: 2^32 bins is not a table either, and libvips does
+    /// not build one. It casts a 32-bit input down first, which is
+    /// observable from the outside: on 8.18.6 a `uint` image whose largest
+    /// sample is 70000 gives a **65536**-wide histogram, so the sample was
+    /// saturated into `ushort` before it was counted.
+    ///
+    /// The signed one-byte and two-byte kinds report the same counts their
+    /// unsigned siblings do, and the bins are indexed by the *unsigned*
+    /// value: libvips casts a signed input to the unsigned kind of the same
+    /// width first, so every negative sample lands in bin zero. Measured on
+    /// 8.18.6, a `char` image holding `[-128, -1, 0, 127]` gives a 256-wide
+    /// histogram with `bin 0 = 3` and `bin 127 = 1`.
     pub fn hist_bins(self) -> Option<usize> {
         match self {
             Self::U8 | Self::I8 => Some(256),
@@ -461,10 +526,29 @@ impl PixelFormat {
     /// means, and today it answers "float" for every caller including one
     /// that wanted an integer. This cannot be asked ambiguously.
     ///
-    /// Returns `None` on the same channel counts `with_channels` rejects:
-    /// zero, and anything above `u16::MAX`.
+    /// Returns `None` for two different reasons, and a caller that needs to
+    /// tell them apart has to check the kind itself:
+    ///
+    /// * the channel counts `with_channels` rejects, zero and anything
+    ///   above `u16::MAX`;
+    /// * a [`SampleKind`] no `PixelFormat` carries. `I8`, `I16`, `I32` and
+    ///   `U32` are named by issues #516 and #517 and have no variant yet, so
+    ///   there is no format to return. Falling through to
+    ///   `with_channels(channels, kind.bytes())` would answer `Rgb16` for
+    ///   three bands of `I16` and `FloatF32(3)` for three bands of `U32`,
+    ///   which is the silent retag [`PixelFormat::canonical`]'s comment
+    ///   warns about, arriving through the very constructor built to make
+    ///   the question unambiguous.
+    ///
+    /// The match is total, so a carrier variant added to `PixelFormat` has
+    /// to move its kind out of the refusing arm here.
     pub fn with_kind(channels: usize, kind: SampleKind) -> Option<Self> {
-        Self::with_channels(channels, kind.bytes())
+        match kind {
+            SampleKind::U8 | SampleKind::U16 | SampleKind::F32 => {
+                Self::with_channels(channels, kind.bytes())
+            }
+            SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => None,
+        }
     }
 
     /// Return the variant of this format that includes an alpha channel.
