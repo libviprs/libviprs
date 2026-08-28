@@ -1177,6 +1177,53 @@ mod tests {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
     }
 
+    /**
+     * Tests the carrier every counting histogram op writes, so the module
+     * doc's claims about count depth have a check behind them and a wider
+     * carrier lands as a red test at each op that must change.
+     * Works by asserting the output `PixelFormat` of `hist_find`,
+     * `hist_find_band`, `hist_find_indexed`, `hist_find_ndim` and
+     * `hist_cum` on an 8-bit input, covering both the per-band and the
+     * pooled shapes.
+     * Measured on vips 8.18.6: `hist_find`, `hist_find_ndim` and
+     * `hist_cum` (on an unsigned input) emit `VIPS_FORMAT_UINT`, while
+     * `hist_find_indexed` emits `DOUBLE` for every input format and either
+     * `combine` mode, which the module doc used to sweep into "32-bit
+     * unsigned" (issue #759).
+     * Input: a 4x4 Gray8 image -> Output: Gray16 from all five.
+     */
+    #[test]
+    fn counting_ops_carry_16_bit_samples() {
+        let im = gray(4, 4, (0u8..16).collect());
+        assert_eq!(im.hist_find().format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find_band(0).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find_indexed(&im).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find_ndim(Some(4)).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find().hist_cum().format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that `hist_find` saturates a bin count past 65535 rather than
+     * wrapping, the deviation the 16-bit carrier forces.
+     * Works by histogramming a 256x256 single-valued image, whose one
+     * populated bin holds 65536 samples, one past the ceiling. That is the
+     * smallest square image that overflows it, and it is 64 KiB.
+     * Measured on vips 8.18.6, whose `UINT` output holds the true value: a
+     * 300x300 single-valued image gives `vips max` of `90000` on the
+     * histogram. libviprs reports the `65535` asserted here (issue #759).
+     * Input: 256x256 all-7 -> Output: bin 7 is 65535, not 65536.
+     */
+    #[test]
+    fn hist_find_saturates_a_count_past_the_16_bit_ceiling() {
+        let im = gray(256, 256, vec![7u8; 256 * 256]);
+        let h = im.hist_find();
+        assert_eq!(h.getpoint(7, 0), vec![65535.0]);
+        // The bins either side stay at zero, so the saturation above is a
+        // real count and not every bin reading full.
+        assert_eq!(h.getpoint(6, 0), vec![0.0]);
+        assert_eq!(h.getpoint(8, 0), vec![0.0]);
+    }
+
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
         let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
         Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
