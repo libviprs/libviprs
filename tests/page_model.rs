@@ -21,22 +21,25 @@
 //! guards cannot drift apart: same recursive walk, same cut at the first
 //! `#[cfg(test)] mod`, same "quoted literal in non-comment code" question.
 //!
-//! # A note on Miri, so the omission is not silent
+//! # A note on Miri, which is no longer an omission
 //!
-//! Three tests here reach the filesystem to read `src/`, and none carries
-//! `#[cfg_attr(miri, ignore)]`. `tests/miri_ignore_convention.rs` does not
-//! flag them because its scanner reads test *bodies* and these reach `std::fs`
-//! through `non_test_bodies`, which is the same shape
-//! `tests/n_pages_meaning.rs` already has. That is a gap rather than a clean
-//! bill: under Miri an unannotated filesystem test aborts the whole run.
+//! This module doc used to say that three tests here reach the filesystem to
+//! read `src/` and that none carried `#[cfg_attr(miri, ignore)]`, deferring
+//! them to #712's sweep. #781 measured it: it is **one**,
+//! [`exactly_one_source_file_names_the_page_height_key`], which reaches
+//! `std::fs` through `non_test_bodies`. It carries the annotation now and has a
+//! row in `tests/miri_fs_test_inventory.txt`.
 //!
-//! It is not a new gap and it does not move the gate. `cargo +nightly miri
-//! test` already stops long before reaching this file, on the first of the
-//! ~138 unannotated filesystem tests #712 is working through, and
-//! `tests/n_pages_meaning.rs::no_source_file_has_real_code_past_its_cut` is
-//! itself recorded in the inventory as `unannotated fs-detected`. Annotating
-//! these three means adding three lines to `tests/miri_fs_test_inventory.txt`,
-//! which #712 owns, so it belongs in that lane's sweep rather than here.
+//! The other two the note counted do not touch a file.
+//! `a_page_split_survives_a_v_round_trip` goes through `encode_vips` and
+//! `decode_bytes`, which are both in memory, and
+//! `the_scanner_sees_a_writer_when_there_is_one` scans string literals it
+//! declares inline. So the detector was right about them and the note was not.
+//!
+//! What was true is the shape: the scanner read test *bodies* and could not see
+//! a filesystem call reached through a helper. It follows one into test
+//! scaffolding now, one file deep and to a fixed point, which is how this test
+//! was found rather than by a re-read.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -180,6 +183,7 @@ fn names_field(body: &str, field: &str) -> bool {
 /// divide and `Raster` is what owns that buffer. The two keys answer
 /// different questions and sit next to the thing each is about.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn exactly_one_source_file_names_the_page_height_key() {
     let namers: Vec<String> = non_test_bodies()
         .into_iter()

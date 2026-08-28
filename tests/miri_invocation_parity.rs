@@ -52,6 +52,21 @@
 //! tree. When the backlog finally drops through the bound, this goes red once
 //! and the sentence gets rewritten once, which is the right number of times.
 //!
+//! It did, in #739. The sweep took the backlog from 138 to 4, this went red on
+//! the commit that did it, and the sentence in `merge-gate.yml` was rewritten
+//! in the same change. The bound points the other way now: the workflow says
+//! the backlog is a named handful and this refuses to let it climb back past
+//! ten without somebody revisiting that sentence. The floor it used to be is
+//! gone entirely, because a floor demands the debt exist and would go red on
+//! the change that clears it, which is the same mistake
+//! `tests/miri_ignore_convention.rs` made with `assert!(unannotated_fs > 0)`.
+//!
+//! Zero is its own arm rather than a bound that trivially holds. At zero the
+//! bound passes, the phrase is still in the file, and the workflow goes on
+//! describing a handful of unannotated tests that do not exist, which is the
+//! one state where nothing checks that sentence. So zero demands a different
+//! sentence, and the transition is one red and one rewrite.
+//!
 //! # Why it runs under Miri
 //!
 //! Every file this reads is pulled in with `include_str!` at compile time rather
@@ -77,9 +92,17 @@ const SIGNIFICANT_ENV: [&str; 2] = ["MIRIFLAGS", "RUSTFLAGS"];
 /// The bound `merge-gate.yml` states about the unannotated backlog, and the
 /// words it states it in. Asserted rather than quoted exactly, for the reason in
 /// the module docs.
-const BACKLOG_BOUND: usize = 100;
+const BACKLOG_BOUND: usize = 10;
 /// How the workflow has to spell [`BACKLOG_BOUND`].
-const BACKLOG_PHRASE: &str = "more than a hundred unannotated filesystem-touching tests";
+const BACKLOG_PHRASE: &str = "a named handful of unannotated filesystem-touching tests";
+/// What the workflow has to say instead once the backlog reaches zero.
+///
+/// Without this arm the zero case is the one state in which nothing checks the
+/// sentence: the bound `0 <= BACKLOG_BOUND` holds, [`BACKLOG_PHRASE`] is still
+/// in the file, and the workflow goes on describing a handful of unannotated
+/// tests that no longer exist. So the sentence has to change exactly once, when
+/// #756 lands, and this is what makes that one red rather than a silent lie.
+const CLEARED_PHRASE: &str = "every filesystem-touching test carries the annotation";
 
 /// One Miri invocation, however it happens to be written down.
 #[derive(Debug, PartialEq, Eq)]
@@ -544,18 +567,30 @@ fn merge_gate_states_the_backlog_as_a_bound_it_still_meets() {
     let rows = inventory_rows();
     let unannotated = rows.iter().filter(|(annotated, _)| !annotated).count();
 
+    if unannotated == 0 {
+        assert!(
+            WORKFLOW.contains(CLEARED_PHRASE),
+            "the unannotated backlog is empty, so `merge-gate.yml` saying `{BACKLOG_PHRASE}` \
+             is false. Rewrite that sentence to say `{CLEARED_PHRASE}`. This is the one \
+             deliberate red the zero transition is supposed to produce, and it is #756 \
+             landing."
+        );
+        return;
+    }
+
     assert!(
-        unannotated > BACKLOG_BOUND,
-        "the unannotated backlog is down to {unannotated}, which is no longer \
-         `{BACKLOG_PHRASE}`. That sentence in `merge-gate.yml` is now false: rewrite it \
-         against the real number, and revisit `BACKLOG_BOUND` here. Reaching this point is \
-         #712 nearly finishing, which is good news."
+        unannotated <= BACKLOG_BOUND,
+        "the unannotated backlog is back up to {unannotated}, which is more than \
+         `{BACKLOG_PHRASE}` in `merge-gate.yml` can honestly be read as. Either annotate \
+         the new ones, which is what `tests/miri_ignore_convention.rs` will have told you \
+         to do already, or rewrite that sentence and revisit `BACKLOG_BOUND` here."
     );
     assert!(
         WORKFLOW.contains(BACKLOG_PHRASE),
-        "`merge-gate.yml` no longer says `{BACKLOG_PHRASE}`. The job aborts on the first \
-         unannotated filesystem test it reaches, and the workflow has to keep saying so or \
-         the next reader will assume the gate reports. The live count is {unannotated}."
+        "`merge-gate.yml` no longer says `{BACKLOG_PHRASE}`. The backlog is not zero and \
+         the workflow has to keep saying so, spelled that way and on one line, or the next \
+         reader will assume the filesystem class is fully enforced. The live count is \
+         {unannotated}."
     );
     assert!(
         WORKFLOW.contains("tests/miri_fs_test_inventory.txt"),

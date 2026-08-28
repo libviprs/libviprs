@@ -69,6 +69,7 @@ fn header_cards_are_attached_as_numbered_fields() {
 /// `encode_fits` and `save_fits` are both reachable on `Raster`, they agree
 /// byte for byte, and a decode of what they write reproduces the pixels.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_from_outside_the_crate() {
     let raster = decode_fits(&sample(), DecodeLimits::default()).unwrap();
     let encoded = raster.encode_fits().unwrap();
@@ -86,6 +87,7 @@ fn encode_and_save_round_trip_from_outside_the_crate() {
 /// The extension-dispatched save and the shared format dispatch both carry
 /// a FITS row, and all three spellings vips registers reach it.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_shared_dispatch_carries_a_fits_row() {
     let raster = decode_fits(&sample(), DecodeLimits::default()).unwrap();
     let direct = raster.encode_fits().unwrap();
