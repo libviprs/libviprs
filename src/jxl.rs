@@ -200,6 +200,8 @@ use crate::codec::EncodeError;
 #[cfg(feature = "jxl")]
 use crate::conversion::Interpretation;
 #[cfg(feature = "jxl")]
+use crate::frames::FrameDelay;
+#[cfg(feature = "jxl")]
 use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jxl")]
@@ -434,6 +436,50 @@ impl SaveOptions {
     }
 }
 
+/// Which frames [`decode_jxl_with`] reads out of a multi-frame file
+/// (libvips `jxlload`'s `page` and `n`).
+///
+/// The default is page 0 and one frame, which is exactly what a bare
+/// `vips jxlload` does, so [`decode_jxl`] is this struct's default and
+/// nothing about the still path moved.
+///
+/// The same two knobs as [`crate::webp::LoadOptions`], and a separate type
+/// for the same reason [`SaveOptions`] is: the two modules answer to two
+/// different libvips loaders, and a shared struct would tie a change in one
+/// loader's options to the other.
+///
+/// ```
+/// use libviprs::jxl;
+///
+/// let all = jxl::LoadOptions { n: None, ..Default::default() };
+/// assert_eq!(jxl::LoadOptions::default(), jxl::LoadOptions { page: 0, n: Some(1) });
+/// # let _ = all;
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LoadOptions {
+    /// The first frame to read, zero-based (libvips `page`).
+    pub page: u32,
+    /// How many frames to read from [`page`](LoadOptions::page), or `None`
+    /// for every frame to the end of the file, which is what libvips spells
+    /// `n = -1`. `Some(0)` is refused with [`SourceError::PageOutOfRange`],
+    /// as vips refuses `n = 0`.
+    pub n: Option<u32>,
+}
+
+impl Default for LoadOptions {
+    /// Page 0, one frame: what a default `vips jxlload` reads.
+    ///
+    /// Written by hand rather than derived, because a derived `Default`
+    /// would put `None` under `n` and quietly turn every default load into
+    /// a whole-document load.
+    fn default() -> Self {
+        Self {
+            page: 0,
+            n: Some(1),
+        }
+    }
+}
+
 /// Decode JPEG XL bytes into a [`Raster`] (libvips `jxlload_buffer` at its
 /// default `n = 1`).
 ///
@@ -496,6 +542,19 @@ impl SaveOptions {
 /// * [`SourceError::DimensionLimitExceeded`] when `width * height` exceeds
 ///   [`DecodeLimits::max_pixels`].
 pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+    decode_jxl_with(bytes, LoadOptions::default(), limits)
+}
+
+/// Decode JPEG XL bytes, choosing which frames of a multi-frame file to
+/// read (libvips `jxlload_buffer` with `page` and `n`).
+///
+/// STUB: still reads frame 0 only. Issue #621.
+pub fn decode_jxl_with(
+    bytes: &[u8],
+    options: LoadOptions,
+    limits: DecodeLimits,
+) -> Result<Raster, SourceError> {
+    let _ = options;
     decode(bytes, limits)
 }
 
@@ -940,6 +999,18 @@ fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
         (false, 2) => Interpretation::Rgb16,
         (false, _) => Interpretation::Srgb,
     }
+}
+
+/// The milliseconds a frame lasts, given its `duration` in ticks and the
+/// animation header's ticks-per-second rate, or `None` when the duration is
+/// not one.
+///
+/// STUB: issue #621.
+#[cfg(feature = "jxl")]
+#[allow(dead_code)]
+fn frame_millis(ticks: u32, tps_numerator: u32, tps_denominator: u32) -> Option<FrameDelay> {
+    let _ = (ticks, tps_numerator, tps_denominator);
+    None
 }
 
 /// The `exif-data` blob for an image, or `None` when there is no readable
@@ -2291,5 +2362,430 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Animated load (issue #621). The roll every fixture below was
+    // written from is a 4x12 RGB ramp with `page-height 3`; the animated
+    // one additionally carries `delay 45 67 200 12` and `loop 3`.
+    // -----------------------------------------------------------------
+
+    /// `vips jxlsave --lossless --strip` on a 4x12 toilet roll carrying
+    /// `page-height 3`, `delay 45 67 200 12` and `loop 3`: a real
+    /// animation of four 4x3 frames.
+    ///
+    /// `ANIM3` and `ANIM5` cannot do this job, and the reason is the whole
+    /// subject of this issue: they were saved from a roll with no `delay`,
+    /// so `jxlsave` wrote a **multipage document** rather than an
+    /// animation, and every one of their frame headers carries the
+    /// `0xffffffff` duration. This file is the other branch.
+    #[cfg(feature = "jxl")]
+    const ANIM4_DELAY: [u8; 251] = [
+        0xff, 0x0a, 0x10, 0x30, 0xc1, 0x68, 0x10, 0x13, 0x08, 0x00, 0xb6, 0x00, 0x00, 0xc8, 0x00,
+        0x4b, 0x18, 0x8b, 0x15, 0x92, 0x48, 0xac, 0xee, 0x6e, 0x9e, 0x73, 0x48, 0xfd, 0x97, 0xea,
+        0x17, 0x88, 0x05, 0x40, 0x03, 0x56, 0xd8, 0xfa, 0x6a, 0x05, 0xad, 0xa0, 0xca, 0xfd, 0x08,
+        0x5e, 0xeb, 0x86, 0xaf, 0xc8, 0xb9, 0x63, 0x38, 0x26, 0xef, 0x45, 0x69, 0xb3, 0x3a, 0x38,
+        0x4f, 0xeb, 0x60, 0x10, 0x00, 0x08, 0x00, 0x0e, 0x01, 0x00, 0xcc, 0x00, 0x4b, 0x18, 0x8b,
+        0x15, 0x0a, 0x1d, 0xbb, 0x6d, 0x25, 0xd2, 0x6a, 0xff, 0x05, 0x82, 0x01, 0xf8, 0xcb, 0x14,
+        0xb2, 0x73, 0xf6, 0x2d, 0x76, 0xcc, 0x8e, 0x4d, 0x4f, 0xaf, 0xee, 0x1c, 0xec, 0x85, 0x57,
+        0x6c, 0xd7, 0xd9, 0xc4, 0x25, 0xb2, 0xd2, 0x82, 0x90, 0xc0, 0xdc, 0xca, 0x54, 0x20, 0x22,
+        0x10, 0x18, 0x28, 0x08, 0x00, 0x22, 0x03, 0x00, 0xd8, 0x00, 0x4b, 0x18, 0x8b, 0x15, 0x0a,
+        0x25, 0x70, 0xdb, 0x4a, 0x24, 0xd2, 0xee, 0xbf, 0x40, 0x30, 0x00, 0xdf, 0x52, 0x99, 0x64,
+        0x9f, 0x7c, 0x8a, 0x6c, 0x93, 0x6d, 0xd5, 0x83, 0x77, 0x6e, 0x50, 0xf4, 0xb9, 0x3d, 0x33,
+        0x03, 0xf2, 0x5c, 0xeb, 0x1e, 0xc6, 0x56, 0x36, 0x1a, 0x8e, 0x40, 0xd6, 0x45, 0x80, 0x88,
+        0x40, 0x60, 0x20, 0x00, 0x08, 0x00, 0x32, 0x04, 0x00, 0xf0, 0x00, 0x4b, 0x18, 0x8b, 0x15,
+        0x52, 0x5c, 0xd2, 0x6f, 0xf7, 0x8a, 0x17, 0x91, 0x0f, 0xe2, 0xf2, 0xba, 0xfb, 0xd1, 0x5a,
+        0xd6, 0x3e, 0xb7, 0x0b, 0x04, 0x03, 0xa0, 0x49, 0x5d, 0xf2, 0xf2, 0xff, 0x42, 0xa5, 0x2e,
+        0xef, 0xee, 0x50, 0x8e, 0x87, 0x1f, 0x7a, 0xc5, 0x5e, 0x0c, 0x9c, 0x18, 0x6d, 0x66, 0x07,
+        0xf4, 0xf2, 0x8c, 0x36, 0x55, 0x0f, 0x78, 0x37, 0x84, 0x0e, 0x11,
+    ];
+
+    /// The 144 bytes `vips rawsave 'roll4d.jxl[n=-1]'` writes, which are
+    /// byte-identical to the WebP capture of the same roll: the whole
+    /// four-page roll, top page first.
+    #[cfg(feature = "jxl")]
+    const ANIM4_ROLL: [u8; 144] = [
+        0, 0, 0, 5, 11, 3, 10, 22, 6, 15, 33, 9, 25, 7, 13, 30, 18, 16, 35, 29, 19, 40, 40, 22, 50,
+        14, 26, 55, 25, 29, 60, 36, 32, 65, 47, 35, 75, 21, 39, 80, 32, 42, 85, 43, 45, 90, 54, 48,
+        100, 28, 52, 105, 39, 55, 110, 50, 58, 115, 61, 61, 125, 35, 65, 130, 46, 68, 135, 57, 71,
+        140, 68, 74, 150, 42, 78, 155, 53, 81, 160, 64, 84, 165, 75, 87, 175, 49, 91, 180, 60, 94,
+        185, 71, 97, 190, 82, 100, 200, 56, 104, 205, 67, 107, 210, 78, 110, 215, 89, 113, 225, 63,
+        117, 230, 74, 120, 235, 85, 123, 240, 96, 126, 250, 70, 130, 255, 81, 133, 4, 92, 136, 9,
+        103, 139, 19, 77, 143, 24, 88, 146, 29, 99, 149, 34, 110, 152,
+    ];
+
+    /// Every frame, which is `n = -1` in vips.
+    #[cfg(feature = "jxl")]
+    fn all_pages() -> LoadOptions {
+        LoadOptions {
+            n: None,
+            ..Default::default()
+        }
+    }
+
+    /**
+     * Tests that asking for every frame stacks them into one toilet-roll
+     * raster with the page geometry the frames model derives. Works by
+     * decoding the four-frame capture with `n = None` and comparing the
+     * whole buffer to what `vips rawsave 'x.jxl[n=-1]'` wrote.
+     * Input: `ANIM4_DELAY` with `n = None` -> Output: 4x12 `Rgb8`, bytes
+     * equal to `ANIM4_ROLL`, `page-height` 3 and `n-pages` 4.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn every_keyframe_stacks_into_one_roll() {
+        let raster = decode_jxl_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+            .expect("the four-frame capture decodes");
+        assert_eq!((raster.width(), raster.height()), (4, 12));
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        assert_eq!(raster.data(), &ANIM4_ROLL[..]);
+        assert_eq!(raster.get_page_height(), 3);
+        assert_eq!(raster.pages_loaded(), 4);
+        assert_eq!(raster.get_n_pages(), 4);
+    }
+
+    /**
+     * Tests that JPEG XL frame durations arrive as milliseconds and that
+     * the loop count comes off the animation header unshifted, and that
+     * `gif-loop` is **not** attached where the WebP loader attaches it.
+     * Works by reading every animation field off a whole-file load and
+     * comparing to `vipsheader -f` on the same bytes.
+     * Input: `ANIM4_DELAY` with `n = None` -> Output: `delay` = `[45, 67,
+     * 200, 12]`, `loop` = 3, `gif-delay` = 4, and no `gif-loop` at all.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_delays_are_milliseconds_and_there_is_no_gif_loop() {
+        let raster = decode_jxl_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+            .expect("the four-frame capture decodes");
+        // The frame header holds ticks and the animation header holds
+        // 1000 ticks per second, so a tick is a millisecond and the four
+        // durations come through untouched. `vipsheader -f delay` prints
+        // `45 67 200 12 `.
+        assert_eq!(
+            raster.get_int_array("delay"),
+            Some(&[45i64, 67, 200, 12][..])
+        );
+        assert_eq!(raster.get_field("loop"), Some(MetadataValue::Int(3)));
+        // 45 ms is 4.5 cs and vips writes 4: half-to-even again.
+        assert_eq!(raster.get_field("gif-delay"), Some(MetadataValue::Int(4)));
+        // Measured, and the asymmetry is the point: `vipsheader -f
+        // gif-loop` on the WebP save of this same roll prints 2, and on
+        // the JPEG XL save it fails with `field "gif-loop" not found`.
+        // `jxlload` attaches `gif-delay` and not `gif-loop`.
+        assert_eq!(raster.get_field("gif-loop"), None);
+    }
+
+    /**
+     * Tests the answer to the question issue #621 asked: a multipage
+     * JPEG XL is a document, not an animation, and carries no delay and no
+     * loop at all, so the `0xffffffff` duration never reaches a metadata
+     * field and an unsigned delay costs nothing. Works by loading the two
+     * multipage captures, whose every frame header holds that sentinel,
+     * and asserting the page geometry is there and the animation fields
+     * are not.
+     * Input: `ANIM3` and `ANIM5` with `n = None` -> Output: 4x9 and 4x15
+     * rolls with `page-height` 3 and `n-pages` 3 and 5, and none of
+     * `delay`, `loop`, `gif-delay` or `gif-loop`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_multipage_document_carries_no_delay_and_no_loop() {
+        for (bytes, pages) in [(&ANIM3[..], 3u32), (&ANIM5[..], 5)] {
+            let raster = decode_jxl_with(bytes, all_pages(), DecodeLimits::default())
+                .expect("a multipage file loads every page");
+            assert_eq!(raster.width(), 4);
+            assert_eq!(raster.height(), 3 * pages);
+            assert_eq!(raster.get_page_height(), 3, "{pages} pages");
+            assert_eq!(raster.pages_loaded(), pages);
+            assert_eq!(raster.get_n_pages(), pages);
+            // `vipsheader -f delay 'x.jxl[n=-1]'` fails with `field
+            // "delay" not found` on both, where the same roll saved as
+            // WebP reports `100 100 100`: WebP has no multipage form, so
+            // `webpsave` had to invent durations and `jxlsave` did not.
+            for field in ["delay", "loop", "gif-delay", "gif-loop"] {
+                assert_eq!(raster.get_field(field), None, "{field} on a document");
+            }
+        }
+    }
+
+    /**
+     * Tests that the tick-to-millisecond conversion handles the multipage
+     * sentinel and a malformed ticks-per-second without inventing a delay,
+     * which is the arithmetic the loader above depends on. Works by
+     * calling the conversion directly on the values a frame header can
+     * hold.
+     * Input: durations at several ticks-per-second rates -> Output:
+     * milliseconds for a real duration, `None` for the `0xffffffff`
+     * sentinel and for a zero numerator.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_frame_duration_becomes_milliseconds_or_nothing() {
+        // The only rate the oracle writes: `jxlsave` puts 1000/1 in the
+        // animation header, so a tick is a millisecond and the four
+        // durations of `ANIM4_DELAY` pass through unchanged.
+        for (ticks, millis) in [(45u32, 45u32), (67, 67), (200, 200), (12, 12), (0, 0)] {
+            assert_eq!(
+                frame_millis(ticks, 1000, 1),
+                Some(FrameDelay::from_millis(millis)),
+                "{ticks} ticks at 1000/1"
+            );
+        }
+        // A slower clock: 3 ticks at 10 ticks per second is 300 ms. The
+        // multiplication has to come before the division or this answers
+        // 0.
+        assert_eq!(frame_millis(3, 10, 1), Some(FrameDelay::from_millis(300)));
+        // And a rate with a denominator: 1000/1001 ticks per second is the
+        // NTSC rate, where one tick is 1.001 ms.
+        assert_eq!(
+            frame_millis(1000, 1000, 1001),
+            Some(FrameDelay::from_millis(1001))
+        );
+        // The sentinel that marks a multipage document rather than an
+        // animation. It is not a duration and does not become one.
+        assert_eq!(frame_millis(0xffff_ffff, 1000, 1), None);
+        // A zero numerator is not a rate. Refusing rather than dividing
+        // keeps a malformed header from being a panic.
+        assert_eq!(frame_millis(45, 0, 1), None);
+        // And an absurd duration saturates rather than wrapping.
+        assert_eq!(
+            frame_millis(0xffff_fffe, 1, 1),
+            Some(FrameDelay::from_millis(u32::MAX))
+        );
+    }
+
+    /**
+     * Tests that a partial load subsets the delay array to the pages it
+     * loaded, the same divergence from vips the WebP loader makes, so the
+     * two agree with each other. Works by loading two frames from the
+     * middle of a four-frame animation and reading the array.
+     * Input: `ANIM4_DELAY` with `page = 1, n = Some(2)` -> Output: 4x6
+     * with `delay` = `[67, 200]` where vips reports `45 67 200 12`, and
+     * `n-pages` still 4.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_partial_load_subsets_the_delay_array() {
+        let raster = decode_jxl_with(
+            &ANIM4_DELAY,
+            LoadOptions {
+                page: 1,
+                n: Some(2),
+            },
+            DecodeLimits::default(),
+        )
+        .expect("frames 1 and 2 exist");
+        assert_eq!((raster.width(), raster.height()), (4, 6));
+        assert_eq!(raster.data(), &ANIM4_ROLL[12..36]);
+        assert_eq!(raster.pages_loaded(), 2);
+        assert_eq!(raster.get_page_height(), 3);
+        // Measured: `vipsheader -f delay 'x.jxl[page=1,n=2]'` prints
+        // `45 67 200 12 ` for this load. Nothing on the raster records the
+        // offset, so the file-scoped array cannot be aligned to the pages
+        // that are actually there.
+        assert_eq!(raster.get_int_array("delay"), Some(&[67i64, 200][..]));
+        assert_eq!(raster.get_field("gif-delay"), Some(MetadataValue::Int(7)));
+        assert_eq!(raster.get_n_pages(), 4);
+    }
+
+    /**
+     * Tests that a one-page load carries no page split and one delay, and
+     * that the default two-argument entry point still reads frame 0. Works
+     * by loading each page on its own and comparing to that slice of the
+     * roll.
+     * Input: `ANIM4_DELAY` at each `page` -> Output: 4x3, no `page-height`
+     * field, that page's pixels and that page's delay.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_one_page_load_carries_no_page_split() {
+        for (page, delay) in [(0u32, 45i64), (1, 67), (2, 200), (3, 12)] {
+            let raster = decode_jxl_with(
+                &ANIM4_DELAY,
+                LoadOptions { page, n: Some(1) },
+                DecodeLimits::default(),
+            )
+            .expect("every page of a four-frame file loads");
+            assert_eq!((raster.width(), raster.height()), (4, 3), "page {page}");
+            assert_eq!(raster.get_field("page-height"), None, "page {page}");
+            assert_eq!(
+                raster.data(),
+                &ANIM4_ROLL[page as usize * 36..page as usize * 36 + 36],
+                "page {page}"
+            );
+            assert_eq!(
+                raster.get_int_array("delay"),
+                Some(&[delay][..]),
+                "page {page}"
+            );
+        }
+        let default = decode_jxl(&ANIM4_DELAY, DecodeLimits::default())
+            .expect("the default load reads one frame");
+        assert_eq!((default.width(), default.height()), (4, 3));
+        assert_eq!(default.data(), &ANIM4_ROLL[..36]);
+        assert_eq!(default.get_n_pages(), 4);
+        assert_eq!(
+            LoadOptions::default(),
+            LoadOptions {
+                page: 0,
+                n: Some(1)
+            }
+        );
+    }
+
+    /**
+     * Tests that a page past the end is refused with the file's own count
+     * rather than clamped, matching `jxlload: bad page number`. Works by
+     * asking for the last page, then one past it, then a count that runs
+     * off the end, then no pages at all.
+     * Input: `ANIM4_DELAY` at `page = 3`, `page = 4`, `page = 2, n = 5`
+     * and `n = 0` -> Output: the last page loads; the rest are
+     * `SourceError::PageOutOfRange` naming four pages.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_page_past_the_end_is_refused_rather_than_clamped() {
+        assert!(
+            decode_jxl_with(
+                &ANIM4_DELAY,
+                LoadOptions {
+                    page: 3,
+                    n: Some(1)
+                },
+                DecodeLimits::default()
+            )
+            .is_ok()
+        );
+        for (page, n) in [(4u32, Some(1u32)), (2, Some(5)), (0, Some(0)), (9, None)] {
+            let err = decode_jxl_with(
+                &ANIM4_DELAY,
+                LoadOptions { page, n },
+                DecodeLimits::default(),
+            )
+            .expect_err("vips calls this a bad page number");
+            assert!(
+                matches!(
+                    err,
+                    SourceError::PageOutOfRange {
+                        format: "JPEG XL",
+                        pages: 4,
+                        ..
+                    }
+                ),
+                "page={page} n={n:?} got {err:?}"
+            );
+        }
+        // A still has exactly one page, and page 1 of it does not exist.
+        let err = decode_jxl_with(
+            &LOSSLESS_RGB,
+            LoadOptions {
+                page: 1,
+                n: Some(1),
+            },
+            DecodeLimits::default(),
+        )
+        .expect_err("a still has one page");
+        assert!(
+            matches!(err, SourceError::PageOutOfRange { pages: 1, .. }),
+            "got {err:?}"
+        );
+    }
+
+    /**
+     * Tests that a still JPEG XL has no animation surface at all, which is
+     * the third branch beside the animation and the multipage document.
+     * Works by loading the lossless still under both option shapes.
+     * Input: `LOSSLESS_RGB` -> Output: 4x3 with none of `delay`, `loop`,
+     * `gif-delay`, `gif-loop` or `n-pages`.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_still_image_has_no_animation_fields() {
+        for options in [LoadOptions::default(), all_pages()] {
+            let raster = decode_jxl_with(&LOSSLESS_RGB, options, DecodeLimits::default())
+                .expect("a still loads under either option shape");
+            assert_eq!((raster.width(), raster.height()), (4, 3));
+            for field in ["delay", "loop", "gif-delay", "gif-loop", "n-pages"] {
+                assert_eq!(raster.get_field(field), None, "{field} on a still");
+            }
+        }
+    }
+
+    /**
+     * Tests that the page split the loader writes is one the page model
+     * reads back, so a page extracted from the roll is the page a
+     * single-page load hands over. Works by extracting each page of a
+     * whole-file load and comparing it to a load of that page alone, on
+     * both the animation and the multipage document.
+     * Input: `ANIM4_DELAY` and `ANIM3` -> Output: `try_extract_page(i)`
+     * equals the `page = i` load, byte for byte.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn a_page_of_the_roll_is_the_page_loaded_on_its_own() {
+        for (bytes, pages) in [(&ANIM4_DELAY[..], 4u32), (&ANIM3[..], 3)] {
+            let roll = decode_jxl_with(bytes, all_pages(), DecodeLimits::default())
+                .expect("the capture decodes");
+            // Asserted before the loop, because a roll holding one page
+            // makes the comparison below trivially true.
+            assert_eq!(roll.pages_loaded(), pages);
+            for page in 0..roll.pages_loaded() {
+                let extracted = roll.try_extract_page(page).expect("page is in range");
+                let alone = decode_jxl_with(
+                    bytes,
+                    LoadOptions { page, n: Some(1) },
+                    DecodeLimits::default(),
+                )
+                .expect("page is in range");
+                assert_eq!(
+                    (extracted.width(), extracted.height()),
+                    (alone.width(), alone.height()),
+                    "page {page}"
+                );
+                assert_eq!(extracted.data(), alone.data(), "page {page}");
+            }
+        }
+    }
+
+    /**
+     * Tests that the resource ceilings are checked against the whole roll
+     * and not against one frame. Works by setting each ceiling so one
+     * frame fits and four do not, with the single-frame load as the
+     * positive control.
+     * Input: `ANIM4_DELAY` under `max_pixels = 40` and under a 100-byte
+     * allocation budget -> Output: a typed refusal for the roll and a
+     * successful single-frame load under the same ceiling.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_ceilings_are_checked_against_the_roll_not_the_frame() {
+        let pixels = DecodeLimits::default().with_max_pixels(40);
+        assert!(
+            decode_jxl_with(&ANIM4_DELAY, LoadOptions::default(), pixels).is_ok(),
+            "one frame fits under 40 pixels"
+        );
+        assert!(
+            matches!(
+                decode_jxl_with(&ANIM4_DELAY, all_pages(), pixels),
+                Err(SourceError::DimensionLimitExceeded { height: 12, .. })
+            ),
+            "four frames do not"
+        );
+
+        let alloc = DecodeLimits::default().with_max_alloc_bytes(100);
+        assert!(decode_jxl_with(&ANIM4_DELAY, LoadOptions::default(), alloc).is_ok());
+        let err = decode_jxl_with(&ANIM4_DELAY, all_pages(), alloc)
+            .expect_err("144 bytes is over a 100-byte budget");
+        assert!(
+            matches!(
+                err,
+                SourceError::AllocLimitExceeded {
+                    needed_bytes: 144,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 }
