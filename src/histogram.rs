@@ -295,6 +295,15 @@ fn bins_for(kind: SampleKind) -> usize {
 /// data-sized group for the matching reason, since the same cast turns them
 /// into `ushort`.
 ///
+/// There is no cap on `max_bin + 1` here, and there was one until mutation
+/// testing showed nothing could reach it. [`read_flat`] already folds every
+/// sample into the bin table, so `max_bin` cannot exceed
+/// `bins_for(kind) - 1` and a `.min(bins_for(kind))` is a no-op on every
+/// input that can be constructed. The invariant belongs in a test rather
+/// than in a branch no test can enter, and
+/// `read_flat_folds_a_32_bit_sample_into_the_16_bit_bin_table` asserts it
+/// for every kind that carries a sample.
+///
 /// This is deliberately *not* [`bins_for`], which answers a different
 /// question and must keep answering it: `hist_find_ndim` uses it as the
 /// value **range** it scales samples by, and measurement says that range is
@@ -305,7 +314,7 @@ fn hist_width(kind: SampleKind, max_bin: u32) -> usize {
     match kind {
         SampleKind::U8 | SampleKind::I8 => bins_for(kind),
         SampleKind::U16 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
-            (max_bin as usize + 1).min(bins_for(kind))
+            max_bin as usize + 1
         }
     }
 }
@@ -1587,6 +1596,29 @@ mod tests {
                 (got as usize) < bins_for(kind),
                 "{kind:?} indexed past the {} bins it declares",
                 bins_for(kind)
+            );
+        }
+        // The invariant `hist_width` leans on, stated for every kind that
+        // carries a sample: a bin index is inside the kind's own table, so
+        // a histogram sized `max + 1` can never be wider than `bins_for`
+        // and the cap that used to be in `hist_width` was unreachable.
+        for (kind, bits) in [
+            (SampleKind::U8, 0xFFu32),
+            (SampleKind::I8, 0xFF),
+            (SampleKind::U16, 0xFFFF),
+            (SampleKind::I16, 0xFFFF),
+        ] {
+            let mut buf = vec![0u8; kind.bytes()];
+            if kind.bytes() == 1 {
+                buf[0] = bits as u8;
+            } else {
+                buf.copy_from_slice(&(bits as u16).to_ne_bytes());
+            }
+            let got = read_flat(&buf, kind, 0) as usize;
+            assert!(got < bins_for(kind), "{kind:?} indexed past its table");
+            assert!(
+                hist_width(kind, u32::try_from(got).unwrap()) <= bins_for(kind),
+                "{kind:?} sizes a histogram wider than its table"
             );
         }
     }
