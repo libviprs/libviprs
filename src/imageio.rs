@@ -3240,8 +3240,9 @@ mod tests {
         im.fields
             .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
 
+        let kept = im.encode_for_extension("jp2", true).unwrap();
         assert_eq!(
-            im.encode_for_extension("jp2", true).unwrap(),
+            kept,
             im.encode_for_extension("jp2", false).unwrap(),
             "jp2ksave writes no metadata, so the strip flag cannot change the bytes"
         );
@@ -3250,6 +3251,24 @@ mod tests {
             im.encode_for_extension("webp", false).unwrap(),
             "positive control: the WebP row does carry metadata and does differ"
         );
+
+        // Identical bytes on their own would also be what a row that stripped
+        // *both* ways produces, so the second half says which way it went: the
+        // profile is not in the file at all, under either flag. Read back
+        // through the decoder rather than by scanning for the four bytes,
+        // because a JP2 could legitimately contain them by accident.
+        let back = crate::jp2k::decode_jp2k(&kept, DecodeLimits::default())
+            .expect("the container this row writes must read back");
+        assert_eq!(
+            back.icc_profile(),
+            None,
+            "jp2ksave writes no colr box for an attached profile, so nothing \
+             carries it and there is nothing for the flag to drop"
+        );
+        assert_eq!(back.get_field("exif-data"), None);
+        // And the pixels did survive, so "no metadata" is not "no file".
+        assert_eq!(back.width(), 8);
+        assert_eq!(back.height(), 6);
     }
 
     /// Without the `jp2k` feature the five suffixes fall through to
