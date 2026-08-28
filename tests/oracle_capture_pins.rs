@@ -759,6 +759,7 @@ fn digest_of(path: &Path) -> Option<(String, u64)> {
 ///     to match, with [`EXPECTED_PINNED_FIXTURE_HASHES`] pinning how many of
 ///     those there are.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn every_recorded_fixture_hash_matches_the_committed_file() {
     let root = captures_dir();
     let mut pinned = 0usize;
@@ -872,6 +873,7 @@ fn every_recorded_fixture_hash_matches_the_committed_file() {
 /// fine. The tree has none today, and it should not need one: what is being
 /// refused is the contradiction, not the sharing.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn no_two_records_hash_one_name_differently() {
     let mut claims: BTreeMap<(String, String), BTreeMap<String, Vec<String>>> = BTreeMap::new();
     for record in named_file_hashes() {
@@ -990,6 +992,7 @@ fn any_module_level_line(src: &str, pred: impl Fn(&str) -> bool) -> bool {
 /// the call is this script's own. A script checking a different area's pin
 /// entry passes a substring scan and checks the wrong thing.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn every_capture_script_checks_the_oracle_pin() {
     let embedded: BTreeSet<&str> = CAPTURE_SCRIPTS.iter().map(|(area, _)| *area).collect();
     let on_disk = areas_on_disk();
