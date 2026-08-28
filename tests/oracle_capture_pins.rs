@@ -277,6 +277,7 @@ fn walk_objects(value: &Value, key: Option<&str>, f: &mut impl FnMut(Option<&str
 /// the #650 drift was not that a version changed, it was that nothing was
 /// looking at the version at all.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn every_capture_declares_the_oracle_it_was_measured_against() {
     let pin = pin_file();
     let pinned = pin["pinned_vips_version"]
@@ -354,6 +355,7 @@ fn every_capture_declares_the_oracle_it_was_measured_against() {
 /// that is blind to what it guards and loud about what it does not is worse
 /// than none, so the pin is now `raw_sha256`, over `vips rawsave` output.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn convolution_pins_pixels_not_the_v_container() {
     let capture = read_json(&captures_dir().join("convolution").join("oracle.json"));
     let mut with_raw = 0usize;
@@ -395,6 +397,7 @@ fn convolution_pins_pixels_not_the_v_container() {
 /// raster order, and `ties` says how many positions hold it, so a reader can
 /// tell an unambiguous pin from an arbitrary-but-reproducible one.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn convolution_min_max_positions_are_deterministic() {
     let capture = read_json(&captures_dir().join("convolution").join("oracle.json"));
     let mut blocks = 0usize;
@@ -443,6 +446,7 @@ fn convolution_min_max_positions_are_deterministic() {
 /// these files are meant to be machine-readable evidence, and evidence only
 /// one language can open is not much of a corpus.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn captures_parse_as_json_and_the_python_only_list_does_not_grow() {
     let areas = areas_with_repair_flags();
     let mut needed_repair: Vec<&str> = areas
@@ -755,6 +759,7 @@ fn digest_of(path: &Path) -> Option<(String, u64)> {
 ///     to match, with [`EXPECTED_PINNED_FIXTURE_HASHES`] pinning how many of
 ///     those there are.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn every_recorded_fixture_hash_matches_the_committed_file() {
     let root = captures_dir();
     let mut pinned = 0usize;
@@ -868,6 +873,7 @@ fn every_recorded_fixture_hash_matches_the_committed_file() {
 /// fine. The tree has none today, and it should not need one: what is being
 /// refused is the contradiction, not the sharing.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn no_two_records_hash_one_name_differently() {
     let mut claims: BTreeMap<(String, String), BTreeMap<String, Vec<String>>> = BTreeMap::new();
     for record in named_file_hashes() {
@@ -896,5 +902,144 @@ fn no_two_records_hash_one_name_differently() {
          The later write wins on disk. Give the earlier record its own \
          fixture name and re-run that area's capture.py.",
         contradictions.join("\n  ")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Every capture script checks the pin before it writes anything (issue #796).
+// ---------------------------------------------------------------------------
+
+/// Every capture script in the tree, by area, embedded at compile time.
+///
+/// `include_str!` rather than a directory walk, for two reasons. The scripts
+/// are the evidence a running test is reasoning about, and reading them at
+/// run time would put this test on the Miri filesystem ledger for a file that
+/// cannot change between the build and the run. And a missing path is then a
+/// compile error naming it, which is a better failure than a test that walked
+/// a directory and found one fewer script than it expected.
+///
+/// The list being hand-written is the thing that could rot, so
+/// [`every_capture_script_checks_the_oracle_pin`] cross-checks it against the
+/// live area walk before it reads anything into what the scripts say.
+#[rustfmt::skip]
+const CAPTURE_SCRIPTS: [(&str, &str); 14] = [
+    ("convolution",       include_str!("../oracle-captures/convolution/capture.py")),
+    ("convolution/canny", include_str!("../oracle-captures/convolution/canny/capture.py")),
+    ("foreign-analyze",   include_str!("../oracle-captures/foreign-analyze/capture.py")),
+    ("foreign-avif",      include_str!("../oracle-captures/foreign-avif/capture.py")),
+    ("foreign-exr",       include_str!("../oracle-captures/foreign-exr/capture.py")),
+    ("foreign-fits",      include_str!("../oracle-captures/foreign-fits/capture.py")),
+    ("foreign-gif",       include_str!("../oracle-captures/foreign-gif/capture.py")),
+    ("foreign-jp2k",      include_str!("../oracle-captures/foreign-jp2k/capture.py")),
+    ("foreign-jxl",       include_str!("../oracle-captures/foreign-jxl/capture.py")),
+    ("foreign-mat",       include_str!("../oracle-captures/foreign-mat/capture.py")),
+    ("foreign-nifti",     include_str!("../oracle-captures/foreign-nifti/capture.py")),
+    ("foreign-radiance",  include_str!("../oracle-captures/foreign-radiance/capture.py")),
+    ("foreign-uhdr",      include_str!("../oracle-captures/foreign-uhdr/capture.py")),
+    ("foreign-webp",      include_str!("../oracle-captures/foreign-webp/capture.py")),
+];
+
+/// Does any MODULE-LEVEL line of `src` satisfy `pred`?
+///
+/// Module level means column zero: no leading whitespace. That is what
+/// separates the real statement from a copy of it in prose, and there is a
+/// copy in prose. `oracle_pin.py`'s own docstring shows callers exactly what
+/// to write:
+///
+/// ```text
+///     sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir)))
+///     import oracle_pin
+///
+///     VIPS_VERSION, PIN = oracle_pin.check(AREA, VIPS)
+/// ```
+///
+/// Indented by four, because it is an example. A scan that took a substring
+/// match would read that docstring as an adoption, and this repository has
+/// already shipped one scanner that let prose answer for code (#703 read an
+/// outer `json.dump` as guarded when only a nested call carried the flag).
+/// Python has no module-level indentation, so the rule costs nothing real:
+/// a statement that runs when the script starts is at column zero.
+///
+/// A trailing `#` comment is dropped first, so the `# noqa` both convolution
+/// scripts carry does not have to be spelled out here.
+fn any_module_level_line(src: &str, pred: impl Fn(&str) -> bool) -> bool {
+    src.lines()
+        .filter(|line| !line.starts_with([' ', '\t']))
+        .map(|line| line.split('#').next().unwrap_or("").trim_end())
+        .any(pred)
+}
+
+/// Every `capture.py` refuses to run against a libvips `ORACLE_PIN.json` does
+/// not pin it to (issue #796).
+///
+/// #650 left a two-sided guard: `capture.py` stops a bad capture being TAKEN,
+/// and [`every_capture_declares_the_oracle_it_was_measured_against`] stops one
+/// being KEPT. Only the second side was real. `ORACLE_PIN.json` said
+/// "capture.py refuses to run against a binary that disagrees with it",
+/// `oracle_pin.py` opened "The oracle pin every capture.py under
+/// oracle-captures/ checks", and the module doc at the top of this file said
+/// "each area's". Measured: two of fourteen scripts, both of them the
+/// convolution ones the helper was written in.
+///
+/// So the twelve `foreign-*` areas could be re-run on a moved binary and
+/// would write a whole capture with the new version stamped through it,
+/// silently, which is exactly the #650 failure. The six `pre_pin` areas are
+/// the ones most likely to be re-run and all six were in the unguarded
+/// twelve.
+///
+/// Three things are checked per script, because two of them alone can be
+/// true and useless: the import, the call, and that the area name handed to
+/// the call is this script's own. A script checking a different area's pin
+/// entry passes a substring scan and checks the wrong thing.
+#[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
+fn every_capture_script_checks_the_oracle_pin() {
+    let embedded: BTreeSet<&str> = CAPTURE_SCRIPTS.iter().map(|(area, _)| *area).collect();
+    let on_disk = areas_on_disk();
+    let live: BTreeSet<&str> = on_disk.keys().map(String::as_str).collect();
+    assert_eq!(
+        embedded, live,
+        "CAPTURE_SCRIPTS no longer names the areas on disk, so it is not the \
+         population this test means to read. Add the new area's capture.py to \
+         the list with an include_str!."
+    );
+
+    let mut gaps: Vec<String> = Vec::new();
+    for (area, src) in CAPTURE_SCRIPTS {
+        let mut missing: Vec<&str> = Vec::new();
+        if !any_module_level_line(src, |line| {
+            line.trim_end() == "import oracle_pin" || line.starts_with("import oracle_pin ")
+        }) {
+            missing.push("a module-level `import oracle_pin`");
+        }
+        if !any_module_level_line(src, |line| line.contains("oracle_pin.check(")) {
+            missing.push("a module-level call to `oracle_pin.check`");
+        }
+        let declares = format!("AREA = {area:?}");
+        if !any_module_level_line(src, |line| line.trim_end() == declares) {
+            missing.push("a module-level `AREA` naming its own area");
+        }
+        if !missing.is_empty() {
+            gaps.push(format!(
+                "oracle-captures/{area}/capture.py is missing {}",
+                missing.join(", and ")
+            ));
+        }
+    }
+
+    assert!(
+        gaps.is_empty(),
+        "{} of {} capture scripts do not check ORACLE_PIN.json before they \
+         write, so for those areas nothing stops a capture being TAKEN \
+         against the wrong libvips:\n  {}\nAdd, at module level:\n\
+         \x20   AREA = \"<this area>\"\n\
+         \x20   sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir)))\n\
+         \x20   import oracle_pin\n\
+         \x20   VIPS_VERSION, ORACLE_PIN = oracle_pin.check(AREA, VIPS)\n\
+         See oracle-captures/convolution/capture.py, which has had it since \
+         #650.",
+        gaps.len(),
+        CAPTURE_SCRIPTS.len(),
+        gaps.join("\n  ")
     );
 }
