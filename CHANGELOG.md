@@ -658,6 +658,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MATLAB level 5 (`.mat`) load** (issues #510, #640, #763). `decode_mat`
+  reads the first variable of rank 1, 2 or 3 out of a MAT-5 container, in
+  either byte order, bare or inside a `miCOMPRESSED` zlib element, and `.mat`
+  becomes a live row in the content sniffer so `decode_bytes` and
+  `decode_file` reach it without being told what the bytes are. There is no
+  save half: `vips` registers no `matsave`.
+
+  **The sniff is the shipped binary's, not the C source's**, and that is the
+  sharp edge of this port. `vips__mat_ismat` in the reference checkout reads
+  ten bytes and compares them with `MATLAB 5.0`; the 8.18.6 dylib that
+  shipped reads 128 and validates the version word and the endian indicator
+  as well, and the 8.18.4 it replaced did not (issue #650). A port written
+  from the source would claim `MATLAB 5.1`, `matlab 5.0`, `MATLAB_5.0`, a
+  file with a bogus endian indicator and a 127-byte file, all of which
+  8.18.6 refuses. The whole predicate lands as two route-table rows, because
+  the version and the indicator are one four-byte constant per byte order and
+  the 128-byte length floor falls out of the offset.
+
+  The container is a transpose and a de-planarisation, not a copy.
+  `mat2vips_get_header` takes the height from `dims[0]` and the width from
+  `dims[1]`, so a MATLAB 2x3 becomes a 3x2 image and element `(r, c)` is
+  pixel `(c, r)`; rank 3 makes `dims[2]` the band count and the file holds
+  the planes one after another where a libviprs raster is interleaved.
+
+  The behaviours a spec reading gets wrong are the point. One variable loads
+  and there is no way to pick it. The rank filter runs in the search loop and
+  the class check runs *after* it, so a loadable `uint8` variable behind an
+  `int64` one fails outright. The logical flag is read and ignored. And
+  read-info validates the array-flags, dimensions and name subelements and
+  never the data one, so a file truncated mid-element reports a full header
+  and fails only at the pixels.
+
+  Four deliberate divergences, all refusals where `matload` carries on.
+  A complex array is refused: vips never reads the complex bit and memcpys
+  out of a `mat_complex_split_t`, so its pixels are the raw bytes of two heap
+  addresses and change from run to run under ASLR. A non-positive dimension
+  is refused rather than clamped to 1 by GObject. A band count other than 1,
+  3 or 4 is refused rather than pushed onto a multiband carrier the decode
+  path does not produce. And a stored element type that does not match the
+  array class is refused rather than widened.
+
+  Three of the eight classes `matload` reads have a carrier here (`mxUINT8`,
+  `mxUINT16`, `mxSINGLE`) and the other five are refused **by name** with the
+  issue that would add the carrier: `mxINT8`, `mxINT16` and `mxINT32` need
+  #516, `mxUINT32` needs #517, and `mxDOUBLE`, which is what MATLAB writes
+  unless told otherwise, needs #518.
+
+  The allocation budget matters twice here rather than once.
+  `dims_100000x100000.mat` declares ten gigapixels behind eight bytes of
+  data, so the declared geometry goes through `DecodeLimits::check_coord`,
+  `check_pixels` and `check_image_alloc` before anything is reserved; and a
+  `miCOMPRESSED` element's inflated size is not declared anywhere in the
+  container, so every inflate stops at `max_alloc_bytes` and is refused
+  rather than grown past it.
+
+  No new dependency. `flate2` was already a required dependency of this
+  crate, and nothing else in the format needs one.
+
 - A page model for multi-frame images (issue #564). A multi-frame image is one
   `Raster` whose rows are a whole number of equal-height pages stacked top to
   bottom, the layout libvips calls a toilet roll, and the split is now a
