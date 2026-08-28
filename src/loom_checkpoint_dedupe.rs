@@ -416,6 +416,7 @@ fn loom_dedupe_placement_is_deterministic() {
 /// same record path, and canonicalisation makes the final layout
 /// order-independent, so a resumed `finish()` is byte-identical to a clean one.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn loom_resume_seeding_reconstructs_identical_placement() {
     // Reference: the uninterrupted run's canonical placement.
     let clean = (1u32, vec![2u32, 3u32]);

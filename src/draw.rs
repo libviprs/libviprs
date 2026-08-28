@@ -765,7 +765,7 @@ impl DrawOp for Smudge {
 /// The overlay's pixels replace the target's (libvips "set" mode) with the
 /// overlay's top-left corner at `(x, y)`. Off-canvas rows and columns clip
 /// away, so the overlay may straddle any edge. The overlay must share the
-/// target's [`PixelFormat`](crate::pixel::PixelFormat); pasting a mismatched
+/// target's [`PixelFormat`]; pasting a mismatched
 /// format is a documented no-op (libvips would cast the sub-image, a
 /// conversion this seam deliberately leaves to the caller).
 #[derive(Debug, Clone)]

@@ -95,7 +95,9 @@
 //! **See also:** the [interactive CLI documentation](https://libviprs.org/cli/)
 //! bundles every public knob into runnable examples.
 
+pub mod analyze;
 pub mod arithmetic;
+pub mod avif;
 pub mod bands;
 pub mod cancel;
 pub mod checksum;
@@ -118,12 +120,14 @@ pub mod extensions;
 pub mod extract;
 pub mod fits;
 pub mod foreign_stubs;
+pub mod frames;
 pub mod freqfilt;
 pub mod geo;
 pub mod gif;
 pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
+pub mod jp2k;
 pub mod jxl;
 pub(crate) mod level_walk;
 #[cfg(loom)]
@@ -132,6 +136,7 @@ mod loom_checkpoint_dedupe;
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
+pub mod mat;
 pub mod matrix;
 pub mod morphology;
 pub mod mosaicing;
@@ -215,6 +220,7 @@ pub use foreign_stubs::{
     MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, magickload,
     magickload_with,
 };
+pub use frames::{FrameDelay, LoopCount, PageLayout};
 pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
@@ -262,6 +268,12 @@ pub use radiance::{RadianceError, decode_radiance};
 // already knows the bytes are a GIF and does not want to go through the
 // sniff route.
 pub use gif::{GifError, decode_gif};
+// `decode_avif` is re-exported beside its error type for the reason
+// `decode_exr` is: it is the direct entry point for a caller who already
+// knows the bytes are an AVIF. There is no encoder half to pair it with,
+// and unlike EXR that is a scope decision rather than an upstream gap:
+// `heifsave` exists and writes HEVC, which is exactly what this cannot do.
+pub use avif::{AvifError, decode_avif};
 // `decode_exr` is re-exported beside its error type for the same reason
 // `decode_radiance` is: it is the direct entry point for a caller who
 // already knows the bytes are an OpenEXR file. There is no encoder half
@@ -277,6 +289,16 @@ pub use fits::{FitsError, decode_fits};
 // There is no encoder half, and there is no libvips half either: the pinned
 // build reports `NIfTI load/save with libnifti: false` (issue #510).
 pub use nifti::{NiftiError, decode_nifti};
+// `decode_mat` is re-exported for the reason `decode_nifti` is: it is the
+// direct entry point for a caller who already knows the bytes are a MATLAB
+// level 5 file. There is no encoder half, because libvips registers no
+// `matsave` (issue #510).
+pub use mat::{MatError, decode_mat};
+// `decode_analyze_file` is re-exported rather than `decode_analyze`, because
+// Analyze is a `.hdr` plus an `.img` and the path-taking half is the one a
+// caller who already knows the format actually wants. The buffer-pair and
+// filename-resolving halves stay behind `libviprs::analyze::` (issue #764).
+pub use analyze::{AnalyzeError, decode_analyze_file};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
@@ -323,6 +345,7 @@ pub use webp::decode_webp;
 // beside theirs, so a caller can name the type they are matching on. The
 // option types stay behind `libviprs::jxl::` so the crate root does not
 // gain a third `SaveOptions`.
+pub use jp2k::{Jp2kError, decode_jp2k};
 pub use jxl::{JxlError, decode_jxl};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
