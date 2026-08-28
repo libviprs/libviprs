@@ -974,11 +974,11 @@ fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize
 /// module's memory went: 384 MB of a 464 MiB peak on a 4000x4000 `Rgb8`
 /// integer `conv` over a 48 MB input. [`Scan`] widens a rolling window of
 /// rows instead, which took the same measurement to 98 MiB, and the same
-/// change reads on `sobel` and on `gaussblur` (issue #575). What is left
-/// on this function is [`Raster::try_compass`], which widens each of its
-/// `times` results to combine them, and the two correlations, which read
-/// arbitrary offsets into both operands and so have no row window to
-/// keep.
+/// change reads on `sobel` and on `gaussblur` (issue #575). Nor does
+/// [`Raster::try_compass`] any more: it folds each result into its combine
+/// off that result's own bytes (issue #790). What is left on this function
+/// is the two correlations, which compare a template against the image at
+/// every offset and so read the whole of both operands per output sample.
 fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let fmt = r.format();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
@@ -1037,27 +1037,71 @@ fn raster_from_f64(
 ///
 /// Same [`alloc_op_output`] / [`Raster::from_op_output`] pair as
 /// [`raster_from_f64`], for the same reason (issue #575).
+///
+/// Takes an iterator rather than a slice, so its one caller does not have to
+/// materialise a whole image of `i64` to be walked once and dropped
+/// (issue #790). `ExactSizeIterator` is what keeps the length assertion, which
+/// a plain `Iterator` would have quietly taken away.
 fn raster_from_i64(
     src: &Raster,
     w: u32,
     h: u32,
     fmt: PixelFormat,
-    samples: &[i64],
+    samples: impl ExactSizeIterator<Item = i64>,
 ) -> Result<Raster, RasterError> {
     debug_assert_eq!(samples.len(), w as usize * h as usize * fmt.channels());
     let mut data = alloc_op_output(w, h, fmt)?;
     if fmt.bytes_per_channel() == 1 {
-        for (out, &v) in data.iter_mut().zip(samples) {
+        for (out, v) in data.iter_mut().zip(samples) {
             *out = v as u8;
         }
     } else {
-        for (out, &v) in data.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
+        for (out, v) in data.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
             *out = (v as u16).to_ne_bytes();
         }
     }
     let mut out = Raster::from_op_output(w, h, fmt, data)?;
     out.carry_meta_from(src);
     Ok(out)
+}
+
+/// Fold one compass result into the running combine, reading its samples off
+/// its own bytes rather than out of a widened copy.
+///
+/// `first` seeds the accumulator instead of combining into it, which is what
+/// `planes[0][i].abs()` used to do; the decode is chosen once per result
+/// rather than once per sample, which is the only reason this is not simply a
+/// `sample_at` call in the loop.
+fn fold_abs_samples(acc: &mut [f64], r: &Raster, first: bool, combine: Combine) {
+    let mut apply = |i: usize, v: f64| {
+        let v = v.abs();
+        acc[i] = if first {
+            v
+        } else {
+            match combine {
+                Combine::Max => acc[i].max(v),
+                Combine::Sum => acc[i] + v,
+            }
+        };
+    };
+    let data = r.data();
+    match r.format().bytes_per_channel() {
+        1 => {
+            for (i, &b) in data.iter().enumerate() {
+                apply(i, f64::from(b));
+            }
+        }
+        2 => {
+            for (i, c) in data.as_chunks::<2>().0.iter().enumerate() {
+                apply(i, f64::from(u16::from_ne_bytes(*c)));
+            }
+        }
+        _ => {
+            for (i, c) in data.as_chunks::<4>().0.iter().enumerate() {
+                apply(i, f64::from(f32::from_ne_bytes(*c)));
+            }
+        }
+    }
 }
 
 /// Clamp a mask-relative coordinate to the image, replicating edge pixels
@@ -1967,25 +2011,20 @@ impl Raster {
         // Take the absolute value of every result, then combine
         // (vips_abs + vips_bandrank / vips_sum). All results share one
         // format because they come from the same input and precision.
+        //
+        // Folded off each result's own bytes, one result at a time. This used
+        // to widen all `times` of them with [`samples_f64`] first and hold
+        // every widening live at once, which is `times * 8` bytes a sample for
+        // a combine that reads each sample exactly once: 96 of the 159 bytes a
+        // pixel a four-round uchar compass cost, and the whole difference
+        // between 36x the input and 8x it (issue #790).
         let (w, h) = (self.width(), self.height());
         let channels = results[0].format().channels();
-        let planes: Vec<Vec<f64>> = results
-            .iter()
-            .map(samples_f64)
-            .collect::<Result<_, RasterError>>()?;
-        let n = planes[0].len();
+        let n = w as usize * h as usize * channels;
         let mut combined = try_buffer::<f64>(w, h, n)?;
         combined.resize(n, 0.0);
-        for i in 0..n {
-            let mut acc: f64 = planes[0][i].abs();
-            for plane in &planes[1..] {
-                let v = plane[i].abs();
-                acc = match combine {
-                    Combine::Max => acc.max(v),
-                    Combine::Sum => acc + v,
-                };
-            }
-            combined[i] = acc;
+        for (round, result) in results.iter().enumerate() {
+            fold_abs_samples(&mut combined, result, round == 0, combine);
         }
 
         let fmt = results[0].format();
@@ -2007,9 +2046,16 @@ impl Raster {
                     .expect("validated channel count has a 16-bit format"),
             };
             let max = depth_max(out_fmt);
-            let mut vals = try_buffer::<i64>(w, h, n)?;
-            vals.extend(combined.iter().map(|&v| (v as i64).min(max)));
-            Ok(raster_from_i64(like, w, h, out_fmt, &vals)?)
+            // Straight into the output raster rather than through a whole
+            // `Vec<i64>` of clipped samples that is walked once and dropped,
+            // which was another eight bytes a sample (issue #790).
+            Ok(raster_from_i64(
+                like,
+                w,
+                h,
+                out_fmt,
+                combined.iter().map(|&v| (v as i64).min(max)),
+            )?)
         }
     }
 
