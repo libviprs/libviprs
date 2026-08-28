@@ -311,6 +311,35 @@ fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
     hists
 }
 
+/// Row count for a [`Raster::hist_plot`] bar graph of `values`.
+///
+/// `uchar` is the only format libvips gives a fixed plot height, and that
+/// is measured rather than inferred from the width: on 8.18.6 a histogram
+/// of `[0, 5]` plots 256 rows high as `uchar` and 5 rows high as `char`,
+/// `ushort`, `short`, `uint` or `int`. So the signed one-byte kind belongs
+/// with the data-driven group even though it shares `U8`'s width, which is
+/// exactly the distinction [`SampleKind`] exists to carry.
+///
+/// A separate function rather than a `match` inside `try_hist_plot` so the
+/// grouping can be asserted for the kinds no `PixelFormat` produces, since
+/// there is no raster to hand the op.
+///
+/// The `max + 1` for the data-driven group is libviprs's own rule and does
+/// **not** match libvips, which plots `max` rows; that is issue #802 and it
+/// is deliberately not changed here.
+#[inline]
+fn plot_height(kind: SampleKind, values: &[u32]) -> usize {
+    match kind {
+        SampleKind::U8 => 256,
+        SampleKind::U16
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32
+        | SampleKind::F32 => values.iter().copied().max().unwrap_or(0) as usize + 1,
+    }
+}
+
 /// Saturate a `u64` count into a 16-bit sample value.
 #[inline]
 fn sat16(v: u64) -> u32 {
@@ -755,20 +784,7 @@ impl Raster {
         // of inheriting the 16-bit branch (issue #607). `F32` is
         // unreachable in practice: `read_flat` above panics on it for any
         // non-empty histogram, and `hist_len` rejects the empty shape.
-        let height = match kind {
-            // `uchar` is the only format libvips gives a fixed plot height,
-            // measured on 8.18.6: a `uchar` histogram of `[0, 5]` plots 256
-            // rows high while the same values as `char`, `ushort`, `short`,
-            // `uint` or `int` plot 5. So the signed one-byte kind belongs
-            // with the data-driven group and not with `U8`.
-            SampleKind::U8 => 256,
-            SampleKind::U16
-            | SampleKind::I8
-            | SampleKind::I16
-            | SampleKind::U32
-            | SampleKind::I32
-            | SampleKind::F32 => values.iter().copied().max().unwrap_or(0) as usize + 1,
-        };
+        let height = plot_height(kind, &values);
         let mut out = Raster::zeroed(n as u32, height as u32, PixelFormat::Gray8)?;
         let buf = out.data_mut();
         for (x, &v) in values.iter().enumerate() {
@@ -1420,6 +1436,43 @@ mod tests {
      * sample was saturated into `ushort` before it was counted.
      * Input: U32 70000 -> 65535; U32 1000 -> 1000; I32 -7 -> 0.
      */
+    /**
+     * Tests that the fixed 256-row plot height belongs to `U8` alone and
+     * not to every one-byte kind, which is the one claim in this change
+     * that a raster cannot reach, since no `PixelFormat` carries `I8`.
+     * Works by calling the height rule directly for every kind on the same
+     * values, with a control that the data-driven group does answer from
+     * the data.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: a histogram of
+     * `[0, 5]` plots 256 rows high as `uchar` and 5 rows high as `char`,
+     * `ushort`, `short`, `uint` and `int`.
+     * Input: ([0, 5], U8) -> 256; ([0, 5], I8) -> 6 (libviprs's own
+     * `max + 1`, see #802).
+     */
+    #[test]
+    fn only_the_unsigned_byte_kind_plots_a_fixed_height() {
+        let values = [0u32, 5];
+        assert_eq!(plot_height(SampleKind::U8, &values), 256);
+        for kind in [
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+            SampleKind::F32,
+        ] {
+            assert_eq!(
+                plot_height(kind, &values),
+                6,
+                "{kind:?} did not take its plot height from the data"
+            );
+        }
+        // Control: the data-driven answer really does follow the data, so
+        // the 6 above is not a second constant.
+        assert_eq!(plot_height(SampleKind::I8, &[0, 40]), 41);
+        assert_eq!(plot_height(SampleKind::I8, &[]), 1);
+    }
+
     #[test]
     fn read_flat_folds_a_32_bit_sample_into_the_16_bit_bin_table() {
         for (kind, stored, index) in [
