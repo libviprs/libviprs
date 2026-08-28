@@ -2981,11 +2981,18 @@ mod tests {
     ///
     /// The ICC blob is here because it is the attachment a caller notices
     /// losing, and because it exercises the other `MetadataValue` arm. That
-    /// half was measured on a real profile rather than a hand-written one,
-    /// since a `VipsBlob` typed into an extension block does not survive
-    /// being written back out: `vips icc_transform in.v out.v "sRGB
-    /// Profile.icc"` attaches 3144 bytes of `icc-profile-data`, and all
-    /// eight hand the same 3144 bytes on.
+    /// half was measured on a real profile rather than a hand-written one:
+    /// `vips icc_transform in.v out.v "sRGB Profile.icc"` attaches 3144 bytes
+    /// of `icc-profile-data`, and all eight hand the same 3144 bytes on.
+    ///
+    /// This used to say a hand-written `VipsBlob` in an extension block does
+    /// not survive being written back out. **That does not reproduce on
+    /// 8.18.6**: a 48-byte blob written with `vipsedit --setext` comes back
+    /// through `copy`, `gamma`, `fwfft` and the rest unchanged (#717 uses one
+    /// as a control precisely because it does). A real profile is still the
+    /// better carrier here, because it is the attachment the issue is about
+    /// and the only one `icc_transform` will produce; it was never the only
+    /// one that works.
     #[test]
     fn every_extract_op_carries_the_attached_fields() {
         let mut im = tagged_source();

@@ -601,3 +601,153 @@ fn sharpen_carries_through_its_final_colourspace() {
     );
     assert_eq!(out.icc_profile(), Some(PROFILE), "ICC profile");
 }
+
+/// Every op in `src/bands.rs`, which finished on a bare `Raster::new` and so
+/// returned `RasterMeta::default()` and an empty field map: the last module in
+/// the crate with the defect #717 and #719 fixed elsewhere (issue #727).
+///
+/// Measured on vips 8.18.6 from the same 8x8 `rgb` source:
+///
+/// ```text
+/// op                   output shape    interp  xres  ori  lane-711  icc   xoff/yoff
+/// bandjoin             6 bands         RGB     5     6    carried   3144  11 / 13
+/// bandjoin_const 128   4 bands         RGB     5     6    carried   3144  11 / 13
+/// bandfold             1x8, 24 bands   RGB     5     6    carried   3144  11 / 13
+/// bandunfold           24x8, 1 band    RGB     5     6    carried   3144  11 / 13
+/// bandmean             1 band          RGB     5     6    carried   3144  11 / 13
+/// bandrank             3 bands         RGB     5     6    carried   3144  11 / 13
+/// bandbool and/or/eor  1 band          RGB     5     6    carried   3144  11 / 13
+/// extract_band 1       1 band          RGB     5     6    carried   3144  11 / 13
+/// extract_band 0 --n 2 2 bands         RGB     5     6    carried   3144  11 / 13
+/// ```
+///
+/// Two cells there were worth measuring rather than assuming. **`bandfold` and
+/// `bandunfold` reshape the pixel grid and do not rescale the resolution**:
+/// 8x8 3-band folds to 1x8 24-band and still reports `xres 5 yres 7`, and
+/// unfolds to 24x8 1-band reporting the same. That is the shape `zoom` and
+/// `subsample` had in #690. And **nothing in this module stamps the origin
+/// offset**: all twelve report `11 / 13` straight through, unlike `flip`,
+/// `rot`, `wrap` and the convolving ops, so the offsets are asserted here where
+/// they are left out of #719's test.
+#[test]
+fn every_bands_op_carries_the_metadata() {
+    let im = tagged_source();
+    let other = tagged_source();
+
+    for (name, out) in [
+        ("bandjoin", im.try_bandjoin(&other).unwrap()),
+        ("bandjoin_const", im.try_bandjoin_const(128.0).unwrap()),
+        ("bandjoin_vec", im.try_bandjoin_vec(&[10.0, 20.0]).unwrap()),
+        ("bandfold", im.try_bandfold(None).unwrap()),
+        ("bandunfold", im.try_bandunfold(None).unwrap()),
+        ("bandmean", im.try_bandmean().unwrap()),
+        ("bandrank", im.try_bandrank(&[&other], None).unwrap()),
+        ("bandand", im.try_bandand().unwrap()),
+        ("bandor", im.try_bandor().unwrap()),
+        ("bandeor", im.try_bandeor().unwrap()),
+        ("extract_band", im.try_extract_band(1).unwrap()),
+        ("extract_bands", im.try_extract_bands(0, 2).unwrap()),
+    ] {
+        assert_eq!(out.interpretation(), Interpretation::Rgb, "{name} interp");
+        assert_eq!(out.xres(), 5.0, "{name} xres");
+        assert_eq!(out.yres(), 7.0, "{name} yres");
+        assert_eq!(out.orientation(), 6, "{name} orientation");
+        assert_eq!(
+            (out.xoffset(), out.yoffset()),
+            (11, 13),
+            "{name} offsets carried verbatim"
+        );
+        assert_eq!(
+            out.get_field(LANE),
+            Some(MetadataValue::Str("carried".to_string())),
+            "{name} attached string"
+        );
+        assert_eq!(
+            out.get_field(PLAIN_BLOB),
+            Some(MetadataValue::Blob(vec![1, 2, 3])),
+            "{name} attached blob"
+        );
+        assert_eq!(out.icc_profile(), Some(PROFILE), "{name} ICC profile");
+    }
+}
+
+/// Issue #727 against #718. `bandjoin` and `bandrank` are multi-input and take
+/// the same two rules `insert`, `join` and `arrayjoin` do: the header block
+/// from the first input alone, the attached fields as the union of every input
+/// with the first winning a name they share.
+///
+/// `bandjoin` is the one that proves it in both directions, because the two
+/// sources disagree on everything and only one of them carries a profile.
+///
+/// ```text
+/// vips bandjoin "main.v other.v" out.v
+///   RGB, xres 5, orientation 6, offsets 11 / 13   <- main
+///   lane-711 carried, icc-profile-data 3144       <- main
+///   main-only from-main                           <- other
+///
+/// vips bandjoin "other.v main.v" out.v
+///   sRGB, xres 1, orientation 1, offsets 41 / 42  <- other
+///   lane-711 from-main                            <- other
+///   icc-profile-data 3144                         <- main, the second input
+/// ```
+///
+/// `bandrank` takes any number of inputs and the union spans all of them:
+/// `vips bandrank "main.v other.v third.v"` reports `third-only`, `main-only`,
+/// the first input's `lane-711` and the first input's profile.
+#[test]
+fn bandjoin_and_bandrank_take_the_union_of_every_input() {
+    let (main, sub) = disagreeing_pair();
+    assert_union(&main.try_bandjoin(&sub).unwrap(), "bandjoin");
+    assert_union(&main.try_bandrank(&[&sub], None).unwrap(), "bandrank");
+
+    // The other way round: the header block follows whichever input is first,
+    // and the profile still crosses from the one that has it.
+    let flipped = sub.try_bandjoin(&main).unwrap();
+    assert_eq!(
+        flipped.interpretation(),
+        Interpretation::Rgb,
+        "reversed bandjoin takes sub's interpretation"
+    );
+    assert_eq!(flipped.xres(), 5.0, "reversed bandjoin takes sub's xres");
+    assert_eq!(
+        (flipped.xoffset(), flipped.yoffset()),
+        (11, 13),
+        "reversed bandjoin takes sub's offsets"
+    );
+    assert_eq!(
+        flipped.get_field(LANE),
+        Some(MetadataValue::Str("carried".to_string())),
+        "reversed bandjoin lets sub win the shared name"
+    );
+    assert_eq!(
+        flipped.get_field("main-only"),
+        Some(MetadataValue::Str("from-main".to_string())),
+        "reversed bandjoin still takes main's own field"
+    );
+
+    // Three inputs, so the union is not just a two-way merge in disguise.
+    let mut third = tagged_source();
+    third.set_field("third-only", MetadataValue::Str("from-third".to_string()));
+    third.set_field(LANE, MetadataValue::Str("from-third".to_string()));
+    let ranked = main.try_bandrank(&[&sub, &third], None).unwrap();
+    assert_eq!(
+        ranked.get_field("third-only"),
+        Some(MetadataValue::Str("from-third".to_string())),
+        "the third input's own field reaches the output"
+    );
+    assert_eq!(
+        ranked.get_field("sub-only"),
+        Some(MetadataValue::Str("from-sub".to_string())),
+        "the second input's own field reaches the output"
+    );
+    assert_eq!(
+        ranked.get_field(LANE),
+        Some(MetadataValue::Str("from-main".to_string())),
+        "the first input wins the name all three share"
+    );
+    assert_eq!(
+        ranked.icc_profile(),
+        Some(PROFILE),
+        "the profile crosses from whichever input has one"
+    );
+}
