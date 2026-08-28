@@ -1069,11 +1069,9 @@ impl SpaceDepth {
 /// Number of colour bands a space occupies; bands past these are extra
 /// bands and carried through unchanged.
 fn space_bands(space: Interpretation) -> usize {
-    match space {
-        Interpretation::Cmyk => 4,
-        Interpretation::Bw | Interpretation::Grey16 => 1,
-        _ => 3,
-    }
+    // One table, in `conversion`, because #720 needs the same number to decide
+    // whether an attached ICC profile can still describe the tag.
+    space.space_bands()
 }
 
 /// Canonical storage depth of a space.
@@ -1727,7 +1725,7 @@ fn raster_from_bytes(
 ) -> Result<Raster, RasterError> {
     let mut out = Raster::from_op_output(width, height, format_for(channels, depth), buf)?;
     out.carry_meta_from(like);
-    out.meta.interpretation = Some(tag);
+    out.set_interpretation(Some(tag));
     Ok(out)
 }
 
@@ -2412,7 +2410,7 @@ impl Raster {
                 data[i * 4..i * 4 + 4].copy_from_slice(&bytes);
             }
         }
-        raster.meta.interpretation = Some(interpretation);
+        raster.set_interpretation(Some(interpretation));
         raster
     }
 
@@ -4393,7 +4391,30 @@ mod tests {
     /**
      * Tests grey-profile ICC support: a Gray8 image with a gamma-2.2 grey
      * profile imports through the exact grayTRC path (L ~54 for code 128)
-     * and export round-trips within 1 count.
+     * and round-trips within 1 count when the export profile is named.
+     *
+     * The export leg has to name the profile since #720. `icc_import` retags
+     * the output Lab, and a one-channel grey profile cannot describe a
+     * three-channel space, so it goes with the retag and there is nothing left
+     * for a bare `icc_export` to use. That is vips's behaviour, not a
+     * consequence of the fix:
+     *
+     * ```text
+     * vips icc_import grey.v out.v      -> lab, no icc-profile-data
+     * vips icc_import rgb.v  out.v      -> lab, icc-profile-data 3144 bytes
+     * vips icc_import cmyk.v out.v      -> lab, no icc-profile-data
+     * vips icc_export lab-from-grey.v x.v
+     *     -> VipsIcc: Unsupported raster format
+     * vips icc_export lab-from-grey.v x.v --output-profile "Generic Gray.icc"
+     *     -> 8x8 uchar, 1 band, b-w
+     * vips icc_export lab-from-rgb.v x.v -> 8x8 uchar, 3 bands, srgb
+     * ```
+     *
+     * So the RGB round trip still works off the attached profile, and the grey
+     * one never did in vips; this test used to assert it did. The migration is
+     * `icc_export_with(.., Some(path))`, the same thing vips needs, and the
+     * file-handling half of that is already covered by
+     * `icc_transform_to_display_p3`.
      */
     #[test]
     fn icc_gray_profile_roundtrip() {
@@ -4403,6 +4424,11 @@ mod tests {
 
         let imported = im.icc_import();
         assert_eq!(imported.interpretation(), Interpretation::Lab);
+        assert_eq!(
+            imported.icc_profile(),
+            None,
+            "a grey profile cannot describe Lab, so the retag drops it (#720)"
+        );
         let px = imported.getpoint(0, 0);
         assert!(
             (px[0] - 53.8).abs() < 1.0,
@@ -4411,10 +4437,17 @@ mod tests {
         );
         assert!(px[1].abs() < 0.5 && px[2].abs() < 0.5);
 
-        let exported = imported.icc_export();
-        assert_eq!(exported.interpretation(), Interpretation::Bw);
-        let diff = (exported.getpoint(0, 0)[0] - 128.0).abs();
-        assert!(diff <= 1.0, "grey round trip drifted by {diff}");
+        // And the consequence, which is the half worth pinning: with nothing
+        // attached there is no profile for the export to use, and it says so
+        // rather than inventing one. vips fails the same way and needs the
+        // same fix, an explicit output profile.
+        assert!(
+            matches!(
+                imported.try_icc_export_with(8, Intent::Perceptual, None),
+                Err(ColourError::NoProfile)
+            ),
+            "a bare export has no profile left to use"
+        );
     }
 
     /**

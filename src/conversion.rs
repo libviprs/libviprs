@@ -455,6 +455,22 @@ impl Interpretation {
     /// Read off [`PixelFormat::canonical`], so both spellings of a layout
     /// get the same answer: `FloatF32(4)` reads as sRGB exactly as
     /// `RgbaF32` does (issue #531).
+    /// How many samples a colour in this space takes: the band count the tag
+    /// implies, whatever the raster actually holds.
+    ///
+    /// This is the number an ICC profile has to agree with to describe the
+    /// space (issue #720), and the same one `crate::colour` reads to size a
+    /// conversion. It is the tag's band count and not the image's on purpose:
+    /// `vips bandmean` takes a three-band `scrgb` raster to one band, leaves
+    /// the tag alone, and keeps a three-channel profile.
+    pub(crate) fn space_bands(self) -> usize {
+        match self {
+            Self::Cmyk => 4,
+            Self::Bw | Self::Grey16 => 1,
+            _ => 3,
+        }
+    }
+
     pub fn for_format(format: PixelFormat) -> Self {
         match format.canonical() {
             PixelFormat::Gray8 => Self::Bw,
@@ -670,7 +686,14 @@ impl RasterCopyBuilder<'_> {
     /// source, with this builder's metadata.
     pub fn build(self) -> Raster {
         let mut out = self.src.clone();
+        let interpretation = self.meta.interpretation;
         out.meta = self.meta;
+        // The public retag surface, and the one the rule was measured on
+        // (`vips copy in.v out.v --interpretation b-w` removes a three-channel
+        // profile). Re-stamping through the setter is what applies it; the
+        // assignment above cannot, because it is a whole-block copy that does
+        // not know which field changed (#720).
+        out.set_interpretation(interpretation);
         out
     }
 }
@@ -868,6 +891,37 @@ impl Raster {
         self.meta
             .interpretation
             .unwrap_or_else(|| Interpretation::for_format(self.format()))
+    }
+
+    /// Stamp the colour interpretation, dropping an attached ICC profile that
+    /// cannot describe the new space (issue #720).
+    ///
+    /// `None` means "infer from the pixel format", which is what an operation
+    /// that has left the source's space without arriving in a nameable one
+    /// says; the profile check runs against the tag that inference resolves
+    /// to, because that is the tag every reader will see.
+    ///
+    /// **Every stamp goes through here.** The check cannot live in
+    /// [`Raster::carry_meta_from`], which is where it first looks like it
+    /// belongs: six of the eight stamping sites carry *before* they retag, so
+    /// at carry time the output still holds the source's tag and the check
+    /// could never fire, and `Raster::copy().interpretation(..)` never calls
+    /// the carry at all. Putting it on the stamp instead is the same answer
+    /// #717 gave to the same shape of problem: one method, every site routed,
+    /// so "did this retag revalidate the profile" has one answer.
+    ///
+    /// Measured on vips 8.18.6 across three real profiles and twenty targets;
+    /// see `tests/icc_retag.rs` for the table.
+    pub(crate) fn set_interpretation(&mut self, tag: Option<Interpretation>) {
+        self.meta.interpretation = tag;
+        let bands = self.interpretation().space_bands();
+        let stale = self
+            .icc_profile()
+            .and_then(crate::imageio::profile_space_bands)
+            .is_some_and(|profile_bands| profile_bands != bands);
+        if stale {
+            self.remove_icc_profile();
+        }
     }
 
     /// Horizontal resolution in pixels per millimetre (default `1.0`).
@@ -1679,7 +1733,7 @@ impl Raster {
         out.carry_meta_from(self);
         // `vips falsecolour` retags the output sRGB whatever the input said,
         // so the stamp goes on after the carry rather than before it.
-        out.meta.interpretation = Some(Interpretation::Srgb);
+        out.set_interpretation(Some(Interpretation::Srgb));
         Ok(out)
     }
 
@@ -1875,7 +1929,7 @@ impl Raster {
         // extras. Drop the tag and let the getter infer from the format. A
         // depth-only promotion keeps the tag, matching vips.
         if out.bands() != images[0].bands() {
-            out.meta.interpretation = None;
+            out.set_interpretation(None);
         }
         Ok(out)
     }
@@ -2031,7 +2085,7 @@ impl Raster {
         // when joining `b-w` uchar with `grey16`, so the trigger is
         // specifically the band count changing.
         if out.bands() != self.bands() {
-            out.meta.interpretation = None;
+            out.set_interpretation(None);
         }
         Ok(out)
     }

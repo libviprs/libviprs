@@ -731,6 +731,35 @@ fn interpretation_from_code(code: i32) -> Option<Interpretation> {
     })
 }
 
+/// How many samples a colour takes in the space an ICC profile describes, read
+/// from bytes 16..20 of the profile header (issue #720).
+///
+/// `None` for a blob too short to hold the field or carrying a signature this
+/// build does not know. Those are **kept** by the caller: dropping an
+/// attachment because the parser could not reach a verdict is worse than
+/// keeping one that may not apply, and it is the same call this module makes
+/// for `.v` trailer values it cannot interpret (#565). It also stops the rule
+/// silently eating a profile in a colour space a later libviprs learns about.
+///
+/// The signatures are the ICC.1 data colour spaces, grouped by channel count.
+/// Only the count matters here, so the 2-channel and 5-to-15-channel `xCLR`
+/// spaces resolve to their own counts rather than being listed one by one.
+pub(crate) fn profile_space_bands(profile: &[u8]) -> Option<usize> {
+    let sig: &[u8; 4] = profile.get(16..20)?.try_into().ok()?;
+    Some(match sig {
+        b"GRAY" => 1,
+        b"CMY " | b"RGB " | b"XYZ " | b"Lab " | b"Luv " | b"YCbr" | b"Yxy " | b"HSV " | b"HLS "
+        | b"3CLR" => 3,
+        b"CMYK" | b"4CLR" => 4,
+        b"2CLR" => 2,
+        b"5CLR" => 5,
+        b"6CLR" => 6,
+        b"7CLR" => 7,
+        b"8CLR" => 8,
+        _ => return None,
+    })
+}
+
 impl Raster {
     /// Read a metadata field by name (libvips `vips_image_get`): the
     /// built-in header fields (`width`, `height`, `bands`, `format`,

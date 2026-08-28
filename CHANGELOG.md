@@ -1648,6 +1648,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy. I found that by mutating the second check away and watching the tests
   stay green.
 
+- An attached ICC profile is dropped when the interpretation is retagged to a
+  space it cannot describe, matching vips (issue #720). `try_colourspace(Bw)`
+  used to hand back a one-band grey raster with a three-channel RGB profile
+  still attached, and the next `icc_transform` read that profile as if it
+  described the samples.
+
+  Measured against the pinned vips 8.18.6 on three **real** profiles, sRGB
+  (3144 bytes), Generic Gray (2020) and Generic CMYK (55280), against every
+  interpretation. The rule is the band count the new tag implies versus the
+  profile's own colour space: `b-w` and `grey16` imply one, `cmyk` four, and
+  everything else three. Swapping the profile swaps which targets lose it,
+  which is what makes it a rule rather than a list of unlucky interpretations.
+
+  It reads the **tag** and not the image. `vips bandmean` and
+  `vips extract_band 0` both take a three-band `scrgb` raster to one band,
+  leave the tag alone, and keep the three-channel profile, so an
+  implementation comparing the profile against `format().channels()` would be
+  wrong.
+
+  Setting the interpretation through `Raster::set_field` still keeps the
+  profile, and that split is vips's rather than a gap:
+  `vipsedit --interpretation b-w` keeps it and `vips copy --interpretation b-w`
+  drops it. A header write describes what the file already holds, so
+  revalidating there would drop a profile the file legitimately carries; the
+  decoders assign the tag directly for the same reason.
+
+  A profile this build cannot read is kept: the colour space lives at bytes
+  16..20 of the ICC header, and a blob too short to hold one, or carrying a
+  signature this build does not know, has no verdict. Dropping an attachment
+  because the parser could not reach one is worse than keeping one that may
+  not apply, and it is the same call `imageio` makes for `.v` trailer values it
+  cannot interpret (#565).
+
+  `invfft`, `invfft_real` and `freqmult` still drop the profile through an
+  explicit call rather than through the general rule, and that is now written
+  down with its reason: libviprs tags them `None` where vips tags them `B_W`,
+  so the rule looks at `Multiband` (three channels) and keeps what vips drops.
+
 - The operations that reposition an image stamp the origin offset instead of
   carrying the input's, matching vips (issue #721). `fliphor`, `flipver`,
   `rot`, `wrap`, `autorot`, `conv`, `convsep`, `compass`, `gaussblur`, `sobel`,
