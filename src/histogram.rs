@@ -47,14 +47,32 @@
 //!   return [`HistogramError::NotAHistogram`] otherwise. Element order is
 //!   identical for both orientations (row-major data with interleaved
 //!   bands), and outputs preserve the input's orientation.
-//! * **Count depth.** libvips stores counts in 32-bit unsigned samples;
-//!   [`PixelFormat`] has no depth wider than 16 bits, so every op that
-//!   produces counts or sums writes 16-bit samples and saturates at
-//!   `65535`. This is the documented contract until a wider sample depth
-//!   lands. Operations that consume pixel-value distributions internally
-//!   ([`Raster::hist_equal`], [`Raster::hist_local`], [`Raster::percent`])
-//!   compute full-precision `u64` histograms directly from the image and
-//!   are exact regardless of image size.
+//! * **Count depth.** [`PixelFormat`] has no unsigned depth wider than 16
+//!   bits, so every op that produces counts or sums writes 16-bit samples
+//!   and saturates at `65535`. This is the documented contract until a
+//!   wider sample kind lands. Operations that consume pixel-value
+//!   distributions internally ([`Raster::hist_equal`],
+//!   [`Raster::hist_local`], [`Raster::percent`]) compute full-precision
+//!   `u64` histograms directly from the image and are exact regardless of
+//!   image size.
+//!
+//!   **The ceiling is a deviation and any image over 256x256 reaches it**,
+//!   because these are pixel counters. What libvips emits instead is not
+//!   one format, measured on 8.18.6 (issue #759):
+//!
+//!   | op | vips output format |
+//!   |---|---|
+//!   | `hist_find`, `hist_find_ndim` | `UINT`, whatever the input |
+//!   | `hist_find_indexed` | `DOUBLE`, whatever the input and either `combine` |
+//!   | `hist_cum` | `UINT` / `INT` / `FLOAT` / `DOUBLE`, following the input |
+//!
+//!   So closing this needs more than the uint carrier of issue #517: the
+//!   signed carriers of #516 for `hist_cum` on a signed input, and a
+//!   double one, which is why #518 being closed matters here. Reading the
+//!   libvips source will mislead you on `hist_find`: for a
+//!   `VipsStatisticClass` the per-op `format_table` is an **input cast**
+//!   table (`statistic.c`), not the output format, which is set separately
+//!   to `UINT` in `hist_find.c`.
 //! * **Bins.** 8-bit images histogram into 256 bins, 16-bit images into
 //!   65536 bins, indexed by the raw sample value.
 //! * **Bands.** `hist_find`, `hist_cum`, `hist_norm`, `hist_equal`,

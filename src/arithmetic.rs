@@ -1445,7 +1445,18 @@ impl Raster {
     /// `1 x height` image whose value at `y` is the column index of the
     /// first non-zero sample in row `y` (the image width when all zero).
     /// Both outputs are 16-bit with the input band count, positions
-    /// saturating at `65535`, matching the libvips `ushort` output.
+    /// saturating at `65535`.
+    ///
+    /// **That ceiling is a deviation, and the saturation is visible on any
+    /// image longer than 65535 along the axis being profiled.** libvips
+    /// emits `VIPS_FORMAT_INT` here, measured on 8.18.6 for every one of
+    /// the eight input formats, so its positions are exact up to
+    /// `i32::MAX`: on a 1x65537 all-zero image `vips profile` reports
+    /// `65537` where this reports `65535`. Note the signedness. `INT` is
+    /// the *signed* 32-bit carrier, so closing this gap is a payoff of the
+    /// signed carriers (issue #516) and not of the uint one (issue #517),
+    /// which is the opposite of what issue #532 assumes about the counter
+    /// family. Values are unaffected below the ceiling.
     pub fn profile(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
@@ -1495,8 +1506,17 @@ impl Raster {
     /// Returns `(columns, rows)`: `columns` is a `width x 1` image holding
     /// the per-band sum of each column; `rows` is a `1 x height` image
     /// holding the per-band sum of each row. Outputs are 16-bit and sums
-    /// saturate at `65535` (libvips promotes to a 32-bit format this crate
-    /// does not have).
+    /// saturate at `65535`.
+    ///
+    /// **The ceiling is a deviation and it is reached by any image with
+    /// more than 257 rows of full-scale 8-bit samples.** libvips promotes
+    /// to a 32-bit carrier this crate does not have, and *which* one
+    /// depends on the input, measured on 8.18.6: `UINT` for `uchar`,
+    /// `ushort` and `uint`, `INT` for `char`, `short` and `int`, and
+    /// `DOUBLE` for `float` and `double`. So matching vips here needs both
+    /// carrier families and not just the uint one (issues #517 and #516).
+    /// On a 1x65537 all-255 image `vips project` reports `16711935` where
+    /// this reports `65535`.
     pub fn project(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
