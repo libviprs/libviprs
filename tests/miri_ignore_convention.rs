@@ -266,12 +266,13 @@ const EXPECTED_SRC_MODULES: usize = 8;
 /// stayed green, and reading a `;` inside `[u8; 32]` as a bodyless declaration
 /// dropped 116 functions out of the call graph the same way.
 ///
-/// Seventeen today: five in `tests/dependency_policy.rs`, three in
+/// Eighteen today: five in `tests/dependency_policy.rs`, three in
 /// `tests/pdfium_source_audit.rs` and two in `tests/workspace_layout.rs`, which
 /// are the ten #714 is about; six in `tests/icc_lut_alloc.rs`, which spawn a
-/// child on purpose to watch it abort (#693); and one in `src/source.rs` that
+/// child on purpose to watch it abort (#693); one in `src/source.rs` that
 /// shells out to `mkfifo` and was already annotated, for the filesystem reason,
-/// before any of this.
+/// before any of this; and one in `tests/oracle_capture_pins.rs` that runs
+/// `git ls-files`, which is the one #701 brought in.
 ///
 /// The population is wider than the ten that needed fixing, and deliberately
 /// so. Pinning only the ten would go green again the moment the detector lost
