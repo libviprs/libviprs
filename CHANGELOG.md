@@ -2111,6 +2111,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the intermediate passes the 512 KiB bound this module advertises. Both ends
   are one named number, and a chunk outside the window now fails saying so
   rather than sending the reader upstream to bump a moxcms pin.
+- `cargo +nightly miri test` gets past `tests/dependency_policy.rs` (issue #714).
+  It used to die there on the first test that shells out, with `unsupported
+  operation: can't call foreign function `fork``, and Miri ends the whole session
+  on one unsupported operation rather than failing that one test. So the gate
+  reported "Miri failed" having run none of the code it exists to check.
+
+  Ten tests over three files now carry `#[cfg_attr(miri, ignore)]`: the five in
+  `tests/dependency_policy.rs`, the three in `tests/pdfium_source_audit.rs` and
+  two of the three in `tests/workspace_layout.rs`. None of them calls into
+  libviprs at all, so nothing is lost by keeping them out of Miri.
+
+  This is not #707, which is a Stacked Borrows violation in `sha2`'s aarch64
+  NEON backend and so never executes on the hosted `ubuntu-latest` job. Miri
+  supports process spawning on no target and under no flag, and
+  `-Zmiri-disable-isolation` does nothing about it, so this one was taking the
+  hosted gate down as well.
+
+  `tests/miri_ignore_convention.rs` enforces it from here, and enforces it
+  differently from the filesystem convention it was built for. The filesystem
+  rows are a ledger: an `unannotated fs-detected` test is allowed to stand,
+  because isolation makes its call come back rather than abort. A spawning test
+  is a flat refusal, because there is no configuration in which it runs.
+
+  The detector had to learn to follow a call to see any of them, since not one
+  of the ten spells `Command::new` in its own body: they call `cells()`, which
+  calls `graphs()`, which spawns cargo. It now parses every `fn` in a file,
+  marks the ones that reach `std::process`, and repeats to a fixed point,
+  matching a callee by name on identifier boundaries rather than as `name(`,
+  because `graphs()` reaches cargo through `CELLS.iter().map(resolve)` where the
+  callee never sits beside a paren.
 
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
