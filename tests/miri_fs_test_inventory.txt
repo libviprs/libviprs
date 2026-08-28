@@ -101,6 +101,12 @@ annotated   not-detected src/source.rs::decode_file_not_found
 annotated   not-detected src/stream_verify.rs::stream_verify_rejects_overtall_strip
 annotated   not-detected src/stream_verify.rs::stream_verify_rejects_overwide_strip
 annotated   not-detected src/stream_verify.rs::stream_verify_rejects_wrong_format_strip
+annotated   not-detected tests/icc_lut_alloc.rs::a_lut_export_survives_a_ceiling_at_the_promised_cms_bound
+annotated   not-detected tests/icc_lut_alloc.rs::a_lut_import_survives_a_ceiling_at_the_promised_cms_bound
+annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting
+annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allocates_itself_ends_the_process
+annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
+annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
 annotated   not-detected tests/miri_ignore_convention.rs::the_annotated_set_stays_the_size_it_is_documented_to_be
 unannotated fs-detected  src/colour.rs::icc_transform_to_display_p3

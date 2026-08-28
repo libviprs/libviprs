@@ -2055,6 +2055,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in both, since the transform writes every element. Same follow-up (#460),
   same reason: std has no fallible zeroed `Vec` today.
 
+- The ICC LUT routes hand the CMS bounded slices instead of the whole plane, so
+  the buffer moxcms allocates for itself no longer follows the image size
+  (issue #693). `try_icc_import_with`, `try_icc_export_with` and
+  `try_icc_transform` drive `xf.transform` in 16384-pixel chunks, which caps a
+  single moxcms intermediate at 192 KiB on any geometry and any device space.
+  Measured on the 256-square LUT fixture the CMS asked for 786432 bytes before
+  and 196608 after; on the 512-square one, 3145728 before and the same 196608
+  after.
+
+  **This still does not make the LUT routes abort-free**, and the difference
+  matters. moxcms sizes the katana engine's intermediates from the slice it is
+  handed and allocates them with a plain `vec![0f32; n]`
+  (`conversions/katana/md3x3.rs:176`, `md4x3.rs:164`, `md_nx3.rs:160` and
+  `md_pipeline.rs:90` in 0.8.1), so a request the host cannot serve still
+  reaches `handle_alloc_error` and still ends the process. Nothing in this crate
+  can change that: the fallible spelling is upstream's to adopt, a `try_vec!`
+  over `try_reserve_exact` returning `CmsError::OutOfMemory` that
+  `katana/rgb_xyz.rs:56` already uses and the `md*` stages do not. What changed
+  is that the request is now a fixed 192 KiB rather than an attacker-chosen
+  fraction of the address space, so an image big enough to exhaust the host
+  fails at one of this crate's own fallible reservations, which report
+  `ColourError::Raster`, rather than at moxcms's infallible one.
+
+  `tests/icc_lut_alloc.rs` keeps that distinction on the record rather than
+  letting the docs quietly widen past it. It drives the routes at two
+  geometries under a `GlobalAlloc` that logs and can refuse, insists the largest
+  *zeroed* request is the same number at both sizes and under the 512 KiB the
+  module promises, then refuses that request too and asserts the child dies on
+  SIGABRT with a `handle_alloc_error` message naming a size inside the bound.
+  Zeroed is what separates the two kinds of allocation: every buffer this crate
+  reserves arrives as a plain `alloc` through `try_reserve_exact`, and the four
+  katana sites are `vec![0f32; n]`, which std lowers to `alloc_zeroed`. So the
+  ceiling cannot answer ahead of the call it is aimed at, which is the trap the
+  #685 tests fell into.
+
+  Splitting the plane changes no sample. Every stage moxcms runs reads only the
+  pixel it is writing (`conversions/katana/stages.rs:73`), and
+  `chunking_the_cms_transform_reproduces_the_whole_plane_result` asserts the
+  chunked buffer is bit-identical to one whole-plane call over a fused LUT
+  profile, a katana LUT profile and a four-channel source layout, on a geometry
+  that ends on a short chunk. The oracle captures are unchanged.
+
+  `transform_in_chunks` refuses two sides that disagree on pixel count instead
+  of asserting it. `zip` stops at the shorter one, so a mismatch would transform
+  a prefix, leave the rest of the destination holding whatever it was reserved
+  with, and return `Ok(())`. Both callers derive both planes from one
+  `(width, height)` so it cannot happen today, which is why a `debug_assert!`
+  was the wrong tool: nothing would ever exercise it, and the release build
+  would have neither the assert nor an error.
+
+  16384 is a cache choice, and the constant's doc now says which retunes are
+  free and which are not. Anything from 43 to 43690 pixels is green; below that
+  the intermediate stops clearing the test's zeroed logging floor, and above it
+  the intermediate passes the 512 KiB bound this module advertises. Both ends
+  are one named number, and a chunk outside the window now fails saying so
+  rather than sending the reader upstream to bump a moxcms pin.
+
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
   (issue #631). They reached the same `depth_max` panic the alpha pair did, on
