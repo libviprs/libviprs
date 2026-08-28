@@ -1857,16 +1857,23 @@ impl Raster {
     ///
     /// [`ConvolutionError::Colour`] when the image has no LabS colourspace
     /// route (for example a 2-band multiband image), plus the
-    /// [`Kernel::try_gaussmat`] errors.
+    /// [`Kernel::try_gaussmat`] errors. The LabS round trip this opens and
+    /// closes reserves its output buffers fallibly at both ends now, so a
+    /// conversion the host cannot allocate arrives here as
+    /// [`ConvolutionError::Colour`] carrying [`ColourError::Raster`]
+    /// instead of ending the process (issue #672).
     ///
     /// Unlike the rest of the module's fallible entry points, this one is
-    /// **not** abort-free: it widens through [`Raster::f32_samples`], which
-    /// still collects infallibly, and it makes the LabS round trip through
-    /// `colour.rs` on top of that, where every intermediate is a plain
-    /// `vec![]`. An allocation failure inside either reaches
-    /// `handle_alloc_error` and ends the process instead of arriving here as
-    /// [`ConvolutionError::Raster`]. Removing that widening is #575's third
-    /// item, which is still open.
+    /// still **not** abort-free, and what is left of that is on this side
+    /// of the call rather than in `colour.rs`. It widens through
+    /// [`Raster::f32_samples`], which collects infallibly, and five
+    /// image-sized buffers below are still a plain `vec![]` or a `clone`:
+    /// the clamped L plane, the two `convsep_short_pass` blur passes, the
+    /// copy of the widened samples, and the whole-raster clone the result
+    /// is written into. An allocation failure in any of those reaches
+    /// `handle_alloc_error` and ends the process instead of arriving here
+    /// at all. That is the set issue #627 tracks, and PR #669 is open
+    /// against it.
     pub fn try_sharpen(&self, sigma: f64, m1: f64, m2: f64) -> Result<Raster, ConvolutionError> {
         // vips_sharpen: remember the interpretation, work in LabS.
         let old_interpretation = self.interpretation();

@@ -151,6 +151,25 @@
 //! round-trips through the same profile, and export attaches the output
 //! profile it used, both mirroring libvips.
 //!
+//! # Allocation
+//!
+//! Every image-sized buffer this module reserves goes through a private helper,
+//! `alloc_colour_output`, `alloc_colour_plane` (or its `_filled` form) or
+//! `alloc_colour_source_copy`, all of which reserve with
+//! [`Vec::try_reserve_exact`] and report [`RasterError::AllocationFailed`],
+//! reaching the caller as [`ColourError::Raster`]. So on the colour-difference
+//! and ICC paths a host that cannot serve a buffer gets an `Err` where it used
+//! to get `handle_alloc_error` and a dead process (issues #672 and #685).
+//!
+//! That is a claim about the buffers this module owns, and it does not reach
+//! past them. On a **LUT profile** both ICC directions run the pixels through
+//! a moxcms transform, and the katana stages inside it size intermediates from
+//! the image and allocate them with a plain `vec![]`, so memory exhaustion on
+//! that route still aborts. moxcms has the fallible spelling already, a
+//! `try_vec!` over `try_reserve_exact` returning `CmsError::OutOfMemory`;
+//! those stages simply do not use it, and issue #693 tracks the fix upstream.
+//! The matrix-shaper and grey-TRC routes evaluate here and never reach it.
+//!
 //! # Deferred
 //!
 //! * `max_value` (used by the ported ICC test alongside these ops) is
@@ -180,6 +199,8 @@
 //!   which is what [`Raster::colourspace`] implements. Profiled CMYK is
 //!   available through [`Raster::icc_import`] with a CMYK profile.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -192,7 +213,7 @@ use thiserror::Error;
 
 use crate::conversion::Interpretation;
 use crate::pixel::PixelFormat;
-use crate::raster::Raster;
+use crate::raster::{Raster, RasterError, alloc_op_output, buffer_len};
 
 /// Typed errors for the colour operations in [`crate::colour`].
 #[derive(Debug, Error)]
@@ -242,6 +263,27 @@ pub enum ColourError {
     /// The CMS could not build or run a transform for this profile pair.
     #[error("ICC transform failed: {detail}")]
     IccTransform { detail: String },
+    /// Building a colour operation's output raster failed.
+    ///
+    /// The variant is `#[from] RasterError`, so it carries whatever that
+    /// type says, and `#[error(transparent)]` means the caller reads
+    /// `RasterError`'s own message rather than a colour one. Two of those
+    /// are caller conditions: [`RasterError::AllocationFailed`] when the
+    /// host cannot serve an output this size, and
+    /// [`RasterError::SizeOverflow`] when the geometry implies a length no
+    /// `usize` can address. Both are answered by asking for a smaller
+    /// image, and neither is a process abort any more, which is the point
+    /// of the variant (issue #672).
+    ///
+    /// The wrap through `Raster::from_op_output` can also spell
+    /// [`RasterError::ZeroDimension`] and
+    /// [`RasterError::BufferSizeMismatch`], and those two are **libviprs
+    /// bugs rather than caller conditions**: the buffer is allocated from
+    /// the same geometry a few lines above and then validated against it,
+    /// so seeing either means the two disagreed. There is nothing for a
+    /// caller to do about them except report them.
+    #[error(transparent)]
+    Raster(#[from] RasterError),
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,11 +1372,350 @@ fn format_for(channels: usize, depth: SpaceDepth) -> PixelFormat {
         .expect("colour op output has a valid channel count")
 }
 
+/// Allocate a colour operation's output byte buffer, fallibly.
+///
+/// Every colour result is one image-sized `Vec<u8>`: the
+/// [`Raster::try_colourspace`] conversion buffer that the hot loop writes
+/// samples straight into, and the [`build_raster`] quantisation buffer the
+/// colour-difference and ICC ops finish through. (The working vectors those
+/// ops fill on the way to it go through [`alloc_colour_plane`], for the same
+/// reason and against the same ceiling.) Both used to be a plain
+/// `vec![0u8; ..]`, and a request the allocator cannot satisfy reaches
+/// `handle_alloc_error` and **aborts the process** — which no `?` catches, so
+/// `try_colourspace` promised a `Result` it could not keep and
+/// [`Raster::try_sharpen`] inherited the abort through its LabS round trip
+/// (issue #672). A `try_` API that aborts is worse than an infallible one,
+/// because a caller reasonably reads the `Result` as covering allocation.
+///
+/// [`alloc_op_output`] is the crate's answer: [`Vec::try_reserve_exact`]
+/// reporting [`RasterError::AllocationFailed`], and deliberately no
+/// [`DEFAULT_MAX_ALLOC_BYTES`] re-check. A colour output derives from an input
+/// raster that was budget-checked at its own construction and legitimately
+/// grows on top of that — `Srgb -> Lab` widens 8-bit bands to `f32`, a 4x — so
+/// re-imposing the budget here would reject legal large conversions (#279).
+///
+/// One cost is worth naming, because it is not free and it is not new here.
+/// [`alloc_op_output`] reserves and then fills with [`Vec::resize`], so the
+/// buffer is a `malloc` plus a full `memset` where the `vec![0u8; n]` it
+/// replaces lowered to `alloc_zeroed` and, at image sizes, took fresh zeroed
+/// pages at no write cost. The fill has no reader on either colour path: the
+/// [`Raster::try_colourspace`] loop writes every byte of the buffer and
+/// [`build_raster`] quantises into every byte of its own. It is measurable in
+/// the size class this function's own justification invokes, `rustc -O`, best
+/// of nine: 256 MiB and 1 GiB are level at 6.4 ms and 25.8 ms, and 4 GiB goes
+/// 241 ms to 325 ms, a 34% regression. `arithmetic.rs`'s `try_scratch` carries
+/// the same cost for the same reason and records it as a follow-up on #460,
+/// and so does this: std exposes no fallible zeroed `Vec` today, so the
+/// `calloc`-preserving shape (probe with [`Vec::try_reserve_exact`], drop the
+/// probe, then `vec![0u8; size]`) belongs with that issue rather than
+/// hand-rolled `unsafe` here.
+///
+/// [`DEFAULT_MAX_ALLOC_BYTES`]: crate::raster::DEFAULT_MAX_ALLOC_BYTES
+/// [`Raster::try_sharpen`]: crate::Raster::try_sharpen
+fn alloc_colour_output(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+) -> Result<Vec<u8>, RasterError> {
+    // Test-only: honour a lowered per-thread ceiling so the fallible path is
+    // reachable at a buildable input, the hook #460 added to the arithmetic
+    // scratch. An output the allocator genuinely refuses needs an input far
+    // past the 8 GiB construction budget, so no test can reach the branch on
+    // its own. This branch and the thread-locals it reads compile only under
+    // `cfg(test)`: production allocation is bounded solely by the allocator,
+    // exactly as `alloc_op_output`, and no test-support surface ships.
+    #[cfg(test)]
+    refuse_over_colour_cap(
+        width,
+        height,
+        buffer_len(width, height, format.bytes_per_pixel())?,
+    )?;
+    alloc_op_output(width, height, format)
+}
+
+/// Reserve one image-sized colour *intermediate*, fallibly: `per_pixel`
+/// elements of `T` for every pixel of a `width` x `height` image, returned as
+/// an empty [`Vec`] with at least that capacity, reserved in one request.
+///
+/// [`alloc_colour_output`] covers the byte buffer a colour op *returns*. This
+/// covers the working vectors it fills on the way there, which are the same
+/// size class and were the rest of the abort surface issue #685 tracks: the
+/// colour-difference `Vec<f64>` (8 bytes a sample, the largest single buffer
+/// this module asks for), the ICC device and PCS planes, and the `Vec<[f64; 3]>`
+/// Lab staging on both ICC directions. Every one of them was a
+/// `Vec::with_capacity` or a `vec![0.0; ..]`, which is infallible: a request the
+/// allocator cannot satisfy reaches `handle_alloc_error` and **aborts the
+/// process**, so `try_de00` and `try_icc_import_with` promised a `Result` that
+/// did not cover the largest allocation they make. Reserving with
+/// [`Vec::try_reserve_exact`] turns that into
+/// [`RasterError::AllocationFailed`], which the caller sees as
+/// [`ColourError::Raster`].
+///
+/// One request is the whole point: the callers `push` into what comes back, so
+/// the reservation is the only allocation the fill performs and a short reserve
+/// cannot hide behind a later growth. "At least" rather than "exactly" because
+/// [`Vec::try_reserve_exact`] is allowed to hand back more room than asked for,
+/// which is why [`alloc_colour_plane_filled`] fills to a computed length rather
+/// than to `capacity()`.
+///
+/// The half of that invariant this function cannot enforce is the callers'.
+/// Most of them derive their loop bound from the same geometry they pass here,
+/// so the two cannot disagree. The four ICC conversions do not: they size from
+/// a `(width, height)` and fill from a slice handed to them, so each one opens
+/// with a `debug_assert_eq!` tying the slice length back to the geometry. Let
+/// those drift and `push` grows through the infallible path on the largest
+/// buffers in the module, which is the failure this whole helper exists to
+/// remove.
+///
+/// Sizing goes through [`buffer_len`], the same `u64` multiplication
+/// [`Raster::new`] prices its buffers with, so a geometry whose element count
+/// does not fit a `usize` is [`RasterError::SizeOverflow`] on 32- and 64-bit
+/// targets alike rather than a wrapped product. The byte figure the errors
+/// carry is that count times `size_of::<T>()`, so a `Vec<[f64; 3]>` plane
+/// reports the 24 bytes a pixel it actually asks for.
+///
+/// No [`DEFAULT_MAX_ALLOC_BYTES`] re-check, for the reason
+/// [`alloc_colour_output`] gives: an intermediate is derived from an input
+/// raster that was budget-checked at its own construction and legitimately
+/// grows on top of it.
+///
+/// [`DEFAULT_MAX_ALLOC_BYTES`]: crate::raster::DEFAULT_MAX_ALLOC_BYTES
+fn alloc_colour_plane<T>(width: u32, height: u32, per_pixel: usize) -> Result<Vec<T>, RasterError> {
+    // Bytes a pixel, which is what `SizeOverflow`'s field is named for and what
+    // this plane actually costs. Handing `per_pixel` straight to `buffer_len`
+    // would report a `Vec<[f64; 3]>` plane as "1 bytes per pixel" where the
+    // figure is 24, and the variant is public through `ColourError::Raster`.
+    // Saturating because it is only ever an error payload here: a `per_pixel`
+    // big enough to overflow it fails the length check on the next line anyway.
+    let bpp = per_pixel.saturating_mul(size_of::<T>());
+    let overflow = || RasterError::SizeOverflow { width, height, bpp };
+    // One priced product, not two. `buffer_len` does the `u64` multiply
+    // `Raster::new` prices its buffers with, and the byte figure the errors
+    // carry falls out of it rather than being computed a second time.
+    let len = buffer_len(width, height, per_pixel).map_err(|_| overflow())?;
+    let bytes = len.checked_mul(size_of::<T>()).ok_or_else(overflow)?;
+    #[cfg(test)]
+    refuse_over_colour_cap(width, height, bytes)?;
+    let mut out: Vec<T> = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        })?;
+    Ok(out)
+}
+
+/// [`alloc_colour_plane`], filled with `fill` to its full length, for the two
+/// ICC fallback buffers a moxcms transform writes into rather than pushes to.
+///
+/// This is the one place the colour module pays [`alloc_colour_output`]'s
+/// zeroing cost twice over. `vec![0.0f32; n]` hits std's zero specialisation
+/// and lowers to `alloc_zeroed`; reserving and then [`Vec::resize`] is a
+/// `malloc` plus a full `memset`, and the fill is dead either way because the
+/// transform writes every element. The measurement and the `calloc`-preserving
+/// shape that would fix it are on [`alloc_colour_output`], and the fix belongs
+/// with #460 for both.
+fn alloc_colour_plane_filled<T: Clone>(
+    width: u32,
+    height: u32,
+    per_pixel: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut out = alloc_colour_plane::<T>(width, height, per_pixel)?;
+    // Not `out.capacity()`: `try_reserve_exact` is allowed to hand back more
+    // room than asked for, and the length here is a contract with the moxcms
+    // transform that writes into it, not whatever the allocator rounded up to.
+    out.resize(buffer_len(width, height, per_pixel)?, fill);
+    Ok(out)
+}
+
+/// Debug-only: check that a slice a colour conversion fills from and the
+/// geometry it reserves against describe the same image.
+///
+/// [`alloc_colour_plane`] rests on the reservation being the fill's only
+/// allocation, and most callers get that for free by driving their loop from
+/// the same `width` x `height` they reserve against. The four ICC conversions
+/// cannot: they are handed a slice and told a geometry, and those are two
+/// independent inputs. Let them disagree and the `push` loop runs past the
+/// reservation, [`Vec`] grows through the *infallible* path, and the process
+/// dies in `handle_alloc_error` on the largest buffers in the module, while
+/// every allocation test still passes, because those starve the reserve rather
+/// than filling it.
+///
+/// A `debug_assert` rather than a returned error because all four callers are
+/// private to this file, so a mismatch is a bug here and not a condition a user
+/// can provoke. The suite runs in debug, so an edit that breaks the tie fails
+/// on the next run.
+fn debug_assert_plane_geometry(len: usize, per_pixel: usize, width: u32, height: u32) {
+    debug_assert_eq!(
+        len,
+        buffer_len(width, height, per_pixel).unwrap_or(usize::MAX),
+        "a colour conversion sized a plane from {width}x{height} at {per_pixel} \
+         elements a pixel and then filled it from a {len}-element slice; the \
+         reserve and the fill have to agree or `push` grows infallibly"
+    );
+}
+
+/// Copy a raster a colour op is about to work over, fallibly.
+///
+/// [`Raster::try_icc_export_with`] takes a copy of its input on the fast path
+/// where that input is already Lab, and `Clone::clone` copies the whole pixel
+/// buffer through an infallible allocation: on a full-resolution image that is
+/// the largest single request the export makes, and a host that cannot serve it
+/// gets `handle_alloc_error` and a dead process rather than the `Err` the
+/// signature advertises. [`Raster::try_clone`] exists for exactly this and says
+/// so in its own doc; this wrapper adds nothing but the test ceiling, so the
+/// copy is starvable alongside the other sites on the path (#685).
+///
+/// The ceiling sits *before* the delegation, so starving it proves the routing
+/// and says nothing about the copy itself being fallible. Nothing can starve
+/// `Raster::try_clone` at a size a test can build, so the delegation is counted
+/// instead, by `icc_export_copies_an_already_lab_input_through_the_fallible_clone`
+/// over the `cfg(test)` counter `raster.rs` keeps.
+///
+/// Spelled `alloc_colour_*` rather than `try_*` to match
+/// [`alloc_colour_output`] and [`alloc_colour_plane`], the two helpers it
+/// shares a ceiling with. All three hand back one image-sized colour buffer or
+/// an [`Err`], and reading as one family is worth more here than the `try_`
+/// marker, which the return type already carries.
+fn alloc_colour_source_copy(src: &Raster) -> Result<Raster, RasterError> {
+    #[cfg(test)]
+    refuse_over_colour_cap(src.width(), src.height(), src.data().len())?;
+    src.try_clone()
+}
+
+/// Test-only: refuse an over-ceiling colour allocation of `bytes`, unless the
+/// calling thread still has a spare to wave it through.
+///
+/// One gate for every image-sized allocation in this module, so the ceiling and
+/// the spare counter mean the same thing at [`alloc_colour_output`],
+/// [`alloc_colour_plane`] and [`alloc_colour_source_copy`]. Sharing the counter
+/// is what lets a test address a *particular* site by index along a path (see
+/// [`with_colour_alloc_cap_after`]).
+#[cfg(test)]
+fn refuse_over_colour_cap(width: u32, height: u32, bytes: usize) -> Result<(), RasterError> {
+    if bytes as u64 > OUTPUT_ALLOC_CAP.with(Cell::get) && !spare_an_over_cap_output() {
+        return Err(RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+/// Test-only: consume one of the calling thread's spared over-ceiling colour
+/// outputs, reporting whether there was one to consume.
+///
+/// This is what makes the ceiling a *counting* hook rather than a size one. An
+/// operation that allocates more than once through here (`try_sharpen` opens
+/// and closes a LabS round trip, so it is two) otherwise always fails at the
+/// first site, and a byte ceiling cannot tell the sites apart: the entry
+/// conversion's output is the larger of the two on every route into LabS, so
+/// no ceiling exists that admits it and refuses the exit. Sparing the first
+/// `n` refusals instead lets a test run the whole body and starve a chosen
+/// later allocation.
+#[cfg(test)]
+fn spare_an_over_cap_output() -> bool {
+    OUTPUT_ALLOC_SPARE.with(|spare| {
+        let left = spare.get();
+        if left == 0 {
+            return false;
+        }
+        spare.set(left - 1);
+        true
+    })
+}
+
+/// Test-only: how many spared over-ceiling allocations the calling thread has
+/// left, so a check can count a function's image-sized requests instead of
+/// sizing them. Two sites of the same size on one path are otherwise
+/// indistinguishable by the error they report.
+#[cfg(test)]
+fn colour_alloc_spare_left() -> u32 {
+    OUTPUT_ALLOC_SPARE.with(Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread ceiling, in bytes, on a single [`alloc_colour_output`].
+    ///
+    /// Defaults to `u64::MAX` (no ceiling), so a colour output is bounded only
+    /// by the allocator, matching [`alloc_op_output`]. Lowered by
+    /// [`with_colour_alloc_cap`] so a test can drive the fallible path at a
+    /// buildable input. Compiled only under `cfg(test)`, so it never exists in
+    /// a production build.
+    static OUTPUT_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
+
+    /// Per-thread count of over-ceiling colour outputs to wave through before
+    /// the ceiling starts refusing, set by [`with_colour_alloc_cap_after`].
+    ///
+    /// Defaults to zero, so the plain [`with_colour_alloc_cap`] refuses the
+    /// first over-ceiling output as it always did.
+    static OUTPUT_ALLOC_SPARE: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Test-only hook: run `f` with the calling thread's [`alloc_colour_output`]
+/// ceiling lowered to `max_bytes`, restoring the previous ceiling afterwards
+/// (including on unwind).
+///
+/// The abort guard only fires at output sizes the allocator refuses, which for
+/// a colour op means an input past the construction budget. Lowering the
+/// per-thread ceiling makes the path reachable at a small input; the ceiling is
+/// thread-local, so parallel tests do not perturb one another (#460).
+#[cfg(test)]
+fn with_colour_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    with_colour_alloc_cap_after(0, max_bytes, f)
+}
+
+/// Test-only hook: [`with_colour_alloc_cap`], but wave the first `spare`
+/// over-ceiling allocations through before the ceiling starts refusing.
+///
+/// For an operation with one colour allocation the two are the same call. For
+/// one with several, `spare` picks which of them starves, which is the only way
+/// to prove a test reached past the first: `try_sharpen`'s entry conversion
+/// into LabS allocates at least as much as its exit conversion back on every
+/// route (LabS is the widest storage depth the space table has), so a byte
+/// ceiling that admits the entry admits the exit too.
+///
+/// The colour-difference and ICC paths are the same shape only worse, which is
+/// why #685 reused this rather than adding a second mechanism. `try_de00`
+/// converts both inputs to Lab before it reaches its own `Vec<f64>`, and after
+/// #678 those conversions are themselves fallible, so *any* ceiling low enough
+/// to starve the difference buffer returns from `try_colourspace` first and the
+/// check goes green having never run the line it names. `spare` is the index of
+/// the site along the path: two spares on a dE, three on an ICC import, and the
+/// byte count in the resulting [`RasterError::AllocationFailed`] says which
+/// buffer it was.
+#[cfg(test)]
+fn with_colour_alloc_cap_after<R>(spare: u32, max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    struct Restore(u64, u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OUTPUT_ALLOC_CAP.with(|c| c.set(self.0));
+            OUTPUT_ALLOC_SPARE.with(|c| c.set(self.1));
+        }
+    }
+    let _restore = Restore(
+        OUTPUT_ALLOC_CAP.with(|c| c.replace(max_bytes)),
+        OUTPUT_ALLOC_SPARE.with(|c| c.replace(spare)),
+    );
+    f()
+}
+
 /// Wrap an already-quantised sample byte buffer into a raster, carrying
 /// `like`'s metadata block and attached fields, tagged `tag`. The hot
 /// [`Raster::try_colourspace`] loop writes its output samples straight
 /// into `buf` (via [`write_sample`]) and finishes through here, so no
 /// intermediate full-image `Vec<f64>` staging is materialised.
+///
+/// The wrap goes through [`Raster::from_op_output`] rather than
+/// [`Raster::new`], for the reason [`alloc_colour_output`] skips the byte
+/// budget: a colour output derives from an already-budget-checked input and
+/// legitimately grows past `DEFAULT_MAX_ALLOC_BYTES` on a widening conversion,
+/// where `Raster::new` would reject it and the old `.expect` would turn that
+/// rejection into a panic out of a `try_` form (issue #279).
 fn raster_from_bytes(
     width: u32,
     height: u32,
@@ -1343,17 +1724,20 @@ fn raster_from_bytes(
     buf: Vec<u8>,
     like: &Raster,
     tag: Interpretation,
-) -> Raster {
-    let mut out = Raster::new(width, height, format_for(channels, depth), buf)
-        .expect("colour op output is well-formed");
+) -> Result<Raster, RasterError> {
+    let mut out = Raster::from_op_output(width, height, format_for(channels, depth), buf)?;
     out.meta = like.meta;
     out.meta.interpretation = Some(tag);
     out.fields = like.fields.clone();
-    out
+    Ok(out)
 }
 
 /// Build a raster from per-channel `f64` samples at `depth`, carrying
 /// `like`'s metadata block and attached fields, tagged `tag`.
+///
+/// The byte buffer is the colour-difference and ICC arms' output, so it goes
+/// through [`alloc_colour_output`] and reports
+/// [`RasterError::AllocationFailed`] rather than aborting (issue #672).
 fn build_raster(
     width: u32,
     height: u32,
@@ -1362,8 +1746,8 @@ fn build_raster(
     samples: &[f64],
     like: &Raster,
     tag: Interpretation,
-) -> Raster {
-    let mut buf = vec![0u8; samples.len() * depth.bytes()];
+) -> Result<Raster, RasterError> {
+    let mut buf = alloc_colour_output(width, height, format_for(channels, depth))?;
     for (i, &v) in samples.iter().enumerate() {
         write_sample(&mut buf, depth, i, v);
     }
@@ -1743,20 +2127,24 @@ impl ShaperCurves {
 /// Matrix-shaper RGB and grey-TRC profiles evaluate exactly; everything
 /// else runs a moxcms float transform to its generic Lab profile and
 /// decodes the ICC-encoded PCS XYZ it delivers.
+///
+/// `width` and `height` size the output plane and `device` drives the fill, so
+/// the two have to describe the same image; see the assertion below.
 fn icc_device_to_lab(
     profile: &ColorProfile,
     device: &[f32],
     channels: usize,
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<[f64; 3]>, ColourError> {
-    let pixels = device.len() / channels;
-
+    debug_assert_plane_geometry(device.len(), channels, width, height);
     if profile.color_space == DataColorSpace::Rgb
         && profile.is_matrix_shaper()
         && let Some(lin) = ShaperCurves::linear_rgb(profile)
     {
         let m = profile.colorant_matrix();
-        let mut out = Vec::with_capacity(pixels);
+        let mut out = alloc_colour_plane::<[f64; 3]>(width, height, 1)?;
         for px in device.as_chunks::<3>().0 {
             let v = m.mul_vector(Vector3d {
                 v: [
@@ -1778,7 +2166,7 @@ fn icc_device_to_lab(
             .map_err(|e| ColourError::IccTransform {
                 detail: format!("{e:?}"),
             })?;
-        let mut out = Vec::with_capacity(pixels);
+        let mut out = alloc_colour_plane::<[f64; 3]>(width, height, 1)?;
         for &px in device {
             let v = lin.evaluate_value(px) as f64;
             out.push(xyz_to_lab([ICC_D50[0] * v, v, ICC_D50[2] * v], ICC_D50));
@@ -1786,18 +2174,27 @@ fn icc_device_to_lab(
         return Ok(out);
     }
 
-    icc_device_to_lab_fallback(profile, device, channels, intent)
+    icc_device_to_lab_fallback(profile, device, channels, intent, width, height)
 }
 
 /// The LUT-profile import path: moxcms transform to the generic Lab
 /// profile, PCS XYZ decoded from the ICC `u1Fixed15` code scale.
+///
+/// The two buffers on either side of `xf.transform` are reserved fallibly. The
+/// transform between them is not: moxcms sizes its katana intermediates from
+/// the image and allocates them with a plain `vec![]`, so this route and its
+/// export twin are the two places in the module where memory exhaustion is
+/// still a process abort. Issue #693 tracks that upstream, where the fallible
+/// spelling already exists and these stages just do not use it.
 fn icc_device_to_lab_fallback(
     profile: &ColorProfile,
     device: &[f32],
     channels: usize,
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<[f64; 3]>, ColourError> {
-    let pixels = device.len() / channels;
+    debug_assert_plane_geometry(device.len(), channels, width, height);
     let lab_profile = ColorProfile::new_lab();
     let xf = profile
         .create_transform_f32(
@@ -1809,40 +2206,46 @@ fn icc_device_to_lab_fallback(
         .map_err(|e| ColourError::IccTransform {
             detail: format!("{e:?}"),
         })?;
-    let mut pcs = vec![0.0f32; pixels * 3];
+    let mut pcs = alloc_colour_plane_filled::<f32>(width, height, 3, 0.0)?;
     xf.transform(device, &mut pcs)
         .map_err(|e| ColourError::IccTransform {
             detail: format!("{e:?}"),
         })?;
-    Ok(pcs
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|px| {
-            xyz_to_lab(
-                [
-                    px[0] as f64 * PCS_XYZ_SCALE,
-                    px[1] as f64 * PCS_XYZ_SCALE,
-                    px[2] as f64 * PCS_XYZ_SCALE,
-                ],
-                ICC_D50,
-            )
-        })
-        .collect())
+    // `collect()` here sized itself from the iterator's exact length hint, so
+    // it was a second infallible image-sized allocation, just one that does not
+    // look like an allocation. Reserved and pushed instead (#685).
+    let mut out = alloc_colour_plane::<[f64; 3]>(width, height, 1)?;
+    for px in pcs.as_chunks::<3>().0 {
+        out.push(xyz_to_lab(
+            [
+                px[0] as f64 * PCS_XYZ_SCALE,
+                px[1] as f64 * PCS_XYZ_SCALE,
+                px[2] as f64 * PCS_XYZ_SCALE,
+            ],
+            ICC_D50,
+        ));
+    }
+    Ok(out)
 }
 
 /// Convert D50 PCS Lab triples to normalised (0..1) device pixels.
+///
+/// `width` and `height` size the output plane and `labs` drives the fill, so
+/// the two have to describe the same image; see the assertion below.
 fn icc_lab_to_device(
     profile: &ColorProfile,
     labs: &[[f64; 3]],
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<f32>, ColourError> {
+    debug_assert_plane_geometry(labs.len(), 1, width, height);
     if profile.color_space == DataColorSpace::Rgb
         && profile.is_matrix_shaper()
         && let Some(gamma) = ShaperCurves::gamma_rgb(profile)
     {
         let inv = profile.colorant_matrix().inverse();
-        let mut out = Vec::with_capacity(labs.len() * 3);
+        let mut out = alloc_colour_plane::<f32>(width, height, 3)?;
         for lab in labs {
             let xyz = lab_to_xyz(*lab, ICC_D50);
             let v = inv.mul_vector(Vector3d { v: xyz });
@@ -1861,7 +2264,7 @@ fn icc_lab_to_device(
             .map_err(|e| ColourError::IccTransform {
                 detail: format!("{e:?}"),
             })?;
-        let mut out = Vec::with_capacity(labs.len());
+        let mut out = alloc_colour_plane::<f32>(width, height, 1)?;
         for lab in labs {
             let y = lab_to_xyz(*lab, ICC_D50)[1];
             out.push((gamma.evaluate_value(y.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0));
@@ -1869,16 +2272,23 @@ fn icc_lab_to_device(
         return Ok(out);
     }
 
-    icc_lab_to_device_fallback(profile, labs, intent)
+    icc_lab_to_device_fallback(profile, labs, intent, width, height)
 }
 
 /// The LUT-profile export path: PCS XYZ re-encoded to the ICC code scale
 /// and run through a moxcms transform from the generic Lab profile.
+///
+/// Carries the same moxcms residue as [`icc_device_to_lab_fallback`]: both of
+/// this function's own buffers are fallible, the transform between them is not
+/// (issue #693).
 fn icc_lab_to_device_fallback(
     profile: &ColorProfile,
     labs: &[[f64; 3]],
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<f32>, ColourError> {
+    debug_assert_plane_geometry(labs.len(), 1, width, height);
     let channels = device_channels(profile)?;
     let lab_profile = ColorProfile::new_lab();
     let xf = lab_profile
@@ -1891,14 +2301,14 @@ fn icc_lab_to_device_fallback(
         .map_err(|e| ColourError::IccTransform {
             detail: format!("{e:?}"),
         })?;
-    let mut pcs = Vec::with_capacity(labs.len() * 3);
+    let mut pcs = alloc_colour_plane::<f32>(width, height, 3)?;
     for lab in labs {
         let xyz = lab_to_xyz(*lab, ICC_D50);
         pcs.push((xyz[0] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
         pcs.push((xyz[1] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
         pcs.push((xyz[2] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
     }
-    let mut device = vec![0.0f32; labs.len() * channels];
+    let mut device = alloc_colour_plane_filled::<f32>(width, height, channels, 0.0)?;
     xf.transform(&pcs, &mut device)
         .map_err(|e| ColourError::IccTransform {
             detail: format!("{e:?}"),
@@ -1934,11 +2344,11 @@ fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
 /// the sub-integer precision callers assume survives. The 8-bit integer
 /// (`/255`) and 16-bit (`/65535`) arms are unchanged and remain
 /// byte-parity with libvips.
-fn read_device_normalised(raster: &Raster, channels: usize) -> Vec<f32> {
+fn read_device_normalised(raster: &Raster, channels: usize) -> Result<Vec<f32>, RasterError> {
     let total = raster.width() as usize * raster.height() as usize;
     let all = raster.format().channels();
     let bpc = raster.format().bytes_per_channel();
-    let mut out = Vec::with_capacity(total * channels);
+    let mut out = alloc_colour_plane::<f32>(raster.width(), raster.height(), channels)?;
     for p in 0..total {
         for c in 0..channels {
             let v = read_sample_f64(raster, p * all + c);
@@ -1953,7 +2363,7 @@ fn read_device_normalised(raster: &Raster, channels: usize) -> Vec<f32> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// The profile bytes an ICC op should use: the explicit path if given,
@@ -2035,8 +2445,11 @@ impl Raster {
     /// # Errors
     ///
     /// [`ColourError::UnsupportedColourspace`] when the source or target
-    /// has no route, and [`ColourError::TooFewBands`] when the image has
-    /// fewer bands than its space needs.
+    /// has no route, [`ColourError::TooFewBands`] when the image has
+    /// fewer bands than its space needs, and [`ColourError::Raster`] when
+    /// the output cannot be allocated. That last one arrives as a value:
+    /// the output buffer is reserved fallibly, so an over-capacity
+    /// conversion is an `Err` and never a process abort.
     pub fn try_colourspace(&self, target: Interpretation) -> Result<Raster, ColourError> {
         let src = alias_source(self.interpretation());
         if !space_supported(src) {
@@ -2073,8 +2486,15 @@ impl Raster {
         // (libviprs#284). `src_px` is reused across pixels for the source
         // colour bands, and `tgt_px` is a reused stack scratch wide enough
         // for every space (CMYK is the widest at four bands) that
-        // `from_xyz_into` writes into.
-        let mut buf = vec![0u8; total * out_channels * tgt_depth.bytes()];
+        // `from_xyz_into` writes into. The output buffer is the one
+        // image-sized allocation on this path, so it is reserved fallibly:
+        // `vec![]` here reached `handle_alloc_error` and aborted the process,
+        // which is the one thing a `try_` form must not do (issue #672).
+        let mut buf = alloc_colour_output(
+            self.width(),
+            self.height(),
+            format_for(out_channels, tgt_depth),
+        )?;
         let mut src_px = vec![0.0f64; src_bands];
         let mut tgt_px = [0.0f64; 4];
         let identity = src == target;
@@ -2124,7 +2544,7 @@ impl Raster {
             buf,
             self,
             target,
-        ))
+        )?)
     }
 
     /// Convert this image to the target colour space (libvips
@@ -2168,7 +2588,7 @@ impl Raster {
         let out_channels = 1 + extras;
         let total = left.width() as usize * left.height() as usize;
 
-        let mut samples = Vec::with_capacity(total * out_channels);
+        let mut samples = alloc_colour_plane::<f64>(left.width(), left.height(), out_channels)?;
         for p in 0..total {
             let a = [
                 read_sample_f64(&left, p * l_ch),
@@ -2194,7 +2614,7 @@ impl Raster {
             &samples,
             &left,
             Interpretation::Bw,
-        ))
+        )?)
     }
 
     /// CIE76 colour difference between two images (libvips `vips_dE76`):
@@ -2205,7 +2625,15 @@ impl Raster {
     /// # Errors
     ///
     /// The [`Raster::try_colourspace`] errors, plus
-    /// [`ColourError::DimensionMismatch`] when the images differ in size.
+    /// [`ColourError::DimensionMismatch`] when the images differ in size and
+    /// [`ColourError::Raster`] when a buffer cannot be allocated. A dE holds
+    /// three image-sized buffers at once (both Lab conversions and the `f64`
+    /// difference plane, which at 8 bytes a sample is the largest single
+    /// allocation this module makes), and each of those three is reserved
+    /// fallibly, so a host that cannot serve one of them gets an `Err` rather
+    /// than a process abort. The claim is exactly that wide: those three
+    /// buffers, on a path that stays inside this crate. It is not a promise
+    /// that the whole call is allocation-safe.
     pub fn try_de76(&self, other: &Raster) -> Result<Raster, ColourError> {
         self.colour_difference(other, de76)
     }
@@ -2328,7 +2756,19 @@ impl Raster {
     /// profiles, [`ColourError::TooFewBands`] when the image has fewer
     /// bands than the profile's device space, and
     /// [`ColourError::IccTransform`] when the CMS cannot build a
-    /// transform for a LUT profile.
+    /// transform for a LUT profile, and [`ColourError::Raster`] when a buffer
+    /// cannot be allocated. That last one covers every image-sized allocation
+    /// the import itself makes and not only the output: the normalised device
+    /// plane, the Lab staging the CMS fills, and the sample buffer are all
+    /// reserved fallibly, so an image too large for the host is an `Err` rather
+    /// than a process abort.
+    ///
+    /// That is where the guarantee stops. On a LUT profile the pixels also pass
+    /// through a moxcms transform, which sizes intermediates of its own from
+    /// the image and allocates them infallibly, so on that route a host that
+    /// cannot serve them still ends the process. The matrix-shaper and grey-TRC
+    /// routes evaluate in this crate and do not reach it. See the
+    /// [module docs](crate::colour#allocation) for where that sits.
     pub fn try_icc_import_with(
         &self,
         intent: Intent,
@@ -2349,8 +2789,15 @@ impl Raster {
         }
         let extras = channels - dev_ch;
 
-        let device = read_device_normalised(self, dev_ch);
-        let labs = icc_device_to_lab(&profile, &device, dev_ch, intent)?;
+        let device = read_device_normalised(self, dev_ch)?;
+        let labs = icc_device_to_lab(
+            &profile,
+            &device,
+            dev_ch,
+            intent,
+            self.width(),
+            self.height(),
+        )?;
 
         let pcs = pcs.unwrap_or(Pcs::Lab);
         let tag = match pcs {
@@ -2358,9 +2805,8 @@ impl Raster {
             Pcs::Xyz => Interpretation::Xyz,
         };
 
-        let total = self.width() as usize * self.height() as usize;
         let out_channels = 3 + extras;
-        let mut samples = Vec::with_capacity(total * out_channels);
+        let mut samples = alloc_colour_plane::<f64>(self.width(), self.height(), out_channels)?;
         for (p, lab) in labs.iter().enumerate() {
             match pcs {
                 Pcs::Lab => samples.extend_from_slice(lab),
@@ -2382,7 +2828,7 @@ impl Raster {
             &samples,
             self,
             tag,
-        ))
+        )?)
     }
 
     /// Panicking form of [`Raster::try_icc_import_with`], matching the
@@ -2427,7 +2873,16 @@ impl Raster {
     /// # Errors
     ///
     /// [`ColourError::UnsupportedDepth`] for depths other than 8 and 16,
-    /// plus the [`Raster::try_icc_import_with`] profile errors.
+    /// [`ColourError::Raster`] when a buffer cannot be allocated, plus the
+    /// [`Raster::try_icc_import_with`] profile errors. The allocation arm
+    /// covers the copy this takes of an already-Lab input as well as the Lab
+    /// staging, the device plane and the sample buffer, so none of those can
+    /// abort the process out of a `try_` form.
+    ///
+    /// It stops there, exactly as on [`Raster::try_icc_import_with`]: a LUT
+    /// profile hands the pixels to a moxcms transform that allocates
+    /// image-sized intermediates infallibly, so that route can still end the
+    /// process. See the [module docs](crate::colour#allocation).
     pub fn try_icc_export_with(
         &self,
         depth: u32,
@@ -2444,7 +2899,7 @@ impl Raster {
         };
 
         let source = if self.interpretation() == Interpretation::Lab {
-            self.clone()
+            alloc_colour_source_copy(self)?
         } else {
             self.try_colourspace(Interpretation::Lab)?
         };
@@ -2464,7 +2919,7 @@ impl Raster {
         let extras = channels - 3;
         let total = source.width() as usize * source.height() as usize;
 
-        let mut labs = Vec::with_capacity(total);
+        let mut labs = alloc_colour_plane::<[f64; 3]>(source.width(), source.height(), 1)?;
         for p in 0..total {
             labs.push([
                 read_sample_f64(&source, p * channels),
@@ -2472,11 +2927,11 @@ impl Raster {
                 read_sample_f64(&source, p * channels + 2),
             ]);
         }
-        let device = icc_lab_to_device(&profile, &labs, intent)?;
+        let device = icc_lab_to_device(&profile, &labs, intent, source.width(), source.height())?;
 
         let scale = out_depth.max_value();
         let out_channels = dev_ch + extras;
-        let mut samples = Vec::with_capacity(total * out_channels);
+        let mut samples = alloc_colour_plane::<f64>(source.width(), source.height(), out_channels)?;
         for p in 0..total {
             for c in 0..dev_ch {
                 samples.push(device[p * dev_ch + c] as f64 * scale);
@@ -2494,7 +2949,7 @@ impl Raster {
             &samples,
             &source,
             device_tag(dev_ch, out_depth),
-        );
+        )?;
         out.set_icc_profile(&bytes);
         Ok(out)
     }
@@ -2564,6 +3019,7 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::convolution::ConvolutionError;
 
     /// A small constant Lab fixture with one extra band, the shape the
     /// ported colour tests build.
@@ -4021,9 +4477,11 @@ mod tests {
             180.0 / 255.0,
             160.0 / 255.0,
         ];
-        let exact = icc_device_to_lab(&profile, &device, 3, Intent::Perceptual).unwrap();
+        // Two RGB pixels, so the plane geometry the allocation is priced
+        // against is 2x1.
+        let exact = icc_device_to_lab(&profile, &device, 3, Intent::Perceptual, 2, 1).unwrap();
         let fallback =
-            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual).unwrap();
+            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual, 2, 1).unwrap();
         for (e, f) in exact.iter().zip(fallback.iter()) {
             assert!(
                 de76(*e, *f) < 2.0,
@@ -4940,5 +5398,809 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- allocation --
+
+    /// A per-thread [`alloc_colour_output`] ceiling below every colour output
+    /// the tests below ask for (each is 768 bytes at 8x8), so the fallible path
+    /// trips deterministically at a tiny, instantly-constructible input instead
+    /// of the multi-gigabyte one the real refusal would need (#672).
+    const OUTPUT_TEST_CAP_BYTES: u64 = 16;
+
+    /// An 8x8 sRGB fixture with no profile attached, so nothing routes through
+    /// the ICC arms.
+    fn srgb_8x8() -> Raster {
+        Raster::new(8, 8, PixelFormat::Rgb8, vec![119u8; 8 * 8 * 3]).unwrap()
+    }
+
+    /**
+     * Tests that a colour output the allocator refuses is reported as a
+     * typed error rather than reaching `handle_alloc_error` and aborting.
+     * Runs with no test ceiling in play, so the refusal is the real
+     * allocator's and the guard holds without the hook.
+     *
+     * The size matters. `2^31` square at one byte per pixel is 4 EiB, under
+     * the `isize::MAX` ceiling `Vec` checks up front, so the request reaches
+     * the allocator, is refused, and an infallible `vec![]` would abort there
+     * — the exact failure #672 is about. `u32::MAX` square is past that
+     * ceiling instead, where `vec![]` panics on "capacity overflow" before the
+     * allocator sees it; both must come back typed, so both are pinned.
+     */
+    #[test]
+    fn colour_output_allocation_reports_failure_rather_than_aborting() {
+        let refused = alloc_colour_output(1 << 31, 1 << 31, PixelFormat::Gray8);
+        assert!(
+            matches!(refused, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed for a 4 EiB request, got {refused:?}"
+        );
+
+        let overflowing = alloc_colour_output(u32::MAX, u32::MAX, PixelFormat::Gray8);
+        assert!(
+            matches!(
+                overflowing,
+                Err(RasterError::AllocationFailed { .. } | RasterError::SizeOverflow { .. })
+            ),
+            "expected AllocationFailed or SizeOverflow, got {overflowing:?}"
+        );
+    }
+
+    /**
+     * Tests that a colour *intermediate* the allocator refuses comes back as a
+     * typed error rather than reaching `handle_alloc_error` and aborting.
+     *
+     * This is the one check in the file that proves `alloc_colour_plane` is
+     * fallible, and none of the site checks below can stand in for it. They all
+     * drive the `cfg(test)` ceiling, and the ceiling answers *before*
+     * `try_reserve_exact` is reached, so every one of them stays green with the
+     * reservation reverted to an infallible `Vec::reserve_exact`, which is the
+     * whole subject of #685 removed with the suite silent. This one runs with no
+     * ceiling in play, so the refusal is the real allocator's.
+     *
+     * The size matters for the same reason it does one screen up. `2^28` square
+     * at one `f64` a pixel is 512 PiB, under the `isize::MAX` ceiling `Vec`
+     * checks up front, so the request reaches the allocator, is refused, and an
+     * infallible reserve would abort right there. `u32::MAX` square at three
+     * `f64` a pixel prices past `usize` instead, so it comes back
+     * `SizeOverflow` before the allocator is asked, and the `bpp` it reports is
+     * the plane's 24 bytes a pixel rather than its one element a pixel.
+     */
+    #[test]
+    fn colour_plane_allocation_reports_failure_rather_than_aborting() {
+        let refused = alloc_colour_plane::<f64>(1 << 28, 1 << 28, 1);
+        assert!(
+            matches!(refused, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed, got {:?}",
+            refused.map(|v: Vec<f64>| v.capacity())
+        );
+
+        let overflowing = alloc_colour_plane::<[f64; 3]>(u32::MAX, u32::MAX, 1);
+        assert!(
+            matches!(
+                overflowing,
+                Err(RasterError::AllocationFailed { .. }
+                    | RasterError::SizeOverflow { bpp: 24, .. })
+            ),
+            "expected AllocationFailed or SizeOverflow at 24 bytes a pixel, got {:?}",
+            overflowing.map(|v: Vec<[f64; 3]>| v.capacity())
+        );
+    }
+
+    /**
+     * Tests that try_colourspace surfaces an output it cannot allocate as
+     * ColourError::Raster instead of aborting the process. The conversion
+     * buffer is the one image-sized allocation on that path and it used to
+     * be an infallible `vec![]`, so the `Result` in the signature did not
+     * cover the failure it most needed to (#672).
+     * Works by lowering the per-thread output ceiling for the one call.
+     * Input: 8x8 sRGB -> Labs (3 f32 bands, 768 bytes) under a 16-byte
+     * ceiling -> Err(Raster(AllocationFailed)).
+     */
+    #[test]
+    fn try_colourspace_reports_an_unservable_output_as_a_typed_error() {
+        let im = srgb_8x8();
+        let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || {
+            im.try_colourspace(Interpretation::Labs)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte Labs output, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests that the panicking twin keeps panicking rather than aborting:
+     * `colourspace` has no error channel, so an output the host cannot
+     * allocate has to surface as a panic, which unwinds and can be caught,
+     * where an abort would take the process down with it (#672).
+     * Input: 8x8 sRGB -> Labs under the lowered ceiling, caught.
+     */
+    #[test]
+    fn colourspace_panics_rather_than_aborting_on_an_unservable_output() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught = std::panic::catch_unwind(|| {
+            let im = srgb_8x8();
+            with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || {
+                im.colourspace(Interpretation::Labs)
+            })
+        });
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "an unservable colourspace output must panic (unwindable), not abort"
+        );
+    }
+
+    /**
+     * Tests the reason #672 was filed: try_sharpen opens a LabS round trip
+     * through try_colourspace, so it inherited that abort however its own
+     * signature read. An entry conversion the host cannot allocate now
+     * arrives as ConvolutionError::Colour(ColourError::Raster) at the call
+     * site. Lives here rather than in `convolution.rs` because the ceiling
+     * hook it needs is this module's.
+     *
+     * Named for the *entry* conversion deliberately. `?` returns from the
+     * first statement of try_sharpen, so nothing in the body runs and this
+     * check can say nothing about it; the exit-conversion test below is the
+     * one that gets past here. Mutation: an unconditional panic! at the
+     * `sharpened` construction leaves this test green, which is correct for
+     * what its name now claims and was not for what it used to.
+     * Input: 8x8 sRGB, sharpen(1.5, 1.0, 2.0) under a 16-byte ceiling.
+     */
+    #[test]
+    fn try_sharpen_reports_an_unservable_entry_conversion_not_an_abort() {
+        let im = srgb_8x8();
+        let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || im.try_sharpen(1.5, 1.0, 2.0));
+        assert!(
+            matches!(
+                out,
+                Err(ConvolutionError::Colour(ColourError::Raster(
+                    RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 768
+                    }
+                )))
+            ),
+            "expected a typed allocation failure entering the LabS round trip, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the closing half of the same round trip, which is the half no
+     * byte ceiling on its own can reach. try_sharpen allocates twice through
+     * colour.rs and the entry conversion is the larger of the two on every
+     * route into LabS (F32 is the widest depth in the space table), so any
+     * ceiling that refuses the exit refuses the entry first and returns
+     * before the body runs. Sparing the first refusal lets the whole body
+     * execute and starves the conversion back, which is what proves this
+     * check observes try_sharpen rather than only its first statement.
+     * Mutation: an unconditional panic! at the `sharpened` construction
+     * reddens this test, and the entry test above stays green.
+     * Input: 8x8 sRGB, sharpen(1.5, 1.0, 2.0) under a 16-byte ceiling with
+     * one refusal spared -> the 768-byte entry succeeds, the 192-byte exit
+     * back to sRGB is Err(Raster(AllocationFailed)).
+     */
+    #[test]
+    fn try_sharpen_reports_an_unservable_exit_conversion_not_an_abort() {
+        let im = srgb_8x8();
+        let out =
+            with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || im.try_sharpen(1.5, 1.0, 2.0));
+        assert!(
+            matches!(
+                out,
+                Err(ConvolutionError::Colour(ColourError::Raster(
+                    RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 192
+                    }
+                )))
+            ),
+            "expected a typed allocation failure leaving the LabS round trip, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /// An sRGB-profiled 8x8 fixture with a fourth band, so every image-sized
+    /// allocation on the ICC import path has a *different* byte size and the
+    /// per-site tests below assert on a number no neighbouring site can
+    /// produce: 768 for the device plane, 1536 for the Lab staging, 2048 for
+    /// the sample buffer, 1024 for the output. The three-band fixture makes
+    /// the first and the last both 768, which is exactly the coincidence that
+    /// lets a check pass for the wrong site.
+    fn srgb_profiled_rgba_fixture() -> Raster {
+        let mut im = Raster::new(8, 8, PixelFormat::Rgba8, vec![119u8; 8 * 8 * 4]).unwrap();
+        im.set_icc_profile(&srgb_profile_bytes());
+        im
+    }
+
+    /// The 8x8 Lab fixture with a profile attached, so `try_icc_export_with`
+    /// takes its already-Lab fast path (the copy) and finds a profile without
+    /// a path argument.
+    fn lab_profiled_fixture() -> Raster {
+        let mut im = lab_fixture();
+        im.set_icc_profile(&srgb_profile_bytes());
+        im
+    }
+
+    fn gray_profile_bytes() -> Vec<u8> {
+        ColorProfile::new_gray_with_gamma(2.2).encode().unwrap()
+    }
+
+    /// A grey-profiled 8x8 fixture with a second band, for the grey-TRC import
+    /// arm. Two bands keep the Lab staging (1536) and the sample buffer (2048)
+    /// at different sizes.
+    fn gray_profiled_fixture() -> Raster {
+        let format = PixelFormat::with_channels(2, 1).unwrap();
+        let mut im = Raster::new(8, 8, format, vec![128u8; 8 * 8 * 2]).unwrap();
+        im.set_icc_profile(&gray_profile_bytes());
+        im
+    }
+
+    /// A three-band Lab fixture carrying a grey profile, for the grey-TRC
+    /// export arm. No extra band, so the copy (768), the Lab staging (1536),
+    /// the device plane (256), the sample buffer (512) and the output (64) are
+    /// five distinct sizes.
+    fn lab_gray_profiled_fixture() -> Raster {
+        let mut im = Raster::constant(8, 8, &[50.0, 0.0, 0.0], Interpretation::Lab);
+        im.set_icc_profile(&gray_profile_bytes());
+        im
+    }
+
+    /// 64 mid-grey Lab triples, the input the export-side ICC helpers take.
+    fn lab_triples_8x8() -> Vec<[f64; 3]> {
+        vec![[50.0, 10.0, -10.0]; 64]
+    }
+
+    /**
+     * Tests the second image-sized allocation in this module, the one
+     * `build_raster` makes to quantise samples into bytes. It is a distinct
+     * site from the try_colourspace conversion buffer, and `try_icc_import`
+     * is the entry point that reaches it *without* going through
+     * try_colourspace at all, so a lowered ceiling here can only be tripped
+     * by an allocation this module made.
+     *
+     * `build_raster` is the *fourth* of them on the import path, so it takes
+     * three spares to reach: the device plane, the Lab staging and the sample
+     * buffer come first (#685). Before those three were fallible this ran at
+     * spare 0 and passed, and it would still pass at spare 0 today, against
+     * `read_device_normalised`, which is also 768 bytes on a three-band
+     * fixture. That is the failure mode this whole file keeps hitting, so the
+     * fixture now has four bands and the assertion is on 1024, a size no other
+     * site on the path produces.
+     * Input: the 8x8 four-band sRGB-profiled fixture, icc_import under a
+     * 16-byte ceiling with three refusals spared -> Err(Raster(
+     * AllocationFailed)) for its 1024-byte RgbaF32 Lab output.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_output_as_a_typed_error() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_colour_alloc_cap_after(3, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1024
+                }))
+            ),
+            "expected AllocationFailed for the 1024-byte import output, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the largest single buffer this module allocates, the `Vec<f64>`
+     * `colour_difference` fills with one sample per output band. It was a
+     * `Vec::with_capacity`, so an image the host could convert to Lab twice
+     * but not hold a difference for aborted the process out of a `try_` form
+     * (#685).
+     *
+     * Two spares is the whole point. Both operands convert to Lab first and
+     * after #678 those conversions are fallible, so a plain ceiling low enough
+     * to starve this buffer returns from the *first* `try_colourspace` and the
+     * body never runs. Sparing both conversions runs the body and starves the
+     * line under test; the 512 bytes are this buffer's and no other site on
+     * the path has that size (the conversions are 768 each, the output 256).
+     * Mutation: an unconditional panic! at the `samples` construction reddens
+     * this test and leaves every other allocation test in the module green.
+     * Input: two 8x8 sRGB fixtures, each of the four dE entry points under a
+     * 16-byte ceiling with two refusals spared -> Err(Raster(AllocationFailed
+     * { bytes: 512 })).
+     */
+    #[test]
+    fn try_de_reports_an_unservable_difference_buffer_not_an_abort() {
+        type De = fn(&Raster, &Raster) -> Result<Raster, ColourError>;
+        let ops: [(&str, De); 4] = [
+            ("try_de76", Raster::try_de76),
+            ("try_de00", Raster::try_de00),
+            ("try_de00_sharma", Raster::try_de00_sharma),
+            ("try_de_cmc", Raster::try_de_cmc),
+        ];
+        for (name, op) in ops {
+            let a = srgb_8x8();
+            let b = srgb_8x8();
+            let out = with_colour_alloc_cap_after(2, OUTPUT_TEST_CAP_BYTES, || op(&a, &b));
+            assert!(
+                matches!(
+                    out,
+                    Err(ColourError::Raster(RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 512
+                    }))
+                ),
+                "{name}: expected AllocationFailed for the 512-byte difference buffer, got {:?}",
+                out.map(|r| (r.width(), r.height(), r.format()))
+            );
+        }
+    }
+
+    /**
+     * Tests `read_device_normalised`, the first image-sized allocation on the
+     * ICC import path: the `Vec<f32>` of device samples the CMS transform
+     * reads. It was a `Vec::with_capacity` and is the site issue #685 names
+     * first.
+     * Works by starving the very first colour allocation the import makes, so
+     * no spares; the 768 bytes are three f32 device bands over 64 pixels.
+     * Mutation: an unconditional panic! at its `out` construction reddens this
+     * test alone.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_device_plane_not_an_abort() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte device plane, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the `Vec<[f64; 3]>` Lab staging the matrix-shaper import arm
+     * fills, 24 bytes a pixel and the widest per-pixel intermediate on the
+     * path.
+     * Works by sparing the device plane so the second allocation starves; 1536
+     * bytes is 64 pixels of three f64.
+     * Mutation: an unconditional panic! at that arm's `out` construction
+     * reddens this test alone.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_lab_staging_not_an_abort() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte Lab staging, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the same Lab staging on the *grey*-TRC import arm, which is a
+     * separate `Vec::with_capacity` in the same function and is not reached at
+     * all by an RGB profile.
+     * Works by importing a two-band grey-profiled fixture with the device
+     * plane spared; 1536 bytes is the same 64 pixels of three f64.
+     * Mutation: an unconditional panic! at the grey arm's `out` construction
+     * reddens this test and leaves the matrix-shaper one above green.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_grey_lab_staging_not_an_abort() {
+        let im = gray_profiled_fixture();
+        let out = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte grey Lab staging, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the import's own `Vec<f64>` sample buffer, the one that carries
+     * the PCS triples plus the extra bands into `build_raster`.
+     * Works by sparing the device plane and the Lab staging; 2048 bytes is 64
+     * pixels of four f64 output bands, distinct from every neighbour.
+     * Mutation: an unconditional panic! at its `samples` construction reddens
+     * this test alone.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_sample_buffer_not_an_abort() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_colour_alloc_cap_after(2, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 2048
+                }))
+            ),
+            "expected AllocationFailed for the 2048-byte import sample buffer, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the copy `try_icc_export_with` takes of an input that is already
+     * Lab. It was a plain `self.clone()`, which copies the whole pixel buffer
+     * infallibly, so on a full-resolution image the export's *largest* request
+     * was the one allocation its `Result` could not report (#685). It is now
+     * `Raster::try_clone`, which is what that method exists for.
+     * Works by starving the first colour allocation the export makes; 1024
+     * bytes is the RgbaF32 fixture's own buffer, so the number also confirms
+     * it is the copy and not something derived from it.
+     * Mutation: an unconditional panic! at the copy reddens this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_source_copy_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1024
+                }))
+            ),
+            "expected AllocationFailed for the 1024-byte source copy, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests that the copy above really is `Raster::try_clone` and not
+     * `Clone::clone`, which the starvation check cannot say.
+     *
+     * That check's ceiling lives in `alloc_colour_source_copy`, one line before
+     * the delegation, so it stays green with `src.try_clone()` put back to
+     * `Ok(src.clone())`, the site exactly as #685 found it. No ceiling can do
+     * better: it would have to sit inside `try_clone`, and the real allocator
+     * will not refuse a copy of a raster small enough for a test to build. So
+     * this counts the delegation instead, through the `cfg(test)` counter
+     * `raster.rs` keeps on `try_clone`.
+     * Input: the 8x8 Lab fixture exported with no ceiling in play -> Ok, and
+     * exactly one raster copied through the fallible path.
+     * Mutation: `src.try_clone()` -> `Ok(src.clone())` leaves the count at zero
+     * and reddens this test alone.
+     */
+    #[test]
+    fn icc_export_copies_an_already_lab_input_through_the_fallible_clone() {
+        let im = lab_profiled_fixture();
+        let (out, copies) = crate::raster::counting_try_clones(|| {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            out.is_ok(),
+            "the unstarved export must succeed, got {out:?}"
+        );
+        assert_eq!(
+            copies, 1,
+            "the export must copy its already-Lab input through Raster::try_clone"
+        );
+    }
+
+    /**
+     * Tests the export's `Vec<[f64; 3]>` Lab staging, gathered from the source
+     * raster before the CMS runs.
+     * Works by sparing the source copy; 1536 bytes is 64 pixels of three f64.
+     * Mutation: an unconditional panic! at its `labs` construction reddens
+     * this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_lab_staging_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte export Lab staging, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the `Vec<f32>` device plane the matrix-shaper export arm fills.
+     * Works by sparing the source copy and the Lab staging; 768 bytes is 64
+     * pixels of three f32 device bands.
+     * Mutation: an unconditional panic! at that arm's `out` construction
+     * reddens this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_device_plane_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_colour_alloc_cap_after(2, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte export device plane, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the same device plane on the *grey*-TRC export arm, a separate
+     * `Vec::with_capacity` an RGB profile never reaches.
+     * Works by exporting a three-band Lab fixture through a grey profile with
+     * the copy and the Lab staging spared; 256 bytes is 64 pixels of one f32
+     * ink, which no other site on that path produces.
+     * Mutation: an unconditional panic! at the grey arm's `out` construction
+     * reddens this test and leaves the matrix-shaper one above green.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_grey_device_plane_not_an_abort() {
+        let im = lab_gray_profiled_fixture();
+        let out = with_colour_alloc_cap_after(2, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 256
+                }))
+            ),
+            "expected AllocationFailed for the 256-byte grey device plane, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the export's own `Vec<f64>` sample buffer, which scales the device
+     * inks to the output depth and carries the extra bands.
+     * Works by sparing the copy, the Lab staging and the device plane; 2048
+     * bytes is 64 pixels of four f64.
+     * Mutation: an unconditional panic! at its `samples` construction reddens
+     * this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_sample_buffer_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_colour_alloc_cap_after(3, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 2048
+                }))
+            ),
+            "expected AllocationFailed for the 2048-byte export sample buffer, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the PCS buffer the LUT-profile import fallback hands to moxcms.
+     *
+     * The fallback is only *dispatched to* by a LUT profile, and the suite
+     * carries none, so this calls it directly with the sRGB profile exactly as
+     * `icc_fallback_encoding_pinned` above already does. That runs the real
+     * function over the real transform; what it does not prove is the dispatch,
+     * which is why the site is described as reachable with a LUT profile rather
+     * than claimed to be covered end to end.
+     * Input: 64 RGB device pixels through the fallback under a 16-byte ceiling
+     * -> Err(Raster(AllocationFailed { bytes: 768 })), 64 pixels of three f32.
+     * Mutation: an unconditional panic! at its `pcs` construction reddens this
+     * test alone.
+     */
+    #[test]
+    fn icc_import_fallback_reports_an_unservable_pcs_buffer_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let device = vec![0.5f32; 8 * 8 * 3];
+        let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || {
+            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte fallback PCS buffer, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Tests the Lab result the LUT-profile import fallback decodes the PCS
+     * into. It was a `.collect()`, which sizes itself from the iterator's exact
+     * length hint and is every bit as infallible as the `with_capacity` next to
+     * it, just harder to see.
+     * Works by sparing the PCS buffer so the decode starves; 1536 bytes is 64
+     * pixels of three f64.
+     * Mutation: an unconditional panic! at its `out` construction reddens this
+     * test and leaves the PCS one above green.
+     */
+    #[test]
+    fn icc_import_fallback_reports_an_unservable_lab_result_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let device = vec![0.5f32; 8 * 8 * 3];
+        let out = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte fallback Lab result, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Tests that the LUT-profile export fallback reaches its PCS buffer
+     * through the fallible path at all, called directly for the same reason as
+     * the import fallback above.
+     *
+     * The name is deliberately weaker than its neighbours' and so is the
+     * claim. This one pair cannot be told apart by size: the PCS buffer is
+     * three f32 per pixel and the device buffer is one f32 per ink, and the
+     * only device space the suite can build a profile for is RGB, so both are
+     * 768 bytes. Revert the PCS site to an infallible `Vec::with_capacity` and
+     * the device buffer takes the refusal at the same spare index and reports
+     * the same 768, so this check stays green: no mutation in the matrix
+     * reddens it. `icc_export_fallback_allocates_both_of_its_buffers_fallibly`
+     * below is what covers the site, by counting the refusals the function
+     * offers up rather than sizing them.
+     * Input: 64 Lab triples through the fallback under a 16-byte ceiling ->
+     * Err(Raster(AllocationFailed { bytes: 768 })).
+     */
+    #[test]
+    fn icc_export_fallback_reaches_its_pcs_buffer_through_the_fallible_path() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let labs = lab_triples_8x8();
+        let out = with_colour_alloc_cap(OUTPUT_TEST_CAP_BYTES, || {
+            icc_lab_to_device_fallback(&profile, &labs, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte export fallback PCS buffer, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Tests the device buffer the LUT-profile export fallback hands to moxcms,
+     * the last of the four fallback allocations.
+     * Works by sparing the PCS buffer so the second of the two starves; see the
+     * PCS test above for why the size alone does not separate them.
+     * Mutation: an unconditional panic! at its `device` construction reddens
+     * this test and leaves the PCS one above green.
+     */
+    #[test]
+    fn icc_export_fallback_reports_an_unservable_device_buffer_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let labs = lab_triples_8x8();
+        let out = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            icc_lab_to_device_fallback(&profile, &labs, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte export fallback device buffer, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Counts, rather than sizes, the export fallback's allocations: with
+     * enough spares that nothing is actually refused, exactly two over-ceiling
+     * requests reach the hook, which is the PCS buffer and the device buffer.
+     *
+     * The two are the same size, so the pair of tests above rest on the spare
+     * index alone and neither would notice the other's site quietly going back
+     * to an infallible `Vec::with_capacity`, since the remaining site would
+     * take the refusal and report the same 768 bytes. This one notices, because a site
+     * that does not go through `alloc_colour_plane` does not consume a spare.
+     * Input: 64 Lab triples through the fallback under a 16-byte ceiling with
+     * eight spares -> Ok, and six spares left.
+     */
+    #[test]
+    fn icc_export_fallback_allocates_both_of_its_buffers_fallibly() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let labs = lab_triples_8x8();
+        let (out, left) = with_colour_alloc_cap_after(8, OUTPUT_TEST_CAP_BYTES, || {
+            let out = icc_lab_to_device_fallback(&profile, &labs, Intent::Perceptual, 8, 8);
+            (out, colour_alloc_spare_left())
+        });
+        assert!(out.is_ok(), "the spared run must succeed, got {out:?}");
+        assert_eq!(
+            8 - left,
+            2,
+            "the export fallback must make exactly two image-sized allocations \
+             through the fallible path"
+        );
     }
 }
