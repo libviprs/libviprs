@@ -11,6 +11,7 @@
 //! literally, so what a caller writes against is this crate's own codec
 //! surface plus the extension dispatch every format shares.
 
+use libviprs::imageio::MetadataValue;
 use libviprs::source::{DecodeLimits, SourceError};
 use libviprs::{GifError, PixelFormat, Raster, decode_gif, decode_gif_with, gif};
 
@@ -124,6 +125,57 @@ fn encode_and_save_round_trip_from_outside_the_crate() {
         other => panic!("gifload emits 3 or 4 bands, got {other:?}"),
     };
     assert_eq!(rgb, source.data());
+}
+
+/// A page roll saves as an animation and loads back as one from outside the
+/// crate, carrying the delays and the loop count with it.
+#[test]
+fn an_animation_round_trips_from_outside_the_crate() {
+    let colours = [[255u8, 0, 0], [0, 255, 0], [0, 0, 255]];
+    let mut data = Vec::new();
+    for colour in &colours {
+        for _ in 0..4 {
+            data.extend_from_slice(colour);
+        }
+    }
+    let mut roll = Raster::new(2, 6, PixelFormat::Rgb8, data).unwrap();
+    roll.set_page_height(2);
+    roll.set_field("delay", MetadataValue::IntArray(vec![40, 60, 80]));
+    roll.set_field("loop", MetadataValue::Int(3));
+
+    let bytes = roll.encode_gif(gif::SaveOptions::default()).unwrap();
+    let back = decode_gif_with(
+        &bytes,
+        DecodeLimits::default(),
+        gif::LoadOptions::default().with_n(-1),
+    )
+    .expect("the animation loads back");
+
+    assert_eq!((back.width(), back.height()), (2, 6));
+    assert_eq!(back.get_page_height(), 2);
+    assert_eq!(back.pages_loaded(), 3);
+    assert_eq!(back.get_n_pages(), 3);
+    assert_eq!(back.get_int_array("delay"), Some(&[40i64, 60, 80][..]));
+    assert_eq!(back.get_int("loop"), Some(3));
+    for (page, colour) in colours.iter().enumerate() {
+        let opaque = [colour[0], colour[1], colour[2], u8::MAX];
+        assert_eq!(
+            back.extract_page(page as u32).data(),
+            opaque.repeat(4),
+            "page {page}"
+        );
+    }
+
+    // The window is the raster's, and the delay array follows it.
+    let middle = decode_gif_with(
+        &bytes,
+        DecodeLimits::default(),
+        gif::LoadOptions::default().with_page(1).with_n(2),
+    )
+    .expect("a two-page window loads");
+    assert_eq!(middle.pages_loaded(), 2);
+    assert_eq!(middle.get_int_array("delay"), Some(&[60i64, 80][..]));
+    assert_eq!(middle.get_n_pages(), 3, "n-pages still describes the file");
 }
 
 /// Malformed bytes surface as the codec's own typed variant through
