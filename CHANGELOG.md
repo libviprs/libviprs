@@ -1677,6 +1677,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `nohalo` are one expression with a single narrowing at the store and were
   already bit-exact.
 
+- `affine` and `mapim` convert the caller's `background` to the carrier once
+  before they resample, the way `vips_affine_build` runs `vips__vector_to_ink`
+  once before it embeds (issue #736). `vips_cast` clips and then truncates
+  toward zero on an integer carrier and narrows on a float one, so every tap
+  past the edge and every output pixel outside the transformed input is already
+  a carrier value in vips; this module carried the raw `f64` into both.
+
+  It was worth up to **75 of 255** on a byte carrier: `--background 400.9` is
+  ink 255 in vips and 400.9 in a `f64` convolution, and the difference survives
+  wherever the ink is weighted against real pixels. Measured over a 6x6
+  constant with five interpolators and three carriers, the whole table is now 0
+  differences except the two cells that belong to other issues (#732, #733) and
+  two float samples in a degenerate constant-ramp fixture that land exactly on
+  an `f32` rounding midpoint.
+
+  Callers passing an in-range integral background see no change. A fractional
+  one now truncates rather than rounding, and an out-of-range one clips, which
+  is what vips does and what the docs claimed the module already did.
+
 - The `resample` module docs said `Extend::White` diverges on an alpha raster
   because `vips_affine` "premultiplies into a float image before it paints that
   border", so `FILL_LINE(float, ...)` runs and the byte `memset` never does.

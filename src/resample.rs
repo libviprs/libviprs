@@ -118,7 +118,13 @@
 //!   interpolated; positions whose floor falls outside `[-1, dim - 1]` are
 //!   painted with the background, and interpolation taps outside the image
 //!   read the [`Extend`] mode (background 0 by default), reproducing the
-//!   one-pixel anti-aliased border of `vips_affine_gen`. `vips_affine` grows
+//!   one-pixel anti-aliased border of `vips_affine_gen`. Both inks are
+//!   converted to the carrier once before any resampling, the way
+//!   `vips_affine_build` runs `vips__vector_to_ink` once before it embeds:
+//!   clipped and truncated toward zero on an integer carrier, narrowed to
+//!   `f32` on a float one (issue #736). Carrying
+//!   the caller's `f64` into the convolution instead was worth up to 75 of 255
+//!   on a byte carrier with an out-of-range background. `vips_affine` grows
 //!   that border by embedding the input with the caller's extend mode before
 //!   it resamples (`affine.c:534`), so on a raster **without** an alpha band
 //!   an [`Extend::White`] tap is inked the way `vips_embed` inks one, from the
@@ -847,6 +853,35 @@ impl SampleLayout {
     }
 }
 
+impl SampleLayout {
+    /// Convert a caller-supplied ink to the carrier the way
+    /// `vips__vector_to_ink` does (issue #736): it builds a one-pixel image of
+    /// the doubles and casts it to the input's band format, and `vips_cast`
+    /// **clips and then truncates toward zero** on an integer carrier
+    /// (`cast.c:237`, and the file's own header note: "now does floor(), not
+    /// rint() ... you'll need to round yourself"), and narrows without clipping
+    /// on a float one.
+    ///
+    /// `vips_affine_build` runs that once, before the embed and before the
+    /// resample, so both the taps the interpolator reads past the edge and the
+    /// pixels `vips_affine_gen` paints outside the transformed input are
+    /// already carrier values. Carrying the raw `f64` instead is worth up to
+    /// 75 of 255 on a byte carrier with an out-of-range background, because the
+    /// convolution then weights a value the carrier cannot hold.
+    ///
+    /// Note this is **not** [`write`](SampleLayout::write), which rounds half
+    /// up. The two disagree on every fractional ink, and that is the whole
+    /// point: vips quantises the ink one way and the resampled sample the
+    /// other.
+    fn cast_ink(self, v: f64) -> f64 {
+        if self.is_float {
+            f64::from(v as f32)
+        } else {
+            v.clamp(0.0, self.max).trunc()
+        }
+    }
+}
+
 /// The alpha ceiling the premultiply bracket divides by, the default
 /// `vips_premultiply` / `vips_unpremultiply` read from
 /// `vips_interpretation_max_alpha` (issue #664).
@@ -1130,16 +1165,23 @@ struct TapFetch<'a> {
 
 impl TapFetch<'_> {
     fn new(src: &Raster, extend: Extend, background: f64) -> TapFetch<'_> {
+        let layout = SampleLayout::of(src.format());
         TapFetch {
             data: src.data(),
             w: i64::from(src.width()),
             h: i64::from(src.height()),
             bands: src.format().channels(),
-            layout: SampleLayout::of(src.format()),
+            layout,
             alpha_max: bracket_max_alpha(src.format(), src.interpretation()),
-            white: white_ink(src.format(), src.interpretation()),
+            // Both inks go through the carrier once, here, exactly as
+            // `vips_affine_build` runs `vips__vector_to_ink` once before it
+            // embeds (issue #736). The white ink is already integral and in
+            // range on every carrier, so this is a no-op for it and #667's
+            // table does not move; the caller's background is the one that
+            // needs it.
+            white: layout.cast_ink(white_ink(src.format(), src.interpretation())),
             extend,
-            background,
+            background: layout.cast_ink(background),
         }
     }
 
@@ -2829,8 +2871,12 @@ impl Raster {
                         layout.write(buf, oi + bi, *v);
                     }
                 } else {
+                    // `vips_affine_gen` paints everything outside the
+                    // transformed input with `affine->ink`, the same converted
+                    // background the taps read, not with the caller's `f64`
+                    // (issue #736).
                     for bi in 0..bands {
-                        layout.write(buf, oi + bi, options.background);
+                        layout.write(buf, oi + bi, fetch.background);
                     }
                 }
             }
@@ -2995,8 +3041,9 @@ impl Raster {
                         layout.write(buf, oi + bi, *v);
                     }
                 } else {
+                    // The same converted ink the taps read (issue #736).
                     for bi in 0..bands {
-                        layout.write(buf, oi + bi, background);
+                        layout.write(buf, oi + bi, fetch.background);
                     }
                 }
             }
@@ -4601,6 +4648,13 @@ mod tests {
     /// last sample of each row is an output pixel outside the transformed
     /// input, which `vips_affine_gen` paints with `affine->ink` rather than
     /// interpolating, so each row covers both sites the cast reaches.
+    ///
+    /// No `bilinear` cell here, and that is not an oversight: on an integer
+    /// carrier `SWITCH_INTERPOLATE` sends bilinear to `BILINEAR_INT` and its
+    /// four weights are 12-bit fixed point, so the row still misses the binary
+    /// by a byte for a reason that has nothing to do with the ink (#733). The
+    /// equivalences above do cover bilinear, because they compare two libviprs
+    /// runs against each other and that divergence cancels.
     #[test]
     fn affine_background_ink_rows_match_the_oracle() {
         let gray8 = |v: u8| Raster::new(6, 6, PixelFormat::Gray8, vec![v; 36]).unwrap();
@@ -4625,12 +4679,12 @@ mod tests {
             )
             .unwrap()
         };
-        let out = shift(&gray8(100), "bilinear", 200.7);
+        let out = shift(&gray8(100), "bicubic", 200.7);
         assert_eq!((out.width(), out.height()), (9, 8), "output size");
         assert_eq!(
             &out.data()[..9],
-            &[189u8, 179, 169, 158, 148, 138, 127, 151, 200],
-            "uchar bilinear, background 200.7"
+            &[193u8, 183, 173, 160, 148, 135, 118, 146, 200],
+            "uchar bicubic, background 200.7"
         );
         assert_eq!(
             &shift(&gray8(100), "lbb", 400.9).data()[..9],
