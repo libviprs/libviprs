@@ -80,9 +80,11 @@
 //! no FITS crate models: the vertical flip, the `fits-N` record naming,
 //! the cfitsio equivalent-type table, and the byte-exact generated header.
 //! A dependency would supply the easy half and leave all of that here
-//! anyway. `fitsio` is disqualified separately, under the rule in the
-//! contributing notes: it pulls `fitsio-sys`, which declares
-//! `links = "cfitsio"`.
+//! anyway. `fitsio` is disqualified separately, under the dependency rule
+//! in `CONTRIBUTING.md`: it pulls `fitsio-sys`, which needs a cfitsio
+//! installed on the machine. The `links = "cfitsio"` key is the symptom
+//! there rather than the reason; plenty of crates declare one and compile
+//! nothing.
 //!
 //! Every number this module is pinned against was measured on the real
 //! vips 8.18.4 binary (`cfitsio: true`, cfitsio 4.6.4) and is recorded,
