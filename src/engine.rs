@@ -87,7 +87,7 @@ pub enum EngineError {
         kind: crate::EngineKind,
         reason: &'static str,
     },
-    /// The supplied [`PyramidPlan`](crate::PyramidPlan) describes an image
+    /// The supplied [`PyramidPlan`] describes an image
     /// whose dimensions do not match the source raster it was paired with.
     /// The engine validates this at entry so a mismatch surfaces as a typed
     /// error instead of an out-of-bounds slice copy inside the tiling /
@@ -103,7 +103,7 @@ pub enum EngineError {
         source_width: u32,
         source_height: u32,
     },
-    /// The supplied [`PyramidPlan`](crate::PyramidPlan) is structurally
+    /// The supplied [`PyramidPlan`] is structurally
     /// invalid (for example, it has no levels). A plan is normally produced by
     /// [`PyramidPlanner::plan`](crate::PyramidPlanner::plan), which upholds
     /// these invariants; the engine re-checks them at entry so a malformed
@@ -361,8 +361,9 @@ impl EngineConfig {
     /// [`EngineResult::tiles_skipped`] and, for on-disk sinks, materialised as
     /// the [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER). It is
     /// non-lossy: the marker regenerates to the same uniform tile, so
-    /// Verify-mode reconstruction still matches (see
-    /// [`regenerated_tile_matches_marker`]).
+    /// Verify-mode reconstruction still matches. Verify gets there by
+    /// re-applying the *same* blankness predicate to the regenerated tile
+    /// rather than byte-comparing it against the 1-byte marker (issue #94).
     ///
     /// Both [`Blanks`](crate::dedupe::DedupeStrategy::Blanks) and
     /// [`All`](crate::dedupe::DedupeStrategy::All) promote uniform content at
@@ -545,9 +546,10 @@ pub(crate) fn generate_pyramid_observed(
 /// before cropping when they differ.
 ///
 /// This mirrors libvips `dzsave`'s region rendering. It is observer-free (it
-/// drives a [`NoopObserver`](crate::observe::NoopObserver) internally); use
-/// [`generate_pyramid_observed`] on a pre-cropped raster if progress events are
-/// needed.
+/// drives a [`NoopObserver`](crate::observe::NoopObserver) internally). For
+/// progress events, crop first and run the pyramid through
+/// [`EngineBuilder::with_observer`](crate::EngineBuilder::with_observer)
+/// instead.
 ///
 /// # Errors
 ///

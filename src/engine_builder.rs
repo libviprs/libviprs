@@ -14,7 +14,7 @@
 //! 1. The [`EngineKind`] set via [`EngineBuilder::with_engine`]
 //!    (default: [`EngineKind::Auto`]).
 //! 2. Whether the source is an in-memory [`Raster`] or a
-//!    [`StripSource`](crate::streaming::StripSource).
+//!    [`StripSource`].
 //!
 //! [`EngineKind::Monolithic`] refuses to run against a strip source and
 //! surfaces [`EngineError::IncompatibleSource`] instead of silently pulling
@@ -299,7 +299,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// Composes the observers through a [`FanOutObserver`](crate::FanOutObserver),
     /// so delivery is synchronous, on the thread that produced the event,
     /// exactly as with a single observer; the extension hatch
-    /// ([`EngineObserver::on_extensions`](crate::EngineObserver::on_extensions))
+    /// ([`EngineObserver::on_extensions`])
     /// is forwarded to each of them too. Like every observer setter, this
     /// fills the builder's one observer slot: it replaces anything a prior
     /// [`with_observer`](Self::with_observer) /
@@ -328,7 +328,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// [`EngineKind::MapReduceHotCache`] (the engines with a MAP phase);
     /// the monolithic and sequential streaming engines have no strip-dispatch
     /// seam and ignore it. Defaults to
-    /// [`LocalWorkExecutor`](crate::streaming_mapreduce::LocalWorkExecutor),
+    /// [`LocalWorkExecutor`],
     /// which preserves the engine's historical behaviour exactly. See
     /// [`WorkExecutor`] for the dispatch-order and byte-parity contract a
     /// custom executor must uphold.
@@ -536,7 +536,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// without a semver bump. On [`run`](EngineBuilder::run) /
     /// [`run_collect`](EngineBuilder::run_collect) the full map is delivered to
     /// the attached observer via
-    /// [`EngineObserver::on_extensions`](crate::observe::EngineObserver::on_extensions)
+    /// [`EngineObserver::on_extensions`]
     /// once, before any tile is emitted, so a custom observer can read the
     /// values it needs for the run.
     pub fn with_extension<T: Send + Sync + 'static>(mut self, value: T) -> Self {
