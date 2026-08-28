@@ -49,7 +49,20 @@ fn captures_dir() -> PathBuf {
 /// the other two `capture.py` scripts do that is the area owner's call
 /// rather than this test's, so the list is allowed to shrink and nothing
 /// else.
-const PYTHON_ONLY_JSON: &[&str] = &["foreign-radiance", "foreign-uhdr"];
+///
+/// It has now shrunk to nothing. #677 quoted the non-finite floats in both
+/// captures, so every committed capture parses strictly and there is no
+/// longer an exception to record. This branch predates that merge, which is
+/// why the list arrived here already stale.
+///
+/// The empty list is still doing work: the companion assertion fails when a
+/// capture that needs repairing is *not* named here, so a new script writing
+/// a bare `NaN` reddens the test rather than quietly joining an exception
+/// list. What it no longer does is grant anyone an exemption. #682 is the
+/// follow-up that stops the scripts being able to write one in the first
+/// place, which is the difference between the data being clean today and it
+/// staying clean.
+const PYTHON_ONLY_JSON: &[&str] = &[];
 
 /// Quote bare `NaN` / `Infinity` / `-Infinity` so a Python-written capture
 /// parses. Returns the repaired text and whether anything needed repairing.
