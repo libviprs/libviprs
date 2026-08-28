@@ -323,6 +323,9 @@ pub enum SourceError {
     /// bytes are not JPEG XL" without reading a message (issue #634).
     #[error(transparent)]
     Jxl(#[from] crate::jxl::JxlError),
+    /// An AVIF could not be read; see [`crate::avif::AvifError`].
+    #[error(transparent)]
+    Avif(#[from] crate::avif::AvifError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -1115,6 +1118,17 @@ enum Magic {
         /// The bytes at `tag_at`.
         tag: &'static [u8],
     },
+    /// The head carries `bytes` at offset `at`, with **no constraint at
+    /// offset 0**. AVIF's `ftypavif` is the only one: bytes 0..4 are the
+    /// `ftyp` box's own size, which is file-specific and carries no
+    /// signature, so this cannot be a `Prefix` and cannot be a `Split`
+    /// either (a `Split` still pins its prefix at offset 0).
+    At {
+        /// Where `bytes` starts.
+        at: usize,
+        /// The signature bytes at `at`.
+        bytes: &'static [u8],
+    },
     /// The head's whole first line is exactly these bytes, CR- or
     /// LF-terminated. Radiance's `#?RADIANCE` is the only one:
     /// `vips__rad_israd` (`radiance.c:568-577`) reads the first line and
@@ -1157,6 +1171,10 @@ impl Magic {
                     && head.starts_with(prefix)
                     && head[tag_at..tag_at + tag.len()] == *tag
             }
+            Self::At { at, bytes } => {
+                debug_assert!(!bytes.is_empty(), "an empty At constrains nothing");
+                head.len() >= at + bytes.len() && head[at..at + bytes.len()] == *bytes
+            }
             Self::Line(magic) => {
                 debug_assert!(
                     !magic.is_empty(),
@@ -1187,6 +1205,11 @@ impl Magic {
                 let mut head = vec![0u8; tag_at + tag.len()];
                 head[..prefix.len()].copy_from_slice(prefix);
                 head[tag_at..].copy_from_slice(tag);
+                head
+            }
+            Self::At { at, bytes } => {
+                let mut head = vec![0u8; at + bytes.len()];
+                head[at..].copy_from_slice(bytes);
                 head
             }
             Self::Line(magic) => [magic, b"\n"].concat(),
@@ -1291,6 +1314,10 @@ pub(crate) enum SniffedFormat {
     Fits,
     /// OpenEXR, `76 2F 31 01`.
     OpenExr,
+    /// AVIF, the `ftyp` box type at offset 4 followed by the major brand
+    /// `avif`. Still images only, and deliberately not the other nine
+    /// brands libheif's magic list accepts; see [`crate::avif`].
+    Avif,
 }
 
 impl SniffedFormat {
@@ -1316,7 +1343,8 @@ impl SniffedFormat {
             Self::Jxl => Some(Self::Radiance),
             Self::Radiance => Some(Self::Fits),
             Self::Fits => Some(Self::OpenExr),
-            Self::OpenExr => None,
+            Self::OpenExr => Some(Self::Avif),
+            Self::Avif => None,
         }
     }
 
@@ -1330,8 +1358,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 10] = {
-        let mut all = [Self::Vips; 10];
+    pub(crate) const ALL: [Self; 11] = {
+        let mut all = [Self::Vips; 11];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1473,6 +1501,23 @@ impl SniffedFormat {
             Self::OpenExr => Route {
                 magics: &[Magic::Prefix(&crate::exr::MAGIC)],
                 decoder: Decoder::Native(crate::exr::decode_exr),
+            },
+            // `image` has no AVIF route this build can use: its `avif`
+            // feature is encode-only (`ravif`), and its `avif-native`
+            // decode feature is `dav1d-sys`, a C library that has to be
+            // installed on the machine, which CONTRIBUTING.md clause 2
+            // excludes outright. [`crate::avif`] hand-rolls the ISOBMFF
+            // walk and drives the pure-Rust `rav1d` behind the `avif`
+            // feature. It reads the file whole because the container's
+            // `iloc` addresses payload bytes by absolute file offset, so
+            // the item extents are only reachable with the whole file
+            // resident.
+            Self::Avif => Route {
+                magics: &[Magic::At {
+                    at: 4,
+                    bytes: crate::avif::MAGIC_AT_4,
+                }],
+                decoder: Decoder::Native(crate::avif::decode_avif),
             },
         }
     }
@@ -2698,15 +2743,15 @@ mod tests {
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            10,
+            11,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 10 are: 6 self-priced (gif, radiance, fits, openexr, jxl, \
-             and webp which joined them in #686), 3 refused inside the image crate \
-             (jpeg, png, tiff), and .v, which applies no allocation budget at all and \
-             is issue #710"
+             count. Today the 11 are: 7 self-priced (gif, radiance, fits, openexr, jxl, \
+             webp which joined them in #686, and avif which joined them in #605), 3 \
+             refused inside the image crate (jpeg, png, tiff), and .v, which applies \
+             no allocation budget at all and is issue #710"
         );
     }
 
@@ -2828,6 +2873,10 @@ mod tests {
                 // The facade flattens the channel set `crate::exr` needs
                 // (issue #504).
                 SniffedFormat::OpenExr => Kind::Native,
+                // Native because the container's `iloc` addresses payload
+                // bytes by absolute file offset, so the whole file has to be
+                // resident before an item's extents can be gathered.
+                SniffedFormat::Avif => Kind::Native,
             }
         }
 
