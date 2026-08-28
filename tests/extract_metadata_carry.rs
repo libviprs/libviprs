@@ -304,24 +304,44 @@ fn the_engine_region_path_carries_the_metadata_into_the_tiles() {
     let sink = MemorySink::new();
     generate_pyramid_region(&src, &plan, &sink, &EngineConfig::default(), 0, 0, 32, 32).unwrap();
 
+    check_tiles(&sink, "DeepZoom");
+
+    // The Google layout takes a different padding path in `extract_tile`,
+    // including a branch for tiles that fall entirely outside the raster. A
+    // DeepZoom-only test leaves that branch unexercised, and the mutation sweep
+    // said so: removing its carry survived until this run was added.
+    let gplan = PyramidPlanner::new(32, 32, 16, 0, Layout::Google)
+        .unwrap()
+        .plan();
+    let gsink = MemorySink::new();
+    generate_pyramid_region(&src, &gplan, &gsink, &EngineConfig::default(), 0, 0, 32, 32).unwrap();
+    check_tiles(&gsink, "Google");
+}
+
+/// The per-tile assertions, shared by the two layouts.
+fn check_tiles(sink: &MemorySink, layout: &str) {
     let tiles = sink.tiles();
-    assert!(!tiles.is_empty(), "the run produced tiles at all");
+    assert!(!tiles.is_empty(), "{layout} produced tiles at all");
     for t in &tiles {
         let c = t.coord;
         assert_eq!(
             t.raster.interpretation(),
             Interpretation::ScRgb,
-            "tile L{} c{} r{} keeps the interpretation",
+            "{layout} tile L{} c{} r{} keeps the interpretation",
             c.level,
             c.col,
             c.row
         );
-        assert_eq!(t.raster.xres(), 5.0, "tile keeps the resolution");
-        assert_eq!(t.raster.orientation(), 6, "tile keeps the orientation");
+        assert_eq!(t.raster.xres(), 5.0, "{layout} tile keeps the resolution");
+        assert_eq!(
+            t.raster.orientation(),
+            6,
+            "{layout} tile keeps the orientation"
+        );
         assert_eq!(
             t.raster.icc_profile().map(<[u8]>::len),
             Some(PROFILE_LEN),
-            "tile keeps the ICC profile"
+            "{layout} tile keeps the ICC profile"
         );
     }
 }
