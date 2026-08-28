@@ -391,6 +391,11 @@ fn reserve_plane<T>(
     } else {
         len
     };
+    // Test-only: ask for more room than the caller wanted, which the allocator
+    // is always allowed to give and on this one never does. Zero unless a check
+    // has set it, so an ordinary run reserves exactly `len`.
+    #[cfg(test)]
+    let len = len.saturating_add(PLANE_PROBE.with(|c| c.get().over_reserve));
     let mut out: Vec<T> = Vec::new();
     out.try_reserve_exact(len)
         .map_err(|_| RasterError::AllocationFailed {
@@ -469,6 +474,17 @@ struct PlaneProbe {
     /// twice on a path, which is `try_sharpen`'s LabS round trip and nothing
     /// else.
     cap_spare: u32,
+    /// Extra capacity to reserve beyond what the caller asked for.
+    ///
+    /// [`Vec::try_reserve_exact`] is allowed to hand back more room than it was
+    /// asked for, and on this allocator at these sizes it never does, so a
+    /// length computed from the geometry and one read back off `capacity()`
+    /// agree at every size a test can build. That makes
+    /// [`try_plane_filled`]'s stated contract, that the fill length is the
+    /// geometry's, unobservable: `out.resize(out.capacity(), fill)` passes the
+    /// whole suite. This makes the allocator's licence happen on purpose so the
+    /// contract can be checked (issue #696).
+    over_reserve: usize,
 }
 
 #[cfg(test)]
@@ -496,8 +512,25 @@ thread_local! {
             cap_site: "",
             cap_bytes: u64::MAX,
             cap_spare: 0,
+            over_reserve: 0,
         })
     };
+}
+
+/// Test-only hook: run `f` with every plane reservation asking the allocator
+/// for `extra` elements more than the caller wanted.
+///
+/// [`Vec::try_reserve_exact`] may hand back more room than it was asked for,
+/// and [`try_plane_filled`] fills to a length computed from the geometry rather
+/// than to `capacity()` for exactly that reason. On this allocator at these
+/// sizes the two never differ, so the contract is invisible and
+/// `out.resize(out.capacity(), fill)` passes the whole suite. This makes them
+/// differ on purpose.
+#[cfg(test)]
+pub(crate) fn with_plane_over_reserve<R>(extra: usize, f: impl FnOnce() -> R) -> R {
+    let mut probe = PLANE_PROBE.with(Cell::get);
+    probe.over_reserve = extra;
+    with_plane_probe(probe, f).0
 }
 
 /// Test-only hook: run `f` with the calling thread's plane probe armed as
@@ -538,6 +571,7 @@ pub(crate) fn counting_planes<R>(prefix: &'static str, f: impl FnOnce() -> R) ->
             cap_site: "",
             cap_bytes: u64::MAX,
             cap_spare: 0,
+            over_reserve: 0,
         },
         f,
     )
@@ -564,6 +598,7 @@ pub(crate) fn counting_planes_under_cap<R>(
             cap_site,
             cap_bytes: max_bytes,
             cap_spare: 0,
+            over_reserve: 0,
         },
         f,
     )
@@ -613,6 +648,7 @@ pub(crate) fn with_plane_cap_after<R>(
             cap_site: site,
             cap_bytes: max_bytes,
             cap_spare: spare,
+            over_reserve: 0,
         },
         f,
     )
@@ -1988,6 +2024,49 @@ mod tests {
             ),
             "expected AllocationFailed or SizeOverflow at 24 bytes a pixel, got {:?}",
             overflowing.map(|v: Vec<[f64; 3]>| v.capacity())
+        );
+    }
+
+    /**
+     * Tests [`try_plane_filled`]'s contract: the length it fills to is the
+     * geometry's, not whatever the allocator rounded the reservation up to.
+     *
+     * The check needs a hook because the property is otherwise unobservable.
+     * [`Vec::try_reserve_exact`] is allowed to hand back more room than asked
+     * for and on this allocator at these sizes it never does, so
+     * `out.resize(out.capacity(), fill)` behaves identically at every size a
+     * test can build. Mutated to check exactly that: with the hook off, that
+     * substitution passes all 81 allocation checks in the crate; with it on,
+     * this one goes red. The doc on `try_plane_filled` has said the length is a
+     * contract since it was `alloc_colour_plane_filled`, and nothing held it.
+     *
+     * The capacity assertion is the positive control on the hook itself: if the
+     * over-reserve did not happen, the two lengths would agree for the ordinary
+     * reason and this would prove nothing.
+     */
+    #[test]
+    fn a_filled_plane_is_as_long_as_its_geometry_and_not_as_its_capacity() {
+        const EXTRA: usize = 4096;
+        let plane = with_plane_over_reserve(EXTRA, || {
+            try_plane_filled::<u8>("test.filled", 8, 8, 3, 7u8)
+        })
+        .expect("a 192-byte plane is servable");
+
+        assert!(
+            plane.capacity() >= 192 + EXTRA,
+            "the over-reserve has to have happened, or the length check below \
+             passes for the ordinary reason and says nothing; capacity is {}",
+            plane.capacity()
+        );
+        assert_eq!(
+            plane.len(),
+            192,
+            "8x8 at three bytes a pixel is 192 elements however much room the \
+             allocator handed back"
+        );
+        assert!(
+            plane.iter().all(|&b| b == 7),
+            "and every element of that length is the fill"
         );
     }
 
