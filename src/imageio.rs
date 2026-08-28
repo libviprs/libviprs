@@ -57,8 +57,8 @@
 //! pixels and stops (issue #546). An empty trailer is not free, because the
 //! slot is not optional to libvips once a byte is in it.
 //!
-//! The four [`MetadataValue`] variants map one to one onto the four GTypes
-//! vips can round-trip through its `VIPS_TYPE_SAVE_STRING` transforms
+//! The five [`MetadataValue`] variants map one to one onto five of the GTypes
+//! vips round-trips through its `VIPS_TYPE_SAVE_STRING` transforms
 //! (`libvips/iofuncs/type.c:424-800`):
 //!
 //! | [`MetadataValue`] | `type=` | text |
@@ -67,6 +67,34 @@
 //! | [`Double`](MetadataValue::Double) | `gdouble` | shortest round-tripping decimal |
 //! | [`Str`](MetadataValue::Str) | `VipsRefString` | the string |
 //! | [`Blob`](MetadataValue::Blob) | `VipsBlob` | standard base64, padded, unwrapped |
+//! | [`IntArray`](MetadataValue::IntArray) | `VipsArrayInt` | decimals, each followed by one space |
+//!
+//! The array spelling has a **trailing space**, which is not decoration.
+//! Measured on the pinned vips 8.18.6, `vips copy 'anim3.webp[n=-1]' out.v`
+//! writes `<field type="VipsArrayInt" name="delay">100 100 100 </field>`,
+//! one space per element including the last, because `vips_array_int`'s save
+//! transform appends a separator after every value rather than between them.
+//! The reader is looser than the writer on purpose, and so is vips's: a
+//! trailer carrying `40 60 80`, `40 60 80 ` or `  40   60   80  ` reads back
+//! as the same three elements in both libraries, and an element list that is
+//! empty is an empty array rather than a missing field.
+//!
+//! Two things about that carrier that are libviprs's own answer rather than
+//! vips's, both measured on 8.18.6:
+//!
+//! * **an element that is not a number keeps the whole field opaque.** vips
+//!   hands back an *empty* array for `40 x 80` (`vipsheader -f delay` prints
+//!   nothing and a `vips copy` writes the field back out empty), silently
+//!   losing the two elements that did parse. libviprs carries the text
+//!   through untouched instead, which is the same rule every other GType in
+//!   this table follows when its text will not parse;
+//! * **an element outside `gint` does not survive a trip through vips.**
+//!   [`MetadataValue::Int`] is an `i64` and so are these elements, but vips's
+//!   `gint` is 32 bits and wraps: a trailer carrying `3000000000` reads back
+//!   as `-1294967296`, and `9223372036854775807 -9223372036854775808` reads
+//!   back as `-1 0`. libviprs round-trips all of them through its own reader.
+//!   The element type is signed and 64-bit anyway, because the value has to
+//!   survive a hostile `.v` rather than only a well-formed one.
 //!
 //! The orientation tag rides in `<meta>` as an ordinary
 //! `<field type="gint" name="orientation">`, which is where libvips keeps it
@@ -106,7 +134,7 @@
 //! image with it, silently, which made a new variant a data-loss break that
 //! `cargo semver-checks` could not see. The rules the format holds to:
 //!
-//! * a field whose `type` is not one of the four above is carried opaquely
+//! * a field whose `type` is not one of the five above is carried opaquely
 //!   as that type name plus its character data exactly as it sat on disk:
 //!   invisible to [`Raster::get_field`] and [`Raster::get_fields`], because
 //!   this build cannot say what it means, but written back out byte for
@@ -114,8 +142,8 @@
 //!   strip what it could not read. Setting or removing a field of the same
 //!   name supersedes it, so stripping still strips. vips itself keeps
 //!   reading such a field, because the carrier *is* its own encoding: a
-//!   `delay` array from #573 goes out as `VipsArrayInt` and
-//!   `vipsheader -a` prints it;
+//!   `background` array goes out as `VipsArrayDouble` and `vipsheader -a`
+//!   prints it, exactly as `delay` did until #787 gave it a variant;
 //! * a `type` name libvips does not know is skipped by vips silently, with
 //!   no warning and no error (measured on 8.18.4), which is what makes the
 //!   carrier safe to write;
@@ -138,12 +166,19 @@
 //! The writer no longer produces it, with one exception. A value carried
 //! opaquely out of a JSON trailer has **no XML spelling**, and cannot get
 //! one: the two formats encode the same value differently
-//! (`{"IntArray":[40,40,90]}` against `type="VipsArrayInt">40 40 90`), so
-//! translating between them means interpreting the value, which is the one
-//! thing a carried value is defined not to allow. Rather than drop it, a
+//! (`{"DoubleArray":[1.5,2.5]}` against `type="VipsArrayDouble">1.5 2.5 `),
+//! so translating between them means interpreting the value, which is the
+//! one thing a carried value is defined not to allow. Rather than drop it, a
 //! raster still carrying such a value keeps the JSON trailer. That costs
 //! the vips warning on exactly the files that were already unreadable to
 //! vips, and it loses nothing.
+//!
+//! Naming a variant releases the files that only needed *it*: a legacy
+//! trailer whose one unnameable value was a `{"IntArray":[...]}` delay is
+//! read as a value now rather than carried, so the rewrite comes back out as
+//! the XML vips reads. That is the whole payoff of #787 on the disk side, and
+//! it is why the JSON fallback is keyed on what is still carried rather than
+//! on where the file came from.
 //!
 //! The consequence of writing XML, stated plainly: libviprs 0.4.0 reads a
 //! `.v` written now for its pixels, its geometry and its orientation, and
@@ -230,13 +265,14 @@ use crate::source::{DecodeLimits, SourceError};
 ///
 /// # Growing
 ///
-/// `#[non_exhaustive]`, because four is not the number of types a vips
-/// metadata field can have (issue #609). `VipsArrayInt`, `VipsArrayDouble`
-/// and `gboolean` are all live in a `.v` trailer this crate reads today, and
-/// #573 needs an array variant for the per-frame GIF delays. Marking it now
-/// costs downstream a `_ =>` arm on an exhaustive `match`; marking it after
-/// the first of those variants lands would cost a major version instead, and
-/// `cargo semver-checks` would be right to demand one.
+/// `#[non_exhaustive]`, because five is not the number of types a vips
+/// metadata field can have (issue #609). `VipsArrayDouble` and `gboolean`
+/// are both still live in a `.v` trailer this crate only forwards opaquely.
+/// Marking the enum before the first of those variants landed cost
+/// downstream a `_ =>` arm on an exhaustive `match`; marking it after would
+/// have cost a major version instead, and `cargo semver-checks` would have
+/// been right to demand one. [`IntArray`](MetadataValue::IntArray) is the
+/// first variant to arrive through that door (issue #787).
 ///
 /// Only matching is affected. Every variant stays constructible from
 /// outside, so `MetadataValue::Int(3)` and the `From` impls are unchanged,
@@ -253,6 +289,17 @@ pub enum MetadataValue {
     Str(String),
     /// A binary field (`icc-profile-data`, `exif-data`).
     Blob(Vec<u8>),
+    /// An ordered list of signed integers (vips `VipsArrayInt`): the
+    /// per-frame `delay` of every animated format, and the shape every
+    /// animated loader in this crate needs to attach one at all (issue
+    /// #787).
+    ///
+    /// The elements are `i64` like [`Int`](MetadataValue::Int), not `u32`,
+    /// so a hostile `.v` round-trips instead of being silently clamped.
+    /// vips's own `gint` is 32 bits and wraps: see the
+    /// [module docs](crate::imageio) for what that costs a value this crate
+    /// hands back to vips.
+    IntArray(Vec<i64>),
 }
 
 impl MetadataValue {
@@ -324,16 +371,41 @@ impl MetadataValue {
         }
     }
 
+    /// The value as a slice of ints.
+    ///
+    /// Borrowed rather than cloned, like [`MetadataValue::as_blob`], because
+    /// a `delay` array is read once per frame and there is no reason to copy
+    /// it each time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not [`MetadataValue::IntArray`]. A scalar
+    /// [`MetadataValue::Int`] does *not* coerce to a one-element array: vips
+    /// writes `gint` and `VipsArrayInt` as different types and `gifsave`
+    /// reads only the array, so treating one as the other would invent a
+    /// per-frame delay out of a `gif-delay` that is the first frame's alone.
+    #[track_caller]
+    pub fn as_int_array(&self) -> &[i64] {
+        match self {
+            Self::IntArray(v) => v,
+            other => panic!("metadata value is {}, not an int array", other.kind()),
+        }
+    }
+
     /// The type code returned by [`Raster::get_typeof`] for this value:
-    /// 1 int, 2 double, 3 string, 4 blob. These are libviprs codes (the
-    /// C library returns GObject `GType` numbers); the ported call sites
-    /// only distinguish zero (absent) from non-zero (present).
+    /// 1 int, 2 double, 3 string, 4 blob, 5 int array. These are libviprs
+    /// codes (the C library returns GObject `GType` numbers); the ported call
+    /// sites only distinguish zero (absent) from non-zero (present).
+    ///
+    /// Zero is not a code here, it is [`Raster::get_typeof`]'s answer for a
+    /// field that is not there, so every variant has to have one of its own.
     pub fn type_code(&self) -> u64 {
         match self {
             Self::Int(_) => 1,
             Self::Double(_) => 2,
             Self::Str(_) => 3,
             Self::Blob(_) => 4,
+            Self::IntArray(_) => 5,
         }
     }
 
@@ -344,19 +416,23 @@ impl MetadataValue {
     ///   cell, for example the 564-byte ICC profile of `sample.jpg` read
     ///   through magick).
     /// * [`MetadataValue::Str`]: the number of UTF-8 bytes in the string.
+    /// * [`MetadataValue::IntArray`]: the number of elements, which is the
+    ///   frame count for a `delay`.
     /// * [`MetadataValue::Int`] / [`MetadataValue::Double`]: `1`, a scalar
     ///   is a single-element field.
     pub fn len(&self) -> usize {
         match self {
             Self::Blob(b) => b.len(),
             Self::Str(s) => s.len(),
+            Self::IntArray(v) => v.len(),
             Self::Int(_) | Self::Double(_) => 1,
         }
     }
 
     /// Whether this value has zero length; see [`MetadataValue::len`]. A
     /// scalar [`MetadataValue::Int`] or [`MetadataValue::Double`] is never
-    /// empty (its length is `1`).
+    /// empty (its length is `1`); a [`MetadataValue::IntArray`] with no
+    /// elements is, and that is a value vips writes rather than an error.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -368,6 +444,7 @@ impl MetadataValue {
             Self::Double(_) => "a double",
             Self::Str(_) => "a string",
             Self::Blob(_) => "a blob",
+            Self::IntArray(_) => "an int array",
         }
     }
 }
@@ -410,6 +487,16 @@ impl From<Vec<u8>> for MetadataValue {
 impl From<&[u8]> for MetadataValue {
     fn from(b: &[u8]) -> Self {
         Self::Blob(b.to_vec())
+    }
+}
+impl From<Vec<i64>> for MetadataValue {
+    fn from(v: Vec<i64>) -> Self {
+        Self::IntArray(v)
+    }
+}
+impl From<&[i64]> for MetadataValue {
+    fn from(v: &[i64]) -> Self {
+        Self::IntArray(v.to_vec())
     }
 }
 
@@ -1085,6 +1172,45 @@ impl Raster {
         }
     }
 
+    /// The int array under `name`, borrowed rather than materialised; the
+    /// array twin of `field_i64`, which does the same job for a scalar int.
+    ///
+    /// Every built-in header field is a scalar or a string, so none of them
+    /// answers here. `filename` still routes to the attached-field list,
+    /// because that is where [`Raster::get_field`] reads it from and the two
+    /// have to agree on every readable name.
+    fn field_int_array(&self, name: &str) -> Option<&[i64]> {
+        match name {
+            "width" | "height" | "bands" | "format" | "coding" | "interpretation" | "xoffset"
+            | "yoffset" | "xres" | "yres" | "orientation" => None,
+            other => match self.fields.get(other) {
+                Some(MetadataValue::IntArray(v)) => Some(v.as_slice()),
+                _ => None,
+            },
+        }
+    }
+
+    /// Read a metadata field as a slice of ints (libvips
+    /// `vips_image_get_array_int`).
+    ///
+    /// Answers the same names [`Raster::get_field`] does and returns the
+    /// elements when the value is a [`MetadataValue::IntArray`] — the
+    /// per-frame `delay` of an animated format, and nothing else in this
+    /// crate today. Returns `None` for an absent field or a value of any
+    /// other type, including a scalar [`MetadataValue::Int`], which vips
+    /// does not treat as a one-element array either.
+    ///
+    /// It borrows the stored value rather than cloning one out, so reading a
+    /// delay costs nothing even when the name happens to hold a large
+    /// [`MetadataValue::Blob`] instead (issue #635). Any name can hold any
+    /// type — [`Raster::try_set_field`] stores what it is given, and a `.v`
+    /// trailer restores arbitrary named fields with arbitrary types from an
+    /// untrusted file (#565) — so going through [`Raster::get_field`] would
+    /// deep-copy that blob before discovering it is not an array.
+    pub fn get_int_array(&self, name: &str) -> Option<&[i64]> {
+        self.field_int_array(name)
+    }
+
     /// Remove an attached field by setting its type to 0, the libvips
     /// removal idiom (`vips_image_set` with a zero `GType` /
     /// `vips_image_remove`). Removing an absent field is a no-op.
@@ -1463,6 +1589,11 @@ const GTYPE_STRING: &str = "VipsRefString";
 /// GType name for [`MetadataValue::Blob`], carried as base64
 /// (`transform_blob_save_string`, `libvips/iofuncs/type.c:745-758`).
 const GTYPE_BLOB: &str = "VipsBlob";
+/// GType name for [`MetadataValue::IntArray`], carried as space-separated
+/// decimals with a trailing separator (`transform_array_int_save_string`,
+/// `libvips/iofuncs/type.c`). Measured on the pinned 8.18.6: a three-frame
+/// animation's `delay` goes out as `100 100 100 `.
+const GTYPE_ARRAY_INT: &str = "VipsArrayInt";
 
 /// The `type` attribute and character data for one [`MetadataValue`]; see
 /// the type table in the [module docs](crate::imageio).
@@ -1479,7 +1610,51 @@ fn xml_field_of(value: &MetadataValue) -> (&'static str, Cow<'_, str>) {
         MetadataValue::Double(d) => (GTYPE_DOUBLE, Cow::Owned(format!("{d:?}"))),
         MetadataValue::Str(s) => (GTYPE_STRING, Cow::Borrowed(s.as_str())),
         MetadataValue::Blob(b) => (GTYPE_BLOB, Cow::Owned(base64_encode(b))),
+        MetadataValue::IntArray(v) => (GTYPE_ARRAY_INT, Cow::Owned(int_array_text(v))),
     }
+}
+
+/// The character data vips writes for a `VipsArrayInt`: every element
+/// followed by one space, the last one included.
+///
+/// The trailing separator is not a stray. Measured on the pinned 8.18.6,
+/// `vips copy 'anim3.webp[n=-1]' out.v` writes
+/// `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, because
+/// vips's save transform appends after each value rather than joining
+/// between them. Nothing in this crate's own round trip can see the
+/// difference, since [`parse_int_array_text`] ignores the trailing
+/// whitespace either way, which is exactly why it is pinned as bytes.
+fn int_array_text(values: &[i64]) -> String {
+    let mut out = String::new();
+    for v in values {
+        out.push_str(&v.to_string());
+        out.push(' ');
+    }
+    out
+}
+
+/// Parse the character data of a `VipsArrayInt` field.
+///
+/// Whitespace-separated decimals, and **all or nothing**: an element that
+/// will not parse as an `i64` gives `None`, so the caller carries the whole
+/// field opaquely rather than handing back the elements that happened to
+/// work. That is the same rule `gint`, `gdouble` and `VipsBlob` already
+/// follow in [`read_vips_xml_trailer`], and it is a deliberate divergence
+/// from vips, which hands back an **empty** array for `40 x 80` and loses
+/// the two elements that parsed (measured on 8.18.6: `vipsheader -f delay`
+/// prints nothing and `vips copy` writes the field back out empty).
+///
+/// An empty element list is an empty array, not a refusal: vips writes and
+/// reads that, so a `.v` carrying one has to survive a rewrite here.
+///
+/// The elements are `i64` where vips's `gint` is 32 bits. vips wraps rather
+/// than refusing (measured: `3000000000` reads back as `-1294967296`), so a
+/// narrower carrier here would lose data on a file libviprs did not write
+/// and could not warn about.
+fn parse_int_array_text(text: &str) -> Option<Vec<i64>> {
+    text.split_whitespace()
+        .map(|t| t.parse::<i64>().ok())
+        .collect()
 }
 
 /// Whether [`push_xml_field`] escapes the text it is given or writes it out
@@ -2089,6 +2264,7 @@ fn read_vips_xml_trailer(trailer: &[u8], raster: &mut Raster) {
             GTYPE_DOUBLE => value.trim().parse::<f64>().ok().map(MetadataValue::Double),
             GTYPE_STRING => Some(MetadataValue::Str(value)),
             GTYPE_BLOB => base64_decode(value.trim()).map(MetadataValue::Blob),
+            GTYPE_ARRAY_INT => parse_int_array_text(&value).map(MetadataValue::IntArray),
             _ => None,
         };
         match known {
@@ -2828,6 +3004,7 @@ mod tests {
      * pixels and header geometry.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_v_and_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -2860,6 +3037,7 @@ mod tests {
      * absent after `save_stripped`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_webp_round_trips_losslessly_and_honours_strip() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -2894,6 +3072,7 @@ mod tests {
      */
     #[test]
     #[cfg(feature = "jxl")]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -2933,6 +3112,7 @@ mod tests {
      * `SaveError::UnsupportedExtension`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_error_lists_exactly_the_wired_extensions() {
         let dir = tempfile::tempdir().unwrap();
         let im = rgb_2x2();
@@ -2992,6 +3172,7 @@ mod tests {
      * pixels (PNG is lossless), and unknown extensions error.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_png_and_unknown_extension() {
         let dir = tempfile::tempdir().unwrap();
         let im = rgb_2x2();
@@ -3015,6 +3196,7 @@ mod tests {
      * segment scan.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jpeg_keeps_and_strips_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
@@ -3044,6 +3226,7 @@ mod tests {
      * header's filename slot.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sets_filename() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("named.v");
@@ -3278,7 +3461,7 @@ mod tests {
         // and the orientation is back to upright, and it must still be
         // written (issue #565).
         let mut carried = decode_bytes(&file_from_a_newer_build()).unwrap();
-        for name in ["note", "n-pages", "xres-hint", "icc-profile-data"] {
+        for name in ["note", "n-pages", "delay", "xres-hint", "icc-profile-data"] {
             carried.set_typeof(name, 0);
         }
         let carried = carried.copy().orientation(1).build();
@@ -3290,11 +3473,17 @@ mod tests {
 
     // -- .v trailer forward compatibility (issue #565) -----------------------
 
-    /// A `MetadataValue` as a *newer* libviprs writes it: the four variants
-    /// this build has, plus one it does not. #573 needs exactly this — a
-    /// per-frame delay array for animated GIF — and the whole point of this
-    /// lane is that adding it must not cost an older reader the rest of its
+    /// A `MetadataValue` as a *newer* libviprs writes it: the five variants
+    /// this build has, plus one it does not. The whole point of the #565 lane
+    /// is that adding a variant must not cost an older reader the rest of its
     /// metadata, so the future writer is modelled here instead of shipped.
+    ///
+    /// `IntArray` used to be the unknown one. #787 shipped it, so it is the
+    /// **positive control** now: the same file exercises a variant this build
+    /// reads and one it does not, and the reader has to tell them apart. The
+    /// unknown one is `DoubleArray`, which is not invented either —
+    /// `VipsArrayDouble` is live in a `.v` trailer today (vips writes
+    /// `background` as one) and is the next variant in the queue.
     ///
     /// The derive carries no serde attributes, exactly like [`MetadataValue`],
     /// so the bytes it produces are the bytes a future build would produce.
@@ -3304,8 +3493,9 @@ mod tests {
         Double(f64),
         Str(String),
         Blob(Vec<u8>),
-        /// The variant this build has never heard of.
         IntArray(Vec<i64>),
+        /// The variant this build has never heard of.
+        DoubleArray(Vec<f64>),
     }
 
     /// The attached-field list as a newer libviprs writes it.
@@ -3432,7 +3622,7 @@ mod tests {
 
     /// A `.v` file as a newer libviprs would write it: a real header and real
     /// pixels, followed by a trailer carrying one field of every variant this
-    /// build knows plus a `delay` array it does not.
+    /// build knows plus a `background` array it does not.
     fn file_from_a_newer_build() -> Vec<u8> {
         let mut bytes = v_body();
         let trailer = FutureTrailer {
@@ -3444,6 +3634,10 @@ mod tests {
                     (
                         "delay".to_string(),
                         FutureMetadataValue::IntArray(vec![40, 40, 90]),
+                    ),
+                    (
+                        "background".to_string(),
+                        FutureMetadataValue::DoubleArray(vec![1.5, 2.5]),
                     ),
                     ("xres-hint".to_string(), FutureMetadataValue::Double(1.5)),
                     (
@@ -3464,7 +3658,10 @@ mod tests {
     /// the orientation tag all vanished with no error at all.
     ///
     /// The unknown field itself reads as absent: it is carried, not
-    /// interpretable, so it stays out of the field API.
+    /// interpretable, so it stays out of the field API. The `delay` array
+    /// beside it is the positive control, because #787 gave that one a
+    /// variant: the two travel in the same trailer, in the same encoding
+    /// family, and the reader has to hand one back and carry the other.
     #[test]
     fn v_trailer_from_a_newer_build_keeps_the_fields_this_build_understands() {
         let back = decode_bytes(&file_from_a_newer_build()).unwrap();
@@ -3481,12 +3678,21 @@ mod tests {
         // Pixels and geometry are untouched by any of this.
         assert_eq!(back.data(), &[7u8; 12]);
 
+        // The array variant that landed reads back as a value (issue #787).
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(vec![40, 40, 90]))
+        );
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        assert_eq!(back.get_typeof("delay"), 5);
+        assert!(back.get_fields().iter().any(|n| n == "delay"));
+
         // The variant this build cannot represent reads as absent rather than
         // as a wrong value.
-        assert_eq!(back.get_field("delay"), None);
-        assert_eq!(back.get_typeof("delay"), 0);
+        assert_eq!(back.get_field("background"), None);
+        assert_eq!(back.get_typeof("background"), 0);
         assert!(
-            !back.get_fields().iter().any(|n| n == "delay"),
+            !back.get_fields().iter().any(|n| n == "background"),
             "an uninterpretable field must not be advertised as readable"
         );
     }
@@ -3504,22 +3710,31 @@ mod tests {
         let trailer: FutureTrailer =
             serde_json::from_slice(&rewritten[v_body().len()..]).expect("newer build can re-read");
         assert_eq!(trailer.orientation, 6);
-        let delay = trailer
+        let background = trailer
             .fields
             .entries
             .iter()
-            .find(|(n, _)| n == "delay")
+            .find(|(n, _)| n == "background")
             .map(|(_, v)| v);
         assert_eq!(
-            delay,
-            Some(&FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            background,
+            Some(&FutureMetadataValue::DoubleArray(vec![1.5, 2.5])),
             "the unknown field must round-trip untouched"
         );
-        // And the fields this build does understand are still there too.
-        assert_eq!(trailer.fields.entries.len(), 5);
+        // And the fields this build does understand are still there too,
+        // including the array it now reads rather than carries (#787).
+        assert_eq!(trailer.fields.entries.len(), 6);
         assert!(trailer.fields.entries.iter().any(
             |(n, v)| n == "icc-profile-data" && *v == FutureMetadataValue::Blob(vec![5, 5, 5])
         ));
+        assert!(
+            trailer
+                .fields
+                .entries
+                .iter()
+                .any(|(n, v)| n == "delay" && *v == FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            "the named array must survive the rewrite as a value, not as a carrier"
+        );
     }
 
     /// Issue #718. The multi-input field union covers the **uninterpretable**
@@ -3554,22 +3769,22 @@ mod tests {
         // And the opaque one, which reads as absent through the field API and
         // is only visible on the way back out.
         assert_eq!(
-            out.get_field("delay"),
+            out.get_field("background"),
             None,
             "an uninterpretable field stays out of the field API"
         );
         let rewritten = out.encode_vips().unwrap();
         let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..])
             .expect("a carried opaque value keeps the file on the JSON trailer");
-        let delay = trailer
+        let background = trailer
             .fields
             .entries
             .iter()
-            .find(|(n, _)| n == "delay")
+            .find(|(n, _)| n == "background")
             .map(|(_, v)| v);
         assert_eq!(
-            delay,
-            Some(&FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            background,
+            Some(&FutureMetadataValue::DoubleArray(vec![1.5, 2.5])),
             "sub's uninterpretable field must reach the output"
         );
 
@@ -3578,10 +3793,10 @@ mod tests {
         // never ends up holding one name under both carriers.
         let main = decode_bytes(&file_from_a_newer_build()).unwrap();
         let mut sub = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
-        sub.set_field("delay", MetadataValue::Int(9));
+        sub.set_field("background", MetadataValue::Int(9));
         let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
         assert_eq!(
-            out.get_field("delay"),
+            out.get_field("background"),
             None,
             "main's opaque value wins the shared name"
         );
@@ -3597,30 +3812,33 @@ mod tests {
     #[test]
     fn setting_or_removing_a_field_supersedes_the_unknown_one() {
         let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
-        back.set_field("delay", MetadataValue::Int(4));
+        back.set_field("background", MetadataValue::Int(4));
         let fields = trailer_fields(&back.encode_vips().unwrap());
-        let delays: Vec<_> = fields.iter().filter(|(n, _, _)| n == "delay").collect();
-        assert_eq!(delays.len(), 1, "the field must not be written twice");
-        assert_eq!(delays[0].1, GTYPE_INT);
-        assert_eq!(delays[0].2, "4");
+        let hits: Vec<_> = fields
+            .iter()
+            .filter(|(n, _, _)| n == "background")
+            .collect();
+        assert_eq!(hits.len(), 1, "the field must not be written twice");
+        assert_eq!(hits[0].1, GTYPE_INT);
+        assert_eq!(hits[0].2, "4");
         assert_eq!(
             fields.len(),
-            6,
-            "overwriting one field must not disturb the other four, or the \
+            7,
+            "overwriting one field must not disturb the other five, or the \
              orientation tag: {fields:?}"
         );
 
         let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
-        back.set_typeof("delay", 0);
+        back.set_typeof("background", 0);
         let fields = trailer_fields(&back.encode_vips().unwrap());
         assert!(
-            !fields.iter().any(|(n, _, _)| n == "delay"),
+            !fields.iter().any(|(n, _, _)| n == "background"),
             "a removed field must not come back from the opaque carrier"
         );
         assert_eq!(
             fields.len(),
-            5,
-            "removing one field must not remove the other four: {fields:?}"
+            6,
+            "removing one field must not remove the other five: {fields:?}"
         );
     }
 
@@ -3781,12 +3999,20 @@ mod tests {
 
     /// Every [`MetadataValue`] variant survives the XML round trip, including
     /// the awkward numbers: a negative and a 64-bit integer, a double that
-    /// has no short decimal, one that needs an exponent, a negative zero, and
-    /// a blob holding all 256 byte values.
+    /// has no short decimal, one that needs an exponent, a negative zero, a
+    /// blob holding all 256 byte values, and an int array with a negative
+    /// element, a 64-bit one and no elements at all.
     ///
     /// The doubles are compared exactly on purpose. A tolerance would pass on
     /// a writer that threw away digits, and throwing away digits is the whole
     /// failure mode a text encoding of a float has.
+    ///
+    /// The variant list here is hand-maintained, and it is the one place that
+    /// matters. `xml_field_of`, `type_code` and `len` all match on the enum,
+    /// so the compiler makes a sixth variant impossible to forget in those
+    /// three; the **reader** has a `_ => None` fallthrough and would carry a
+    /// new variant opaquely for ever without a word. This test is what
+    /// notices.
     #[test]
     fn v_trailer_xml_round_trips_every_metadata_variant() {
         let mut im = rgb_2x2().copy().orientation(8).build();
@@ -3800,6 +4026,8 @@ mod tests {
             "bytes",
             MetadataValue::Blob((0..=255u8).collect::<Vec<_>>()),
         );
+        im.set_field("delay", MetadataValue::IntArray(vec![40, -5, i64::MAX]));
+        im.set_field("no-delay", MetadataValue::IntArray(Vec::new()));
 
         let back = decode_bytes(&im.encode_vips().unwrap()).unwrap();
         assert_eq!(back.orientation(), 8);
@@ -3819,6 +4047,15 @@ mod tests {
         assert_eq!(
             back.get_field("bytes").unwrap().as_blob(),
             (0..=255u8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(vec![40, -5, i64::MAX]))
+        );
+        assert_eq!(
+            back.get_field("no-delay"),
+            Some(MetadataValue::IntArray(Vec::new())),
+            "an empty array is a value, not a dropped field"
         );
         // The blob went out as base64 rather than as anything binary.
         let bytes = im.encode_vips().unwrap();
@@ -3925,10 +4162,15 @@ mod tests {
     ///
     /// This is where the XML trailer beats the JSON one it replaces. The
     /// carrier *is* vips's own encoding, so the value is not merely preserved
-    /// for the build that wrote it: vips reads it too. Measured on 8.18.4,
-    /// `vipsheader -a` on a file with this exact element prints
-    /// `delay: 40 40 90`, and a `type` name libvips does not know is skipped
+    /// for the build that wrote it: vips reads it too. Measured on 8.18.6,
+    /// `vipsheader -f background` on a file with this exact element prints
+    /// `1.5 2.5`, and a `type` name libvips does not know is skipped
     /// with no warning at all, which is what makes the carrier safe to write.
+    ///
+    /// `delay` sits in the same trailer as the positive control: #787 gave
+    /// `VipsArrayInt` a variant, so that one has to come back as a *value*
+    /// while the other two are still carried. Without it the test would pass
+    /// on a reader that carried everything, which is what it did before.
     #[test]
     fn v_trailer_unknown_xml_type_is_carried_verbatim() {
         let body = rgb_2x2();
@@ -3938,6 +4180,7 @@ mod tests {
               <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n  <meta>\n\
               \x20   <field type=\"VipsRefString\" name=\"note\">hi</field>\n\
               \x20   <field type=\"VipsArrayInt\" name=\"delay\">40 40 90</field>\n\
+              \x20   <field type=\"VipsArrayDouble\" name=\"background\">1.5 2.5 </field>\n\
               \x20   <field type=\"nosuchtype\" name=\"mystery\">a &amp; b</field>\n\
               \x20   <field type=\"gint\" name=\"orientation\">6</field>\n\
               \x20 </meta>\n</root>\n",
@@ -3947,19 +4190,28 @@ mod tests {
         // Readable things stay readable.
         assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
         assert_eq!(back.orientation(), 6);
-        // The two this build cannot name read as absent rather than as a
+        // The array this build now names comes back as a value.
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        // The two it still cannot name read as absent rather than as a
         // wrong value.
-        for name in ["delay", "mystery"] {
+        for name in ["background", "mystery"] {
             assert_eq!(back.get_field(name), None);
             assert_eq!(back.get_typeof(name), 0);
             assert!(!back.get_fields().iter().any(|n| n == name));
         }
 
-        // And both go back out unchanged, escapes included.
+        // The carried ones go back out unchanged, escapes included; the named
+        // one goes back out in this writer's spelling, which is vips's own,
+        // trailing separator and all.
         let rewritten = back.encode_vips().unwrap();
         let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
         assert!(
-            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 40 90</field>"),
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 40 90 </field>"),
+            "got: {trailer}"
+        );
+        assert!(
+            trailer
+                .contains("<field type=\"VipsArrayDouble\" name=\"background\">1.5 2.5 </field>"),
             "got: {trailer}"
         );
         assert!(
@@ -3970,12 +4222,327 @@ mod tests {
         assert!(!is_json_trailer(&rewritten[v_body().len()..]));
     }
 
+    // -- the VipsArrayInt variant (issue #787) -------------------------------
+
+    /// A 2x2 RGB `.v` carrying `meta` as its whole `<meta>` block, so a test
+    /// can hand the reader an arbitrary field element.
+    fn v_with_meta(meta: &str) -> Vec<u8> {
+        let mut bytes = rgb_2x2().encode_vips_impl(false);
+        bytes.extend_from_slice(
+            format!(
+                "<?xml version=\"1.0\"?>\n<root xmlns=\"{VIPS_XML_NAMESPACE}\">\n  <meta>\n\
+                 {meta}\n  </meta>\n</root>\n"
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    /// The `<field>` element the writer produces for an int array is the one
+    /// vips produces, **trailing separator included**.
+    ///
+    /// Measured on the pinned vips 8.18.6:
+    ///
+    /// ```text
+    /// vips copy 'oracle-captures/foreign-webp/fixtures/anim3.webp[n=-1]' out.v
+    /// ```
+    ///
+    /// puts `<field type="VipsArrayInt" name="delay">100 100 100 </field>` in
+    /// the trailer: one space after every element, not between them. Getting
+    /// that wrong is invisible to any round trip through this crate's own
+    /// reader, which is exactly why it is pinned as bytes here.
+    #[test]
+    fn an_int_array_goes_out_in_the_spelling_vips_writes() {
+        let mut im = rgb_2x2();
+        im.set_field("delay", MetadataValue::IntArray(vec![40, 60, 80, 100]));
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 60 80 100 </field>"),
+            "got: {trailer}"
+        );
+
+        // An empty array is a legal value with no elements, and vips writes
+        // exactly that: measured, a trailer holding `<field ...></field>`
+        // round-trips through `vips copy` unchanged.
+        let mut im = rgb_2x2();
+        im.set_field("delay", MetadataValue::IntArray(Vec::new()));
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\"></field>"),
+            "got: {trailer}"
+        );
+
+        // A single element still gets its separator, which is the case a
+        // "join with spaces" implementation gets wrong and a four-element
+        // check cannot see. `vipsheader -f delay` on a one-frame array prints
+        // `40 ` on 8.18.6.
+        let mut im = rgb_2x2();
+        im.set_field("delay", MetadataValue::IntArray(vec![40]));
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 </field>"),
+            "got: {trailer}"
+        );
+    }
+
+    /// An int array survives `encode_vips` and `decode_bytes` as a value,
+    /// reads back through both accessors, and reports type code 5.
+    ///
+    /// The negative and out-of-`gint` elements are the reason the element type
+    /// is `i64`. vips's own `gint` is 32 bits and wraps rather than refusing:
+    /// measured on 8.18.6, a trailer carrying `3000000000` reads back through
+    /// `vipsheader -f delay` as `-1294967296`, and
+    /// `9223372036854775807 -9223372036854775808` as `-1 0`. A `u32` element
+    /// would make libviprs lose the sign as well, on a file it did not write.
+    #[test]
+    fn an_int_array_round_trips_through_the_v_trailer() {
+        let mut im = rgb_2x2();
+        let delays = vec![40i64, -5, 3_000_000_000, i64::MIN, i64::MAX];
+        im.set_field("delay", MetadataValue::IntArray(delays.clone()));
+        let back = decode_bytes(&im.encode_vips().unwrap()).unwrap();
+
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(delays.clone()))
+        );
+        assert_eq!(back.get_int_array("delay"), Some(delays.as_slice()));
+        assert_eq!(back.get_typeof("delay"), 5);
+        assert!(back.get_fields().iter().any(|n| n == "delay"));
+        // The trailer is the XML vips reads, not the legacy JSON fallback:
+        // the value has a spelling now, so nothing forces the old format.
+        assert!(!is_json_trailer(
+            &im.encode_vips().unwrap()[v_body().len()..]
+        ));
+    }
+
+    /// The reader takes every spelling vips takes.
+    ///
+    /// Measured on 8.18.6 by editing the `delay` element of a real `.v` and
+    /// reading it back with `vipsheader -f delay`: `40 60 80`, `40 60 80 ` and
+    /// `  40   60   80  ` all print `40 60 80 `, and an element list that is
+    /// empty prints nothing rather than dropping the field. Writing one
+    /// spelling and accepting only that one would refuse files vips wrote.
+    #[test]
+    fn the_int_array_reader_takes_every_spelling_vips_takes() {
+        for text in ["40 60 80", "40 60 80 ", "  40   60   80  ", "40\t60\n80"] {
+            let bytes = v_with_meta(&format!(
+                "    <field type=\"VipsArrayInt\" name=\"delay\">{text}</field>"
+            ));
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.get_int_array("delay"),
+                Some(&[40i64, 60, 80][..]),
+                "spelling {text:?} must read as three elements"
+            );
+        }
+
+        let bytes = v_with_meta("    <field type=\"VipsArrayInt\" name=\"delay\"></field>");
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(
+            back.get_int_array("delay"),
+            Some(&[][..]),
+            "an empty element list is an empty array, not a missing field"
+        );
+        assert_eq!(back.get_typeof("delay"), 5);
+    }
+
+    /// An element that is not a number keeps the **whole** field opaque, the
+    /// same rule every other GType in the trailer follows when its text will
+    /// not parse.
+    ///
+    /// This is a deliberate divergence and it is measured. vips hands back an
+    /// *empty* array for `40 x 80`: on 8.18.6 `vipsheader -f delay` prints
+    /// nothing and `vips copy` writes the field back out as
+    /// `<field type="VipsArrayInt" name="delay"></field>`, so the two
+    /// elements that did parse are gone from the file. Carrying the text
+    /// through loses nothing and lets a build that understands it read it.
+    ///
+    /// The positive control is the same trailer with the element fixed: it
+    /// has to come back as a value, or "carried" would just mean "the reader
+    /// never worked".
+    #[test]
+    fn an_int_array_element_that_is_not_a_number_keeps_the_whole_field_opaque() {
+        for text in ["40 x 80", "40 60 80.5", "40 99999999999999999999", "40 -"] {
+            let bytes = v_with_meta(&format!(
+                "    <field type=\"VipsArrayInt\" name=\"delay\">{text}</field>"
+            ));
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.get_field("delay"),
+                None,
+                "{text:?} must not be read as a partial array"
+            );
+            assert_eq!(back.get_typeof("delay"), 0);
+            // And it goes back out byte for byte, so a build that can read it
+            // still can.
+            let rewritten = back.encode_vips().unwrap();
+            let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+            assert!(
+                trailer.contains(&format!("name=\"delay\">{text}</field>")),
+                "got: {trailer}"
+            );
+        }
+
+        // Positive control: fix the element and the same route reads a value.
+        let bytes = v_with_meta("    <field type=\"VipsArrayInt\" name=\"delay\">40 60 80</field>");
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 60, 80][..]));
+    }
+
+    /// The array variant answers [`MetadataValue::type_code`],
+    /// [`MetadataValue::len`] and the panic-message kind for itself, rather
+    /// than borrowing a scalar's answers.
+    #[test]
+    fn the_array_variant_reports_its_own_type_code_and_element_count() {
+        let three = MetadataValue::IntArray(vec![40, 60, 80]);
+        assert_eq!(three.type_code(), 5, "a fifth type needs a fifth code");
+        assert_eq!(three.len(), 3, "len is the element count, not 1");
+        assert!(!three.is_empty());
+        assert_eq!(three.as_int_array(), &[40, 60, 80]);
+
+        let empty = MetadataValue::IntArray(Vec::new());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty(), "an empty array is empty, unlike a scalar");
+        assert_eq!(empty.type_code(), 5);
+
+        // No code collides: five variants, five codes.
+        let codes: Vec<u64> = [
+            MetadataValue::Int(1),
+            MetadataValue::Double(1.0),
+            MetadataValue::Str(String::new()),
+            MetadataValue::Blob(Vec::new()),
+            MetadataValue::IntArray(Vec::new()),
+        ]
+        .iter()
+        .map(MetadataValue::type_code)
+        .collect();
+        assert_eq!(codes, vec![1, 2, 3, 4, 5]);
+
+        // The kind name reaches the panic messages and the WrongType error.
+        assert_eq!(
+            std::panic::catch_unwind(|| MetadataValue::IntArray(vec![1]).as_i64())
+                .unwrap_err()
+                .downcast_ref::<String>()
+                .cloned(),
+            Some("metadata value is an int array, not an int".to_string())
+        );
+        let err = rgb_2x2()
+            .try_set_field("xoffset", MetadataValue::IntArray(vec![1]))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("an int array"),
+            "the error has to name the kind it got: {err}"
+        );
+
+        // And a scalar is not a one-element array, in either direction.
+        assert!(
+            std::panic::catch_unwind(|| MetadataValue::Int(40).as_int_array()).is_err(),
+            "an Int must not coerce to a one-element array"
+        );
+    }
+
+    /// `get_int_array` answers exactly what resolving through `get_field`
+    /// answers, on every readable name, and borrows rather than cloning
+    /// (issue #635).
+    ///
+    /// Same shape as `get_int_agrees_with_get_field_on_every_readable_name`,
+    /// and for the same reason: any name can hold any type, so the accessor
+    /// that skips the clone has to give the same answer on the built-in
+    /// header fields, on `filename` (the one built-in read out of the field
+    /// list), on an attached blob sitting under an array's name, and on a
+    /// name that is not set at all.
+    #[test]
+    fn get_int_array_agrees_with_get_field_on_every_readable_name() {
+        let mut im = rgb_2x2();
+        im.set_field("orientation", MetadataValue::Int(6));
+        im.set_field("yres", MetadataValue::Double(1.5));
+        im.set_field("filename", MetadataValue::IntArray(vec![11, 12]));
+        im.set_field("delay", MetadataValue::IntArray(vec![40, 60, 80]));
+        im.set_field("empty-delay", MetadataValue::IntArray(Vec::new()));
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        im.set_field("note", MetadataValue::Str("hello".to_string()));
+        im.set_field("bits-per-sample", MetadataValue::Int(8));
+
+        let names = im.get_fields();
+        assert!(names.len() > 12, "the sweep has to reach the attachments");
+        for name in names {
+            let through_get_field = match im.get_field(&name) {
+                Some(MetadataValue::IntArray(v)) => Some(v),
+                _ => None,
+            };
+            assert_eq!(
+                im.get_int_array(&name).map(<[i64]>::to_vec),
+                through_get_field,
+                "get_int_array and get_field disagree on {name}"
+            );
+        }
+        assert_eq!(im.get_int_array("no-such-field"), None);
+        // The #635 case: a blob under an array's name reads as absent here
+        // rather than being deep-copied out first.
+        assert_eq!(im.get_int_array("icc-profile-data"), None);
+        // And a scalar int under the name is not an array.
+        assert_eq!(im.get_int_array("bits-per-sample"), None);
+
+        // The borrow really is a borrow: the slice points into the raster.
+        let slice = im.get_int_array("delay").unwrap();
+        let stored = match im.get_field("delay") {
+            Some(MetadataValue::IntArray(v)) => v,
+            other => panic!("expected an array, got {other:?}"),
+        };
+        assert_eq!(slice, stored.as_slice());
+    }
+
+    /// A legacy JSON trailer whose only unnameable value was an array is read
+    /// as a value now, and the rewrite comes back out as the XML vips reads.
+    ///
+    /// This is the disk-side payoff of #787 and the thing the JSON fallback
+    /// was always meant to do: it is keyed on what is *still* carried, not on
+    /// where the file came from, so naming a variant releases every file that
+    /// only needed that one. The positive control is the same trailer with a
+    /// variant this build still cannot name, which must keep the old format.
+    #[test]
+    fn a_legacy_json_array_is_read_and_releases_the_file_from_the_json_trailer() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(
+            br#"{"orientation":6,"fields":{"entries":[["note",{"Str":"hi"}],["delay",{"IntArray":[40,40,90]}]]}}"#,
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
+
+        let rewritten = back.encode_vips().unwrap();
+        assert!(
+            !is_json_trailer(&rewritten[v_body().len()..]),
+            "with the array named, nothing holds the file on the legacy format"
+        );
+        let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 40 90 </field>"),
+            "got: {trailer}"
+        );
+
+        // Positive control: an array this build still cannot name keeps it.
+        let mut bytes = v_body();
+        bytes.extend_from_slice(
+            br#"{"orientation":6,"fields":{"entries":[["background",{"DoubleArray":[1.5]}]]}}"#,
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_field("background"), None);
+        assert!(
+            is_json_trailer(&back.encode_vips().unwrap()[v_body().len()..]),
+            "a JSON-only carried value still keeps the JSON trailer"
+        );
+    }
+
     /// A value carried out of a *legacy JSON* trailer has no XML spelling, so
     /// the file keeps the JSON trailer rather than losing it.
     ///
     /// Translating it would mean interpreting it: the two formats encode the
-    /// same value differently (`{"IntArray":[40,40,90]}` against
-    /// `type="VipsArrayInt">40 40 90`), and a build that cannot name the
+    /// same value differently (`{"DoubleArray":[1.5,2.5]}` against
+    /// `type="VipsArrayDouble">1.5 2.5 `), and a build that cannot name the
     /// variant cannot convert between the encodings. Dropping it would be the
     /// #565 data loss one step later, so the writer stays on the old format
     /// for exactly the files that need it, and flips to XML the moment
@@ -4003,7 +4570,7 @@ mod tests {
 
         // Drop the value that forced it and the format flips.
         let mut named = decode_bytes(&file_from_a_newer_build()).unwrap();
-        named.set_typeof("delay", 0);
+        named.set_typeof("background", 0);
         let rewritten = named.encode_vips().unwrap();
         assert!(
             !is_json_trailer(&rewritten[v_body().len()..]),

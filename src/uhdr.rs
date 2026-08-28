@@ -461,6 +461,18 @@ pub enum UhdrError {
         /// Which rule was broken.
         reason: String,
     },
+    /// [`encode_uhdr`] was handed a raster it cannot save. The input must be
+    /// 3-band `f32` holding linear-light scRGB, which is what a gain map is
+    /// computed from.
+    ///
+    /// This is a separate variant from [`UhdrError::BadInput`] rather than a
+    /// second user of it, because the two name different operations and the
+    /// message says which (issue #810).
+    #[error("uhdrsave: {reason}")]
+    BadSaveInput {
+        /// Which rule was broken.
+        reason: String,
+    },
     /// The raster carries no gain map, so there is nothing to expand.
     ///
     /// libvips reaches the same case and exits **printing nothing**:
@@ -1200,7 +1212,14 @@ pub fn from_container(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sour
 }
 
 /// Options for [`encode_uhdr`].
+///
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from [`SaveOptions::default`] and set what you need
+/// with the `with_*` builders, e.g.
+/// `uhdr::SaveOptions::default().with_quality(95)`. A struct literal would
+/// compile today and stop the day a field lands (issue #630).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// JPEG quality for both halves, 1..=100. libvips defaults `uhdrsave`
     /// to 75 and so does [`SaveOptions::default`].
@@ -1216,6 +1235,23 @@ impl Default for SaveOptions {
             quality: 75,
             gain_map_shrink: 2,
         }
+    }
+}
+
+impl SaveOptions {
+    /// Set the JPEG quality for both halves, returning the updated options.
+    #[must_use]
+    pub fn with_quality(mut self, quality: u8) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Set how much smaller than the base the gain map is, per axis,
+    /// returning the updated options.
+    #[must_use]
+    pub fn with_gain_map_shrink(mut self, gain_map_shrink: u32) -> Self {
+        self.gain_map_shrink = gain_map_shrink;
+        self
     }
 }
 
@@ -1375,16 +1411,13 @@ fn splice_after_soi(jpeg: &[u8], segments: &[u8]) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// [`UhdrError::BadInput`] if `scrgb` is not 3-band `f32`, or
+/// [`UhdrError::BadSaveInput`] if `scrgb` is not 3-band `f32`, or
 /// [`UhdrError::Jpeg`] if either half fails to encode.
 pub fn encode_uhdr(scrgb: &Raster, options: &SaveOptions) -> Result<Vec<u8>, UhdrError> {
     let bands = scrgb.format().channels();
     if !matches!(scrgb.format(), PixelFormat::FloatF32(_)) || bands != 3 {
-        return Err(UhdrError::BadInput {
-            reason: format!(
-                "uhdrsave needs a 3-band float image, got {:?}",
-                scrgb.format()
-            ),
+        return Err(UhdrError::BadSaveInput {
+            reason: format!("needs a 3-band float image, got {:?}", scrgb.format()),
         });
     }
     let (width, height) = (scrgb.width(), scrgb.height());
@@ -1728,6 +1761,57 @@ mod tests {
      * Input: a payload whose gamma denominator is 0 -> Output: a typed
      * `BadMetadata`, not a `NaN`.
      */
+    /**
+     * Issue #810. `encode_uhdr` refuses a raster it cannot save, and until
+     * this test that refusal was displayed as a `uhdr2scRGB` error, so a
+     * failed **save** named the **expand** operation and named it first.
+     *
+     * The expand refusals are the positive control: they must keep saying
+     * `uhdr2scRGB`, or a fix that simply deleted the prefix everywhere would
+     * pass this test while losing the operation name altogether.
+     */
+    #[test]
+    fn the_save_refusal_names_uhdrsave_and_the_expand_refusals_name_uhdr2scrgb() {
+        let rgb = Raster::new(4, 4, PixelFormat::Rgb8, vec![0u8; 48]).unwrap();
+        let save = encode_uhdr(&rgb, &SaveOptions::default())
+            .expect_err("a 3-band uchar raster cannot be saved as Ultra HDR")
+            .to_string();
+        assert!(
+            save.starts_with("uhdrsave: "),
+            "the save refusal should name uhdrsave, got {save:?}"
+        );
+        assert!(
+            !save.contains("uhdr2scRGB"),
+            "the save refusal must not name the expand operation, got {save:?}"
+        );
+
+        let gray16 = Raster::new(4, 4, PixelFormat::Gray16, vec![0u8; 32]).unwrap();
+        let float3 = Raster::new(
+            4,
+            4,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            vec![0u8; 192],
+        )
+        .unwrap();
+        for (what, err) in [
+            (
+                "gain map",
+                uhdr_to_scrgb(&rgb, &gray16, &GainMapMetadata::default())
+                    .expect_err("bad gain map"),
+            ),
+            (
+                "base",
+                uhdr_to_scrgb(&float3, &gray16, &GainMapMetadata::default()).expect_err("bad base"),
+            ),
+        ] {
+            let text = err.to_string();
+            assert!(
+                text.starts_with("uhdr2scRGB: "),
+                "the {what} refusal should still name uhdr2scRGB, got {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_zero_denominator_is_refused_rather_than_made_infinite() {
         let mut payload = ISO_GAIN_MAP_ID.to_vec();
