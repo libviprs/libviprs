@@ -102,8 +102,8 @@
 //!   float output keeps a base tag that never described a float space), so
 //!   downstream code must not assume the tag and the samples can never
 //!   diverge — it is exactly why the genuine-16 read is gated on the 2-byte
-//!   storage depth (see [`is_genuine_16bit`]) rather than trusting the tag
-//!   alone.
+//!   storage depth, which is what the private `is_genuine_16bit` predicate
+//!   tests, rather than on the tag alone.
 //!
 //! # Blend mode table
 //!

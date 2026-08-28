@@ -146,10 +146,15 @@ jobs:
       - run: cargo check --all-targets --features jxl
 
   docs:
-    name: Docs (deny broken intra-doc links)
+    name: Docs (deny broken and private intra-doc links)
     runs-on: ubuntu-latest
     env:
-      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+      # `private_intra_doc_links` is warn-by-default, so public documentation
+      # could point at a `pub(crate)` item, rustdoc would drop the link and
+      # render it as inert bracketed text on docs.rs, and this job stayed green
+      # (issue #697). `tests/doc_link_gate.rs` keeps this line and the
+      # `Makefile` mirror of it saying the same thing.
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -361,8 +361,9 @@ impl EngineConfig {
     /// [`EngineResult::tiles_skipped`] and, for on-disk sinks, materialised as
     /// the [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER). It is
     /// non-lossy: the marker regenerates to the same uniform tile, so
-    /// Verify-mode reconstruction still matches (see
-    /// [`regenerated_tile_matches_marker`]).
+    /// Verify-mode reconstruction still matches. Verify gets there by
+    /// re-applying the *same* blankness predicate to the regenerated tile
+    /// rather than byte-comparing it against the 1-byte marker (issue #94).
     ///
     /// Both [`Blanks`](crate::dedupe::DedupeStrategy::Blanks) and
     /// [`All`](crate::dedupe::DedupeStrategy::All) promote uniform content at
@@ -545,9 +546,10 @@ pub(crate) fn generate_pyramid_observed(
 /// before cropping when they differ.
 ///
 /// This mirrors libvips `dzsave`'s region rendering. It is observer-free (it
-/// drives a [`NoopObserver`](crate::observe::NoopObserver) internally); use
-/// [`generate_pyramid_observed`] on a pre-cropped raster if progress events are
-/// needed.
+/// drives a [`NoopObserver`](crate::observe::NoopObserver) internally). For
+/// progress events, crop first and run the pyramid through
+/// [`EngineBuilder::with_observer`](crate::EngineBuilder::with_observer)
+/// instead.
 ///
 /// # Errors
 ///
