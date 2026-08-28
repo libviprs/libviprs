@@ -1246,6 +1246,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The `miri` job in `.github/workflows/merge-gate.yml` no longer runs with
+  `-Zmiri-disable-isolation`, and `make miri` is now a real local mirror of it
+  (issues #675, #707). Neither change makes the job pass. What they change is
+  that it fails in a couple of minutes with something to act on, instead of
+  running to the 90 minute ceiling and reporting `cancelled`.
+
+  The flag was added with the claim that it was not a coverage loss, on the
+  reasoning that only *unannotated* filesystem tests stop aborting the run so
+  the job covers strictly more. That was never measured and it is false:
+  letting those tests execute under the interpreter is what pushed the run past
+  the ceiling, so the job covered nothing at all. Three consecutive dispatched
+  runs died at 90 minutes, and the run before the ceiling existed went 4h13m.
+
+  `RUSTFLAGS` gains `--cfg sha2_backend="soft"`, which pins sha2's portable
+  backend. Without it the run reaches `vld1q_u32(&K32[0])` in sha2's aarch64
+  NEON path and aborts about 30 seconds in on a Stacked Borrows violation, a 16
+  byte load through a `&u32` whose retag covers four. That shape is on file
+  against Miri itself as rust-lang/miri#3900, closed as not planned, so it is
+  Stacked Borrows being stricter than the model that eventually lands rather
+  than something that can go wrong at runtime. `-Zmiri-tree-borrows` also
+  clears it, measured, and is not used because it would change the aliasing
+  model all 1572 tests are checked against to route around one dependency.
+  Pinning the backend has the side benefit of making the run deterministic:
+  otherwise `cpufeatures` picks the backend at runtime and the interpreter sees
+  different instructions on aarch64 than on the hosted x86_64 runner.
+
+  What the job does now is abort on the first filesystem test that has no
+  `#[cfg_attr(miri, ignore)]`, of which `tests/miri_fs_test_inventory.txt`
+  still records 141. Annotating them is #712. Whether the suite then fits
+  inside `timeout-minutes: 90` is still open, and nothing measured so far is
+  close to answering it.
+
+  Three claims in that workflow file were false when I got here and are gone.
+  It said Miri "cannot run on the dev machine", which stopped being true when a
+  nightly past the 1.97 MSRV was installed. It said the tree carries 48
+  annotations across seven modules, where the inventory records 53 across
+  eight. And it said dropping the isolation flag was a coverage win.
+  `tests/miri_invocation_parity.rs` now holds the workflow to both counts, to
+  keeping the isolation flag off, to pinning the sha2 backend, and to running
+  the same command with the same environment as the `Makefile`, so the mirror
+  cannot quietly stop mirroring.
+
 - Every edit that adds a format to `src/source.rs` is checked by `cargo build`
   now, where two of the six used to fail silently (issue #633). It is still
   more than one edit, and worth being exact about which: the variant itself,

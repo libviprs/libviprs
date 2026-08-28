@@ -29,9 +29,22 @@ test:
 	RUSTFLAGS="-Dwarnings" cargo test
 
 ## Run Miri (Miri job — requires nightly)
+##
+## This is the local mirror of the `miri` job in
+## `.github/workflows/merge-gate.yml`, and the flags have to match it or a local
+## green and a hosted green stop meaning the same thing.
+## `tests/miri_invocation_parity.rs` holds the two in step, and the workflow
+## carries the reasoning for each flag. The short version: `-A deprecated` is
+## what lets the crate compile under nightly at all (#643), and
+## `--cfg sha2_backend="soft"` keeps the run off sha2's aarch64 NEON path, which
+## aborts it on a Stacked Borrows violation about 30 seconds in (#707).
+##
+## `cargo +nightly` has to resolve to something at or past the 1.97 MSRV. As of
+## 2026-08-28, `nightly-2026-08-20` is rustc 1.100.0 and works; an older nightly
+## pinned in `rustup` will fail to build the crate rather than fail Miri.
 miri:
 	@echo "==> cargo +nightly miri test"
-	cargo +nightly miri test
+	RUSTFLAGS='-A deprecated --cfg sha2_backend="soft"' cargo +nightly miri test
 
 ## Run Loom concurrency tests (Loom job)
 loom:
