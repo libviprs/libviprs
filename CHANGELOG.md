@@ -658,6 +658,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
+  `decode_analyze_file` takes either half of the pair or the bare stem and
+  resolves the other, `analyze::decode_analyze` takes the two buffers, and a
+  `.hdr` becomes a live row in the content sniffer so `decode_file` loads an
+  Analyze image without being told what it is. There is no save half: `vips`
+  registers no `analyzesave`.
+
+  **The decode seam grew a route kind for it**, which is the part of this
+  worth reading. Analyze is the only container in the crate that is
+  inherently two files: a `.hdr` has a geometry and no pixels, an `.img` has
+  pixels and no geometry, and `Decoder::Native(fn(&[u8], DecodeLimits))`
+  cannot express either. The route table now has a `Paired` kind carrying two
+  function pointers, one the file entry point calls with the path and one the
+  buffer entry point calls with the header half alone; the alternatives, a
+  path-only entry point with no sniff row and a sniff row that always
+  refuses, both leave `decode_file` unable to load an Analyze image at all,
+  which is the format's whole normal use.
+
+  `decode_bytes` on a `.hdr` therefore reports
+  `AnalyzeError::PixelsAreInASiblingFile`, after validating the header in
+  full, so a malformed one still reports its malformation. And one divergence
+  falls out that is unavoidable rather than chosen: `vips` loads `fred.img`
+  as well, because its `is_a` rewrites whatever name it is handed, and a
+  content sniff has nothing to look at in a raw pixel array.
+  `decode_analyze_file` takes all three names, so only the sniffing entry
+  point is narrower.
+
+  **Big-endian, always, with no flag and no escape hatch.** Every field of
+  the 348-byte header and every pixel of the `.img` is big-endian whatever
+  the host is; a little-endian `.hdr` is refused because its `sizeof_hdr`
+  reads back as 0x5C010000. This is the single most likely thing for a port
+  on a little-endian host to get backwards and both halves are pinned.
+
+  The rest of the measured contract: the rank is `dim[0]` and must be 2..=7,
+  the width is `dim[1]` and the height is `dim[2]` multiplied by every extent
+  up to the rank, so a volume flattens into a toilet roll with nothing but
+  the `dsr-image_dimension.dim[]` metadata recording that it was ever 3-D.
+  `vox_offset` is parsed, attached and then ignored, so the pixels come from
+  byte 0 of the `.img` on every file that sets one. `bitpix` is attached and
+  never consulted. `DT_RGB` is the only multi-band datatype and its `.img` is
+  interleaved, not planar. A short `.img` is an error and a long one is not.
+
+  63 `dsr-<section>.<member>` metadata fields and the 348-byte `dsr` blob are
+  attached, with both of `getstr`'s traps reproduced: an 80-byte `descrip`
+  loses its last byte to `g_strlcpy`'s size argument, and every byte that is
+  not printable ASCII becomes `@`, which is lossy and not reversible. The
+  capture's own prose states that second rule with an `||` where its measured
+  data needs an `&&`; that is issue #797, fixed in the same wave.
+
+  Three of the nine datatypes `analyzeload` reads have a carrier here
+  (`DT_UNSIGNED_CHAR`, `DT_FLOAT`, `DT_RGB`) and the rest are refused **by
+  name**: `DT_SIGNED_SHORT` and `DT_SIGNED_INT` need #516, `DT_DOUBLE` needs
+  #518, and `DT_COMPLEX` has no carrier and no issue. `DT_SIGNED_SHORT` is
+  what most real Analyze volumes use, so it is the refusal a caller meets
+  first.
+
+  One deliberate divergence, the same one `matload` carries: a zero or
+  negative dimension is refused rather than clamped to 1 by GObject's
+  property range check, which in vips leaves the load exiting 0 with a
+  silently wrong geometry.
+
+  The declared geometry is priced against every `DecodeLimits` ceiling
+  **before the `.img` is opened**, because a 348-byte header can declare
+  1.07 gigapixels in front of a six-byte image, so a header that prices past
+  the budget costs no second read.
+
+  No new dependency.
+
 - **MATLAB level 5 (`.mat`) load** (issues #510, #640, #763). `decode_mat`
   reads the first variable of rank 1, 2 or 3 out of a MAT-5 container, in
   either byte order, bare or inside a `miCOMPRESSED` zlib element, and `.mat`

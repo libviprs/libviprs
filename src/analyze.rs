@@ -460,17 +460,12 @@ fn be_f32(bytes: &[u8], at: usize) -> f32 {
 /// `&&`; its measured data requires the `&&`, because `0x01` is `isascii`
 /// and comes back as `@`. That is issue #797.
 fn getstr(field: &[u8]) -> String {
-    // NOT WRITTEN YET, on purpose: this is `getstr` as the capture's own
-    // prose states it, with the `||` its `metadata` record spells and with
-    // no `g_strlcpy` length trap at all. Both are wrong and the capture's
-    // own measured data is what says so, which is issue #797 and is what
-    // `getstr_drops_the_last_byte_and_rewrites_what_is_not_printable_ascii`
-    // asserts.
-    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
-    field[..end]
+    let usable = &field[..field.len() - 1];
+    let end = usable.iter().position(|&b| b == 0).unwrap_or(usable.len());
+    usable[..end]
         .iter()
         .map(|&c| {
-            if c.is_ascii() || c >= 32 {
+            if c.is_ascii() && c >= 32 {
                 c as char
             } else {
                 '@'
@@ -596,18 +591,24 @@ impl Header {
         let datatype = be_i16(hdr, 70);
         let carrier = carrier_for(datatype)?;
 
-        // NOT WRITTEN YET: the non-positive-dimension refusal. vips lets
-        // the value through to GObject, which rejects it, leaves the
-        // property at 1 and carries on with a silently wrong geometry, and
-        // `a_non_positive_dimension_is_refused_rather_than_clamped_to_one`
-        // is what says a port has to refuse instead.
+        // The divergence: vips lets a non-positive extent through to
+        // GObject, which rejects it, leaves the property at 1 and carries
+        // on.
+        for (axis, &extent) in dim.iter().enumerate().take(rank as usize + 1).skip(1) {
+            if extent <= 0 {
+                return Err(AnalyzeError::NonPositiveDimension {
+                    axis,
+                    found: extent,
+                });
+            }
+        }
         let width = u32::try_from(dim[1]).map_err(|_| AnalyzeError::DimensionOverflow { rank })?;
-        // NOT WRITTEN YET: the height is the PRODUCT of dim[2] up to the
-        // rank, not the last extent. The two agree at rank 2 and at rank 3
-        // whenever dim[2] is 1, which is why
-        // `the_rank_flattens_into_the_height_by_multiplication` uses four
-        // ranks rather than one.
-        let height: u64 = dim[rank as usize] as u64;
+        let mut height: u64 = 1;
+        for &extent in dim.iter().take(rank as usize + 1).skip(2) {
+            height = height
+                .checked_mul(extent as u64)
+                .ok_or(AnalyzeError::DimensionOverflow { rank })?;
+        }
         let height = u32::try_from(height).map_err(|_| AnalyzeError::DimensionOverflow { rank })?;
         Ok(Self {
             raw: hdr.to_vec(),
@@ -665,15 +666,17 @@ impl Header {
 /// matter.
 #[must_use]
 pub fn analyze_filenames(path: &Path) -> (PathBuf, PathBuf) {
-    // NOT WRITTEN YET: `vips__change_suffix` strips in a LOOP and matches
-    // case-insensitively, which is measured rather than read off the source.
-    // This is the obvious single-strip reading, and
-    // `the_suffix_stripping_is_a_loop_and_is_case_insensitive` is what says
-    // it is not what vips does.
     let mut stem = path.as_os_str().to_string_lossy().into_owned();
-    let tail = stem.get(stem.len().saturating_sub(4)..).unwrap_or_default();
-    if tail == ".hdr" || tail == ".img" {
-        stem.truncate(stem.len() - 4);
+    loop {
+        let tail = stem
+            .get(stem.len().saturating_sub(4)..)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if tail == ".hdr" || tail == ".img" {
+            stem.truncate(stem.len() - 4);
+        } else {
+            break;
+        }
     }
     (
         PathBuf::from(format!("{stem}.hdr")),
@@ -819,15 +822,11 @@ fn to_native(pixels: &[u8], carrier: Carrier) -> Vec<u8> {
     match carrier {
         // One byte per sample: byte order cannot apply.
         Carrier::U8 | Carrier::Rgb24 => pixels.to_vec(),
-        // NOT WRITTEN YET: the pixel byte swap. Reading the host's way is
-        // what a port on a little-endian machine gets for free, and
-        // `every_datatype_lands_on_its_measured_carrier_or_is_refused_by_name`
-        // is what says the `.img` is big-endian whatever the host is.
         Carrier::F32 => pixels
             .as_chunks::<4>()
             .0
             .iter()
-            .flat_map(|c| f32::from_ne_bytes(*c).to_ne_bytes())
+            .flat_map(|c| f32::from_be_bytes(*c).to_ne_bytes())
             .collect(),
     }
 }
