@@ -668,10 +668,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the reference. Rank 0 is a one-voxel image, a non-positive `dim[1]` is
   refused, and a zero extent on any higher axis is silently clamped to 1.
 
-  And one where the capture's own prose is wrong and its measurements are
+  And one where the capture's own prose was wrong and its measurements were
   right: on NIfTI-1 the byte order comes from `dim[0]`, not from the
   `sizeof_hdr` sentinel, with the sentinel only as a fallback. A file with
-  only its four sentinel bytes swapped loads little-endian.
+  only its four sentinel bytes swapped loads little-endian. That prose is
+  corrected in the capture (issue #752) and the correction is held against
+  this module by a test rather than by hope.
 
   NIfTI is a volume format and `Raster` is two-dimensional, so the axes above
   the second fold into the height, `dim[1]` wide by `dim[2] * .. * dim[rank]`
