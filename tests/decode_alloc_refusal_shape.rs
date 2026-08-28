@@ -244,6 +244,44 @@ fn refuse(row: &Row) -> SourceError {
         .unwrap_or_else(|| panic!("{} must be refused one byte under its price", row.format))
 }
 
+/// Issue #686. The two tables together account for every container, so adding
+/// a decoder without adding a row cannot pass unnoticed.
+///
+/// This is the half of that link which lives out here. The other half is
+/// `source::tests::adding_a_container_reddens_the_alloc_refusal_tables`, which
+/// pins `SniffedFormat::ALL.len()` and points back at this file, because the
+/// set of containers is `pub(crate)` and an integration test cannot see it.
+/// Neither half is sufficient alone: this one catches a row deleted here, that
+/// one catches a container added there.
+///
+/// `.v` is the one container in neither table, deliberately, because it
+/// applies no allocation budget at all. That is issue #710 and the count below
+/// says so rather than leaving a reader to wonder whether it was forgotten.
+#[test]
+fn the_two_tables_account_for_every_container() {
+    let self_priced = priced_by_libviprs().len();
+    let image_backed = priced_by_the_image_crate().len();
+    let excluded_no_budget_at_all = 1; // `.v`, issue #710
+
+    // JPEG XL is only compiled in behind its feature, so the self-priced table
+    // is one shorter without it. Spelled out rather than hidden in a `cfg!`
+    // inside the sum, because a reader has to be able to check the arithmetic.
+    let expected_self_priced = if cfg!(feature = "jxl") { 6 } else { 5 };
+    assert_eq!(
+        self_priced, expected_self_priced,
+        "the self-priced table changed size"
+    );
+    assert_eq!(image_backed, 3, "the image-backed table changed size");
+
+    let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
+    assert_eq!(
+        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent,
+        10,
+        "the two tables plus the documented exclusion must account for all ten \
+         containers libviprs sniffs; see SniffedFormat::ALL"
+    );
+}
+
 /// Issue #686. Every format libviprs prices itself reports the refusal in one
 /// shape, so a caller writes one match arm rather than five.
 #[test]

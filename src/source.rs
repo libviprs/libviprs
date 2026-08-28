@@ -2637,6 +2637,39 @@ mod tests {
     }
 
     /**
+     * Tests that adding a container reddens the allocation-refusal tables in
+     * `tests/decode_alloc_refusal_shape.rs`, which are hand-written and carry
+     * a universal claim ("this is the shape every decoder that prices a frame
+     * itself uses") that nothing otherwise ties to the set of containers.
+     *
+     * `SniffedFormat::ALL` is built by an exhaustive `match`, so a new variant
+     * stops the crate compiling *there* rather than here. What this adds is
+     * the link to the other file: without it, Batch D can add JP2K, AVIF,
+     * UHDR and the rest and those tables silently stay one short each time.
+     * Every new decoder either prices its own frame, which needs a
+     * `priced_by_libviprs` row, or wraps a crate that refuses internally the
+     * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
+     * else will say so.
+     * Input: `SniffedFormat::ALL.len()` -> Output: 10, which is what the two
+     * tables plus the one documented exclusion account for.
+     */
+    #[test]
+    fn adding_a_container_reddens_the_alloc_refusal_tables() {
+        assert_eq!(
+            SniffedFormat::ALL.len(),
+            10,
+            "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
+             enumerates every container the decode allocation budget can refuse, in \
+             two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
+             wrapped crate refuses internally the way jxl-oxide does, then update this \
+             count. Today the 10 are: 6 self-priced (gif, radiance, fits, openexr, jxl, \
+             and webp which joined them in #686), 3 refused inside the image crate \
+             (jpeg, png, tiff), and .v, which applies no allocation budget at all and \
+             is issue #710"
+        );
+    }
+
+    /**
      * Pins the two contracts the route table cannot check for itself, both
      * of which are judgement calls rather than derivations. First, the
      * mapping into the `image` facade is an identity: one container in, one

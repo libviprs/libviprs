@@ -435,11 +435,25 @@ pub fn decode_exr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     // number of bands the selection keeps, because that is what the price is
     // and what the decoder allocates for.
     let declared = header.channels.list.len();
+    //
+    // The `u32` narrowing saturates rather than wrapping, and saturating is
+    // the safe direction here because the price only goes up. It is also
+    // unreachable in any way that matters, and the reason is worth writing
+    // down rather than leaving to a reader: `declared` counts entries in a
+    // channel list `exr` has already parsed into memory, so a count above
+    // `u32::MAX` would need the reader to have allocated four billion
+    // `Channel` descriptions first. If it somehow got here, the reported
+    // `bands` would be a floor rather than the true count, and the price is
+    // already saturated to `u64::MAX` by `decode_alloc_bytes`, which
+    // `exceeds_alloc_budget` refuses under every budget including "no limit".
+    // So the refusal stays correct; only the number in the message would
+    // understate.
+    let declared_bands = u32::try_from(declared).unwrap_or(u32::MAX);
     limits.check_image_alloc(
         "OpenEXR sample buffers",
         width,
         height,
-        u32::try_from(declared).unwrap_or(u32::MAX),
+        declared_bands,
         SAMPLE_BYTES as u32,
     )?;
 
