@@ -248,11 +248,18 @@ pub enum ArithmeticError {
 // Sample-level helpers
 // ---------------------------------------------------------------------------
 
-/// Read the flat `i`-th sample as `u32` (native byte order for
-/// [`SampleKind::U16`], matching [`crate::raster_ops`]). Unsigned kinds
-/// only: the [`SampleKind::F32`] arm panics rather than misreading float
-/// bytes as `u16` pairs, which is what the arithmetic ops did before the
-/// float formats existed.
+/// Read the flat `i`-th sample as its stored bit pattern, zero-extended
+/// into a `u32` (native byte order for the multi-byte kinds, matching
+/// [`crate::raster_ops`]). Integer kinds only: the [`SampleKind::F32`] arm
+/// panics rather than misreading float bytes as `u16` pairs, which is what
+/// the arithmetic ops did before the float formats existed.
+///
+/// This is the *storage* read, and it is deliberately not the numeric one.
+/// Every caller wants the bits: the bitwise family operates on them (as
+/// libvips `boolean` does), and `profile`'s scans only ask whether a sample
+/// is non-zero, which the two's-complement pattern answers correctly for
+/// the signed kinds. Use [`read_f64`] where the *value* is wanted, since
+/// that one sign-extends.
 ///
 /// The match is over the kind and has no wildcard, so a carrier added to
 /// [`SampleKind`] is a compile error here instead of a silent misread
@@ -260,15 +267,20 @@ pub enum ArithmeticError {
 #[inline]
 fn read_u32(data: &[u8], kind: SampleKind, i: usize) -> u32 {
     match kind {
-        SampleKind::U8 => data[i] as u32,
-        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        SampleKind::U8 | SampleKind::I8 => data[i] as u32,
+        SampleKind::U16 | SampleKind::I16 => {
+            u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32
+        }
+        SampleKind::U32 | SampleKind::I32 => u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]),
         SampleKind::F32 => panic!(
             "the arithmetic operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
-            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
-        }
     }
 }
 
@@ -284,51 +296,82 @@ fn read_u32(data: &[u8], kind: SampleKind, i: usize) -> u32 {
 fn read_f64(data: &[u8], kind: SampleKind, i: usize) -> f64 {
     match kind {
         SampleKind::U8 => f64::from(data[i]),
+        SampleKind::I8 => f64::from(data[i] as i8),
         SampleKind::U16 => f64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::I16 => f64::from(i16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::U32 => f64::from(u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::I32 => f64::from(i32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
         SampleKind::F32 => f64::from(f32::from_ne_bytes([
             data[4 * i],
             data[4 * i + 1],
             data[4 * i + 2],
             data[4 * i + 3],
         ])),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
-            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
-        }
     }
 }
 
-/// Write the flat `i`-th sample. `v` must already fit the kind.
-/// Unsigned kinds only; see [`read_u32`], including on why the match has
-/// no wildcard arm.
+/// Write the flat `i`-th sample from its stored bit pattern, truncated to
+/// the kind's width. `v` must already fit the kind. Integer kinds only; see
+/// [`read_u32`], which is the read this inverts, including on why the match
+/// has no wildcard arm.
 #[inline]
 fn write_u32(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
     match kind {
-        SampleKind::U8 => data[i] = v as u8,
-        SampleKind::U16 => {
+        SampleKind::U8 | SampleKind::I8 => data[i] = v as u8,
+        SampleKind::U16 | SampleKind::I16 => {
             let b = (v as u16).to_ne_bytes();
             data[2 * i] = b[0];
             data[2 * i + 1] = b[1];
+        }
+        SampleKind::U32 | SampleKind::I32 => {
+            let b = v.to_ne_bytes();
+            data[4 * i..4 * i + 4].copy_from_slice(&b);
         }
         SampleKind::F32 => panic!(
             "the arithmetic operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
-            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
-        }
     }
 }
 
-/// Round `v` to nearest, saturate into `0..=max`, and write it as the flat
-/// `i`-th sample. NaN writes `0`.
+/// Round `v` to nearest, saturate into the kind's range capped at `max`,
+/// and write it as the flat `i`-th sample. NaN writes `0`.
+///
+/// The floor comes from [`SampleKind::range`] rather than being a literal
+/// `0.0`, because zero is only the right floor for three of the six integer
+/// kinds. On the unsigned carriers the crate has today the two spellings
+/// are the same number, so this changes nothing; on a signed carrier the
+/// old spelling would have clipped every negative result to zero, which is
+/// the "samples are non-negative" assumption issue #607 names as the
+/// expensive half of #516.
+///
+/// `max` stays a parameter because callers cap below the kind's ceiling
+/// (`profile` and the hough accumulators pass `65535.0` regardless of what
+/// the kind could hold).
 #[inline]
 fn write_f64(data: &mut [u8], kind: SampleKind, i: usize, v: f64, max: f64) {
+    // A float kind has no range; `write_u32` below refuses it anyway, so
+    // the floor it never reads is immaterial.
+    let min = kind.range().map_or(0.0, |(lo, _)| lo as f64);
     let v = if v.is_nan() {
         0.0
     } else {
-        v.round().clamp(0.0, max)
+        v.round().clamp(min, max)
     };
-    write_u32(data, kind, i, v as u32);
+    // Through `i64` first: `(-5.0f64) as u32` saturates to `0` in Rust,
+    // where the two's-complement pattern `write_u32` wants is `0xFFFF_FFFB`.
+    // Non-negative values are unaffected.
+    write_u32(data, kind, i, v as i64 as u32);
 }
 
 /// Dead zone around zero alpha for the un-premultiply factor, the `0.01` of
