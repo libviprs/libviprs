@@ -83,12 +83,26 @@
 //! so on).
 //!
 //! The operations in this module carry the metadata of their (first) input
-//! through to the result, with two exceptions: [`Raster::autorot`] resets
-//! the orientation tag to `1` after applying it, and
-//! [`Raster::falsecolour`] stamps its RGB result as
-//! [`Interpretation::Srgb`]. Operations in the earlier batches
-//! ([`crate::bands`], [`crate::arithmetic`], [`crate::extract`]) predate the
-//! metadata block and return default metadata.
+//! through to the result, and so does every other module now (issues #717,
+//! #719 and #727 closed the gaps this paragraph used to describe in
+//! [`crate::bands`], [`crate::convolution`] and [`crate::extract`]).
+//!
+//! Four fields are stamped rather than carried, and each is measured against
+//! the pinned vips rather than reasoned about:
+//!
+//! * [`Raster::autorot`] resets the orientation tag to `1` after applying it.
+//! * [`Raster::falsecolour`] stamps its RGB result as
+//!   [`Interpretation::Srgb`].
+//! * The **origin offset** is stamped by every operation that repositions the
+//!   image (issue #721): [`Raster::fliphor`] to `(width, 0)`,
+//!   [`Raster::flipver`] to `(0, height)`, [`Raster::rot`] to the edge the
+//!   input's origin lands on, and [`Raster::wrap`] to `(w - w/2, h - h/2)`.
+//!   [`Raster::rot45`] and [`Raster::grid`] carry it, and so does everything
+//!   else here. [`Raster::autorot`] inherits whichever transform it finishes
+//!   on, except at orientation 4, where vips composes a rotation and a flip
+//!   and stamps the flip's.
+//! * `extract_area` and `crop` stamp `(-left, -top)` (issue #690), and the
+//!   convolving operations stamp their mask's centre (issue #721).
 //!
 //! The decode paths do not read EXIF yet, so a freshly decoded JPEG always
 //! carries orientation `1` and [`Raster::autorot`] is the identity for it,
@@ -742,6 +756,21 @@ fn remap(
     Ok(out)
 }
 
+/// One edge of the image as an origin offset, saturating rather than wrapping.
+///
+/// The stamped offsets in this module are all a dimension or a dimension
+/// difference, and a `u32` dimension above `i32::MAX` is representable here
+/// where vips holds every dimension and both offsets in an `int`. A bare
+/// `as i32` would wrap a 3-gigapixel-wide image's offset to a negative one,
+/// so it saturates instead. That mirrors `extract`'s `negated_origin`, which
+/// saturates at `i32::MIN` for the same reason (#690). A raster that wide fits
+/// the construction budget at one byte per pixel, so the branch is reachable
+/// rather than theoretical, and like `negated_origin` it is asserted by
+/// reasoning: there is no test here that allocates 2 GiB to prove it.
+fn origin(v: u32) -> i32 {
+    i32::try_from(v).unwrap_or(i32::MAX)
+}
+
 /// The largest `shim` [`Raster::join`] and [`Raster::arrayjoin`] accept,
 /// matching the libvips property bound both operations declare:
 /// `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)` in `join.c` and the
@@ -984,7 +1013,14 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_fliphor(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
-        remap(self, w, self.height(), |x, y| (w - 1 - x, y))
+        let mut out = remap(self, w, self.height(), |x, y| (w - 1 - x, y))?;
+        // The input's origin ends up at `x = width` in the output, and vips
+        // stamps that rather than carrying the source's offsets: measured
+        // `(5, 0)`, `(7, 0)` and `(8, 0)` at 5x6, 7x3 and 8x8 from a source at
+        // 11 / 13, and the same numbers from one at 0 / 0 (#721).
+        out.meta.xoffset = origin(w);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Mirror left-right (libvips `vips_flip` with
@@ -1006,7 +1042,12 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_flipver(&self) -> Result<Raster, ConversionError> {
         let h = self.height();
-        remap(self, self.width(), h, |x, y| (x, h - 1 - y))
+        let mut out = remap(self, self.width(), h, |x, y| (x, h - 1 - y))?;
+        // Mirror of `try_fliphor`: `(0, height)`, measured `(0, 6)`, `(0, 3)`
+        // and `(0, 8)` at the three shapes (#721).
+        out.meta.xoffset = 0;
+        out.meta.yoffset = origin(h);
+        Ok(out)
     }
 
     /// Mirror top-bottom (libvips `vips_flip` with
@@ -1033,12 +1074,25 @@ impl Raster {
     pub fn try_rot(&self, angle: Angle) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        match angle {
-            Angle::D0 => Ok(self.clone()),
-            Angle::D90 => remap(self, h, w, |x, y| (y, h - 1 - x)),
-            Angle::D180 => remap(self, w, h, |x, y| (w - 1 - x, h - 1 - y)),
-            Angle::D270 => remap(self, h, w, |x, y| (w - 1 - y, x)),
-        }
+        // Each turn puts the input's origin on a different edge of the output
+        // and vips stamps where, rather than carrying the source's offsets.
+        // Measured at 5x6, 7x3 and 8x8 from a source at 11 / 13, and the same
+        // from one at 0 / 0 (#721). `D0` is a copy and carries, which is also
+        // what vips does.
+        let (mut out, offset) = match angle {
+            Angle::D0 => return Ok(self.clone()),
+            // Output is `h` wide, so this is `(out width, 0)`.
+            Angle::D90 => (remap(self, h, w, |x, y| (y, h - 1 - x))?, (origin(h), 0)),
+            Angle::D180 => (
+                remap(self, w, h, |x, y| (w - 1 - x, h - 1 - y))?,
+                (origin(w), origin(h)),
+            ),
+            // Output is `w` tall, so this is `(0, out height)`.
+            Angle::D270 => (remap(self, h, w, |x, y| (w - 1 - y, x))?, (0, origin(w))),
+        };
+        out.meta.xoffset = offset.0;
+        out.meta.yoffset = offset.1;
+        Ok(out)
     }
 
     /// Rotate by a right-angle [`Angle`] (libvips `vips_rot`). `D90` is a
@@ -1420,7 +1474,13 @@ impl Raster {
     fn transpose(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        remap(self, h, w, |x, y| (y, x))
+        let mut out = remap(self, h, w, |x, y| (y, x))?;
+        // Only reachable through `autorot`, so the measurement is
+        // `vips autorot` on an orientation-5 source: `(6, 0)`, `(3, 0)` and
+        // `(4, 0)` at 5x6, 7x3 and 9x4, which is `(out width, 0)` (#721).
+        out.meta.xoffset = origin(h);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Flip along the bottom-left to top-right diagonal (EXIF
@@ -1428,7 +1488,12 @@ impl Raster {
     fn transverse(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        remap(self, h, w, |x, y| (w - 1 - y, h - 1 - x))
+        let mut out = remap(self, h, w, |x, y| (w - 1 - y, h - 1 - x))?;
+        // Same numbers as `transpose`, measured the same way on an
+        // orientation-7 source (#721).
+        out.meta.xoffset = origin(h);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Fallible form of [`Raster::autorot`].
@@ -1440,7 +1505,19 @@ impl Raster {
         let mut out = match self.meta.orientation {
             2 => self.try_fliphor()?,
             3 => self.try_rot(Angle::D180)?,
-            4 => self.try_flipver()?,
+            4 => {
+                // The one orientation composition gets wrong. `vips_autorot`
+                // reaches 4 as a 180-degree rotation followed by a horizontal
+                // flip and stamps the flip's `(width, 0)`; a single vertical
+                // flip is the same pixels but stamps `(0, height)`. Measured
+                // `(5, 0)`, `(7, 0)` and `(9, 0)` at 5x6, 7x3 and 9x4, so the
+                // offset is corrected here rather than paying for a second
+                // pass over the image to make the composition match (#721).
+                let mut f = self.try_flipver()?;
+                f.meta.xoffset = origin(self.width());
+                f.meta.yoffset = 0;
+                f
+            }
             5 => self.transpose()?,
             6 => self.try_rot(Angle::D90)?,
             7 => self.transverse()?,
@@ -1480,7 +1557,16 @@ impl Raster {
         let h = self.height();
         let dx = w / 2;
         let dy = h / 2;
-        remap(self, w, h, |x, y| ((x + dx) % w, (y + dy) % h))
+        let mut out = remap(self, w, h, |x, y| ((x + dx) % w, (y + dy) % h))?;
+        // The shift moves the input's origin to `(w - dx, h - dy)` and vips
+        // stamps that: measured `(3, 3)`, `(4, 2)` and `(4, 4)` at 5x6, 7x3
+        // and 8x8. `vips wrap --x 1 --y 2` gives `(4, 4)`, `(6, 1)` and
+        // `(7, 6)` on the same three, which is the same expression with the
+        // caller's shift, so the rule is the shift rather than the halving
+        // (#721). This surface only exposes the centring default.
+        out.meta.xoffset = origin(w - dx);
+        out.meta.yoffset = origin(h - dy);
+        Ok(out)
     }
 
     /// Toroidally shift the image so the pixel at the centre
