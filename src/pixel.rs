@@ -89,6 +89,124 @@ pub enum PixelFormat {
     FloatF32(NonZeroU16),
 }
 
+/// What the bytes at one channel sample *are*: the sample's type, as
+/// distinct from how many bytes of it there are.
+///
+/// The crate used to answer that question with
+/// [`PixelFormat::bytes_per_channel`], and byte width is not a sample kind.
+/// Four bytes means `f32` today, and would equally mean `u32` under the
+/// unsigned-32 carrier of issue #517 or `i32` under the signed carriers of
+/// issue #516. Every `match` keyed on the width therefore carries a
+/// trailing `_` arm that reads a hypothetical four-byte integer as a float,
+/// silently, with nothing in the compiler to say so. Dispatching on this
+/// enum instead makes each of those sites a decision the compiler forces
+/// when a carrier is added (issue #607).
+///
+/// Both accessors stay, and they answer different questions: use
+/// [`PixelFormat::bytes_per_channel`] for a stride or a buffer size, and
+/// [`PixelFormat::kind`] to decide how to interpret the bytes.
+///
+/// # Variants
+///
+/// | Variant | Rust type | Bytes | Largest value |
+/// |---|---|---|---|
+/// | `U8`  | `u8`  | 1 | 255 |
+/// | `U16` | `u16` | 2 | 65535 |
+/// | `F32` | `f32` | 4 | none |
+///
+/// Multi-byte samples are stored in **native** byte order throughout the
+/// crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SampleKind {
+    /// Unsigned 8-bit samples (`u8`).
+    U8,
+    /// Unsigned 16-bit samples (`u16`), native byte order.
+    U16,
+    /// 32-bit IEEE-754 float samples (`f32`), native byte order.
+    F32,
+}
+
+impl SampleKind {
+    /// Bytes one sample of this kind occupies: 1, 2, or 4.
+    ///
+    /// This is the same number [`PixelFormat::bytes_per_channel`] returns
+    /// for any format of this kind, and
+    /// [`PixelFormat::kind`]`().bytes()` equals it for every variant. The
+    /// direction that does *not* hold is the reason this enum exists: a
+    /// byte width does not name a kind.
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::U8 => 1,
+            Self::U16 => 2,
+            Self::F32 => 4,
+        }
+    }
+
+    /// Whether samples of this kind are floating point.
+    ///
+    /// The same answer [`PixelFormat::is_float`] gives for any format of
+    /// this kind.
+    pub fn is_float(self) -> bool {
+        match self {
+            Self::U8 | Self::U16 => false,
+            Self::F32 => true,
+        }
+    }
+
+    /// The largest value an integer sample of this kind can hold, or `None`
+    /// for a float kind.
+    ///
+    /// `None` is not "no ceiling exists in practice", it is "the sample kind
+    /// does not imply one". A float raster's meaningful range comes from its
+    /// [`Interpretation`](crate::conversion::Interpretation) instead, which
+    /// is why [`crate::arithmetic`]'s premultiply bracket takes its
+    /// `max_alpha` from the tag rather than from the depth.
+    pub fn max_value(self) -> Option<u32> {
+        match self {
+            Self::U8 => Some(0xFF),
+            Self::U16 => Some(0xFFFF),
+            Self::F32 => None,
+        }
+    }
+
+    /// The kind that carries both `self` and `other` losslessly: the
+    /// promotion libvips calls `vips__formatalike`, restricted to the
+    /// carriers this crate has.
+    ///
+    /// `F32` wins over both unsigned kinds and `U16` wins over `U8`, which
+    /// is what a two-image arithmetic op needs when its inputs disagree.
+    ///
+    /// The match is over the *pair*, deliberately, and not over
+    /// [`SampleKind::bytes`]: byte width cannot order the carriers, because
+    /// a four-byte integer and a four-byte float are the same width and
+    /// promote in opposite directions. Adding a kind leaves three pairs
+    /// uncovered here and so fails to compile, which is the point (issue
+    /// #607).
+    pub fn promote(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::F32, _) | (_, Self::F32) => Self::F32,
+            (Self::U16, _) | (_, Self::U16) => Self::U16,
+            (Self::U8, Self::U8) => Self::U8,
+        }
+    }
+
+    /// The number of histogram bins that covers every value of this kind
+    /// exactly once, or `None` for a float kind.
+    ///
+    /// 256 for `U8` and 65536 for `U16`, matching the bin counts
+    /// [`crate::histogram`] uses and the ones libvips picks in
+    /// `hist_find.c`. `F32` is `None` because a float histogram needs a
+    /// range and a bin width, not a value-indexed table.
+    pub fn hist_bins(self) -> Option<usize> {
+        match self {
+            Self::U8 => Some(256),
+            Self::U16 => Some(65536),
+            Self::F32 => None,
+        }
+    }
+}
+
 impl PixelFormat {
     /// Bytes per pixel for this format.
     ///
@@ -254,6 +372,38 @@ impl PixelFormat {
         }
     }
 
+    /// The sample kind this format carries.
+    ///
+    /// This is the crate's single answer to "what are these bytes", and the
+    /// match below is the chokepoint that makes it one: it has no wildcard
+    /// arm, so a new carrier variant on this `#[non_exhaustive]` enum is a
+    /// compile error here rather than a width that some other module reads
+    /// as the wrong type (issue #607).
+    ///
+    /// Prefer this over [`PixelFormat::bytes_per_channel`] whenever the
+    /// question is how to interpret a sample; the width is still the right
+    /// call for a stride or a buffer size.
+    pub fn kind(self) -> SampleKind {
+        match self {
+            Self::Gray8 | Self::Rgb8 | Self::Rgba8 | Self::Multi8(_) => SampleKind::U8,
+            Self::Gray16 | Self::Rgb16 | Self::Rgba16 | Self::Multi16(_) => SampleKind::U16,
+            Self::RgbaF32 | Self::FloatF32(_) => SampleKind::F32,
+        }
+    }
+
+    /// The canonical format for a channel count and a sample kind.
+    ///
+    /// The kind-keyed form of [`PixelFormat::with_channels`], and the one to
+    /// reach for: `with_channels(bands, 4)` has to decide what four bytes
+    /// means, and today it answers "float" for every caller including one
+    /// that wanted an integer. This cannot be asked ambiguously.
+    ///
+    /// Returns `None` on the same channel counts `with_channels` rejects:
+    /// zero, and anything above `u16::MAX`.
+    pub fn with_kind(channels: usize, kind: SampleKind) -> Option<Self> {
+        Self::with_channels(channels, kind.bytes())
+    }
+
     /// Return the variant of this format that includes an alpha channel.
     ///
     /// `Gray8` and `Gray16` promote to `Rgba8` / `Rgba16` respectively (not
@@ -302,6 +452,174 @@ impl PixelFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /**
+     * Tests that the sample-kind spine lives in this module, so the rest of
+     * the crate has one shared answer to "what are these bytes" rather than
+     * a hand-rolled depth enum per module (`colour.rs`'s private `SpaceDepth`
+     * is exactly that duplicate, issue #607).
+     * Works by scanning this module's own source, compiled in with
+     * `include_str!`, for the type declaration; the needle is spelled in two
+     * halves so this assertion is not itself a hit.
+     * Input: `src/pixel.rs` -> Output: the declaration is present.
+     */
+    #[test]
+    fn sample_kind_spine_is_declared_here() {
+        const SRC: &str = include_str!("pixel.rs");
+        // Positive control: the same scan finds a declaration that is
+        // present, so a miss below is a real miss and not an empty read.
+        assert!(
+            SRC.contains(concat!("pub enum Pixel", "Format")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        assert!(
+            SRC.contains(concat!("pub enum Sample", "Kind")),
+            "the SampleKind spine must be declared in src/pixel.rs, not \
+             hand-rolled per module"
+        );
+    }
+
+    /**
+     * Tests that every format's sample kind agrees with its byte width, so
+     * the two accessors cannot drift apart while both are in the crate.
+     * Works by walking every variant, including a multiband spelling of
+     * each carrier, and asserting `kind().bytes() == bytes_per_channel()`
+     * and `kind().is_float() == is_float()`.
+     * Input: all 10 variants -> Output: both identities hold for each.
+     */
+    #[test]
+    fn kind_agrees_with_width_and_floatness() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        for fmt in [
+            PixelFormat::Gray8,
+            PixelFormat::Gray16,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::Rgb16,
+            PixelFormat::Rgba16,
+            PixelFormat::RgbaF32,
+            PixelFormat::Multi8(n(7)),
+            PixelFormat::Multi16(n(7)),
+            PixelFormat::FloatF32(n(7)),
+        ] {
+            assert_eq!(
+                fmt.kind().bytes(),
+                fmt.bytes_per_channel(),
+                "kind width disagrees for {fmt:?}"
+            );
+            assert_eq!(
+                fmt.kind().is_float(),
+                fmt.is_float(),
+                "kind floatness disagrees for {fmt:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests the sample kind each carrier reports, pinned per variant rather
+     * than derived, so a variant that gets remapped is caught even if the
+     * width identity above still holds.
+     * Works by asserting the exact kind for one named and one multiband
+     * spelling of all three carriers.
+     * Input: Gray8 -> U8, Rgb16 -> U16, RgbaF32 -> F32, and the tuple
+     * spellings alongside.
+     */
+    #[test]
+    fn kind_per_carrier() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        assert_eq!(PixelFormat::Gray8.kind(), SampleKind::U8);
+        assert_eq!(PixelFormat::Rgba8.kind(), SampleKind::U8);
+        assert_eq!(PixelFormat::Multi8(n(5)).kind(), SampleKind::U8);
+        assert_eq!(PixelFormat::Gray16.kind(), SampleKind::U16);
+        assert_eq!(PixelFormat::Rgb16.kind(), SampleKind::U16);
+        assert_eq!(PixelFormat::Multi16(n(5)).kind(), SampleKind::U16);
+        assert_eq!(PixelFormat::RgbaF32.kind(), SampleKind::F32);
+        assert_eq!(PixelFormat::FloatF32(n(5)).kind(), SampleKind::F32);
+    }
+
+    /**
+     * Tests the per-kind constants the sample modules read: byte width, the
+     * integer ceiling, and the histogram bin count.
+     * Works by asserting each accessor for all three kinds, including that
+     * the float kind reports `None` for both quantities a depth would
+     * imply, since a float carrier has neither a value ceiling nor a
+     * value-indexed bin table.
+     * Input: U8/U16/F32 -> Output: (1, 255, 256), (2, 65535, 65536),
+     * (4, None, None).
+     */
+    #[test]
+    fn sample_kind_constants() {
+        assert_eq!(SampleKind::U8.bytes(), 1);
+        assert_eq!(SampleKind::U16.bytes(), 2);
+        assert_eq!(SampleKind::F32.bytes(), 4);
+
+        assert_eq!(SampleKind::U8.max_value(), Some(255));
+        assert_eq!(SampleKind::U16.max_value(), Some(65535));
+        assert_eq!(SampleKind::F32.max_value(), None);
+
+        assert_eq!(SampleKind::U8.hist_bins(), Some(256));
+        assert_eq!(SampleKind::U16.hist_bins(), Some(65536));
+        assert_eq!(SampleKind::F32.hist_bins(), None);
+
+        assert!(!SampleKind::U8.is_float());
+        assert!(!SampleKind::U16.is_float());
+        assert!(SampleKind::F32.is_float());
+    }
+
+    /**
+     * Tests that `promote` is the `vips__formatalike` order and that it is
+     * symmetric, which is what the two-image arithmetic ops rely on when
+     * their inputs disagree.
+     * Works by asserting all nine ordered pairs, so an arm that is right in
+     * one direction and wrong in the other cannot pass.
+     * Input: (U8,U16) -> U16, (U16,F32) -> F32, (U8,F32) -> F32, and each
+     * kind with itself.
+     */
+    #[test]
+    fn promote_is_the_formatalike_order() {
+        use SampleKind::{F32, U8, U16};
+        assert_eq!(U8.promote(U8), U8);
+        assert_eq!(U16.promote(U16), U16);
+        assert_eq!(F32.promote(F32), F32);
+        assert_eq!(U8.promote(U16), U16);
+        assert_eq!(U16.promote(U8), U16);
+        assert_eq!(U8.promote(F32), F32);
+        assert_eq!(F32.promote(U8), F32);
+        assert_eq!(U16.promote(F32), F32);
+        assert_eq!(F32.promote(U16), F32);
+    }
+
+    /**
+     * Tests that `with_kind` names the same formats `with_channels` does at
+     * each kind's width, and that it rejects the same channel counts.
+     * Works by comparing the two constructors across the band counts with
+     * named variants and one without, plus the zero and over-`u16::MAX`
+     * rejections.
+     * Input: (3, U8) -> Rgb8, (4, F32) -> RgbaF32, (0, U8) -> None,
+     * (65536, U8) -> None.
+     */
+    #[test]
+    fn with_kind_matches_with_channels() {
+        for kind in [SampleKind::U8, SampleKind::U16, SampleKind::F32] {
+            for channels in [1usize, 2, 3, 4, 7] {
+                assert_eq!(
+                    PixelFormat::with_kind(channels, kind),
+                    PixelFormat::with_channels(channels, kind.bytes()),
+                    "with_kind disagrees at {channels} channels of {kind:?}"
+                );
+            }
+            assert_eq!(PixelFormat::with_kind(0, kind), None);
+            assert_eq!(PixelFormat::with_kind(65_536, kind), None);
+        }
+        assert_eq!(
+            PixelFormat::with_kind(3, SampleKind::U8),
+            Some(PixelFormat::Rgb8)
+        );
+        assert_eq!(
+            PixelFormat::with_kind(4, SampleKind::F32),
+            Some(PixelFormat::RgbaF32)
+        );
+    }
 
     /**
      * Tests that bytes_per_pixel equals channels * bytes_per_channel for every format.
