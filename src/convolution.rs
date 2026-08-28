@@ -962,16 +962,25 @@ fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize
 /// Read every sample of `r` as `f64`, row-major with bands interleaved.
 /// Unsigned samples convert exactly; float samples widen exactly.
 ///
-/// Eight bytes per sample where the source carries one or two makes this
-/// the largest single allocation on the convolution path: measured
-/// post-#598 on a 4000x4000 `Rgb8` integer conv, 384 MB of a 486 MB peak
-/// for 48 MB of input. It is also the allocation every fallible entry
-/// point in this module sits on, so it is reserved through
-/// [`try_buffer`] and reports [`RasterError::AllocationFailed`]. It used
+/// Eight bytes per sample where the source carries one or two, so this is
+/// eight or four times the raster it is handed. It is reserved through
+/// [`try_buffer`] and reports [`RasterError::AllocationFailed`]; it used
 /// to be a plain `.collect()`, which on failure reaches
 /// `handle_alloc_error` and **aborts the process**. A `try_` API that
 /// aborts is worse than an infallible one, because a caller reasonably
 /// reads the `Result` as covering allocation (issue #575).
+///
+/// **The convolution traversal no longer calls this.** It was where the
+/// module's memory went: 384 MB of a 464 MiB peak on a 4000x4000 `Rgb8`
+/// integer `conv` over a 48 MB input. [`Scan`] widens a rolling window of
+/// rows instead, which took the same measurement to 98 MiB, and the same
+/// change reads on `sobel` and on `gaussblur` (issue #575). Nor does
+/// [`Raster::try_compass`] any more: it folds each result into its combine
+/// off that result's own bytes (issue #790). What is left on this function
+/// is the two correlations' **template**, which they read whole at every
+/// output sample and which is bounded by the operand a caller passes rather
+/// than by the image. Their image operand goes through [`RowWindow`] like the
+/// traversal's (issue #791).
 fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let fmt = r.format();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
@@ -1030,27 +1039,71 @@ fn raster_from_f64(
 ///
 /// Same [`alloc_op_output`] / [`Raster::from_op_output`] pair as
 /// [`raster_from_f64`], for the same reason (issue #575).
+///
+/// Takes an iterator rather than a slice, so its one caller does not have to
+/// materialise a whole image of `i64` to be walked once and dropped
+/// (issue #790). `ExactSizeIterator` is what keeps the length assertion, which
+/// a plain `Iterator` would have quietly taken away.
 fn raster_from_i64(
     src: &Raster,
     w: u32,
     h: u32,
     fmt: PixelFormat,
-    samples: &[i64],
+    samples: impl ExactSizeIterator<Item = i64>,
 ) -> Result<Raster, RasterError> {
     debug_assert_eq!(samples.len(), w as usize * h as usize * fmt.channels());
     let mut data = alloc_op_output(w, h, fmt)?;
     if fmt.bytes_per_channel() == 1 {
-        for (out, &v) in data.iter_mut().zip(samples) {
+        for (out, v) in data.iter_mut().zip(samples) {
             *out = v as u8;
         }
     } else {
-        for (out, &v) in data.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
+        for (out, v) in data.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
             *out = (v as u16).to_ne_bytes();
         }
     }
     let mut out = Raster::from_op_output(w, h, fmt, data)?;
     out.carry_meta_from(src);
     Ok(out)
+}
+
+/// Fold one compass result into the running combine, reading its samples off
+/// its own bytes rather than out of a widened copy.
+///
+/// `first` seeds the accumulator instead of combining into it, which is what
+/// `planes[0][i].abs()` used to do; the decode is chosen once per result
+/// rather than once per sample, which is the only reason this is not simply a
+/// `sample_at` call in the loop.
+fn fold_abs_samples(acc: &mut [f64], r: &Raster, first: bool, combine: Combine) {
+    let mut apply = |i: usize, v: f64| {
+        let v = v.abs();
+        acc[i] = if first {
+            v
+        } else {
+            match combine {
+                Combine::Max => acc[i].max(v),
+                Combine::Sum => acc[i] + v,
+            }
+        };
+    };
+    let data = r.data();
+    match r.format().bytes_per_channel() {
+        1 => {
+            for (i, &b) in data.iter().enumerate() {
+                apply(i, f64::from(b));
+            }
+        }
+        2 => {
+            for (i, c) in data.as_chunks::<2>().0.iter().enumerate() {
+                apply(i, f64::from(u16::from_ne_bytes(*c)));
+            }
+        }
+        _ => {
+            for (i, c) in data.as_chunks::<4>().0.iter().enumerate() {
+                apply(i, f64::from(f32::from_ne_bytes(*c)));
+            }
+        }
+    }
 }
 
 /// Clamp a mask-relative coordinate to the image, replicating edge pixels
@@ -1213,9 +1266,136 @@ fn compact_taps<C: Copy + Default + PartialEq>(
     taps
 }
 
-/// Everything one traversal shares across the masks it carries: the
-/// source widened to `f64` **once**, the output geometry, and the two
-/// clamped index tables that replace per-tap edge arithmetic.
+/// A rolling `f64` window over a raster's rows, for a traversal that runs
+/// output rows in order and reads the source rows around the one it is on.
+///
+/// Widening the whole source to `f64` first is eight bytes a sample where a
+/// uchar carries one, and it was where the convolution module's memory went:
+/// 384 MB of a 464 MiB peak on a 4000x4000 `Rgb8` integer `conv` over a 48 MB
+/// input (issue #575). Nothing needs it whole. A window of
+/// `span = min(h, lead + trail + 1)` rows is enough, and each source row is
+/// widened exactly once on the way past.
+///
+/// Source row `r` lives at slot `r % span`, which is what [`RowWindow::slot`]
+/// answers. **The residency argument is the whole correctness of it.** Output
+/// row `y` reads clamped source rows `[max(0, y - lead), min(h - 1, y + trail)]`,
+/// an interval of at most `span` values, so no two of them share a residue mod
+/// `span` and none can evict another. [`RowWindow::advance`] fills up to
+/// `min(y + trail, h - 1)` before row `y` runs, and widening row `r` evicts row
+/// `r - span`, which sits below that interval's floor.
+///
+/// Two callers share it: [`Scan`], where `lead` and `trail` come off the mask
+/// height, and the two correlations, where they come off the template's
+/// (issue #791). Both walk `y` upwards and neither ever looks back further
+/// than `lead`.
+struct RowWindow<'a> {
+    /// The source bytes, read one row at a time on the way past.
+    data: &'a [u8],
+    /// Bytes per sample in `data`: 1, 2 or 4, the three carriers
+    /// [`samples_f64`] widens.
+    depth: usize,
+    /// `span` source rows widened to `f64`, source row `r` at slot
+    /// `r % span`.
+    window: Vec<f64>,
+    /// How many source rows `window` holds.
+    span: usize,
+    /// The next source row [`RowWindow::advance`] will widen. Advancing to a
+    /// row already resident is free, so the total work stays at one widening
+    /// per source row however tall the mask or template is.
+    next: usize,
+    /// The furthest row **below** the output row a read reaches, which is how
+    /// far ahead of `y` the window has to be filled.
+    trail: usize,
+    /// Source rows.
+    h: usize,
+    /// Samples in one source row, which is one window slot.
+    row_stride: usize,
+}
+
+impl<'a> RowWindow<'a> {
+    /// Reserve a window big enough for a traversal that reads `lead` rows
+    /// above and `trail` rows below the output row it is on.
+    ///
+    /// The reservation goes through [`try_buffer`], so a host that cannot
+    /// serve it gets [`RasterError::AllocationFailed`] rather than
+    /// `handle_alloc_error` and an aborted process. The error names the
+    /// source raster and not the window, because that is what a caller
+    /// holding it has.
+    ///
+    /// A raster cannot be zero-height (`RasterError::ZeroDimension`), so the
+    /// span is at least one row and the residue arithmetic has no division by
+    /// zero in it.
+    fn new(src: &'a Raster, lead: usize, trail: usize) -> Result<RowWindow<'a>, RasterError> {
+        let h = src.height() as usize;
+        let row_stride = src.width() as usize * src.format().channels();
+        let span = (lead + trail + 1).min(h);
+        let mut window = try_buffer::<f64>(src.width(), src.height(), span * row_stride)?;
+        window.resize(span * row_stride, 0.0);
+        Ok(RowWindow {
+            data: src.data(),
+            depth: src.format().bytes_per_channel(),
+            window,
+            span,
+            next: 0,
+            trail,
+            h,
+            row_stride,
+        })
+    }
+
+    /// Where source row `row` sits in the window, as a sample offset.
+    #[inline]
+    fn slot(&self, row: usize) -> usize {
+        (row % self.span) * self.row_stride
+    }
+
+    /// The widened rows, indexed from a [`RowWindow::slot`] base.
+    #[inline]
+    fn samples(&self) -> &[f64] {
+        &self.window
+    }
+
+    /// Widen every source row output row `y` reaches that is not resident
+    /// yet, which is every row up to `min(y + trail, h - 1)`.
+    ///
+    /// This is [`samples_f64`] one row at a time, over the same three carriers
+    /// and producing the same values; the widening moved here rather than
+    /// changing.
+    fn advance(&mut self, y: usize) {
+        let (data, depth, stride) = (self.data, self.depth, self.row_stride);
+        let last = (y + self.trail).min(self.h - 1);
+        while self.next <= last {
+            let start = self.next * stride;
+            let base = (self.next % self.span) * stride;
+            let row = &mut self.window[base..base + stride];
+            match depth {
+                1 => {
+                    for (out, &b) in row.iter_mut().zip(&data[start..start + stride]) {
+                        *out = b as f64;
+                    }
+                }
+                2 => {
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let p = (start + i) * 2;
+                        *out = u16::from_ne_bytes([data[p], data[p + 1]]) as f64;
+                    }
+                }
+                _ => {
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let p = (start + i) * 4;
+                        *out = f32::from_ne_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                            as f64;
+                    }
+                }
+            }
+            self.next += 1;
+        }
+    }
+}
+
+/// Everything one traversal shares across the masks it carries: a rolling
+/// window of the source widened to `f64`, the output geometry, and the
+/// two clamped index tables that replace per-tap edge arithmetic.
 ///
 /// The tables are `vips_embed(..., VIPS_EXTEND_COPY)` expressed as
 /// indices rather than as pixels: `convf.c:335-341` embeds the input into
@@ -1228,8 +1408,17 @@ fn compact_taps<C: Copy + Default + PartialEq>(
 /// `kw / 2` over the masks in the traversal, so masks of different sizes
 /// (the 90-degree rotation of a non-square mask, for one) share one pair
 /// of tables.
-struct Scan {
-    samples: Vec<f64>,
+///
+/// # The rows it reads from
+///
+/// [`RowWindow`] holds `min(h, mask height)` source rows widened to `f64`
+/// rather than the whole image, and `ytab` names a **window slot** instead of
+/// an absolute offset, which is what keeps [`Scan::add_tap`] the same code
+/// reading the same values in the same order (issue #575). The residency
+/// argument and the measurement are on `RowWindow`.
+struct Scan<'a> {
+    /// The source rows this traversal can currently reach, widened.
+    rows: RowWindow<'a>,
     w: usize,
     h: usize,
     channels: usize,
@@ -1238,7 +1427,7 @@ struct Scan {
     xtab: Vec<usize>,
 }
 
-impl Scan {
+impl<'a> Scan<'a> {
     /// Validate every mask's scale and offset, then decode `src` and build
     /// the tables.
     ///
@@ -1249,9 +1438,9 @@ impl Scan {
     /// silently wraps to black in release. Both are rejected here, at the
     /// one boundary every caller passes through.
     fn new<const M: usize>(
-        src: &Raster,
+        src: &'a Raster,
         masks: &[&DenseKernel; M],
-    ) -> Result<Scan, ConvolutionError> {
+    ) -> Result<Scan<'a>, ConvolutionError> {
         for mask in masks {
             if mask.scale == 0.0 {
                 return Err(ConvolutionError::ZeroScale);
@@ -1264,19 +1453,19 @@ impl Scan {
         }
         let (w, h) = (src.width() as usize, src.height() as usize);
         let channels = src.format().channels();
-        let row_stride = w * channels;
         let oy = masks.iter().map(|m| m.h / 2).max().unwrap_or(0);
         let ox = masks.iter().map(|m| m.w / 2).max().unwrap_or(0);
         let ty = masks.iter().map(|m| m.h - 1 - m.h / 2).max().unwrap_or(0);
         let tx = masks.iter().map(|m| m.w - 1 - m.w / 2).max().unwrap_or(0);
+        let rows = RowWindow::new(src, oy, ty)?;
         let ytab = (0..h + oy + ty)
-            .map(|t| clamp_coord(t as i64 - oy as i64, src.height()) * row_stride)
+            .map(|t| rows.slot(clamp_coord(t as i64 - oy as i64, src.height())))
             .collect();
         let xtab = (0..w + ox + tx)
             .map(|t| clamp_coord(t as i64 - ox as i64, src.width()) * channels)
             .collect();
         Ok(Scan {
-            samples: samples_f64(src)?,
+            rows,
             w,
             h,
             channels,
@@ -1305,7 +1494,8 @@ impl Scan {
         (lo, hi, (lo + tx).saturating_sub(ox) * self.channels)
     }
 
-    /// Add one tap's contribution across a whole output row.
+    /// Add one tap's contribution across a whole output row, reading the
+    /// source row already resident at window offset `row`.
     ///
     /// Taps are applied to an output row in mask order, exactly the order
     /// the per-sample accumulator used to add them in, so the float sums
@@ -1320,7 +1510,7 @@ impl Scan {
         mut fma: impl FnMut(&mut A, C, f64),
     ) {
         let (lo, hi, start) = self.interior(tx);
-        let (samples, xtab) = (&self.samples[..], &self.xtab[..]);
+        let (samples, xtab) = (self.rows.samples(), &self.xtab[..]);
         for x in 0..lo {
             let col = xtab[x + tx];
             for band in 0..self.channels {
@@ -1333,7 +1523,7 @@ impl Scan {
         }
         if hi > lo {
             // Guarded rather than left to an empty slice: a mask wider
-            // than the image can push `start` past the end of `samples`
+            // than the image can push `start` past the end of the row
             // even when the span itself is empty, and `&v[n..n]` still
             // demands `n <= v.len()`.
             let (a, b) = (lo * self.channels, hi * self.channels);
@@ -1362,7 +1552,7 @@ impl Scan {
     /// offset summand goes (`convf.c:172`).
     #[inline]
     fn float<const M: usize>(
-        &self,
+        &mut self,
         taps: &[Vec<Tap<f64>>; M],
         init: [f64; M],
         mut emit: impl FnMut(usize, [f64; M]),
@@ -1371,6 +1561,7 @@ impl Scan {
         let mut acc: [Vec<f64>; M] = std::array::from_fn(|_| vec![0.0f64; stride]);
         let mut idx = 0;
         for y in 0..self.h {
+            self.rows.advance(y);
             for ((row, mask), &seed) in acc.iter_mut().zip(taps).zip(&init) {
                 row.fill(seed);
                 for t in mask {
@@ -1394,7 +1585,7 @@ impl Scan {
     /// [`Precision::Integer`].
     #[inline]
     fn int<const M: usize>(
-        &self,
+        &mut self,
         taps: &[Vec<Tap<i64>>; M],
         mut emit: impl FnMut(usize, [i64; M]),
     ) {
@@ -1402,6 +1593,7 @@ impl Scan {
         let mut acc: [Vec<i64>; M] = std::array::from_fn(|_| vec![0i64; stride]);
         let mut idx = 0;
         for y in 0..self.h {
+            self.rows.advance(y);
             for (row, mask) in acc.iter_mut().zip(taps) {
                 row.fill(0);
                 for t in mask {
@@ -1536,7 +1728,7 @@ fn conv_planes<const M: usize>(
     masks: [&DenseKernel; M],
     precision: Precision,
 ) -> Result<[Raster; M], ConvolutionError> {
-    let scan = Scan::new(src, &masks)?;
+    let mut scan = Scan::new(src, &masks)?;
     let (w, h) = (src.width(), src.height());
     let channels = src.format().channels();
 
@@ -1722,6 +1914,27 @@ impl Raster {
     /// scale, [`ConvolutionError::NonFiniteMaskParameter`] for a `NaN` or
     /// infinite one, or [`ConvolutionError::Raster`] on allocation
     /// failure.
+    ///
+    /// # What it costs to run
+    ///
+    /// One image-sized allocation, the output, plus a row window of
+    /// `mask height * width * bands * 8` bytes. Peak live memory over a
+    /// three-band uchar image is three bytes a pixel at integer precision and
+    /// twelve at float, where the output is a float image; measured at
+    /// 4000x4000 `Rgb8`, a 3x3 integer `conv` peaks at 98 MiB over a 48 MB
+    /// input.
+    ///
+    /// It used to widen the whole source to `f64` first, which was eight bytes
+    /// a sample on top of all that: the same measurement read 464 MiB, ten
+    /// times the image it was handed (issue #575). `sobel`, `scharr`,
+    /// `prewitt`, `convsep`, `gaussblur`, `compass` and canny's gradient stage
+    /// all run the same traversal and all moved with it.
+    ///
+    /// `tests/convolution_image_sized_allocations.rs` holds those numbers
+    /// rather than this paragraph asserting them: it counts image-sized
+    /// allocations and peak live image-sized bytes a pixel through a counting
+    /// allocator, at two image sizes so a budget has to be a rate, and pins
+    /// both at what they measure.
     pub fn try_conv(
         &self,
         kernel: &Kernel,
@@ -1844,25 +2057,20 @@ impl Raster {
         // Take the absolute value of every result, then combine
         // (vips_abs + vips_bandrank / vips_sum). All results share one
         // format because they come from the same input and precision.
+        //
+        // Folded off each result's own bytes, one result at a time. This used
+        // to widen all `times` of them with [`samples_f64`] first and hold
+        // every widening live at once, which is `times * 8` bytes a sample for
+        // a combine that reads each sample exactly once: 96 of the 159 bytes a
+        // pixel a four-round uchar compass cost, and the whole difference
+        // between 36x the input and 8x it (issue #790).
         let (w, h) = (self.width(), self.height());
         let channels = results[0].format().channels();
-        let planes: Vec<Vec<f64>> = results
-            .iter()
-            .map(samples_f64)
-            .collect::<Result<_, RasterError>>()?;
-        let n = planes[0].len();
+        let n = w as usize * h as usize * channels;
         let mut combined = try_buffer::<f64>(w, h, n)?;
         combined.resize(n, 0.0);
-        for i in 0..n {
-            let mut acc: f64 = planes[0][i].abs();
-            for plane in &planes[1..] {
-                let v = plane[i].abs();
-                acc = match combine {
-                    Combine::Max => acc.max(v),
-                    Combine::Sum => acc + v,
-                };
-            }
-            combined[i] = acc;
+        for (round, result) in results.iter().enumerate() {
+            fold_abs_samples(&mut combined, result, round == 0, combine);
         }
 
         let fmt = results[0].format();
@@ -1884,9 +2092,16 @@ impl Raster {
                     .expect("validated channel count has a 16-bit format"),
             };
             let max = depth_max(out_fmt);
-            let mut vals = try_buffer::<i64>(w, h, n)?;
-            vals.extend(combined.iter().map(|&v| (v as i64).min(max)));
-            Ok(raster_from_i64(like, w, h, out_fmt, &vals)?)
+            // Straight into the output raster rather than through a whole
+            // `Vec<i64>` of clipped samples that is walked once and dropped,
+            // which was another eight bytes a sample (issue #790).
+            Ok(raster_from_i64(
+                like,
+                w,
+                h,
+                out_fmt,
+                combined.iter().map(|&v| (v as i64).min(max)),
+            )?)
         }
     }
 
@@ -1997,7 +2212,7 @@ impl Raster {
     /// sense in which this is still not abort-free.
     ///
     /// A test holds that, rather than only this paragraph asserting it.
-    /// `tests/sharpen_canny_image_sized_allocations.rs` counts the path's
+    /// `tests/convolution_image_sized_allocations.rs` counts the path's
     /// image-sized allocations and its peak live image-sized bytes per pixel
     /// through a counting allocator, at two image sizes so the budgets have to
     /// hold as rates, and pins both at what they measure. Either of the two
@@ -2109,9 +2324,13 @@ impl Raster {
         let (w, h) = (self.width(), self.height());
         let (tw, th) = (template.width() as usize, template.height() as usize);
         let n_pels = (tw * th) as f64;
-        let input = samples_f64(self)?;
+        // The template is read whole at every output sample, so it is widened
+        // whole; the image is read as a sliding window of `th` rows, so it is
+        // not (issue #791).
         let refs = samples_f64(template)?;
         let row_stride = w as usize * channels;
+        let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
+        let mut rows = RowWindow::new(self, ay as usize, th - 1 - ay as usize)?;
 
         // Pre-generate: per-band template mean and
         // sqrt(sum((ref - mean)^2)) (vips_spcor_pre_generate).
@@ -2131,19 +2350,25 @@ impl Raster {
             c1[b] = sum2.sqrt();
         }
 
-        let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
-        let mut out = try_buffer::<f64>(w, h, input.len())?;
-        out.resize(input.len(), 0.0);
+        // Straight into the output raster's bytes. This used to fill a whole
+        // `Vec<f64>` in output order and then hand it to `raster_from_f64`,
+        // which walked it once: eight bytes a sample for a buffer written and
+        // read in the same order, on top of the four the raster itself carries
+        // (issue #791).
+        let fmt = float_format(channels);
+        let mut data = alloc_op_output(w, h, fmt)?;
         for y in 0..h as i64 {
+            rows.advance(y as usize);
+            let input = rows.samples();
             for x in 0..w as i64 {
                 for b in 0..channels {
                     // Mean of the input window under the template.
                     let mut sum1 = 0.0;
                     for j in 0..th as i64 {
-                        let sy = clamp_coord(y + j - ay, h);
+                        let sy = rows.slot(clamp_coord(y + j - ay, h));
                         for i in 0..tw as i64 {
                             let sx = clamp_coord(x + i - ax, w);
-                            sum1 += input[sy * row_stride + sx * channels + b];
+                            sum1 += input[sy + sx * channels + b];
                         }
                     }
                     let imean = sum1 / n_pels;
@@ -2153,10 +2378,10 @@ impl Raster {
                     let mut sum2 = 0.0;
                     let mut sum3 = 0.0;
                     for j in 0..th as i64 {
-                        let sy = clamp_coord(y + j - ay, h);
+                        let sy = rows.slot(clamp_coord(y + j - ay, h));
                         for i in 0..tw as i64 {
                             let sx = clamp_coord(x + i - ax, w);
-                            let ip = input[sy * row_stride + sx * channels + b];
+                            let ip = input[sy + sx * channels + b];
                             let rp = refs[(j as usize * tw + i as usize) * channels + b];
                             let t = ip - imean;
                             sum2 += t * t;
@@ -2167,12 +2392,15 @@ impl Raster {
                     let c2 = c1[b] * sum2.sqrt();
                     // A constant reference (or window) is regarded as
                     // uncorrelated.
-                    let cc = if c2 == 0.0 { 0.0 } else { sum3 / c2 };
-                    out[y as usize * row_stride + x as usize * channels + b] = cc;
+                    let cc: f64 = if c2 == 0.0 { 0.0 } else { sum3 / c2 };
+                    let o = y as usize * row_stride + x as usize * channels + b;
+                    data[o * 4..o * 4 + 4].copy_from_slice(&(cc as f32).to_ne_bytes());
                 }
             }
         }
-        Ok(raster_from_f64(self, w, h, channels, &out)?)
+        let mut out = Raster::from_op_output(w, h, fmt, data)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Spatial correlation (libvips `vips_spcor`): each output pixel is
@@ -2199,10 +2427,12 @@ impl Raster {
         let channels = check_correlation_bands(self, template)?;
         let (w, h) = (self.width(), self.height());
         let (tw, th) = (template.width() as usize, template.height() as usize);
-        let input = samples_f64(self)?;
+        // Same split as `try_spcor`: the template whole, the image as a
+        // sliding window of `th` rows (issue #791).
         let refs = samples_f64(template)?;
         let row_stride = w as usize * channels;
         let (ax, ay) = ((tw / 2) as i64, (th / 2) as i64);
+        let mut rows = RowWindow::new(self, ay as usize, th - 1 - ay as usize)?;
 
         // vips__formatalike: any float input switches both sides to the
         // float path (f32 accumulation, CORR_FLOAT); two unsigned inputs
@@ -2210,42 +2440,48 @@ impl Raster {
         // CORR_INT).
         let float_path = self.format().is_float() || template.format().is_float();
 
-        let mut out = try_buffer::<f64>(w, h, input.len())?;
-        out.resize(input.len(), 0.0);
+        // Straight into the output raster's bytes, for the reason `try_spcor`
+        // gives (issue #791).
+        let fmt = float_format(channels);
+        let mut data = alloc_op_output(w, h, fmt)?;
         for y in 0..h as i64 {
+            rows.advance(y as usize);
+            let input = rows.samples();
             for x in 0..w as i64 {
                 for b in 0..channels {
                     let o = y as usize * row_stride + x as usize * channels + b;
                     if float_path {
                         let mut sum = 0.0f32;
                         for j in 0..th as i64 {
-                            let sy = clamp_coord(y + j - ay, h);
+                            let sy = rows.slot(clamp_coord(y + j - ay, h));
                             for i in 0..tw as i64 {
                                 let sx = clamp_coord(x + i - ax, w);
                                 let dif = refs[(j as usize * tw + i as usize) * channels + b]
                                     as f32
-                                    - input[sy * row_stride + sx * channels + b] as f32;
+                                    - input[sy + sx * channels + b] as f32;
                                 sum += dif * dif;
                             }
                         }
-                        out[o] = sum as f64;
+                        data[o * 4..o * 4 + 4].copy_from_slice(&sum.to_ne_bytes());
                     } else {
                         let mut sum = 0u32;
                         for j in 0..th as i64 {
-                            let sy = clamp_coord(y + j - ay, h);
+                            let sy = rows.slot(clamp_coord(y + j - ay, h));
                             for i in 0..tw as i64 {
                                 let sx = clamp_coord(x + i - ax, w);
                                 let t = refs[(j as usize * tw + i as usize) * channels + b] as i64
-                                    - input[sy * row_stride + sx * channels + b] as i64;
+                                    - input[sy + sx * channels + b] as i64;
                                 sum = sum.wrapping_add((t * t) as u32);
                             }
                         }
-                        out[o] = sum as f64;
+                        data[o * 4..o * 4 + 4].copy_from_slice(&(sum as f32).to_ne_bytes());
                     }
                 }
             }
         }
-        Ok(raster_from_f64(self, w, h, channels, &out)?)
+        let mut out = Raster::from_op_output(w, h, fmt, data)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Fast correlation (libvips `vips_fastcor`): each output pixel is the
@@ -2377,7 +2613,7 @@ impl Raster {
         };
         let spun = dense.rot90();
         let masks = [&dense, &spun];
-        let scan = Scan::new(self, &masks)?;
+        let mut scan = Scan::new(self, &masks)?;
         let mut data = alloc_op_output(w, h, fmt)?;
 
         if uchar {
@@ -2878,7 +3114,7 @@ impl Raster {
     /// with the pixel count.
     ///
     /// Both arms are held to that by
-    /// `tests/sharpen_canny_image_sized_allocations.rs`, which budgets each of
+    /// `tests/convolution_image_sized_allocations.rs`, which budgets each of
     /// them separately through a counting allocator; see
     /// [`Raster::try_sharpen`] for what the two numbers mean (issue #700).
     pub fn try_canny(&self, sigma: f64, precision: Precision) -> Result<Raster, ConvolutionError> {
@@ -3579,27 +3815,20 @@ mod tests {
         }
     }
 
-    /// #575: the `f64` widening buffer is reserved fallibly, so a request
-    /// the host cannot serve surfaces as
-    /// [`RasterError::AllocationFailed`] instead of reaching
-    /// `handle_alloc_error` and aborting the process.
+    /// A reservation no allocator can serve is a typed error, and the byte
+    /// count in it is the size of the **request** rather than the raster's
+    /// own length.
     ///
-    /// `samples_f64` is the biggest allocation on the convolution path,
-    /// eight bytes per sample where the source carries one, and every
-    /// `try_` entry point in this module goes through it, so the plain
-    /// `.collect()` it used to be made the whole fallible surface
-    /// abortable. Driving the widening itself to failure would need a
-    /// raster the machine cannot hold, so the reservation is exercised
-    /// directly at a length no allocator can serve; the widening is
-    /// covered by every other convolution test in this file.
+    /// That distinction is the reason [`try_buffer`] takes a length instead
+    /// of reading one off the raster: every intermediate it reserves is some
+    /// multiple of the source, and an error naming the source's byte length
+    /// would understate what failed by four or eight times.
     #[test]
-    fn samples_f64_reserves_fallibly_rather_than_aborting() {
+    fn try_buffer_reports_the_size_of_the_request_not_of_the_raster() {
         assert!(matches!(
             try_buffer::<f64>(1, 1, usize::MAX / 4),
             Err(RasterError::AllocationFailed { .. })
         ));
-        // The byte count in the error is the size of the request, which
-        // is eight times the sample count, not the raster's own length.
         assert!(matches!(
             try_buffer::<f64>(3, 2, usize::MAX),
             Err(RasterError::AllocationFailed {
@@ -3608,9 +3837,394 @@ mod tests {
                 bytes: usize::MAX
             })
         ));
-        // The ordinary path still widens every sample exactly.
-        let im = Raster::new(2, 1, PixelFormat::Gray8, vec![7, 9]).unwrap();
-        assert_eq!(samples_f64(&im).unwrap(), vec![7.0, 9.0]);
+    }
+
+    /// [`samples_f64`] widens all three carriers exactly, which is what
+    /// [`Raster::try_compass`] and the two correlations still read it for.
+    ///
+    /// The old version of this checked the 8-bit arm only, so the `u16` and
+    /// `f32` decodes were asserted by nothing here at all.
+    #[test]
+    fn samples_f64_widens_every_carrier_exactly() {
+        let u8s = Raster::new(2, 1, PixelFormat::Gray8, vec![7, 9]).unwrap();
+        assert_eq!(samples_f64(&u8s).unwrap(), vec![7.0, 9.0]);
+
+        let mut u16s = Vec::new();
+        for v in [7u16, 65535] {
+            u16s.extend_from_slice(&v.to_ne_bytes());
+        }
+        let u16s = Raster::new(2, 1, PixelFormat::Gray16, u16s).unwrap();
+        assert_eq!(samples_f64(&u16s).unwrap(), vec![7.0, 65535.0]);
+
+        let mut f32s = Vec::new();
+        for v in [-1.5f32, 0.25] {
+            f32s.extend_from_slice(&v.to_ne_bytes());
+        }
+        let f32s = Raster::new(2, 1, float_format(1), f32s).unwrap();
+        assert_eq!(samples_f64(&f32s).unwrap(), vec![-1.5, 0.25]);
+    }
+
+    /// #575: the convolution traversal reserves a **row window**, fallibly,
+    /// and the size of that reservation is set by the mask rather than by
+    /// the image.
+    ///
+    /// The test this replaces asserted neither half. It called
+    /// [`try_buffer`] directly and then checked that [`samples_f64`] widened
+    /// two pixels correctly, so putting `let out: Vec<f64> = ....collect();
+    /// Ok(out)` back inside `samples_f64` left every assertion passing: the
+    /// reservation under test was one the test made for itself, and the
+    /// widening under test was never the one the convolution runs. A guard
+    /// that stays green under a mutation of the thing it names is worth
+    /// nothing, so it is replaced rather than kept alongside.
+    ///
+    /// The four assertions each break under a different regression, which is
+    /// why none of them can carry this alone:
+    ///
+    /// * an uncapped run reserves **once** per traversal, so a window
+    ///   re-reserved per row (or a `vec![0.0; n]` put back in place of the
+    ///   [`try_buffer`] call) moves the count;
+    /// * a ceiling far under the whole widening still completes, which is
+    ///   the whole of #575: before the window, this reserved
+    ///   `w * h * bands * 8` bytes and could not;
+    /// * the **same** ceiling completes on an image four times as tall,
+    ///   which is what makes the second assertion a rate rather than a
+    ///   number that happens to fit one image;
+    /// * a ceiling under even the window is
+    ///   [`ConvolutionError::Raster`] and not an abort.
+    #[test]
+    fn the_conv_window_is_reserved_fallibly_and_does_not_scale_with_the_image() {
+        let blur = Kernel {
+            data: vec![vec![1.0; 3]; 3],
+            scale: 9.0,
+        };
+        let im = noise_rgb(64, 64, 34);
+        // The whole-image widening this used to make: 64 * 64 * 3 * 8.
+        let whole = 64 * 64 * 3 * 8;
+        // Three rows of it, which is what a 3-tall mask needs resident.
+        let window = 3 * 64 * 3 * 8;
+
+        let (ok, calls) =
+            with_conv_buffer_probe(u64::MAX, || im.try_conv(&blur, Precision::Integer));
+        assert!(ok.is_ok());
+        assert_eq!(
+            calls, 1,
+            "one traversal must reserve its window once, not once a row"
+        );
+
+        // Comfortably above the window and far below the image.
+        let ceiling = window * 2;
+        assert!(ceiling < whole / 8, "the ceiling has to separate the two");
+        let (windowed, calls) =
+            with_conv_buffer_probe(ceiling, || im.try_conv(&blur, Precision::Integer));
+        assert!(
+            windowed.is_ok(),
+            "a conv must complete under a ceiling of {ceiling} bytes, far below the {whole} the \
+             whole-image widening asked for (issue #575)"
+        );
+        assert_eq!(calls, 1);
+
+        // Four times as tall, same ceiling: the reservation is the mask's
+        // size and not the image's.
+        let tall = noise_rgb(64, 256, 35);
+        let (tall_ok, _) =
+            with_conv_buffer_probe(ceiling, || tall.try_conv(&blur, Precision::Integer));
+        assert!(
+            tall_ok.is_ok(),
+            "the window is bounded by the mask height, so a taller image must fit the same ceiling"
+        );
+
+        let (capped, _) = with_conv_buffer_probe(16, || im.try_conv(&blur, Precision::Integer));
+        let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+        assert!(
+            matches!(
+                capped,
+                Err(ConvolutionError::Raster(
+                    RasterError::AllocationFailed { .. }
+                ))
+            ),
+            "an unservable window must be a typed error, got {got:?}"
+        );
+    }
+
+    /// #575, #790, #791: what each operation still reserves, how many times,
+    /// and that the size of it is set by the mask or the template rather than
+    /// by the image.
+    ///
+    /// Three changes took the whole-image `f64` widenings out of this module
+    /// and each left a different residue, so this is one test with three arms
+    /// rather than three tests:
+    ///
+    /// * **compass** reserves a window per traversal and one accumulator, and
+    ///   widens nothing: #790 folds each result into the combine off its own
+    ///   bytes.
+    /// * **the two correlations** reserve a window and widen the **template**,
+    ///   which they read whole at every output sample. The template is bounded
+    ///   by the operand a caller passes and not by the image, which is what
+    ///   the two ceilings below say: a correlation completes under a ceiling
+    ///   far below its own image, and under the same ceiling on an image four
+    ///   times as tall.
+    /// * and a ceiling under even the window is
+    ///   [`ConvolutionError::Raster`] rather than an abort, on both.
+    ///
+    /// The counts are the load-bearing half, for the reason
+    /// `sharpen_scratch_planes_are_fallible_not_aborting` gives: a `.collect()`
+    /// and a [`try_buffer`] read the same values at every size a test can
+    /// build, so only the count tells them apart. Mutated to check it:
+    /// `.collect()` back inside [`samples_f64`] reddens this test and **nothing
+    /// else in the crate**.
+    #[test]
+    fn every_remaining_intermediate_is_reserved_fallibly_and_bounded_by_its_operand() {
+        let im = noise_rgb(8, 6, 36);
+        let template = noise_rgb(3, 3, 37);
+        let mask = Kernel {
+            data: vec![vec![1.0; 3]; 3],
+            scale: 9.0,
+        };
+
+        let compass = || im.try_compass(&mask, 2, Angle45::D45, Combine::Max, Precision::Integer);
+        let (ok, calls) = with_conv_buffer_probe(u64::MAX, compass);
+        assert!(ok.is_ok());
+        assert_eq!(
+            calls, 3,
+            "two traversals reserve a window each and the combine reserves its accumulator; \
+             nothing widens a result and nothing materialises the clipped samples"
+        );
+
+        for (name, run) in [
+            (
+                "spcor",
+                (|a: &Raster, b: &Raster| a.try_spcor(b)) as fn(&Raster, &Raster) -> _,
+            ),
+            ("fastcor", |a: &Raster, b: &Raster| a.try_fastcor(b)),
+        ] {
+            let (ok, calls) = with_conv_buffer_probe(u64::MAX, || run(&im, &template));
+            assert!(ok.is_ok());
+            assert_eq!(
+                calls, 2,
+                "{name} reserves a row window over the image and widens the template, and \
+                 writes its result straight into the output raster"
+            );
+
+            // 64x64 `Rgb8` is 98304 bytes widened whole; a 3-row window is
+            // 4608, and this ceiling is twice that.
+            let ceiling = 9216;
+            let wide = noise_rgb(64, 64, 38);
+            let tall = noise_rgb(64, 256, 39);
+            for im in [&wide, &tall] {
+                let (out, _) = with_conv_buffer_probe(ceiling, || run(im, &template));
+                assert!(
+                    out.is_ok(),
+                    "{name} on a {}x{} image must complete under a ceiling of {ceiling} bytes: \
+                     the reservation is the template's height, not the image's (issue #791)",
+                    im.width(),
+                    im.height()
+                );
+            }
+
+            let (capped, _) = with_conv_buffer_probe(16, || run(&im, &template));
+            let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+            assert!(
+                matches!(
+                    capped,
+                    Err(ConvolutionError::Raster(
+                        RasterError::AllocationFailed { .. }
+                    ))
+                ),
+                "an unservable {name} window must be a typed error, got {got:?}"
+            );
+        }
+    }
+
+    /// Scalar reference for `fastcor` at one output sample: the sum of
+    /// squared differences between the template and the image window under it,
+    /// read through [`Raster::getpoint`] and so independent of how the
+    /// operation gets at its pixels.
+    fn ref_fastcor(im: &Raster, t: &Raster, x: i64, y: i64, b: usize, float: bool) -> f64 {
+        let (tw, th) = (t.width() as i64, t.height() as i64);
+        let (ax, ay) = (tw / 2, th / 2);
+        let mut fsum = 0.0f32;
+        let mut isum = 0u32;
+        for j in 0..th {
+            let sy = (y + j - ay).clamp(0, im.height() as i64 - 1) as u32;
+            for i in 0..tw {
+                let sx = (x + i - ax).clamp(0, im.width() as i64 - 1) as u32;
+                let r = t.getpoint(i as u32, j as u32)[b];
+                let p = im.getpoint(sx, sy)[b];
+                if float {
+                    let d = r as f32 - p as f32;
+                    fsum += d * d;
+                } else {
+                    let d = r as i64 - p as i64;
+                    isum = isum.wrapping_add((d * d) as u32);
+                }
+            }
+        }
+        if float {
+            f64::from(fsum)
+        } else {
+            f64::from(isum)
+        }
+    }
+
+    /// Scalar reference for `spcor` at one output sample: the normalised
+    /// cross-correlation of the template against the image window under it,
+    /// again through [`Raster::getpoint`].
+    fn ref_spcor(im: &Raster, t: &Raster, x: i64, y: i64, b: usize) -> f64 {
+        let (tw, th) = (t.width() as i64, t.height() as i64);
+        let (ax, ay) = (tw / 2, th / 2);
+        let n = (tw * th) as f64;
+        let mut rmean = 0.0;
+        for j in 0..th {
+            for i in 0..tw {
+                rmean += t.getpoint(i as u32, j as u32)[b];
+            }
+        }
+        rmean /= n;
+        let mut c1 = 0.0;
+        for j in 0..th {
+            for i in 0..tw {
+                let d = t.getpoint(i as u32, j as u32)[b] - rmean;
+                c1 += d * d;
+            }
+        }
+        let c1 = c1.sqrt();
+
+        let window = |j: i64, i: i64| {
+            let sy = (y + j - ay).clamp(0, im.height() as i64 - 1) as u32;
+            let sx = (x + i - ax).clamp(0, im.width() as i64 - 1) as u32;
+            im.getpoint(sx, sy)[b]
+        };
+        let mut imean = 0.0;
+        for j in 0..th {
+            for i in 0..tw {
+                imean += window(j, i);
+            }
+        }
+        imean /= n;
+        let (mut sum2, mut sum3) = (0.0, 0.0);
+        for j in 0..th {
+            for i in 0..tw {
+                let d = window(j, i) - imean;
+                sum2 += d * d;
+                sum3 += (t.getpoint(i as u32, j as u32)[b] - rmean) * d;
+            }
+        }
+        let c2 = c1 * sum2.sqrt();
+        if c2 == 0.0 { 0.0 } else { sum3 / c2 }
+    }
+
+    /// #791: the correlations read their image through the same row window the
+    /// convolution traversal uses, and answer the same thing the whole-image
+    /// widening answered, at **every** output sample.
+    ///
+    /// `correlation_peaks_at_match` asserts one point of one image and
+    /// `fastcor_hand_values` a 2x2, so an eviction that only bites when the
+    /// template is taller than the image, or when the image is one row, would
+    /// have gone through both. Here it is six image shapes against six
+    /// template shapes, on both operations and on both of `fastcor`'s
+    /// accumulation paths, compared against a reference that reads its pixels
+    /// with `getpoint` and so cannot share the indexing under test.
+    #[test]
+    fn the_correlation_row_window_matches_the_scalar_reference_at_every_sample() {
+        for (w, h) in [(1u32, 1u32), (1, 6), (6, 1), (2, 2), (5, 4), (7, 9)] {
+            let eight = noise_gray(w, h, 3_000 + w * 31 + h);
+            let floats = float_from(w, h, |x, y| (x * 7 + y * 13) as f32 * 0.25 - 3.0);
+            for (tw, th) in [(1u32, 1u32), (3, 3), (2, 2), (3, 5), (5, 3), (3, 9)] {
+                let t8 = noise_gray(tw, th, 4_000 + tw * 31 + th);
+                let tf = float_from(tw, th, |x, y| (x * 3 + y * 5) as f32 * 0.5 - 1.0);
+                for (im, t, float) in [(&eight, &t8, false), (&floats, &tf, true)] {
+                    let fast = im.fastcor(t);
+                    let ncc = im.spcor(t);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let want = ref_fastcor(im, t, x as i64, y as i64, 0, float);
+                            let got = fast.getpoint(x, y)[0];
+                            assert!(
+                                (got - want).abs() <= 1e-3 * want.abs().max(1.0),
+                                "fastcor {tw}x{th} template on a {w}x{h} image at ({x},{y}): \
+                                 got {got}, expected {want}"
+                            );
+                            let want = ref_spcor(im, t, x as i64, y as i64, 0);
+                            let got = ncc.getpoint(x, y)[0];
+                            assert!(
+                                (got - want).abs() <= 1e-3 * want.abs().max(1.0),
+                                "spcor {tw}x{th} template on a {w}x{h} image at ({x},{y}): \
+                                 got {got}, expected {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// #575: the rolling window answers the same image the whole-image
+    /// widening did, at **every** output sample and not at four probe
+    /// points.
+    ///
+    /// This is the guard the window itself needs, because the way a rolling
+    /// window goes wrong is a row read out of the wrong slot, which moves
+    /// some rows of some images and leaves the rest exactly right. The
+    /// pinned oracle captures and the FNV hashes in this file all run one
+    /// image shape against one mask shape, and
+    /// `conv_matches_reference_on_noise` samples four points; none of them
+    /// would see an eviction that only bites when the mask is taller than
+    /// the image, or when the image is one row.
+    ///
+    /// So: every combination of six image shapes and ten mask shapes, on one
+    /// band and on three, compared against the scalar reference at every
+    /// sample. The mask shapes deliberately include an even height (where
+    /// `kh / 2` and `kh - 1 - kh / 2` differ, so the window is not centred),
+    /// a mask taller than every image here, and both degenerate 1-row and
+    /// 1-column masks. The three-band pass is not decoration: a slot base
+    /// that lost its band stride would be exactly right on every one-band
+    /// image and wrong on every other.
+    #[test]
+    fn the_row_window_matches_the_scalar_reference_at_every_sample() {
+        for (w, h) in [(1u32, 1u32), (1, 7), (7, 1), (2, 2), (5, 4), (9, 11)] {
+            for im in [
+                noise_gray(w, h, 1_000 + w * 37 + h),
+                noise_rgb(w, h, 2_000 + w * 37 + h),
+            ] {
+                let bands = im.format().channels();
+                for (kw, kh) in [
+                    (1usize, 1usize),
+                    (3, 3),
+                    (1, 5),
+                    (5, 1),
+                    (2, 2),
+                    (4, 3),
+                    (3, 4),
+                    (7, 9),
+                    (9, 7),
+                    (2, 9),
+                ] {
+                    // Distinct coefficients, so a tap landing on the wrong
+                    // row cannot cancel out against a symmetric neighbour.
+                    let data: Vec<Vec<f64>> = (0..kh)
+                        .map(|j| (0..kw).map(|i| (j * kw + i) as f64 - 3.0).collect())
+                        .collect();
+                    let kernel = Kernel { data, scale: 7.0 };
+                    let out = im.conv(&kernel, Precision::Float);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let expected = ref_conv(&im, &kernel, x as i64, y as i64);
+                            let got = out.getpoint(x, y);
+                            for b in 0..bands {
+                                assert!(
+                                    (got[b] - expected[b]).abs()
+                                        <= 1e-3 * expected[b].abs().max(1.0),
+                                    "{kw}x{kh} mask on a {bands}-band {w}x{h} image at \
+                                     ({x},{y}) band {b}: got {}, expected {}",
+                                    got[b],
+                                    expected[b]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// #627: the `f32` widening `try_sharpen` sits on is fallible, so an
@@ -4129,6 +4743,85 @@ mod tests {
                 assert!((sum - (a + b)).abs() < 1e-3);
             }
         }
+    }
+
+    /// #790: the combine reads each result off its own bytes, so it has one
+    /// decode per carrier depth, and each has to be exercised on **values**
+    /// rather than only on the output format.
+    ///
+    /// Nothing here did. `compass_matches_manual_combination` runs float
+    /// precision on a `Gray8` input, so its results are float and only the
+    /// 4-byte decode is reached, and `compass_integer_formats` asserts formats
+    /// and never a sample. Dropping the high byte of the 2-byte decode left
+    /// both of them green, which the mutation pass on #790 found.
+    ///
+    /// The 16-bit fixture spans well past 255 on purpose: a 2-byte decode that
+    /// reads only the low byte is exactly right on every sample below 256.
+    #[test]
+    fn compass_combines_each_integer_carrier_off_its_own_bytes() {
+        let sobel = Kernel {
+            data: vec![
+                vec![1.0, 2.0, 1.0],
+                vec![0.0, 0.0, 0.0],
+                vec![-1.0, -2.0, -1.0],
+            ],
+            scale: 1.0,
+        };
+        let sobel45 = Kernel {
+            data: rot45_kernel(&sobel.data, Angle45::D45),
+            scale: 1.0,
+        };
+        let eight = noise_gray(9, 7, 41);
+        let sixteen = gray16_from(9, 7, |x, y| ((x * 7919 + y * 20011) % 65536) as u16);
+        for im in [eight, sixteen] {
+            let a = im.conv(&sobel, Precision::Integer);
+            let b = im.conv(&sobel45, Precision::Integer);
+            let max = im.compass(&sobel, 2, Angle45::D45, Combine::Max, Precision::Integer);
+            let sum = im.compass(&sobel, 2, Angle45::D45, Combine::Sum, Precision::Integer);
+            let ceiling = f64::from(depth_max(sum.format()) as u32);
+            for y in 0..im.height() {
+                for x in 0..im.width() {
+                    let (pa, pb) = (a.getpoint(x, y)[0], b.getpoint(x, y)[0]);
+                    assert_eq!(
+                        max.getpoint(x, y)[0],
+                        pa.max(pb),
+                        "{:?} Max at ({x},{y})",
+                        im.format()
+                    );
+                    assert_eq!(
+                        sum.getpoint(x, y)[0],
+                        (pa + pb).min(ceiling),
+                        "{:?} Sum at ({x},{y})",
+                        im.format()
+                    );
+                }
+            }
+        }
+    }
+
+    /// #790: the combine seeds from the first round's response rather than
+    /// folding it into the zeroed accumulator, which is only observable over a
+    /// non-finite sample.
+    ///
+    /// Every finite sample makes the two identical, because `0` is the
+    /// identity of both combines over an absolute value. `f64::max` is not
+    /// symmetric in `NaN` though: it answers the *other* operand, so folding
+    /// round 0 into a zero seed reads `0` where seeding from it reads `NaN`.
+    /// That is what the old code did, one whole `f64` copy of every result
+    /// ago, and it is what this keeps.
+    #[test]
+    fn compass_seeds_the_combine_from_the_first_round_and_not_from_zero() {
+        let im = float_from(2, 1, |x, _| if x == 0 { f32::NAN } else { 4.0 });
+        let identity = Kernel {
+            data: vec![vec![1.0]],
+            scale: 1.0,
+        };
+        let out = im.compass(&identity, 1, Angle45::D45, Combine::Max, Precision::Float);
+        assert!(
+            out.getpoint(0, 0)[0].is_nan(),
+            "one round of |NaN| is NaN, not the zero the accumulator started at"
+        );
+        assert_eq!(out.getpoint(1, 0), vec![4.0]);
     }
 
     /// compass at integer precision keeps the unsigned format for Max and
