@@ -1620,11 +1620,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   API docs gets the same answer. What changed here is only the two `colour.rs`
   allocations the round trip reaches, which is all #672 was ever about.
 
-- The colour-difference and ICC paths no longer abort the process when they
-  cannot allocate, so `try_de76`, `try_de00`, `try_de00_sharma`, `try_de_cmc`,
-  `try_icc_import_with`, `try_icc_export_with` and `try_icc_transform` report
-  the failure as `ColourError::Raster` rather than ending it (issue #685).
-  No new public error variant: this reports through the one #672 added.
+- The fourteen image-sized buffers the colour-difference and ICC paths allocate
+  are now reserved fallibly, so `try_de76`, `try_de00`, `try_de00_sharma`,
+  `try_de_cmc`, `try_icc_import_with`, `try_icc_export_with` and
+  `try_icc_transform` report a host that cannot serve one of them as
+  `ColourError::Raster` instead of aborting the process (issue #685). No new
+  public error variant: this reports through the one #672 added.
+
+  **This does not make the ICC paths abort-free**, and the claim is deliberately
+  the fourteen sites rather than the call. On a LUT profile both directions hand
+  the pixels to a moxcms transform, and three katana stages inside it size
+  intermediates from the image and allocate them with a plain `vec![]`
+  (`conversions/katana/md3x3.rs`, `md4x3.rs` and `md_nx3.rs` in 0.8.1), so that
+  route still reaches `handle_alloc_error`. moxcms is a required dependency with
+  `any_to_any` on, and `any_to_any` is exactly what turns the katana engine on,
+  so this is the default build and not a corner. The fallible spelling already
+  exists upstream, a `try_vec!` over `try_reserve_exact` returning
+  `CmsError::OutOfMemory`, and those three stages just do not use it; issue #693
+  tracks the fix there. The matrix-shaper and grey-TRC routes evaluate in this
+  crate and never reach any of it, and the module docs now carry the same
+  boundary so the API and the CHANGELOG say one thing.
 
   #678 made `try_colourspace`'s output fallible and deliberately converted only
   the sites on that route. Fourteen image-sized allocations were left over
@@ -1647,6 +1662,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Raster::try_clone`, which exists for exactly this. The panicking twins keep
   panicking, as they do on every other `ColourError`.
 
+  Reserving once and pushing is only abort-free while the reserve and the fill
+  agree, and the four ICC conversions are the ones where they could drift: they
+  size a plane from a `(width, height)` and fill it from a slice they were
+  handed, which are two independent inputs. Each of the four now opens with a
+  `debug_assert_eq!` tying the slice back to the geometry, because a `push` past
+  the reservation grows through the infallible path on the largest buffers in
+  the module and every allocation test would still pass, since those starve the
+  reserve rather than filling it.
+
   Testing this is the whole difficulty and it is worth writing down, because a
   byte ceiling cannot reach any of it. Both dE operands convert to Lab first,
   and after #678 those conversions are themselves fallible, so any ceiling low
@@ -1666,6 +1690,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same size. They are covered jointly by a check that counts the refusals
   the function offers up instead of sizing them, which is what notices if
   either site quietly goes back to an infallible `Vec::with_capacity`.
+
+  The ceiling has a blind spot of its own, and it took the review to find it: it
+  answers *before* `try_reserve_exact` runs, so every one of those site checks
+  stays green with the reservation put back to an infallible `reserve_exact` and
+  the copy back to `Clone::clone`. The whole change undone, 1562 lib tests
+  passing. They pin the routing, which is worth having, and say nothing about
+  the helper being fallible. Two checks say that directly now.
+  `colour_plane_allocation_reports_failure_rather_than_aborting` asks
+  `alloc_colour_plane` for a 512 PiB plane with no ceiling in play, so the
+  refusal is the real allocator's and the infallible spelling aborts on it. The
+  export's copy of an already-Lab input cannot be reached that way at any size a
+  test can build, so `raster.rs` keeps a `cfg(test)` counter on
+  `Raster::try_clone` and the export check counts the delegation instead of
+  starving it.
 
   On the zeroing cost #672's entry records: twelve of the fourteen dodge it
   entirely, because they reserve and then push or copy and never touch a byte

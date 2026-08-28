@@ -401,7 +401,8 @@ impl Raster {
         })
     }
 
-    /// A fallible [`Clone`], for the operation paths that must not abort.
+    /// A fallible [`Clone`] **of the pixel buffer**, for the operation paths
+    /// that must not abort.
     ///
     /// `Raster` derives `Clone` and cloning copies the whole pixel buffer,
     /// which on a full-resolution image is the largest single allocation an
@@ -417,6 +418,14 @@ impl Raster {
     /// copy is not spelled as `Raster::new` over a fresh buffer, which would
     /// silently reset all of it.
     ///
+    /// And it is where the fallibility stops. `fields.clone()` copies the
+    /// attachments through the same infallible allocation `Clone` uses, an
+    /// embedded ICC profile among them, so a host that cannot serve *that*
+    /// still aborts. A profile is a bounded copy rather than an image-sized
+    /// one, which is why it sits outside what #685 set out to remove, but it
+    /// means this method is not abort-free and the first line says "of the
+    /// pixel buffer" for that reason.
+    ///
     /// No budget is applied. The source raster is already held in memory and
     /// already passed whatever budget built it, so a copy of it is by
     /// definition in budget; the fallibility here is against the allocator,
@@ -427,6 +436,11 @@ impl Raster {
     /// Returns [`RasterError::AllocationFailed`] if the allocator cannot
     /// satisfy a buffer the same size as this one.
     pub(crate) fn try_clone(&self) -> Result<Self, RasterError> {
+        // Test-only: `counting_try_clones` reads this, so a caller that goes
+        // back to `Clone::clone` is visible to a test even where no ceiling can
+        // reach the copy.
+        #[cfg(test)]
+        TRY_CLONE_CALLS.with(|n| n.set(n.get() + 1));
         let mut data: Vec<u8> = Vec::new();
         data.try_reserve_exact(self.data.len())
             .map_err(|_| RasterError::AllocationFailed {
@@ -823,6 +837,41 @@ impl<'a> RegionView<'a> {
         let start = abs_y as usize * stride + abs_x as usize * bpp;
         Some(&self.raster.data()[start..start + bpp])
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how many rasters the calling thread has copied through
+    /// [`Raster::try_clone`].
+    ///
+    /// The colour module's ICC export copies an input that is already Lab, and
+    /// that copy is one of the fourteen allocation sites #685 made fallible. It
+    /// is the only one of the fourteen no ceiling can prove: `colour.rs` puts
+    /// its ceiling in the wrapper, where it answers before `try_clone` runs,
+    /// and the real allocator will not refuse a copy of a raster small enough
+    /// for a test to have built in the first place. What is left to check is
+    /// the delegation, so this counts it. A wrapper that goes back to
+    /// `Clone::clone` leaves the count at zero.
+    static TRY_CLONE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: run `f` and report how many [`Raster::try_clone`] copies it made
+/// on the calling thread.
+///
+/// The counter is thread-local and saved and restored around `f`, so parallel
+/// tests and nested uses do not perturb one another, matching the colour
+/// module's own ceiling hook.
+#[cfg(test)]
+pub(crate) fn counting_try_clones<R>(f: impl FnOnce() -> R) -> (R, u32) {
+    struct Restore(u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TRY_CLONE_CALLS.with(|n| n.set(self.0));
+        }
+    }
+    let _restore = Restore(TRY_CLONE_CALLS.with(|n| n.replace(0)));
+    let out = f();
+    (out, TRY_CLONE_CALLS.with(std::cell::Cell::get))
 }
 
 #[cfg(test)]
