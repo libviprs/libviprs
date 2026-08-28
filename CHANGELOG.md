@@ -1648,6 +1648,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy. I found that by mutating the second check away and watching the tests
   stay green.
 
+- `conv`, `convsep`, `compass`, `gaussblur`, `spcor` and `fastcor` carry the
+  input's metadata onto their results, where all six used to hand back a raster
+  built from `RasterMeta::default()` and an empty field map (issue #719). They
+  lost the interpretation, the resolution, the offsets and the orientation as
+  well as every attachment, which is a step worse than the sites #717 fixed.
+  `try_sobel` named the six in a comment and nothing tracked it.
+
+  Measured against the pinned vips 8.18.6 from an 8x8 `rgb` source carrying
+  `xres 5`, `yres 7`, `orientation 6`, an attached string and a real 3144-byte
+  sRGB ICC profile: `conv` at 3x3 and 5x5, `convsep` at 1x3, `compass` at 3x3
+  and `gaussblur` at sigma 1 and 3 all report the tag, the resolution, the
+  orientation, the string and the 3144 bytes back. `spcor` and `fastcor` want a
+  one-band input, so those two were measured on a `b-w` source carrying a real
+  2020-byte grey profile and hand all of it on as well. The profile has to match
+  the tag there, because a three-channel profile under a `b-w` tag is removed by
+  a rule about the retag rather than about these ops (issue #720).
+
+  The origin offsets are **not** fixed by this. `conv`, `convsep`, `compass` and
+  `gaussblur` stamp a mask-relative origin (`-1 / -1` for a 3x3, `-2 / -2` for a
+  5x5, `0 / -1` for a separable 1x3) that does not depend on the input's at all,
+  and now that they carry, they carry the input's instead of stamping. That is
+  issue #721, it is the same shape `flip`, `rot` and `wrap` have, and the test
+  deliberately asserts nothing about the offsets so it does not pin behaviour
+  this change leaves wrong.
+
 - Every operation that builds a fresh raster carries its input's metadata onto
   it, not just the header block: the interpretation, the resolution, the
   offsets and the orientation as before, and now the ICC profile, the EXIF blob
