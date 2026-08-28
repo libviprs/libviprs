@@ -3,8 +3,15 @@
 
 `ORACLE_PIN.json` next to this file names the libvips build these captures
 are measured against. This module is the code that enforces it, factored out
-so the six areas still on the old oracle can adopt it with two lines rather
-than a copy of the same forty.
+so an area adopts it with three lines rather than a copy of the same forty.
+
+The first line of this docstring was aspirational for as long as it stood:
+only the two convolution areas ever imported this, and the other twelve ran
+against whatever vips was on the machine (issue #796). All fourteen carry it
+now, and `every_capture_script_checks_the_oracle_pin` in
+`tests/oracle_capture_pins.rs` fails if a script drops it or a new area
+arrives without it, so the sentence has a check behind it instead of a
+convention.
 
 Why it exists: a `brew upgrade` nobody ran deliberately replaced vips 8.18.4
 with 8.18.6 mid-session and deleted the old keg, so the reference

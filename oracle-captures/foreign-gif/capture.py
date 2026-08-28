@@ -45,6 +45,7 @@ import json
 import os
 import struct
 import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(ROOT, "fixtures")
@@ -52,6 +53,19 @@ OUT = os.path.join(ROOT, "outputs")
 
 VIPS = "/opt/homebrew/bin/vips"
 VIPSHEADER = "/opt/homebrew/bin/vipsheader"
+
+AREA = "foreign-gif"
+
+# The oracle is pinned: oracle-captures/ORACLE_PIN.json names the libvips
+# build this area is measured against, and check() exits before anything is
+# written when the binary on the machine disagrees, so a wrong-oracle run
+# leaves no half-updated capture behind. #650 is what happened without it,
+# #796 is why every area carries it now, and tests/oracle_capture_pins.rs is
+# the half of the guard that runs in CI.
+sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir)))
+import oracle_pin  # noqa: E402  (needs the path above)
+
+VIPS_VERSION, ORACLE_PIN = oracle_pin.check(AREA, VIPS)
 REFERENCE = ("/Users/rom/workspace/libviprs/libviprs-tests/tmp/"
              "libvips-reference-tests/test-suite/images")
 REFERENCE_GIFS = [
