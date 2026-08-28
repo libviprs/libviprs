@@ -125,6 +125,7 @@ pub mod gif;
 pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
+pub mod jp2k;
 pub mod jxl;
 pub(crate) mod level_walk;
 #[cfg(loom)]
@@ -330,6 +331,7 @@ pub use webp::decode_webp;
 // beside theirs, so a caller can name the type they are matching on. The
 // option types stay behind `libviprs::jxl::` so the crate root does not
 // gain a third `SaveOptions`.
+pub use jp2k::{Jp2kError, decode_jp2k};
 pub use jxl::{JxlError, decode_jxl};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the

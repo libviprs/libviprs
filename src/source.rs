@@ -346,6 +346,17 @@ pub enum SourceError {
     /// An AVIF could not be read; see [`crate::avif::AvifError`].
     #[error(transparent)]
     Avif(#[from] crate::avif::AvifError),
+    /// A malformed or unsupported JPEG 2000 file. libviprs decodes JPEG 2000
+    /// through `hayro-jpeg2000` and reads the box structure and the `SIZ` /
+    /// `COD` markers itself, so a refusal arrives as the codec's own typed
+    /// [`Jp2kError`](crate::jp2k::Jp2kError) rather than as an opaque string.
+    ///
+    /// Declared whether or not the **`jp2k`** feature is on. Without the
+    /// feature the only [`Jp2kError`](crate::jp2k::Jp2kError) it can carry is
+    /// [`FeatureNotEnabled`](crate::jp2k::Jp2kError::FeatureNotEnabled), so a
+    /// caller's `match` has the same arms in either build (issue #634).
+    #[error(transparent)]
+    Jp2k(#[from] crate::jp2k::Jp2kError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -1403,6 +1414,9 @@ pub(crate) enum SniffedFormat {
     /// `avif`. Still images only, and deliberately not the other nine
     /// brands libheif's magic list accepts; see [`crate::avif`].
     Avif,
+    /// JPEG 2000, in either of its two containers: the RFC 3745 JP2
+    /// signature box, or the bare codestream's `SOC` + `SIZ` pair.
+    Jp2k,
 }
 
 impl SniffedFormat {
@@ -1431,7 +1445,8 @@ impl SniffedFormat {
             Self::Fits => Some(Self::OpenExr),
             Self::OpenExr => Some(Self::Nifti),
             Self::Nifti => Some(Self::Avif),
-            Self::Avif => None,
+            Self::Avif => Some(Self::Jp2k),
+            Self::Jp2k => None,
         }
     }
 
@@ -1445,8 +1460,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 13] = {
-        let mut all = [Self::Vips; 13];
+    pub(crate) const ALL: [Self; 14] = {
+        let mut all = [Self::Vips; 14];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1691,6 +1706,25 @@ impl SniffedFormat {
                 }],
                 decoder: Decoder::Native(crate::avif::decode_avif),
             },
+            // `image` has no JPEG 2000 route at all, so this row was never
+            // anything but a native one; [`crate::jp2k`] drives
+            // `hayro-jpeg2000` directly (issue #501). It reads the file whole
+            // because it makes two passes over the same bytes: one that walks
+            // the JP2 boxes and the `SIZ` / `COD` markers for the sign bit,
+            // the subsampling factors, the tile geometry and the raw ICC
+            // payload, and one that decodes.
+            //
+            // The row stays live without the `jp2k` feature, on purpose, for
+            // the reason the JPEG XL row does: `decode_jp2k` then reports
+            // "this build has no JPEG 2000", where falling through to
+            // [`reader_for`] would report "these bytes are not an image".
+            Self::Jp2k => Route {
+                magics: &[
+                    Magic::Prefix(crate::jp2k::JP2_SIGNATURE),
+                    Magic::Prefix(crate::jp2k::CODESTREAM_SIGNATURE),
+                ],
+                decoder: Decoder::Native(crate::jp2k::decode_jp2k),
+            },
         }
     }
 
@@ -1858,8 +1892,9 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
 /// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
-/// FITS, OpenEXR, NIfTI and AVIF: each one either parses its own container
-/// end to end or makes a second pass over the same bytes for metadata.
+/// FITS, OpenEXR, NIfTI, AVIF and JPEG 2000: each one either parses its own
+/// container end to end or makes a second pass over the same bytes for
+/// metadata.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -2831,7 +2866,7 @@ mod tests {
         // writes rather than a byte-string literal: the row's signature is
         // structural, so there is no literal to write.
         let uhdr = crate::uhdr::smallest_container();
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 47] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 52] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -2989,6 +3024,39 @@ mod tests {
             // One byte short of the magic, so a 348-byte signature cannot
             // be decided.
             ("nifti-1 truncated to 347", &NIFTI_1_LE[..347], None),
+            // JPEG 2000 is the second container here with two unrelated
+            // magics: the RFC 3745 signature box and the bare codestream's
+            // `SOC` + `SIZ` pair, which `jp2ksave` never writes and
+            // `jp2kload` still reads.
+            (
+                "jp2 signature box",
+                b"\x00\x00\x00\x0cjP  \r\n\x87\nftypjp2 ",
+                Some(SniffedFormat::Jp2k),
+            ),
+            (
+                "jp2k bare codestream",
+                b"\xff\x4f\xff\x51\x00\x2f\x00\x00",
+                Some(SniffedFormat::Jp2k),
+            ),
+            // The signature box decided from 11 bytes would be a guess, and
+            // its first four bytes are the same box length JPEG XL's
+            // signature box carries, so a sniff that stopped at the length
+            // would answer the wrong container.
+            (
+                "jp2 signature truncated",
+                b"\x00\x00\x00\x0cjP  \r\n\x87",
+                None,
+            ),
+            // `SOC` alone is not the pair: a codestream opens `FF 4F FF 51`
+            // and `FF 4F` followed by anything else is not JPEG 2000.
+            ("soc without siz", b"\xff\x4f\xff\x52\x00\x00", None),
+            // And the JPEG XL signature box, which shares the first four
+            // bytes, must still be JPEG XL rather than JPEG 2000.
+            (
+                "jxl box is not jp2",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a",
+                Some(SniffedFormat::Jxl),
+            ),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -3037,24 +3105,24 @@ mod tests {
      * `priced_by_libviprs` row, or wraps a crate that refuses internally the
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
-     * Input: `SniffedFormat::ALL.len()` -> Output: 13, which is what the two
+     * Input: `SniffedFormat::ALL.len()` -> Output: 14, which is what the two
      * tables account for between them, with no exclusions left.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            13,
+            14,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 13 are: 10 self-priced (gif, radiance, fits, openexr, \
+             count. Today the 14 are: 11 self-priced (gif, radiance, fits, openexr, \
              jxl, webp which joined them in #686, uhdr which joined them in #508 and \
              prices two images rather than one, .v which joined them in #710, nifti \
-             which joined them in #510, and avif which joined them in #605) and 3 \
-             refused inside the image crate (jpeg, png, tiff). There are no \
-             exclusions left"
+             which joined them in #510, avif which joined them in #605, and jp2k \
+             which joined them in #501) and 3 refused inside the image crate (jpeg, \
+             png, tiff). There are no exclusions left"
         );
     }
 
@@ -3187,6 +3255,8 @@ mod tests {
                 // bytes by absolute file offset, so the whole file has to be
                 // resident before an item's extents can be gathered.
                 SniffedFormat::Avif => Kind::Native,
+                // `image` has no JPEG 2000 route at all (issue #501).
+                SniffedFormat::Jp2k => Kind::Native,
             }
         }
 
@@ -3247,6 +3317,7 @@ mod tests {
                 SniffedFormat::OpenExr,
                 SniffedFormat::Nifti,
                 SniffedFormat::Avif,
+                SniffedFormat::Jp2k,
             ],
             "decode_file_with_limits' doc names every container it reads whole, in \
              this order; move the doc and this list together"
