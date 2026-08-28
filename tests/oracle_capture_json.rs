@@ -290,3 +290,375 @@ fn the_repaired_captures_still_record_a_real_infinity_and_a_real_nan() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The other half of the same problem (issue #682).
+//
+// Everything above reads what a capture WROTE. It catches a bare `NaN` the
+// moment CI runs, which is a real net and is what found the two bad files.
+// What it cannot do is stop the capture producing one, and by the time CI is
+// red the person who ran `python3 capture.py` has moved on and the machine
+// with libvips on it is somebody else's laptop.
+//
+// `json.dump(..., allow_nan=False)` moves that failure to the write, where it
+// costs a re-run and no investigation. Two of the fourteen capture scripts set
+// it, both from #674. The rest are guarded here.
+// ---------------------------------------------------------------------------
+
+/// Every Python file under `oracle-captures/`, sorted.
+///
+/// All of them, not just `capture.py`. `oracle_pin.py` serialises nothing
+/// today, and a helper that starts writing JSON tomorrow should not have to be
+/// added to a list before this notices.
+fn capture_scripts() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).expect("oracle-captures must be readable") {
+            let path = entry.expect("readable directory entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "py") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&repo_root().join("oracle-captures"), &mut out);
+    out.sort();
+    out
+}
+
+/// Blank out Python comments and the INSIDES of string literals, keeping every
+/// other byte and every newline where it was.
+///
+/// This is what stops the scan below being the kind of check this repository
+/// keeps having to unpick. A `grep allow_nan` passes on a file whose only
+/// mention of it is the comment explaining why it matters, and both scripts
+/// that already set the flag carry exactly such a comment. Blanking first
+/// means prose cannot answer for code: what survives is the syntax.
+///
+/// The quote characters themselves stay, so a call's argument list still reads
+/// as a list of values. Backslash escapes are honoured, which is right for raw
+/// strings too: `r"\""` does not end at the second quote in Python either.
+///
+/// An f-string is two things at once and is handled as both. Its literal text
+/// is prose and gets blanked, and what sits inside its `{...}` fields is code
+/// and is kept, because `foreign-jp2k` writes one of its four dict-key dumps
+/// there:
+///
+/// ```text
+/// body = ",\n".join(f"{pad}  {json.dumps(k)}: {encode(v, indent + 2)}"
+/// ```
+///
+/// Blanking the whole literal hides that call, and the first version of this
+/// scan did exactly that: it reported seventeen unguarded call sites where the
+/// tree has eighteen, and the one it lost was the one hiding inside a string.
+fn code_only(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = vec![b' '; b.len()];
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\n' {
+            out[i] = b'\n';
+            i += 1;
+        } else if c == b'#' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'"' || c == b'\'' {
+            // A string prefix is at most two of `rRbBuUfF` and sits directly
+            // against the quote, so scanning back over identifier bytes tells
+            // an f-string from an `elif` that happens to end in an f.
+            let mut p = i;
+            while p > 0 && (b[p - 1].is_ascii_alphanumeric() || b[p - 1] == b'_') {
+                p -= 1;
+            }
+            let prefix = &b[p..i];
+            let is_f = prefix.len() <= 2
+                && prefix.iter().all(|c| b"rRbBuUfF".contains(c))
+                && prefix.iter().any(|c| *c == b'f' || *c == b'F');
+
+            let triple = i + 2 < b.len() && b[i + 1] == c && b[i + 2] == c;
+            let quote = if triple { 3 } else { 1 };
+            out[i..(i + quote).min(b.len())].fill(c);
+            let mut j = i + quote;
+            let mut field = 0usize;
+            let close = loop {
+                if j >= b.len() {
+                    break None;
+                }
+                if b[j] == b'\\' {
+                    if b.get(j + 1) == Some(&b'\n') {
+                        out[j + 1] = b'\n';
+                    }
+                    j += 2;
+                    continue;
+                }
+                if is_f && field == 0 && (b[j] == b'{' || b[j] == b'}') {
+                    // `{{` and `}}` are literal braces, not a field.
+                    if b.get(j + 1) == Some(&b[j]) {
+                        j += 2;
+                        continue;
+                    }
+                    if b[j] == b'{' {
+                        field = 1;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if is_f && field > 0 {
+                    match b[j] {
+                        b'{' => field += 1,
+                        b'}' => field -= 1,
+                        b'\n' => out[j] = b'\n',
+                        other => out[j] = other,
+                    }
+                    j += 1;
+                    continue;
+                }
+                if b[j] == c && (!triple || (b.get(j + 1) == Some(&c) && b.get(j + 2) == Some(&c)))
+                {
+                    break Some(j);
+                }
+                if b[j] == b'\n' {
+                    out[j] = b'\n';
+                }
+                j += 1;
+            };
+            match close {
+                Some(j) => {
+                    out[j..(j + quote).min(b.len())].fill(c);
+                    i = (j + quote).min(b.len());
+                }
+                // An unterminated literal is a syntax error the capture would
+                // have hit long before this test ran, so there is nothing
+                // sensible left to scan.
+                None => i = b.len(),
+            }
+        } else {
+            out[i] = c;
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking only ever replaces whole bytes with ASCII")
+}
+
+/// One `json.dump` / `json.dumps` call: its 1-based line, and the text of its
+/// own argument list.
+struct DumpCall {
+    line: usize,
+    args: String,
+}
+
+/// Find every `json.dump(` and `json.dumps(` in already-blanked source, and
+/// take each call's arguments by matching its own brackets.
+///
+/// Per call rather than per file, because `foreign-avif` and `foreign-jp2k`
+/// have four apiece: both hand-roll an encoder that keeps a leaf array on one
+/// line, and a leaf is exactly where a float lives. A file-wide answer would
+/// call those two guarded while three quarters of their serialisation was not.
+///
+/// Nesting resolves the same way. A `json.dumps` inside another call's
+/// arguments is its own site with its own brackets, so it cannot borrow the
+/// outer call's flag.
+fn json_dump_calls(code: &str) -> Vec<DumpCall> {
+    let b = code.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(hit) = code[from..].find("json.dump") {
+        let start = from + hit;
+        let after = start + "json.dump".len();
+        from = after;
+        let open = if code[after..].starts_with('(') {
+            after
+        } else if code[after..].starts_with("s(") {
+            after + 1
+        } else {
+            continue;
+        };
+
+        let mut depth = 0usize;
+        let mut k = open;
+        let close = loop {
+            if k >= b.len() {
+                break None;
+            }
+            match b[k] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break Some(k);
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        };
+        let close = close.unwrap_or_else(|| {
+            panic!("a json.dump call starting at byte {start} never closes its brackets")
+        });
+
+        out.push(DumpCall {
+            line: 1 + code[..start].bytes().filter(|c| *c == b'\n').count(),
+            args: code[open + 1..close].to_string(),
+        });
+        // `from` stays just past this call's name rather than past its closing
+        // bracket, so a `json.dumps` nested in another call's arguments is
+        // still found and still answered on its own brackets.
+    }
+    out
+}
+
+/// Does this argument list pass `allow_nan=False`?
+///
+/// Whitespace is squashed so `allow_nan = False` counts, and the argument text
+/// has already had its string interiors emptied, so nothing a capture happens
+/// to SAY can answer for what it does.
+fn refuses_non_finite(args: &str) -> bool {
+    let squashed: String = args.chars().filter(|c| !c.is_whitespace()).collect();
+    squashed.contains("allow_nan=False")
+}
+
+/// Every capture script stops at the write rather than emitting a bare
+/// non-finite float (issue #682).
+///
+/// The rule is blanket: every `json.dump`/`json.dumps` in the tree passes the
+/// flag, including the two that only serialise a dict key and cannot go
+/// non-finite. An exemption needs a rule for who qualifies, and any such rule
+/// is a thing you can argue your way past six months later. This one has
+/// nothing to argue with.
+#[test]
+fn every_capture_script_refuses_to_write_a_non_finite_float() {
+    let scripts = capture_scripts();
+    let mut sites_by_script: Vec<(String, usize)> = Vec::new();
+    let mut unguarded: Vec<String> = Vec::new();
+
+    for path in &scripts {
+        let rel = path
+            .strip_prefix(repo_root())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = fs::read_to_string(path).expect("a capture script must be readable");
+        let calls = json_dump_calls(&code_only(&src));
+        sites_by_script.push((rel.clone(), calls.len()));
+        for call in &calls {
+            if !refuses_non_finite(&call.args) {
+                unguarded.push(format!("{rel}:{}", call.line));
+            }
+        }
+    }
+
+    // The scan is the part that can quietly find nothing and take the whole
+    // test with it, so it is anchored before any conclusion is drawn. Every
+    // capture area has a `capture.py` next to its `oracle.json`, and every one
+    // of those writes JSON, so a script that yields no call site means the
+    // scanner broke rather than that the script is clean.
+    for capture in KNOWN_CAPTURES {
+        let script = capture.replace("oracle.json", "capture.py");
+        let found = sites_by_script
+            .iter()
+            .find(|(rel, _)| *rel == script)
+            .unwrap_or_else(|| panic!("{script} was not scanned; found {sites_by_script:?}"));
+        assert!(
+            found.1 > 0,
+            "{script} yielded no json.dump call site. Every capture writes its \
+             oracle.json with one, so this is the scanner failing to see the \
+             code rather than the script having none."
+        );
+    }
+
+    assert!(
+        unguarded.is_empty(),
+        "these json.dump/json.dumps calls can write a bare NaN, Infinity or \
+         -Infinity, none of which is JSON, and Python will read the result \
+         back without complaining so the damage surfaces in another language \
+         months later (issue #682). Pass allow_nan=False so the capture stops \
+         at the write instead:\n  {}",
+        unguarded.join("\n  ")
+    );
+}
+
+/// The scan really does read code and not prose, and really does answer per
+/// call.
+///
+/// Without this, `every_capture_script_refuses_to_write_a_non_finite_float`
+/// is a check whose fallibility nobody has looked at: a scanner that returned
+/// "guarded" for everything would pass it just as well as a correct one, and
+/// the two scripts that already set the flag both carry a COMMENT saying
+/// `allow_nan=False`, which is precisely the string a naive grep would find.
+#[test]
+fn the_allow_nan_scan_cannot_be_satisfied_by_a_comment_or_a_docstring() {
+    let decoy = concat!(
+        "import json\n",
+        "\n",
+        "def write(oracle, f):\n",
+        "    \"\"\"Dumps with allow_nan=False so a non-finite stops us.\"\"\"\n",
+        "    # allow_nan=False\n",
+        "    json.dump(oracle, f, indent=2)\n",
+    );
+    let calls = json_dump_calls(&code_only(decoy));
+    assert_eq!(calls.len(), 1, "expected one call site in the decoy");
+    assert_eq!(calls[0].line, 6, "the reported line must be the call's");
+    assert!(
+        !refuses_non_finite(&calls[0].args),
+        "a docstring and a comment satisfied the scan, so it is checking prose"
+    );
+
+    // The real form, and the spaced spelling of it.
+    for guarded in [
+        "json.dump(oracle, f, indent=2, allow_nan=False)\n",
+        "json.dump(oracle, f, allow_nan = False)\n",
+    ] {
+        let calls = json_dump_calls(&code_only(guarded));
+        assert_eq!(calls.len(), 1);
+        assert!(refuses_non_finite(&calls[0].args), "{guarded} should pass");
+    }
+
+    // `allow_nan=True` is the flag written out and turned off, which is worse
+    // than not writing it, and must not read as guarded.
+    let calls = json_dump_calls(&code_only("json.dump(o, f, allow_nan=True)\n"));
+    assert_eq!(calls.len(), 1);
+    assert!(!refuses_non_finite(&calls[0].args));
+
+    // Half a file guarded is not a guarded file: the encoders in foreign-avif
+    // and foreign-jp2k have four call sites each.
+    let half = "json.dumps(a, allow_nan=False)\njson.dumps(b, indent=2)\n";
+    let calls = json_dump_calls(&code_only(half));
+    assert_eq!(calls.len(), 2);
+    assert!(refuses_non_finite(&calls[0].args));
+    assert!(
+        !refuses_non_finite(&calls[1].args),
+        "the second call is bare"
+    );
+
+    // A nested call cannot borrow the outer call's flag.
+    let nested = "json.dumps(json.dumps(x), allow_nan=False)\n";
+    let calls = json_dump_calls(&code_only(nested));
+    assert_eq!(calls.len(), 2, "the inner call is its own site");
+    assert!(
+        refuses_non_finite(&calls[0].args),
+        "the outer call is guarded"
+    );
+    assert!(!refuses_non_finite(&calls[1].args), "the inner call is not");
+
+    // A string mentioning json.dump is not a call site.
+    let quoted = "note = \"json.dump(o, f) writes a bare NaN\"\n";
+    assert!(
+        json_dump_calls(&code_only(quoted)).is_empty(),
+        "a call named inside a string counted as one"
+    );
+
+    // ...but a call inside an f-string field IS one, which is where
+    // foreign-jp2k keeps its fourth. The literal text around it is still prose:
+    // the `allow_nan=False` in it must not answer for the call.
+    let fstring = "body = f\"{pad} allow_nan=False {json.dumps(k)}: x\"\n";
+    let calls = json_dump_calls(&code_only(fstring));
+    assert_eq!(calls.len(), 1, "a call in an f-string field is a call site");
+    assert!(
+        !refuses_non_finite(&calls[0].args),
+        "the f-string's own text answered for the call inside it"
+    );
+}

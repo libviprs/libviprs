@@ -197,29 +197,35 @@ def magic(path, n=12):
 def encode(obj, indent=0):
     """json.dumps with indent=2 puts every integer of a pixel dump on its
     own line, which triples the size of this file for no gain. Same JSON,
-    but a list that fits on one line stays on one line."""
+    but a list that fits on one line stays on one line.
+
+    Every json.dumps below passes allow_nan=False. This is where the leaf
+    values are serialised, so guarding one arm and not the others would
+    leave most of the document able to carry a bare NaN (#682)."""
     pad = " " * indent
     if isinstance(obj, dict):
         if not obj:
             return "{}"
-        flat = json.dumps(obj)
+        flat = json.dumps(obj, allow_nan=False)
         if (len(flat) + indent <= 78
                 and not any(isinstance(v, (dict, list))
                             for v in obj.values())):
             return flat
-        body = ",\n".join(f"{pad}  {json.dumps(k)}: {encode(v, indent + 2)}"
-                          for k, v in obj.items())
+        body = ",\n".join(
+            f"{pad}  {json.dumps(k, allow_nan=False)}: "
+            f"{encode(v, indent + 2)}"
+            for k, v in obj.items())
         return "{\n" + body + "\n" + pad + "}"
     if isinstance(obj, list):
         if not obj:
             return "[]"
-        flat = json.dumps(obj)
+        flat = json.dumps(obj, allow_nan=False)
         if (len(flat) + indent <= 78
                 or all(not isinstance(i, (dict, list)) for i in obj)):
             return flat
         body = ",\n".join(f"{pad}  {encode(v, indent + 2)}" for v in obj)
         return "[\n" + body + "\n" + pad + "]"
-    return json.dumps(obj)
+    return json.dumps(obj, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------
