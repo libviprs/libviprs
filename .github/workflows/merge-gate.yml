@@ -173,7 +173,7 @@ jobs:
       # With the flag gone the run aborts on the first unannotated filesystem
       # test instead. That is not a finished gate, and the inventory says how
       # far off it is:
-      # 141 unannotated filesystem-touching tests are still recorded in
+      # 138 unannotated filesystem-touching tests are still recorded in
       # `tests/miri_fs_test_inventory.txt`, against the three that #670
       # annotated. Measured with isolation on, at 120acb6:
       #
@@ -181,7 +181,7 @@ jobs:
       #     error: unsupported operation: `mkdir` not available when isolation
       #     is enabled, from tempfile::tempdir at src/connection.rs:552
       #
-      # Annotating those 141 reaches into most of `src/` and is its own change,
+      # Annotating those 138 reaches into most of `src/` and is its own change,
       # so it is #712 rather than smuggled in here. Each round of it moves the
       # abort point forward and the abort names the next test, so the work
       # drives itself. #652 has the larger question of which of the annotated
