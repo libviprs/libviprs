@@ -294,11 +294,8 @@
 use crate::colour::ColourError;
 use crate::conversion::{Angle45, ConversionError, Interpretation, cast_float_sample};
 use crate::pixel::PixelFormat;
-use crate::raster::{Raster, RasterError, alloc_op_output};
+use crate::raster::{Raster, RasterError, alloc_op_output, try_plane_len};
 use thiserror::Error;
-
-#[cfg(test)]
-use std::cell::Cell;
 
 /// Don't allow the gaussmat/logmat mask radius to go over this
 /// (`MASK_SANITY` in `create/gaussmat.c`).
@@ -881,82 +878,32 @@ fn check_mask_param(
 // Shared pixel plumbing
 // ---------------------------------------------------------------------------
 
-/// An empty `Vec<T>` with room for `len` items, reserved fallibly.
+/// Site labels for the image-scaled buffers this module reserves through
+/// [`try_plane_len`].
 ///
-/// `width` and `height` only name the raster in the error; `bytes` is the
-/// real size of the request, which for these intermediates is several
-/// times the raster's own byte length.
+/// Every one of them used to go through a private `try_buffer` with a ceiling
+/// of its own, which meant a path crossing into `colour.rs` could be starved in
+/// one module or the other but never in the one the check named. They are the
+/// crate's one funnel now, and the label is what a test addresses instead of a
+/// position along the path (issue #696).
 ///
-/// This is [`alloc_op_output`]'s contract for a buffer that is not an
-/// op's output: reserve with [`Vec::try_reserve_exact`] and report
-/// [`RasterError::AllocationFailed`], never reach `handle_alloc_error`
-/// and abort. Callers fill the returned `Vec` with `extend` or `resize`,
-/// neither of which reallocates while the reserved capacity holds.
-fn try_buffer<T>(width: u32, height: u32, len: usize) -> Result<Vec<T>, RasterError> {
-    let bytes = len.saturating_mul(size_of::<T>());
-    // Test-only: count this reservation and honour a lowered per-thread
-    // ceiling, so a test can both see that an intermediate goes through here at
-    // all and drive the fallible branch at a raster it can build. This and the
-    // thread-local it reads compile only under `cfg(test)`, so a production
-    // reservation is bounded solely by the allocator.
-    #[cfg(test)]
-    let cap = CONV_BUFFER_PROBE.with(|c| {
-        let (cap, calls) = c.get();
-        c.set((cap, calls + 1));
-        cap
-    });
-    #[cfg(test)]
-    if bytes as u64 > cap {
-        return Err(RasterError::AllocationFailed {
-            width,
-            height,
-            bytes,
-        });
-    }
-    let mut v = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| RasterError::AllocationFailed {
-            width,
-            height,
-            bytes,
-        })?;
-    Ok(v)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Per-thread [`try_buffer`] probe: a ceiling in bytes on a single
-    /// reservation, and how many reservations have been made under the current
-    /// [`with_conv_buffer_probe`] call.
-    ///
-    /// The ceiling defaults to `u64::MAX`, so an ordinary run bounds an
-    /// intermediate only by what the allocator will serve. The count is what
-    /// makes a `vec![0i32; n]` put back in place of a [`try_buffer`] call
-    /// visible to a test: the two spellings differ only in what they do when
-    /// the allocation fails, which for a plane a test can actually build is
-    /// never, so nothing else distinguishes them (issue #627).
-    static CONV_BUFFER_PROBE: Cell<(u64, usize)> = const { Cell::new((u64::MAX, 0)) };
-}
-
-/// Test-only hook: run `f` with the calling thread's [`try_buffer`] ceiling
-/// lowered to `max_bytes`, returning its value alongside the number of
-/// reservations it made, and restoring the previous probe afterwards including
-/// on unwind.
-///
-/// The probe is thread-local, so tests running in parallel do not perturb one
-/// another, and it compiles only under `cfg(test)`.
-#[cfg(test)]
-fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize) {
-    struct Restore((u64, usize));
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            CONV_BUFFER_PROBE.with(|c| c.set(self.0));
-        }
-    }
-    let _restore = Restore(CONV_BUFFER_PROBE.with(|c| c.replace((max_bytes, 0))));
-    let value = f();
-    let calls = CONV_BUFFER_PROBE.with(|c| c.get().1);
-    (value, calls)
+/// The two `canny_polar` arms share a label deliberately: they are the uchar
+/// and the float spelling of the same buffer and exactly one of them runs per
+/// call, so no check can want to tell them apart by site.
+mod plane {
+    /// The whole-operand `f64` widening [`super::samples_f64`] makes, which is
+    /// now only ever a correlation's template.
+    pub(super) const SAMPLES_F64: &str = "convolution.samples_f64";
+    /// The rolling row window every traversal reads its source through.
+    pub(super) const ROW_WINDOW: &str = "convolution.row_window";
+    /// The `f64` accumulator `try_compass` folds each round's result into.
+    pub(super) const COMPASS_COMBINE: &str = "convolution.compass_combine";
+    /// The clamped `i32` L plane `try_sharpen` blurs.
+    pub(super) const SHARPEN_L_PLANE: &str = "convolution.sharpen_l_plane";
+    /// One separable integer blur pass, which `try_sharpen` runs twice.
+    pub(super) const BLUR_PASS: &str = "convolution.blur_pass";
+    /// The gradient-and-angle pair plane `try_canny` thins.
+    pub(super) const CANNY_POLAR: &str = "convolution.canny_polar";
 }
 
 /// Read every sample of `r` as `f64`, row-major with bands interleaved.
@@ -964,7 +911,7 @@ fn with_conv_buffer_probe<R>(max_bytes: u64, f: impl FnOnce() -> R) -> (R, usize
 ///
 /// Eight bytes per sample where the source carries one or two, so this is
 /// eight or four times the raster it is handed. It is reserved through
-/// [`try_buffer`] and reports [`RasterError::AllocationFailed`]; it used
+/// [`try_plane_len`] and reports [`RasterError::AllocationFailed`]; it used
 /// to be a plain `.collect()`, which on failure reaches
 /// `handle_alloc_error` and **aborts the process**. A `try_` API that
 /// aborts is worse than an infallible one, because a caller reasonably
@@ -985,7 +932,7 @@ fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let fmt = r.format();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
     let data = r.data();
-    let mut out = try_buffer(r.width(), r.height(), n)?;
+    let mut out = try_plane_len(plane::SAMPLES_F64, r.width(), r.height(), n)?;
     match fmt.bytes_per_channel() {
         1 => out.extend(data.iter().map(|&b| b as f64)),
         2 => out.extend((0..n).map(|i| u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64)),
@@ -1316,7 +1263,7 @@ impl<'a> RowWindow<'a> {
     /// Reserve a window big enough for a traversal that reads `lead` rows
     /// above and `trail` rows below the output row it is on.
     ///
-    /// The reservation goes through [`try_buffer`], so a host that cannot
+    /// The reservation goes through [`try_plane_len`], so a host that cannot
     /// serve it gets [`RasterError::AllocationFailed`] rather than
     /// `handle_alloc_error` and an aborted process. The error names the
     /// source raster and not the window, because that is what a caller
@@ -1329,7 +1276,12 @@ impl<'a> RowWindow<'a> {
         let h = src.height() as usize;
         let row_stride = src.width() as usize * src.format().channels();
         let span = (lead + trail + 1).min(h);
-        let mut window = try_buffer::<f64>(src.width(), src.height(), span * row_stride)?;
+        let mut window = try_plane_len::<f64>(
+            plane::ROW_WINDOW,
+            src.width(),
+            src.height(),
+            span * row_stride,
+        )?;
         window.resize(span * row_stride, 0.0);
         Ok(RowWindow {
             data: src.data(),
@@ -2067,7 +2019,7 @@ impl Raster {
         let (w, h) = (self.width(), self.height());
         let channels = results[0].format().channels();
         let n = w as usize * h as usize * channels;
-        let mut combined = try_buffer::<f64>(w, h, n)?;
+        let mut combined = try_plane_len::<f64>(plane::COMPASS_COMBINE, w, h, n)?;
         combined.resize(n, 0.0);
         for (round, result) in results.iter().enumerate() {
             fold_abs_samples(&mut combined, result, round == 0, combine);
@@ -2244,7 +2196,7 @@ impl Raster {
         // path and the whole of what kept `try_sharpen` off the abort-free list
         // (issue #627).
         let mut samples = labs.try_f32_samples()?;
-        let mut l = try_buffer::<i32>(rw, rh, w * h)?;
+        let mut l = try_plane_len::<i32>(plane::SHARPEN_L_PLANE, rw, rh, w * h)?;
         l.extend(
             (0..w * h).map(|p| (samples[p * channels] as f64).clamp(-32768.0, 32767.0) as i32),
         );
@@ -3130,7 +3082,7 @@ impl Raster {
             // interleaving (G, theta); a pair per sample is the same
             // layout without the doubled band count, and it is what the
             // thin stage reads back.
-            let mut polar = try_buffer::<(u8, u8)>(w, h, gx.data().len())?;
+            let mut polar = try_plane_len::<(u8, u8)>(plane::CANNY_POLAR, w, h, gx.data().len())?;
             polar.extend(
                 gx.data()
                     .iter()
@@ -3147,7 +3099,7 @@ impl Raster {
             // reachable here; `?` covers it anyway rather than asserting it.
             let sx = gx.try_f32_samples()?;
             let sy = gy.try_f32_samples()?;
-            let mut polar = try_buffer::<(f32, f32)>(w, h, sx.len())?;
+            let mut polar = try_plane_len::<(f32, f32)>(plane::CANNY_POLAR, w, h, sx.len())?;
             polar.extend(
                 sx.iter()
                     .zip(&sy)
@@ -3248,7 +3200,7 @@ fn check_correlation_bands(image: &Raster, template: &Raster) -> Result<usize, C
 /// the L channel (`vips_convsep` at integer precision on a short image).
 ///
 /// The output plane is image-sized and `try_sharpen` calls this twice, so it
-/// comes from [`try_buffer`] rather than `vec![0i32; n]`: the macro form
+/// comes from [`try_plane_len`] rather than `vec![0i32; n]`: the macro form
 /// allocates through `handle_alloc_error` and aborts the process, which a
 /// fallible entry point cannot afford (issue #627).
 ///
@@ -3265,7 +3217,7 @@ fn convsep_short_pass(
 ) -> Result<Vec<i32>, RasterError> {
     let rounding = iscale / 2;
     let half = (mask1d.len() / 2) as i64;
-    let mut out = try_buffer::<i32>(w as u32, h as u32, src.len())?;
+    let mut out = try_plane_len::<i32>(plane::BLUR_PASS, w as u32, h as u32, src.len())?;
     out.resize(src.len(), 0);
     for y in 0..h as i64 {
         for x in 0..w as i64 {
@@ -3292,7 +3244,16 @@ fn convsep_short_pass(
 mod tests {
     use super::*;
     use crate::imageio::MetadataValue;
-    use crate::raster::with_f32_samples_alloc_cap;
+    use crate::raster::{
+        PLANE_F32_SAMPLES, counting_planes, counting_planes_under_cap, with_plane_cap_at,
+    };
+
+    /// Every site label this module owns starts with this, so one prefix counts
+    /// the module's own plane reservations and leaves `colour.rs`'s and the op
+    /// outputs alone. That separation is what the old private probe gave for
+    /// free by being private, and what the shared funnel has to be told
+    /// (issue #696).
+    const CONV_PLANES: &str = "convolution.";
 
     /// Deterministic pseudo-random byte stream for synthetic images.
     fn lcg(seed: u32) -> impl FnMut() -> u8 {
@@ -3815,30 +3776,6 @@ mod tests {
         }
     }
 
-    /// A reservation no allocator can serve is a typed error, and the byte
-    /// count in it is the size of the **request** rather than the raster's
-    /// own length.
-    ///
-    /// That distinction is the reason [`try_buffer`] takes a length instead
-    /// of reading one off the raster: every intermediate it reserves is some
-    /// multiple of the source, and an error naming the source's byte length
-    /// would understate what failed by four or eight times.
-    #[test]
-    fn try_buffer_reports_the_size_of_the_request_not_of_the_raster() {
-        assert!(matches!(
-            try_buffer::<f64>(1, 1, usize::MAX / 4),
-            Err(RasterError::AllocationFailed { .. })
-        ));
-        assert!(matches!(
-            try_buffer::<f64>(3, 2, usize::MAX),
-            Err(RasterError::AllocationFailed {
-                width: 3,
-                height: 2,
-                bytes: usize::MAX
-            })
-        ));
-    }
-
     /// [`samples_f64`] widens all three carriers exactly, which is what
     /// [`Raster::try_compass`] and the two correlations still read it for.
     ///
@@ -3882,7 +3819,7 @@ mod tests {
     ///
     /// * an uncapped run reserves **once** per traversal, so a window
     ///   re-reserved per row (or a `vec![0.0; n]` put back in place of the
-    ///   [`try_buffer`] call) moves the count;
+    ///   [`try_plane_len`] call) moves the count;
     /// * a ceiling far under the whole widening still completes, which is
     ///   the whole of #575: before the window, this reserved
     ///   `w * h * bands * 8` bytes and could not;
@@ -3903,8 +3840,7 @@ mod tests {
         // Three rows of it, which is what a 3-tall mask needs resident.
         let window = 3 * 64 * 3 * 8;
 
-        let (ok, calls) =
-            with_conv_buffer_probe(u64::MAX, || im.try_conv(&blur, Precision::Integer));
+        let (ok, calls) = counting_planes(CONV_PLANES, || im.try_conv(&blur, Precision::Integer));
         assert!(ok.is_ok());
         assert_eq!(
             calls, 1,
@@ -3915,7 +3851,9 @@ mod tests {
         let ceiling = window * 2;
         assert!(ceiling < whole / 8, "the ceiling has to separate the two");
         let (windowed, calls) =
-            with_conv_buffer_probe(ceiling, || im.try_conv(&blur, Precision::Integer));
+            counting_planes_under_cap(CONV_PLANES, CONV_PLANES, ceiling, || {
+                im.try_conv(&blur, Precision::Integer)
+            });
         assert!(
             windowed.is_ok(),
             "a conv must complete under a ceiling of {ceiling} bytes, far below the {whole} the \
@@ -3926,14 +3864,17 @@ mod tests {
         // Four times as tall, same ceiling: the reservation is the mask's
         // size and not the image's.
         let tall = noise_rgb(64, 256, 35);
-        let (tall_ok, _) =
-            with_conv_buffer_probe(ceiling, || tall.try_conv(&blur, Precision::Integer));
+        let (tall_ok, _) = counting_planes_under_cap(CONV_PLANES, CONV_PLANES, ceiling, || {
+            tall.try_conv(&blur, Precision::Integer)
+        });
         assert!(
             tall_ok.is_ok(),
             "the window is bounded by the mask height, so a taller image must fit the same ceiling"
         );
 
-        let (capped, _) = with_conv_buffer_probe(16, || im.try_conv(&blur, Precision::Integer));
+        let capped = with_plane_cap_at(plane::ROW_WINDOW, 16, || {
+            im.try_conv(&blur, Precision::Integer)
+        });
         let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
         assert!(
             matches!(
@@ -3982,7 +3923,7 @@ mod tests {
         };
 
         let compass = || im.try_compass(&mask, 2, Angle45::D45, Combine::Max, Precision::Integer);
-        let (ok, calls) = with_conv_buffer_probe(u64::MAX, compass);
+        let (ok, calls) = counting_planes(CONV_PLANES, compass);
         assert!(ok.is_ok());
         assert_eq!(
             calls, 3,
@@ -3997,7 +3938,7 @@ mod tests {
             ),
             ("fastcor", |a: &Raster, b: &Raster| a.try_fastcor(b)),
         ] {
-            let (ok, calls) = with_conv_buffer_probe(u64::MAX, || run(&im, &template));
+            let (ok, calls) = counting_planes(CONV_PLANES, || run(&im, &template));
             assert!(ok.is_ok());
             assert_eq!(
                 calls, 2,
@@ -4011,7 +3952,7 @@ mod tests {
             let wide = noise_rgb(64, 64, 38);
             let tall = noise_rgb(64, 256, 39);
             for im in [&wide, &tall] {
-                let (out, _) = with_conv_buffer_probe(ceiling, || run(im, &template));
+                let out = with_plane_cap_at(plane::ROW_WINDOW, ceiling, || run(im, &template));
                 assert!(
                     out.is_ok(),
                     "{name} on a {}x{} image must complete under a ceiling of {ceiling} bytes: \
@@ -4021,7 +3962,7 @@ mod tests {
                 );
             }
 
-            let (capped, _) = with_conv_buffer_probe(16, || run(&im, &template));
+            let capped = with_plane_cap_at(plane::ROW_WINDOW, 16, || run(&im, &template));
             let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
             assert!(
                 matches!(
@@ -4245,7 +4186,7 @@ mod tests {
     #[test]
     fn sharpen_widening_returns_typed_error_not_abort() {
         let im = noise_rgb(6, 4, 31);
-        let capped = with_f32_samples_alloc_cap(16, || im.try_sharpen(1.0, 1.0, 2.0));
+        let capped = with_plane_cap_at(PLANE_F32_SAMPLES, 16, || im.try_sharpen(1.0, 1.0, 2.0));
         // Summarised rather than `{capped:?}`, which prints the whole pixel
         // buffer of the raster the failing case wrongly returns.
         let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
@@ -4271,7 +4212,9 @@ mod tests {
     #[test]
     fn canny_float_arm_widening_returns_typed_error_not_abort() {
         let im = noise_gray(8, 8, 32);
-        let capped = with_f32_samples_alloc_cap(16, || im.try_canny(1.4, Precision::Float));
+        let capped = with_plane_cap_at(PLANE_F32_SAMPLES, 16, || {
+            im.try_canny(1.4, Precision::Float)
+        });
         let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
         assert!(
             matches!(
@@ -4286,16 +4229,18 @@ mod tests {
         // sigma < 0.2 short-circuits the blur to a copy, so the gradient runs
         // on a uchar image and the float widening is never reached.
         assert!(
-            with_f32_samples_alloc_cap(16, || im.try_canny(0.1, Precision::Integer)).is_ok(),
+            with_plane_cap_at(PLANE_F32_SAMPLES, 16, || im
+                .try_canny(0.1, Precision::Integer))
+            .is_ok(),
             "the uchar arm does not widen, so the ceiling must not reach it"
         );
     }
 
     /// #627: the three image-sized `i32` planes `try_sharpen` builds for
     /// itself, the clamped L band and the two separable blur passes, are
-    /// reserved through [`try_buffer`] rather than `vec![0i32; n]`.
+    /// reserved through [`try_plane_len`] rather than `vec![0i32; n]`.
     ///
-    /// The count is the load-bearing half. `vec![0i32; n]` and `try_buffer`
+    /// The count is the load-bearing half. `vec![0i32; n]` and `try_plane_len`
     /// behave identically at every size a test can build, and differ only in
     /// what they do when the allocation fails, which is that one aborts the
     /// process and the other returns; so putting the macro back in any one of
@@ -4309,14 +4254,15 @@ mod tests {
     fn sharpen_scratch_planes_are_fallible_not_aborting() {
         let im = noise_rgb(6, 4, 33);
 
-        let (ok, calls) = with_conv_buffer_probe(u64::MAX, || im.try_sharpen(1.0, 1.0, 2.0));
+        let (ok, calls) = counting_planes(CONV_PLANES, || im.try_sharpen(1.0, 1.0, 2.0));
         assert!(ok.is_ok());
         assert_eq!(
             calls, 3,
             "the L plane and both blur passes must each reserve fallibly"
         );
 
-        let (capped, _) = with_conv_buffer_probe(16, || im.try_sharpen(1.0, 1.0, 2.0));
+        let capped =
+            with_plane_cap_at(plane::SHARPEN_L_PLANE, 16, || im.try_sharpen(1.0, 1.0, 2.0));
         let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
         assert!(
             matches!(
