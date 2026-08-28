@@ -267,7 +267,10 @@ pub use radiance::{RadianceError, decode_radiance};
 // `decode_radiance` is: it is the direct entry point for a caller who
 // already knows the bytes are a GIF and does not want to go through the
 // sniff route.
-pub use gif::{GifError, decode_gif};
+// `decode_gif_with` joins them for the animated half (issue #572): it is
+// `decode_gif` with vips's `page` and `n`, and a caller who wants every
+// frame reaches for it by name rather than by option struct.
+pub use gif::{GifError, decode_gif, decode_gif_with};
 // `decode_avif` is re-exported beside its error type for the reason
 // `decode_exr` is: it is the direct entry point for a caller who already
 // knows the bytes are an AVIF. There is no encoder half to pair it with,
