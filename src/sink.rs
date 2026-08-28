@@ -704,9 +704,9 @@ impl TileFormat {
 ///
 /// * `dedupe_promote` is the sole **outer** lock. It guards the whole
 ///   promote-on-2nd-hit critical section and is only ever taken at the top of
-///   `FsSink::dedupe_write`, never while a field mutex is already held. It is
-///   *sharded by content digest* (see `DEDUPE_PROMOTE_SHARDS` and
-///   `FsSink::promote_shard`): all occurrences of a given content map to the
+///   [`FsSink::dedupe_write`], never while a field mutex is already held. It is
+///   *sharded by content digest* (see [`DEDUPE_PROMOTE_SHARDS`] and
+///   [`FsSink::promote_shard`]): all occurrences of a given content map to the
 ///   same shard — preserving the per-key atomicity the at-least-one-hardlink
 ///   invariant requires (issue #111) — while distinct content maps to
 ///   (usually) distinct shards, so tiles of different content no longer
@@ -729,7 +729,7 @@ impl TileFormat {
 /// (a `OnceLock`) and `per_level_counts` (atomics) take no mutex and are
 /// irrelevant to this rule.
 ///
-/// Field mutexes are acquired through `FsSink::lock_leaf`, which in debug
+/// Field mutexes are acquired through [`FsSink::lock_leaf`], which in debug
 /// builds trips a panic the instant a second leaf lock is taken while one is
 /// still held — turning an accidental nesting into an immediate, local
 /// failure instead of a latent deadlock (issue #112).
@@ -737,8 +737,8 @@ impl TileFormat {
 /// # Sharded promote lock
 ///
 /// The `dedupe_promote` outer lock is striped across
-/// `DEDUPE_PROMOTE_SHARDS` shards, indexed by a hash of the tile content
-/// (see `FsSink::promote_shard`). All occurrences of a given content select
+/// [`DEDUPE_PROMOTE_SHARDS`] shards, indexed by a hash of the tile content
+/// (see [`FsSink::promote_shard`]). All occurrences of a given content select
 /// the same shard, so the per-key atomicity issue #111 relies on is preserved;
 /// distinct content selects (usually) distinct shards, so it no longer
 /// serialises on one process-wide lock (issue #296).
@@ -1359,7 +1359,7 @@ impl TileSink for FsSink {
     /// since the last barrier so the checkpoint about to certify them never
     /// records tiles whose bytes are still only in the page cache. Drains the
     /// tracked `unsynced_tiles` set and fsyncs each path via the sink's
-    /// `Durability` backend.
+    /// [`Durability`](crate::resume::Durability) backend.
     fn sync_pending(&self) -> Result<(), SinkError> {
         // Take the pending set under the leaf lock, then release it before any
         // I/O so the fsyncs never run while a leaf lock is held (the

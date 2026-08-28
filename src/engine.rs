@@ -362,7 +362,7 @@ impl EngineConfig {
     /// the [`BLANK_TILE_MARKER`](crate::sink::BLANK_TILE_MARKER). It is
     /// non-lossy: the marker regenerates to the same uniform tile, so
     /// Verify-mode reconstruction still matches (see
-    /// `regenerated_tile_matches_marker`).
+    /// [`regenerated_tile_matches_marker`]).
     ///
     /// Both [`Blanks`](crate::dedupe::DedupeStrategy::Blanks) and
     /// [`All`](crate::dedupe::DedupeStrategy::All) promote uniform content at
@@ -546,7 +546,7 @@ pub(crate) fn generate_pyramid_observed(
 ///
 /// This mirrors libvips `dzsave`'s region rendering. It is observer-free (it
 /// drives a [`NoopObserver`](crate::observe::NoopObserver) internally); use
-/// `generate_pyramid_observed` on a pre-cropped raster if progress events are
+/// [`generate_pyramid_observed`] on a pre-cropped raster if progress events are
 /// needed.
 ///
 /// # Errors

@@ -18,7 +18,7 @@
 //! 2. **Tile-level (within each strip)** — scoped-thread tile extraction
 //!    with bounded-channel backpressure, same pattern as the monolithic engine.
 //! 3. **Sequential reduce (propagation)** — half-strips feed into
-//!    `propagate_down` in order, since
+//!    [`propagate_down`](crate::streaming::propagate_down) in order, since
 //!    the pairing dependency requires sequential processing.
 //!
 //! ## Entry points

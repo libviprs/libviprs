@@ -377,6 +377,17 @@ fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
 /// for scRGB) instead. libviprs paints the ink first and premultiplies after,
 /// so it keeps the memset ink there; issue #692 tracks the reordering and
 /// [`crate::resample`] pins the divergence.
+//
+// This is `pub(crate)`, so nothing public may link it: rustdoc renders a
+// `[white_ink]` from a public doc as literal brackets with no anchor. The two
+// public docs that used to do that, the module doc above and `Extend::White`,
+// inline what a caller needs instead. Nothing in CI stops that coming back yet.
+// `rustdoc::private_intra_doc_links` is warn-by-default and the doc gate denies
+// only `broken_intra_doc_links`, and denying the other one is not a one-line
+// change, because 33 sites across 13 files elsewhere in the tree trip it too.
+// Issue #697 carries the gate and the sweep together; it is deliberately not
+// here, since a doc-only conflict across those 13 files is the worst kind to
+// resolve while the lanes holding them are still open.
 #[inline]
 pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> f64 {
     let ink = interpretation_max_alpha(interpretation);

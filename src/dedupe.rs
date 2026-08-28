@@ -41,10 +41,10 @@
 //! at-least-one-hardlink guarantee, then, at `finish()` (after all writers have
 //! joined), reassigns the single full-payload holder of each duplicated content
 //! to its **coordinate-minimal** occurrence — sorted by `(level, row, col)`,
-//! the canonical order used by `crate::mapreduce_hot_cache`. The layout shape
+//! the canonical order used by [`crate::mapreduce_hot_cache`]. The layout shape
 //! is otherwise identical; only *which* occurrence keeps the full bytes changes,
 //! and it changes to a value fixed by the input alone. See
-//! `crate::sink::FsSink::canonicalize_dedupe_layout`.
+//! [`crate::sink::FsSink::canonicalize_dedupe_layout`].
 //!
 //! The standalone [`materialize_reference`] helper (symlink → hardlink →
 //! placeholder fallback, reported via [`LinkResult`]) is provided for

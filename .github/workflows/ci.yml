@@ -146,14 +146,10 @@ jobs:
       - run: cargo check --all-targets --features jxl
 
   docs:
-    name: Docs (deny broken and private intra-doc links)
+    name: Docs (deny broken intra-doc links)
     runs-on: ubuntu-latest
     env:
-      # `private_intra_doc_links` is warn-by-default, so a public doc that
-      # links a `pub(crate)` item renders as literal brackets with no anchor
-      # and this job stayed green through it (issue #667 shipped two). Denying
-      # it here and in `make doc` keeps the two gates spelling the same rule.
-      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
