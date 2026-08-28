@@ -20,20 +20,21 @@
 #                              helper it cannot follow
 #   <file>::<test>             repo-relative path and function name
 #
-# The `unannotated fs-detected` rows used to be a ledger of known debt, 138 of
-# them, on the argument that PR #644 disabled Miri's isolation so letting them
-# run cost nothing. #711 put isolation back, which made every one of them a way
-# to end the whole session on its first syscall, and #712 and #739 annotated
-# 134 of the 138.
+# There are no `unannotated fs-detected` rows left, and that is the state this
+# file is meant to be in. There were 138, kept as a ledger of known debt on the
+# argument that PR #644 disabled Miri's isolation so letting them run cost
+# nothing. #711 put isolation back, which made every one of them a way to end
+# the whole session on its first syscall. #712 and #739 annotated 134, #781
+# taught the detector to follow a call into a test helper and annotated what
+# that found, and #756 took the last four in `src/resample.rs`.
 #
 # So this is not a ledger any more.
 # `no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions` in
 # `tests/miri_ignore_convention.rs` refuses a filesystem-touching test that is
 # neither annotated nor named in `UNANNOTATED_FS_EXCEPTIONS`, and that list is
-# the four rows still spelled `unannotated` below. They are all in
-# `src/resample.rs`, which had four pull requests open against it while the
-# sweep ran, and issue #756 carries them. Nothing else can join them without an
-# edit to that constant and a reason that survives review.
+# empty. A row spelled `unannotated` below means somebody put a name in that
+# constant, which wants a reason that survives review and an issue to carry it,
+# because the cost is the whole gate rather than one test.
 #
 # The rows stay, and the exact set-equality check with them, because they catch
 # a different edit from the refusal: an annotation being *deleted*, and an
@@ -198,6 +199,10 @@ annotated   fs-detected  src/pdf.rs::pdf_info_with_password_reports_encrypted_as
 annotated   fs-detected  src/pdf.rs::typed_background_matches_slice_form
 annotated   fs-detected  src/radiance.rs::save_radiance_writes_a_file_decode_radiance_reads_back
 annotated   fs-detected  src/radiance.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
+annotated   fs-detected  src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box
+annotated   fs-detected  src/resample.rs::thumbnail_file_and_buffer_agree
+annotated   fs-detected  src/resample.rs::thumbnail_free_fn_fits_the_width_box
+annotated   fs-detected  src/resample.rs::thumbnail_unknown_profile_is_typed_error
 annotated   fs-detected  src/resume.rs::concurrent_saves_never_publish_a_torn_checkpoint
 annotated   fs-detected  src/resume.rs::load_dedupes_overlap_between_header_and_segments
 annotated   fs-detected  src/resume.rs::load_ignores_torn_trailing_segment_frame
@@ -337,7 +342,3 @@ annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_not
 annotated   not-detected tests/miri_ignore_convention.rs::the_filesystem_detector_follows_a_test_helper_but_not_the_library
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
 annotated   not-detected tests/workspace_layout.rs::root_workspace_contains_both_crates
-unannotated fs-detected  src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box
-unannotated fs-detected  src/resample.rs::thumbnail_file_and_buffer_agree
-unannotated fs-detected  src/resample.rs::thumbnail_free_fn_fits_the_width_box
-unannotated fs-detected  src/resample.rs::thumbnail_unknown_profile_is_typed_error

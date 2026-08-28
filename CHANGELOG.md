@@ -1388,6 +1388,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- No test in the tree reaches the filesystem without `#[cfg_attr(miri, ignore)]`
+  any more, and `UNANNOTATED_FS_EXCEPTIONS` is empty (issue #756).
+
+  The four that were left are in `src/resample.rs`, which had four pull requests
+  open against it while #739's sweep ran and so was the one module the sweep
+  could not touch. Those merged, so these are annotated and their four rows in
+  `tests/miri_fs_test_inventory.txt` flip to `annotated`. The file now records
+  272 `annotated fs-detected` and 14 `annotated not-detected` tests, and nothing
+  else.
+
+  Emptying the list cost one further edit and no change to any assertion, which
+  is the difference between an exception list and the floor it replaced. The
+  floor, `assert!(unannotated_fs > 0)`, would have gone red here and demanded
+  rewriting. What did go red, on purpose, is
+  `merge_gate_states_the_backlog_as_a_bound_it_still_meets`: it has a separate
+  arm for zero, because at zero the bound holds and `merge-gate.yml`'s sentence
+  about a named handful of unannotated tests becomes false with nothing to catch
+  it. That sentence is rewritten, once, and the failure named it.
+
 - The Miri filesystem detector follows a call into a test helper, one file deep
   and to a fixed point, and 72 more tests over eight files carry
   `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
