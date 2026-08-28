@@ -1625,16 +1625,88 @@ mod tests {
         assert_eq!(hist.getpoint(3, 0), vec![0.0, 0.0, 2000.0]);
     }
 
-    /// 16-bit input histograms into 65536 bins, indexed by raw value.
+    /**
+     * Tests that a 16-bit histogram is as wide as the data needs and not
+     * as wide as the depth allows (issue #803).
+     * Works by histogramming the values libvips was measured on and
+     * asserting the width and every populated bin, so a width that is
+     * right by accident still fails on where the counts landed.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips hist_find` of a
+     * `ushort` `[4096, 4096, 9]` gives width **4097**. This test asserted
+     * 65536 before, which is the depth's ceiling rather than the answer.
+     * Input: `[4096, 4096, 9]` -> 4097x1, bin 4096 = 2, bin 9 = 1.
+     */
     #[test]
     fn hist_find_16bit_width() {
         let im = gray16(3, 1, &[4096, 4096, 9]);
         let hist = im.hist_find();
-        assert_eq!(hist.width(), 65536);
+        assert_eq!(hist.width(), 4097);
         assert_eq!(hist.height(), 1);
         assert_eq!(hist.getpoint(4096, 0), vec![2.0]);
         assert_eq!(hist.getpoint(9, 0), vec![1.0]);
         assert_eq!(hist.getpoint(0, 0), vec![0.0]);
+    }
+
+    /**
+     * Tests the 16-bit histogram width across the measured sweep, and that
+     * the 8-bit width stays fixed at 256 whatever the data holds.
+     * Works by histogramming each case and comparing the width, with the
+     * 8-bit rows alongside so the two rules cannot collapse into one.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6, `ushort` input:
+     * `[0]` -> 1, `[0, 1000]` -> 1001, `[4096, 4096, 9]` -> 4097,
+     * `[0, 1000, 65535]` -> 65536. A `uchar` `[3, 0]` gives 256 and a
+     * `uchar` `[255, 0]` gives 256.
+     */
+    #[test]
+    fn hist_find_width_follows_the_data_at_16_bit_only() {
+        for (vals, width) in [
+            (vec![0u16], 1u32),
+            (vec![0, 1000], 1001),
+            (vec![4096, 4096, 9], 4097),
+            (vec![0, 1000, 65535], 65536),
+        ] {
+            let n = u32::try_from(vals.len()).unwrap();
+            assert_eq!(
+                gray16(n, 1, &vals).hist_find().width(),
+                width,
+                "16-bit histogram of {vals:?} came out the wrong width"
+            );
+        }
+        for vals in [vec![3u8, 0], vec![255, 0]] {
+            let n = u32::try_from(vals.len()).unwrap();
+            assert_eq!(gray(n, 1, vals).hist_find().width(), 256);
+        }
+    }
+
+    /**
+     * Tests that the width follows the band actually being histogrammed,
+     * which the whole-image sweep cannot separate from the global maximum.
+     * Works by building a two-band 16-bit image whose bands have very
+     * different maxima and asserting all three widths, so a `hist_find_band`
+     * that quietly used the global max would fail on band 0.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 for a `ushort` image with
+     * band 0 maxing at 10 and band 1 at 5000: `vips hist_find` gives 5001
+     * over two bands, `--band 0` gives 11 and `--band 1` gives 5001.
+     * Input: bands `[10, 0]` and `[5000, 0]` -> 5001, 11, 5001.
+     */
+    #[test]
+    fn hist_find_band_width_follows_its_own_band() {
+        let vals: [u16; 4] = [10, 5000, 0, 0];
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap(),
+            data,
+        )
+        .unwrap();
+        assert_eq!(im.hist_find().width(), 5001);
+        assert_eq!(im.hist_find_band(0).width(), 11);
+        assert_eq!(im.hist_find_band(1).width(), 5001);
+        // The counts still land where they should, so the narrower widths
+        // are a size and not a truncation.
+        assert_eq!(im.hist_find_band(0).getpoint(10, 0), vec![1.0]);
+        assert_eq!(im.hist_find_band(1).getpoint(5000, 0), vec![1.0]);
     }
 
     /// Counts saturate at 65535 rather than wrapping: 90000 zero-valued
@@ -1681,8 +1753,17 @@ mod tests {
         assert_eq!(hist.getpoint(2, 0), vec![0.0]);
     }
 
-    /// A 16-bit index image widens the output to 65536 elements, and a
-    /// multiband input keeps one sum per band.
+    /**
+     * Tests that a 16-bit index sizes the indexed histogram to the largest
+     * index present rather than to the depth's ceiling, and that a
+     * multiband input still keeps one sum per band (issue #803).
+     * Works by indexing with a 16-bit image whose largest value is 300 and
+     * asserting the width alongside both bands' sums.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips hist_find_indexed`
+     * with a `ushort` index maxing at 10 gives width 11, and with a `uchar`
+     * index gives 256.
+     * Input: index max 300 -> 301 elements, two bands.
+     */
     #[test]
     fn hist_find_indexed_16bit_index_and_bands() {
         let data: Vec<u8> = std::iter::repeat_n([4u8, 6], 6).flatten().collect();
@@ -1695,7 +1776,7 @@ mod tests {
         .unwrap();
         let index = gray16(3, 2, &[300, 300, 300, 0, 0, 0]);
         let hist = im.hist_find_indexed(&index);
-        assert_eq!(hist.width(), 65536);
+        assert_eq!(hist.width(), 301);
         assert_eq!(hist.format().channels(), 2);
         assert_eq!(hist.getpoint(300, 0), vec![12.0, 18.0]);
         assert_eq!(hist.getpoint(0, 0), vec![12.0, 18.0]);
