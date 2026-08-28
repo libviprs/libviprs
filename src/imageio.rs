@@ -21,16 +21,25 @@
 //! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
+//! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
 //! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
 //! [`SaveError::UnsupportedExtension`]; they arrive with the
-//! foreign-format batch. `.jxl` joins them when the crate is built
-//! without the non-default `jxl` feature, and the refusal follows the
-//! build: it names the extensions this binary actually has an encoder
-//! behind rather than a fixed list, so neither cfg can advertise the
-//! other's.
+//! foreign-format batch. `.jxl` and the five JPEG 2000 suffixes join them
+//! when the crate is built without their non-default feature, and the
+//! refusal follows the build: it names the extensions this binary actually
+//! has an encoder behind rather than a fixed list, so no cfg can advertise
+//! another's.
+//!
+//! The JPEG 2000 row is the one place in that table where the suffix does
+//! **not** pick the codec. `jp2ksave` registers five and writes the same JP2
+//! container for every one of them, measured on 8.18.6: `vips copy` over
+//! `.jp2`, `.j2k`, `.jpt`, `.j2c` and `.jpc` produces five files with one
+//! SHA-256 between them, and `.jp2000` is refused as an unknown format. So
+//! all five are rows, and the suffix only decides whether the file is written
+//! at all.
 //!
 //! Structured EXIF tag writing (`exif-ifd0-*` fields into the TIFF
 //! directory of a JPEG APP1 segment) is also deferred to the foreign
@@ -1286,13 +1295,17 @@ pub enum SaveError {
 /// [module table](crate::imageio) lists them.
 ///
 /// It is a function rather than a literal inside the `#[error]` string
-/// because `.jxl` is only a live arm when the non-default `jxl` feature is
-/// on. A fixed list would either promise a JPEG XL encoder to a build that
-/// has none, or hide one from a build that has it, and the message is the
-/// only thing a caller who guessed an extension ever sees. The
-/// `save_error_lists_exactly_the_wired_extensions` test walks this string
-/// back through [`Raster::save`], so a new arm that forgets to update it
-/// fails rather than drifting.
+/// because `.jxl` and the five JPEG 2000 suffixes are only live arms when
+/// their non-default feature is on. A fixed list would either promise an
+/// encoder to a build that has none, or hide one from a build that has it,
+/// and the message is the only thing a caller who guessed an extension ever
+/// sees. The `save_error_lists_exactly_the_wired_extensions` test walks this
+/// string back through [`Raster::save`], so a new arm that forgets to update
+/// it fails rather than drifting.
+///
+/// Two optional features means four builds, so the list is assembled rather
+/// than written out four times: a fifth format would make it eight literals,
+/// and the third of the four is the one nobody would ever run.
 fn saveable_extensions() -> &'static str {
     if cfg!(feature = "jxl") {
         "png, jpg/jpeg, gif, webp, jxl, fits/fit/fts, and v/vips"
@@ -1339,7 +1352,28 @@ impl Raster {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        let bytes = match extension.as_str() {
+        let bytes = self.encode_for_extension(&extension, keep_metadata)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// The extension route itself: pick the encoder from an already
+    /// lowercased extension and produce the bytes, without writing them.
+    ///
+    /// Split out of [`Raster::save_impl`] so the dispatch table can be
+    /// asserted without touching the filesystem. That is not tidiness: every
+    /// test that reaches this route through [`Raster::save`] has to carry
+    /// `#[cfg_attr(miri, ignore)]` and a row in
+    /// `tests/miri_fs_test_inventory.txt`, because Miri aborts the whole run
+    /// on the first filesystem call it refuses (#652). A route test does not
+    /// need a file on disk to say which extensions have an encoder behind
+    /// them, so it should not create one.
+    fn encode_for_extension(
+        &self,
+        extension: &str,
+        keep_metadata: bool,
+    ) -> Result<Vec<u8>, SaveError> {
+        Ok(match extension {
             "png" => crate::sink::encode_png(self)?,
             "jpg" | "jpeg" => {
                 let encoded = crate::sink::encode_jpeg(self, SAVE_JPEG_QUALITY)?;
@@ -1389,10 +1423,12 @@ impl Raster {
                 other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
             })?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
-            _ => return Err(SaveError::UnsupportedExtension { extension }),
-        };
-        std::fs::write(path, bytes)?;
-        Ok(())
+            _ => {
+                return Err(SaveError::UnsupportedExtension {
+                    extension: extension.to_owned(),
+                });
+            }
+        })
     }
 
     /// Encode as native `.v` bytes (libvips `vipssave_buffer`): the
@@ -2623,6 +2659,21 @@ mod tests {
         assert_eq!(str_field.get_field("n-pages").unwrap().as_str(), "3");
     }
 
+    /// An 8x6 RGB raster, the smallest shape the JPEG 2000 tests in
+    /// [`crate::jp2k`] use. `rgb_2x2` is too small for the encoder's
+    /// resolution-count rule (`floor(log2(min(w, h))) - 5`), so the save-route
+    /// tests take their own.
+    #[allow(dead_code)]
+    fn jp2k_sized() -> Raster {
+        Raster::new(
+            8,
+            6,
+            PixelFormat::Rgb8,
+            (0..8u32 * 6 * 3).map(|i| (i % 251) as u8).collect(),
+        )
+        .unwrap()
+    }
+
     fn rgb_2x2() -> Raster {
         Raster::new(
             2,
@@ -3097,13 +3148,127 @@ mod tests {
         assert_ne!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
     }
 
+    /// Every suffix `jp2ksave` registers is a live row in the extension route,
+    /// and all of them write the **same** JP2 container (issue #770).
+    ///
+    /// This is the one row in the table where the suffix does not pick the
+    /// codec, and that is measured rather than read out of `jp2ksave.c`. On
+    /// the pinned vips 8.18.6:
+    ///
+    /// ```text
+    /// vips black base.v 8 6 --bands 3
+    /// for ext in jp2 j2k jpt j2c jpc; do vips copy base.v out.$ext; done
+    /// ```
+    ///
+    /// writes five files with one SHA-256 between them
+    /// (`fbe9f8f7fbe8d044...`), while `out.jp2000` and `out.xyz` are refused
+    /// with "is not a known file format". So five rows, one encoder, and the
+    /// refusal still has to work: the negative half is the positive control
+    /// for the positive half, since a route that accepted everything would
+    /// pass the first assertion on its own.
+    ///
+    /// Goes through `encode_for_extension` rather than [`Raster::save`] so it
+    /// needs no tempdir, no `#[cfg_attr(miri, ignore)]` and no row in
+    /// `tests/miri_fs_test_inventory.txt`.
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn every_suffix_jp2ksave_registers_is_a_row_and_they_all_write_one_container() {
+        let im = jp2k_sized();
+        let direct = im
+            .encode_jp2k(crate::jp2k::SaveOptions::default())
+            .expect("the encoder takes an 8x6 RGB raster");
+
+        for extension in ["jp2", "j2k", "jpt", "j2c", "jpc"] {
+            let bytes = im
+                .encode_for_extension(extension, true)
+                .unwrap_or_else(|e| panic!(".{extension} must be a live row, got {e}"));
+            assert_eq!(
+                bytes, direct,
+                ".{extension} must write the same JP2 container as encode_jp2k"
+            );
+        }
+
+        // vips refuses these two, so the route has to as well, or "every
+        // suffix is a row" would just mean "every string is a row".
+        for extension in ["jp2000", "xyz"] {
+            assert!(
+                matches!(
+                    im.encode_for_extension(extension, true),
+                    Err(SaveError::UnsupportedExtension { .. })
+                ),
+                ".{extension} is not a format vips knows either"
+            );
+        }
+    }
+
+    /// The JPEG 2000 row takes no `keep_metadata`, because there is nothing
+    /// for it to drop (issue #770).
+    ///
+    /// `jp2ksave.c` has no code for an ICC profile, an EXIF block or an XMP
+    /// packet, so a stripped save and a kept one write the same bytes. Same
+    /// shape as the `.jxl` row, and worth pinning rather than leaving as an
+    /// accident: the day the encoder learns to embed a profile, this says so.
+    ///
+    /// The control is `.webp` in the same assertion, which is the row that
+    /// genuinely does carry metadata and genuinely does differ under the flag.
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_jp2k_row_has_nothing_for_the_strip_flag_to_drop() {
+        let mut im = jp2k_sized();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("jp2", true).unwrap(),
+            im.encode_for_extension("jp2", false).unwrap(),
+            "jp2ksave writes no metadata, so the strip flag cannot change the bytes"
+        );
+        assert_ne!(
+            im.encode_for_extension("webp", true).unwrap(),
+            im.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
+    /// Without the `jp2k` feature the five suffixes fall through to
+    /// `UnsupportedExtension` like any other extension with no encoder, and
+    /// the refusal message stops naming them (issue #770).
+    ///
+    /// The failure this guards against is not "the save fails": it is the save
+    /// failing with a *JPEG 2000* error, which would tell a caller the format
+    /// is broken when the truth is that this build has no encoder for it.
+    #[test]
+    #[cfg(not(feature = "jp2k"))]
+    fn without_the_jp2k_feature_the_five_suffixes_are_plain_unsupported_extensions() {
+        let im = jp2k_sized();
+        for extension in ["jp2", "j2k", "jpt", "j2c", "jpc"] {
+            let err = im.encode_for_extension(extension, true).unwrap_err();
+            assert!(
+                matches!(&err, SaveError::UnsupportedExtension { extension: e } if e == extension),
+                ".{extension} must read as an unsupported extension, got {err}"
+            );
+            assert!(
+                !saveable_extensions().contains(extension),
+                "the refusal must not advertise .{extension}: {}",
+                saveable_extensions()
+            );
+        }
+        // Positive control: a row that *is* live in every build.
+        assert!(im.encode_for_extension("png", true).is_ok());
+    }
+
     /**
      * Tests that the `UnsupportedExtension` message names exactly the
      * extensions this build has an encoder behind, so the string and the
      * match arms cannot drift apart. They already did once: the `.jxl` arm
      * landed while the message still read "libviprs encodes png, jpg/jpeg,
      * gif, webp, and v/vips", so `save("x.avif")` told the caller JPEG XL
-     * was unsupported at the moment it became supported. Works by parsing
+     * was unsupported at the moment it became supported. The same thing was
+     * about to happen to the five JPEG 2000 suffixes (#770), which is why
+     * they are swept here by feature rather than named in one build.
+     * `jp2000` sits in the unlisted set because vips refuses that suffix too,
+     * measured, so it is the nearest miss to a live row. Works by parsing
      * the extension list back out of a rendered message, saving under every
      * name it holds, and then checking a name it does not hold is refused.
      * Input: the message from `save("out.avif")` -> Output: every listed
@@ -3138,6 +3303,13 @@ mod tests {
             cfg!(feature = "jxl"),
             "the message follows the feature: {message}"
         );
+        for suffix in ["jp2", "j2k", "jpt", "j2c", "jpc"] {
+            assert_eq!(
+                extensions.contains(&suffix),
+                cfg!(feature = "jp2k"),
+                "the message follows the feature for .{suffix}: {message}"
+            );
+        }
 
         for extension in &extensions {
             let path = dir.path().join(format!("listed.{extension}"));
@@ -3148,9 +3320,12 @@ mod tests {
 
         // The other direction, so the list cannot go stale by growing
         // either: an extension it does not name has no arm behind it.
-        let mut unlisted = vec!["avif", "heic", "tif"];
+        let mut unlisted = vec!["avif", "heic", "tif", "jp2000"];
         if !cfg!(feature = "jxl") {
             unlisted.push("jxl");
+        }
+        if !cfg!(feature = "jp2k") {
+            unlisted.extend(["jp2", "j2k", "jpt", "j2c", "jpc"]);
         }
         for extension in unlisted {
             assert!(
