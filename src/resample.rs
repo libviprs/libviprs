@@ -1336,8 +1336,15 @@ fn interpolate_at(
                 }
             }
             for (b, o) in out.iter_mut().enumerate() {
-                let acc: f64 = (0..4).map(|j| cy[j] * rows_f[j * bands + b]).sum();
-                *o = if narrow { f64::from(acc as f32) } else { acc };
+                // `cubic_float<T>` narrows the column combine too, and that
+                // narrowing is deliberately not spelled here: on a float
+                // carrier [`SampleLayout::write`] stores an `f32` anyway, and
+                // on a premultiplied one [`Raster::try_affine_with`] quantises
+                // the accumulator to `f32` at the un-premultiply seam (#664).
+                // Mutation N5 in the PR adds it back and every test stays
+                // green, which is what says the two spellings are the same
+                // bits rather than an assumption that they are.
+                *o = (0..4).map(|j| cy[j] * rows_f[j * bands + b]).sum();
             }
         }
         Interpolator::Lbb => {
@@ -4550,6 +4557,80 @@ mod tests {
             want,
             "float bicubic against vips 8.18.6"
         );
+    }
+
+    /// Issue #705, the third guard: the plain `ushort` carrier must **not**
+    /// narrow. `bicubic_unsigned_int32_tab` calls `bicubic_float<double>`, so
+    /// `cubic_float` returns `double` there and nothing rounds between the row
+    /// sums and the combine.
+    ///
+    /// No oracle can arbitrate that one head on. An `f32` ulp at 16-bit
+    /// magnitudes is about 0.004, so it only moves a sample sitting that close
+    /// to a rounding boundary, and vips truncates its own `ushort` store where
+    /// this module rounds half up (#732), so the binary quantises the two
+    /// candidate answers differently anyway. What *can* arbitrate it is the
+    /// float carrier, which is pinned bit for bit against 8.18.6 by
+    /// [`affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier`]: run
+    /// the same numbers through both carriers and they have to **disagree**
+    /// exactly where the narrowing bites. Giving `ushort` the narrowing makes
+    /// them agree, and that is the mutation this catches.
+    ///
+    /// The fixture is `(i * 7907 + 13) % 64007`, picked out of a search over
+    /// 330 candidates because one of its 270 output samples lands within an
+    /// `f32` ulp of a rounding boundary *and* moves under narrowing the rows
+    /// alone. That second condition matters: my first fixture only moved when
+    /// the column combine narrowed, so it let a mutation that narrows only the
+    /// four row sums through, which is exactly the arm this is meant to guard.
+    ///
+    /// [`affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier`]: self::affine_bicubic_rounds_each_row_sum_to_f32_on_a_float_carrier
+    #[test]
+    fn affine_bicubic_keeps_full_f64_rows_on_a_ushort_carrier() {
+        let values: Vec<u32> = (0..12 * 12u32).map(|i| (i * 7907 + 13) % 64007).collect();
+        let as_u16 = Raster::new(
+            12,
+            12,
+            PixelFormat::Gray16,
+            values
+                .iter()
+                .flat_map(|v| (*v as u16).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap()
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+        let as_f32 = Raster::new(
+            12,
+            12,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            values
+                .iter()
+                .flat_map(|v| (*v as f32).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap()
+        .affine([1.3, 0.2, -0.15, 1.1], "bicubic");
+
+        let got: Vec<u16> = as_u16
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_ne_bytes(*b))
+            .collect();
+        // The float result quantised by this module's own writer rule, so the
+        // only thing left between the two runs is the accumulation.
+        let via_float: Vec<u16> = float_samples(&as_f32)
+            .iter()
+            .map(|v| (f64::from(*v) + 0.5).floor().clamp(0.0, 65535.0) as u16)
+            .collect();
+        assert_eq!(got.len(), 18 * 15, "output size");
+
+        let differ: Vec<usize> = (0..got.len()).filter(|&i| got[i] != via_float[i]).collect();
+        assert_eq!(
+            differ,
+            vec![73],
+            "the two carriers must disagree exactly where the f32 narrowing bites"
+        );
+        assert_eq!((got[73], via_float[73]), (38531, 38532));
     }
 
     /// Issue #705, the premultiplied half. `vips_affine_build` premultiplies
