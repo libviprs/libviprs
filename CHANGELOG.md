@@ -1757,6 +1757,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how the wrong sentence survived. Six counter ops get a format pin and two
   get a ceiling pin carrying the measured vips answer beside the libviprs one.
 
+- The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
+  body it copies out of the file, priced from the declared header geometry
+  through the same `DecodeLimits::check_image_alloc` every other self-priced
+  decoder uses (issue #710). It applied `max_coord` and `max_pixels` and then
+  nothing else, so a 36-byte raster decoded clean under a 35-byte ceiling and
+  `.v` was the one container out of ten where setting the budget bought a
+  caller nothing.
+
+  **`.v` was never a decompression-bomb vector**, and that is worth saying
+  because the obvious reading is wrong. The reader refuses a header promising
+  more pixel data than the file physically holds, so the allocation was already
+  bounded by the input length, and no crafted small file ever got past it. What
+  was missing was the contract, in two visible ways. `Raster::new`'s 8 GiB
+  construction budget was the only ceiling in force, fifteen times the 512 MiB
+  decode default. And the two decode entry points disagreed about the same run
+  of bytes: `decode_file_with_limits` spends the budget on the bounded
+  whole-file read, `decode_bytes_with_limits` has no file to spend it on.
+  Measured before the change:
+
+  ```text
+  bytes 4x4 budget=47 (price 48) -> Ok((4, 4))
+  file  4x4 budget=47 (price 48) -> Err(AllocLimitExceeded {
+      what: "image file body", needed_bytes: 112, max_alloc_bytes: 47 })
+  ```
+
+  **What changes for a caller.** Only `decode_bytes_with_limits` and
+  `decode_bytes`, and only on a `.v` whose pixel body is over the budget. The
+  file entry points cannot change: a `.v` file is always its 64-byte header
+  plus the body plus any trailer, so a budget under the body's price is under
+  the file's length too and the whole-file read refuses first. On the in-memory
+  path a `.v` body over `max_alloc_bytes` now comes back as
+  `SourceError::AllocLimitExceeded { what: ".v pixel buffer", .. }` with the
+  declared geometry attached, where it used to decode. At the 512 MiB default
+  that is a `.v` over half a gigabyte handed to the crate as bytes.
+
 - `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
   now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster
   with no alpha band (issue #704). `vips_interpolate_bicubic_interpolate` sends
