@@ -532,7 +532,18 @@ fn tracked_under_oracle_captures() -> Vec<String> {
 /// tracked. So the ignore on its own leaves both files exactly where they were
 /// AND stops `git status` mentioning them, which is worse than either half
 /// alone. Nothing about the ignore rule can notice that; this can.
+///
+/// It asks git, which means it spawns a process, so it cannot run under Miri.
+/// Miri supports process spawning on no target and under no flag, so the first
+/// one it reaches ends the whole session with an unsupported-operation abort on
+/// `fork` rather than failing this one test (issue #714).
+///
+/// The spawn is one call down, in [`tracked_under_oracle_captures`], not here,
+/// so the body scan that classifies the filesystem rows reads this test as
+/// pure. The call-following process detector in
+/// `tests/miri_ignore_convention.rs` is what sees it.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
 fn no_compiled_python_is_tracked_under_oracle_captures() {
     let tracked = tracked_under_oracle_captures();
     let artefacts: Vec<&String> = tracked
