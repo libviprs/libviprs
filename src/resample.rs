@@ -4477,6 +4477,207 @@ mod tests {
         );
     }
 
+    /// Issue #736. `vips_affine_build` converts the background exactly once,
+    /// before any resampling happens:
+    ///
+    /// ```c
+    /// affine->ink = vips__vector_to_ink(class->nickname, in,
+    ///     VIPS_AREA(affine->background)->data, NULL,
+    ///     VIPS_AREA(affine->background)->n);
+    /// ```
+    ///
+    /// `vips__vector_to_ink` builds a one-pixel image of the doubles and casts
+    /// it to the input's band format, and `vips_cast` clips and then truncates
+    /// toward zero (`cast.c:237`, and the file's own header note: "now does
+    /// floor(), not rint()"). So every tap past the edge, and every output
+    /// pixel outside the transformed input, is already an integer inside the
+    /// carrier's range by the time the interpolator sees it. This module
+    /// carried the raw `f64` into both.
+    ///
+    /// Verified on 8.18.6 for every interpolator on both integer carriers,
+    /// `vips affine in.v out.v "1.3 0.2 -0.15 1.1" --interpolate INTERP
+    /// --extend background --background BG` over a 6x6 constant:
+    ///
+    /// ```text
+    ///           200.7 == 200   200.7 != 201   -30.4 == 0   over-range == max
+    /// uchar     yes            yes            yes          400.9 == 255
+    /// ushort    yes            yes            yes          70000.9 == 65535
+    /// ```
+    ///
+    /// all five interpolators, all four columns. The `200.7 != 201` column is
+    /// the positive control: without it the first column would also pass if the
+    /// ink were being ignored altogether.
+    #[test]
+    fn affine_casts_the_background_ink_to_an_integer_carrier() {
+        for (format, value, over, ceiling) in [
+            (PixelFormat::Gray8, 100u16, 400.9, 255.0),
+            (PixelFormat::Gray16, 25000u16, 70000.9, 65535.0),
+        ] {
+            for name in ["nearest", "bilinear", "bicubic", "nohalo", "lbb"] {
+                let bytes: Vec<u8> = if format == PixelFormat::Gray8 {
+                    vec![value as u8; 36]
+                } else {
+                    (0..36).flat_map(|_| value.to_ne_bytes()).collect()
+                };
+                let im = Raster::new(6, 6, format, bytes).unwrap();
+                let interp = Interpolator::from_name(name).unwrap();
+                let shift = |background: f64| -> Vec<u8> {
+                    im.try_affine_with(
+                        [1.3, 0.2, -0.15, 1.1],
+                        interp,
+                        AffineOptions {
+                            extend: Extend::Background,
+                            background,
+                            ..AffineOptions::default()
+                        },
+                    )
+                    .unwrap()
+                    .data()
+                    .to_vec()
+                };
+                assert_eq!(shift(200.7), shift(200.0), "{format:?} {name}: truncates");
+                assert_ne!(
+                    shift(200.7),
+                    shift(201.0),
+                    "{format:?} {name}: truncates rather than rounding"
+                );
+                assert_eq!(shift(-30.4), shift(0.0), "{format:?} {name}: clips low");
+                assert_eq!(shift(over), shift(ceiling), "{format:?} {name}: clips high");
+            }
+        }
+    }
+
+    /// Issue #736, the float carrier. `vips_cast` to `VIPS_FORMAT_FLOAT` is
+    /// still a narrowing and there is no clip on that arm, so vips reads
+    /// `f32(200.7)` where this module read the `f64`. Measured on 8.18.6 for
+    /// all five interpolators: `--background 200.7` and
+    /// `--background 200.6999969482422` produce identical output, `200.7` and
+    /// `200` do not, and an ink below zero is **not** clipped the way it is on
+    /// an integer carrier.
+    #[test]
+    fn affine_narrows_the_background_ink_on_a_float_carrier() {
+        let data: Vec<u8> = (0..36).flat_map(|_| 100.0f32.to_ne_bytes()).collect();
+        let im = Raster::new(
+            6,
+            6,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            data,
+        )
+        .unwrap();
+        for name in ["nearest", "bilinear", "bicubic", "nohalo", "lbb"] {
+            let interp = Interpolator::from_name(name).unwrap();
+            let shift = |background: f64| -> Vec<f32> {
+                float_samples(
+                    &im.try_affine_with(
+                        [1.3, 0.2, -0.15, 1.1],
+                        interp,
+                        AffineOptions {
+                            extend: Extend::Background,
+                            background,
+                            ..AffineOptions::default()
+                        },
+                    )
+                    .unwrap(),
+                )
+            };
+            assert_eq!(
+                shift(200.7),
+                shift(f64::from(200.7f32)),
+                "{name}: the ink narrows to f32"
+            );
+            assert_ne!(shift(200.7), shift(200.0), "{name}: and only to f32");
+            assert_ne!(
+                shift(-30.4),
+                shift(0.0),
+                "{name}: a float carrier has no clip on the cast"
+            );
+        }
+    }
+
+    /// Issue #736, the anchors. The equivalences above say the ink is converted
+    /// the same way vips converts it; these say the converted value is the one
+    /// vips uses. Row 0 of the 9x8 output for five
+    /// `(carrier, interpolator, background)` cells, measured on 8.18.6. The
+    /// last sample of each row is an output pixel outside the transformed
+    /// input, which `vips_affine_gen` paints with `affine->ink` rather than
+    /// interpolating, so each row covers both sites the cast reaches.
+    #[test]
+    fn affine_background_ink_rows_match_the_oracle() {
+        let gray8 = |v: u8| Raster::new(6, 6, PixelFormat::Gray8, vec![v; 36]).unwrap();
+        let gray16 = |v: u16| {
+            Raster::new(
+                6,
+                6,
+                PixelFormat::Gray16,
+                (0..36).flat_map(|_| v.to_ne_bytes()).collect::<Vec<u8>>(),
+            )
+            .unwrap()
+        };
+        let shift = |im: &Raster, name: &str, background: f64| -> Raster {
+            im.try_affine_with(
+                [1.3, 0.2, -0.15, 1.1],
+                Interpolator::from_name(name).unwrap(),
+                AffineOptions {
+                    extend: Extend::Background,
+                    background,
+                    ..AffineOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let out = shift(&gray8(100), "bilinear", 200.7);
+        assert_eq!((out.width(), out.height()), (9, 8), "output size");
+        assert_eq!(
+            &out.data()[..9],
+            &[189u8, 179, 169, 158, 148, 138, 127, 151, 200],
+            "uchar bilinear, background 200.7"
+        );
+        assert_eq!(
+            &shift(&gray8(100), "lbb", 400.9).data()[..9],
+            &[250u8, 237, 219, 196, 173, 149, 129, 165, 255],
+            "uchar lbb, background 400.9"
+        );
+        let u16_row = |r: &Raster| -> Vec<u16> {
+            r.data().as_chunks::<2>().0[..9]
+                .iter()
+                .map(|b| u16::from_ne_bytes(*b))
+                .collect()
+        };
+        assert_eq!(
+            u16_row(&shift(&gray16(25000), "nearest", 200.7)),
+            vec![200u16; 9],
+            "ushort nearest, background 200.7"
+        );
+        assert_eq!(
+            u16_row(&shift(&gray16(25000), "nohalo", -30.4)),
+            vec![1108u16, 3551, 6799, 10163, 13034, 16155, 19701, 13081, 0],
+            "ushort nohalo, background -30.4"
+        );
+        let data: Vec<u8> = (0..36).flat_map(|_| 100.0f32.to_ne_bytes()).collect();
+        let f = Raster::new(
+            6,
+            6,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            data,
+        )
+        .unwrap();
+        assert_eq!(
+            &float_samples(&shift(&f, "bicubic", 200.7))[..9],
+            &[
+                193.14478f32,
+                183.42047,
+                173.28777,
+                160.13597,
+                148.38359,
+                134.8123,
+                118.18186,
+                146.40132,
+                200.7
+            ],
+            "float bicubic, background 200.7"
+        );
+    }
+
     /// Issue #704 and #736. The taps `bicubic_unsigned_int_tab` reads are the
     /// stored samples of the embedded image, so an out-of-band tap is already
     /// an integer inside the carrier's range by the time the interpolator sees
