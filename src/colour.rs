@@ -163,12 +163,21 @@
 //!
 //! That is a claim about the buffers this module owns, and it does not reach
 //! past them. On a **LUT profile** both ICC directions run the pixels through
-//! a moxcms transform, and the katana stages inside it size intermediates from
-//! the image and allocate them with a plain `vec![]`, so memory exhaustion on
-//! that route still aborts. moxcms has the fallible spelling already, a
-//! `try_vec!` over `try_reserve_exact` returning `CmsError::OutOfMemory`;
-//! those stages simply do not use it, and issue #693 tracks the fix upstream.
-//! The matrix-shaper and grey-TRC routes evaluate here and never reach it.
+//! a moxcms transform, and the katana stages inside it size their intermediates
+//! from the slice they are handed and allocate them with a plain `vec![]`, so a
+//! request the host cannot serve reaches `handle_alloc_error` and ends the
+//! process. Nothing in this crate can make that allocation fallible. moxcms has
+//! the fallible spelling already, a `try_vec!` over `try_reserve_exact`
+//! returning `CmsError::OutOfMemory`, and those stages simply do not use it.
+//!
+//! What this module does instead is stop the request following the image.
+//! `xf.transform` is driven in `ICC_TRANSFORM_CHUNK_PIXELS`-pixel slices, so
+//! the largest buffer moxcms allocates on our behalf is 192 KiB whatever the
+//! image is, and an ICC transform of a 30000-square raster asks the CMS for no
+//! more memory than one of a 200-square raster does (issue #693). That is a
+//! bound, not a `Result`: refuse that 192 KiB and the process still dies, which
+//! is why `tests/icc_lut_alloc.rs` keeps a check that says so out loud. The
+//! matrix-shaper and grey-TRC routes evaluate here and never reach any of it.
 //!
 //! # Deferred
 //!
@@ -206,8 +215,8 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use moxcms::{
-    ColorProfile, DataColorSpace, Layout, RenderingIntent, ToneCurveEvaluator, TransformOptions,
-    Vector3d,
+    ColorProfile, DataColorSpace, Layout, RenderingIntent, ToneCurveEvaluator,
+    TransformF32Executor, TransformOptions, Vector3d,
 };
 use thiserror::Error;
 
@@ -1716,6 +1725,12 @@ fn with_colour_alloc_cap_after<R>(spare: u32, max_bytes: u64, f: impl FnOnce() -
 /// legitimately grows past `DEFAULT_MAX_ALLOC_BYTES` on a widening conversion,
 /// where `Raster::new` would reject it and the old `.expect` would turn that
 /// rejection into a panic out of a `try_` form (issue #279).
+///
+/// The `fields.clone()` on the last line is not fallible and copies an
+/// attached ICC profile with everything else, so every colour op that carries
+/// metadata onto its output has one bounded infallible allocation left in it.
+/// See [`profile_bytes`] for why that is ranked below the image-sized sites
+/// rather than fixed with them (#693).
 fn raster_from_bytes(
     width: u32,
     height: u32,
@@ -2177,15 +2192,106 @@ fn icc_device_to_lab(
     icc_device_to_lab_fallback(profile, device, channels, intent, width, height)
 }
 
+/// How many pixels one `xf.transform` call is handed.
+///
+/// moxcms sizes the katana engine's intermediates from the slice it is given
+/// and allocates them with a plain `vec![0f32; n]` (0.8.1
+/// `conversions/katana/md3x3.rs:176`, `md4x3.rs:164`, `md_nx3.rs:160` and
+/// `md_pipeline.rs:90`), so a request the host cannot serve reaches
+/// `handle_alloc_error` and ends the process. That allocation is not ours and
+/// cannot be made fallible from here. The one thing this crate controls is
+/// `n`, and handing the transform a fixed number of pixels rather than the
+/// whole plane takes the request off the image size (issue #693).
+///
+/// Every katana initial stage produces three `f32` a pixel, so this caps a
+/// single CMS intermediate at 192 KiB on any image and any device space.
+/// `tests/icc_lut_alloc.rs` pins that at two geometries and then refuses it, to
+/// keep the difference between "bounded" and "fallible" on the record.
+///
+/// The value is a cache choice rather than a correctness one: 192 KiB of
+/// working set per call, against one `Vec` allocation per chunk, which is a
+/// 733-chunk transform on a 12-megapixel image. Splitting changes no sample,
+/// because every stage moxcms runs reads only the pixel it is writing
+/// (`conversions/katana/stages.rs:73`).
+///
+/// # Retuning it
+///
+/// Correctness does not depend on the value, but the checks that police it do,
+/// and saying "cache choice" without saying that is how somebody makes a
+/// strictly better choice and gets three red tests blaming an upstream crate.
+/// The window is **43 to 43690 pixels**, and each end is one number in
+/// `tests/icc_lut_alloc.rs`:
+///
+/// * below 43, the intermediate at twelve bytes a pixel stops clearing that
+///   file's 512-byte `ZEROED_LOG_FLOOR`, so the ceiling never sees the request
+///   it is aimed at. Lower the floor and the window moves down with it.
+/// * above 43690, the intermediate passes `CMS_CEILING_BYTES`, which is the
+///   512 KiB bound this module advertises. That end is a real promise rather
+///   than a test artefact, so raise the bound deliberately or not at all.
+///
+/// Nothing else is pinned to it. The equivalence check below sizes its fixture
+/// from this constant, and `LOG_CAP` in that file is diagnostic rather than
+/// load-bearing, both so a retune inside the window costs nothing.
+const ICC_TRANSFORM_CHUNK_PIXELS: usize = 16 * 1024;
+
+/// Run `xf` over a whole plane in [`ICC_TRANSFORM_CHUNK_PIXELS`] slices.
+///
+/// `src_channels` and `dst_channels` are samples per pixel on each side, which
+/// differ whenever the two profiles disagree on device space, so the two chunk
+/// iterators are stepped over pixels rather than over samples.
+///
+/// # Errors
+///
+/// [`ColourError::IccTransform`] if the two sides do not describe the same
+/// number of pixels, or if moxcms refuses a chunk.
+///
+/// The first of those is a programming error rather than a host condition, and
+/// it is checked rather than asserted on purpose. `zip` stops at the shorter
+/// side, so a mismatch would transform a prefix, leave the rest of `dst` at
+/// whatever it was reserved with, and return `Ok(())`: a wrong image with no
+/// error anywhere. A `debug_assert!` catches that in the tests and says nothing
+/// in the release build people actually run, which is the wrong way round for a
+/// failure whose whole danger is being silent.
+fn transform_in_chunks(
+    xf: &TransformF32Executor,
+    src: &[f32],
+    src_channels: usize,
+    dst: &mut [f32],
+    dst_channels: usize,
+) -> Result<(), ColourError> {
+    let (src_pixels, dst_pixels) = (src.len() / src_channels, dst.len() / dst_channels);
+    if src_pixels != dst_pixels {
+        return Err(ColourError::IccTransform {
+            detail: format!(
+                "the two sides of an ICC transform must describe the same pixels, \
+                 got {src_pixels} in ({} samples at {src_channels} a pixel) and \
+                 {dst_pixels} out ({} samples at {dst_channels} a pixel)",
+                src.len(),
+                dst.len()
+            ),
+        });
+    }
+    for (s, d) in src
+        .chunks(ICC_TRANSFORM_CHUNK_PIXELS * src_channels)
+        .zip(dst.chunks_mut(ICC_TRANSFORM_CHUNK_PIXELS * dst_channels))
+    {
+        xf.transform(s, d).map_err(|e| ColourError::IccTransform {
+            detail: format!("{e:?}"),
+        })?;
+    }
+    Ok(())
+}
+
 /// The LUT-profile import path: moxcms transform to the generic Lab
 /// profile, PCS XYZ decoded from the ICC `u1Fixed15` code scale.
 ///
-/// The two buffers on either side of `xf.transform` are reserved fallibly. The
-/// transform between them is not: moxcms sizes its katana intermediates from
-/// the image and allocates them with a plain `vec![]`, so this route and its
-/// export twin are the two places in the module where memory exhaustion is
-/// still a process abort. Issue #693 tracks that upstream, where the fallible
-/// spelling already exists and these stages just do not use it.
+/// The two buffers on either side of the transform are reserved fallibly and
+/// the transform between them is driven in [`ICC_TRANSFORM_CHUNK_PIXELS`]
+/// slices, so the buffer moxcms allocates for itself is bounded rather than
+/// image-sized. It is still not fallible: this route and its export twin are
+/// the two places in the module where memory exhaustion is a process abort
+/// rather than an `Err`, and issue #693 tracks the fix upstream, where the
+/// fallible spelling already exists and these stages just do not use it.
 fn icc_device_to_lab_fallback(
     profile: &ColorProfile,
     device: &[f32],
@@ -2207,10 +2313,7 @@ fn icc_device_to_lab_fallback(
             detail: format!("{e:?}"),
         })?;
     let mut pcs = alloc_colour_plane_filled::<f32>(width, height, 3, 0.0)?;
-    xf.transform(device, &mut pcs)
-        .map_err(|e| ColourError::IccTransform {
-            detail: format!("{e:?}"),
-        })?;
+    transform_in_chunks(xf.as_ref(), device, channels, &mut pcs, 3)?;
     // `collect()` here sized itself from the iterator's exact length hint, so
     // it was a second infallible image-sized allocation, just one that does not
     // look like an allocation. Reserved and pushed instead (#685).
@@ -2279,8 +2382,9 @@ fn icc_lab_to_device(
 /// and run through a moxcms transform from the generic Lab profile.
 ///
 /// Carries the same moxcms residue as [`icc_device_to_lab_fallback`]: both of
-/// this function's own buffers are fallible, the transform between them is not
-/// (issue #693).
+/// this function's own buffers are fallible and the transform between them is
+/// chunked, so what moxcms allocates for itself is bounded but still not
+/// fallible (issue #693).
 fn icc_lab_to_device_fallback(
     profile: &ColorProfile,
     labs: &[[f64; 3]],
@@ -2309,10 +2413,7 @@ fn icc_lab_to_device_fallback(
         pcs.push((xyz[2] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
     }
     let mut device = alloc_colour_plane_filled::<f32>(width, height, channels, 0.0)?;
-    xf.transform(&pcs, &mut device)
-        .map_err(|e| ColourError::IccTransform {
-            detail: format!("{e:?}"),
-        })?;
+    transform_in_chunks(xf.as_ref(), &pcs, 3, &mut device, channels)?;
     Ok(device)
 }
 
@@ -2368,6 +2469,24 @@ fn read_device_normalised(raster: &Raster, channels: usize) -> Result<Vec<f32>, 
 
 /// The profile bytes an ICC op should use: the explicit path if given,
 /// else the raster's attached profile.
+///
+/// Both arms copy the blob infallibly, and that is deliberate rather than
+/// overlooked. [`std::fs::read`] sizes its buffer from the file and
+/// `<[u8]>::to_vec` copies the attached bytes, so a host that cannot serve
+/// either one reaches `handle_alloc_error` instead of the [`Err`] the `try_`
+/// forms advertise. [`Raster::try_icc_export_with`] makes four copies of the
+/// same blob in all: this one, the `fields.clone()` inside
+/// [`Raster::try_clone`], the one [`raster_from_bytes`] makes carrying the
+/// metadata onto the output, and `set_icc_profile` at the end.
+///
+/// They sit below the image-sized sites #685 and #689 removed because a
+/// profile is a *bounded* copy where a full-resolution plane is not: the blob
+/// an attacker can drive here comes from a decoded JPEG's APP2 chain, which
+/// `crate::imageio` caps at roughly 16 MB. Bounded is a reason to rank it
+/// last, though, not a reason to call these paths abort-free.
+/// [`Raster::try_clone`]'s first line says "of the pixel buffer" for exactly
+/// this reason, and this is the same statement seen from the colour side
+/// (#693).
 fn profile_bytes(raster: &Raster, path: Option<&Path>) -> Result<Vec<u8>, ColourError> {
     match path {
         Some(p) => std::fs::read(p).map_err(|source| ColourError::ProfileRead {
@@ -5663,6 +5782,110 @@ mod tests {
         vec![[50.0, 10.0, -10.0]; 64]
     }
 
+    /// An RGB **LUT** profile: an A2B0 and a B2A0 over a plain lookup table,
+    /// and no TRCs, so `is_matrix_shaper()` is false and both ICC directions
+    /// dispatch past their exact arms into the CMS fallback.
+    ///
+    /// The suite carried no LUT profile until this one, which is why #689's
+    /// four fallback checks call `icc_device_to_lab_fallback` and its export
+    /// twin directly and say in as many words that they do not prove the
+    /// dispatch. The two checks at the bottom of this module are what proves
+    /// it, and this is what they drive.
+    ///
+    /// Deliberately *not* the profile `tests/icc_lut_alloc.rs` builds. That one
+    /// carries degenerate curves because it needs moxcms's katana engine
+    /// specifically; this one only needs to not be a matrix shaper, and a plain
+    /// table keeps it readable. Both are LUT profiles and both reach the
+    /// fallback; only one of them reaches the buffer #693 is about.
+    fn lut_profile_bytes() -> Vec<u8> {
+        use moxcms::ToneReprCurve;
+
+        lut_profile_bytes_with(ToneReprCurve::Lut((0..256u16).map(|i| i * 257).collect()))
+    }
+
+    /// [`lut_profile_bytes`] with the curve moxcms calls degenerate: a run of
+    /// more than twenty duplicated leading entries, which is what
+    /// `lut_hint::is_katana_required` keys on.
+    ///
+    /// A well-behaved LUT profile gets fused into a single interpolated grid
+    /// built once at transform *creation*, so it never enters the katana
+    /// engine and never makes the per-call allocation #693 is about. This is
+    /// the same profile shape `tests/icc_lut_alloc.rs` drives, here so the
+    /// chunking equivalence check covers the engine the bound is for and not
+    /// only the one it is not.
+    fn katana_lut_profile_bytes() -> Vec<u8> {
+        use moxcms::ToneReprCurve;
+
+        let mut v = vec![0u16; 40];
+        v.extend((0..216u16).map(|i| i * 300));
+        lut_profile_bytes_with(ToneReprCurve::Lut(v))
+    }
+
+    /// The shared body of the two builders above: an RGB LUT profile over
+    /// `ramp`, with a Lab PCS so moxcms cannot short-circuit the destination
+    /// analysis the way it does for an XYZ one.
+    fn lut_profile_bytes_with(ramp: moxcms::ToneReprCurve) -> Vec<u8> {
+        use moxcms::{LutMultidimensionalType, LutStore, LutWarehouse, Matrix3d, ProfileClass};
+
+        const GRID: usize = 9;
+        let code = |x: usize| ((x as f32 / (GRID - 1) as f32) * 65535.0) as u16;
+        let mut clut = Vec::with_capacity(GRID * GRID * GRID * 3);
+        for r in 0..GRID {
+            for g in 0..GRID {
+                for b in 0..GRID {
+                    clut.push(code(r));
+                    clut.push(code(g));
+                    clut.push(code(b));
+                }
+            }
+        }
+        let mab = LutWarehouse::Multidimensional(LutMultidimensionalType {
+            num_input_channels: 3,
+            num_output_channels: 3,
+            grid_points: [
+                GRID as u8, GRID as u8, GRID as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            clut: Some(LutStore::Store16(clut)),
+            a_curves: vec![ramp.clone(), ramp.clone(), ramp.clone()],
+            b_curves: vec![ramp.clone(), ramp.clone(), ramp],
+            m_curves: vec![],
+            matrix: Matrix3d::IDENTITY,
+            bias: Vector3d::default(),
+        });
+        // Built on top of `new_srgb` rather than written out as a literal:
+        // `ColorProfile`'s version field is private to moxcms, so the struct
+        // cannot be constructed from here, and the base supplies a white point
+        // the encoder accepts.
+        let mut p = ColorProfile::new_srgb();
+        p.profile_class = ProfileClass::DisplayDevice;
+        p.color_space = DataColorSpace::Rgb;
+        p.pcs = DataColorSpace::Lab;
+        p.red_trc = None;
+        p.green_trc = None;
+        p.blue_trc = None;
+        p.lut_a_to_b_perceptual = Some(mab.clone());
+        p.lut_a_to_b_colorimetric = Some(mab.clone());
+        p.lut_b_to_a_perceptual = Some(mab.clone());
+        p.lut_b_to_a_colorimetric = Some(mab);
+        p.encode().unwrap()
+    }
+
+    /// [`srgb_profiled_rgba_fixture`]'s shape with a LUT profile attached, so
+    /// the two differ in nothing but the engine the profile selects.
+    fn lut_profiled_rgba_fixture() -> Raster {
+        let mut im = Raster::new(8, 8, PixelFormat::Rgba8, vec![119u8; 8 * 8 * 4]).unwrap();
+        im.set_icc_profile(&lut_profile_bytes());
+        im
+    }
+
+    /// [`lab_profiled_fixture`]'s shape with a LUT profile attached, the export
+    /// twin of [`lut_profiled_rgba_fixture`].
+    fn lab_lut_profiled_fixture() -> Raster {
+        let mut im = lab_fixture();
+        im.set_icc_profile(&lut_profile_bytes());
+        im
+    }
+
     /**
      * Tests the second image-sized allocation in this module, the one
      * `build_raster` makes to quantise samples into bytes. It is a distinct
@@ -6201,6 +6424,257 @@ mod tests {
             2,
             "the export fallback must make exactly two image-sized allocations \
              through the fallible path"
+        );
+    }
+
+    /**
+     * Tests that splitting a plane across `xf.transform` calls changes no
+     * sample, which is the whole premise of the chunking that bounds moxcms's
+     * katana intermediate (issue #693).
+     *
+     * `tests/icc_lut_alloc.rs` measures that the CMS request stopped following
+     * the image. It cannot say the pixels came out the same, because it has no
+     * un-chunked path left to compare against. This does: it builds the
+     * transform the fallback builds, runs it once over the whole plane as the
+     * reference, then runs [`transform_in_chunks`] over the same input and
+     * asserts the two buffers are bit-identical.
+     *
+     * Three cells, because the risk is in the two channel counts rather than
+     * in the split. `Rgba -> Rgb` is not a synthetic shape: `moxcms_layout(4)`
+     * is `Layout::Rgba`, so that is exactly how a CMYK import reaches moxcms,
+     * and it is the only cell where using one side's channel count for the
+     * other side's stride goes wrong.
+     *
+     * The plane is sized from [`ICC_TRANSFORM_CHUNK_PIXELS`] rather than
+     * written down, at two full chunks and a single-pixel tail. Two full ones
+     * so a run that only ever made one call cannot pass, and the sharpest tail
+     * available so a run that dropped the remainder leaves exactly one pixel
+     * wrong, which is the hardest version of that failure to notice. Writing a
+     * geometry down instead is what made an earlier version of this quietly
+     * depend on the constant's value: at a 32768-pixel chunk it stopped
+     * spanning two chunks and failed on its own precondition.
+     * Input: a ramp plane through each of a fused LUT profile, a katana LUT
+     * profile and a four-channel source layout -> chunked == whole, exactly.
+     * Mutation: `chunks` to `chunks_exact` drops the tail and reddens all
+     * three; swapping `src_channels` and `dst_channels` in either argument
+     * reddens the `Rgba -> Rgb` cell.
+     */
+    #[test]
+    fn chunking_the_cms_transform_reproduces_the_whole_plane_result() {
+        let pixels = ICC_TRANSFORM_CHUNK_PIXELS * 2 + 1;
+        let lab_profile = ColorProfile::new_lab();
+
+        for (what, bytes, src_layout, src_channels) in [
+            ("the fused LUT profile", lut_profile_bytes(), Layout::Rgb, 3),
+            (
+                "the katana LUT profile",
+                katana_lut_profile_bytes(),
+                Layout::Rgb,
+                3,
+            ),
+            (
+                "a four-channel source layout, as a CMYK import spells it",
+                lut_profile_bytes(),
+                Layout::Rgba,
+                4,
+            ),
+        ] {
+            let profile = parse_profile(&bytes).unwrap();
+            let xf = profile
+                .create_transform_f32(
+                    src_layout,
+                    &lab_profile,
+                    Layout::Rgb,
+                    transform_options(Intent::Perceptual),
+                )
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let device: Vec<f32> = (0..pixels * src_channels)
+                .map(|i| (i % 251) as f32 / 250.0)
+                .collect();
+
+            let mut whole = vec![0f32; pixels * 3];
+            xf.transform(&device, &mut whole)
+                .unwrap_or_else(|e| panic!("{what}, whole plane: {e:?}"));
+            let mut chunked = vec![0f32; pixels * 3];
+            transform_in_chunks(xf.as_ref(), &device, src_channels, &mut chunked, 3)
+                .unwrap_or_else(|e| panic!("{what}, chunked: {e:?}"));
+
+            let differing = chunked
+                .iter()
+                .zip(&whole)
+                .enumerate()
+                .filter(|(_, (a, b))| a.to_bits() != b.to_bits())
+                .map(|(i, (a, b))| (i, *a, *b))
+                .take(4)
+                .collect::<Vec<_>>();
+            assert!(
+                differing.is_empty(),
+                "{what}: chunking changed samples, first few (index, chunked, \
+                 whole) are {differing:?}"
+            );
+            assert!(
+                whole.iter().any(|v| *v != 0.0),
+                "{what}: the reference run wrote nothing, so an all-zero \
+                 chunked buffer would have matched it"
+            );
+        }
+    }
+
+    /**
+     * Tests that a plane mismatch comes back as an `Err` rather than as a
+     * quietly half-transformed buffer.
+     *
+     * `transform_in_chunks` steps two `chunks` iterators through `zip`, and
+     * `zip` stops at the shorter one. So two sides that disagree on pixel
+     * count would transform a prefix, leave the rest of `dst` holding whatever
+     * it was reserved with, and return `Ok(())`. Both callers derive both
+     * planes from one `(width, height)` so it cannot happen today, which is
+     * exactly why it needs a check rather than a `debug_assert!`: nothing in
+     * the suite would ever exercise the assert, and the release build people
+     * run would have neither.
+     * Input: a 40-sample source at 4 a pixel against a 30-sample destination
+     * at 3 a pixel, so 10 pixels against 10, accepted; then the same source
+     * against a 27-sample destination, so 10 against 9 -> `IccTransform` whose
+     * detail names both counts.
+     * Mutation: dropping the `src_pixels != dst_pixels` arm makes the second
+     * call return `Ok(())` having transformed nine pixels of ten, and reddens
+     * this and nothing else.
+     */
+    #[test]
+    fn a_mismatched_transform_plane_is_refused_rather_than_half_filled() {
+        let profile = parse_profile(&lut_profile_bytes()).unwrap();
+        let xf = profile
+            .create_transform_f32(
+                Layout::Rgba,
+                &ColorProfile::new_lab(),
+                Layout::Rgb,
+                transform_options(Intent::Perceptual),
+            )
+            .unwrap();
+        let src = vec![0.5f32; 40];
+
+        let mut matched = vec![0f32; 30];
+        assert!(
+            transform_in_chunks(xf.as_ref(), &src, 4, &mut matched, 3).is_ok(),
+            "ten pixels against ten must be accepted"
+        );
+
+        let mut short = vec![0f32; 27];
+        let err = transform_in_chunks(xf.as_ref(), &src, 4, &mut short, 3);
+        let Err(ColourError::IccTransform { detail }) = err else {
+            panic!("a nine-against-ten plane must be refused, got {err:?}");
+        };
+        assert!(
+            detail.contains("10 in") && detail.contains("9 out"),
+            "the detail must name both counts so the caller can see which side \
+             is wrong, got {detail:?}"
+        );
+        assert!(
+            short.iter().all(|v| *v == 0.0),
+            "a refused transform must not have written any of the destination"
+        );
+    }
+
+    /**
+     * Tests that a LUT profile really does dispatch past `icc_device_to_lab`'s
+     * exact arm and into the CMS fallback, which the four #689 checks above
+     * cannot say: the suite carried no LUT profile, so they call the private
+     * fallback directly and describe the site as reachable with one rather than
+     * covered by anything.
+     *
+     * Works by starving the same spare index under both profiles and reading
+     * the byte count back. Spare 1 is the allocation after the device plane,
+     * and the two arms make a different one there: the exact arm reserves the
+     * `Vec<[f64; 3]>` Lab staging at three f64 a pixel, 1536 bytes over 64
+     * pixels, and the fallback reserves the PCS plane it hands the transform at
+     * three f32 a pixel, 768. So the size names the arm, and the two fixtures
+     * differ in nothing but the profile.
+     * Input: the four-band 8x8 fixture under a 16-byte ceiling with one spare,
+     * once with the sRGB profile -> 1536, once with the LUT profile -> 768.
+     * Mutation: `profile.is_matrix_shaper()` to `false` in the RGB arm's
+     * condition sends sRGB down the fallback too and reddens the first half;
+     * sizing the fallback's PCS plane at six f32 a pixel reddens the second.
+     * *Dropping* the `is_matrix_shaper()` term rather than falsifying it
+     * changes nothing, and that is worth knowing rather than assuming: the
+     * `ShaperCurves::linear_rgb` term next to it already answers `None` for a
+     * profile with no TRCs, so the arm is guarded twice over.
+     */
+    #[test]
+    fn a_lut_profile_import_dispatches_into_the_cms_fallback() {
+        let shaper = srgb_profiled_rgba_fixture();
+        let exact = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            shaper.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                exact,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "an sRGB profile must take the exact arm, whose second allocation \
+             is the 1536-byte Lab staging, got {:?}",
+            exact.map(|r| (r.width(), r.height(), r.format()))
+        );
+
+        let lut = lut_profiled_rgba_fixture();
+        let fallback = with_colour_alloc_cap_after(1, OUTPUT_TEST_CAP_BYTES, || {
+            lut.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                fallback,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "a LUT profile must take the CMS fallback, whose second allocation \
+             is the 768-byte PCS plane, got {:?}",
+            fallback.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * The export twin of the dispatch check above, counted rather than sized.
+     *
+     * Sizes cannot separate the two export arms: the exact arm's device plane
+     * and the fallback's PCS plane are both three f32 a pixel over an RGB
+     * profile, so both report 768 at the same spare index. What does separate
+     * them is how many image-sized allocations the call makes at all, because
+     * the fallback stages the PCS *and* the device buffer where the exact arm
+     * writes one buffer straight out.
+     * Input: the 8x8 Lab fixture exported under a 16-byte ceiling with sixteen
+     * spares, so nothing is actually refused, once with the sRGB profile and
+     * once with the LUT profile -> five requests against six.
+     * Mutation: `profile.is_matrix_shaper()` to `false` in the RGB arm's
+     * condition takes the sRGB count to six and reddens this test. Dropping
+     * the term instead is a no-op, for the reason the import twin records.
+     */
+    #[test]
+    fn a_lut_profile_export_dispatches_into_the_cms_fallback() {
+        const SPARES: u32 = 16;
+        let count = |im: &Raster| {
+            let (out, left) = with_colour_alloc_cap_after(SPARES, OUTPUT_TEST_CAP_BYTES, || {
+                let out = im.try_icc_export_with(8, Intent::Perceptual, None);
+                (out, colour_alloc_spare_left())
+            });
+            assert!(out.is_ok(), "the spared export must succeed, got {out:?}");
+            SPARES - left
+        };
+        assert_eq!(
+            count(&lab_profiled_fixture()),
+            5,
+            "the exact export arm makes the copy, the Lab staging, the device \
+             plane, the sample buffer and the output"
+        );
+        assert_eq!(
+            count(&lab_lut_profiled_fixture()),
+            6,
+            "the CMS fallback adds its own PCS plane on top of those five"
         );
     }
 }
