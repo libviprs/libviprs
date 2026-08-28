@@ -1,7 +1,16 @@
 use crate::conversion::RasterMeta;
-use crate::imageio::MetadataFields;
+use crate::frames::PageLayout;
+use crate::imageio::{MetadataFields, MetadataValue};
 use crate::pixel::PixelFormat;
 use thiserror::Error;
+
+/// The metadata key holding the page split, named here and nowhere else.
+///
+/// Same discipline as `n-pages` (issue #635): one writer, one reader, one
+/// documented meaning, and `tests/page_model.rs` fails if a second file
+/// spells it. The reader is [`Raster::page_layout`] and the writer is
+/// [`Raster::try_set_page_height`].
+const PAGE_HEIGHT: &str = "page-height";
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -75,6 +84,10 @@ pub enum RasterError {
     UnknownMemoryFormat { format: String },
     #[error("invalid band count {bands} for memory format {format:?}")]
     InvalidMemoryBands { bands: u32, format: String },
+    #[error("page height {page_height} does not divide a {height}-row raster into whole pages")]
+    PageHeightNotADivisor { height: u32, page_height: u32 },
+    #[error("page {index} is out of bounds for a raster holding {pages} page(s)")]
+    PageOutOfBounds { index: u32, pages: u32 },
 }
 
 /// Default ceiling, in bytes, on a single raster buffer allocation sized from
@@ -543,6 +556,18 @@ impl Raster {
     pub(crate) fn carry_meta_from(&mut self, src: &Raster) {
         self.meta = src.meta;
         self.fields = src.fields.clone();
+        // The page split is the one attachment that is a statement about the
+        // pixel buffer's own shape, so it cannot survive a change of shape
+        // (issue #564). vips carries it regardless and that is measurably
+        // wrong: `vips resize` on a four-page 4x12 roll writes a 2x6 result
+        // still claiming `page-height: 3`, and saving that produces a
+        // **two**-frame GIF whose frames are two half-height frames stacked,
+        // with no warning (measured on 8.18.6). Dropping it instead leaves a
+        // still image, which is the safe half of the two wrong answers, and
+        // it costs nothing on a still: nothing here attaches the field to one.
+        if self.height != src.height {
+            self.fields.remove(PAGE_HEIGHT);
+        }
     }
 
     /// Merge `other`'s attached fields **under** this raster's, so a name they
@@ -555,7 +580,19 @@ impl Raster {
     /// `sub` on top of that, and a profile that only `sub` has still reaches
     /// the output.
     pub(crate) fn merge_fields_from(&mut self, other: &Raster) {
+        // A page split describes the raster it is attached to and cannot be
+        // inherited from a second input, so it is the one name the union does
+        // not import (issue #564). vips does import it, and the result is
+        // wrong: `vips join plain.v paged.v out.v horizontal`, where only the
+        // *second* input is a four-page roll, produces an 8x12 output
+        // carrying `page-height: 3`, `n-pages: 4` and the roll's delay array,
+        // so an unpaged image silently becomes a four-frame animation
+        // (measured on 8.18.6).
+        let had_page_height = self.fields.get(PAGE_HEIGHT).is_some();
         self.fields.merge_under(&other.fields);
+        if !had_page_height {
+            self.fields.remove(PAGE_HEIGHT);
+        }
     }
 
     /// Create a raster filled with zeros.
@@ -973,6 +1010,167 @@ impl Raster {
     /// bands, fmt)` reconstructs an identical image.
     pub fn write_to_memory(&self) -> Vec<u8> {
         self.data().to_vec()
+    }
+
+    // -----------------------------------------------------------------
+    // The page model (issue #564)
+    // -----------------------------------------------------------------
+
+    /// How this raster's rows divide into pages, with libvips's sanity check
+    /// already applied (issue #564).
+    ///
+    /// A multi-frame image here is one raster whose rows are a whole number
+    /// of equal-height pages stacked top to bottom, the layout libvips calls
+    /// a toilet roll. The split is derived from the stored `page-height`
+    /// field and this raster's own height, never taken on trust: see
+    /// [`PageLayout::of`] for the rule and the measurement behind it.
+    ///
+    /// Reading it costs no allocation whatever type is sitting under the
+    /// name, for the reason [`Raster::get_n_pages`] gives.
+    pub fn page_layout(&self) -> PageLayout {
+        PageLayout::of(self.height, self.stored_page_height())
+    }
+
+    /// The height of one page in rows, a port of
+    /// `vips_image_get_page_height`.
+    ///
+    /// Total, and always a divisor of [`Raster::height`]: a raster that is
+    /// not paged reports its whole height, which is one page. That is what
+    /// vips reports too, measured on 8.18.6 across a sweep of stored values
+    /// (the table is in [`crate::frames`]).
+    pub fn get_page_height(&self) -> u32 {
+        self.page_layout().page_height()
+    }
+
+    /// How many pages this raster **holds**.
+    ///
+    /// Not to be confused with [`Raster::get_n_pages`], which is how many
+    /// pages the **file** held (issue #635). They differ whenever a loader
+    /// was asked for a subset: `vips copy 'anim3.webp[n=2]' out.v` reports
+    /// `n-pages: 3` on a raster holding two pages.
+    pub fn pages_loaded(&self) -> u32 {
+        self.page_layout().pages()
+    }
+
+    /// Declare that this raster's rows divide into pages `page_height` rows
+    /// tall.
+    ///
+    /// This is the one place in the crate that names the `page-height` key,
+    /// the way `Raster::set_n_pages` is for `n-pages` (issue #635), and
+    /// `tests/page_model.rs` holds it to that.
+    ///
+    /// Unlike vips's setter this one refuses a page height the raster cannot
+    /// hold. vips stores whatever it is given and its reader then discards a
+    /// value that does not divide the height, so a caller that sets a bad one
+    /// gets a silently unpaged image back; refusing at the setter turns that
+    /// into an error at the point the mistake was made.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::PageHeightNotADivisor`] when `page_height` is
+    /// zero, taller than the raster, or does not divide its height exactly.
+    pub fn try_set_page_height(&mut self, page_height: u32) -> Result<(), RasterError> {
+        if !PageLayout::divides(self.height, i64::from(page_height)) {
+            return Err(RasterError::PageHeightNotADivisor {
+                height: self.height,
+                page_height,
+            });
+        }
+        self.fields
+            .set(PAGE_HEIGHT, MetadataValue::Int(i64::from(page_height)));
+        Ok(())
+    }
+
+    /// Panicking form of [`Raster::try_set_page_height`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when `page_height` does not divide the raster's height; see
+    /// [`Raster::try_set_page_height`].
+    #[track_caller]
+    pub fn set_page_height(&mut self, page_height: u32) {
+        match self.try_set_page_height(page_height) {
+            Ok(()) => {}
+            Err(e) => panic!("set_page_height: {e}"),
+        }
+    }
+
+    /// Forget the page split, leaving a single-page raster.
+    ///
+    /// The pixels are untouched; only the declaration goes. This is what an
+    /// operation reaches for when it has produced a buffer whose rows no
+    /// longer tile the way the source's did.
+    pub fn clear_page_height(&mut self) {
+        self.fields.remove(PAGE_HEIGHT);
+    }
+
+    /// A zero-copy view of page `index`, counting from zero.
+    ///
+    /// Zero-based to match every loader's `page` argument and the
+    /// `0..get_n_pages()` sweep [`Raster::get_n_pages`] documents (issue
+    /// #566). An unpaged raster has exactly one page, `0`, covering every
+    /// row, so this works on a still image without the caller branching.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::PageOutOfBounds`] when `index` is past the last
+    /// page this raster holds.
+    pub fn page(&self, index: u32) -> Result<RegionView<'_>, RasterError> {
+        let layout = self.page_layout();
+        let rows = layout.rows(index).ok_or(RasterError::PageOutOfBounds {
+            index,
+            pages: layout.pages(),
+        })?;
+        self.region(0, rows.start, self.width, layout.page_height())
+    }
+
+    /// Copy page `index` into a new owned single-page raster.
+    ///
+    /// The metadata comes with it exactly as [`Raster::extract`] carries it,
+    /// minus the page split: a single page is not paged, so the result
+    /// reports one page whatever the source held. `n-pages` is *not* dropped,
+    /// because it says how many pages the file had and that is still true of
+    /// the file this page came out of.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::PageOutOfBounds`] when `index` is past the last
+    /// page, or any error from [`Raster::extract`].
+    pub fn try_extract_page(&self, index: u32) -> Result<Raster, RasterError> {
+        let layout = self.page_layout();
+        let rows = layout.rows(index).ok_or(RasterError::PageOutOfBounds {
+            index,
+            pages: layout.pages(),
+        })?;
+        let mut page = self.extract(0, rows.start, self.width, layout.page_height())?;
+        page.clear_page_height();
+        Ok(page)
+    }
+
+    /// Panicking form of [`Raster::try_extract_page`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`RasterError`]; see [`Raster::try_extract_page`].
+    #[track_caller]
+    pub fn extract_page(&self, index: u32) -> Raster {
+        match self.try_extract_page(index) {
+            Ok(page) => page,
+            Err(e) => panic!("extract_page: {e}"),
+        }
+    }
+
+    /// The raw stored `page-height`, borrowed rather than materialised.
+    ///
+    /// Borrowed for the reason `Raster::field_i64` gives: the name is not a
+    /// built-in, so an untrusted `.v` can leave a blob under it and cloning
+    /// that out on every geometry read would be an image-sized copy behind an
+    /// accessor that returns a small integer (issue #635).
+    fn stored_page_height(&self) -> Option<i64> {
+        match self.fields.get(PAGE_HEIGHT) {
+            Some(&MetadataValue::Int(n)) => Some(n),
+            _ => None,
+        }
     }
 }
 
@@ -1854,6 +2052,367 @@ mod tests {
             decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1),
             u64::MAX
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The page model (issue #564)
+    // -----------------------------------------------------------------
+
+    /// A four-page 4x12 roll whose rows carry the page index in the red
+    /// channel, so a slice can be checked by reading a pixel.
+    fn four_page_roll() -> Raster {
+        let (w, h, page_height) = (4u32, 12u32, 3u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let offset = (y as usize * w as usize + x as usize) * bpp;
+                data[offset] = (y / page_height) as u8;
+                data[offset + 1] = y as u8;
+                data[offset + 2] = x as u8;
+            }
+        }
+        let mut roll = Raster::new(w, h, PixelFormat::Rgb8, data).unwrap();
+        roll.set_page_height(page_height);
+        roll
+    }
+
+    /// The geometry accessors read through the sanity check, so a stored
+    /// value the raster cannot hold never reaches a caller.
+    ///
+    /// Same table as `frames::tests::page_height_honours_only_a_divisor_of_the_height`,
+    /// asked of a real raster this time, because the accessor could always
+    /// have been wired to the raw field instead.
+    #[test]
+    fn the_raster_geometry_accessors_apply_the_sanity_check() {
+        for (stored, page_height, pages) in [
+            (3i64, 3u32, 4u32),
+            (5, 12, 1),
+            (0, 12, 1),
+            (-1, 12, 1),
+            (12, 12, 1),
+            (100, 12, 1),
+        ] {
+            let mut roll = make_rgb_raster(4, 12);
+            roll.set_field("page-height", MetadataValue::Int(stored));
+            assert_eq!(roll.get_page_height(), page_height, "stored {stored}");
+            assert_eq!(roll.pages_loaded(), pages, "stored {stored}");
+            assert_eq!(roll.page_layout().pages(), pages, "stored {stored}");
+        }
+
+        let still = make_rgb_raster(4, 12);
+        assert_eq!(still.get_page_height(), 12);
+        assert_eq!(still.pages_loaded(), 1);
+    }
+
+    /// A `page-height` that is not an int is ignored, and the stored value
+    /// stays readable.
+    ///
+    /// `page-height` is not a built-in, so `set_field` stores whatever type it
+    /// is handed and a `.v` trailer restores arbitrary types from an untrusted
+    /// file (issue #565). vips reads the key with `vips_image_get_int`, which
+    /// refuses to coerce a string, so a `gchararray` `"3"` leaves the image
+    /// unpaged there; this agrees. The same shape as
+    /// `get_n_pages_ignores_a_field_that_is_not_an_int` (issue #635).
+    #[test]
+    fn a_page_height_that_is_not_an_int_is_ignored() {
+        let mut roll = make_rgb_raster(4, 12);
+
+        for wrong in [
+            MetadataValue::Str("3".to_string()),
+            MetadataValue::Double(3.0),
+            MetadataValue::Blob(vec![3u8; 4]),
+        ] {
+            roll.set_field("page-height", wrong.clone());
+            assert_eq!(
+                roll.get_page_height(),
+                12,
+                "{wrong:?} is not an int, so the raster is one page"
+            );
+            assert_eq!(roll.pages_loaded(), 1);
+            assert_eq!(
+                roll.get_field("page-height"),
+                Some(wrong),
+                "the check is on the accessor, not on the stored value"
+            );
+        }
+    }
+
+    /// A page height the raster cannot hold is refused at the setter rather
+    /// than stored and silently discarded on the way back out.
+    #[test]
+    fn setting_a_page_height_that_does_not_divide_is_refused() {
+        let mut roll = make_rgb_raster(4, 12);
+
+        for bad in [0u32, 5, 7, 13, 100, u32::MAX] {
+            let err = roll
+                .try_set_page_height(bad)
+                .expect_err("{bad} does not divide 12");
+            assert!(
+                matches!(
+                    err,
+                    RasterError::PageHeightNotADivisor {
+                        height: 12,
+                        page_height,
+                    } if page_height == bad
+                ),
+                "got {err:?} for {bad}"
+            );
+            assert_eq!(
+                roll.get_page_height(),
+                12,
+                "a refused page height leaves the raster unpaged"
+            );
+        }
+
+        for good in [1u32, 2, 3, 4, 6, 12] {
+            roll.try_set_page_height(good).expect("{good} divides 12");
+            assert_eq!(roll.get_page_height(), good);
+            assert_eq!(roll.pages_loaded(), 12 / good);
+        }
+
+        roll.clear_page_height();
+        assert_eq!(roll.get_page_height(), 12);
+        assert_eq!(roll.pages_loaded(), 1);
+    }
+
+    /// The panicking twin panics on exactly what the fallible one rejects.
+    #[test]
+    #[should_panic(expected = "does not divide a 12-row raster")]
+    fn set_page_height_panics_on_a_non_divisor() {
+        make_rgb_raster(4, 12).set_page_height(5);
+    }
+
+    /// `page` views the rows the layout says, and refuses an index past the
+    /// last page.
+    #[test]
+    fn page_views_the_rows_the_layout_names() {
+        let roll = four_page_roll();
+
+        for index in 0..4u32 {
+            let view = roll.page(index).expect("page in range");
+            assert_eq!(view.width(), 4);
+            assert_eq!(view.height(), 3);
+            let top = view.pixel(0, 0).expect("the top-left pixel");
+            assert_eq!(
+                top[0],
+                index as u8,
+                "page {index} must start at row {}",
+                index * 3
+            );
+            assert_eq!(top[1], (index * 3) as u8, "and hold that absolute row");
+        }
+
+        let err = roll.page(4).expect_err("there is no fifth page");
+        assert!(
+            matches!(err, RasterError::PageOutOfBounds { index: 4, pages: 4 }),
+            "got {err:?}"
+        );
+
+        // A still image has exactly one page, so a caller sweeping pages does
+        // not have to branch on whether the image is animated.
+        let still = make_rgb_raster(4, 12);
+        assert_eq!(still.page(0).expect("the only page").height(), 12);
+        assert!(still.page(1).is_err());
+    }
+
+    /// `extract_page` copies one page out, carries the metadata, and leaves
+    /// the result unpaged while keeping `n-pages`, which is a fact about the
+    /// file rather than about these rows.
+    #[test]
+    fn extract_page_copies_one_page_and_leaves_it_unpaged() {
+        let mut roll = four_page_roll();
+        roll.set_n_pages(4);
+        roll.set_field("icc-profile-data", MetadataValue::Blob(vec![7u8; 16]));
+
+        let page = roll.try_extract_page(2).expect("page 2 is in range");
+        assert_eq!((page.width(), page.height()), (4, 3));
+        assert_eq!(page.data()[0], 2, "the third page's rows");
+        assert_eq!(page.data()[1], 6, "which start at absolute row 6");
+        assert_eq!(page.pages_loaded(), 1, "one page is not paged");
+        assert_eq!(page.get_page_height(), 3);
+        assert_eq!(
+            page.get_n_pages(),
+            4,
+            "the file still had four pages; that is what n-pages says (#635)"
+        );
+        assert_eq!(
+            page.get_field("icc-profile-data"),
+            Some(MetadataValue::Blob(vec![7u8; 16])),
+            "the attachments come with it, as Raster::extract carries them"
+        );
+
+        let err = roll
+            .try_extract_page(4)
+            .expect_err("there is no fifth page");
+        assert!(
+            matches!(err, RasterError::PageOutOfBounds { index: 4, pages: 4 }),
+            "got {err:?}"
+        );
+
+        assert_eq!(roll.extract_page(0).data()[0], 0, "the panicking twin");
+
+        // The only page of a single-page raster comes out with the field
+        // gone, not merely with a page height equal to its own height. The
+        // carry cannot do this one: the heights match, so it has nothing to
+        // react to, and only the explicit clear in `try_extract_page` removes
+        // it. Without that, a `.v` written from here would hand vips a
+        // `page-height` on a still image.
+        let mut one_page = make_rgb_raster(4, 12);
+        one_page.set_page_height(12);
+        let only = one_page.try_extract_page(0).expect("the only page");
+        assert_eq!((only.width(), only.height()), (4, 12));
+        assert_eq!(
+            only.get_field("page-height"),
+            None,
+            "an extracted page carries no page split of its own"
+        );
+    }
+
+    /// The carry drops the page split when the output is a different height,
+    /// and keeps it when the rows are untouched.
+    ///
+    /// The negative half is the point: vips carries it regardless, and
+    /// `vips resize` on this exact roll produced a 2x6 result still claiming
+    /// `page-height: 3`, which `gifsave` then wrote as a two-frame animation
+    /// (measured on 8.18.6). The positive half is the control: a
+    /// same-geometry op like `cast` or `gamma` must not lose the split.
+    #[test]
+    fn the_carry_drops_the_page_split_only_when_the_height_moves() {
+        let roll = four_page_roll();
+
+        // Same height: the split survives, along with everything else.
+        let mut same = make_rgb_raster(4, 12);
+        same.carry_meta_from(&roll);
+        assert_eq!(
+            same.get_page_height(),
+            3,
+            "a same-height op keeps the split"
+        );
+        assert_eq!(same.pages_loaded(), 4);
+
+        // A narrower raster of the same height: still four pages.
+        let mut narrower = make_rgb_raster(2, 12);
+        narrower.carry_meta_from(&roll);
+        assert_eq!(narrower.get_page_height(), 3);
+
+        // Half the height, which is what `resize 0.5` produces. vips keeps
+        // `page-height: 3` here and gets two pages; this drops it and gets a
+        // still.
+        let mut halved = make_rgb_raster(2, 6);
+        halved.carry_meta_from(&roll);
+        assert_eq!(
+            halved.get_page_height(),
+            6,
+            "a height change invalidates the split, so the result is one page"
+        );
+        assert_eq!(halved.pages_loaded(), 1);
+        assert_eq!(
+            halved.get_field("page-height"),
+            None,
+            "and the stale field is gone rather than merely ignored, so a \
+             `.v` written from here does not hand the lie to vips"
+        );
+
+        // Everything else still carries across the same height change.
+        let mut with_fields = four_page_roll();
+        with_fields.set_field("lane-564", MetadataValue::Str("carried".into()));
+        with_fields.set_n_pages(4);
+        let mut out = make_rgb_raster(4, 4);
+        out.carry_meta_from(&with_fields);
+        assert_eq!(
+            out.get_field("lane-564"),
+            Some(MetadataValue::Str("carried".into())),
+            "the drop is one name, not a reset of the carry"
+        );
+        assert_eq!(
+            out.get_n_pages(),
+            4,
+            "n-pages counts the file's pages and survives a crop"
+        );
+    }
+
+    /// `Raster::extract` goes through the carry, so a crop that straddles a
+    /// page boundary cannot hand back something still claiming to be paged.
+    #[test]
+    fn a_crop_across_a_page_boundary_is_not_paged() {
+        let roll = four_page_roll();
+
+        let straddling = roll.extract(0, 1, 4, 5).expect("in bounds");
+        assert_eq!(straddling.pages_loaded(), 1);
+        assert_eq!(straddling.get_field("page-height"), None);
+
+        let one_page = roll.extract(0, 3, 4, 3).expect("in bounds");
+        assert_eq!(one_page.pages_loaded(), 1);
+
+        // Cropping the width alone leaves the rows, and therefore the pages,
+        // exactly as they were.
+        let narrowed = roll.extract(1, 0, 2, 12).expect("in bounds");
+        assert_eq!(narrowed.pages_loaded(), 4);
+        assert_eq!(narrowed.get_page_height(), 3);
+    }
+
+    /// The multi-input union does not import a page split from the second
+    /// image, because the split describes rows this output does not have.
+    ///
+    /// Measured counter-example on 8.18.6:
+    /// `vips join plain.v paged.v out.v horizontal`, with only the *second*
+    /// input paged, produced an 8x12 output carrying `page-height: 3`,
+    /// `n-pages: 4` and the roll's delay array, so an unpaged image became a
+    /// four-frame animation. The positive control below is that every other
+    /// field still comes across.
+    #[test]
+    fn the_field_union_does_not_import_a_page_split() {
+        let mut sub = four_page_roll();
+        sub.set_field("sub-only", MetadataValue::Str("from sub".into()));
+        sub.set_field("shared", MetadataValue::Str("sub wins nothing".into()));
+
+        let mut main = make_rgb_raster(4, 12);
+        main.set_field("shared", MetadataValue::Str("main keeps this".into()));
+
+        let mut out = make_rgb_raster(8, 12);
+        out.carry_meta_from(&main);
+        out.merge_fields_from(&sub);
+
+        assert_eq!(
+            out.get_field("sub-only"),
+            Some(MetadataValue::Str("from sub".into())),
+            "positive control: the union does import the second image's fields"
+        );
+        assert_eq!(
+            out.get_field("shared"),
+            Some(MetadataValue::Str("main keeps this".into())),
+            "and the first input still wins a shared name (#718)"
+        );
+        assert_eq!(
+            out.get_field("page-height"),
+            None,
+            "but not the page split: this output's rows are not sub's rows"
+        );
+        assert_eq!(out.pages_loaded(), 1);
+
+        // The other direction: a paged first input keeps its own split
+        // through the merge.
+        let mut paged_out = make_rgb_raster(8, 12);
+        paged_out.carry_meta_from(&four_page_roll());
+        paged_out.merge_fields_from(&sub);
+        assert_eq!(paged_out.get_page_height(), 3);
+        assert_eq!(paged_out.pages_loaded(), 4);
+    }
+
+    /// The two counts are different numbers and the accessors say so.
+    ///
+    /// Measured: `vips copy 'anim3.webp[n=2]' out.v` gives a 4x6 raster
+    /// reporting `n-pages: 3` and `page-height: 3`, so the file has three
+    /// pages and the raster holds two.
+    #[test]
+    fn pages_loaded_is_not_the_files_page_count() {
+        let mut subset = make_rgb_raster(4, 6);
+        subset.set_n_pages(3);
+        subset.set_page_height(3);
+
+        assert_eq!(subset.get_n_pages(), 3, "the file holds three pages");
+        assert_eq!(subset.pages_loaded(), 2, "this raster holds two of them");
     }
 }
 

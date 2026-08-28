@@ -182,6 +182,14 @@ const WASM_BINDGEN: (&str, &str) = ("wasm-bindgen-shared", "wasm_bindgen");
 /// it is in every cell's clause-3 set; `zstd-sys` joins it wherever `packfile`
 /// resolves.
 const BLAKE3: &[&str] = &["blake3"];
+/// `rav1d` joins the clause-3 set wherever `avif` resolves. It ships the dav1d
+/// assembly and has a build script able to compile it, which is what this scan
+/// looks for; it compiles none of it, because the `avif` feature takes the
+/// crate with `default-features = false` and its whole `mod asm` is behind the
+/// `asm` feature. See CONTRIBUTING.md, which records the measurement.
+const BLAKE3_RAV1D: &[&str] = &["blake3", "rav1d"];
+/// Both of the above, for the `--all-features` cells.
+const BLAKE3_RAV1D_ZSTD: &[&str] = &["blake3", "rav1d", "zstd-sys"];
 const BLAKE3_ZSTD: &[&str] = &["blake3", "zstd-sys"];
 
 /// `pdfium-render` takes `libloading` as an unconditional dependency under
@@ -224,6 +232,16 @@ const CELLS: &[Cell] = &[
         discovery: &[],
         runtime_loaders: &[],
         vendored_native: BLAKE3,
+    },
+    Cell {
+        label: "host / avif",
+        target: HOST,
+        features: &["--features", "avif"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3_RAV1D,
     },
     Cell {
         label: "host / jxl",
@@ -279,7 +297,7 @@ const CELLS: &[Cell] = &[
         links: &[RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
-        vendored_native: BLAKE3_ZSTD,
+        vendored_native: BLAKE3_RAV1D_ZSTD,
     },
     // Dev-dependencies never reach a consumer, but they do have to build on a
     // contributor's machine. `generator` is loom's coroutine crate; it
@@ -326,7 +344,7 @@ const CELLS: &[Cell] = &[
         links: &[RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
-        vendored_native: BLAKE3_ZSTD,
+        vendored_native: BLAKE3_RAV1D_ZSTD,
     },
     Cell {
         label: "linux / default",
@@ -356,7 +374,7 @@ const CELLS: &[Cell] = &[
         links: &[RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
-        vendored_native: BLAKE3_ZSTD,
+        vendored_native: BLAKE3_RAV1D_ZSTD,
     },
     Cell {
         label: "windows / default",
@@ -386,7 +404,7 @@ const CELLS: &[Cell] = &[
         links: &[RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
-        vendored_native: BLAKE3_ZSTD,
+        vendored_native: BLAKE3_RAV1D_ZSTD,
     },
     // wasm32 is where the third `links` key lives. `packfile` is what puts it
     // there: `zip` turns on `getrandom`'s `wasm_js` backend and pulls `time`'s
@@ -422,7 +440,7 @@ const CELLS: &[Cell] = &[
         links: &[RAYON, WASM_BINDGEN, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: &[],
-        vendored_native: BLAKE3_ZSTD,
+        vendored_native: BLAKE3_RAV1D_ZSTD,
     },
 ];
 
