@@ -38,32 +38,30 @@ fn decode_radiance_is_public_and_returns_float_rgb() {
     assert_eq!(raster.interpretation(), libviprs::Interpretation::ScRgb);
 }
 
-/// The options struct is a plain, `Default`, module-scoped type a caller
-/// can build with `..Default::default()`, which is the whole point of the
-/// format wave's naming verdict.
+/// The options struct is a `#[non_exhaustive]`, `Default`, module-scoped type
+/// a caller outside the crate builds from `default()` through the `with_*`
+/// setters. It used to be a struct literal here, which is what issue #630 took
+/// away: this test compiles as an external crate, so it was itself the
+/// downstream caller the old "later fields can be added without a breaking
+/// change" promise would have broken.
 #[test]
 fn save_options_are_constructible_downstream() {
-    let explicit = radiance::SaveOptions {
-        exposure: Some(2.0),
-        aspect: Some(1.5),
-    };
-    let partial = radiance::SaveOptions {
-        exposure: Some(2.0),
-        ..Default::default()
-    };
+    let explicit = radiance::SaveOptions::default()
+        .with_exposure(Some(2.0))
+        .with_aspect(Some(1.5));
+    let partial = radiance::SaveOptions::default().with_exposure(Some(2.0));
     assert_eq!(explicit.exposure, partial.exposure);
-    assert_eq!(
-        radiance::SaveOptions::default(),
-        radiance::SaveOptions {
-            exposure: None,
-            aspect: None,
-        }
-    );
+    assert_eq!(explicit.aspect, Some(1.5));
+    assert_eq!(partial.aspect, None);
+
+    let d = radiance::SaveOptions::default();
+    assert_eq!((d.exposure, d.aspect), (None, None));
 }
 
 /// `encode_radiance` and `save_radiance` are both reachable on `Raster`,
 /// and a decode of what they write reproduces the pixels.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_from_outside_the_crate() {
     let raster = decode_radiance(&sample(), DecodeLimits::default()).unwrap();
     let encoded = raster

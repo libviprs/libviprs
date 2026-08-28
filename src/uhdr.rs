@@ -1212,7 +1212,14 @@ pub fn from_container(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, Sour
 }
 
 /// Options for [`encode_uhdr`].
+///
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from [`SaveOptions::default`] and set what you need
+/// with the `with_*` builders, e.g.
+/// `uhdr::SaveOptions::default().with_quality(95)`. A struct literal would
+/// compile today and stop the day a field lands (issue #630).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// JPEG quality for both halves, 1..=100. libvips defaults `uhdrsave`
     /// to 75 and so does [`SaveOptions::default`].
@@ -1228,6 +1235,23 @@ impl Default for SaveOptions {
             quality: 75,
             gain_map_shrink: 2,
         }
+    }
+}
+
+impl SaveOptions {
+    /// Set the JPEG quality for both halves, returning the updated options.
+    #[must_use]
+    pub fn with_quality(mut self, quality: u8) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Set how much smaller than the base the gain map is, per axis,
+    /// returning the updated options.
+    #[must_use]
+    pub fn with_gain_map_shrink(mut self, gain_map_shrink: u32) -> Self {
+        self.gain_map_shrink = gain_map_shrink;
+        self
     }
 }
 
