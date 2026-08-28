@@ -30,12 +30,24 @@
 //! geometry to report. WebP had both and threw them away to look like the
 //! other three, so it moves onto the shared shape and the three do not.
 //!
-//! And the `.v` reader never consults `max_alloc_bytes` at all, which is issue
-//! #710 and is why `.v` is the one container missing from the tables below.
+//! And the `.v` reader consulted `max_alloc_bytes` nowhere at all, which was
+//! the third correction and became issue #710. It does now, so `.v` has a row
+//! in the first table rather than a comment saying why it has none:
+//! `decode_vips_bytes` prices its pixel buffer from the declared header
+//! geometry through the same `DecodeLimits::check_image_alloc` as every other
+//! self-priced container.
+//!
+//! What was wrong there was the contract rather than the safety. `.v` is not a
+//! decompression-bomb vector: the reader refuses a header promising more pixel
+//! data than the file physically holds, so the allocation was already bounded
+//! by the input length. But a caller who set `max_alloc_bytes` did not get it
+//! on one container out of ten, and the two entry points disagreed about the
+//! same run of bytes: `decode_file_with_limits` refuses an over-budget `.v` at
+//! the bounded whole-file read, while `decode_bytes_with_limits` served it.
 //!
 //! # What this file holds
 //!
-//! The five formats where **libviprs itself** prices a declared geometry and
+//! The six formats where **libviprs itself** prices a declared geometry and
 //! refuses it must all report one shape, `SourceError::AllocLimitExceeded`.
 //! The four where the `image` crate refuses keep reporting the `image` shape,
 //! and that is asserted here too so the split is a decision on the record
@@ -114,6 +126,22 @@ struct Row {
 /// at a budget of 1.
 fn priced_by_libviprs() -> Vec<Row> {
     let mut rows = vec![
+        // libviprs's own container, and the last one to get the budget.
+        // `decode_vips_bytes` applied `max_coord` and `max_pixels` and then
+        // went straight to the pixel copy, so a 36-byte raster decoded clean
+        // under a 35-byte ceiling (issue #710). The price is the declared
+        // geometry's product, which is also exactly the byte range the reader
+        // copies out of the file, so the row's `price` holds those two
+        // spellings together from outside the crate.
+        Row {
+            format: "v",
+            bytes: rgb8(4).encode_vips().expect("v fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: ".v pixel buffer",
+            price: 48,
+        },
         Row {
             format: "gif",
             bytes: rgb8(4).encode_gif(Default::default()).expect("gif fixture"),
@@ -255,19 +283,18 @@ fn refuse(row: &Row) -> SourceError {
 /// Neither half is sufficient alone: this one catches a row deleted here, that
 /// one catches a container added there.
 ///
-/// `.v` is the one container in neither table, deliberately, because it
-/// applies no allocation budget at all. That is issue #710 and the count below
-/// says so rather than leaving a reader to wonder whether it was forgotten.
+/// Every container has a row now. `.v` was the one in neither table, because
+/// it applied no allocation budget at all, and closing #710 is what let the
+/// exclusion term below be deleted rather than kept as a documented hole.
 #[test]
 fn the_two_tables_account_for_every_container() {
     let self_priced = priced_by_libviprs().len();
     let image_backed = priced_by_the_image_crate().len();
-    let excluded_no_budget_at_all = 1; // `.v`, issue #710
 
     // JPEG XL is only compiled in behind its feature, so the self-priced table
     // is one shorter without it. Spelled out rather than hidden in a `cfg!`
     // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 6 } else { 5 };
+    let expected_self_priced = if cfg!(feature = "jxl") { 7 } else { 6 };
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
@@ -276,10 +303,10 @@ fn the_two_tables_account_for_every_container() {
 
     let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
     assert_eq!(
-        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent,
+        self_priced + image_backed + jxl_absent,
         10,
-        "the two tables plus the documented exclusion must account for all ten \
-         containers libviprs sniffs; see SniffedFormat::ALL"
+        "the two tables must account for all ten containers libviprs sniffs, \
+         with no exclusions left; see SniffedFormat::ALL"
     );
 }
 

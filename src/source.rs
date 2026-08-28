@@ -2692,7 +2692,7 @@ mod tests {
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
      * Input: `SniffedFormat::ALL.len()` -> Output: 10, which is what the two
-     * tables plus the one documented exclusion account for.
+     * tables account for between them, with no exclusions left.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
@@ -2703,10 +2703,9 @@ mod tests {
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 10 are: 6 self-priced (gif, radiance, fits, openexr, jxl, \
-             and webp which joined them in #686), 3 refused inside the image crate \
-             (jpeg, png, tiff), and .v, which applies no allocation budget at all and \
-             is issue #710"
+             count. Today the 10 are: 7 self-priced (gif, radiance, fits, openexr, jxl, \
+             webp which joined them in #686, and .v which joined them in #710) and 3 \
+             refused inside the image crate (jpeg, png, tiff)"
         );
     }
 
