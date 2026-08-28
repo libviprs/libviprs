@@ -43,7 +43,10 @@
 //!   one fill that does **not** come from the depth: its ink is a property of
 //!   the [`Interpretation`] and of the mechanism vips paints it with, so it
 //!   reads the tag rather than the depth ceiling (issue #667), and the variant
-//!   doc on [`Extend::White`] carries the measured table.
+//!   doc on [`Extend::White`] carries the measured table. That table's float
+//!   column belongs to the resamplers: `embed` and `gravity` refuse a float
+//!   raster outright with [`ExtractError::FloatUnsupported`], so no `Extend`
+//!   mode ever inks one here (issue #694).
 //!   A background vector must have one entry (replicated across bands) or
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
@@ -212,8 +215,10 @@ pub enum Extend {
     ///
     /// [`Raster::embed`] and [`Raster::gravity`] paint it straight into the
     /// output, so the table above is exactly what they give. They do not carry
-    /// the float row yet: both still refuse a float carrier rather than paint
-    /// it wrongly (issue #694).
+    /// the float row: both refuse a float carrier rather than paint it
+    /// wrongly, with [`ExtractError::FloatUnsupported`] out of the `try_`
+    /// forms. That used to be a **panic** out of a `Result` signature, which
+    /// this doc's float row made easy to walk into (issue #694).
     ///
     /// The resamplers that read this mode for taps landing outside the input
     /// ([`Raster::affine`] and the interpolating forms in [`crate::resample`])
@@ -545,6 +550,30 @@ fn negated_origin(v: u32) -> i32 {
     -(v.min(i32::MAX as u32) as i32)
 }
 
+/// Refuse a float raster for an operation that reads samples through
+/// [`read_s`] / [`write_s`] (issue #694).
+///
+/// The split in this module is not about the operation, it is about how the
+/// operation moves pixels. `extract_area`, `crop`, `replicate`, `zoom` and
+/// `subsample` copy whole pixels byte-wise, so the sample depth never comes
+/// up and a float carrier travels through untouched. `embed`, `gravity`,
+/// `insert` and `smartcrop`'s two analysing strategies read and write
+/// individual samples through a `u32`, and there is no float on that path.
+///
+/// So the guard sits at each of those four entry points rather than inside
+/// `read_s`, which would cost a branch on every sample of every op to say
+/// something that is already decided before the first one.
+///
+/// This mirrors [`reject_float_input`](crate::arithmetic) in `arithmetic.rs`,
+/// which #631 added for `recomb` and `stdif`. Same problem, same shape.
+#[inline]
+fn reject_float(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
+    if r.format().is_float() {
+        return Err(ExtractError::FloatUnsupported { op });
+    }
+    Ok(())
+}
+
 /// Unwrap an extract-op result for the panicking ported-test surface.
 #[inline]
 #[track_caller]
@@ -669,8 +698,10 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
-    /// or [`ExtractError::BackgroundLengthMismatch`] for a bad background
-    /// vector.
+    /// [`ExtractError::BackgroundLengthMismatch`] for a bad background
+    /// vector, or [`ExtractError::FloatUnsupported`] on a float raster: this
+    /// copies samples through an unsigned 8/16-bit path, so cast first
+    /// (issue #694).
     pub fn try_embed(
         &self,
         x: i32,
@@ -680,6 +711,7 @@ impl Raster {
         extend: Extend,
         background: Option<&[f64]>,
     ) -> Result<Raster, ExtractError> {
+        reject_float("embed", self)?;
         self.embed_impl(x as i64, y as i64, width, height, extend, background)
     }
 
@@ -707,6 +739,12 @@ impl Raster {
 
     /// Shared embed kernel with an `i64` origin so `gravity` cannot
     /// overflow the public `i32` surface on extreme canvas sizes.
+    ///
+    /// Both callers reject a float raster before they get here, because the
+    /// refusal has to name the public operation and this kernel cannot see
+    /// which one called (issue #694). The `debug_assert` below is what holds
+    /// that rather than this sentence: the suite runs in debug, so a third
+    /// caller added without a guard trips it in the first test that reaches it.
     fn embed_impl(
         &self,
         x: i64,
@@ -719,6 +757,10 @@ impl Raster {
         if width == 0 || height == 0 {
             return Err(ExtractError::EmptyArea);
         }
+        debug_assert!(
+            !self.format().is_float(),
+            "embed_impl's callers must reject a float raster first; see reject_float (issue #694)"
+        );
         let fmt = self.format();
         let bands = fmt.channels();
         let bpc = fmt.bytes_per_channel();
@@ -777,8 +819,10 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
-    /// or [`ExtractError::BackgroundLengthMismatch`] for a bad background
-    /// vector.
+    /// [`ExtractError::BackgroundLengthMismatch`] for a bad background
+    /// vector, or [`ExtractError::FloatUnsupported`] on a float raster: this
+    /// copies samples through an unsigned 8/16-bit path, so cast first
+    /// (issue #694).
     pub fn try_gravity(
         &self,
         direction: CompassDirection,
@@ -803,6 +847,7 @@ impl Raster {
             D::SouthWest => (0, by),
             D::NorthWest => (0, 0),
         };
+        reject_float("gravity", self)?;
         self.embed_impl(x, y, width, height, extend, background)
     }
 
@@ -995,9 +1040,12 @@ impl Raster {
     ///
     /// Returns [`ExtractError::BandCountMismatch`] for incompatible band
     /// counts, [`ExtractError::BackgroundLengthMismatch`] for a background
-    /// vector whose length is neither 1 nor the band count, or
+    /// vector whose length is neither 1 nor the band count,
     /// [`ExtractError::SizeOverflow`] if the expanded canvas would not fit
-    /// `u32` dimensions.
+    /// `u32` dimensions, or [`ExtractError::FloatUnsupported`] if **either**
+    /// input is a float raster: the result takes the wider of the two depths,
+    /// so a float `sub` reaches the sample copy exactly as a float `self` does
+    /// (issue #694).
     pub fn try_insert(
         &self,
         sub: &Raster,
@@ -1011,6 +1059,10 @@ impl Raster {
         if mb != sb && mb != 1 && sb != 1 {
             return Err(ExtractError::BandCountMismatch { main: mb, sub: sb });
         }
+        // Both inputs, because the result's depth is the wider of the two, so
+        // a float `sub` reaches the sample copy just as a float `self` does.
+        reject_float("insert", self)?;
+        reject_float("insert", sub)?;
         let bands = mb.max(sb);
         let bpc = self
             .format()
@@ -1079,6 +1131,12 @@ impl Raster {
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
     /// or [`ExtractError::AreaOutOfBounds`] if the crop is larger than the
     /// image (libvips "bad extract area").
+    ///
+    /// [`SmartcropInteresting::Entropy`] and
+    /// [`SmartcropInteresting::Attention`] also return
+    /// [`ExtractError::FloatUnsupported`] on a float raster, because they read
+    /// samples; the four pure-geometry strategies take one unchanged (issue
+    /// #694).
     pub fn try_smartcrop(
         &self,
         width: u32,
@@ -1103,6 +1161,17 @@ impl Raster {
             SmartcropInteresting::All => (self.width(), self.height()),
             _ => (width, height),
         };
+        // Only the two strategies that read samples. The other four are pure
+        // geometry and take a float raster unchanged, so a guard at this entry
+        // point would break four working strategies to fix two (issue #694).
+        // Ahead of the premultiply below, so a refused call does not pay for a
+        // whole-image copy first.
+        if matches!(
+            interesting,
+            SmartcropInteresting::Entropy | SmartcropInteresting::Attention
+        ) {
+            reject_float("smartcrop", self)?;
+        }
         // libvips premultiplies before the strategy switch whenever an
         // alpha band is present; `has_alpha` guarantees the two bands
         // `premultiply` needs, so the panicking form cannot fire.
@@ -2490,6 +2559,24 @@ mod tests {
             ),
             ("insert", im.try_insert(&sub, 1, 1, false, None)),
             ("insert expand", im.try_insert(&sub, 1, 1, true, None)),
+            // Either input is enough on its own. The result takes the wider of
+            // the two depths, so a float `sub` under an unsigned `main`
+            // reaches the same sample copy, and a guard that only looked at
+            // `self` would leave it panicking. I found this by mutating the
+            // `sub` guard away and watching this test stay green, so it is
+            // here rather than in the "nice to have" pile.
+            (
+                "insert float sub",
+                rgb(8, 8, vec![1u8; 8 * 8 * 3]).try_insert(&sub, 1, 1, false, None),
+            ),
+            (
+                "insert float sub expanding",
+                rgb(8, 8, vec![1u8; 8 * 8 * 3]).try_insert(&sub, -1, -1, true, None),
+            ),
+            (
+                "insert float main",
+                im.try_insert(&rgb(2, 2, vec![1u8; 12]), 1, 1, false, None),
+            ),
         ];
         for (name, got) in cases {
             assert!(

@@ -1622,6 +1622,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `try_embed`, `try_gravity`, `try_insert` and `smartcrop`'s `Entropy` and
+  `Attention` strategies return a new `ExtractError::FloatUnsupported` on a
+  float raster instead of **panicking** out of a `Result` signature
+  (issue #694). The enum is `#[non_exhaustive]`, so the variant is additive
+  and this is not a breaking change.
+
+  #667 made the panic easy to walk into rather than creating it. It put the
+  float column of the white-ink table on the public `Extend::White` rustdoc, so
+  a caller holding a float raster from an EXR, FITS or `.v` decode reads that
+  the ink is `1.0` for `ScRgb`, calls `try_embed`, and gets a process-visible
+  panic out of a signature that promised an `Err`. That doc now says the float
+  column belongs to the resamplers.
+
+  The issue names two entry points. It is four, plus two of `smartcrop`'s six
+  strategies, and the split is not per operation, it is whether the operation
+  copies whole pixels byte-wise or reads individual samples. `extract_area`,
+  `crop`, `replicate`, `zoom`, `subsample` and `smartcrop`'s four pure-geometry
+  strategies (`Centre`, `Low`, `High`, `All`) take a float raster unchanged and
+  always did, so the guard is deliberately not at the `try_smartcrop` entry
+  point: putting it there would break four working strategies to fix two.
+
+  `insert` checks **both** inputs. The result takes the wider of the two
+  depths, so a float `sub` under an unsigned `main` reaches the same sample
+  copy. I found that by mutating the second check away and watching the tests
+  stay green.
+
 - Every operation in `src/extract.rs` carries its input's metadata through to
   its result: `extract_area`, `crop`, `embed`, `gravity`, `replicate`, `zoom`,
   `subsample` and `smartcrop` all keep the interpretation, the resolution, the
