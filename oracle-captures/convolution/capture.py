@@ -1445,7 +1445,9 @@ oracle = {
 
 oracle_json_path = os.path.join(ROOT, "oracle.json")
 with open(oracle_json_path, "w") as f:
-    json.dump(oracle, f, indent=2, sort_keys=False)
+    # allow_nan=False so a non-finite measurement stops the capture here
+    # rather than writing a file nobody outside Python can parse (#682).
+    json.dump(oracle, f, indent=2, sort_keys=False, allow_nan=False)
 
 dual = [r for r in RECORDS if "paths_agree" in r]
 divergent = [r for r in dual if not r["paths_agree"]]

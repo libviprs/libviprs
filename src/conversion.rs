@@ -83,12 +83,26 @@
 //! so on).
 //!
 //! The operations in this module carry the metadata of their (first) input
-//! through to the result, with two exceptions: [`Raster::autorot`] resets
-//! the orientation tag to `1` after applying it, and
-//! [`Raster::falsecolour`] stamps its RGB result as
-//! [`Interpretation::Srgb`]. Operations in the earlier batches
-//! ([`crate::bands`], [`crate::arithmetic`], [`crate::extract`]) predate the
-//! metadata block and return default metadata.
+//! through to the result, and so does every other module now (issues #717,
+//! #719 and #727 closed the gaps this paragraph used to describe in
+//! [`crate::bands`], [`crate::convolution`] and [`crate::extract`]).
+//!
+//! Four fields are stamped rather than carried, and each is measured against
+//! the pinned vips rather than reasoned about:
+//!
+//! * [`Raster::autorot`] resets the orientation tag to `1` after applying it.
+//! * [`Raster::falsecolour`] stamps its RGB result as
+//!   [`Interpretation::Srgb`].
+//! * The **origin offset** is stamped by every operation that repositions the
+//!   image (issue #721): [`Raster::fliphor`] to `(width, 0)`,
+//!   [`Raster::flipver`] to `(0, height)`, [`Raster::rot`] to the edge the
+//!   input's origin lands on, and [`Raster::wrap`] to `(w - w/2, h - h/2)`.
+//!   [`Raster::rot45`] and [`Raster::grid`] carry it, and so does everything
+//!   else here. [`Raster::autorot`] inherits whichever transform it finishes
+//!   on, except at orientation 4, where vips composes a rotation and a flip
+//!   and stamps the flip's.
+//! * `extract_area` and `crop` stamp `(-left, -top)` (issue #690), and the
+//!   convolving operations stamp their mask's centre (issue #721).
 //!
 //! The decode paths do not read EXIF yet, so a freshly decoded JPEG always
 //! carries orientation `1` and [`Raster::autorot`] is the identity for it,
@@ -258,7 +272,7 @@ pub enum ConversionError {
     /// of panicking. Mirrors
     /// [`crate::arithmetic::ArithmeticError::FloatUnsupported`].
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
-    FloatFormatUnsupported {
+    FloatUnsupported {
         /// The operation that was asked for.
         op: &'static str,
     },
@@ -441,6 +455,22 @@ impl Interpretation {
     /// Read off [`PixelFormat::canonical`], so both spellings of a layout
     /// get the same answer: `FloatF32(4)` reads as sRGB exactly as
     /// `RgbaF32` does (issue #531).
+    /// How many samples a colour in this space takes: the band count the tag
+    /// implies, whatever the raster actually holds.
+    ///
+    /// This is the number an ICC profile has to agree with to describe the
+    /// space (issue #720), and the same one `crate::colour` reads to size a
+    /// conversion. It is the tag's band count and not the image's on purpose:
+    /// `vips bandmean` takes a three-band `scrgb` raster to one band, leaves
+    /// the tag alone, and keeps a three-channel profile.
+    pub(crate) fn space_bands(self) -> usize {
+        match self {
+            Self::Cmyk => 4,
+            Self::Bw | Self::Grey16 => 1,
+            _ => 3,
+        }
+    }
+
     pub fn for_format(format: PixelFormat) -> Self {
         match format.canonical() {
             PixelFormat::Gray8 => Self::Bw,
@@ -656,7 +686,14 @@ impl RasterCopyBuilder<'_> {
     /// source, with this builder's metadata.
     pub fn build(self) -> Raster {
         let mut out = self.src.clone();
+        let interpretation = self.meta.interpretation;
         out.meta = self.meta;
+        // The public retag surface, and the one the rule was measured on
+        // (`vips copy in.v out.v --interpretation b-w` removes a three-channel
+        // profile). Re-stamping through the setter is what applies it; the
+        // assignment above cannot, because it is a whole-block copy that does
+        // not know which field changed (#720).
+        out.set_interpretation(interpretation);
         out
     }
 }
@@ -738,8 +775,23 @@ fn remap(
             odata[oo..oo + bpp].copy_from_slice(&sdata[so..so + bpp]);
         }
     }
-    out.meta = src.meta;
+    out.carry_meta_from(src);
     Ok(out)
+}
+
+/// One edge of the image as an origin offset, saturating rather than wrapping.
+///
+/// The stamped offsets in this module are all a dimension or a dimension
+/// difference, and a `u32` dimension above `i32::MAX` is representable here
+/// where vips holds every dimension and both offsets in an `int`. A bare
+/// `as i32` would wrap a 3-gigapixel-wide image's offset to a negative one,
+/// so it saturates instead. That mirrors `extract`'s `negated_origin`, which
+/// saturates at `i32::MIN` for the same reason (#690). A raster that wide fits
+/// the construction budget at one byte per pixel, so the branch is reachable
+/// rather than theoretical, and like `negated_origin` it is asserted by
+/// reasoning: there is no test here that allocates 2 GiB to prove it.
+fn origin(v: u32) -> i32 {
+    i32::try_from(v).unwrap_or(i32::MAX)
 }
 
 /// The largest `shim` [`Raster::join`] and [`Raster::arrayjoin`] accept,
@@ -839,6 +891,37 @@ impl Raster {
         self.meta
             .interpretation
             .unwrap_or_else(|| Interpretation::for_format(self.format()))
+    }
+
+    /// Stamp the colour interpretation, dropping an attached ICC profile that
+    /// cannot describe the new space (issue #720).
+    ///
+    /// `None` means "infer from the pixel format", which is what an operation
+    /// that has left the source's space without arriving in a nameable one
+    /// says; the profile check runs against the tag that inference resolves
+    /// to, because that is the tag every reader will see.
+    ///
+    /// **Every stamp goes through here.** The check cannot live in
+    /// [`Raster::carry_meta_from`], which is where it first looks like it
+    /// belongs: six of the eight stamping sites carry *before* they retag, so
+    /// at carry time the output still holds the source's tag and the check
+    /// could never fire, and `Raster::copy().interpretation(..)` never calls
+    /// the carry at all. Putting it on the stamp instead is the same answer
+    /// #717 gave to the same shape of problem: one method, every site routed,
+    /// so "did this retag revalidate the profile" has one answer.
+    ///
+    /// Measured on vips 8.18.6 across three real profiles and twenty targets;
+    /// see `tests/icc_retag.rs` for the table.
+    pub(crate) fn set_interpretation(&mut self, tag: Option<Interpretation>) {
+        self.meta.interpretation = tag;
+        let bands = self.interpretation().space_bands();
+        let stale = self
+            .icc_profile()
+            .and_then(crate::imageio::profile_space_bands)
+            .is_some_and(|profile_bands| profile_bands != bands);
+        if stale {
+            self.remove_icc_profile();
+        }
     }
 
     /// Horizontal resolution in pixels per millimetre (default `1.0`).
@@ -957,7 +1040,7 @@ impl Raster {
                 }
             }
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -984,7 +1067,14 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_fliphor(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
-        remap(self, w, self.height(), |x, y| (w - 1 - x, y))
+        let mut out = remap(self, w, self.height(), |x, y| (w - 1 - x, y))?;
+        // The input's origin ends up at `x = width` in the output, and vips
+        // stamps that rather than carrying the source's offsets: measured
+        // `(5, 0)`, `(7, 0)` and `(8, 0)` at 5x6, 7x3 and 8x8 from a source at
+        // 11 / 13, and the same numbers from one at 0 / 0 (#721).
+        out.meta.xoffset = origin(w);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Mirror left-right (libvips `vips_flip` with
@@ -1006,7 +1096,12 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_flipver(&self) -> Result<Raster, ConversionError> {
         let h = self.height();
-        remap(self, self.width(), h, |x, y| (x, h - 1 - y))
+        let mut out = remap(self, self.width(), h, |x, y| (x, h - 1 - y))?;
+        // Mirror of `try_fliphor`: `(0, height)`, measured `(0, 6)`, `(0, 3)`
+        // and `(0, 8)` at the three shapes (#721).
+        out.meta.xoffset = 0;
+        out.meta.yoffset = origin(h);
+        Ok(out)
     }
 
     /// Mirror top-bottom (libvips `vips_flip` with
@@ -1033,12 +1128,25 @@ impl Raster {
     pub fn try_rot(&self, angle: Angle) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        match angle {
-            Angle::D0 => Ok(self.clone()),
-            Angle::D90 => remap(self, h, w, |x, y| (y, h - 1 - x)),
-            Angle::D180 => remap(self, w, h, |x, y| (w - 1 - x, h - 1 - y)),
-            Angle::D270 => remap(self, h, w, |x, y| (w - 1 - y, x)),
-        }
+        // Each turn puts the input's origin on a different edge of the output
+        // and vips stamps where, rather than carrying the source's offsets.
+        // Measured at 5x6, 7x3 and 8x8 from a source at 11 / 13, and the same
+        // from one at 0 / 0 (#721). `D0` is a copy and carries, which is also
+        // what vips does.
+        let (mut out, offset) = match angle {
+            Angle::D0 => return Ok(self.clone()),
+            // Output is `h` wide, so this is `(out width, 0)`.
+            Angle::D90 => (remap(self, h, w, |x, y| (y, h - 1 - x))?, (origin(h), 0)),
+            Angle::D180 => (
+                remap(self, w, h, |x, y| (w - 1 - x, h - 1 - y))?,
+                (origin(w), origin(h)),
+            ),
+            // Output is `w` tall, so this is `(0, out height)`.
+            Angle::D270 => (remap(self, h, w, |x, y| (w - 1 - y, x))?, (0, origin(w))),
+        };
+        out.meta.xoffset = offset.0;
+        out.meta.yoffset = offset.1;
+        Ok(out)
     }
 
     /// Rotate by a right-angle [`Angle`] (libvips `vips_rot`). `D90` is a
@@ -1420,7 +1528,13 @@ impl Raster {
     fn transpose(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        remap(self, h, w, |x, y| (y, x))
+        let mut out = remap(self, h, w, |x, y| (y, x))?;
+        // Only reachable through `autorot`, so the measurement is
+        // `vips autorot` on an orientation-5 source: `(6, 0)`, `(3, 0)` and
+        // `(4, 0)` at 5x6, 7x3 and 9x4, which is `(out width, 0)` (#721).
+        out.meta.xoffset = origin(h);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Flip along the bottom-left to top-right diagonal (EXIF
@@ -1428,7 +1542,12 @@ impl Raster {
     fn transverse(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        remap(self, h, w, |x, y| (w - 1 - y, h - 1 - x))
+        let mut out = remap(self, h, w, |x, y| (w - 1 - y, h - 1 - x))?;
+        // Same numbers as `transpose`, measured the same way on an
+        // orientation-7 source (#721).
+        out.meta.xoffset = origin(h);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Fallible form of [`Raster::autorot`].
@@ -1440,7 +1559,19 @@ impl Raster {
         let mut out = match self.meta.orientation {
             2 => self.try_fliphor()?,
             3 => self.try_rot(Angle::D180)?,
-            4 => self.try_flipver()?,
+            4 => {
+                // The one orientation composition gets wrong. `vips_autorot`
+                // reaches 4 as a 180-degree rotation followed by a horizontal
+                // flip and stamps the flip's `(width, 0)`; a single vertical
+                // flip is the same pixels but stamps `(0, height)`. Measured
+                // `(5, 0)`, `(7, 0)` and `(9, 0)` at 5x6, 7x3 and 9x4, so the
+                // offset is corrected here rather than paying for a second
+                // pass over the image to make the composition match (#721).
+                let mut f = self.try_flipver()?;
+                f.meta.xoffset = origin(self.width());
+                f.meta.yoffset = 0;
+                f
+            }
             5 => self.transpose()?,
             6 => self.try_rot(Angle::D90)?,
             7 => self.transverse()?,
@@ -1480,7 +1611,16 @@ impl Raster {
         let h = self.height();
         let dx = w / 2;
         let dy = h / 2;
-        remap(self, w, h, |x, y| ((x + dx) % w, (y + dy) % h))
+        let mut out = remap(self, w, h, |x, y| ((x + dx) % w, (y + dy) % h))?;
+        // The shift moves the input's origin to `(w - dx, h - dy)` and vips
+        // stamps that: measured `(3, 3)`, `(4, 2)` and `(4, 4)` at 5x6, 7x3
+        // and 8x8. `vips wrap --x 1 --y 2` gives `(4, 4)`, `(6, 1)` and
+        // `(7, 6)` on the same three, which is the same expression with the
+        // caller's shift, so the rule is the shift rather than the halving
+        // (#721). This surface only exposes the centring default.
+        out.meta.xoffset = origin(w - dx);
+        out.meta.yoffset = origin(h - dy);
+        Ok(out)
     }
 
     /// Toroidally shift the image so the pixel at the centre
@@ -1551,7 +1691,7 @@ impl Raster {
         for i in 0..samples {
             write_flat(odata, bpc, i, lut[read_flat(sdata, bpc, i) as usize]);
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -1590,8 +1730,10 @@ impl Raster {
             let v = read_flat(sdata, bpc, p * channels).min(255) as usize;
             odata[p * 3..p * 3 + 3].copy_from_slice(&FALSECOLOUR_PET[v]);
         }
-        out.meta = self.meta;
-        out.meta.interpretation = Some(Interpretation::Srgb);
+        out.carry_meta_from(self);
+        // `vips falsecolour` retags the output sRGB whatever the input said,
+        // so the stamp goes on after the carry rather than before it.
+        out.set_interpretation(Some(Interpretation::Srgb));
         Ok(out)
     }
 
@@ -1628,7 +1770,7 @@ impl Raster {
             65535.0
         };
         let mut out = self.try_bandjoin_const(max)?;
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -1655,8 +1797,9 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConversionError::EmptyInput`] for an empty list,
-    /// [`ConversionError::FloatFormatUnsupported`] if any input is a float
-    /// raster (the sample copy is unsigned-only),
+    /// [`ConversionError::FloatUnsupported`] if any input is a float raster
+    /// (the sample copy is unsigned-only, and unlike `try_join` this is the
+    /// guard that stops a panic rather than one that chooses an error type),
     /// [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`, the
     /// bound libvips declares on the property,
     /// [`ConversionError::AcrossOutOfRange`] for an explicit `across`
@@ -1676,11 +1819,24 @@ impl Raster {
         // The sample copy below is `read_flat` / `write_flat`, which are
         // unsigned-only and panic on 4-byte samples, so a float input has to
         // be refused here rather than panicking out of a fallible method.
-        // Same reason as `try_join`: `space_depth` maps Lab, Lch, OkLab,
+        //
+        // Unlike `try_join`, this really is the thing that stops a panic:
+        // `arrayjoin` blits the cells itself rather than delegating to
+        // `try_insert`, so there is no second guard underneath it. Removing it
+        // reaches `read_flat`'s `bpc == 4` arm, which is a `panic!`.
+        //
+        // With one caveat worth writing down, because the obvious test fixture
+        // misses it: that is only true once the band counts agree. A 3-band and
+        // a 4-band input are refused by the band check below before any sample
+        // is read, so an unguarded `arrayjoin` returns `BandCountMismatch`
+        // there rather than panicking. The panicking path needs matching band
+        // counts, and the test uses them.
+        //
+        // Float input is not exotic: `space_depth` maps Lab, Lch, OkLab,
         // OkLCh, XYZ, scRGB and Yxy all to F32, so a `colourspace` result is
         // already float.
         if images.iter().any(|i| i.format().is_float()) {
-            return Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" });
+            return Err(ConversionError::FloatUnsupported { op: "arrayjoin" });
         }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
         // vips does not clamp `across` to the image count: it lays out a grid
@@ -1771,7 +1927,15 @@ impl Raster {
                 }
             }
         }
-        out.meta = images[0].meta;
+        out.carry_meta_from(images[0]);
+        // Measured on vips 8.18.6 (issue #718): the header block comes from
+        // the first input alone and the attached fields are the union of all
+        // of them, first input winning a name they share. So the carry takes
+        // images[0] wholesale and the rest merge under it, which puts a
+        // profile only a later cell carries onto the grid.
+        for img in &images[1..] {
+            out.merge_fields_from(img);
+        }
         // Same re-stamp as `join`: `bandalike` can give the grid more bands
         // than images[0] has, and images[0]'s interpretation then describes
         // an image that no longer exists. `space_bands(Bw) == 1`, so a
@@ -1779,7 +1943,7 @@ impl Raster {
         // extras. Drop the tag and let the getter infer from the format. A
         // depth-only promotion keeps the tag, matching vips.
         if out.bands() != images[0].bands() {
-            out.meta.interpretation = None;
+            out.set_interpretation(None);
         }
         Ok(out)
     }
@@ -1825,10 +1989,12 @@ impl Raster {
     ///
     /// Checked here, before anything is placed or allocated:
     ///
-    /// * [`ConversionError::FloatFormatUnsupported`] if either input is a
-    ///   float raster. The placement path underneath reads samples as `u8`
-    ///   or `u16` and panics on 4-byte ones, so a float input is rejected
-    ///   up front rather than delegated into a panic.
+    /// * [`ConversionError::FloatUnsupported`] if either input is a float
+    ///   raster. [`Raster::try_insert`] refuses one itself since #694, so
+    ///   this is no longer what stops a panic; it is what keeps the refusal
+    ///   in the error type this signature promises, rather than surfacing an
+    ///   [`crate::extract::ExtractError`] naming an operation the caller did
+    ///   not call. It runs first, so it is the refusal that fires.
     /// * [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`,
     ///   the bound libvips declares on the property.
     /// * [`ConversionError::PlacementOffsetOverflow`] if the offset the
@@ -1860,6 +2026,11 @@ impl Raster {
     ///   leave the canvas. Neither is reachable through `join` as the
     ///   placement is computed today; they are listed because the crop can
     ///   raise them and a `#[non_exhaustive]` match should expect them.
+    /// * [`crate::extract::ExtractError::FloatUnsupported`], for the same
+    ///   reason: both delegates raise it on a float raster, and neither can
+    ///   be reached with one because the guard above returns first. Listing
+    ///   it is this module's own rule, and leaving it out was the thing
+    ///   #730 noticed.
     pub fn try_join(
         &self,
         other: &Raster,
@@ -1869,14 +2040,25 @@ impl Raster {
         background: Option<&[f64]>,
         align: Option<Align>,
     ) -> Result<Raster, ConversionError> {
-        // The placement path (`insert` -> `blit`) is unsigned-only and
-        // panics on 4-byte samples. Float input is not exotic: `space_depth`
-        // maps every one of Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to
-        // F32, so `im.colourspace(Lab).join(..)` arrives here as float.
-        // Reject it as a typed error rather than delegating into a panic
-        // from a fallible method.
+        // This used to be the thing that stopped a panic: the placement path
+        // (`insert` -> `blit`) was unsigned-only and paniced on 4-byte
+        // samples. #694 moved that guard into `try_insert`, so the delegated
+        // path now refuses a float raster itself and the panic is gone either
+        // way.
+        //
+        // The guard stays because of the *type*. Without it a float input
+        // arrives as `ConversionError::Extract(ExtractError::FloatUnsupported
+        // { op: "insert" })`, which names an operation the caller did not
+        // call, through a variant their `try_join` signature does not lead
+        // them to expect. With it they get `ConversionError::FloatUnsupported
+        // { op: "join" }`. It runs before the delegation, so it is the one
+        // that fires and `try_insert`'s is unreachable from here.
+        //
+        // Float input is not exotic: `space_depth` maps every one of Lab,
+        // Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to F32, so
+        // `im.colourspace(Lab).join(..)` arrives here as float.
         if self.format().is_float() || other.format().is_float() {
-            return Err(ConversionError::FloatFormatUnsupported { op: "join" });
+            return Err(ConversionError::FloatUnsupported { op: "join" });
         }
         let align = align.unwrap_or(Align::Low);
         let shim = shim.unwrap_or(0);
@@ -1917,7 +2099,11 @@ impl Raster {
                 joined
             }
         };
-        out.meta = self.meta;
+        out.carry_meta_from(self);
+        // Same union as `insert`, which is what `join` is built on: measured
+        // on vips 8.18.6 the header block is in1's alone and the attached
+        // fields are both inputs', in1 winning a shared name (issue #718).
+        out.merge_fields_from(other);
         // libvips `bandalike` promotes a one-band input up to the other's
         // band count, so the result can have more bands than in1 has. in1's
         // interpretation then describes an image that no longer exists:
@@ -1931,7 +2117,7 @@ impl Raster {
         // when joining `b-w` uchar with `grey16`, so the trigger is
         // specifically the band count changing.
         if out.bands() != self.bands() {
-            out.meta.interpretation = None;
+            out.set_interpretation(None);
         }
         Ok(out)
     }
@@ -3736,7 +3922,7 @@ mod tests {
         for list in [[&ramp, &plain], [&plain, &ramp]] {
             assert!(matches!(
                 Raster::try_arrayjoin(&list, None, None),
-                Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" })
+                Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
             ));
         }
     }
@@ -4237,7 +4423,7 @@ mod tests {
         for (a, b) in [(&ramp, &join_a()), (&join_a(), &ramp)] {
             assert!(matches!(
                 a.try_join(b, JoinDirection::Horizontal, false, None, None, None),
-                Err(ConversionError::FloatFormatUnsupported { op: "join" })
+                Err(ConversionError::FloatUnsupported { op: "join" })
             ));
         }
     }

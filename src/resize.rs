@@ -88,7 +88,15 @@ fn downscale_half_noalpha(src: &Raster) -> Result<Raster, RasterError> {
         }
     }
 
-    Raster::new(dst_w, dst_h, fmt, dst)
+    let mut out = Raster::new(dst_w, dst_h, fmt, dst)?;
+    // vips carries the whole block through a shrink, including the resolution,
+    // which it does *not* rescale with the pixel grid: `vips shrink in.v out.v
+    // 2 2` on an `xres 5 yres 7` source reports 5 and 7 back, and hands on the
+    // orientation, the attached fields and the ICC profile, with the origin
+    // offsets carried rather than stamped. `reduce` and `resize` agree.
+    // Measured on 8.18.6 (#740).
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Downscale with alpha-weighted averaging for color channels.
@@ -201,7 +209,15 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
         }
     }
 
-    Raster::new(dst_w, dst_h, fmt, dst)
+    let mut out = Raster::new(dst_w, dst_h, fmt, dst)?;
+    // vips carries the whole block through a shrink, including the resolution,
+    // which it does *not* rescale with the pixel grid: `vips shrink in.v out.v
+    // 2 2` on an `xres 5 yres 7` source reports 5 and 7 back, and hands on the
+    // orientation, the attached fields and the ICC profile, with the origin
+    // offsets carried rather than stamped. `reduce` and `resize` agree.
+    // Measured on 8.18.6 (#740).
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 /// Number of source samples covered by one destination pixel's source region.
@@ -410,7 +426,15 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
         }
     }
 
-    Raster::new(dst_w, dst_h, fmt, dst)
+    let mut out = Raster::new(dst_w, dst_h, fmt, dst)?;
+    // vips carries the whole block through a shrink, including the resolution,
+    // which it does *not* rescale with the pixel grid: `vips shrink in.v out.v
+    // 2 2` on an `xres 5 yres 7` source reports 5 and 7 back, and hands on the
+    // orientation, the attached fields and the ICC profile, with the origin
+    // offsets carried rather than stamped. `reduce` and `resize` agree.
+    // Measured on 8.18.6 (#740).
+    out.carry_meta_from(src);
+    Ok(out)
 }
 
 #[cfg(test)]
