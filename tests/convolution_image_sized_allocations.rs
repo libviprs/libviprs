@@ -1,5 +1,14 @@
-//! Holds the "no image-sized infallible allocation left on this path" claim
-//! that #669 wrote onto `try_sharpen` and `try_canny` (issue #700).
+//! Budgets the image-sized allocations of the convolution module: every
+//! `pub fn` in `src/convolution.rs` that a row below names, held to the two
+//! numbers it measures.
+//!
+//! It started as the guard for the "no image-sized infallible allocation left
+//! on this path" claim that #669 wrote onto `try_sharpen` and `try_canny`
+//! (issue #700), and grew `conv`, `sobel`, `gaussblur` and `compass` rows when
+//! #575 took the whole-image `f64` widening off the traversal all four of them
+//! run through. The file used to be called
+//! `sharpen_canny_image_sized_allocations.rs`; the budgets are no longer only
+//! sharpen's and canny's, so the name is not either.
 //!
 //! Nothing held it. Two one-line mutations put an image-sized copy back with
 //! the whole suite green: `let mut sharpened = labs.clone();` where the LabS
@@ -81,9 +90,12 @@
 //!   which is the property both mutations break.
 //! * It counts a request, not a residency. An allocator that over-allocates, or
 //!   a page never touched, is charged at the size asked for.
-//! * The budgets only cover the carriers the rows name. Every row runs an
-//!   `Rgb8` input and an `Rgba8` one, so a buffer that only appears with an
-//!   alpha band is visible, but a 16-bit or float carrier is not.
+//! * The budgets only cover the carriers the rows name. The sharpen, canny and
+//!   `conv` rows run an `Rgb8` input and an `Rgba8` one, so a buffer that only
+//!   appears with an alpha band is visible; `conv` adds a 16-bit and a
+//!   32-bit-float carrier and `sobel` a single-band one, which between them
+//!   reach all three arms of the row widening and all three band counts, but no
+//!   row here covers a 16-bit or float carrier through sharpen or canny.
 //! * A change that legitimately adds an image-sized buffer to one of these
 //!   paths reddens the row it belongs to, and the budget wants re-measuring
 //!   with the same evidence that set it in the first place. That is the
@@ -107,7 +119,10 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use libviprs::{ConvolutionError, PixelFormat, Precision, Raster, generate_test_raster};
+use libviprs::{
+    Angle45, Combine, ConvolutionError, Kernel, PixelFormat, Precision, Raster,
+    generate_test_raster,
+};
 
 // --- counting global allocator ----------------------------------------------
 
@@ -379,8 +394,56 @@ fn rgba8(dim: u32) -> Raster {
     Raster::new(dim, dim, PixelFormat::Rgba8, data).expect("fixture raster")
 }
 
-/// Measured on the tree that closed #700, at both sizes below, and set at the
-/// measured value rather than above it. None of these carry slack.
+/// One band of the gradient, so a buffer that scales with the band count and
+/// one that does not are told apart by something other than the alpha row.
+fn gray8(dim: u32) -> Raster {
+    let rgb = rgb8(dim);
+    let px = (dim as usize) * (dim as usize);
+    let data: Vec<u8> = (0..px).map(|p| rgb.data()[p * 3]).collect();
+    Raster::new(dim, dim, PixelFormat::Gray8, data).expect("fixture raster")
+}
+
+/// The gradient on the 16-bit carrier.
+///
+/// `Scan::advance` widens three carriers with three different decodes, and
+/// until this row existed nothing here ran the 2-byte one: every guarded path
+/// was 8-bit, or 32-bit float through canny's gradient stage. An arm no row
+/// exercises is an arm that can break with the whole file green, which is the
+/// same argument the positive control makes about the allocator's four.
+fn rgb16(dim: u32) -> Raster {
+    let rgb = rgb8(dim);
+    let n = (dim as usize) * (dim as usize) * 3;
+    let mut data = vec![0u8; n * 2];
+    for (i, out) in data.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        *out = (u16::from(rgb.data()[i]) * 257).to_ne_bytes();
+    }
+    Raster::new(dim, dim, PixelFormat::Rgb16, data).expect("fixture raster")
+}
+
+/// The gradient on the 32-bit float carrier, which is the third decode and
+/// also the only carrier that reaches `vips_convi_gen`'s double path.
+fn rgbf32(dim: u32) -> Raster {
+    let rgb = rgb8(dim);
+    let n = (dim as usize) * (dim as usize) * 3;
+    let mut data = vec![0u8; n * 4];
+    for (i, out) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *out = (f32::from(rgb.data()[i]) / 255.0).to_ne_bytes();
+    }
+    let fmt = PixelFormat::with_channels(3, 4).expect("three bands have a float format");
+    Raster::new(dim, dim, fmt, data).expect("fixture raster")
+}
+
+/// The 3x3 box blur every `conv` and `compass` row runs, which is the mask
+/// shape the module's own pins use.
+fn box3() -> Kernel {
+    Kernel {
+        data: vec![vec![1.0; 3]; 3],
+        scale: 9.0,
+    }
+}
+
+/// Measured at both sizes below and set at the measured value rather than
+/// above it. None of these carry slack.
 ///
 /// The per-pixel figures read off the algorithms. `try_sharpen`'s 39 on `Rgb8`
 /// is the LabS raster the colourspace conversion returns and the f32 widening
@@ -390,11 +453,11 @@ fn rgba8(dim: u32) -> Raster {
 /// that are live longest. Canny's float arm holds two gradient rasters, the two
 /// widenings of them and the polar pairs, at twelve or twenty-four bytes a
 /// pixel apiece; its uchar arm skips the widenings and reads the gradient bytes
-/// directly, which is why it is a third of the float arm.
+/// directly, which is why it is a fifth of the float arm.
 ///
 /// The `Rgba8` rows are the same algorithms carrying a fourth band, and their
 /// numbers say so: the allocation counts are identical and both canny rates are
-/// exactly four thirds of the `Rgb8` ones (84 to 112, 33 to 44). Sharpen is 39
+/// exactly four thirds of the `Rgb8` ones (84 to 112, 15 to 20). Sharpen is 39
 /// to 48 rather than 52 because only the buffers that carry every band widen
 /// with the alpha (the LabS raster and its widening go twelve to sixteen, the
 /// output raster three to four) while the L plane and the two blur passes are
@@ -403,7 +466,133 @@ fn rgba8(dim: u32) -> Raster {
 ///
 /// Both mutations #700 names add twelve bytes a pixel and one allocation to the
 /// sharpen row, one as a `Raster` and one as a `Vec<f32>`.
+///
+/// # The traversal rows
+///
+/// `conv`, `sobel`, `gaussblur` and `compass` all run `Scan`, and their rows
+/// are what #575 moved. Each one used to carry a whole-image `f64` widening,
+/// eight bytes a sample, on top of what it reads here now:
+///
+/// | row | before #575 | after |
+/// |---|---|---|
+/// | `try_conv` integer, `Rgb8` | 2 allocs, 27 a pixel | 1, 3 |
+/// | `try_conv` float, `Rgb8` | 2, 36 | 1, 12 |
+/// | `try_sobel`, `Rgb8` | 2, 27 | 1, 3 |
+/// | `try_gaussblur` integer, `Rgb8` | 4, 30 | 2, 6 |
+/// | `try_canny` uchar, `Rgb8` | 9, 33 | 6, 15 |
+///
+/// So a `conv` at integer precision now allocates **one** image-sized buffer,
+/// its own output, and holds nothing else: three bytes a pixel for a three-band
+/// uchar image is the output and nothing more. The window itself is real but it
+/// is not image-sized, which is exactly the property these rows pin: it is
+/// `span * width * bands * 8` bytes for a mask `span` rows tall, so at 192 and
+/// 256 square it sits below one byte a pixel and is not charged at either, and
+/// a window that went back to scaling with the height would be.
+///
+/// The float arm reads twelve rather than three because `vips_convf` writes a
+/// float image whatever it was handed, so the output is four bytes a band; the
+/// `Rgb16` row reads six for the same reason in reverse, since `vips_convi`
+/// keeps the input depth.
+///
+/// `try_compass` is the outlier, and its row is here to say so rather than to
+/// praise it: 159 bytes a pixel over a three-byte-a-pixel input, 53 times what
+/// it was handed. It convolves `times` times, keeps every result, and then
+/// widens every one of them to `f64` to combine, so four whole-image widenings
+/// are 96 of the 159. That is the same `samples_f64` amplification #575 names,
+/// in the one place a row window cannot reach it because the combine reads all
+/// `times` results at the same sample. It has its own issue and this row is
+/// what will move when that lands.
 const BUDGETS: &[Budget] = &[
+    Budget {
+        op: "try_conv",
+        arm: "integer arm",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: |src| src.try_conv(&box3(), Precision::Integer),
+        allocs: 1,
+        live_per_pixel: 3,
+    },
+    Budget {
+        op: "try_conv",
+        arm: "float arm",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: |src| src.try_conv(&box3(), Precision::Float),
+        allocs: 1,
+        live_per_pixel: 12,
+    },
+    Budget {
+        op: "try_conv",
+        arm: "integer arm",
+        carrier: "Rgba8",
+        src: rgba8,
+        run: |src| src.try_conv(&box3(), Precision::Integer),
+        allocs: 1,
+        live_per_pixel: 4,
+    },
+    Budget {
+        op: "try_conv",
+        arm: "float arm",
+        carrier: "Rgba8",
+        src: rgba8,
+        run: |src| src.try_conv(&box3(), Precision::Float),
+        allocs: 1,
+        live_per_pixel: 16,
+    },
+    Budget {
+        op: "try_conv",
+        arm: "integer arm",
+        carrier: "Rgb16",
+        src: rgb16,
+        run: |src| src.try_conv(&box3(), Precision::Integer),
+        allocs: 1,
+        live_per_pixel: 6,
+    },
+    Budget {
+        op: "try_conv",
+        arm: "float arm",
+        carrier: "FloatF32(3)",
+        src: rgbf32,
+        run: |src| src.try_conv(&box3(), Precision::Float),
+        allocs: 1,
+        live_per_pixel: 12,
+    },
+    Budget {
+        op: "try_sobel",
+        arm: "",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: Raster::try_sobel,
+        allocs: 1,
+        live_per_pixel: 3,
+    },
+    Budget {
+        op: "try_sobel",
+        arm: "",
+        carrier: "Gray8",
+        src: gray8,
+        run: Raster::try_sobel,
+        allocs: 1,
+        live_per_pixel: 1,
+    },
+    Budget {
+        op: "try_gaussblur",
+        arm: "integer arm",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: |src| src.try_gaussblur(1.4, 0.2, Precision::Integer),
+        allocs: 2,
+        live_per_pixel: 6,
+    },
+    Budget {
+        op: "try_compass",
+        arm: "Max, 4 rounds",
+        carrier: "Rgb8",
+        src: rgb8,
+        run: |src| src.try_compass(&box3(), 4, Angle45::D45, Combine::Max, Precision::Integer),
+        allocs: 11,
+        live_per_pixel: 159,
+    },
     Budget {
         op: "try_sharpen",
         arm: "",
@@ -419,7 +608,7 @@ const BUDGETS: &[Budget] = &[
         carrier: "Rgb8",
         src: rgb8,
         run: |src| src.try_canny(1.4, Precision::Float),
-        allocs: 11,
+        allocs: 8,
         live_per_pixel: 84,
     },
     Budget {
@@ -428,8 +617,8 @@ const BUDGETS: &[Budget] = &[
         carrier: "Rgb8",
         src: rgb8,
         run: |src| src.try_canny(1.4, Precision::Integer),
-        allocs: 9,
-        live_per_pixel: 33,
+        allocs: 6,
+        live_per_pixel: 15,
     },
     Budget {
         op: "try_sharpen",
@@ -446,7 +635,7 @@ const BUDGETS: &[Budget] = &[
         carrier: "Rgba8",
         src: rgba8,
         run: |src| src.try_canny(1.4, Precision::Float),
-        allocs: 11,
+        allocs: 8,
         live_per_pixel: 112,
     },
     Budget {
@@ -455,14 +644,18 @@ const BUDGETS: &[Budget] = &[
         carrier: "Rgba8",
         src: rgba8,
         run: |src| src.try_canny(1.4, Precision::Integer),
-        allocs: 9,
-        live_per_pixel: 44,
+        allocs: 6,
+        live_per_pixel: 20,
     },
 ];
 
 /// Two sizes, so a budget has to hold as a rate rather than as a constant
 /// fitted to one image. Both are far enough above the fixed-size buffers on
-/// either path that one byte per pixel cleanly separates image-sized from not.
+/// these paths that one byte per pixel cleanly separates image-sized from not,
+/// and that now includes the convolution row window: it is
+/// `span * width * bands * 8` bytes, which for the mask shapes here is under
+/// `dim * dim` at both sizes. A window that went back to scaling with the
+/// height would cross the threshold and be charged, which is the point.
 const DIMS: [u32; 2] = [192, 256];
 
 /// Measure one row at one size, after a warm-up run that keeps any one-time
@@ -512,7 +705,7 @@ fn cost_of(budget: &Budget, dim: u32) -> (Cost, usize) {
 }
 
 #[test]
-fn sharpen_and_canny_hold_their_image_sized_allocation_budgets() {
+fn every_convolution_op_holds_its_image_sized_allocation_budget() {
     let _serial = serialised();
     for budget in BUDGETS {
         for dim in DIMS {
@@ -520,7 +713,7 @@ fn sharpen_and_canny_hold_their_image_sized_allocation_budgets() {
             assert!(
                 cost.allocs <= budget.allocs,
                 "{} {} on {} made {} image-sized allocations at {dim}x{dim} against a budget of \
-                 {}: something on the path is copying a whole image again (issue #700)",
+                 {}: something on the path is copying a whole image again (issues #700, #575)",
                 budget.op,
                 budget.arm,
                 budget.carrier,
@@ -532,7 +725,7 @@ fn sharpen_and_canny_hold_their_image_sized_allocation_budgets() {
                 cost.peak_bytes <= ceiling,
                 "{} {} on {} held {} image-sized bytes live at once at {dim}x{dim} ({:.1} a \
                  pixel) against a budget of {} a pixel: something on the path is copying a whole \
-                 image again (issue #700)",
+                 image again (issues #700, #575)",
                 budget.op,
                 budget.arm,
                 budget.carrier,
