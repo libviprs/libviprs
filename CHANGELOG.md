@@ -658,6 +658,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Raster::encode_uhdr(quality)` and `Raster::encode_uhdr_gainmap_scale(quality,
+  scale_factor)` **write an Ultra HDR container** instead of returning
+  `EncodeError::Unsupported` (issue #757). #508 landed the writer in
+  `crate::uhdr` with no new dependency and libvips reads its output back
+  (`vipsheader -a` reports `vips-loader: uhdrload`), but the documented
+  `Raster` surface still refused, so a caller was told this build cannot write
+  Ultra HDR while the crate demonstrably could.
+
+  The input is a **3-band `f32`** raster holding linear-light scRGB, which is
+  what a gain map is computed from. Anything else is
+  `EncodeError::InvalidParameter` naming the format it got, not `Unsupported`:
+  the build can write the format, this raster is the wrong shape for it, and
+  those are different answers. libvips gates on the interpretation tag instead
+  and it does not buy correctness there. Measured on 8.18.6: a 1-band scRGB
+  float image saves as an all-black container, and a `uchar` scRGB image is
+  re-linearised on the way in, so a constant 128 comes back as 0.2137 rather
+  than 0.502.
+
+  `scale_factor` is the libvips `gainmap-scale-factor` and is refused outside
+  1..=128. libvips declares that same range and then silently substitutes the
+  default: `--gainmap-scale-factor 0` and `--gainmap-scale-factor 200` both
+  exit 0 and write the same 2630 bytes as the plain call, with
+  `gainmap-scale-factor: 2` in the header. `quality` is clamped to 1..=100 the
+  way `Raster::encode_jpeg` clamps its own.
+
 - A page model for multi-frame images (issue #564). A multi-frame image is one
   `Raster` whose rows are a whole number of equal-height pages stacked top to
   bottom, the layout libvips calls a toilet roll, and the split is now a
