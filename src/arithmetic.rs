@@ -266,6 +266,9 @@ fn read_u32(data: &[u8], kind: SampleKind, i: usize) -> u32 {
             "the arithmetic operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
+        }
     }
 }
 
@@ -288,6 +291,9 @@ fn read_f64(data: &[u8], kind: SampleKind, i: usize) -> f64 {
             data[4 * i + 2],
             data[4 * i + 3],
         ])),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
+        }
     }
 }
 
@@ -307,6 +313,9 @@ fn write_u32(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
             "the arithmetic operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+            todo!("the signed and 32-bit sample kinds (issues #516, #517)")
+        }
     }
 }
 
@@ -3851,6 +3860,99 @@ mod tests {
                  and PixelFormat::with_kind() instead"
             );
         }
+    }
+
+    /**
+     * Tests that the module's sample helpers read and write every
+     * [`SampleKind`], including the signed and 32-bit kinds no
+     * `PixelFormat` carries yet (issues #516, #517), so those arms are a
+     * real path rather than a hole waiting for the carrier.
+     * Works by writing a sample through `write_u32` and reading it back
+     * with both `read_u32` (the storage bit pattern, which is what the
+     * bitwise family and the non-zero scans want) and `read_f64` (the
+     * numeric value, sign-extended), on a buffer sized for the kind.
+     * Input: -1 stored as I16 -> `read_u32` 0xFFFF, `read_f64` -1.0;
+     * 4294967295 stored as U32 -> `read_f64` 4294967295.0.
+     */
+    #[test]
+    fn sample_helpers_read_and_write_every_integer_kind() {
+        // (kind, stored bit pattern, numeric value)
+        let cases: [(SampleKind, u32, f64); 12] = [
+            (SampleKind::U8, 0, 0.0),
+            (SampleKind::U8, 255, 255.0),
+            (SampleKind::I8, 0xFF, -1.0),
+            (SampleKind::I8, 0x80, -128.0),
+            (SampleKind::I8, 127, 127.0),
+            (SampleKind::U16, 65535, 65535.0),
+            (SampleKind::I16, 0xFFFF, -1.0),
+            (SampleKind::I16, 0x8000, -32768.0),
+            (SampleKind::I16, 32767, 32767.0),
+            (SampleKind::U32, 0xFFFF_FFFF, 4_294_967_295.0),
+            (SampleKind::I32, 0xFFFF_FFFF, -1.0),
+            (SampleKind::I32, 0x7FFF_FFFF, 2_147_483_647.0),
+        ];
+        for (kind, bits, value) in cases {
+            // Two samples wide, and the write goes to index 1, so an arm
+            // that ignores the stride writes over index 0 and is caught.
+            let mut buf = vec![0u8; kind.bytes() * 2];
+            write_u32(&mut buf, kind, 1, bits);
+            assert_eq!(
+                read_u32(&buf, kind, 1),
+                bits,
+                "{kind:?} did not round-trip the bit pattern {bits:#x}"
+            );
+            assert_eq!(
+                read_f64(&buf, kind, 1),
+                value,
+                "{kind:?} read {bits:#x} as the wrong number"
+            );
+            assert!(
+                buf[..kind.bytes()].iter().all(|&b| b == 0),
+                "{kind:?} wrote outside sample 1"
+            );
+        }
+    }
+
+    /**
+     * Tests that the rounding, saturating write clamps into the sample
+     * kind's whole range rather than into `0..=max`, which is the floor
+     * issue #607 names as the assumption the signed carriers of #516 break.
+     * Works by writing a value under the kind's floor and one over its
+     * ceiling and reading both back numerically, with the unsigned kinds
+     * asserted alongside so the change cannot have moved them.
+     * Input: -300.0 into I16 -> -32768; -5.0 into U8 -> 0; 400.0 into I8
+     * -> 127.
+     */
+    #[test]
+    fn write_f64_clamps_into_the_kind_range() {
+        // (kind, written, read back)
+        let cases: [(SampleKind, f64, f64); 10] = [
+            (SampleKind::U8, -5.0, 0.0),
+            (SampleKind::U8, 400.0, 255.0),
+            (SampleKind::U16, -5.0, 0.0),
+            (SampleKind::U16, 70000.0, 65535.0),
+            (SampleKind::I8, -300.0, -128.0),
+            (SampleKind::I8, 400.0, 127.0),
+            (SampleKind::I16, -40000.0, -32768.0),
+            (SampleKind::I16, 40000.0, 32767.0),
+            (SampleKind::U32, -1.0, 0.0),
+            (SampleKind::I32, -3.0e9, f64::from(i32::MIN)),
+        ];
+        for (kind, wrote, want) in cases {
+            let mut buf = vec![0u8; kind.bytes()];
+            let max = f64::from(kind.max_value().expect("an integer kind has a ceiling"));
+            write_f64(&mut buf, kind, 0, wrote, max);
+            assert_eq!(
+                read_f64(&buf, kind, 0),
+                want,
+                "{kind:?} clamped {wrote} to the wrong value"
+            );
+        }
+        // Positive control: an in-range value survives untouched, so the
+        // clamp cannot be passing as a constant.
+        let mut buf = vec![0u8; 2];
+        write_f64(&mut buf, SampleKind::I16, 0, -1234.0, 32767.0);
+        assert_eq!(read_f64(&buf, SampleKind::I16, 0), -1234.0);
     }
 
     /// A width x height Gray8 raster from a byte vector.
