@@ -21,11 +21,22 @@
 #   <file>::<test>             repo-relative path and function name
 #
 # The `unannotated fs-detected` rows are a ledger of known debt, not an
-# endorsement. Issue #652 records the choice: PR #644 disables Miri's isolation
-# on the job, so mass-annotating another 138 tests now would cut Miri coverage
-# in exactly the direction #644 is trying to widen it. Pinning them here instead
-# makes the set knowable (it was previously described as "unknown but clearly
-# larger than one") and makes any addition to it a visible edit in review.
+# endorsement. The original argument for leaving them was that PR #644 disables
+# Miri's isolation on the job, so annotating another 138 tests would cut
+# coverage in the direction #644 was widening. That argument no longer holds:
+# #675 found that the isolation-disabled run never finishes, three attempts all
+# died at the 90 minute ceiling, and the `miri` job now sits behind a job-level
+# `if:` so it does not run on an ordinary pull request at all. So the coverage
+# being protected here is currently zero, and mass-annotating would cost
+# nothing today.
+#
+# They stay unannotated anyway, for a different and smaller reason: what to do
+# with them depends on how #675 resolves. If Miri comes back with isolation on,
+# they all need annotating and the scanner will say so. If it comes back with
+# isolation off and a workable runtime, none of them do. Deciding now means
+# redoing it either way. Pinning them makes the set knowable (it was previously
+# described as "unknown but clearly larger than one") and makes any addition a
+# visible edit in review, which is the part that holds regardless of #675.
 #
 # The `annotated not-detected` rows are the scanner's blind spot made durable.
 # Those tests reach the filesystem through a helper or through a library
