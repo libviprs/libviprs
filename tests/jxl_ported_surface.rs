@@ -33,7 +33,7 @@ use libviprs::EncodeError;
 #[cfg(feature = "jxl")]
 use libviprs::decode_bytes;
 use libviprs::source::{DecodeLimits, SourceError};
-use libviprs::{JxlError, PixelFormat, Raster, decode_jxl, jxl};
+use libviprs::{JxlError, PixelFormat, Raster, decode_jxl, decode_jxl_with, jxl};
 
 /// A 4x3 sRGB ramp, the same one `oracle-captures/foreign-jxl` is built
 /// from, so a failure here and a failure in the unit tests point at the
@@ -267,4 +267,40 @@ fn without_the_feature_the_surface_is_unchanged_and_typed() {
     let message = err.to_string();
     assert!(message.contains("unsupported save extension"), "{message}");
     assert!(!message.contains("webp, jxl"), "{message}");
+}
+
+/// The animated entry point and its options struct resolve from outside the
+/// crate in **either** build, and the option shape is the one a caller
+/// writes: struct-update syntax over a `Default` that is page 0 and one
+/// frame, not every frame (issue #621).
+///
+/// The refusal under test is the feature-off one, `JxlError::FeatureNotEnabled`,
+/// so this half runs in both builds; the page refusal needs a real file and
+/// lives in the unit tests.
+#[test]
+fn the_animated_load_surface_resolves_from_outside_the_crate() {
+    let explicit = jxl::LoadOptions {
+        page: 0,
+        n: Some(1),
+    };
+    assert_eq!(jxl::LoadOptions::default(), explicit);
+    let all = jxl::LoadOptions {
+        n: None,
+        ..Default::default()
+    };
+    assert_eq!(all.page, 0);
+
+    // Not a JPEG XL file, so the call fails either way; what is pinned here
+    // is that it is callable, that it is typed the same in both builds, and
+    // that the feature-off build says so rather than reporting a bad file.
+    let result = decode_jxl_with(b"not a jxl file at all", all, DecodeLimits::default());
+    let err = result.expect_err("those bytes are not JPEG XL");
+    if cfg!(feature = "jxl") {
+        assert!(matches!(err, SourceError::Jxl(_)), "{err:?}");
+    } else {
+        assert!(
+            matches!(err, SourceError::Jxl(JxlError::FeatureNotEnabled)),
+            "{err:?}"
+        );
+    }
 }

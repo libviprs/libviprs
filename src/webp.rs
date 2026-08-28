@@ -56,15 +56,20 @@
 //! * **Animated WebP can be read and never written.** No pure-Rust
 //!   encoder emits `ANIM`/`ANMF`: `image-webp` 0.2.4 writes one `VP8L`
 //!   chunk and has no animation surface at all, so [`SaveOptions`] has
-//!   nowhere to spell a frame delay or a loop count and
-//!   [`Raster::encode_webp`] writes the **first page** of a roll rather
-//!   than an animation. That asymmetry is deliberate and it is not going
-//!   to be papered over: a caller who wants to save an animation saves it
-//!   as GIF, which does have a pure-Rust encoder behind it. Making
-//!   `encode_webp` refuse a paged raster instead would break the ordinary
-//!   crop-a-frame-and-save-it path for no gain, since the pixels it writes
-//!   are exactly the pixels a caller who extracted page 0 would have
-//!   handed it.
+//!   nowhere to spell a frame delay or a loop count. So a roll loaded by
+//!   [`decode_webp_with`] and handed straight back to
+//!   [`Raster::encode_webp`] comes out as **one tall still image**, four
+//!   pages deep, and `vips webpsave` on the same raster would have written
+//!   a four-frame animation. That is a real divergence and it is pinned
+//!   rather than assumed (`an_animation_saved_back_is_one_tall_still`).
+//!
+//!   Refusing a paged raster was the alternative and it is worse: the
+//!   pixels are a perfectly good image, the crate has no other way to spell
+//!   "save this roll", and a refusal would fire on the ordinary path of
+//!   loading two pages and saving the result. A caller who wants one frame
+//!   uses [`Raster::try_extract_page`], and a caller who wants an animation
+//!   saves GIF, which is the one animated format in this crate with a
+//!   pure-Rust encoder behind it.
 //! * **16-bit input is refused, where vips narrows it.** `webpsave`
 //!   accepts a `ushort` image and right-shifts it by 8 on the way in
 //!   (measured: 255 becomes 0, 256 becomes 1, 65535 becomes 255, and the
@@ -2078,5 +2083,88 @@ mod tests {
             Some(&[45i64, 67, 200, 12][..])
         );
         assert_eq!(raster.get_field("loop"), Some(MetadataValue::Int(3)));
+    }
+
+    /**
+     * Tests that a scanner asked about a frame that declares alpha and
+     * asks to be blended leaves it alone, which the two captures cannot
+     * show on their own: vips writes blending off on every frame of the
+     * transparent roll and on with no alpha on the opaque one, so the two
+     * conditions never come apart in a file the oracle produces. Works by
+     * clearing the no-blend bit on the transparent capture by hand, which
+     * is the combination no encoder here writes, and asking again.
+     * Input: `ANIM4_RGBA` with every frame's no-blend bit cleared ->
+     * Output: still no offsets, where the same edit to the opaque capture
+     * names all four frames.
+     */
+    #[test]
+    fn a_frame_that_declares_alpha_is_left_blended() {
+        // Clearing the bit everywhere is the only way to reach the fourth
+        // combination: `vips webpsave` writes blend-off + alpha for a
+        // transparent roll and blend-on + no-alpha for an opaque one, so
+        // blend-on + alpha has to be built.
+        let clear_all = |bytes: &[u8]| {
+            let mut owned = bytes.to_vec();
+            let mut cursor = 12usize;
+            while let Some(header) = owned.get(cursor..cursor + 8) {
+                let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+                if &header[..4] == b"ANMF" {
+                    owned[cursor + 8 + 15] &= !ANMF_NO_BLEND;
+                }
+                cursor += 8 + size + (size & 1);
+            }
+            owned
+        };
+
+        let opaque = clear_all(&ANIM4_DELAY);
+        assert_eq!(
+            opaque_blended_frame_offsets(&opaque).len(),
+            4,
+            "with frame 0 blended too, all four opaque frames need the rewrite"
+        );
+
+        let transparent = clear_all(&ANIM4_RGBA);
+        assert!(
+            opaque_blended_frame_offsets(&transparent).is_empty(),
+            "a frame that declares alpha keeps its blending: switching it off \
+             would change the image, where switching it off on an opaque frame \
+             cannot"
+        );
+        // The edit really did happen, or the assertion above would pass on
+        // a buffer nothing had touched.
+        assert_ne!(transparent, ANIM4_RGBA.to_vec());
+        assert_ne!(opaque, ANIM4_DELAY.to_vec());
+    }
+
+    /**
+     * Tests what saving an animation back as WebP actually does, which is
+     * the read-only asymmetry made concrete: the roll comes out as one
+     * tall still image, where `vips webpsave` on the same raster writes a
+     * four-frame animation. Works by loading every page, encoding, and
+     * loading the result.
+     * Input: the four-page roll from `ANIM4_DELAY` -> Output: a 4x12
+     * still whose pixels are the whole roll and which carries no
+     * `n-pages`, no `delay` and no `loop`.
+     */
+    #[test]
+    fn an_animation_saved_back_is_one_tall_still() {
+        let roll = decode_webp_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+            .expect("the four-frame capture decodes");
+        assert_eq!(roll.pages_loaded(), 4);
+
+        let bytes = roll
+            .encode_webp(SaveOptions::default())
+            .expect("a 4x12 Rgb8 raster encodes");
+        // No `ANIM` chunk, because `image-webp` has no code that writes
+        // one: the file is the plain `RIFF`/`WEBP`/`VP8L` form.
+        assert_eq!(riff_chunks(&bytes), vec!["VP8L"]);
+
+        let back = decode_webp(&bytes, DecodeLimits::default()).expect("it reads back");
+        assert_eq!((back.width(), back.height()), (4, 12));
+        assert_eq!(back.data(), &ANIM4_ROLL[..]);
+        assert_eq!(back.pages_loaded(), 1);
+        for field in ["n-pages", "page-height", "delay", "loop"] {
+            assert_eq!(back.get_field(field), None, "{field} on the round trip");
+        }
     }
 }
