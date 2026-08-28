@@ -600,7 +600,7 @@ impl DeclaredGeometry {
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
 /// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
-/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read (`.v`'s own uncompressed body is sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read, and on the pixel body itself, priced from the declared header geometry (issue #710) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
 ///
 /// The single-axis [`max_coord`](Self::max_coord) and total
@@ -611,8 +611,8 @@ impl DeclaredGeometry {
 /// The format decoders libviprs owns outright take the same
 /// [`DecodeLimits`] and apply `max_coord`, `max_pixels` and
 /// `max_alloc_bytes` in that order before reserving a frame:
-/// [`crate::gif::decode_gif`], [`crate::webp::decode_webp`], and the TIFF
-/// page readers. [`max_alloc_bytes`](Self::max_alloc_bytes) is the one that
+/// [`crate::gif::decode_gif`], [`crate::webp::decode_webp`], the native `.v`
+/// reader, and the TIFF page readers. [`max_alloc_bytes`](Self::max_alloc_bytes) is the one that
 /// catches a frame `max_pixels` waves through, since a pixel count sees
 /// neither the band count nor the sample depth.
 ///
@@ -2823,7 +2823,7 @@ mod tests {
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
      * Input: `SniffedFormat::ALL.len()` -> Output: 11, which is what the two
-     * tables plus the one documented exclusion account for.
+     * tables account for between them, with no exclusions left.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
@@ -2834,11 +2834,11 @@ mod tests {
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 11 are: 7 self-priced (gif, radiance, fits, openexr, jxl, \
-             webp which joined them in #686, and uhdr which joined them in #508 and \
-             prices two images rather than one), 3 refused inside the image crate \
-             (jpeg, png, tiff), and .v, which applies no allocation budget at all and \
-             is issue #710"
+             count. Today the 11 are: 8 self-priced (gif, radiance, fits, openexr, \
+             jxl, webp which joined them in #686, uhdr which joined them in #508 and \
+             prices two images rather than one, and .v which joined them in #710) and \
+             3 refused inside the image crate (jpeg, png, tiff). There are no \
+             exclusions left"
         );
     }
 
