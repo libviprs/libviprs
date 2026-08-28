@@ -427,9 +427,12 @@ pub enum Compression {
 /// Options for [`Raster::encode_jp2k`] (libvips `jp2ksave` /
 /// `jp2ksave_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `jp2k::SaveOptions { compression, ..Default::default() }` and later fields
-/// can be added without a breaking change.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from [`SaveOptions::default`] and set what you need
+/// with the `with_*` builders, e.g.
+/// `jp2k::SaveOptions::default().with_compression(compression)`. That is what
+/// makes "later fields can be added without a breaking change" true rather
+/// than merely written down (issue #630).
 ///
 /// There is no `keep` field and no `profile` field, because `jp2ksave` has
 /// neither behind it: it inherits both from `VipsForeignSave` and implements
@@ -440,9 +443,19 @@ pub enum Compression {
 /// `opj_cparameters_t` `pub(crate)`, so neither has an encoder behind it.
 /// Tiled save is issue #768.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// How to compress. Defaults to [`Compression::Lossless`].
     pub compression: Compression,
+}
+
+impl SaveOptions {
+    /// Set the compression mode, returning the updated options.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
 }
 
 /// Decode JPEG 2000 bytes into a [`Raster`] (libvips `jp2kload_buffer` at its

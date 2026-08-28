@@ -186,12 +186,15 @@ pub enum GifError {
 
 /// Options for [`Raster::encode_gif`] (libvips `gifsave` / `gifsave_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `gif::SaveOptions { dither: 0.0, ..Default::default() }` and later fields
-/// can be added without a breaking change. Deliberately *not*
-/// `#[non_exhaustive]`, which would block the struct literal downstream and
-/// kill `..Default::default()`.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from
+/// [`SaveOptions::default`] and set what you need with the `with_*` builders,
+/// e.g. `gif::SaveOptions::default().with_dither(0.0)`. That is what makes
+/// "later fields can be added without a breaking change" true rather than
+/// merely written down; a struct literal here would compile today and stop the
+/// day a field lands (issue #630).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// Write the frame interlaced (libvips `gifsave` `interlace`).
     /// Defaults to `false`, as vips does.
@@ -215,6 +218,29 @@ impl Default for SaveOptions {
             dither: DEFAULT_DITHER,
             bitdepth: DEFAULT_BITDEPTH,
         }
+    }
+}
+
+impl SaveOptions {
+    /// Write the frame interlaced, returning the updated options.
+    #[must_use]
+    pub fn with_interlaced(mut self, interlaced: bool) -> Self {
+        self.interlaced = interlaced;
+        self
+    }
+
+    /// Set the dithering amount, returning the updated options.
+    #[must_use]
+    pub fn with_dither(mut self, dither: f64) -> Self {
+        self.dither = dither;
+        self
+    }
+
+    /// Set the bits per pixel, returning the updated options.
+    #[must_use]
+    pub fn with_bitdepth(mut self, bitdepth: u8) -> Self {
+        self.bitdepth = bitdepth;
+        self
     }
 }
 

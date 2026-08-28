@@ -889,10 +889,9 @@ fn the_scrgb_round_trip_is_bounded_and_improves_with_quality() {
     for (quality, gain_map_shrink) in [(75u8, 2u32), (95, 2), (95, 1), (100, 1)] {
         let bytes = uhdr::encode_uhdr(
             &src,
-            &SaveOptions {
-                quality,
-                gain_map_shrink,
-            },
+            &SaveOptions::default()
+                .with_quality(quality)
+                .with_gain_map_shrink(gain_map_shrink),
         )
         .expect("encodes");
         let back = uhdr::from_container(&bytes, DecodeLimits::default()).expect("expands");
