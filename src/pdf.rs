@@ -1170,8 +1170,9 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
 /// without a `/Rotate` entry, missing values, and self-referential
 /// parent chains all resolve to [`PageRotation::Zero`].
 ///
-/// This is the path-based companion of the private [`resolve_rotate`]
-/// helper. Callers driving pdfium's matrix render path need the page's
+/// This is the path-based companion of the crate-internal `resolve_rotate`
+/// helper, which answers the same question for an already-open `lopdf`
+/// document. Callers driving pdfium's matrix render path need the page's
 /// intrinsic `/Rotate` to compose the right device transform —
 /// `FPDF_RenderPageBitmapWithMatrix` does not auto-apply it the way the
 /// form-data render path does.

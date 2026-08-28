@@ -566,3 +566,477 @@ fn no_compiled_python_is_tracked_under_oracle_captures() {
          the NEXT one being added, it cannot untrack these."
     );
 }
+
+// ---------------------------------------------------------------------------
+// Recorded fixture hashes describe the files in the tree (issue #779).
+// ---------------------------------------------------------------------------
+
+/// Keys a capture hangs "the file this record is about" off, when the hash key
+/// is the bare `sha256`.
+///
+/// Three spellings because three areas settled on three words for the same
+/// thing before anything read across them: `convolution/canny` writes `path`,
+/// `foreign-exr` writes `file`, and everything else writes `fixture`.
+const FILE_KEYS: &[&str] = &["path", "file", "fixture"];
+
+/// Recorded hashes that name a path this guard cannot reach, with the reason.
+///
+/// One entry, and it earns it: `foreign-uhdr` anchors its whole area on
+/// libvips' own `ultra-hdr.jpg` from the reference test suite, which is not in
+/// this repository and is named by absolute path. The hash is still worth
+/// recording, because it says which byte-for-byte input the rest of that area
+/// was measured from, but nothing here can check it.
+///
+/// The list is exact rather than a floor, so a record quietly acquiring an
+/// absolute path (or a `..`) fails here instead of dropping out of the checked
+/// set. That is the failure mode this whole test exists for: a hash nobody
+/// compares to anything.
+const HASHES_NAMING_A_PATH_THIS_TREE_DOES_NOT_HOLD: &[&str] =
+    &["foreign-uhdr .records.reference_image sha256"];
+
+/// How many recorded hashes name a committed file, across every area.
+///
+/// Pinned rather than floored because the steady state of this test is a
+/// zero: with every hash agreeing there is nothing left for it to report, and
+/// a selector that quietly stopped selecting would look exactly the same. The
+/// number is what says the guard still has 95 things to be right about.
+///
+/// Moving it is fine and expected: a new capture area, or a new record with a
+/// fixture behind it, moves it up. Re-run the suite and put the number it
+/// prints here.
+const EXPECTED_PINNED_FIXTURE_HASHES: usize = 95;
+
+/// One recorded hash that names a file, lifted out of one capture.
+#[derive(Debug)]
+struct NamedFileHash {
+    /// The capture area, as `areas_on_disk` keys it.
+    area: String,
+    /// Dotted path to the record inside that area's `oracle.json`.
+    at: String,
+    /// The key the hash was recorded under.
+    hash_key: String,
+    /// The key the file name was recorded under.
+    path_key: String,
+    /// The file name, as written, relative to the area directory.
+    named: String,
+    /// The recorded digest.
+    recorded: String,
+    /// The recorded byte count, when the record carries one.
+    bytes: Option<u64>,
+}
+
+impl NamedFileHash {
+    /// How the test names this row in a message and in the exemption list.
+    fn label(&self) -> String {
+        format!("{} {} {}", self.area, self.at, self.hash_key)
+    }
+}
+
+/// Is this a 64-character lowercase hex digest?
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Pull every recorded hash that names a file out of one capture.
+///
+/// The selector is deliberately narrow, because most of the 954 hashes in
+/// these captures are not file hashes at all: `raw_sha256` is over a
+/// `vips rawsave` dump, `vips_payload_sha256` and `payload_sha256` are over a
+/// decoded payload, `frame_zero_pixel_sha256` is over pixels. Hashing the
+/// file those records sit next to and calling it a mismatch would be a guard
+/// that is wrong 26 times out of 121.
+///
+/// So a hash is taken to name a file only when the record says which one:
+///
+///   * the bare `sha256`, paired with a `path`, `file` or `fixture` sibling,
+///   * `<name>_sha256`, paired with a sibling literally called `<name>`,
+///     which is how `foreign-avif` records `fixture_444_sha256` against its
+///     `fixture_444`.
+///
+/// Everything else is left alone. That is a real blind spot and it is the
+/// right one: a hash with no file name next to it is not a claim about a file
+/// in the tree, so there is nothing here to check it against.
+fn collect_named_file_hashes(area: &str, at: &str, value: &Value, out: &mut Vec<NamedFileHash>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let Some(recorded) = child.as_str() else {
+                    continue;
+                };
+                if !key.ends_with("sha256") || !is_sha256_hex(recorded) {
+                    continue;
+                }
+                let path_key = match key.strip_suffix("_sha256") {
+                    Some(prefix) => map
+                        .get(prefix)
+                        .and_then(Value::as_str)
+                        .map(|_| prefix.to_string()),
+                    None if key == "sha256" => FILE_KEYS
+                        .iter()
+                        .find(|k| map.get(**k).and_then(Value::as_str).is_some())
+                        .map(|k| (*k).to_string()),
+                    None => None,
+                };
+                let Some(path_key) = path_key else {
+                    continue;
+                };
+                out.push(NamedFileHash {
+                    area: area.to_string(),
+                    at: at.to_string(),
+                    hash_key: key.clone(),
+                    named: map[&path_key]
+                        .as_str()
+                        .expect("path_key was chosen because it is a string")
+                        .to_string(),
+                    path_key,
+                    recorded: recorded.to_string(),
+                    bytes: map.get("bytes").and_then(Value::as_u64),
+                });
+            }
+            for (key, child) in map {
+                collect_named_file_hashes(area, &format!("{at}.{key}"), child, out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                collect_named_file_hashes(area, &format!("{at}[{i}]"), item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every recorded file hash in every committed capture.
+fn named_file_hashes() -> Vec<NamedFileHash> {
+    let mut out = Vec::new();
+    for (area, capture) in areas_on_disk() {
+        collect_named_file_hashes(&area, "", &capture, &mut out);
+    }
+    out
+}
+
+/// The sha256 and size of a file, or `None` if it is not there.
+///
+/// The read lives here rather than in the test body on purpose: it is the
+/// same shape as [`areas_on_disk`], and it keeps the filesystem call out of
+/// the body scan in `tests/miri_ignore_convention.rs`, which classifies a
+/// test by what its own body mentions.
+fn digest_of(path: &Path) -> Option<(String, u64)> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, &bytes);
+    let digest = sha2::Digest::finalize(hasher);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Some((hex, bytes.len() as u64))
+}
+
+/// Every recorded hash that names a committed fixture matches that fixture
+/// (issue #779).
+///
+/// `oracle-captures/foreign-avif`'s bit-depth carrier recorded
+/// `d5a55b1a…` / 323 bytes for `fixtures/rgb8.avif` and the file in the tree
+/// was `c1f34aad…` / 355 bytes, because two records wrote different images to
+/// the same name and the later write won. Nothing noticed for as long as the
+/// capture existed. The version guard above checks that a capture says which
+/// vips it was measured on; this one checks that it was measured on the bytes
+/// anybody else can read.
+///
+/// Three populations come out of the walk and they are treated differently:
+///
+///   * a name under an `outputs/` directory is scratch the area's own
+///     `.gitignore` excludes, so it is checked when it happens to be on disk
+///     and skipped when it is not,
+///   * a name that leaves the captures (absolute, or with a `..`) is
+///     unreachable and has to be listed in
+///     [`HASHES_NAMING_A_PATH_THIS_TREE_DOES_NOT_HOLD`],
+///   * everything else is a committed fixture and has to be present and have
+///     to match, with [`EXPECTED_PINNED_FIXTURE_HASHES`] pinning how many of
+///     those there are.
+#[test]
+fn every_recorded_fixture_hash_matches_the_committed_file() {
+    let root = captures_dir();
+    let mut pinned = 0usize;
+    let mut scratch_checked = 0usize;
+    let mut unreachable = Vec::new();
+    let mut absent = Vec::new();
+    let mut wrong = Vec::new();
+
+    for record in named_file_hashes() {
+        let named = record.named.replace('\\', "/");
+        let leaves_the_captures =
+            named.starts_with('/') || named.split('/').any(|part| part == "..");
+        if leaves_the_captures {
+            unreachable.push(record.label());
+            continue;
+        }
+        let is_scratch = named.split('/').any(|part| part == "outputs");
+        let path = root.join(&record.area).join(&named);
+        if !is_scratch {
+            pinned += 1;
+        }
+        match digest_of(&path) {
+            None if is_scratch => {}
+            None => absent.push(format!(
+                "{} names {} under `{}`, and no such file is committed",
+                record.label(),
+                record.named,
+                record.path_key
+            )),
+            Some((digest, size)) => {
+                if is_scratch {
+                    scratch_checked += 1;
+                }
+                let size_wrong = record.bytes.is_some_and(|b| b != size);
+                if digest != record.recorded || size_wrong {
+                    wrong.push(format!(
+                        "{} records {}/{} bytes for {}, which is really {}/{} bytes",
+                        record.label(),
+                        record.recorded,
+                        record
+                            .bytes
+                            .map_or_else(|| "?".to_string(), |b| b.to_string()),
+                        record.named,
+                        digest,
+                        size
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        absent.is_empty(),
+        "a capture records a hash for a file that is not in the tree, so \
+         nothing it says about that file can be checked:\n  {}\n\
+         Either commit the file or move the record onto a name under \
+         `outputs/`, which every area's .gitignore already treats as scratch.",
+        absent.join("\n  ")
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} recorded hash(es) do not describe the committed file they name:\n  \
+         {}\nRe-run that area's capture.py against the pinned binary so the \
+         record and the artefact come out of the same run; do not hand-edit \
+         oracle.json to agree.",
+        wrong.len(),
+        wrong.join("\n  ")
+    );
+
+    let mut unreachable_sorted = unreachable;
+    unreachable_sorted.sort();
+    let mut allowed: Vec<String> = HASHES_NAMING_A_PATH_THIS_TREE_DOES_NOT_HOLD
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    allowed.sort();
+    assert_eq!(
+        unreachable_sorted, allowed,
+        "the set of recorded hashes naming a path outside oracle-captures has \
+         moved. A hash nothing can be compared against is exactly the shape \
+         #779 was about, so each one is listed with its reason rather than \
+         silently skipped."
+    );
+
+    assert_eq!(
+        pinned, EXPECTED_PINNED_FIXTURE_HASHES,
+        "this guard checked {pinned} recorded hashes against committed files, \
+         not {EXPECTED_PINNED_FIXTURE_HASHES}. Adding a record or an area is \
+         fine, move the number; a DROP with no records deleted means the \
+         selector stopped selecting, and since every hash agreeing looks \
+         identical to nothing being read, this count is the only thing saying \
+         the test still has work to do. ({scratch_checked} further hashes \
+         named a file under outputs/ that happened to be on disk and were \
+         checked too.)"
+    );
+}
+
+/// No two records in one capture hash the same name differently (issue #779).
+///
+/// This is the same defect read off the JSON alone, with no filesystem
+/// involved, and it reaches three things the check above cannot. It sees a
+/// collision under `outputs/`, which is scratch nobody commits and nothing
+/// else can compare. It sees one on a path that leaves the captures
+/// altogether. And it fires in a fresh clone that has not run a single
+/// `capture.py`, because the contradiction is already written down: before
+/// this was fixed, `foreign-avif` said `fixtures/rgb8.avif` was `d5a55b1a…`
+/// in one record and `c1f34aad…` in another, and no more evidence than that
+/// was needed to know one of them was wrong.
+///
+/// Two records describing the SAME file with the same hash is fine and stays
+/// fine. The tree has none today, and it should not need one: what is being
+/// refused is the contradiction, not the sharing.
+#[test]
+fn no_two_records_hash_one_name_differently() {
+    let mut claims: BTreeMap<(String, String), BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for record in named_file_hashes() {
+        claims
+            .entry((record.area.clone(), record.named.replace('\\', "/")))
+            .or_default()
+            .entry(record.recorded.clone())
+            .or_default()
+            .push(record.label());
+    }
+    let contradictions: Vec<String> = claims
+        .iter()
+        .filter(|(_, hashes)| hashes.len() > 1)
+        .map(|((area, named), hashes)| {
+            let sides: Vec<String> = hashes
+                .iter()
+                .map(|(hash, rows)| format!("{} says {hash}", rows.join(" and ")))
+                .collect();
+            format!("{area} {named}: {}", sides.join("; "))
+        })
+        .collect();
+    assert!(
+        contradictions.is_empty(),
+        "one capture records two different hashes for one name, so at least \
+         one of those records describes a file that no longer exists:\n  {}\n\
+         The later write wins on disk. Give the earlier record its own \
+         fixture name and re-run that area's capture.py.",
+        contradictions.join("\n  ")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Every capture script checks the pin before it writes anything (issue #796).
+// ---------------------------------------------------------------------------
+
+/// Every capture script in the tree, by area, embedded at compile time.
+///
+/// `include_str!` rather than a directory walk, for two reasons. The scripts
+/// are the evidence a running test is reasoning about, and reading them at
+/// run time would put this test on the Miri filesystem ledger for a file that
+/// cannot change between the build and the run. And a missing path is then a
+/// compile error naming it, which is a better failure than a test that walked
+/// a directory and found one fewer script than it expected.
+///
+/// The list being hand-written is the thing that could rot, so
+/// [`every_capture_script_checks_the_oracle_pin`] cross-checks it against the
+/// live area walk before it reads anything into what the scripts say.
+#[rustfmt::skip]
+const CAPTURE_SCRIPTS: [(&str, &str); 14] = [
+    ("convolution",       include_str!("../oracle-captures/convolution/capture.py")),
+    ("convolution/canny", include_str!("../oracle-captures/convolution/canny/capture.py")),
+    ("foreign-analyze",   include_str!("../oracle-captures/foreign-analyze/capture.py")),
+    ("foreign-avif",      include_str!("../oracle-captures/foreign-avif/capture.py")),
+    ("foreign-exr",       include_str!("../oracle-captures/foreign-exr/capture.py")),
+    ("foreign-fits",      include_str!("../oracle-captures/foreign-fits/capture.py")),
+    ("foreign-gif",       include_str!("../oracle-captures/foreign-gif/capture.py")),
+    ("foreign-jp2k",      include_str!("../oracle-captures/foreign-jp2k/capture.py")),
+    ("foreign-jxl",       include_str!("../oracle-captures/foreign-jxl/capture.py")),
+    ("foreign-mat",       include_str!("../oracle-captures/foreign-mat/capture.py")),
+    ("foreign-nifti",     include_str!("../oracle-captures/foreign-nifti/capture.py")),
+    ("foreign-radiance",  include_str!("../oracle-captures/foreign-radiance/capture.py")),
+    ("foreign-uhdr",      include_str!("../oracle-captures/foreign-uhdr/capture.py")),
+    ("foreign-webp",      include_str!("../oracle-captures/foreign-webp/capture.py")),
+];
+
+/// Does any MODULE-LEVEL line of `src` satisfy `pred`?
+///
+/// Module level means column zero: no leading whitespace. That is what
+/// separates the real statement from a copy of it in prose, and there is a
+/// copy in prose. `oracle_pin.py`'s own docstring shows callers exactly what
+/// to write:
+///
+/// ```text
+///     sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir)))
+///     import oracle_pin
+///
+///     VIPS_VERSION, PIN = oracle_pin.check(AREA, VIPS)
+/// ```
+///
+/// Indented by four, because it is an example. A scan that took a substring
+/// match would read that docstring as an adoption, and this repository has
+/// already shipped one scanner that let prose answer for code (#703 read an
+/// outer `json.dump` as guarded when only a nested call carried the flag).
+/// Python has no module-level indentation, so the rule costs nothing real:
+/// a statement that runs when the script starts is at column zero.
+///
+/// A trailing `#` comment is dropped first, so the `# noqa` both convolution
+/// scripts carry does not have to be spelled out here.
+fn any_module_level_line(src: &str, pred: impl Fn(&str) -> bool) -> bool {
+    src.lines()
+        .filter(|line| !line.starts_with([' ', '\t']))
+        .map(|line| line.split('#').next().unwrap_or("").trim_end())
+        .any(pred)
+}
+
+/// Every `capture.py` refuses to run against a libvips `ORACLE_PIN.json` does
+/// not pin it to (issue #796).
+///
+/// #650 left a two-sided guard: `capture.py` stops a bad capture being TAKEN,
+/// and [`every_capture_declares_the_oracle_it_was_measured_against`] stops one
+/// being KEPT. Only the second side was real. `ORACLE_PIN.json` said
+/// "capture.py refuses to run against a binary that disagrees with it",
+/// `oracle_pin.py` opened "The oracle pin every capture.py under
+/// oracle-captures/ checks", and the module doc at the top of this file said
+/// "each area's". Measured: two of fourteen scripts, both of them the
+/// convolution ones the helper was written in.
+///
+/// So the twelve `foreign-*` areas could be re-run on a moved binary and
+/// would write a whole capture with the new version stamped through it,
+/// silently, which is exactly the #650 failure. The six `pre_pin` areas are
+/// the ones most likely to be re-run and all six were in the unguarded
+/// twelve.
+///
+/// Three things are checked per script, because two of them alone can be
+/// true and useless: the import, the call, and that the area name handed to
+/// the call is this script's own. A script checking a different area's pin
+/// entry passes a substring scan and checks the wrong thing.
+#[test]
+fn every_capture_script_checks_the_oracle_pin() {
+    let embedded: BTreeSet<&str> = CAPTURE_SCRIPTS.iter().map(|(area, _)| *area).collect();
+    let on_disk = areas_on_disk();
+    let live: BTreeSet<&str> = on_disk.keys().map(String::as_str).collect();
+    assert_eq!(
+        embedded, live,
+        "CAPTURE_SCRIPTS no longer names the areas on disk, so it is not the \
+         population this test means to read. Add the new area's capture.py to \
+         the list with an include_str!."
+    );
+
+    let mut gaps: Vec<String> = Vec::new();
+    for (area, src) in CAPTURE_SCRIPTS {
+        let mut missing: Vec<&str> = Vec::new();
+        if !any_module_level_line(src, |line| {
+            line.trim_end() == "import oracle_pin" || line.starts_with("import oracle_pin ")
+        }) {
+            missing.push("a module-level `import oracle_pin`");
+        }
+        if !any_module_level_line(src, |line| line.contains("oracle_pin.check(")) {
+            missing.push("a module-level call to `oracle_pin.check`");
+        }
+        let declares = format!("AREA = {area:?}");
+        if !any_module_level_line(src, |line| line.trim_end() == declares) {
+            missing.push("a module-level `AREA` naming its own area");
+        }
+        if !missing.is_empty() {
+            gaps.push(format!(
+                "oracle-captures/{area}/capture.py is missing {}",
+                missing.join(", and ")
+            ));
+        }
+    }
+
+    assert!(
+        gaps.is_empty(),
+        "{} of {} capture scripts do not check ORACLE_PIN.json before they \
+         write, so for those areas nothing stops a capture being TAKEN \
+         against the wrong libvips:\n  {}\nAdd, at module level:\n\
+         \x20   AREA = \"<this area>\"\n\
+         \x20   sys.path.insert(0, os.path.abspath(os.path.join(ROOT, os.pardir)))\n\
+         \x20   import oracle_pin\n\
+         \x20   VIPS_VERSION, ORACLE_PIN = oracle_pin.check(AREA, VIPS)\n\
+         See oracle-captures/convolution/capture.py, which has had it since \
+         #650.",
+        gaps.len(),
+        CAPTURE_SCRIPTS.len(),
+        gaps.join("\n  ")
+    );
+}
