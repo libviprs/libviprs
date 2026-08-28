@@ -481,6 +481,13 @@ pub enum UhdrError {
     /// so this is a real error here.
     #[error("uhdr2scRGB: image carries no gain map")]
     NoGainMap,
+    /// The gain map could not be scaled to the base image's size.
+    ///
+    /// [`uhdr_to_scrgb`] runs the same `crate::resample` linear resize
+    /// `uhdr2scRGB` runs (issue #760), so a gain map at a ratio that resize
+    /// refuses reaches the caller as this rather than as a panic.
+    #[error("uhdr2scRGB: gain map resize: {0}")]
+    Resample(#[from] crate::resample::ResampleError),
     /// The raster could not be built from the decoded pixels.
     #[error(transparent)]
     Raster(#[from] crate::raster::RasterError),
@@ -1062,6 +1069,29 @@ fn resize_gain_map(
         }
     }
     out
+}
+
+/// Scale `gain_map` to `width` x `height`, the `vips_resize(..., "kernel",
+/// VIPS_KERNEL_LINEAR)` at `uhdr2scRGB.c:233-240`.
+///
+/// Additive in the red commit and still delegating to the private
+/// [`resize_gain_map`] there, so the tests that pin what it must do compile
+/// against the name they are going to keep (issue #760).
+///
+/// # Errors
+///
+/// [`UhdrError::Resample`] if the resize refuses the ratio.
+fn scale_gain_map(gain_map: &Raster, width: u32, height: u32) -> Result<Raster, UhdrError> {
+    let bands = gain_map.format().channels();
+    let px = resize_gain_map(
+        gain_map.data(),
+        gain_map.width().max(1),
+        gain_map.height().max(1),
+        bands,
+        width,
+        height,
+    );
+    Ok(Raster::new(width, height, gain_map.format(), px)?)
 }
 
 /// Apply the gain map to the base image, the libvips `uhdr2scRGB`.
@@ -1786,6 +1816,142 @@ mod tests {
                 "the {what} refusal should still name uhdr2scRGB, got {text:?}"
             );
         }
+    }
+
+    /// A base and a gain map for the resample pins, both filled from the
+    /// house formula `(i * 53 + 17) % 251` so the same bytes can be rebuilt
+    /// on the vips side through `vips rawload`.
+    fn resample_pair(bw: u32, bh: u32, gw: u32, gh: u32) -> (Raster, Raster, GainMapMetadata) {
+        let base: Vec<u8> = (0..(bw * bh * 3) as usize)
+            .map(|i| ((i * 37 + 11) % 251) as u8)
+            .collect();
+        let gain: Vec<u8> = (0..(gw * gh) as usize)
+            .map(|i| ((i * 53 + 17) % 251) as u8)
+            .collect();
+        let meta = GainMapMetadata {
+            max_content_boost: [6.0; 3],
+            hdr_capacity_max: 6.0,
+            ..GainMapMetadata::default()
+        };
+        (
+            Raster::new(bw, bh, PixelFormat::Rgb8, base).unwrap(),
+            Raster::new(gw, gh, PixelFormat::Gray8, gain).unwrap(),
+            meta,
+        )
+    }
+
+    /**
+     * Issue #760, the case the private resampler got wrong. `uhdr2scRGB`
+     * scales the gain map with `vips_resize(..., VIPS_KERNEL_LINEAR)`, and
+     * `vips_resize` is not a bilinear point sample: below 1.0 it runs
+     * `reduce`, which averages every input sample the output covers. #508's
+     * private `resize_gain_map` interpolated between two neighbours at any
+     * scale, so a gain map **larger** than its base aliased instead of
+     * averaging.
+     *
+     * That is reachable. `encode_uhdr` never writes one, and neither does
+     * libuhdr, but `from_container` reads whatever a file holds and
+     * `uhdr_prices_the_gain_map_as_well_as_the_base` already builds a
+     * container with a 512x512 gain map on an 8x8 base.
+     *
+     * The oracle is `vips resize in.v out.v 0.3333333333333333 --vscale
+     * 0.3333333333333333 --kernel linear` on the 12x9 gain map, rebuilt with
+     * `vips rawload`, and the assertion is exact: expanding with the small
+     * map has to equal expanding with vips' own already-scaled one, because
+     * both go through the identical per-pixel transform and the resample is
+     * the only thing left. Before this change 12 of those 12 gain-map levels
+     * were wrong, the worst by 87 of 255.
+     */
+    #[test]
+    fn a_gain_map_larger_than_its_base_is_averaged_rather_than_point_sampled() {
+        let (base, gain, meta) = resample_pair(4, 3, 12, 9);
+        let vips_8_18_6: [u8; 12] = [104, 136, 122, 138, 129, 117, 124, 126, 125, 126, 118, 122];
+        let prescaled = Raster::new(4, 3, PixelFormat::Gray8, vips_8_18_6.to_vec()).unwrap();
+
+        let via_resample = uhdr_to_scrgb(&base, &gain, &meta).unwrap();
+        let via_oracle = uhdr_to_scrgb(&base, &prescaled, &meta).unwrap();
+        assert_eq!(
+            via_resample.data(),
+            via_oracle.data(),
+            "the gain map has to be scaled the way vips scales it"
+        );
+
+        // Positive control on the oracle itself: a nearest pick of the same
+        // map is a different answer, so the equality above is a statement
+        // about the resampler rather than about a map flat enough not to care.
+        let nearest: Vec<u8> = (0..12usize)
+            .map(|i| {
+                let (x, y) = (i % 4, i / 4);
+                gain.data()[(y * 3) * 12 + x * 3]
+            })
+            .collect();
+        assert_ne!(
+            nearest,
+            vips_8_18_6.to_vec(),
+            "the fixture has to be one where averaging and picking disagree"
+        );
+    }
+
+    /**
+     * Issue #760, the other half: what moving onto the shared resampler costs
+     * on an **upscale**, which is the direction every container libuhdr or
+     * this crate writes actually uses.
+     *
+     * Oracle is `vips resize in.v out.v 2.6666666666666665 --vscale 2.5
+     * --kernel linear` on the 3x2 gain map. `crate::resample` reproduces 39
+     * of those 40 levels, and the fortieth is an exact rounding tie: the
+     * separable bilinear at that position is **80.5** on the nose, so vips
+     * rounds it up and this module's accumulation lands one ulp below the
+     * boundary and floors. The test computes that value rather than asserting
+     * it, because "the residual is a tie" is the whole claim.
+     */
+    #[test]
+    fn the_gain_map_upscale_matches_vips_except_at_an_exact_rounding_tie() {
+        let (sw, sh, dw, dh) = (3usize, 2usize, 8usize, 5usize);
+        let src: Vec<u8> = (0..sw * sh).map(|i| ((i * 53 + 17) % 251) as u8).collect();
+        #[rustfmt::skip]
+        let vips_8_18_6: [u8; 40] = [
+            17, 17, 30, 50, 70, 90, 110, 123,
+            17, 17, 30, 50, 70, 90, 110, 123,
+            65, 65, 78, 98, 118, 109, 101, 95,
+            128, 128, 142, 161, 181, 135, 89, 59,
+            176, 176, 189, 209, 229, 155, 81, 31,
+        ];
+        let got = scale_gain_map(
+            &Raster::new(sw as u32, sh as u32, PixelFormat::Gray8, src.clone()).unwrap(),
+            dw as u32,
+            dh as u32,
+        )
+        .unwrap();
+
+        let mut ties = 0usize;
+        let mut differ = 0usize;
+        for (i, (&a, &b)) in got.data().iter().zip(vips_8_18_6.iter()).enumerate() {
+            if a == b {
+                continue;
+            }
+            differ += 1;
+            assert_eq!(a.abs_diff(b), 1, "sample {i} is off by more than a level");
+            // The separable bilinear at `j / scale - 0.5`, clamped, which is
+            // what both implementations are approximating.
+            let (x, y) = (i % dw, i / dw);
+            let px = ((x as f64) * sw as f64 / dw as f64 - 0.5).clamp(0.0, (sw - 1) as f64);
+            let py = ((y as f64) * sh as f64 / dh as f64 - 0.5).clamp(0.0, (sh - 1) as f64);
+            let (x0, y0) = (px.floor() as usize, py.floor() as usize);
+            let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
+            let (fx, fy) = (px - px.floor(), py - py.floor());
+            let at = |yy: usize, xx: usize| f64::from(src[yy * sw + xx]);
+            let top = at(y0, x0) + (at(y0, x1) - at(y0, x0)) * fx;
+            let bot = at(y1, x0) + (at(y1, x1) - at(y1, x0)) * fx;
+            let exact = top + (bot - top) * fy;
+            if (exact - exact.floor() - 0.5).abs() < 1e-9 {
+                ties += 1;
+            } else {
+                panic!("sample {i} differs at {exact}, which is not a rounding tie");
+            }
+        }
+        assert!(differ <= 1, "{differ} of 40 levels differ from vips 8.18.6");
+        assert_eq!(ties, differ, "every difference has to be a tie");
     }
 
     #[test]
