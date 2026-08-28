@@ -83,19 +83,20 @@ fn decode_jxl_is_public_and_follows_the_files_carrier() {
     assert_eq!(back.interpretation(), libviprs::Interpretation::Rgb16);
 }
 
-/// The options struct is a plain, `Default`, module-scoped type a caller
-/// can build with `..Default::default()`, which is the format wave's naming
-/// verdict, and neither distance nor quality has a spelling in it.
+/// The options struct is a `#[non_exhaustive]`, `Default`, module-scoped type
+/// a caller outside the crate builds from `default()` through the `with_*`
+/// setters, and neither distance nor quality has a spelling in it. It used to
+/// be a struct literal here, which is what issue #630 took away: this test
+/// compiles as an external crate, so it was itself the downstream caller the
+/// old "later fields can be added without a breaking change" promise would
+/// have broken.
 #[test]
 fn save_options_are_constructible_downstream() {
-    let explicit = jxl::SaveOptions {
-        compression: jxl::Compression::Lossless,
-    };
-    let partial = jxl::SaveOptions {
-        ..Default::default()
-    };
+    let explicit = jxl::SaveOptions::default().with_compression(jxl::Compression::Lossless);
+    let partial = jxl::SaveOptions::default();
     assert_eq!(explicit, partial);
     assert_eq!(jxl::SaveOptions::default(), explicit);
+    assert_eq!(explicit.compression, jxl::Compression::Lossless);
 }
 
 /// The lossless encoder is a true identity from outside the crate too,

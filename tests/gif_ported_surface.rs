@@ -38,29 +38,27 @@ fn decode_gif_is_public_and_expands_the_palette() {
     assert_eq!(raster.get_int("palette"), Some(1));
 }
 
-/// The options struct is a plain, `Default`, module-scoped type a caller
-/// can build with `..Default::default()`, which is the whole point of the
-/// format wave's naming verdict.
+/// The options struct is a `#[non_exhaustive]`, `Default`, module-scoped type
+/// a caller outside the crate builds from `default()` through the `with_*`
+/// setters. It used to be a struct literal here, which is what issue #630 took
+/// away: this test compiles as an external crate, so it was itself the
+/// downstream caller the old "later fields can be added without a breaking
+/// change" promise would have broken.
 #[test]
 fn save_options_are_constructible_downstream() {
-    let explicit = gif::SaveOptions {
-        interlaced: true,
-        dither: 0.5,
-        bitdepth: 4,
-    };
-    let partial = gif::SaveOptions {
-        interlaced: true,
-        ..Default::default()
-    };
+    let explicit = gif::SaveOptions::default()
+        .with_interlaced(true)
+        .with_dither(0.5)
+        .with_bitdepth(4);
+    let partial = gif::SaveOptions::default().with_interlaced(true);
     assert_eq!(explicit.interlaced, partial.interlaced);
-    assert_eq!(
-        gif::SaveOptions::default(),
-        gif::SaveOptions {
-            interlaced: false,
-            dither: 1.0,
-            bitdepth: 8,
-        }
-    );
+    assert_eq!(explicit.bitdepth, 4);
+    assert_eq!(partial.bitdepth, 8);
+
+    let d = gif::SaveOptions::default();
+    assert!(!d.interlaced);
+    assert!((d.dither - 1.0).abs() < f64::EPSILON);
+    assert_eq!(d.bitdepth, 8);
 }
 
 /// `encode_gif` and `save_gif` are both reachable on `Raster`, and a decode
