@@ -49,9 +49,11 @@
 //!
 //! The six formats where **libviprs itself** prices a declared geometry and
 //! refuses it must all report one shape, `SourceError::AllocLimitExceeded`.
-//! The four where the `image` crate refuses keep reporting the `image` shape,
+//! The three where the `image` crate refuses keep reporting the `image` shape,
 //! and that is asserted here too so the split is a decision on the record
-//! rather than a gap.
+//! rather than a gap. Three, not four: WebP left that side in #686, and the
+//! prose here and in `SourceError::is_alloc_limit`'s doc went on saying four
+//! until #782.
 
 use libviprs::jxl::JxlError;
 use libviprs::source::{DecodeLimits, decode_bytes_with_limits};
@@ -548,18 +550,23 @@ fn is_alloc_limit_does_not_depend_on_the_jxl_feature() {
     );
 }
 
-/// Issue #686. The four formats the `image` crate refuses keep reporting the
+/// Issue #686. The three formats the `image` crate refuses keep reporting the
 /// `image` shape, and this is here so that is a decision rather than a gap.
 ///
-/// They are not a mechanical move. In all four the ceiling is spent inside
+/// They are not a mechanical move. In all three the ceiling is spent inside
 /// `image`'s own decoder through `Limits::reserve`, so there is no libviprs
-/// price to report and no declared geometry to attach; WebP reaches the same
-/// error deliberately, from its own pre-check, so that it refuses the same
-/// frames as its three siblings and says the same thing about them.
+/// price to report and no declared geometry to attach.
+///
+/// WebP was a fourth here until #686 moved it, and this doc went on saying so
+/// until #782. It still refuses the same *frames* as its three siblings, which
+/// is the part that was always true and is why the pre-check exists; what it no
+/// longer does is say the same *thing* about them, because it has a price and a
+/// declared geometry and reports both.
 ///
 /// This is what a caller still does about WebP, which #686 asks to be spelled
-/// out: exactly what they do about JPEG, PNG and TIFF, and
-/// [`SourceError::is_alloc_limit`] covers all four without them having to know.
+/// out: exactly what they do about JPEG, PNG and TIFF, because
+/// [`SourceError::is_alloc_limit`] covers all four shapes without them having
+/// to know which side of the split a container is on.
 #[test]
 fn the_image_backed_decoders_still_report_the_image_shape() {
     for row in priced_by_the_image_crate() {
@@ -671,5 +678,86 @@ fn an_unrepresentable_v_band_count_is_a_format_error_not_a_budget_one() {
     assert!(
         over.is_alloc_limit(),
         "the control must reach the budget: {over:?}"
+    );
+}
+
+/// `src/source.rs` as text, so a claim its docs make about *this* file's split
+/// can be checked from here.
+///
+/// `include_str!` rather than a read at runtime, deliberately: it costs nothing
+/// at run time, and a test that opened a path would need a
+/// `#[cfg_attr(miri, ignore)]` and a row in `tests/miri_fs_test_inventory.txt`,
+/// which is a shared count two lanes can move at once.
+const SOURCE_RS: &str = include_str!("../src/source.rs");
+
+/// Issue #782. WebP is not one of the containers the `image` crate refuses,
+/// and `SourceError::is_alloc_limit`'s own doc said it was.
+///
+/// #709 moved WebP off the `image` shape and onto
+/// `SourceError::AllocLimitExceeded`, and left three prose sites describing the
+/// world before the move. The public one is the bullet list a caller reads to
+/// decide what to match, which still listed WebP beside JPEG, PNG and TIFF.
+///
+/// Nothing caught it because nothing here pins what is **not** in the
+/// image-backed table. `the_two_tables_account_for_every_container` pins its
+/// size and `the_image_backed_decoders_still_report_the_image_shape` pins what
+/// its rows report, so a format moving out of it and leaving its description
+/// behind is invisible to both.
+///
+/// Measured on `ed958d5`: WebP refused at `price - 1` comes back as
+/// `AllocLimitExceeded { what: "WebP frame buffer", geometry: Some(4x4x3),
+/// needed_bytes: 48, max_alloc_bytes: 47 }`, and it cannot come back as
+/// anything else, because WebP is a `Native` row in the route table and the
+/// `image` crate never decodes one.
+#[test]
+fn the_image_shape_doc_names_exactly_the_containers_that_report_it() {
+    let bullet = SOURCE_RS
+        .split("`image` `LimitError` of kind")
+        .nth(1)
+        .expect("is_alloc_limit's doc has a bullet for the image LimitError shape")
+        .split(';')
+        .next()
+        .expect("that bullet ends at its semicolon");
+
+    for row in priced_by_the_image_crate() {
+        let named = row.format.to_uppercase();
+        assert!(
+            bullet.contains(&named),
+            "{named} reports the image shape but the is_alloc_limit doc does not \
+             name it: {bullet:?}"
+        );
+    }
+    assert!(
+        !bullet.contains("WebP"),
+        "WebP has priced its own frame and reported SourceError::AllocLimitExceeded \
+         since #686, so the is_alloc_limit doc must not list it among the containers \
+         the image crate refuses (issue #782): {bullet:?}"
+    );
+
+    // And the executable half, so the doc is not the only thing saying it.
+    assert!(
+        !priced_by_the_image_crate()
+            .iter()
+            .any(|r| r.format == "webp"),
+        "WebP left the image-backed table in #686"
+    );
+    let webp = priced_by_libviprs()
+        .into_iter()
+        .find(|r| r.format == "webp")
+        .expect("WebP is a self-priced row");
+    let err = refuse(&webp);
+    assert!(
+        !matches!(err, SourceError::Decode(image::ImageError::Limits(_))),
+        "WebP must not report the image crate's own refusal: {err:?}"
+    );
+    assert!(
+        matches!(
+            err,
+            SourceError::AllocLimitExceeded {
+                what: "WebP frame buffer",
+                ..
+            }
+        ),
+        "WebP prices its own frame and names it: {err:?}"
     );
 }
