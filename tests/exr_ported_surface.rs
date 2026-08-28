@@ -15,8 +15,6 @@
 //! `oracle-captures/foreign-exr/oracle.json` under
 //! `findings.there_is_no_exr_saver` rather than asserted from memory.
 
-use std::num::NonZeroU16;
-
 use libviprs::source::{DecodeLimits, SourceError};
 use libviprs::{ExrError, Interpretation, PixelFormat, decode_bytes, decode_exr, decode_file};
 
@@ -31,17 +29,26 @@ fn sample() -> Vec<u8> {
 }
 
 /// The free decode entry point resolves from outside the crate and returns
-/// the float carrier with one band per selected channel.
+/// the float carrier with one band per selected channel, in that band
+/// count's canonical spelling: four bands is `RgbaF32`, which is the format
+/// `with_channels(4, 4)` names, and it reports alpha (issue #531).
 #[test]
 fn decode_exr_is_public_and_returns_float_bands() {
     let raster = decode_exr(&sample(), DecodeLimits::default()).unwrap();
     assert_eq!(raster.width(), 8);
     assert_eq!(raster.height(), 4);
+    assert_eq!(raster.format(), PixelFormat::RgbaF32);
     assert_eq!(
         raster.format(),
-        PixelFormat::FloatF32(NonZeroU16::new(4).unwrap())
+        PixelFormat::with_channels(4, 4).unwrap(),
+        "the RGBA carrier must be the canonical spelling of four float bands"
     );
     assert!(raster.format().is_float());
+    assert!(
+        raster.format().has_alpha(),
+        "an RGBA EXR carries alpha, and resize consults has_alpha to decide \
+         whether to premultiply"
+    );
     assert_eq!(raster.interpretation(), Interpretation::ScRgb);
 }
 

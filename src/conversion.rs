@@ -437,8 +437,12 @@ impl Interpretation {
     /// [`Interpretation::Srgb`] (libvips' guess for non-ushort colour),
     /// and the multiband and float intermediates as
     /// [`Interpretation::Multiband`].
+    ///
+    /// Read off [`PixelFormat::canonical`], so both spellings of a layout
+    /// get the same answer: `FloatF32(4)` reads as sRGB exactly as
+    /// `RgbaF32` does (issue #531).
     pub fn for_format(format: PixelFormat) -> Self {
-        match format {
+        match format.canonical() {
             PixelFormat::Gray8 => Self::Bw,
             PixelFormat::Gray16 => Self::Grey16,
             PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::RgbaF32 => Self::Srgb,
@@ -4576,5 +4580,36 @@ mod tests {
             Raster::try_switch(&many),
             Err(ConversionError::TooManyConditions { .. })
         ));
+    }
+
+    /**
+     * Tests that Interpretation::for_format reads the pixel layout and not
+     * the spelling of it. PixelFormat's tuple variants are public, so
+     * FloatF32(4) and RgbaF32 name one layout; for_format used to call the
+     * first Multiband and the second Srgb, which is the documented answer
+     * for four-band float (issue #531).
+     * Works by walking every layout that has both spellings and asserting
+     * the two land on the same interpretation.
+     * Input: FloatF32(4) vs RgbaF32 -> Srgb for both; Multi8(1) vs Gray8 ->
+     * Bw for both; Multi16(4) vs Rgba16 -> Rgb16 for both.
+     */
+    #[test]
+    fn for_format_reads_the_layout_not_the_spelling() {
+        let nz = |n: u16| core::num::NonZeroU16::new(n).expect("the table holds no zeroes");
+        for (alias, named) in [
+            (PixelFormat::Multi8(nz(1)), PixelFormat::Gray8),
+            (PixelFormat::Multi8(nz(3)), PixelFormat::Rgb8),
+            (PixelFormat::Multi8(nz(4)), PixelFormat::Rgba8),
+            (PixelFormat::Multi16(nz(1)), PixelFormat::Gray16),
+            (PixelFormat::Multi16(nz(3)), PixelFormat::Rgb16),
+            (PixelFormat::Multi16(nz(4)), PixelFormat::Rgba16),
+            (PixelFormat::FloatF32(nz(4)), PixelFormat::RgbaF32),
+        ] {
+            assert_eq!(
+                Interpretation::for_format(alias),
+                Interpretation::for_format(named),
+                "for_format({alias:?}) must match for_format({named:?})"
+            );
+        }
     }
 }
