@@ -600,6 +600,10 @@ pub fn decode_gif_with(
             delays.push(i64::from(FrameDelay::from_centiseconds(delay_cs).millis()));
         }
 
+        // The disposal after the last frame walked is invisible, since
+        // nothing draws over it, and skipping it is what keeps a one-page
+        // load from cloning a snapshot it will never restore. That is the
+        // argument for not pricing `previous` separately.
         if last {
             continue;
         }
@@ -2806,6 +2810,45 @@ mod tests {
             page_bytes(&load(3), 1),
             [0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255],
             "the positive control disposes to blue"
+        );
+    }
+
+    /**
+     * Tests that the background lookup reads a whole colour table entry or
+     * none of it, so a table that stops mid-entry cannot contribute one or
+     * two of a pixel's three bytes. Works by calling `background_rgb`
+     * directly with a four-byte table, where index 1 wants bytes 3, 4 and 5
+     * and only byte 3 is there.
+     * A GIF's global table is always a power-of-two count of three-byte
+     * entries, so the `gif` crate cannot hand this in; the test is here
+     * because the whole-slice read and a byte-at-a-time read with a zero
+     * default are otherwise indistinguishable, and only one of them is
+     * total by construction.
+     * Input: a four-byte table at indices 0 and 1 -> Output: the first
+     * entry, then black.
+     */
+    #[test]
+    fn the_background_lookup_takes_a_whole_entry_or_none() {
+        let ragged = [7u8, 8, 9, 10];
+        assert_eq!(
+            background_rgb(Some(&ragged), Some(0)),
+            [7, 8, 9],
+            "the entry that is wholly there is read"
+        );
+        assert_eq!(
+            background_rgb(Some(&ragged), Some(1)),
+            [0, 0, 0],
+            "an entry that runs off the end contributes nothing, not one byte"
+        );
+        assert_eq!(
+            background_rgb(None, Some(0)),
+            [0, 0, 0],
+            "no table is black"
+        );
+        assert_eq!(
+            background_rgb(Some(&ragged), None),
+            [7, 8, 9],
+            "an absent index is index 0, which is what the descriptor stores"
         );
     }
 
