@@ -53,8 +53,6 @@
 //!   `foo(path)` that opens `path` internally reads as pure to this scanner.
 //! * a filesystem call spelled through an alias (`use std::fs as f;`) or
 //!   through a crate this list does not name.
-//! * other operations Miri refuses under isolation that are not filesystem
-//!   calls at all, most obviously spawning a process with `std::process`.
 //! * anything outside `src/` and `tests/`, which means the `fuzz/` member (a
 //!   separate crate that `cargo miri test` on this package does not build) and
 //!   the `build.rs`-less root manifest.
@@ -62,6 +60,82 @@
 //! The `not-detected` rows are what keeps those blind spots from being silent:
 //! a test the detector cannot classify still gets pinned the moment somebody
 //! annotates it, so the annotation cannot later be deleted unnoticed.
+//!
+//! # Spawning a process, which is a refusal rather than a row
+//!
+//! Everything above is a ledger, and it was written when
+//! `merge-gate.yml` ran Miri with `-Zmiri-disable-isolation`: a filesystem call
+//! came back rather than aborting, so an `unannotated fs-detected` test could
+//! stand. **#711 removed that flag**, and under isolation such a test now ends
+//! the run with `unsupported operation: \`open\` not available when isolation
+//! is enabled`. Measured on `800c699`, plain `main`,
+//! `cargo miri test --test workspace_layout` dies on
+//! `fuzz_crate_is_a_member_of_the_root_workspace` before running anything. The
+//! 138 `unannotated fs-detected` rows across 29 files are all now gate-killers
+//! and none of them is this file's to annotate; that is issue #739.
+//!
+//! `std::process` was different in kind before that change and is merely
+//! *worse* after it. Miri supports process spawning on no target and under no
+//! flag, so no `MIRIFLAGS` setting has ever made a spawning test survivable,
+//! where the filesystem class was survivable until last week. Measured on
+//! `120acb6`, `cargo +nightly miri test --test dependency_policy` died on
+//! `every_links_key_is_on_the_allowlist` before running anything else in the
+//! tree (issue #714).
+//!
+//! So [`no_process_spawning_test_can_run_under_miri`] is an outright assertion,
+//! not a row: every test that reaches `std::process` must carry
+//! `#[cfg_attr(miri, ignore)]`, full stop. There is no "record it as
+//! unannotated and say why in the review" arm, because there is no
+//! configuration in which such a test runs.
+//!
+//! # Following a helper, once, for the process case
+//!
+//! The filesystem detector reads one function body and stops, which is why the
+//! `not-detected` rows exist. That is not good enough here, because none of the
+//! eleven tests #714 found spells `Command::new` in its own body: they call
+//! `cells()`, which calls `graphs()`, which spawns cargo. A body scan sees all
+//! eleven as pure.
+//!
+//! [`process_spawning_fns`] closes that by resolving calls inside the file. It
+//! parses every `fn` in the file, marks the ones whose body matches
+//! [`PROCESS_MARKERS`], and then repeats to a fixed point, marking any function
+//! whose body names an already-marked one. Two hops is what the real tree
+//! needs; the loop takes any depth.
+//!
+//! Where it can, it over-approximates on purpose. A call is matched as the
+//! *name*, on identifier boundaries, not as `name(`: `graphs()` reaches cargo
+//! through `CELLS.iter().map(resolve)`, where the callee never sits next to a
+//! paren at all, and insisting on one is how my first attempt at this missed
+//! four of the ten tests #714 lists. The cost is that a method spelled the same
+//! as a spawning free function counts, and so does a name that is merely
+//! mentioned. Over-approximating costs an unnecessary annotation on a test Miri
+//! could have run. Under-approximating costs the whole gate.
+//!
+//! # Where it under-approximates, which is the half that matters
+//!
+//! It would be comfortable to leave the paragraph above as the whole story. It
+//! is not. Four shapes reach `std::process` without this seeing them, none of
+//! them present in the tree today, all of them things somebody could write
+//! tomorrow:
+//!
+//! * **An aliased import.** `use std::process::Command as Cmd;` then
+//!   `Cmd::new(..)`. The `use` is at module scope rather than inside any `fn`,
+//!   so [`fn_bodies`] never reads it and neither spelling matches
+//!   [`PROCESS_MARKERS`]. Closing this needs the scan to resolve imports, which
+//!   is a different kind of program from the one this file is.
+//! * **A spawn inside a `macro_rules!` body.** Not an `fn`, so it is not in the
+//!   map, and the expansion this file never sees is where the call appears.
+//! * **A closure held in a `static` or a `const`.** Same reason: the body is
+//!   not under an `fn` header, so nothing indexes it.
+//! * **A helper in another file.** [`process_spawning_fns`] runs per file, so a
+//!   spawning helper in a shared `tests/common/mod.rs` is invisible to every
+//!   test that calls it. This is the one most likely to arrive by accident,
+//!   because a shared test helper is an ordinary thing to write.
+//!
+//! [`EXPECTED_PROCESS_SPAWNING_TESTS`] is what stops that list growing in
+//! silence. It pins how many tests the detector finds, so a change that makes
+//! it stop seeing a whole class shows up as a count that moved, rather than as
+//! an empty offender list that still reads as a pass.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -135,6 +209,16 @@ const FS_MARKERS: &[&str] = &[
     ".symlink_metadata()",
 ];
 
+/// Substrings that mean "this function reaches `std::process`".
+///
+/// Short, because there is only one way to start a process from std and every
+/// spelling of it goes through `Command`. `Command::new(` catches the
+/// `use std::process::Command;` form and `process::Command` catches the
+/// qualified one; the bare `.spawn(` / `.output(` / `.status(` methods are
+/// deliberately absent, since those names collide with plenty of innocent APIs
+/// and the constructor is unavoidable.
+const PROCESS_MARKERS: &[&str] = &["Command::new(", "process::Command"];
+
 /// Attribute forms of `#[test]` this scanner does not understand. Finding one
 /// means the parse below would skip a real test, so it is a hard failure with
 /// an instruction rather than a silent gap.
@@ -172,6 +256,30 @@ const EXPECTED_SRC_ANNOTATIONS: usize = 53;
 /// least one annotation.
 const EXPECTED_SRC_MODULES: usize = 8;
 
+/// How many tests in the tree reach `std::process`.
+///
+/// The positive control for [`no_process_spawning_test_can_run_under_miri`],
+/// which on its own asserts that a set is empty and is therefore green both
+/// when every spawning test is annotated and when the detector has quietly
+/// stopped finding any. That is not hypothetical: matching a callee as `name(`
+/// instead of as an identifier took this from 10 to 7 while every assertion
+/// stayed green, and reading a `;` inside `[u8; 32]` as a bodyless declaration
+/// dropped 116 functions out of the call graph the same way.
+///
+/// Seventeen today: five in `tests/dependency_policy.rs`, three in
+/// `tests/pdfium_source_audit.rs` and two in `tests/workspace_layout.rs`, which
+/// are the ten #714 is about; six in `tests/icc_lut_alloc.rs`, which spawn a
+/// child on purpose to watch it abort (#693); and one in `src/source.rs` that
+/// shells out to `mkfifo` and was already annotated, for the filesystem reason,
+/// before any of this.
+///
+/// The population is wider than the ten that needed fixing, and deliberately
+/// so. Pinning only the ten would go green again the moment the detector lost
+/// the other seven, which is the failure this constant exists to catch. It
+/// caught my own miscount the first time I ran it: I wrote eleven, having
+/// forgotten the six that arrived with #693 in the commit underneath this one.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 17;
+
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -188,6 +296,9 @@ struct TestFn {
     annotated: bool,
     /// Whether the body matched [`FS_MARKERS`].
     touches_fs: bool,
+    /// Whether the body matched [`PROCESS_MARKERS`], or called something in
+    /// the same file that (transitively) does. See [`process_spawning_fns`].
+    spawns_process: bool,
 }
 
 impl TestFn {
@@ -399,6 +510,109 @@ fn function_name(header: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// Every `fn` in a masked file, by name, with its body.
+///
+/// A second, looser pass than the one [`scan_source`] runs: it takes any line
+/// [`function_name`] can read a name off, not only the ones under `#[test]`, so
+/// the helpers a test calls are in the map too. A signature that ends in `;`
+/// before it opens a brace is a trait declaration with no body and is skipped,
+/// which matters because consuming forward from one would swallow the next
+/// function whole.
+///
+/// Names collide (two `mod`s can each define `helper`), and the map keeps the
+/// last. That is fine for what it feeds: the caller only asks whether *some*
+/// function of that name spawns, and the answer it wants on a collision is the
+/// conservative one.
+fn fn_bodies(masked: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = masked.lines().collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(name) = function_name(line) else {
+            continue;
+        };
+        let mut body = String::new();
+        let mut depth = 0i64;
+        // Square brackets and parens seen in the *signature*, before the body
+        // opens. A `;` inside one belongs to an array type or a const-generic
+        // default, not to the end of a declaration: `fn f() -> [u8; 32]` and
+        // `where T: Into<[u8; 4]>` both carry one, and treating those as
+        // bodyless dropped 116 real functions from the map across this tree.
+        // Angle brackets need no counting of their own, because a `;` only
+        // reaches the type level inside an array or a tuple and both of those
+        // bring a bracket or a paren with them.
+        let mut nesting = 0i64;
+        let mut opened = false;
+        let mut declaration = false;
+        for line in &lines[i..] {
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    '[' | '(' if !opened => nesting += 1,
+                    ']' | ')' if !opened => nesting -= 1,
+                    ';' if !opened && nesting == 0 => declaration = true,
+                    _ => {}
+                }
+            }
+            body.push_str(line);
+            body.push('\n');
+            if declaration || (opened && depth == 0) {
+                break;
+            }
+        }
+        if !declaration {
+            out.push((name, body));
+        }
+    }
+    out
+}
+
+/// Whether `ident` appears in `body` as a whole identifier rather than as part
+/// of a longer one, so a spawning `run` is not matched by `rerun` or `run_id`.
+fn mentions_ident(body: &str, ident: &str) -> bool {
+    let bytes = body.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    body.match_indices(ident).any(|(at, _)| {
+        let before = at == 0 || !word(bytes[at - 1]);
+        let end = at + ident.len();
+        let after = end == bytes.len() || !word(bytes[end]);
+        before && after
+    })
+}
+
+/// The names of every function in `masked` that reaches `std::process`, either
+/// directly or through another function in the same file.
+///
+/// The fixed point is what makes this useful rather than decorative: the eleven
+/// tests issue #714 found call `cells()`, which calls `graphs()`, which calls
+/// `Command::new(cargo())`. One hop would still see them all as pure.
+fn process_spawning_fns(masked: &str) -> BTreeSet<String> {
+    let bodies = fn_bodies(masked);
+    let mut spawning: BTreeSet<String> = bodies
+        .iter()
+        .filter(|(_, body)| PROCESS_MARKERS.iter().any(|m| body.contains(m)))
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let mut grew = false;
+        for (name, body) in &bodies {
+            if spawning.contains(name) {
+                continue;
+            }
+            if spawning.iter().any(|callee| mentions_ident(body, callee)) {
+                spawning.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            return spawning;
+        }
+    }
+}
+
 /// Parse every `#[test]` function out of one file.
 ///
 /// The parse asserts its own shape as it goes, which is the point: the failure
@@ -433,6 +647,7 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
         );
     }
 
+    let spawning = process_spawning_fns(&masked);
     let lines: Vec<&str> = masked.lines().collect();
     let raw: Vec<&str> = src.lines().collect();
 
@@ -525,11 +740,13 @@ fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
         );
 
         let touches_fs = FS_MARKERS.iter().any(|m| body.contains(m));
+        let spawns_process = spawning.contains(&name);
         found.push(TestFn {
             file: rel.to_string(),
             name,
             annotated,
             touches_fs,
+            spawns_process,
         });
         i = k + 1;
     }
@@ -769,6 +986,327 @@ fn the_annotated_set_stays_the_size_it_is_documented_to_be() {
         unannotated_fs > 0,
         "if this ever reaches zero the ledger has stopped being a ledger: drop the \
          `unannotated` rows and make the guard assert the convention outright"
+    );
+}
+
+/// Every test that reaches `std::process` must be ignored under Miri. This is
+/// an assertion rather than an inventory row, and the difference is the point.
+///
+/// The filesystem rows were a ledger because `-Zmiri-disable-isolation` let an
+/// unannotated filesystem test run. Nothing has ever let a process spawn run:
+/// Miri supports it on no target and under no flag, so the first one it reaches
+/// ends the whole session with `unsupported operation: can't call foreign
+/// function \`fork\`` and reports as a Miri failure rather than as a missing
+/// annotation. Measured on `120acb6` with `nightly-2026-08-20`,
+/// `cargo miri test --test dependency_policy` died on
+/// `every_links_key_is_on_the_allowlist` having run nothing else (issue #714).
+///
+/// Since #711 turned isolation on, the filesystem class aborts too, so the
+/// asymmetry this check was built around has narrowed. It has not gone: this
+/// one is enforceable today because its population is 17 and every one of them
+/// is annotated, where the filesystem population is 138 across 29 files and
+/// fixing it is issue #739. Do not widen this check to cover them; it would go
+/// red on `main` and stay red.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn no_process_spawning_test_can_run_under_miri() {
+    let tests = scan_repo();
+    let offenders: Vec<String> = tests
+        .iter()
+        .filter(|t| t.spawns_process && !t.annotated)
+        .map(|t| format!("  {}::{}", t.file, t.name))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "{} test(s) reach `std::process` without `#[cfg_attr(miri, ignore)]`:\n{}\n\n\
+         Any one of them ends the whole Miri run on the first `fork`, whatever \
+         `MIRIFLAGS` says, so the annotation is not optional here the way it is for \
+         the filesystem rows (issue #714). If a test genuinely must not carry it, the \
+         fix is to stop it spawning, not to widen this check.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+
+    // The positive control. Everything above is an assertion that a set is
+    // empty, and a broken detector produces an empty set too.
+    let spawning: Vec<String> = tests
+        .iter()
+        .filter(|t| t.spawns_process)
+        .map(|t| format!("  {}::{}", t.file, t.name))
+        .collect();
+    assert_eq!(
+        spawning.len(),
+        EXPECTED_PROCESS_SPAWNING_TESTS,
+        "the detector found {} process-spawning tests, not \
+         {EXPECTED_PROCESS_SPAWNING_TESTS}. Adding or removing one is fine, but move \
+         the constant in the same change, because the check above is satisfied by a \
+         detector that has stopped finding anything at all. Found:\n{}",
+        spawning.len(),
+        spawning.join("\n")
+    );
+}
+
+/// The call-following half of the process detector, pinned on its own source
+/// rather than on the tree, so it says what the classifier does instead of what
+/// the tree happens to contain.
+///
+/// The three cells are the three cases that decide whether #714 stays fixed: a
+/// direct spawn, a spawn two hops down a helper chain (which is the shape all
+/// eleven of #714's tests have), and a test that touches neither.
+#[test]
+fn the_detector_follows_a_spawn_through_helpers() {
+    let src = r#"
+fn runs_cargo() -> String {
+    let out = Command::new("cargo").output().unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn graph() -> String {
+    runs_cargo()
+}
+
+fn passes_it_as_a_reference() -> Vec<String> {
+    [0usize].iter().map(runs_cargo_of).collect()
+}
+
+fn runs_cargo_of(_: &usize) -> String {
+    runs_cargo()
+}
+
+fn pure_helper() -> usize {
+    41 + 1
+}
+
+fn rerun_counter() -> usize {
+    7
+}
+
+mod tests {
+    #[test]
+    fn spawns_directly() {
+        let _ = Command::new("true").status();
+    }
+
+    #[test]
+    fn spawns_two_hops_down() {
+        assert!(!graph().is_empty());
+    }
+
+    #[test]
+    fn mentions_command_new_in_a_string_only() {
+        let msg = "Command::new("cargo") failed";
+        assert!(msg.contains("failed"));
+    }
+
+    #[test]
+    fn takes_the_helper_as_a_function_reference() {
+        assert!(!passes_it_as_a_reference().is_empty());
+    }
+
+    #[test]
+    fn calls_only_a_pure_helper() {
+        assert_eq!(pure_helper() + rerun_counter(), 49);
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    let by_name: Vec<(&str, bool)> = found
+        .iter()
+        .map(|t| (t.name.as_str(), t.spawns_process))
+        .collect();
+    assert_eq!(
+        by_name,
+        vec![
+            ("spawns_directly", true),
+            ("spawns_two_hops_down", true),
+            ("mentions_command_new_in_a_string_only", false),
+            ("takes_the_helper_as_a_function_reference", true),
+            ("calls_only_a_pure_helper", false),
+        ],
+        "the process detector must follow calls within the file, including one passed \
+         as a bare function reference, and must not fire on a marker that only appears \
+         inside a string literal"
+    );
+}
+
+/// The three shapes the module docs list as invisible, pinned as misses.
+///
+/// A limitation nobody can reproduce is a limitation nobody believes, and one
+/// that gets quietly fixed without the docs following is worse. Each cell here
+/// reaches `std::process` and each comes back `false`. If one ever flips, that
+/// is good news and this check is where you find out, so move it up into
+/// [`the_detector_follows_a_spawn_through_helpers`] and delete the bullet.
+///
+/// The fourth shape from that list, a helper in another file, cannot be
+/// written as a single-file fixture, which is the whole reason it is missed.
+#[test]
+fn the_documented_blind_spots_are_still_blind() {
+    let cases = [
+        (
+            "an aliased import",
+            r#"
+use std::process::Command as Cmd;
+
+fn runs() -> bool {
+    Cmd::new("true").status().is_ok()
+}
+
+mod tests {
+    #[test]
+    fn spawns_through_an_alias() {
+        assert!(runs());
+    }
+}
+"#,
+        ),
+        (
+            "a spawn inside a macro body",
+            r#"
+macro_rules! run_it {
+    () => {
+        Command::new("true").status()
+    };
+}
+
+mod tests {
+    #[test]
+    fn spawns_through_a_macro() {
+        let _ = run_it!();
+    }
+}
+"#,
+        ),
+        (
+            "a closure in a static",
+            r#"
+static RUNNER: fn() -> bool = || Command::new("true").status().is_ok();
+
+mod tests {
+    #[test]
+    fn spawns_through_a_static_closure() {
+        assert!(RUNNER());
+    }
+}
+"#,
+        ),
+    ];
+    for (what, src) in cases {
+        let found = scan_source("fixture.rs", src);
+        assert_eq!(found.len(), 1, "{what}: expected one test, got {found:?}");
+        assert!(
+            !found[0].spawns_process,
+            "{what} is now detected, which is an improvement. Move this cell into \
+             the helper-following check and drop the bullet from the module docs, \
+             so the two do not disagree."
+        );
+    }
+}
+
+/// A `;` inside the signature's brackets is a type, not the end of a
+/// declaration, and reading it as one drops the whole function from the map.
+///
+/// This is the sharp edge of the declaration skip, and it is a silent
+/// *under*-approximation, which is the direction that costs the gate. Measured
+/// across `src/` and `tests/` on the tree that introduced it, the naive `;`
+/// test dropped 133 function headers where the depth-aware one drops 17: 116
+/// real functions were invisible to the call graph. None of the 116 spawns
+/// today, so nothing was actually missed, and that is luck rather than design.
+///
+/// Both spellings below are in this tree. `-> [u8; 32]` is the shape
+/// `src/checksum.rs` uses, and a `where` clause carrying an array type is the
+/// other way a `;` reaches a signature.
+#[test]
+fn a_semicolon_inside_a_signature_type_does_not_drop_the_function() {
+    let src = r#"
+fn fingerprint() -> [u8; 32] {
+    let _ = Command::new("true").status();
+    [0u8; 32]
+}
+
+fn constrained<T>(_x: T) -> usize
+where
+    T: Into<[u8; 4]>,
+{
+    let _ = Command::new("true").status();
+    4
+}
+
+mod tests {
+    #[test]
+    fn calls_fingerprint() {
+        assert_eq!(fingerprint().len(), 32);
+    }
+
+    #[test]
+    fn calls_constrained() {
+        assert_eq!(constrained([0u8; 4]), 4);
+    }
+}
+"#;
+    let masked = mask_literals_and_comments(src);
+    let parsed: BTreeSet<String> = fn_bodies(&masked).into_iter().map(|(n, _)| n).collect();
+    for want in ["fingerprint", "constrained"] {
+        assert!(
+            parsed.contains(want),
+            "`{want}` must reach the fn map; its signature carries a `;` inside \
+             brackets, not a bodyless declaration. Parsed: {parsed:?}"
+        );
+    }
+    assert_eq!(
+        scan_source("fixture.rs", src)
+            .iter()
+            .map(|t| (t.name.as_str(), t.spawns_process))
+            .collect::<Vec<_>>(),
+        vec![("calls_fingerprint", true), ("calls_constrained", true)],
+        "and both callers must therefore be seen as spawning"
+    );
+}
+
+/// A trait method declaration has no body, and consuming forward from one runs
+/// into whatever comes next. That would file the *next* function's spawn under
+/// the declaration's name, and every caller of the trait method would then be
+/// flagged for a spawn it never makes.
+///
+/// The parser starts a fresh body at every `fn` header, so nothing is ever
+/// hidden by this; the cost is entirely spurious annotations. This pins that it
+/// does not happen, and it is the check that caught my first attempt at the
+/// fixture, which stayed green with the skip removed because the declaration
+/// and the function it swallowed shared a name.
+#[test]
+fn a_bodyless_declaration_does_not_borrow_the_next_function_s_spawn() {
+    let src = r#"
+trait Runner {
+    fn run(&self) -> String;
+}
+
+fn spawns() -> String {
+    let _ = Command::new("true").status();
+    String::new()
+}
+
+struct R;
+
+impl Runner for R {
+    fn run(&self) -> String {
+        String::new()
+    }
+}
+
+mod tests {
+    #[test]
+    fn calls_only_the_trait_method() {
+        assert!(R.run().is_empty());
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    assert_eq!(
+        found
+            .iter()
+            .map(|t| (t.name.as_str(), t.spawns_process))
+            .collect::<Vec<_>>(),
+        vec![("calls_only_the_trait_method", false)],
+        "the declaration above `spawns` must not take its `Command::new` with it"
     );
 }
 

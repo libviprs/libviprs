@@ -2112,6 +2112,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are one named number, and a chunk outside the window now fails saying so
   rather than sending the reader upstream to bump a moxcms pin.
 
+- `cargo +nightly miri test` gets past `tests/dependency_policy.rs` (issue #714).
+  It used to die there on the first test that shells out, with `unsupported
+  operation: can't call foreign function `fork``, and Miri ends the whole session
+  on one unsupported operation rather than failing that one test. So the gate
+  reported "Miri failed" having run none of the code it exists to check.
+
+  Ten tests over three files now carry `#[cfg_attr(miri, ignore)]`: the five in
+  `tests/dependency_policy.rs`, the three in `tests/pdfium_source_audit.rs` and
+  two of the three in `tests/workspace_layout.rs`. None of them calls into
+  libviprs at all, so nothing is lost by keeping them out of Miri.
+
+  This is not #707, which is a Stacked Borrows violation in `sha2`'s aarch64
+  NEON backend and so never executes on the hosted `ubuntu-latest` job. Miri
+  supports process spawning on no target and under no flag, and
+  `-Zmiri-disable-isolation` does nothing about it, so this one was taking the
+  hosted gate down as well.
+
+  `tests/miri_ignore_convention.rs` enforces it from here, and enforces it
+  differently from the filesystem convention it was built for. The filesystem
+  rows were a ledger: an `unannotated fs-detected` test was allowed to stand,
+  because `-Zmiri-disable-isolation` made its call come back rather than abort.
+  A spawning test is a flat refusal, because there is no configuration in which
+  it runs.
+
+  #711 removed that flag after this was written, so the filesystem class aborts
+  now too and the asymmetry has narrowed. It has not gone. This class is
+  enforceable today because its population is 17 and all 17 are annotated; the
+  filesystem population is 138 tests over 29 files, 8 of them `src/` modules,
+  and that is issue #739 rather than something to fold in here. Measured on
+  `800c699` with nothing applied, `cargo miri test --test workspace_layout`
+  aborts on its first test, so the suite has not reached a second target since
+  #711 landed.
+
+  The detector had to learn to follow a call to see any of them, since not one
+  of the ten spells `Command::new` in its own body: they call `cells()`, which
+  calls `graphs()`, which spawns cargo. It now parses every `fn` in a file,
+  marks the ones that reach `std::process`, and repeats to a fixed point,
+  matching a callee by name on identifier boundaries rather than as `name(`,
+  because `graphs()` reaches cargo through `CELLS.iter().map(resolve)` where the
+  callee never sits beside a paren.
+
+  That parse reads a `;` as the end of a bodyless declaration, which is right
+  for a trait method and wrong for `fn fingerprint() -> [u8; 32]`. Measured
+  across `src/` and `tests/`, the naive test dropped 133 function headers where
+  a bracket-aware one drops 17, so **116 real functions were invisible to the
+  call graph**. None of them spawns, so nothing was missed in fact, but the
+  failure was silent and in the under-approximating direction, which is the one
+  that costs the gate rather than an annotation.
+
+  The count of spawning tests is pinned at 17, which is the positive control the
+  rest of it needs: every other assertion here says a set is empty, and a
+  detector that has stopped finding anything satisfies all of them. It earned
+  its place twice over. It caught a miscount the first time it ran, and under
+  the `name(` matching the count goes to 14 while every other check stays green.
+
+  Four shapes still reach `std::process` unseen, none of them in the tree: an
+  aliased `use ... as Cmd`, a spawn inside a `macro_rules!` body, a closure held
+  in a `static`, and a helper in another file, since the scan is per file. The
+  module docs list them and a test pins all three of the single-file ones as
+  misses, so one being fixed shows up as a failure rather than as documentation
+  quietly going stale.
+
 - `try_recomb`, `try_stdif`, `try_bitand`, `try_bitor` and `try_bitxor` return
   `ArithmeticError::FloatUnsupported` on a float raster instead of panicking
   (issue #631). They reached the same `depth_max` panic the alpha pair did, on
