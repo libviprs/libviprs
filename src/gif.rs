@@ -218,6 +218,29 @@ impl Default for SaveOptions {
 }
 
 impl SaveOptions {
+    /// Write the frame interlaced, returning the updated options.
+    #[must_use]
+    pub fn with_interlaced(mut self, interlaced: bool) -> Self {
+        self.interlaced = interlaced;
+        self
+    }
+
+    /// Set the dithering amount, returning the updated options.
+    #[must_use]
+    pub fn with_dither(mut self, dither: f64) -> Self {
+        self.dither = dither;
+        self
+    }
+
+    /// Set the bits per pixel, returning the updated options.
+    #[must_use]
+    pub fn with_bitdepth(mut self, bitdepth: u8) -> Self {
+        self.bitdepth = bitdepth;
+        self
+    }
+}
+
+impl SaveOptions {
     /// The palette ceiling these options imply: `min(255, 1 << bitdepth)`,
     /// with the bitdepth clamped into the 1..=8 range vips declares.
     fn max_colours(self) -> usize {

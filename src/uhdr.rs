@@ -1219,6 +1219,23 @@ impl Default for SaveOptions {
     }
 }
 
+impl SaveOptions {
+    /// Set the JPEG quality for both halves, returning the updated options.
+    #[must_use]
+    pub fn with_quality(mut self, quality: u8) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Set how much smaller than the base the gain map is, per axis,
+    /// returning the updated options.
+    #[must_use]
+    pub fn with_gain_map_shrink(mut self, gain_map_shrink: u32) -> Self {
+        self.gain_map_shrink = gain_map_shrink;
+        self
+    }
+}
+
 /// The `u8` code whose [`V2Y_8`] entry is nearest `linear`.
 ///
 /// The sRGB opto-electrical transfer, done by inverting the very table the

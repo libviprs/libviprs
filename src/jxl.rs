@@ -421,6 +421,15 @@ pub struct SaveOptions {
     pub compression: Compression,
 }
 
+impl SaveOptions {
+    /// Set the compression mode, returning the updated options.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
+}
+
 /// Decode JPEG XL bytes into a [`Raster`] (libvips `jxlload_buffer` at its
 /// default `n = 1`).
 ///

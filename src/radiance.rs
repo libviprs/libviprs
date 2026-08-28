@@ -285,6 +285,24 @@ pub struct SaveOptions {
     pub aspect: Option<f64>,
 }
 
+impl SaveOptions {
+    /// Set the `EXPOSURE=` header value, returning the updated options.
+    /// `None` takes the value from the raster's own `rad-expos` field.
+    #[must_use]
+    pub fn with_exposure(mut self, exposure: Option<f64>) -> Self {
+        self.exposure = exposure;
+        self
+    }
+
+    /// Set the `PIXASPECT=` header value, returning the updated options.
+    /// `None` takes the value from the raster's own `rad-aspect` field.
+    #[must_use]
+    pub fn with_aspect(mut self, aspect: Option<f64>) -> Self {
+        self.aspect = aspect;
+        self
+    }
+}
+
 /// Decode Radiance `.hdr` bytes into a three-band float [`Raster`]
 /// (libvips `radload` followed by `rad2float`).
 ///
