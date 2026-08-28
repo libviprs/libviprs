@@ -1,0 +1,3 @@
+# Importing oracle_pin.py from an area's capture.py leaves a bytecode cache
+# next to it. Nothing reads it and it is not evidence, so it stays out.
+__pycache__/
