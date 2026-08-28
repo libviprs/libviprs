@@ -557,3 +557,58 @@ fn the_image_backed_decoders_still_report_the_image_shape() {
         );
     }
 }
+
+/// Issue #710. The `.v` budget prices the pixel body at the header's declared
+/// sample depth, which is neither the file's length nor one byte per sample.
+///
+/// The `.v` row in `priced_by_libviprs` cannot see either mistake, and that is
+/// why this exists rather than being folded into the table. Its fixture is
+/// `Rgb8`, so a price that assumed one byte per sample would be the same
+/// number; and a price taken from the whole slice would still refuse at
+/// `price - 1`, because the file is longer than the body it holds. `.v` is the
+/// only container in either table whose body is a plain copy out of a longer
+/// file, and the only one carrying 2- and 4-byte samples, so both mistakes are
+/// live here and nowhere else.
+///
+/// The second half is the one that says what the budget means: at the body's
+/// price exactly, a file three times that long decodes. `max_alloc_bytes`
+/// bounds what the decoder allocates, not what the caller handed it. That is
+/// the whole difference between `check_image_alloc` and the bounded whole-file
+/// read `decode_file_with_limits` does first.
+#[test]
+fn the_v_budget_prices_the_declared_body_and_not_the_file() {
+    // 4x3 Rgb16: 24 samples of two bytes, so the body is 72 bytes.
+    let data: Vec<u8> = (0..72u32).map(|v| v as u8).collect();
+    let raster = Raster::new(4, 3, PixelFormat::Rgb16, data).expect("rgb16 fixture");
+    let bytes = raster.encode_vips().expect("v fixture");
+    assert!(
+        bytes.len() > 72,
+        "the fixture has to be longer than its body for this test to say \
+         anything, and it is {} bytes",
+        bytes.len()
+    );
+
+    let err = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(71))
+        .expect_err("a 72-byte body must be refused under a 71-byte ceiling");
+    let SourceError::AllocLimitExceeded {
+        what,
+        geometry,
+        needed_bytes,
+        ..
+    } = err
+    else {
+        panic!("not the shared shape: {err:?}");
+    };
+    assert_eq!(what, ".v pixel buffer", "label");
+    assert_eq!(
+        needed_bytes, 72,
+        "the price is width * height * bands * the declared sample depth"
+    );
+    let g = geometry.expect("a decoder that priced a declared geometry must report it");
+    assert_eq!((g.width, g.height, g.bands), (4, 3, 3), "reported geometry");
+
+    let ok = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(72))
+        .expect("a 72-byte body must decode under a 72-byte ceiling");
+    assert_eq!((ok.width(), ok.height()), (4, 3));
+    assert_eq!(ok.format(), PixelFormat::Rgb16);
+}
