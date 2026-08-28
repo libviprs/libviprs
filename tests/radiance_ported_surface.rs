@@ -64,6 +64,7 @@ fn save_options_are_constructible_downstream() {
 /// `encode_radiance` and `save_radiance` are both reachable on `Raster`,
 /// and a decode of what they write reproduces the pixels.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_from_outside_the_crate() {
     let raster = decode_radiance(&sample(), DecodeLimits::default()).unwrap();
     let encoded = raster

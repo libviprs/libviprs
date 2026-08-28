@@ -775,6 +775,7 @@ mod tests {
      * 128 samples, `(0.0, 3.5, 7.0, 10.5)` at pixel (0, 0).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn rgba_half_decodes_exactly() {
         let raster = decode_exr(&fixture("rgba_half_zip"), DecodeLimits::default()).unwrap();
         assert_eq!((raster.width(), raster.height()), (8, 4));
@@ -811,6 +812,7 @@ mod tests {
      * byte-identical rasters.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn lossless_compressions_agree_byte_for_byte() {
         let reference = decode_exr(&fixture("rgba_half_zip"), DecodeLimits::default()).unwrap();
         for name in [
@@ -840,6 +842,7 @@ mod tests {
      * payload plus `tile-width` 4 and `tile-height` 2.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn tiled_matches_scanline_and_reports_tile_size() {
         let reference = decode_exr(&fixture("rgba_half_zip"), DecodeLimits::default()).unwrap();
         let tiled = decode_exr(&fixture("rgba_half_tiled"), DecodeLimits::default()).unwrap();
@@ -858,6 +861,7 @@ mod tests {
      * matching the ramp at every pixel including the partial tiles.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn ragged_tiles_decode_their_edges() {
         let raster =
             decode_exr(&fixture("rgba_half_tiled_ragged"), DecodeLimits::default()).unwrap();
@@ -884,6 +888,7 @@ mod tests {
      * `vips rawsave` byte gives `2.333984375`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn float_channels_keep_full_precision_where_vips_rounds_to_half() {
         let raster = decode_exr(&fixture("rgba_float_fine"), DecodeLimits::default()).unwrap();
         let got = samples(&raster);
@@ -926,6 +931,7 @@ mod tests {
      * `"R,G,B"`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn rgb_without_alpha_stays_three_bands() {
         let raster = decode_exr(&fixture("rgb_half_zip"), DecodeLimits::default()).unwrap();
         assert_eq!(raster.format().channels(), 3);
@@ -946,6 +952,7 @@ mod tests {
      * `Multiband`, first sample `0.0`, second `0.5`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn luminance_only_file_stays_one_band() {
         let raster = decode_exr(&fixture("y_half_zip"), DecodeLimits::default()).unwrap();
         assert_eq!(raster.format().channels(), 1);
@@ -969,6 +976,7 @@ mod tests {
      * `FloatF32(1)` holding the ramp, `exr-channels` `"Z"`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn depth_only_file_survives_where_vips_returns_black() {
         let raster = decode_exr(&fixture("z_float_zip"), DecodeLimits::default()).unwrap();
         assert_eq!(raster.format().channels(), 1);
@@ -996,6 +1004,7 @@ mod tests {
      * the ZIP payload with `exr-data-window-left` 5 and `-top` 7.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn offset_data_window_normalises_to_the_origin() {
         let reference = decode_exr(&fixture("rgba_half_zip"), DecodeLimits::default()).unwrap();
         let offset = decode_exr(&fixture("rgba_half_offset"), DecodeLimits::default()).unwrap();
@@ -1020,6 +1029,7 @@ mod tests {
      * Input: `rgba_half_display.exr` -> Output: an 8x4 raster.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn display_window_does_not_size_the_image() {
         let raster = decode_exr(&fixture("rgba_half_display"), DecodeLimits::default()).unwrap();
         assert_eq!((raster.width(), raster.height()), (8, 4));
@@ -1036,6 +1046,7 @@ mod tests {
      * in the alphabetical channel list the selection walks.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn uint_channels_are_refused_by_variant() {
         let err = decode_exr(&fixture("rgba_uint_zip"), DecodeLimits::default()).unwrap_err();
         assert!(
@@ -1063,6 +1074,7 @@ mod tests {
      * `AllocLimitExceeded { needed: 512, .. }`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn alloc_budget_is_checked_before_decoding() {
         let limits = DecodeLimits::default().with_max_alloc_bytes(511);
         let err = decode_exr(&fixture("rgba_half_zip"), limits).unwrap_err();
@@ -1094,6 +1106,7 @@ mod tests {
      * Output: a clean 8x4 four-band decode, then `AllocLimitExceeded`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_window_budget_bites_at_exactly_the_declared_price() {
         let exact = DecodeLimits::default().with_max_alloc_bytes(512);
         let raster = decode_exr(&fixture("rgba_half_zip"), exact)
@@ -1129,6 +1142,7 @@ mod tests {
      * was computed from so the message is not self-contradicting.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn alloc_budget_prices_every_declared_channel_not_only_the_selected_ones() {
         let selected_price = 8 * 4 * 4 * SAMPLE_BYTES as u64;
         assert_eq!(
@@ -1182,6 +1196,7 @@ mod tests {
      * `SourceError::CoordLimitExceeded`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn coord_ceiling_is_enforced_on_the_data_window() {
         let limits = DecodeLimits::default().with_max_coord(4);
         let err = decode_exr(&fixture("rgba_half_zip"), limits).unwrap_err();
@@ -1225,6 +1240,7 @@ mod tests {
      * an error every time, never a panic.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn truncated_files_error_rather_than_panic() {
         let full = fixture("rgba_half_zip");
         let mut cut = 4;
@@ -1242,6 +1258,7 @@ mod tests {
      * `(0.0, 3.5, 7.0, 10.5)`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn single_pixel_image_decodes() {
         let raster = decode_exr(&fixture("rgba_half_1x1"), DecodeLimits::default()).unwrap();
         assert_eq!((raster.width(), raster.height()), (1, 1));
@@ -1264,6 +1281,7 @@ mod tests {
      * reports for the same file.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn compression_and_part_count_are_attached() {
         let raster = decode_exr(&fixture("rgba_half_zip"), DecodeLimits::default()).unwrap();
         assert_eq!(
@@ -1349,6 +1367,7 @@ mod tests {
      * vips digest for each.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn vips_parity_holds_exactly_once_the_rgba_funnel_is_applied() {
         use sha2::{Digest, Sha256};
 
@@ -1509,6 +1528,7 @@ mod tests {
      * and no panic from any of them.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fuzz")
@@ -1589,6 +1609,7 @@ mod tests {
      * the ZIP payload.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn lossy_codings_decode_and_are_not_pinned_as_lossless() {
         let reference = decode_exr(&fixture("rgba_half_zip"), DecodeLimits::default()).unwrap();
         let b44 = decode_exr(&fixture("rgba_half_b44"), DecodeLimits::default()).unwrap();

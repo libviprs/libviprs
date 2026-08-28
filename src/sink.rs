@@ -704,9 +704,9 @@ impl TileFormat {
 ///
 /// * `dedupe_promote` is the sole **outer** lock. It guards the whole
 ///   promote-on-2nd-hit critical section and is only ever taken at the top of
-///   [`FsSink::dedupe_write`], never while a field mutex is already held. It is
-///   *sharded by content digest* (see [`DEDUPE_PROMOTE_SHARDS`] and
-///   [`FsSink::promote_shard`]): all occurrences of a given content map to the
+///   `dedupe_write`, never while a field mutex is already held. It is
+///   *sharded by content digest* across a fixed 64 shards picked by hashing
+///   the tile content: all occurrences of a given content map to the
 ///   same shard — preserving the per-key atomicity the at-least-one-hardlink
 ///   invariant requires (issue #111) — while distinct content maps to
 ///   (usually) distinct shards, so tiles of different content no longer
@@ -729,16 +729,15 @@ impl TileFormat {
 /// (a `OnceLock`) and `per_level_counts` (atomics) take no mutex and are
 /// irrelevant to this rule.
 ///
-/// Field mutexes are acquired through [`FsSink::lock_leaf`], which in debug
-/// builds trips a panic the instant a second leaf lock is taken while one is
-/// still held — turning an accidental nesting into an immediate, local
+/// Field mutexes are acquired through one private `lock_leaf` helper, which
+/// in debug builds trips a panic the instant a second leaf lock is taken while
+/// one is still held — turning an accidental nesting into an immediate, local
 /// failure instead of a latent deadlock (issue #112).
 ///
 /// # Sharded promote lock
 ///
-/// The `dedupe_promote` outer lock is striped across
-/// [`DEDUPE_PROMOTE_SHARDS`] shards, indexed by a hash of the tile content
-/// (see [`FsSink::promote_shard`]). All occurrences of a given content select
+/// The `dedupe_promote` outer lock is striped across 64 shards, indexed by a
+/// hash of the tile content. All occurrences of a given content select
 /// the same shard, so the per-key atomicity issue #111 relies on is preserved;
 /// distinct content selects (usually) distinct shards, so it no longer
 /// serialises on one process-wide lock (issue #296).
@@ -1119,7 +1118,7 @@ impl FsSink {
         self
     }
 
-    /// Attach a [`DedupeStrategy`](crate::dedupe::DedupeStrategy) so the sink
+    /// Attach a [`DedupeStrategy`] so the sink
     /// can coalesce identical blank tiles under a shared reference.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
@@ -1359,7 +1358,8 @@ impl TileSink for FsSink {
     /// since the last barrier so the checkpoint about to certify them never
     /// records tiles whose bytes are still only in the page cache. Drains the
     /// tracked `unsynced_tiles` set and fsyncs each path via the sink's
-    /// [`Durability`](crate::resume::Durability) backend.
+    /// injectable `Durability` backend, which issues a real `fsync` in
+    /// production and is stubbed in tests.
     fn sync_pending(&self) -> Result<(), SinkError> {
         // Take the pending set under the leaf lock, then release it before any
         // I/O so the fsyncs never run while a leaf lock is held (the
@@ -2358,6 +2358,7 @@ mod tests {
     /// (`m.lock().unwrap()` in `LeafGuard::new`) the next write panicked (RED);
     /// after it the guard recovers and the run continues (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn poisoned_fs_sink_leaf_recovers_without_cascade() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2400,6 +2401,7 @@ mod tests {
     /// A Zoomify pyramid produces a `TileGroup0/` directory and an
     /// `ImageProperties.xml` sidecar carrying the source dimensions.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn zoomify_run_writes_tilegroup_and_image_properties() {
         let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::Zoomify)
             .unwrap()
@@ -2424,6 +2426,7 @@ mod tests {
     /// An IIIF pyramid produces an `info.json` sidecar carrying the source
     /// dimensions.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn iiif_run_writes_info_json() {
         let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
             .unwrap()
@@ -2448,6 +2451,7 @@ mod tests {
     /// DeepZoom behaviour is unchanged: a sibling `.dzi` manifest is emitted
     /// and no in-directory properties sidecar appears.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn deepzoom_run_still_writes_sibling_dzi_only() {
         let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::DeepZoom)
             .unwrap()
@@ -2673,6 +2677,7 @@ mod tests {
      * the actual filesystem round-trip (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_writes_tile_to_disk() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2720,6 +2725,7 @@ mod tests {
      * actual directory creation on disk (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_creates_directory_structure() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2767,6 +2773,7 @@ mod tests {
      * verifies the manifest is written to disk correctly (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_writes_dzi_manifest() {
         let planner = PyramidPlanner::new(1024, 768, 256, 1, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2806,6 +2813,7 @@ mod tests {
      * appears on disk after finish() (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_no_dzi_for_xyz() {
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::Xyz).unwrap();
         let plan = planner.plan();
@@ -2843,6 +2851,7 @@ mod tests {
      * (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_xyz_path_structure() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::Xyz).unwrap();
         let plan = planner.plan();
@@ -2890,6 +2899,7 @@ mod tests {
      * the same magic bytes (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_encodes_png() {
         let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
@@ -2931,6 +2941,7 @@ mod tests {
      * the same marker (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_encodes_jpeg() {
         let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
@@ -2973,6 +2984,7 @@ mod tests {
      * (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_deterministic_paths() {
         let data = vec![42u8; 256 * 256 * 3];
         let raster = Raster::new(256, 256, PixelFormat::Rgb8, data).unwrap();
@@ -3094,6 +3106,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_dedupe_emit_uniform_tiles_digests_match_disk() {
         use crate::checksum::ChecksumMode;
         use crate::dedupe::DedupeStrategy;
@@ -3183,6 +3196,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_revalidates_corrupt_shared_blob() {
         use crate::dedupe::DedupeStrategy;
 
@@ -3262,6 +3276,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_recorded_tile_deleted_from_disk_fails() {
         use crate::checksum::ChecksumMode;
         use crate::manifest::ChecksumAlgo;
@@ -3378,6 +3393,7 @@ mod tests {
      */
     #[test]
     #[cfg(not(miri))]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn sync_pending_fsyncs_every_written_tile() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -3485,6 +3501,7 @@ mod tests {
      */
     #[cfg(all(not(miri), unix))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_concurrent_promote_keeps_shared_hardlink() {
         use crate::dedupe::DedupeStrategy;
         use std::os::unix::fs::MetadataExt;
@@ -3609,6 +3626,7 @@ mod tests {
     /// B proceeds concurrently (GREEN).
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_distinct_content_promotes_without_serialising() {
         use std::time::Duration;
 
@@ -3663,6 +3681,7 @@ mod tests {
     /// vacuous (no locking at all).
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_same_content_serialises_on_promote_shard() {
         use std::time::Duration;
 
@@ -3700,6 +3719,7 @@ mod tests {
     /// revalidation) while exactly one shared blob exists and stays valid.
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_shared_blob_validated_once_per_key() {
         let (_dir, base, sink) = dedupe_sink_for_promote_tests();
 
@@ -3778,6 +3798,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_run_never_nests_leaf_locks() {
         use crate::checksum::ChecksumMode;
         use crate::dedupe::DedupeStrategy;
@@ -3825,6 +3846,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_full_payload_holder_is_coordinate_minimal_regardless_of_arrival() {
         use crate::dedupe::DedupeStrategy;
 
@@ -3884,6 +3906,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_layout_identical_across_arrival_orders() {
         use crate::dedupe::DedupeStrategy;
 
@@ -3966,6 +3989,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_groups_retention_is_occurrence_independent() {
         let drive = |dups: u32| -> usize {
             let (_dir, base, sink) = dedupe_sink_for_promote_tests();
