@@ -177,6 +177,10 @@ pub(crate) const VERSION_INDICATOR_LE: &[u8; 4] = b"\x00\x01IM";
 /// big-endian MAT-5 writer puts at [`VERSION_INDICATOR_AT`].
 pub(crate) const VERSION_INDICATOR_BE: &[u8; 4] = b"\x01\x00MI";
 
+/// The version word every MAT-5 file carries, read in the order the endian
+/// indicator declares.
+pub(crate) const VERSION_WORD: u16 = 0x0100;
+
 /// The highest rank `read_new` will keep. A variable with more dimensions is
 /// skipped and the search carries on.
 pub const MAX_RANK: usize = 3;
@@ -505,6 +509,9 @@ const fn element_type_name(kind: u32) -> &'static str {
     }
 }
 
+/// The complex bit of the array-flags word's flags byte.
+const FLAG_COMPLEX: u8 = 0x08;
+
 /// The logical bit of the array-flags word's flags byte.
 ///
 /// Read only so the module can say it is ignored: measured, a logical array
@@ -586,14 +593,7 @@ impl Header {
     /// decides which error a file with more than one problem reports, and
     /// `magic_only.mat` is the fixture that has two.
     fn parse(bytes: &[u8]) -> Result<Self, MatError> {
-        // NOT WRITTEN YET, on purpose: this is `vips__mat_ismat` as the
-        // reference checkout spells it (`matlab.c:326-336`), which reads ten
-        // bytes and compares them with `MATLAB 5.0` and nothing else. The
-        // shipped 8.18.6 dylib reads 128 and validates the version word and
-        // the endian indicator as well (issue #650), and
-        // `the_sniff_predicate_is_the_shipped_binarys_and_not_the_sources`
-        // is the test that says so.
-        if bytes.len() < MAGIC_PREFIX.len() {
+        if bytes.len() < HEADER_BYTES {
             return Err(MatError::ShortHeader {
                 found: bytes.len(),
                 needed: HEADER_BYTES,
@@ -604,18 +604,27 @@ impl Header {
                 found: String::from_utf8_lossy(&bytes[..MAGIC_PREFIX.len()]).into_owned(),
             });
         }
-        // The indicator is read so the element walk has a byte order at all,
-        // but nothing validates it and nothing reads the version word: both
-        // of those are the shipped binary's rule rather than the source's.
-        let endian = match bytes.get(VERSION_INDICATOR_AT + 2..VERSION_INDICATOR_AT + 4) {
-            Some(b"MI") => Endian::Big,
-            _ => Endian::Little,
+        let indicator = &bytes[VERSION_INDICATOR_AT + 2..VERSION_INDICATOR_AT + 4];
+        let endian = match indicator {
+            b"IM" => Endian::Little,
+            b"MI" => Endian::Big,
+            other => {
+                return Err(MatError::BadEndianIndicator {
+                    found: String::from_utf8_lossy(other).into_owned(),
+                });
+            }
         };
-        let end = VERSION_INDICATOR_AT.min(bytes.len());
-        let description = bytes[..end]
+        let version = endian.u16([bytes[VERSION_INDICATOR_AT], bytes[VERSION_INDICATOR_AT + 1]]);
+        if version != VERSION_WORD {
+            return Err(MatError::BadVersion {
+                found: version,
+                expected: VERSION_WORD,
+            });
+        }
+        let description = bytes[..VERSION_INDICATOR_AT]
             .iter()
             .position(|&b| b == 0)
-            .map_or(&bytes[..end], |at| &bytes[..at]);
+            .map_or(&bytes[..VERSION_INDICATOR_AT], |end| &bytes[..end]);
         Ok(Self {
             endian,
             description: String::from_utf8_lossy(description).trim_end().to_owned(),
@@ -686,6 +695,11 @@ struct Variable<'a> {
 }
 
 impl Variable<'_> {
+    /// Whether the array-flags word sets the complex bit.
+    const fn complex(&self) -> bool {
+        self.flags & FLAG_COMPLEX != 0
+    }
+
     /// Whether the array-flags word sets the logical bit, which the loader
     /// ignores.
     const fn logical(&self) -> bool {
@@ -823,10 +837,14 @@ fn find_variable(
 /// that `mat2vips_get_header` initialises (`matlab.c:188`), so it is a
 /// one-pixel-wide column.
 fn geometry(dims: &[i32]) -> Result<(u32, u32, u32), MatError> {
-    // NOT WRITTEN YET: the non-positive-dimension refusal. vips lets the
-    // value through to GObject, which rejects it and leaves the property at
-    // 1, and `a_non_positive_dimension_is_refused_rather_than_clamped_to_one`
-    // is what says a port has to refuse instead.
+    for (axis, &extent) in dims.iter().enumerate() {
+        if extent <= 0 {
+            return Err(MatError::NonPositiveDimension {
+                axis,
+                found: extent,
+            });
+        }
+    }
     let height = dims[0] as u32;
     let width = dims.get(1).map_or(1, |&d| d as u32);
     let bands = dims.get(2).map_or(1, |&d| d as u32);
@@ -872,10 +890,16 @@ pub fn decode_mat(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
     let endian = header.endian;
     let variable = find_variable(bytes, endian, limits)?;
 
-    // NOT WRITTEN YET: the complex-array refusal. vips never reads the
-    // complex bit and hands back the bytes of two heap pointers as pixels,
-    // and `a_complex_array_is_refused_rather_than_read_as_heap_pointers` is
-    // what says a port has to refuse instead.
+    // The complex check comes first, before the carrier, so the capture's
+    // one complex fixture reports the divergence this module exists to make
+    // rather than the `mxDOUBLE` ceiling it also happens to trip.
+    if variable.complex() {
+        return Err(MatError::ComplexArray {
+            class: variable.class,
+            name: class_name(variable.class),
+        }
+        .into());
+    }
     let carrier = carrier_for(variable.class)?;
     let (width, height, bands) = geometry(&variable.dims)?;
     let format = carrier
@@ -954,16 +978,17 @@ fn deplanarise(
     carrier: Carrier,
     endian: Endian,
 ) -> Vec<u8> {
-    // NOT WRITTEN YET: the transpose and the de-planarisation. This is the
-    // straight copy a spec reading of "the samples are here" gives you, and
-    // `a_two_by_three_uint8_array_loads_transposed` and
-    // `a_rank_three_array_becomes_bands_and_de_planarises` are the two tests
-    // that say the file's order is neither libviprs's nor vips's.
-    let _ = (width, height, bands);
     let sample = carrier.sample_bytes() as usize;
-    let mut out = Vec::with_capacity(payload.len());
-    for from in (0..payload.len()).step_by(sample) {
-        out.extend_from_slice(&to_native(&payload[from..from + sample], carrier, endian));
+    let (w, h, b) = (width as usize, height as usize, bands as usize);
+    let plane = h * w;
+    let mut out = Vec::with_capacity(plane * b * sample);
+    for y in 0..h {
+        for x in 0..w {
+            for band in 0..b {
+                let from = (band * plane + y + x * h) * sample;
+                out.extend_from_slice(&to_native(&payload[from..from + sample], carrier, endian));
+            }
+        }
     }
     out
 }
