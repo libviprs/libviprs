@@ -357,6 +357,16 @@ pub enum SourceError {
     /// caller's `match` has the same arms in either build (issue #634).
     #[error(transparent)]
     Jp2k(#[from] crate::jp2k::Jp2kError),
+    /// A malformed or unsupported MATLAB level 5 file. libviprs decodes MAT
+    /// itself rather than through `matio` (see [`crate::mat`]), so its
+    /// failures arrive as the codec's own typed
+    /// [`MatError`](crate::mat::MatError) rather than as an opaque string.
+    /// As with FITS and NIfTI, that matters here because a `.mat` can be
+    /// perfectly well formed and still hold a class this build has no pixel
+    /// format for; the variant says which, and names the issue that would
+    /// add it.
+    #[error(transparent)]
+    Mat(#[from] crate::mat::MatError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a
@@ -1417,6 +1427,9 @@ pub(crate) enum SniffedFormat {
     /// JPEG 2000, in either of its two containers: the RFC 3745 JP2
     /// signature box, or the bare codestream's `SOC` + `SIZ` pair.
     Jp2k,
+    /// MATLAB level 5, either byte order: `MATLAB 5.0` at offset 0 plus the
+    /// version word and endian indicator at 124.
+    Mat,
 }
 
 impl SniffedFormat {
@@ -1446,7 +1459,8 @@ impl SniffedFormat {
             Self::OpenExr => Some(Self::Nifti),
             Self::Nifti => Some(Self::Avif),
             Self::Avif => Some(Self::Jp2k),
-            Self::Jp2k => None,
+            Self::Jp2k => Some(Self::Mat),
+            Self::Mat => None,
         }
     }
 
@@ -1460,8 +1474,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 14] = {
-        let mut all = [Self::Vips; 14];
+    pub(crate) const ALL: [Self; 15] = {
+        let mut all = [Self::Vips; 15];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1725,6 +1739,39 @@ impl SniffedFormat {
                 ],
                 decoder: Decoder::Native(crate::jp2k::decode_jp2k),
             },
+            // `image` has no MATLAB route, and neither has any Rust crate
+            // that models `matio`'s behaviour, so [`crate::mat`] hand-rolls
+            // the container (issue #510). It reads the file whole because
+            // the element stream is a linked walk from byte 128 and the
+            // chosen variable can be anywhere in it, and because a
+            // `miCOMPRESSED` element has to be inflated out of the same
+            // bytes.
+            //
+            // Two signatures, one per byte order, and between them they are
+            // the whole of the shipped 8.18.6 sniff predicate: the 128-byte
+            // length floor falls out of the tag offset, and the version
+            // word and the endian indicator are one four-byte constant
+            // because the version is `0x0100` read whichever way the
+            // indicator declares. That is deliberately *not* the ten-byte
+            // prefix test the reference C source does: the dylib that
+            // shipped changed under the capture and validates 128 bytes
+            // (issue #650), and a port written from the source would claim
+            // files 8.18.6 refuses.
+            Self::Mat => Route {
+                magics: &[
+                    Magic::Split {
+                        prefix: crate::mat::MAGIC_PREFIX,
+                        tag_at: crate::mat::VERSION_INDICATOR_AT,
+                        tag: crate::mat::VERSION_INDICATOR_LE,
+                    },
+                    Magic::Split {
+                        prefix: crate::mat::MAGIC_PREFIX,
+                        tag_at: crate::mat::VERSION_INDICATOR_AT,
+                        tag: crate::mat::VERSION_INDICATOR_BE,
+                    },
+                ],
+                decoder: Decoder::Native(crate::mat::decode_mat),
+            },
         }
     }
 
@@ -1892,9 +1939,9 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
 /// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
-/// FITS, OpenEXR, NIfTI, AVIF and JPEG 2000: each one either parses its own
-/// container end to end or makes a second pass over the same bytes for
-/// metadata.
+/// FITS, OpenEXR, NIfTI, AVIF, JPEG 2000 and MATLAB: each one either parses
+/// its own container end to end or makes a second pass over the same bytes
+/// for metadata.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -2866,7 +2913,31 @@ mod tests {
         // writes rather than a byte-string literal: the row's signature is
         // structural, so there is no literal to write.
         let uhdr = crate::uhdr::smallest_container();
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 52] = [
+        // MAT is the other container whose signature is too long to spell
+        // out: the version word and the endian indicator sit at byte 124.
+        // These come out of the oracle capture for the same reason the
+        // NIfTI ones do, and the eight near-misses below are the whole
+        // point of the row, because the shipped 8.18.6 sniff refuses every
+        // one of them while the reference C source accepts four (issue
+        // #650).
+        macro_rules! mat_fixture {
+            ($name:literal) => {
+                include_bytes!(concat!("../oracle-captures/foreign-mat/fixtures/", $name))
+            };
+        }
+        const MAT_LE: &[u8] = mat_fixture!("base_2x3_uint8.mat");
+        const MAT_BE: &[u8] = mat_fixture!("endian_big.mat");
+        const MAT_FREE_TEXT: &[u8] = mat_fixture!("prefix_only.mat");
+        const MAT_HEADER_ONLY: &[u8] = mat_fixture!("header_only.mat");
+        const MAT_51: &[u8] = mat_fixture!("magic_MATLAB_51.mat");
+        const MAT_LOWERCASE: &[u8] = mat_fixture!("magic_matlab_50.mat");
+        const MAT_UNDERSCORE: &[u8] = mat_fixture!("magic_MATLAB_50.mat");
+        const MAT_BAD_VERSION: &[u8] = mat_fixture!("magic_only.mat");
+        const MAT_BAD_INDICATOR: &[u8] = mat_fixture!("endian_bogus.mat");
+        const MAT_NINE_BYTES: &[u8] = mat_fixture!("nine_bytes.mat");
+        const MAT_LEVEL_4: &[u8] = mat_fixture!("level4.mat");
+        const MAT_LEVEL_73: &[u8] = mat_fixture!("level73_hdf5.mat");
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 65] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -3057,6 +3128,39 @@ mod tests {
                 b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a",
                 Some(SniffedFormat::Jxl),
             ),
+            // MATLAB level 5, both byte orders. The free-text and
+            // header-only rows are the two that pin how *little* the sniff
+            // reads: bytes 10..124 are not looked at, and a bare 128-byte
+            // header with no variables in it still routes here, where the
+            // decode then reports `no matrix variables` rather than
+            // "these bytes are not an image".
+            ("mat le", MAT_LE, Some(SniffedFormat::Mat)),
+            ("mat be", MAT_BE, Some(SniffedFormat::Mat)),
+            (
+                "mat free text after the prefix",
+                MAT_FREE_TEXT,
+                Some(SniffedFormat::Mat),
+            ),
+            (
+                "mat header with no variables",
+                MAT_HEADER_ONLY,
+                Some(SniffedFormat::Mat),
+            ),
+            // The eight near-misses. The first three differ from `mat le`
+            // only in the ten-byte prefix and the next two only in bytes
+            // 124..128, and the first three are files a direct
+            // `vips matload` loads: the sniff and `Mat_Open` disagree, and
+            // libviprs follows the sniff.
+            ("mat MATLAB 5.1", MAT_51, None),
+            ("mat lowercase matlab 5.0", MAT_LOWERCASE, None),
+            ("mat MATLAB_5.0", MAT_UNDERSCORE, None),
+            ("mat version 0xffff", MAT_BAD_VERSION, None),
+            ("mat indicator XY", MAT_BAD_INDICATOR, None),
+            ("mat nine bytes", MAT_NINE_BYTES, None),
+            ("mat level 4", MAT_LEVEL_4, None),
+            ("mat level 7.3", MAT_LEVEL_73, None),
+            // One byte short of the 128 the shipped sniff insists on.
+            ("mat truncated to 127", &MAT_LE[..127], None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -3105,24 +3209,24 @@ mod tests {
      * `priced_by_libviprs` row, or wraps a crate that refuses internally the
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
-     * Input: `SniffedFormat::ALL.len()` -> Output: 14, which is what the two
+     * Input: `SniffedFormat::ALL.len()` -> Output: 15, which is what the two
      * tables account for between them, with no exclusions left.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            14,
+            15,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 14 are: 11 self-priced (gif, radiance, fits, openexr, \
+             count. Today the 15 are: 12 self-priced (gif, radiance, fits, openexr, \
              jxl, webp which joined them in #686, uhdr which joined them in #508 and \
              prices two images rather than one, .v which joined them in #710, nifti \
-             which joined them in #510, avif which joined them in #605, and jp2k \
-             which joined them in #501) and 3 refused inside the image crate (jpeg, \
-             png, tiff). There are no exclusions left"
+             and mat which joined them in #510, avif which joined them in #605, and \
+             jp2k which joined them in #501) and 3 refused inside the image crate \
+             (jpeg, png, tiff). There are no exclusions left"
         );
     }
 
@@ -3257,6 +3361,9 @@ mod tests {
                 SniffedFormat::Avif => Kind::Native,
                 // `image` has no JPEG 2000 route at all (issue #501).
                 SniffedFormat::Jp2k => Kind::Native,
+                // `image` has no MATLAB route, and the container is a tagged
+                // element stream with zlib inside it (issue #510).
+                SniffedFormat::Mat => Kind::Native,
             }
         }
 
@@ -3318,6 +3425,7 @@ mod tests {
                 SniffedFormat::Nifti,
                 SniffedFormat::Avif,
                 SniffedFormat::Jp2k,
+                SniffedFormat::Mat,
             ],
             "decode_file_with_limits' doc names every container it reads whole, in \
              this order; move the doc and this list together"
