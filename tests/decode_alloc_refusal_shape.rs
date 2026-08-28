@@ -22,6 +22,10 @@
 //! | OpenEXR | `SourceError::Exr(ExrError::AllocLimitExceeded)` |
 //! | JPEG XL | `SourceError::Jxl(JxlError::AllocLimitExceeded)` |
 //!
+//! JPEG 2000 is not in that table because it did not exist when it was
+//! measured: it landed in #501 on the shared shape from its first commit, and
+//! its row below is the one that says so.
+//!
 //! Two corrections to the table in #686, both from that run. WebP is **not**
 //! the one odd format on the `image` shape: JPEG, PNG and single-image TIFF
 //! report exactly the same thing. But the four are not alike underneath. In
@@ -185,6 +189,24 @@ fn priced_by_libviprs() -> Vec<Row> {
             price: 768,
         });
     }
+    // JPEG 2000 prices its own frame too, from the geometry the `SIZ` marker
+    // declares, before `hayro-jpeg2000` reserves anything. Unlike the JPEG XL
+    // row there is no second ceiling underneath it: the decoder takes no
+    // allocation tracker, so this is the only shape a budget refusal can
+    // arrive in and 4x4 is as small as the row needs to be.
+    if cfg!(feature = "jp2k") {
+        rows.push(Row {
+            format: "jp2k",
+            bytes: rgb8(4)
+                .encode_jp2k(Default::default())
+                .expect("jp2k fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: "JPEG 2000 component buffers",
+            price: 48,
+        });
+    }
     rows
 }
 
@@ -264,21 +286,23 @@ fn the_two_tables_account_for_every_container() {
     let image_backed = priced_by_the_image_crate().len();
     let excluded_no_budget_at_all = 1; // `.v`, issue #710
 
-    // JPEG XL is only compiled in behind its feature, so the self-priced table
-    // is one shorter without it. Spelled out rather than hidden in a `cfg!`
-    // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 6 } else { 5 };
+    // JPEG XL and JPEG 2000 are only compiled in behind their features, so the
+    // self-priced table is shorter without either. Spelled out rather than
+    // hidden in a `cfg!` inside the sum, because a reader has to be able to
+    // check the arithmetic.
+    let jxl_absent = usize::from(!cfg!(feature = "jxl"));
+    let jp2k_absent = usize::from(!cfg!(feature = "jp2k"));
+    let expected_self_priced = 7 - jxl_absent - jp2k_absent;
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
     );
     assert_eq!(image_backed, 3, "the image-backed table changed size");
 
-    let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
     assert_eq!(
-        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent,
-        10,
-        "the two tables plus the documented exclusion must account for all ten \
+        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent + jp2k_absent,
+        11,
+        "the two tables plus the documented exclusion must account for all eleven \
          containers libviprs sniffs; see SniffedFormat::ALL"
     );
 }
