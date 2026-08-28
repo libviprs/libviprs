@@ -40,7 +40,7 @@ pub type DecodeError = crate::source::SourceError;
 /// the pure-Rust `image` / `png` crates surface their crate errors through
 /// [`EncodeError::Encode`]; writes to a caller-supplied target surface
 /// through [`EncodeError::Io`]; and formats that require an external C
-/// library (HEIF/AVIF, JP2K, JPEG-XL, UHDR, magick, ...) return
+/// library (HEIF/AVIF, magick, ...) return
 /// [`EncodeError::Unsupported`] so the ported cells compile and pin the typed
 /// error path.
 #[derive(Debug, Error)]
@@ -62,13 +62,34 @@ pub enum EncodeError {
     /// The requested output format is not available in this build.
     ///
     /// The deferred lanes return this for genuinely-external formats that
-    /// have no mature pure-Rust encoder (HEIF/AVIF, JP2K, JPEG-XL, UHDR,
-    /// FITS, magick, TIFF JPEG/CCITT, ...). The call sites compile and
+    /// have no mature pure-Rust encoder (HEIF/AVIF, magick,
+    /// TIFF JPEG/CCITT, ...). The call sites compile and
     /// assert on the typed error rather than a panic.
     ///
     /// [`crate::webp`] and [`crate::gif`] also return it, but for a
     /// different reason: a pure-Rust codec is reachable for both, and the
     /// stubs are waiting on their own lanes rather than on a dependency.
+    ///
+    /// Four names have left that first list since it was written, and not one
+    /// of them needed a C library in the end (issue #758):
+    ///
+    /// * **Ultra HDR.** A container is two ordinary JPEGs plus MPF and
+    ///   ISO 21496-1 marker segments, so [`crate::uhdr`] reads and writes it
+    ///   through the JPEG codec this crate already required. #508 landed it
+    ///   with **no new dependency at all**, and #757 put it behind
+    ///   `Raster::encode_uhdr`.
+    /// * **FITS.** [`crate::fits`] hand-rolls the format, where vips reaches
+    ///   it through cfitsio.
+    /// * **JPEG XL** and **JPEG 2000.** [`crate::jxl`] and [`crate::jp2k`]
+    ///   carry real pure-Rust codecs behind the non-default `jxl` and `jp2k`
+    ///   features (#501 for the second). Each answers this variant when its
+    ///   feature is off, which is "not available in **this build**" rather
+    ///   than "no pure-Rust encoder exists", and those are different claims.
+    ///
+    /// A name on either list that this build can encode makes this variant's
+    /// contract wrong rather than merely stale, so
+    /// `the_unsupported_doc_lists_name_no_format_this_build_encodes` probes
+    /// each of them by calling its encoder.
     #[error("unsupported encode format: {format}")]
     Unsupported {
         /// The format name the caller asked for (for example `"heif"`).
@@ -142,6 +163,107 @@ pub enum TiffCompression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::Raster;
+
+    /// Issue #758. This module's two prose lists name the formats whose
+    /// encoders answer [`EncodeError::Unsupported`], and the second one is the
+    /// documentation for the variant itself, so a name on it that this build
+    /// can actually encode makes the variant's contract wrong rather than
+    /// merely stale.
+    ///
+    /// The "can encode" half is **measured here** by calling the entry point,
+    /// not declared in a table, so the guard tracks the tree rather than
+    /// someone's memory of it.
+    #[test]
+    fn the_unsupported_doc_lists_name_no_format_this_build_encodes() {
+        let src = include_str!("codec.rs");
+        let list_after = |anchor: &str| -> Vec<String> {
+            let at = src
+                .find(anchor)
+                .unwrap_or_else(|| panic!("the doc anchor {anchor:?} moved"));
+            let rest = &src[at + anchor.len()..];
+            let end = rest.find(')').expect("the list is parenthesised");
+            rest[..end]
+                .replace("///", " ")
+                .replace("//!", " ")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != "...")
+                .collect()
+        };
+        let lists = [
+            list_after("formats that require an external C\n/// library ("),
+            list_after("have no mature pure-Rust encoder ("),
+        ];
+        // The extraction is the thing most likely to rot into a vacuous pass,
+        // so pin that both lists came back non-trivial and that they still
+        // name the two formats nothing in this tree encodes.
+        for l in &lists {
+            assert!(l.len() >= 2, "only extracted {l:?} from one of the lists");
+        }
+        let named: Vec<String> = lists.concat();
+        for must in ["HEIF/AVIF", "magick"] {
+            assert!(
+                named.iter().any(|n| n == must),
+                "expected {must} on a list, got {named:?}"
+            );
+        }
+
+        let rgb = Raster::new(4, 4, crate::pixel::PixelFormat::Rgb8, vec![128u8; 48]).unwrap();
+        let scrgb = Raster::new(
+            4,
+            4,
+            crate::pixel::PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            (0..48)
+                .flat_map(|i| (i as f32 / 48.0).to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        // Each probe runs the encoder, so `encodes` is a measurement; the
+        // third column is what this build is expected to answer. Asserting
+        // the two agree is what stops a probe that has quietly stopped
+        // calling anything from carrying the test.
+        let probes: [(&str, bool, bool); 6] = [
+            ("FITS", rgb.encode_fits().is_ok(), true),
+            (
+                "UHDR",
+                crate::uhdr::encode_uhdr(&scrgb, &crate::uhdr::SaveOptions::default()).is_ok(),
+                true,
+            ),
+            ("HEIF/AVIF", rgb.encode_heif(50, "av1").is_ok(), false),
+            ("magick", rgb.magicksave_buffer(".png").is_ok(), false),
+            // The two feature-gated codecs answer `Unsupported` only when
+            // their feature is off, so the expectation follows the feature.
+            // Features are additive: turning one on must not redden a test.
+            (
+                "JP2K",
+                rgb.encode_jp2k(crate::jp2k::SaveOptions::default()).is_ok(),
+                cfg!(feature = "jp2k"),
+            ),
+            (
+                "JPEG-XL",
+                rgb.encode_jxl(crate::jxl::SaveOptions::default()).is_ok(),
+                cfg!(feature = "jxl"),
+            ),
+        ];
+        for (name, encodes, expected) in probes {
+            assert_eq!(
+                encodes, expected,
+                "whether this build encodes {name} moved; the doc lists have \
+                 to move with it"
+            );
+        }
+        let wrong: Vec<&str> = probes
+            .iter()
+            .filter(|(name, encodes, _)| *encodes && named.iter().any(|n| n == name))
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "{wrong:?} are named in this module's Unsupported doc lists, and \
+             this build encodes every one of them"
+        );
+    }
 
     #[test]
     fn jpeg_subsample_has_the_three_cell_variants() {
