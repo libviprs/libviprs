@@ -288,6 +288,372 @@ pub(crate) fn with_f32_samples_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> 
     f()
 }
 
+// ---------------------------------------------------------------------------
+// The fallible-plane funnel
+// ---------------------------------------------------------------------------
+
+/// Site label for the op-output buffer [`alloc_op_output`] reserves.
+///
+/// The labels are `module.what`, and the leading segment is what a probe
+/// prefix selects on: `counting_planes("colour.", ..)` counts every plane the
+/// colour module reserves and nothing else. Each module owns the labels for
+/// its own sites and spells them as a `const`, so a typo is a compile error
+/// rather than a check that quietly stops matching anything.
+pub(crate) const PLANE_OP_OUTPUT: &str = "raster.op_output";
+
+/// Site label for [`Raster::try_f32_samples`]'s widening.
+pub(crate) const PLANE_F32_SAMPLES: &str = "raster.f32_samples";
+
+/// Reserve `len` elements of `T` for a buffer that scales with an image,
+/// fallibly, and report [`RasterError::AllocationFailed`] rather than reaching
+/// `handle_alloc_error` and aborting the process.
+///
+/// This is [`alloc_op_output`]'s contract for a buffer that is not an op's
+/// output. `width` and `height` only name the raster in the error; `bytes` is
+/// the real size of the request, which for an intermediate is usually several
+/// times the raster's own byte length, so an error naming the raster would
+/// understate what failed by four or eight times.
+///
+/// The returned [`Vec`] is **empty with capacity**, in one request: callers
+/// fill it with `push`, `extend` or [`Vec::resize`], none of which reallocates
+/// while the reserved capacity holds, so the reservation is the fill's only
+/// allocation and a short reserve cannot hide behind a later growth.
+///
+/// No [`DEFAULT_MAX_ALLOC_BYTES`] re-check, for the reason [`alloc_op_output`]
+/// gives at length: a plane derives from an input raster that was already
+/// budget-checked at its own construction and legitimately grows on top of it,
+/// so re-imposing the budget here would refuse legal large work.
+///
+/// `site` is what the `cfg(test)` probe addresses, and it is a label rather
+/// than an ordinal on purpose: see [`with_plane_cap_at`].
+///
+/// This used to be three private helpers in three modules with three
+/// signatures and three separate test ceilings (issue #696).
+pub(crate) fn try_plane_len<T>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+) -> Result<Vec<T>, RasterError> {
+    reserve_plane(site, width, height, len, len.saturating_mul(size_of::<T>()))
+}
+
+/// [`try_plane_len`] sized as `per_pixel` elements of `T` for every pixel of a
+/// `width` x `height` image.
+///
+/// Sizing goes through [`buffer_len`], the same `u64` multiplication
+/// [`Raster::new`] prices its buffers with, so a geometry whose element count
+/// does not fit a `usize` is [`RasterError::SizeOverflow`] on 32- and 64-bit
+/// targets alike rather than a wrapped product.
+///
+/// The `bpp` that variant carries is `per_pixel * size_of::<T>()`, which is
+/// what the plane actually costs a pixel: handing `per_pixel` straight through
+/// would report a `Vec<[f64; 3]>` plane as "1 bytes per pixel" where the figure
+/// is 24, and the variant is public through the module errors that wrap it.
+pub(crate) fn try_plane<T>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    per_pixel: usize,
+) -> Result<Vec<T>, RasterError> {
+    // Saturating because it is only ever an error payload here: a `per_pixel`
+    // big enough to overflow it fails the length check on the next line anyway.
+    let bpp = per_pixel.saturating_mul(size_of::<T>());
+    let overflow = || RasterError::SizeOverflow { width, height, bpp };
+    // One priced product, not two: the byte figure the errors carry falls out
+    // of the same multiplication that sizes the reservation.
+    let len = buffer_len(width, height, per_pixel).map_err(|_| overflow())?;
+    let bytes = len.checked_mul(size_of::<T>()).ok_or_else(overflow)?;
+    reserve_plane(site, width, height, len, bytes)
+}
+
+/// [`try_plane`], filled with `fill` to its full length, for the buffers a
+/// caller writes into by index rather than pushing to.
+///
+/// The length is computed rather than read off `capacity()`:
+/// [`Vec::try_reserve_exact`] is allowed to hand back more room than asked for,
+/// and the length is a contract with whatever writes into it, not whatever the
+/// allocator rounded up to.
+pub(crate) fn try_plane_filled<T: Clone>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    per_pixel: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut out = try_plane::<T>(site, width, height, per_pixel)?;
+    out.resize(buffer_len(width, height, per_pixel)?, fill);
+    Ok(out)
+}
+
+/// The one reservation every plane in the crate goes through.
+///
+/// Split out so [`try_plane_len`] and [`try_plane`] price their request their
+/// own way and still meet at a single `try_reserve_exact`, which is the whole
+/// point of the funnel: one place to instrument, and one place a mutation has
+/// to survive.
+fn reserve_plane<T>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+    bytes: usize,
+) -> Result<Vec<T>, RasterError> {
+    // The label is only ever read by the `cfg(test)` probe below, so a
+    // production build carries the string in `.rodata` and nothing else.
+    #[cfg(not(test))]
+    let _ = site;
+    // Test-only: count this reservation, and over a lowered per-thread ceiling
+    // ask for one the allocator has to refuse. The ceiling deliberately does
+    // *not* return early. Returning here would answer before the reservation
+    // below ever ran, which leaves `try_reserve_exact` and an infallible
+    // `reserve_exact` indistinguishable to every test that drives it: that is
+    // #696's first bullet, and it is how #689's fourteen guards came to pass
+    // with the fallibility they were guarding reverted. Driving the real
+    // reservation instead keeps the thing under test on the path, so the
+    // revert turns every capped test red rather than leaving them green.
+    //
+    // This and the thread-local it reads compile only under `cfg(test)`, so a
+    // production reservation asks for exactly `len` and is bounded solely by
+    // the allocator, exactly as `alloc_op_output` is.
+    #[cfg(test)]
+    let len = if charge_plane_impl(site, bytes) {
+        // Past `isize::MAX` bytes, which `try_reserve_exact` refuses as a
+        // capacity overflow without troubling the allocator. A zero-sized `T`
+        // has no such length, but it also has no image-sized request to refuse:
+        // its `bytes` is zero, so it never trips a ceiling in the first place.
+        usize::MAX / size_of::<T>().max(1)
+    } else {
+        len
+    };
+    let mut out: Vec<T> = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        })?;
+    Ok(out)
+}
+
+/// Test-only: charge one image-sized allocation to the plane probe without
+/// making it here, for a site whose reservation happens somewhere the funnel
+/// cannot reach.
+///
+/// There is exactly one such site today, `colour.rs`'s copy of an
+/// already-Lab export input: the copy itself is [`Raster::try_clone`] and is
+/// fallible on its own account, but it is not a `Vec` this module reserves, so
+/// the routing is what gets counted and starved instead. A ceiling in front of
+/// a delegation proves the routing and says nothing about the copy, which is
+/// why [`counting_try_clones`] exists alongside it.
+#[cfg(test)]
+pub(crate) fn charge_plane(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    bytes: usize,
+) -> Result<(), RasterError> {
+    if charge_plane_impl(site, bytes) {
+        return Err(RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+/// Test-only: count a reservation at `site` against the calling thread's probe
+/// and report whether the probe wants it refused.
+#[cfg(test)]
+fn charge_plane_impl(site: &'static str, bytes: usize) -> bool {
+    PLANE_PROBE.with(|cell| {
+        let mut probe = cell.get();
+        if site.starts_with(probe.count_prefix) {
+            probe.counted = probe.counted.saturating_add(1);
+        }
+        let over = bytes as u64 > probe.cap_bytes && site.starts_with(probe.cap_site);
+        let refuse = over && probe.cap_spare == 0;
+        if over && probe.cap_spare > 0 {
+            probe.cap_spare -= 1;
+        }
+        cell.set(probe);
+        refuse
+    })
+}
+
+/// Test-only: what the calling thread's plane probe is counting and starving.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct PlaneProbe {
+    /// Reservations whose site label starts with this are counted. `""` counts
+    /// every one of them.
+    count_prefix: &'static str,
+    /// How many have been counted since the probe was armed.
+    counted: usize,
+    /// Reservations whose site label starts with this are subject to
+    /// [`PlaneProbe::cap_bytes`]. Prefer an exact label: a prefix matching
+    /// several sites brings back the ordinal reasoning the labels exist to
+    /// remove.
+    cap_site: &'static str,
+    /// Ceiling in bytes on a single reservation at a matching site. `u64::MAX`
+    /// disarms it, which is where every thread starts.
+    cap_bytes: u64,
+    /// How many matching over-ceiling reservations to wave through before the
+    /// ceiling starts refusing. Only ever needed where one site allocates
+    /// twice on a path, which is `try_sharpen`'s LabS round trip and nothing
+    /// else.
+    cap_spare: u32,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread probe over every plane reservation in the crate.
+    ///
+    /// Disarmed at rest: nothing is counted under a prefix no site can match
+    /// only because `""` matches all of them and the count is then thrown away
+    /// with the probe, and `u64::MAX` refuses nothing. So an ordinary run
+    /// bounds a plane only by what the allocator will serve, exactly as
+    /// [`alloc_op_output`] does, and a test that arms the probe reaches the
+    /// fallible branch at a raster it can actually build: a plane whose
+    /// reservation genuinely exhausts the allocator is far past the
+    /// [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch is
+    /// otherwise unreachable from a test (issues #460, #627, #685).
+    ///
+    /// One probe for the whole crate, which is what makes the site labels
+    /// load-bearing: the three modules used to keep three of these, so a
+    /// ceiling meant a different thing in each and a path crossing two of them
+    /// could only be starved in one at a time (issue #696).
+    static PLANE_PROBE: Cell<PlaneProbe> = const {
+        Cell::new(PlaneProbe {
+            count_prefix: "",
+            counted: 0,
+            cap_site: "",
+            cap_bytes: u64::MAX,
+            cap_spare: 0,
+        })
+    };
+}
+
+/// Test-only hook: run `f` with the calling thread's plane probe armed as
+/// given, returning its value alongside the number of reservations it counted,
+/// and restoring the previous probe afterwards including on unwind.
+///
+/// The probe is thread-local, so tests running in parallel do not perturb one
+/// another, and it compiles only under `cfg(test)`, so no test-support symbol
+/// ships and the crate's public surface is unchanged.
+#[cfg(test)]
+fn with_plane_probe<R>(probe: PlaneProbe, f: impl FnOnce() -> R) -> (R, usize) {
+    struct Restore(PlaneProbe);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PLANE_PROBE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(PLANE_PROBE.with(|c| c.replace(probe)));
+    let value = f();
+    let counted = PLANE_PROBE.with(|c| c.get().counted);
+    (value, counted)
+}
+
+/// Test-only hook: run `f` and report how many plane reservations it made at
+/// sites whose label starts with `prefix`, refusing none of them.
+///
+/// This is the funnel's counting half, and it is the load-bearing one wherever
+/// two spellings of the same buffer behave identically at every size a test can
+/// build. `vec![0i32; n]` and [`try_plane_len`] differ only in what they do
+/// when the allocation fails, which for a plane a test can actually build is
+/// never, so nothing but the count tells them apart (issue #627).
+#[cfg(test)]
+pub(crate) fn counting_planes<R>(prefix: &'static str, f: impl FnOnce() -> R) -> (R, usize) {
+    with_plane_probe(
+        PlaneProbe {
+            count_prefix: prefix,
+            counted: 0,
+            cap_site: "",
+            cap_bytes: u64::MAX,
+            cap_spare: 0,
+        },
+        f,
+    )
+}
+
+/// Test-only hook: [`counting_planes`], with the reservations at `cap_site`
+/// refused above `max_bytes`.
+///
+/// Both halves at once, for the checks that want to say an operation completed
+/// under a ceiling *and* that it reserved the number of times it was supposed
+/// to. A ceiling on its own cannot say the second thing and a count on its own
+/// cannot say the first.
+#[cfg(test)]
+pub(crate) fn counting_planes_under_cap<R>(
+    prefix: &'static str,
+    cap_site: &'static str,
+    max_bytes: u64,
+    f: impl FnOnce() -> R,
+) -> (R, usize) {
+    with_plane_probe(
+        PlaneProbe {
+            count_prefix: prefix,
+            counted: 0,
+            cap_site,
+            cap_bytes: max_bytes,
+            cap_spare: 0,
+        },
+        f,
+    )
+}
+
+/// Test-only hook: run `f` with the plane reservation at `site` refused above
+/// `max_bytes`, and every other site left alone.
+///
+/// A label rather than an ordinal, which is the difference between this and
+/// what the three private ceilings did. Theirs refused the Nth over-ceiling
+/// request along a path, so a check naming a site was really naming a position,
+/// disambiguated by the byte sizes on the path happening to be unique. That is
+/// why three of the colour fixtures carry an extra band on purpose, why a pair
+/// of same-sized buffers could not be told apart at all, and why inserting a
+/// new allocation anywhere earlier silently re-pointed a dozen checks at their
+/// neighbours. Naming the site removes all of it (issue #696).
+#[cfg(test)]
+pub(crate) fn with_plane_cap_at<R>(site: &'static str, max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    with_plane_cap_after(site, 0, max_bytes, f)
+}
+
+/// Test-only hook: [`with_plane_cap_at`], waving the first `spare`
+/// over-ceiling reservations **at that same site** through before the ceiling
+/// starts refusing.
+///
+/// Only one path needs it. `try_sharpen` opens and closes a LabS round trip, so
+/// `colour.colourspace_output` allocates twice on one call, and the entry
+/// conversion is the larger of the two on every route into LabS (LabS is the
+/// widest storage depth the space table has), so no ceiling exists that admits
+/// the entry and refuses the exit. Sparing the first reservation at that one
+/// site runs the whole body and starves the second.
+///
+/// The spare counts within the named site rather than across the path, which is
+/// the property the old ordinal did not have: adding an allocation somewhere
+/// else on the same path does not move it.
+#[cfg(test)]
+pub(crate) fn with_plane_cap_after<R>(
+    site: &'static str,
+    spare: u32,
+    max_bytes: u64,
+    f: impl FnOnce() -> R,
+) -> R {
+    with_plane_probe(
+        PlaneProbe {
+            count_prefix: "",
+            counted: 0,
+            cap_site: site,
+            cap_bytes: max_bytes,
+            cap_spare: spare,
+        },
+        f,
+    )
+    .0
+}
+
 /// An owned raster image buffer with known dimensions and pixel format.
 ///
 /// `Raster` is the core pixel container in libviprs. It owns a tightly-packed
@@ -1283,6 +1649,8 @@ pub(crate) fn counting_try_clones<R>(f: impl FnOnce() -> R) -> (R, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversion::{Angle45, Interpretation};
+    use crate::convolution::{Combine, Precision};
     use crate::imageio::MetadataValue;
 
     fn make_rgb_raster(w: u32, h: u32) -> Raster {
@@ -1610,6 +1978,462 @@ mod tests {
         let buf = alloc_op_output(4, 4, PixelFormat::Gray8).unwrap();
         assert_eq!(buf.len(), 16);
         assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    // -- the fallible-plane funnel ------------------------------------------
+
+    /**
+     * Tests that a reservation no allocator can serve comes back typed rather
+     * than reaching `handle_alloc_error` and aborting, and that the byte count
+     * in it is the size of the **request** rather than of the raster.
+     *
+     * That distinction is the reason [`try_plane_len`] takes a length instead
+     * of reading one off the raster: every intermediate it reserves is some
+     * multiple of the source, and an error naming the source's byte length
+     * would understate what failed by four or eight times.
+     *
+     * This runs with the probe disarmed, so the refusal is the real
+     * allocator's. It has to exist and it has to be separate from every check
+     * that drives the ceiling, for the reason #696's first bullet gives: a
+     * ceiling that answers *before* `try_reserve_exact` leaves the fallible
+     * reservation and an infallible `reserve_exact` indistinguishable, and
+     * fourteen of #689's guards passed with the fallibility they were guarding
+     * reverted. Nothing in this one is a hook.
+     *
+     * The two sizes are the two ways a `Vec` refuses. Eight bytes an element
+     * over a quarter of `usize` is under the `isize::MAX` ceiling `Vec` checks
+     * up front, so the request reaches the allocator and is refused there;
+     * `usize::MAX` elements is past that ceiling, so it comes back without the
+     * allocator being asked. Both must be typed.
+     */
+    #[test]
+    fn try_plane_len_reports_the_size_of_the_request_not_of_the_raster() {
+        assert!(matches!(
+            try_plane_len::<f64>("test.direct", 1, 1, usize::MAX / 4),
+            Err(RasterError::AllocationFailed { .. })
+        ));
+        assert!(matches!(
+            try_plane_len::<f64>("test.direct", 3, 2, usize::MAX),
+            Err(RasterError::AllocationFailed {
+                width: 3,
+                height: 2,
+                bytes: usize::MAX
+            })
+        ));
+    }
+
+    /**
+     * Tests the per-pixel form's pricing: the element count goes through
+     * [`buffer_len`], and the `bpp` an overflow carries is what the plane costs
+     * a pixel rather than how many elements it holds.
+     *
+     * `2^28` square at one `f64` a pixel is 512 PiB, under the `isize::MAX`
+     * ceiling, so the allocator is asked and refuses. `u32::MAX` square at one
+     * `[f64; 3]` a pixel prices past `usize` instead, so it is `SizeOverflow`
+     * before the allocator is reached, and the `bpp` in it has to read 24 and
+     * not 1: handing `per_pixel` straight through would report the plane as one
+     * byte a pixel, and the variant is public through the module errors that
+     * wrap it.
+     */
+    #[test]
+    fn try_plane_prices_a_plane_by_what_it_costs_a_pixel() {
+        let refused = try_plane::<f64>("test.direct", 1 << 28, 1 << 28, 1);
+        assert!(
+            matches!(refused, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed, got {:?}",
+            refused.map(|v: Vec<f64>| v.capacity())
+        );
+
+        let overflowing = try_plane::<[f64; 3]>("test.direct", u32::MAX, u32::MAX, 1);
+        assert!(
+            matches!(
+                overflowing,
+                Err(RasterError::AllocationFailed { .. }
+                    | RasterError::SizeOverflow { bpp: 24, .. })
+            ),
+            "expected AllocationFailed or SizeOverflow at 24 bytes a pixel, got {:?}",
+            overflowing.map(|v: Vec<[f64; 3]>| v.capacity())
+        );
+    }
+
+    /**
+     * Tests that the ceiling refuses the site it names and no other, which is
+     * the whole difference between a label and the ordinal the three private
+     * ceilings kept (issue #696).
+     *
+     * Two sites of the same size, reserved in a fixed order, with the *second*
+     * one capped: the first has to go through and the second has to be refused.
+     * An ordinal cannot express that, because it only knows "the Nth
+     * over-ceiling request on this thread", which is why a dozen checks in
+     * `colour.rs` were really naming a position and leaning on the byte sizes
+     * along the path happening to be unique. The order is then reversed under
+     * the same cap, and the refusal follows the label rather than the position,
+     * which is the half a single ordering cannot show.
+     */
+    #[test]
+    fn a_plane_ceiling_follows_the_label_and_not_the_position() {
+        let reserve = |first: &'static str, second: &'static str| {
+            (
+                try_plane_len::<u8>(first, 8, 8, 1024).map(|v| v.capacity()),
+                try_plane_len::<u8>(second, 8, 8, 1024).map(|v| v.capacity()),
+            )
+        };
+
+        let (a, b) = with_plane_cap_at("test.second", 16, || reserve("test.first", "test.second"));
+        assert!(a.is_ok(), "the unnamed site must be untouched, got {a:?}");
+        assert!(
+            matches!(b, Err(RasterError::AllocationFailed { bytes: 1024, .. })),
+            "the named site must be refused, got {b:?}"
+        );
+
+        let (a, b) = with_plane_cap_at("test.second", 16, || reserve("test.second", "test.first"));
+        assert!(
+            matches!(a, Err(RasterError::AllocationFailed { bytes: 1024, .. })),
+            "the named site must be refused wherever it falls on the path, got {a:?}"
+        );
+        assert!(
+            b.is_ok(),
+            "and the unnamed one must still be untouched, got {b:?}"
+        );
+    }
+
+    /**
+     * Tests the spare, which is the one thing a label cannot express on its
+     * own: a site that allocates twice on the same path.
+     *
+     * `try_sharpen`'s LabS round trip is the only one in the crate, and no
+     * ceiling separates its two conversions, because the entry allocation is
+     * the larger on every route in. The spare counts *within* the named site,
+     * so a reservation added anywhere else on the path does not move it, which
+     * is what the old cross-path ordinal could not promise. The third site here
+     * is what says so: it reserves between the two and neither takes the
+     * refusal nor eats the spare.
+     */
+    #[test]
+    fn a_plane_spare_counts_within_its_own_site() {
+        let run = || {
+            (
+                try_plane_len::<u8>("test.twice", 8, 8, 1024).map(|v| v.capacity()),
+                try_plane_len::<u8>("test.between", 8, 8, 1024).map(|v| v.capacity()),
+                try_plane_len::<u8>("test.twice", 8, 8, 1024).map(|v| v.capacity()),
+            )
+        };
+        let (first, between, second) = with_plane_cap_after("test.twice", 1, 16, run);
+        assert!(
+            first.is_ok(),
+            "the spared reservation must go through, got {first:?}"
+        );
+        assert!(
+            between.is_ok(),
+            "a different site must neither be refused nor eat the spare, got {between:?}"
+        );
+        assert!(
+            matches!(
+                second,
+                Err(RasterError::AllocationFailed { bytes: 1024, .. })
+            ),
+            "the second reservation at the named site must be refused, got {second:?}"
+        );
+    }
+
+    /**
+     * Tests the counting half of the probe: which reservations a prefix
+     * selects, that a window counts nothing outside itself, and that the probe
+     * restores itself on the way out including on unwind.
+     *
+     * The restore is not decoration. Every check that counts a path's
+     * reservations reads this counter, and a probe that leaked out of one
+     * window would make the next test's count depend on which tests ran before
+     * it, in a suite that runs in parallel.
+     */
+    #[test]
+    fn the_plane_probe_selects_by_prefix_and_restores_itself() {
+        fn reserve() {
+            let _ = try_plane_len::<u8>("test.alpha.one", 8, 8, 64);
+            let _ = try_plane_len::<u8>("test.alpha.two", 8, 8, 64);
+            let _ = try_plane_len::<u8>("test.beta", 8, 8, 64);
+        }
+
+        assert_eq!(
+            counting_planes("test.", reserve).1,
+            3,
+            "a prefix over all three"
+        );
+        assert_eq!(
+            counting_planes("test.alpha.", reserve).1,
+            2,
+            "a narrower prefix selects the two under it"
+        );
+        assert_eq!(
+            counting_planes("test.beta", reserve).1,
+            1,
+            "and an exact label selects only itself"
+        );
+        assert_eq!(
+            counting_planes("test.gamma", reserve).1,
+            0,
+            "a label nothing matches counts nothing, which is what makes a zero \
+             elsewhere mean something"
+        );
+
+        // A window replaces the probe rather than adding to it, so a nested one
+        // takes the reservations inside it and the outer one resumes after. The
+        // inner prefix here matches nothing on purpose: if the unwind left it
+        // in place, the reservation after it would be counted by nothing and
+        // this would read zero.
+        let (_, outer) = counting_planes("test.", || {
+            let inner = std::panic::catch_unwind(|| {
+                counting_planes("test.gamma", || {
+                    let _ = try_plane_len::<u8>("test.alpha.one", 8, 8, 64);
+                    panic!("unwind out of an armed probe");
+                })
+            });
+            assert!(inner.is_err(), "the inner window must have panicked");
+            let _ = try_plane_len::<u8>("test.beta", 8, 8, 64);
+        });
+        assert_eq!(
+            outer, 1,
+            "the outer window must resume its own prefix after the inner one \
+             unwound, and count the reservation made after it"
+        );
+    }
+
+    /// One entry point and every plane reservation it makes, split by the
+    /// module the site belongs to.
+    struct Funnel {
+        /// The `pub fn` the row runs, and the arm of it where there is one.
+        op: &'static str,
+        run: fn(&Raster),
+        /// Reservations at `raster.op_output`.
+        outputs: usize,
+        /// Reservations at `raster.f32_samples`.
+        widenings: usize,
+        /// Reservations at a `convolution.` site.
+        convolution: usize,
+        /// Reservations at a `colour.` site.
+        colour: usize,
+    }
+
+    /// The 3x3 box blur the `conv` and `compass` rows run.
+    fn funnel_box3() -> crate::convolution::Kernel {
+        crate::convolution::Kernel {
+            data: vec![vec![1.0; 3]; 3],
+            scale: 9.0,
+        }
+    }
+
+    /// Measured, then written down. Nothing here is a ceiling.
+    ///
+    /// The split is what makes each number readable rather than a constant
+    /// somebody fitted. `try_sharpen` is the row the whole funnel exists for:
+    /// it crosses `colour.rs`, `convolution.rs` and `raster.rs` on one call,
+    /// and under the three private helpers no check could count all three.
+    const FUNNEL: &[Funnel] = &[
+        Funnel {
+            op: "try_conv, integer arm",
+            run: |src| drop(src.try_conv(&funnel_box3(), Precision::Integer)),
+            outputs: 1,
+            widenings: 0,
+            convolution: 1,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_conv, float arm",
+            run: |src| drop(src.try_conv(&funnel_box3(), Precision::Float)),
+            outputs: 1,
+            widenings: 0,
+            convolution: 1,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_sobel",
+            run: |src| drop(src.try_sobel()),
+            outputs: 1,
+            widenings: 0,
+            convolution: 1,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_gaussblur, integer arm",
+            run: |src| drop(src.try_gaussblur(1.4, 0.2, Precision::Integer)),
+            outputs: 2,
+            widenings: 0,
+            convolution: 2,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_compass, Max over 4 rounds",
+            run: |src| {
+                drop(src.try_compass(
+                    &funnel_box3(),
+                    4,
+                    Angle45::D45,
+                    Combine::Max,
+                    Precision::Integer,
+                ));
+            },
+            outputs: 5,
+            widenings: 4,
+            convolution: 5,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_sharpen",
+            run: |src| drop(src.try_sharpen(1.5, 1.0, 2.0)),
+            outputs: 0,
+            widenings: 1,
+            convolution: 3,
+            colour: 2,
+        },
+        Funnel {
+            op: "try_canny, float arm",
+            run: |src| drop(src.try_canny(1.4, Precision::Float)),
+            outputs: 5,
+            widenings: 2,
+            convolution: 4,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_canny, uchar arm",
+            run: |src| drop(src.try_canny(1.4, Precision::Integer)),
+            outputs: 5,
+            widenings: 0,
+            convolution: 4,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_de00",
+            run: |src| drop(src.try_de00(src)),
+            outputs: 0,
+            widenings: 0,
+            convolution: 0,
+            colour: 4,
+        },
+        Funnel {
+            op: "try_colourspace to Labs",
+            run: |src| drop(src.try_colourspace(Interpretation::Labs)),
+            outputs: 0,
+            widenings: 0,
+            convolution: 0,
+            colour: 1,
+        },
+    ];
+
+    /**
+     * The funnel: every plane these paths reserve goes through
+     * [`try_plane_len`], and the count of them, per module, is what says so.
+     *
+     * This is #696's "what catches the next site". Each of three modules used
+     * to keep its own helper with its own ceiling, so a check could only count
+     * the sites inside the module it lived in, and a new `Vec::with_capacity`
+     * in a neighbouring module was invisible to every one of them. Three
+     * passes over `colour.rs` (#672, #678, #685) is what that cost, and
+     * `try_sharpen` is the row that shows why: one call crosses all three
+     * modules, and no check before this one could count what it did in more
+     * than one of them at a time.
+     *
+     * Exact equality, not ceilings, for the reason the convolution budget file
+     * gives at length: an upper bound is green when the instrument is broken.
+     *
+     * The per-module split is the load-bearing part. A total on its own is a
+     * magic constant and moves for any reason at all; the split says which
+     * module changed, and the total is then asserted to be the sum of the
+     * parts, so a **fifth** prefix joining the funnel is caught too rather than
+     * being quietly absorbed.
+     *
+     * # What this counts, and what the neighbouring instrument counts
+     *
+     * A reservation, not an image-sized one. `try_compass` widens a 3x3 index
+     * raster once a round inside `rot45_kernel`, 36 bytes, and that is a
+     * reservation through the funnel like any other; the convolution row window
+     * is a few kilobytes and so is that. So these numbers are deliberately not
+     * the same as the ones in `tests/convolution_image_sized_allocations.rs`,
+     * which asks the *allocator* and charges only what is at least a byte a
+     * pixel.
+     *
+     * The two answer different halves of one question and neither is complete
+     * alone. This one cannot see a buffer that never reaches the funnel: a
+     * `Clone::clone`, a `.collect()`, a `vec![0u8; n]`. That one cannot see
+     * whether an allocation it charged was fallible. Put together, where a row
+     * here and a row there agree, every image-sized allocation on the path went
+     * through the fallible helper: `try_sharpen` is 6 in both.
+     *
+     * They cannot live in one binary, which is worth writing down because it
+     * looks like an oversight. The probe is `cfg(test)`, so it exists only in
+     * this crate's own unit-test binary; `#[global_allocator]` is scoped to the
+     * integration-test binary that installs it, and an integration test links
+     * the library built *without* `cfg(test)`. `CONTRIBUTING.md` carries the
+     * rule that there is one instrument shape; this is where the seam in it
+     * falls.
+     *
+     * The ICC entry points are counted the same way in `colour.rs`, next to the
+     * profile fixtures they need, rather than being dragged in here.
+     */
+    #[test]
+    fn every_plane_these_paths_reserve_goes_through_the_one_funnel() {
+        let src = crate::generate_test_raster(64, 64).expect("fixture raster");
+        for row in FUNNEL {
+            // Warm-up outside every window, so a one-time lazily built table
+            // cannot be charged to the first row that happens to touch it.
+            (row.run)(&src);
+
+            let count = |prefix| counting_planes(prefix, || (row.run)(&src)).1;
+            let parts = [
+                ("op outputs", count(PLANE_OP_OUTPUT), row.outputs),
+                ("f32 widenings", count(PLANE_F32_SAMPLES), row.widenings),
+                ("convolution planes", count("convolution."), row.convolution),
+                ("colour planes", count("colour."), row.colour),
+            ];
+            for (what, got, want) in parts {
+                assert_eq!(
+                    got, want,
+                    "{} reserved {got} {what} against {want}: a site was added, removed, or \
+                     routed around `raster::try_plane` (issue #696)",
+                    row.op
+                );
+            }
+            let total = count("");
+            let sum: usize = parts.iter().map(|(_, got, _)| got).sum();
+            assert_eq!(
+                total, sum,
+                "{} made {total} reservations and only {sum} of them are under one of the four \
+                 prefixes above: a module joined the funnel and no row here names it",
+                row.op
+            );
+        }
+    }
+
+    /**
+     * The positive control for the row above. Every one of those numbers is an
+     * equality on a counter, and a counter that has stopped counting reads
+     * zero, which no row would notice if the paths had also stopped allocating.
+     *
+     * So: one deliberate reservation through the funnel moves the count by
+     * exactly one, and a `vec![0u8; n]` of the same size next to it moves it by
+     * nothing. The second half is the blind spot the row's own doc names,
+     * demonstrated rather than asserted, because a limit that is only described
+     * is a limit nobody checks.
+     */
+    #[test]
+    fn the_funnel_counter_sees_a_reservation_and_not_a_bare_vec() {
+        let (_, none) = counting_planes("", || ());
+        assert_eq!(none, 0, "an empty window counts nothing");
+
+        let (_, one) = counting_planes("", || {
+            let v = try_plane_len::<u8>("test.control", 64, 64, 4096);
+            std::hint::black_box(&v);
+        });
+        assert_eq!(one, 1, "a reservation through the funnel is counted");
+
+        let (_, bypassed) = counting_planes("", || {
+            let v = vec![0u8; 4096];
+            std::hint::black_box(&v);
+        });
+        assert_eq!(
+            bypassed, 0,
+            "and a bare `vec![0u8; n]` of the same size is not, which is the limit the counting \
+             allocator in tests/convolution_image_sized_allocations.rs covers and this cannot"
+        );
     }
 
     /**
