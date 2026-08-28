@@ -537,17 +537,26 @@ fn fill_ink(dst: &mut Raster, ink: &[u32]) {
     }
 }
 
-/// `-v` as an `i32` for the crop-origin stamp, saturating rather than
-/// wrapping on the widths only a `u32` dimension can express.
+/// `-v` as an `i32` for the crop-origin stamp, exact wherever `-v` fits an
+/// `i32` and saturating at `i32::MIN` beyond it.
 ///
 /// vips holds every dimension and both offsets in an `int`, so the question
 /// does not arise there; here a `left` above `i32::MAX` is representable and
 /// a bare `-(left as i32)` would wrap it back to a *positive* offset. A
 /// raster that wide fits the 8 GiB construction budget at one byte per pixel,
 /// so the branch is reachable rather than theoretical.
+///
+/// The obvious spelling, `-(v.min(i32::MAX as u32) as i32)`, is wrong at
+/// exactly one input. It saturates at `i32::MIN + 1`, so `left = 2147483648`
+/// comes back as `-2147483647` when `-2147483648` is both the right answer
+/// and representable. Negating through `i64` and narrowing is exact
+/// everywhere it can be, and the unit test below sweeps the four inputs
+/// around the boundary. Proving `extract_area` *reaches* this needs a 2 GiB
+/// raster; proving the arithmetic needs nothing at all, which is why the
+/// first commit's "asserted only by reasoning" was the wrong call.
 #[inline]
 fn negated_origin(v: u32) -> i32 {
-    -(v.min(i32::MAX as u32) as i32)
+    i32::try_from(-i64::from(v)).unwrap_or(i32::MIN)
 }
 
 /// Refuse a float raster for an operation that reads samples through
@@ -2502,6 +2511,31 @@ mod tests {
             Err(ExtractError::UnknownDirection { .. })
         ));
     }
+    // -- crop-origin arithmetic (issue #690) ----------------------------------------------
+
+    /// The offset stamp is exact wherever `-v` fits an `i32`, and saturates
+    /// only past that.
+    ///
+    /// `negated_origin` is a private function of a `u32`, so this costs
+    /// nothing, where proving `extract_area` reaches the far end of the range
+    /// needs a 2 GiB raster. #690 shipped the saturation "asserted only by
+    /// reasoning" on the strength of that second cost, and the reasoning was
+    /// wrong by one: `-(v.min(i32::MAX as u32) as i32)` saturates at
+    /// `i32::MIN + 1`, so `2147483648` came back as `-2147483647` when
+    /// `-2147483648` is representable and correct.
+    #[test]
+    fn the_crop_origin_stamp_is_exact_until_it_cannot_be() {
+        assert_eq!(negated_origin(0), 0);
+        assert_eq!(negated_origin(1), -1);
+        assert_eq!(negated_origin(i32::MAX as u32), -2_147_483_647);
+        // The cell the old spelling got wrong. `-2147483648` is `i32::MIN`,
+        // it fits, and it is the true answer.
+        assert_eq!(negated_origin(2_147_483_648), i32::MIN);
+        // And the first input whose negation genuinely does not fit.
+        assert_eq!(negated_origin(2_147_483_649), i32::MIN);
+        assert_eq!(negated_origin(u32::MAX), i32::MIN);
+    }
+
     // -- float refusal (issue #694) -------------------------------------------------------
 
     /// A float raster of `bands` bands filled with a ramp, the carrier an EXR,
