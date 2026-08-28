@@ -738,7 +738,7 @@ fn remap(
             odata[oo..oo + bpp].copy_from_slice(&sdata[so..so + bpp]);
         }
     }
-    out.meta = src.meta;
+    out.carry_meta_from(src);
     Ok(out)
 }
 
@@ -957,7 +957,7 @@ impl Raster {
                 }
             }
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -1551,7 +1551,7 @@ impl Raster {
         for i in 0..samples {
             write_flat(odata, bpc, i, lut[read_flat(sdata, bpc, i) as usize]);
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -1590,7 +1590,9 @@ impl Raster {
             let v = read_flat(sdata, bpc, p * channels).min(255) as usize;
             odata[p * 3..p * 3 + 3].copy_from_slice(&FALSECOLOUR_PET[v]);
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
+        // `vips falsecolour` retags the output sRGB whatever the input said,
+        // so the stamp goes on after the carry rather than before it.
         out.meta.interpretation = Some(Interpretation::Srgb);
         Ok(out)
     }
@@ -1628,7 +1630,7 @@ impl Raster {
             65535.0
         };
         let mut out = self.try_bandjoin_const(max)?;
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -1771,7 +1773,15 @@ impl Raster {
                 }
             }
         }
-        out.meta = images[0].meta;
+        out.carry_meta_from(images[0]);
+        // Measured on vips 8.18.6 (issue #718): the header block comes from
+        // the first input alone and the attached fields are the union of all
+        // of them, first input winning a name they share. So the carry takes
+        // images[0] wholesale and the rest merge under it, which puts a
+        // profile only a later cell carries onto the grid.
+        for img in &images[1..] {
+            out.merge_fields_from(img);
+        }
         // Same re-stamp as `join`: `bandalike` can give the grid more bands
         // than images[0] has, and images[0]'s interpretation then describes
         // an image that no longer exists. `space_bands(Bw) == 1`, so a
@@ -1917,7 +1927,11 @@ impl Raster {
                 joined
             }
         };
-        out.meta = self.meta;
+        out.carry_meta_from(self);
+        // Same union as `insert`, which is what `join` is built on: measured
+        // on vips 8.18.6 the header block is in1's alone and the attached
+        // fields are both inputs', in1 winning a shared name (issue #718).
+        out.merge_fields_from(other);
         // libvips `bandalike` promotes a one-band input up to the other's
         // band count, so the result can have more bands than in1 has. in1's
         // interpretation then describes an image that no longer exists:

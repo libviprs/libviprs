@@ -489,6 +489,39 @@ impl MetadataFields {
         Some(self.entries.remove(idx).1)
     }
 
+    /// Whether a name is carried at all, under either carrier.
+    fn contains(&self, name: &str) -> bool {
+        self.entries.iter().any(|(n, _)| n == name) || self.unknown.iter().any(|(n, _)| n == name)
+    }
+
+    /// Take `other`'s fields for every name this map does not already carry,
+    /// in `other`'s own order, leaving this map's values alone.
+    ///
+    /// This is the multi-input rule, measured on vips 8.18.6: `insert`,
+    /// `join`, `arrayjoin` and `bandjoin` put the union of both inputs'
+    /// attachments on the output and let the *first* input win a name they
+    /// share, while the header block comes from the first input alone. A
+    /// profile that only the second input carries reaches the output; a
+    /// `lane-711` both carry keeps the first one's value (#718).
+    ///
+    /// Uninterpretable `.v` trailer values merge on the same terms, so a name
+    /// this build cannot read still travels rather than being dropped because
+    /// the reader could not name it (#565). A name held under one carrier here
+    /// blocks the other carrier's copy from `other`, which is the same
+    /// "one value per name" invariant [`MetadataFields::set`] keeps.
+    pub(crate) fn merge_under(&mut self, other: &Self) {
+        for (name, value) in &other.entries {
+            if !self.contains(name) {
+                self.entries.push((name.clone(), value.clone()));
+            }
+        }
+        for (name, value) in &other.unknown {
+            if !self.contains(name) {
+                self.unknown.push((name.clone(), value.clone()));
+            }
+        }
+    }
+
     /// Record a field this build cannot interpret; see
     /// [`MetadataFields::unknown`].
     fn set_unknown(&mut self, name: &str, value: CarriedValue) {
@@ -1048,6 +1081,20 @@ impl Raster {
     pub fn set_icc_profile(&mut self, profile: &[u8]) {
         self.fields
             .set("icc-profile-data", MetadataValue::Blob(profile.to_vec()));
+    }
+
+    /// Drop the attached ICC profile, the way libvips'
+    /// `vips_image_remove(VIPS_META_ICC_NAME)` does. Removing an absent
+    /// profile is a no-op.
+    ///
+    /// Crate-private because a caller already has the same reach through
+    /// `set_typeof("icc-profile-data", 0)`; this exists so the ops that must
+    /// do it can say what they mean. The ops in question are the inverse
+    /// Fourier transforms: measured on vips 8.18.6 they retag the output
+    /// `b-w`, and a three-channel profile does not survive that retag (#717,
+    /// and the general rule is #720).
+    pub(crate) fn remove_icc_profile(&mut self) {
+        let _ = self.fields.remove("icc-profile-data");
     }
 
     /// The attached ICC profile, if any: the `icc-profile-data` blob set
@@ -3417,6 +3464,71 @@ mod tests {
         assert!(trailer.fields.entries.iter().any(
             |(n, v)| n == "icc-profile-data" && *v == FutureMetadataValue::Blob(vec![5, 5, 5])
         ));
+    }
+
+    /// Issue #718. The multi-input field union covers the **uninterpretable**
+    /// carrier as well as the named one, in both directions.
+    ///
+    /// The named half is pinned in `tests/metadata_carry.rs`. This half is here
+    /// because [`MetadataFields::unknown`] is only reachable from inside this
+    /// module, through a trailer written by a build this one cannot fully read
+    /// (#565), and without it `merge_under` could drop the opaque carrier and
+    /// stay green: a field a newer build wrote would survive a load and a
+    /// re-save, and then vanish the moment someone inserted the raster into
+    /// another one.
+    #[test]
+    fn the_multi_input_field_merge_carries_an_uninterpretable_field_too() {
+        let sub = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut main = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        main.set_field("main-only", MetadataValue::Str("from-main".into()));
+        main.set_field("note", MetadataValue::Str("from-main".into()));
+
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+
+        // The header block is `main`'s alone, so `sub`'s orientation 6 does
+        // not reach the output.
+        assert_eq!(out.orientation(), 1, "the header block is main's");
+        // The named half of the union: main wins the shared name, both sides'
+        // own fields arrive.
+        assert_eq!(out.get_field("note").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("main-only").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(out.icc_profile(), Some(&[5u8, 5, 5][..]));
+
+        // And the opaque one, which reads as absent through the field API and
+        // is only visible on the way back out.
+        assert_eq!(
+            out.get_field("delay"),
+            None,
+            "an uninterpretable field stays out of the field API"
+        );
+        let rewritten = out.encode_vips().unwrap();
+        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..])
+            .expect("a carried opaque value keeps the file on the JSON trailer");
+        let delay = trailer
+            .fields
+            .entries
+            .iter()
+            .find(|(n, _)| n == "delay")
+            .map(|(_, v)| v);
+        assert_eq!(
+            delay,
+            Some(&FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            "sub's uninterpretable field must reach the output"
+        );
+
+        // The other direction: a name `main` holds *only* under the opaque
+        // carrier still blocks `sub`'s interpretable value, so the output
+        // never ends up holding one name under both carriers.
+        let main = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut sub = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        sub.set_field("delay", MetadataValue::Int(9));
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+        assert_eq!(
+            out.get_field("delay"),
+            None,
+            "main's opaque value wins the shared name"
+        );
     }
 
     /// A field the caller sets by hand supersedes an unknown field of the same
