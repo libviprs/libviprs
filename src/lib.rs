@@ -119,12 +119,14 @@ pub mod extensions;
 pub mod extract;
 pub mod fits;
 pub mod foreign_stubs;
+pub mod frames;
 pub mod freqfilt;
 pub mod geo;
 pub mod gif;
 pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
+pub mod jp2k;
 pub mod jxl;
 pub(crate) mod level_walk;
 #[cfg(loom)]
@@ -216,6 +218,7 @@ pub use foreign_stubs::{
     MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, magickload,
     magickload_with,
 };
+pub use frames::{FrameDelay, LoopCount, PageLayout};
 pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
@@ -330,6 +333,7 @@ pub use webp::decode_webp;
 // beside theirs, so a caller can name the type they are matching on. The
 // option types stay behind `libviprs::jxl::` so the crate root does not
 // gain a third `SaveOptions`.
+pub use jp2k::{Jp2kError, decode_jp2k};
 pub use jxl::{JxlError, decode_jxl};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
