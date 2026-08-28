@@ -1307,10 +1307,13 @@ pub enum SaveError {
 /// than written out four times: a fifth format would make it eight literals,
 /// and the third of the four is the one nobody would ever run.
 fn saveable_extensions() -> &'static str {
-    if cfg!(feature = "jxl") {
-        "png, jpg/jpeg, gif, webp, jxl, fits/fit/fts, and v/vips"
-    } else {
-        "png, jpg/jpeg, gif, webp, fits/fit/fts, and v/vips"
+    match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
+        (true, true) => {
+            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, fits/fit/fts, and v/vips"
+        }
+        (true, false) => "png, jpg/jpeg, gif, webp, jxl, fits/fit/fts, and v/vips",
+        (false, true) => "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, fits/fit/fts, and v/vips",
+        (false, false) => "png, jpg/jpeg, gif, webp, fits/fit/fts, and v/vips",
     }
 }
 
@@ -1412,6 +1415,24 @@ impl Raster {
             // encoder, and `saveable_extensions()` above stops naming it.
             #[cfg(feature = "jxl")]
             "jxl" => crate::jxl::encode_jxl_for_save(self)?,
+            // All five suffixes `jp2ksave` registers, and they are one arm
+            // rather than five because vips writes the **same bytes** for all
+            // of them: measured on 8.18.6, `vips copy base.v out.EXT` over
+            // `jp2`, `j2k`, `jpt`, `j2c` and `jpc` produces five files with
+            // one SHA-256 between them. So unlike every other row here, the
+            // suffix does not pick the codec, it only gets past the sniffing
+            // chain; `jp2ksave.c` hard-codes `OPJ_CODEC_JP2`.
+            //
+            // `keep_metadata` has nothing to act on, like GIF and FITS above:
+            // `jp2ksave.c` has no code for an ICC profile, an EXIF block or an
+            // XMP packet, so a stripped save and a kept one write the same
+            // bytes. Asserted, not assumed.
+            //
+            // Gated, so that without the `jp2k` feature these five fall
+            // through to `UnsupportedExtension` like any other extension with
+            // no encoder, and `saveable_extensions()` stops naming them.
+            #[cfg(feature = "jp2k")]
+            "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => crate::jp2k::encode_jp2k_for_save(self)?,
             // All three suffixes vips registers (`vips__fits_suffs`,
             // `fits.c:125`). `keep_metadata` has nothing to act on: the
             // records a FITS header carries are the geometry cfitsio
