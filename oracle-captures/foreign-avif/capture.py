@@ -499,7 +499,9 @@ def box(tree, kind, nth=0):
 def fixture(name, tagged, w, h, *args):
     """Save `tagged` as fixtures/<name>.avif and record everything about
     what comes back out of it."""
-    path = fix_path(f"{name}.avif", f"fixture({name})")
+    path = fix_path(f"{name}.avif",
+                    f"fixture({name}) from "
+                    f"{os.path.relpath(tagged, ROOT)}")
     vips("heifsave", tagged, path, *args)
     return path, {
         "fixture": f"fixtures/{name}.avif",
