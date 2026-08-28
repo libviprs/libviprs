@@ -1593,6 +1593,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- No test in the tree reaches the filesystem without `#[cfg_attr(miri, ignore)]`
+  any more, and `UNANNOTATED_FS_EXCEPTIONS` is empty (issue #756).
+
+  The four that were left are in `src/resample.rs`, which had four pull requests
+  open against it while #739's sweep ran and so was the one module the sweep
+  could not touch. Those merged, so these are annotated and their four rows in
+  `tests/miri_fs_test_inventory.txt` flip to `annotated`. The file now records
+  272 `annotated fs-detected` and 14 `annotated not-detected` tests, and nothing
+  else.
+
+  Emptying the list cost one further edit and no change to any assertion, which
+  is the difference between an exception list and the floor it replaced. The
+  floor, `assert!(unannotated_fs > 0)`, would have gone red here and demanded
+  rewriting. What did go red, on purpose, is
+  `merge_gate_states_the_backlog_as_a_bound_it_still_meets`: it has a separate
+  arm for zero, because at zero the bound holds and `merge-gate.yml`'s sentence
+  about a named handful of unannotated tests becomes false with nothing to catch
+  it. That sentence is rewritten, once, and the failure named it.
+
+- The Miri filesystem detector follows a call into a test helper, one file deep
+  and to a fixed point, and 73 more tests over nine files carry
+  `#[cfg_attr(miri, ignore)]` because of it (issue #781). 39 of those were the
+  population when the change was written; the other 34 are `src/nifti.rs`,
+  `tests/uhdr_ported_surface.rs` and `tests/page_model.rs`, which reached `main`
+  while it was in flight and were caught by the new detector on the merge rather
+  than by a re-read.
+
+  `tests/page_model.rs` is the one worth naming, because its own module doc had
+  written the gap down and deferred it: "three tests here reach the filesystem
+  to read `src/`, and none carries `#[cfg_attr(miri, ignore)]` ... it belongs in
+  that lane's sweep rather than here". It is one test, not three. The other two
+  it counted go through `encode_vips` and `decode_bytes`, which are in memory,
+  and through string literals declared inline. The detector was right about
+  those and the note was not; it now says what was measured.
+
+  It read one function body and stopped, which the guard's module docs listed as
+  a known blind spot without ever measuring it. Measured: on the tree where
+  every inventory row was annotated,
+  `cargo +nightly-2026-08-20 miri test --test exr_ported_surface` still died in
+  one second on `channel_names_and_compression_are_readable_downstream`, which
+  calls `sample()` six lines above it, whose body is `std::fs::read(path)`. The
+  same shape killed `tests/n_pages_meaning.rs`.
+
+  `process_spawning_fns` had already solved this for `std::process`, so it
+  becomes `reaching_fns`, parameterised on the marker list and on a scope
+  predicate. The filesystem arm passes a predicate that accepts only test
+  scaffolding: every function in an integration test, and only the
+  `#[cfg(test)]` modules of a `src/` file. That restriction is the interesting
+  part and it is measured rather than argued: with every function in scope, the
+  way the process arm has it, the follower finds 85 unannotated tests over
+  eleven files; with only scaffolding in scope it finds 39 over six. The
+  difference is almost all one arm, `src/colour.rs` reading an ICC profile off
+  disk inside the library, which would have marked all 23 colour tests that
+  reach the loader whether or not any of them passes it a path.
+
+  The `annotated not-detected` class halves as a result, from 22 rows to 13:
+  those were annotations the detector could not have asked for, and nine of them
+  it can now. What is left is the library boundary and the helper in another
+  file.
+
+- The filesystem half of the Miri convention is enforced rather than recorded:
+  134 tests across 28 files carry `#[cfg_attr(miri, ignore)]` that did not, and
+  `tests/miri_ignore_convention.rs` now refuses any filesystem-touching test
+  that is neither annotated nor named in a four-entry exception list (issues
+  #712, #739).
+
+  #711 took `-Zmiri-disable-isolation` off the job. Under isolation a
+  filesystem call is an unsupported operation and Miri ends the whole session
+  on the first one rather than failing that test, so the 138 rows
+  `tests/miri_fs_test_inventory.txt` carried as `unannotated fs-detected` ceased
+  to be recorded debt and became 138 ways to take the gate down. Measured on
+  `bd4bb1d`, `cargo +nightly-2026-08-20 miri test --test workspace_layout` died
+  on `fuzz_crate_is_a_member_of_the_root_workspace` having run nothing.
+
+  The guard's own floor had to go with it. It ended with
+  `assert!(unannotated_fs > 0)` and a message saying that if the count ever
+  reached zero the ledger had stopped being a ledger, which is a floor that
+  goes red on the change that clears the debt. It is now a refusal with an
+  exception list, checked in both directions: a filesystem test that is neither
+  annotated nor named fails, and a named entry that is no longer an unannotated
+  filesystem test fails too, so the list cannot rot into decoration. It carries
+  four names, all in `src/resample.rs`, which had four pull requests open
+  against it while the sweep ran; issue #756 carries them.
+
+  This does not make the `miri` job report, and the reason is worth writing
+  down because it is the half of #675 nobody had measured. `cargo miri test`
+  runs the `--lib` target first and libtest runs it in sorted order, so the
+  first two tests of the whole invocation are
+  `arithmetic::proptests::every_try_method_in_the_module_is_in_the_sweep` and
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster`. Neither
+  touches the filesystem, so no annotation sweep can reach them, and the second
+  is the proptest already measured at over twenty minutes without finishing.
+  The unannotated filesystem tests were never the first wall of the whole-suite
+  run, they were the first wall of every target after it.
+
 - The doc gate denies `rustdoc::private_intra_doc_links`, and the 33 public doc
   comments that pointed at `pub(crate)` items no longer do (issue #697). That
   lint is warn-by-default and neither invocation denied it, so a public doc
@@ -1753,14 +1848,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, measured, and would be a defensible answer; the backend pin is simply
   the smaller of the two changes.
 
-  What the job does now is abort on the first filesystem test that has no
-  `#[cfg_attr(miri, ignore)]`. `tests/miri_fs_test_inventory.txt` still records
-  more than a hundred of those, and annotating them is #712. Whether the suite
-  then fits inside `timeout-minutes: 90` is open, and one measurement says not
-  to assume it will: the single proptest
+  What the job did after this change was abort on the first filesystem test
+  that had no `#[cfg_attr(miri, ignore)]`, of which
+  `tests/miri_fs_test_inventory.txt` recorded 138. Annotating them is #712 and
+  #739, below. Whether the suite then fits inside `timeout-minutes: 90` was
+  open, and one measurement said not to assume it would: the single proptest
   `arithmetic::proptests::no_try_method_panics_on_a_float_raster` ran over
   twenty minutes under the interpreter without finishing, and it touches no
-  filesystem, so no annotation sweep will ever reach it.
+  filesystem, so no annotation sweep will ever reach it. That is the one that
+  turned out to decide the answer.
 
   Three claims in that workflow file were false when I got here and are gone.
   It said Miri "cannot run on the dev machine", which was true of the reason

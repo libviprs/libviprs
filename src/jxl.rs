@@ -2151,6 +2151,7 @@ mod tests {
      */
     #[test]
     #[cfg(not(feature = "jxl"))]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn without_the_feature_every_entry_point_is_a_typed_refusal() {
         let err = decode_jxl(&LOSSLESS_RGB, DecodeLimits::default()).unwrap_err();
         assert!(
@@ -2199,6 +2200,7 @@ mod tests {
      */
     #[cfg(feature = "jxl")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fuzz")

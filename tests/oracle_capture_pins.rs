@@ -277,6 +277,7 @@ fn walk_objects(value: &Value, key: Option<&str>, f: &mut impl FnMut(Option<&str
 /// the #650 drift was not that a version changed, it was that nothing was
 /// looking at the version at all.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn every_capture_declares_the_oracle_it_was_measured_against() {
     let pin = pin_file();
     let pinned = pin["pinned_vips_version"]
@@ -354,6 +355,7 @@ fn every_capture_declares_the_oracle_it_was_measured_against() {
 /// that is blind to what it guards and loud about what it does not is worse
 /// than none, so the pin is now `raw_sha256`, over `vips rawsave` output.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn convolution_pins_pixels_not_the_v_container() {
     let capture = read_json(&captures_dir().join("convolution").join("oracle.json"));
     let mut with_raw = 0usize;
@@ -395,6 +397,7 @@ fn convolution_pins_pixels_not_the_v_container() {
 /// raster order, and `ties` says how many positions hold it, so a reader can
 /// tell an unambiguous pin from an arbitrary-but-reproducible one.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn convolution_min_max_positions_are_deterministic() {
     let capture = read_json(&captures_dir().join("convolution").join("oracle.json"));
     let mut blocks = 0usize;
@@ -443,6 +446,7 @@ fn convolution_min_max_positions_are_deterministic() {
 /// these files are meant to be machine-readable evidence, and evidence only
 /// one language can open is not much of a corpus.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn captures_parse_as_json_and_the_python_only_list_does_not_grow() {
     let areas = areas_with_repair_flags();
     let mut needed_repair: Vec<&str> = areas
@@ -755,6 +759,7 @@ fn digest_of(path: &Path) -> Option<(String, u64)> {
 ///     to match, with [`EXPECTED_PINNED_FIXTURE_HASHES`] pinning how many of
 ///     those there are.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn every_recorded_fixture_hash_matches_the_committed_file() {
     let root = captures_dir();
     let mut pinned = 0usize;
@@ -868,6 +873,7 @@ fn every_recorded_fixture_hash_matches_the_committed_file() {
 /// fine. The tree has none today, and it should not need one: what is being
 /// refused is the contradiction, not the sharing.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn no_two_records_hash_one_name_differently() {
     let mut claims: BTreeMap<(String, String), BTreeMap<String, Vec<String>>> = BTreeMap::new();
     for record in named_file_hashes() {
@@ -986,6 +992,7 @@ fn any_module_level_line(src: &str, pred: impl Fn(&str) -> bool) -> bool {
 /// the call is this script's own. A script checking a different area's pin
 /// entry passes a substring scan and checks the wrong thing.
 #[test]
+#[cfg_attr(miri, ignore)] // reads oracle-captures/ through a helper (#652)
 fn every_capture_script_checks_the_oracle_pin() {
     let embedded: BTreeSet<&str> = CAPTURE_SCRIPTS.iter().map(|(area, _)| *area).collect();
     let on_disk = areas_on_disk();
