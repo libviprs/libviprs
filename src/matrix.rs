@@ -242,7 +242,11 @@ fn matrix_raster(
             data.extend_from_slice(&(v as f32).to_ne_bytes());
         }
     }
-    let format = PixelFormat::FloatF32(NonZeroU16::new(bands).expect("bands is non-zero"));
+    // Canonical spelling of the layout: `invertlut` on a four-column matrix
+    // produces four bands, and that layout is `RgbaF32`, not `FloatF32(4)`
+    // (issue #531).
+    let format = PixelFormat::with_channels(usize::from(bands), 4)
+        .expect("bands is non-zero and 4 bytes per channel is a known depth");
     let mut out = Raster::new(width, height, format, data)?;
     out.meta.interpretation = Some(interpretation);
     Ok(out)

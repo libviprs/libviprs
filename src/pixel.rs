@@ -17,6 +17,18 @@ use core::num::NonZeroU16;
 /// compositing tests cast to; every other float band count is carried by
 /// `FloatF32(n)`.
 ///
+/// # Canonical spelling
+///
+/// A layout with a named variant has two constructible spellings, because
+/// the tuple variants are public: `FloatF32(4)` names what `RgbaF32` names,
+/// and `Multi8(3)` names what `Rgb8` names. The named one is canonical.
+/// [`PixelFormat::with_channels`] produces it, [`PixelFormat::canonical`]
+/// converts to it, and everything this crate hands you is already in it: a
+/// [`Raster`](crate::raster::Raster) canonicalises the format it is built
+/// with, and the manifest wire format writes the canonical tag. `PartialEq`
+/// and `Hash` are derived and so distinguish the two spellings, which is why
+/// nothing here produces the non-canonical one (issue #531).
+///
 /// # Variants
 ///
 /// | Variant      | Channels | Bits/channel | Bytes/pixel |
@@ -125,11 +137,97 @@ impl PixelFormat {
         Some(fmt)
     }
 
+    /// The canonical spelling of this format's pixel layout.
+    ///
+    /// The tuple variants are public, so a layout that has a named variant
+    /// has two constructible spellings: `FloatF32(4)` names what `RgbaF32`
+    /// names, `Multi8(3)` names what `Rgb8` names, and so on for the seven
+    /// rows below. [`PixelFormat::with_channels`] produces the right-hand
+    /// column; direct construction can produce the left-hand one. This maps
+    /// one to the other, and is the identity on everything else.
+    ///
+    /// | non-canonical | canonical |
+    /// |---|---|
+    /// | `Multi8(1)`   | `Gray8`   |
+    /// | `Multi8(3)`   | `Rgb8`    |
+    /// | `Multi8(4)`   | `Rgba8`   |
+    /// | `Multi16(1)`  | `Gray16`  |
+    /// | `Multi16(3)`  | `Rgb16`   |
+    /// | `Multi16(4)`  | `Rgba16`  |
+    /// | `FloatF32(4)` | `RgbaF32` |
+    ///
+    /// Note that `FloatF32(1)` and `FloatF32(3)` are *already* canonical:
+    /// four is the only float band count with a named variant.
+    ///
+    /// You rarely need to call this. Nothing this crate produces is
+    /// non-canonical: every raster canonicalises its format at construction
+    /// (see [`Raster::new`](crate::raster::Raster::new)), and the manifest
+    /// wire format writes the canonical tag. It is here for the case where
+    /// you built a format yourself and want to compare it against one of
+    /// ours, since `PartialEq` is derived and so distinguishes the two
+    /// spellings.
+    pub fn canonical(self) -> Self {
+        // Spelled out per carrier rather than as
+        // `with_channels(self.channels(), self.bytes_per_channel())`, which
+        // would give the same answers today and be shorter. Two reasons, and
+        // the second is the load-bearing one.
+        //
+        // `with_channels` is keyed on a byte depth, and a byte depth does
+        // not identify a carrier: an unsigned-32 carrier (issue #517) would
+        // share `bytes_per_channel() == 4` with the float one, so the short
+        // form would quietly canonicalise `Uint32(3)` to `FloatF32(3)` --
+        // the same class of silent retag this method exists to remove.
+        //
+        // And there is no wildcard arm here, so adding a carrier variant to
+        // this `#[non_exhaustive]` enum is a compile error at this match
+        // rather than a default that happens to be wrong. The decision gets
+        // forced instead of inherited.
+        match self {
+            Self::Gray8
+            | Self::Gray16
+            | Self::Rgb8
+            | Self::Rgba8
+            | Self::Rgb16
+            | Self::Rgba16
+            | Self::RgbaF32 => self,
+            Self::Multi8(n) => match n.get() {
+                1 => Self::Gray8,
+                3 => Self::Rgb8,
+                4 => Self::Rgba8,
+                _ => self,
+            },
+            Self::Multi16(n) => match n.get() {
+                1 => Self::Gray16,
+                3 => Self::Rgb16,
+                4 => Self::Rgba16,
+                _ => self,
+            },
+            // Four is the only float band count with a named variant, so
+            // `FloatF32(1)` and `FloatF32(3)` are already canonical.
+            Self::FloatF32(n) => match n.get() {
+                4 => Self::RgbaF32,
+                _ => self,
+            },
+        }
+    }
+
+    /// Whether this format is the canonical spelling of its pixel layout.
+    ///
+    /// Equivalent to `self.canonical() == self`. See
+    /// [`PixelFormat::canonical`] for the seven layouts where it is `false`.
+    pub fn is_canonical(self) -> bool {
+        self.canonical() == self
+    }
+
     /// Whether this format includes an alpha (transparency) channel.
     ///
-    /// Returns `true` only for `Rgba8`, `Rgba16`, and `RgbaF32`.
+    /// Returns `true` for the four-band layouts: `Rgba8`, `Rgba16`,
+    /// `RgbaF32`, and the tuple spellings of those same layouts
+    /// (`Multi8(4)`, `Multi16(4)`, `FloatF32(4)`). The question is about the
+    /// pixel layout, not about which of its two spellings you are holding,
+    /// so it is answered on [`PixelFormat::canonical`] (issue #531).
     pub fn has_alpha(self) -> bool {
-        matches!(self, Self::Rgba8 | Self::Rgba16 | Self::RgbaF32)
+        matches!(self.canonical(), Self::Rgba8 | Self::Rgba16 | Self::RgbaF32)
     }
 
     /// Whether this format stores 32-bit float samples (`RgbaF32` or
@@ -163,10 +261,16 @@ impl PixelFormat {
     /// One- and three-band float images promote to `RgbaF32`, since
     /// `FloatF32(1)` / `FloatF32(3)` are the canonical float gray and RGB
     /// carriers. If the format already has alpha, returns `self` unchanged.
-    /// The multiband variants have no alpha concept and are returned
-    /// unchanged.
+    /// A band count with no named variant has no alpha concept, so
+    /// `Multi8(2)` and `FloatF32(7)` come back as themselves.
+    ///
+    /// The answer is the same for both spellings of a layout: `Multi8(1)`
+    /// promotes to `Rgba8` exactly as `Gray8` does, and the returned format
+    /// is always canonical (issue #531).
     pub fn with_alpha(self) -> Self {
-        match self {
+        // On the canonical spelling, so `Multi8(1)` promotes the way `Gray8`
+        // does rather than falling through unchanged (issue #531).
+        match self.canonical() {
             Self::Gray8 => Self::Rgba8,
             Self::Gray16 => Self::Rgba16,
             Self::Rgb8 => Self::Rgba8,
@@ -179,10 +283,13 @@ impl PixelFormat {
     /// Return the variant of this format with the alpha channel removed.
     ///
     /// `Rgba8` demotes to `Rgb8`, `Rgba16` to `Rgb16`, and `RgbaF32` to
-    /// `FloatF32(3)` (the canonical three-band float carrier). Formats
-    /// without alpha are returned unchanged.
+    /// `FloatF32(3)` (the canonical three-band float carrier). A format
+    /// without alpha keeps its layout, and comes back in that layout's
+    /// canonical spelling: `Multi8(3)` demotes to `Rgb8`, which is the same
+    /// pixel layout under the name `with_channels` gives it (issue #531).
     pub fn without_alpha(self) -> Self {
-        match self {
+        // On the canonical spelling, for the reason `with_alpha` is.
+        match self.canonical() {
             Self::Rgba8 => Self::Rgb8,
             Self::Rgba16 => Self::Rgb16,
             // Expect: 3 is non-zero, so the constructor cannot fail.
@@ -414,5 +521,265 @@ mod tests {
         assert_eq!(PixelFormat::RgbaF32.without_alpha(), f3);
         assert_eq!(f3.without_alpha(), f3);
         assert_eq!(f2.without_alpha(), f2);
+    }
+
+    /// Every `(band count, byte depth)` pair that has both a tuple spelling
+    /// and a named one, paired with the named variant `with_channels`
+    /// produces for it. Direct construction of the left-hand column is what
+    /// issue #531 is about: the tuple variants are public, so both spellings
+    /// of one pixel layout are constructible.
+    fn alias_table() -> [(PixelFormat, PixelFormat); 7] {
+        let nz = |n: u16| NonZeroU16::new(n).expect("the table holds no zeroes");
+        [
+            (PixelFormat::Multi8(nz(1)), PixelFormat::Gray8),
+            (PixelFormat::Multi8(nz(3)), PixelFormat::Rgb8),
+            (PixelFormat::Multi8(nz(4)), PixelFormat::Rgba8),
+            (PixelFormat::Multi16(nz(1)), PixelFormat::Gray16),
+            (PixelFormat::Multi16(nz(3)), PixelFormat::Rgb16),
+            (PixelFormat::Multi16(nz(4)), PixelFormat::Rgba16),
+            (PixelFormat::FloatF32(nz(4)), PixelFormat::RgbaF32),
+        ]
+    }
+
+    /**
+     * Tests the exact disagreement issue #531 reproduces: FloatF32(4) is a
+     * constructible second spelling of the layout RgbaF32 names, and the two
+     * must not answer differently about that layout.
+     * Works by asking both spellings every question PixelFormat can be
+     * asked and comparing the answers pairwise, so a future accessor that
+     * forgets the alias fails here rather than at a call site.
+     * Input: FloatF32(4) vs RgbaF32 -> Output: 4 channels, 4 bytes each,
+     * 16 bytes per pixel, float, has_alpha true, with_alpha RgbaF32,
+     * without_alpha FloatF32(3), for both.
+     */
+    #[test]
+    fn floatf32_4_and_rgbaf32_answer_alike() {
+        let alias = PixelFormat::FloatF32(NonZeroU16::new(4).expect("4 is non-zero"));
+        let named = PixelFormat::RgbaF32;
+
+        assert_eq!(alias.channels(), named.channels(), "channels disagree");
+        assert_eq!(
+            alias.bytes_per_channel(),
+            named.bytes_per_channel(),
+            "bytes_per_channel disagree"
+        );
+        assert_eq!(
+            alias.bytes_per_pixel(),
+            named.bytes_per_pixel(),
+            "bytes_per_pixel disagree"
+        );
+        assert_eq!(alias.is_float(), named.is_float(), "is_float disagrees");
+        assert_eq!(
+            alias.has_alpha(),
+            named.has_alpha(),
+            "has_alpha disagrees: FloatF32(4) says {} and RgbaF32 says {}",
+            alias.has_alpha(),
+            named.has_alpha()
+        );
+        assert_eq!(
+            alias.with_alpha(),
+            named.with_alpha(),
+            "with_alpha disagrees"
+        );
+        assert_eq!(
+            alias.without_alpha(),
+            named.without_alpha(),
+            "without_alpha disagrees"
+        );
+    }
+
+    /**
+     * Tests that no tuple spelling of a layout behaves differently from the
+     * named variant with_channels canonicalizes it to, for any band count
+     * a named variant exists for.
+     * Works by sweeping band counts 1 to 8 across all three byte depths,
+     * building the tuple variant directly and the canonical one through
+     * with_channels, and comparing every accessor. Counts with no named
+     * variant (2, 5, 6, 7, 8, and 1/3 at the float depth) compare a value
+     * against itself and hold trivially, which is what makes the sweep safe
+     * to state over the whole range.
+     * Input: Multi8(4) vs Rgba8, Multi16(1) vs Gray16, FloatF32(4) vs
+     * RgbaF32, ... -> Output: identical answers in every row.
+     */
+    #[test]
+    fn every_tuple_spelling_behaves_like_its_canonical_form() {
+        for n in 1..=8u16 {
+            let nz = NonZeroU16::new(n).expect("n starts at 1");
+            for (tuple, depth) in [
+                (PixelFormat::Multi8(nz), 1usize),
+                (PixelFormat::Multi16(nz), 2),
+                (PixelFormat::FloatF32(nz), 4),
+            ] {
+                let named = PixelFormat::with_channels(usize::from(n), depth)
+                    .expect("1..=8 bands at depth 1/2/4 is a valid format");
+                assert_eq!(
+                    tuple.channels(),
+                    named.channels(),
+                    "{tuple:?} and {named:?} disagree on channels"
+                );
+                assert_eq!(
+                    tuple.bytes_per_channel(),
+                    named.bytes_per_channel(),
+                    "{tuple:?} and {named:?} disagree on bytes_per_channel"
+                );
+                assert_eq!(
+                    tuple.bytes_per_pixel(),
+                    named.bytes_per_pixel(),
+                    "{tuple:?} and {named:?} disagree on bytes_per_pixel"
+                );
+                assert_eq!(
+                    tuple.is_float(),
+                    named.is_float(),
+                    "{tuple:?} and {named:?} disagree on is_float"
+                );
+                assert_eq!(
+                    tuple.has_alpha(),
+                    named.has_alpha(),
+                    "{tuple:?} and {named:?} disagree on has_alpha"
+                );
+                assert_eq!(
+                    tuple.with_alpha(),
+                    named.with_alpha(),
+                    "{tuple:?} and {named:?} disagree on with_alpha"
+                );
+                assert_eq!(
+                    tuple.without_alpha(),
+                    named.without_alpha(),
+                    "{tuple:?} and {named:?} disagree on without_alpha"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the alpha helpers land on the named variant rather than on
+     * the tuple spelling of the same layout, so a promotion or demotion
+     * cannot introduce an alias that was not there before.
+     * Works by promoting and demoting every row of the alias table and
+     * asserting the result is the named variant's answer, by value.
+     * Input: Multi8(1).with_alpha() -> Rgba8; Multi8(4).without_alpha() ->
+     * Rgb8; FloatF32(4).without_alpha() -> FloatF32(3).
+     */
+    #[test]
+    fn alpha_helpers_land_on_the_named_variant() {
+        for (alias, named) in alias_table() {
+            assert_eq!(
+                alias.with_alpha(),
+                named.with_alpha(),
+                "{alias:?}.with_alpha() must match {named:?}.with_alpha()"
+            );
+            assert_eq!(
+                alias.without_alpha(),
+                named.without_alpha(),
+                "{alias:?}.without_alpha() must match {named:?}.without_alpha()"
+            );
+        }
+    }
+
+    /**
+     * Tests that canonical maps every non-canonical spelling to its named
+     * variant and leaves everything else alone, which is the table issue
+     * #531 enumerates.
+     * Works by asserting the seven rows by value, then asserting canonical
+     * is the identity on all seven named variants and on the tuple
+     * spellings that have no named twin, and that is_canonical agrees with
+     * it everywhere.
+     * Input: FloatF32(4) -> RgbaF32, Multi8(3) -> Rgb8, ...; FloatF32(3),
+     * Multi8(2), Rgb8 -> unchanged.
+     */
+    #[test]
+    fn canonical_maps_the_alias_table_and_nothing_else() {
+        let nz = |n: u16| NonZeroU16::new(n).expect("the table holds no zeroes");
+
+        for (alias, named) in alias_table() {
+            assert_eq!(
+                alias.canonical(),
+                named,
+                "{alias:?} must canonicalize to {named:?}"
+            );
+            assert!(
+                !alias.is_canonical(),
+                "{alias:?} is not the canonical spelling of its layout"
+            );
+            assert!(named.is_canonical(), "{named:?} is canonical");
+        }
+
+        // The named variants and the tuple spellings with no named twin are
+        // fixed points. FloatF32(1) and FloatF32(3) are in this list on
+        // purpose: four is the only float band count with a named variant,
+        // so the float row of the table has one entry where the 8- and
+        // 16-bit rows have three.
+        for fmt in [
+            PixelFormat::Gray8,
+            PixelFormat::Gray16,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::Rgb16,
+            PixelFormat::Rgba16,
+            PixelFormat::RgbaF32,
+            PixelFormat::Multi8(nz(2)),
+            PixelFormat::Multi8(nz(7)),
+            PixelFormat::Multi16(nz(2)),
+            PixelFormat::Multi16(nz(5)),
+            PixelFormat::FloatF32(nz(1)),
+            PixelFormat::FloatF32(nz(3)),
+            PixelFormat::FloatF32(nz(7)),
+        ] {
+            assert_eq!(
+                fmt.canonical(),
+                fmt,
+                "{fmt:?} is already canonical and must be left alone"
+            );
+            assert!(fmt.is_canonical(), "{fmt:?} must report as canonical");
+        }
+    }
+
+    /**
+     * Tests exactly which band counts have a named variant, which is what
+     * decides the shape of the alias table: a count with a named variant is
+     * one where a tuple spelling of the same layout also exists.
+     * Works by sweeping band counts 1 to 300 across all three byte depths
+     * and asserting with_channels lands on a named variant for precisely
+     * 1, 3 and 4 at the 8- and 16-bit depths and precisely 4 at the float
+     * depth, and on a tuple variant everywhere else. Asserting
+     * `is_canonical()` here instead would pin nothing: `canonical` is
+     * defined as `with_channels`, so it holds for any implementation.
+     * Input: (1..=300) x {1, 2, 4} -> Output: named at (1|3|4, 1|2) and
+     * (4, 4), tuple elsewhere.
+     */
+    #[test]
+    fn with_channels_uses_a_named_variant_for_exactly_the_aliased_counts() {
+        for n in 1..=300usize {
+            for depth in [1usize, 2, 4] {
+                let fmt = PixelFormat::with_channels(n, depth)
+                    .expect("1..=300 bands at depth 1/2/4 is a valid format");
+                let is_named = matches!(
+                    fmt,
+                    PixelFormat::Gray8
+                        | PixelFormat::Gray16
+                        | PixelFormat::Rgb8
+                        | PixelFormat::Rgba8
+                        | PixelFormat::Rgb16
+                        | PixelFormat::Rgba16
+                        | PixelFormat::RgbaF32
+                );
+                let wants_named = if depth == 4 {
+                    n == 4
+                } else {
+                    n == 1 || n == 3 || n == 4
+                };
+                assert_eq!(
+                    is_named,
+                    wants_named,
+                    "with_channels({n}, {depth}) produced {fmt:?}, which is \
+                     {}a named variant",
+                    if is_named { "" } else { "not " }
+                );
+                assert!(
+                    fmt.is_canonical(),
+                    "with_channels({n}, {depth}) produced the non-canonical {fmt:?}"
+                );
+            }
+        }
     }
 }
