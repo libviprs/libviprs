@@ -50,14 +50,23 @@
 //!   reducing gap of 1, reproducing `vips_shrink_build`.
 //! * **`reduce` kernels.** Each output sample is a 1D convolution of
 //!   `vips_reduce_get_points(kernel, shrink)` input samples with the kernel
-//!   stretched by the shrink factor and normalised to unit sum, evaluated
-//!   at the exact fractional offset. libvips quantises the offset to
-//!   `VIPS_TRANSFORM_SCALE` fixed-point buckets as a speed optimisation;
-//!   the masks here are computed in `f64` per output position, which is the
-//!   same convolution without the quantisation error. Edges extend by
-//!   replication (`VIPS_EXTEND_COPY`), so constant images are preserved
-//!   exactly. `reduce` itself runs with gap 0 (no box pre-pass); `shrink`
-//!   passes gap 1 and `resize` gap 2, as in libvips.
+//!   stretched by the shrink factor and normalised to unit sum, evaluated at
+//!   the sub-pixel offset rounded onto libvips' 65-entry table grid by
+//!   `table_offset`. That rounding is part of the answer and not a speed
+//!   optimisation, because `vips_reduceh_gen` never evaluates the kernel
+//!   anywhere but on the grid; treating it as one is what made `resize`
+//!   disagree with the binary by up to 2.3 at every non-dyadic scale while
+//!   staying exact at the dyadic ones (issue #668). The masks themselves stay
+//!   in `f64`, where libvips also carries a `short` fixed-point copy it uses
+//!   on the integer carriers. Edges extend by replication
+//!   (`VIPS_EXTEND_COPY`), so constant images are preserved exactly. `reduce`
+//!   itself runs with gap 0 (no box pre-pass); `shrink` passes gap 1 and
+//!   `resize` gap 2, as in libvips.
+//! * **Interpolator offsets.** The bicubic interpolator reads the same kind of
+//!   table (`bicubic.cpp:496-519`), so it rounds its offset through
+//!   `table_offset` too. Bilinear and the nonlinear nohalo and lbb have no
+//!   tables and keep the exact offset, which is what `vips_interpolate_*` does
+//!   for them.
 //! * **`resize` composition.** The scale is split per axis: any downscale
 //!   runs `reducev` / `reduceh` with the chosen kernel (default `lanczos3`,
 //!   gap 2), any residual upscale runs `affine` with the interpolator
@@ -600,6 +609,45 @@ fn round_int(v: f64) -> i64 {
     }
 }
 
+/// `VIPS_TRANSFORM_SCALE` (`interpolate.h:109`): libvips precomputes its
+/// resampling coefficients at 65 sub-pixel positions, one every 1/64 of a
+/// pixel.
+const TRANSFORM_SCALE: i64 = 64;
+
+/// Round the sub-pixel part of a continuous source coordinate onto the grid
+/// libvips builds those tables on, so a mask evaluated here is the mask a table
+/// lookup would have returned.
+///
+/// This is not a precision detail, it is the answer. Neither `vips_reduceh_gen`
+/// nor `vips_interpolate_bicubic_interpolate` ever evaluates its kernel at the
+/// true offset; both index a table built at `(float) x / VIPS_TRANSFORM_SCALE`
+/// and both spell the index with the same five lines (`reduceh.cpp:270-276`,
+/// `bicubic.cpp:496-503`):
+///
+/// ```c
+/// const int sx = X * VIPS_TRANSFORM_SCALE * 2;
+/// const int six = sx & (VIPS_TRANSFORM_SCALE * 2 - 1);
+/// const int tx = (six + 1) >> 1;
+/// ```
+///
+/// A dyadic scale lands every offset on the grid and the rounding is invisible,
+/// which is why [`Raster::resize`] agreed with the binary at 0.5, 0.25, 0.125
+/// and 2.0 while missing 1.5, 0.75, 0.37 and 0.3 by up to 2.3 (issue #668).
+///
+/// The `floor` is deliberate where the C truncates. `(int)(X * 128)` rounds
+/// toward zero and `& 127` reads two's complement, so on a negative coordinate
+/// that pair picks the bucket above the one `floor` picks. vips never meets the
+/// case: `vips_affine_gen` hands the interpolator a coordinate in the embedded
+/// space, shifted by `window_offset` and so never below 1 (`affine.c:361-362`),
+/// while libviprs interpolates in the input's own coordinates, which go
+/// negative on the first output column of any enlargement past 2x. Flooring
+/// agrees with vips on both signs; truncating agrees only on the positive one.
+fn table_offset(x: f64) -> f64 {
+    let sx = (x * (TRANSFORM_SCALE * 2) as f64).floor() as i64;
+    let six = sx.rem_euclid(TRANSFORM_SCALE * 2);
+    ((six + 1) >> 1) as f64 / TRANSFORM_SCALE as f64
+}
+
 /// Per-format sample layout: bytes per channel and float flag.
 #[derive(Clone, Copy)]
 struct SampleLayout {
@@ -878,16 +926,17 @@ fn reduce_axis(
     };
 
     // Precompute the mask and first tap for every output position along the
-    // axis. libvips quantises the sub-pixel offset into fixed-point tables;
-    // computing the mask per position in f64 is the same convolution
-    // without the quantisation.
+    // axis. The masks stay in f64 where libvips carries one `double` table and
+    // one `short` one, but the offset each mask is built at goes through
+    // `table_offset` first: the table is not a precision detail, and evaluating
+    // the kernel at the true offset is a different answer wherever that offset
+    // misses the 1/64 grid (issue #668).
     let mut masks: Vec<(i64, Vec<f64>)> = Vec::with_capacity(out_dim);
     for i in 0..out_dim {
         let x = (i as f64 + 0.5) * shrink - 0.5 - offset;
         let ix = x.floor();
-        let t = x - ix;
         let mut c = vec![0.0f64; n];
-        kernel.mask(&mut c, shrink, t);
+        kernel.mask(&mut c, shrink, table_offset(x));
         masks.push((ix as i64 - margin as i64, c));
     }
 
@@ -1060,8 +1109,12 @@ fn interpolate_at(
         Interpolator::Bicubic => {
             let mut cx = [0.0f64; 4];
             let mut cy = [0.0f64; 4];
-            catmull_coefficients(&mut cx, x - x0 as f64);
-            catmull_coefficients(&mut cy, y - y0 as f64);
+            // The bicubic tables are the reduce tables' twin, so the offset
+            // is quantised the same way; bilinear and the nonlinear
+            // interpolators below have no tables and keep the exact offset
+            // (issue #668).
+            catmull_coefficients(&mut cx, table_offset(x));
+            catmull_coefficients(&mut cy, table_offset(y));
             out.fill(0.0);
             for (j, cyj) in cy.iter().enumerate() {
                 for (i, cxi) in cx.iter().enumerate() {
@@ -4011,16 +4064,23 @@ mod tests {
             // geometry: bilinear differs at a single `.5` rounding tie
             // (delta 1); nearest at 2 equidistant-neighbour ties (a
             // whole-pixel swap, so a large delta but the adjacent sample);
-            // and bicubic within delta 3 because libvips bicubic reads
-            // precomputed coefficient tables quantised to a fixed-point
-            // sub-pixel grid (VIPS_TRANSFORM_SCALE) while this direct
-            // Catmull-Rom does not. None of those conventions touch the
-            // on-grid ported test_affine round-trip.
+            // and bicubic within delta 1 on 30 of 144.
+            //
+            // That bicubic allowance was 60 bytes at delta 3 while this
+            // module evaluated Catmull-Rom at the exact sub-pixel offset and
+            // libvips read its 65-entry table. Rounding the offset the same
+            // way (#668) halves the count and takes the worst delta to one
+            // LSB. What is left is the other table: on a `uchar` carrier
+            // `vips_interpolate_bicubic_interpolate` dispatches to
+            // `bicubic_unsigned_int_tab` and reads `vips_bicubic_matrixi`,
+            // the coefficients themselves quantised to `VIPS_INTERPOLATE_SCALE`
+            // (12-bit) fixed point, where this stays in `f64`. None of those
+            // conventions touch the on-grid ported test_affine round-trip.
             let (allowed_count, allowed_delta) = match name {
                 "nohalo" | "lbb" => (0, 0),
                 "bilinear" => (1, 1),
                 "nearest" => (2, u8::MAX),
-                "bicubic" => (60, 3),
+                "bicubic" => (30, 1),
                 _ => unreachable!(),
             };
             assert!(
