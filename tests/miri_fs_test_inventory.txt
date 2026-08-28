@@ -302,6 +302,9 @@ annotated   fs-detected  tests/oracle_capture_pins.rs::captures_parse_as_json_an
 annotated   fs-detected  tests/oracle_capture_pins.rs::convolution_min_max_positions_are_deterministic
 annotated   fs-detected  tests/oracle_capture_pins.rs::convolution_pins_pixels_not_the_v_container
 annotated   fs-detected  tests/oracle_capture_pins.rs::every_capture_declares_the_oracle_it_was_measured_against
+annotated   fs-detected  tests/oracle_capture_pins.rs::every_capture_script_checks_the_oracle_pin
+annotated   fs-detected  tests/oracle_capture_pins.rs::every_recorded_fixture_hash_matches_the_committed_file
+annotated   fs-detected  tests/oracle_capture_pins.rs::no_two_records_hash_one_name_differently
 annotated   fs-detected  tests/page_model.rs::exactly_one_source_file_names_the_page_height_key
 annotated   fs-detected  tests/path_traversal.rs::svg_image_href_cannot_distinguish_an_existing_file_from_a_missing_one
 annotated   fs-detected  tests/path_traversal.rs::svg_image_href_does_not_follow_a_relative_traversal_off_disk
