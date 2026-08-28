@@ -19,7 +19,7 @@
 //! |--------------------------|-------------------------|--------------------------------------------------|
 //! | [`decode_gif`]           | `gifload`               | frame 0 as `Rgb8` or `Rgba8`, plus the GIF fields |
 //! | [`decode_gif_with`]      | `gifload` `page` / `n`  | a window of frames as one page roll               |
-//! | [`Raster::encode_gif`]   | `gifsave_buffer`        | one-frame GIF89a bytes                           |
+//! | [`Raster::encode_gif`]   | `gifsave_buffer`        | GIF89a bytes, one frame per page                 |
 //! | [`Raster::save_gif`]     | `gifsave`               | the same bytes written to a path                 |
 //!
 //! # Semantics
@@ -929,19 +929,31 @@ fn decode_error(err: gif::DecodingError) -> GifError {
 impl Raster {
     /// Encode as GIF bytes (libvips `gifsave_buffer`).
     ///
-    /// Writes a single-frame GIF89a: a global colour table quantised to
-    /// `min(255, 1 << bitdepth)` entries, one image block, and the NETSCAPE
-    /// looping extension cgif always emits. Requires an 8-bit raster
+    /// Writes a GIF89a: a global colour table quantised to
+    /// `min(255, 1 << bitdepth)` entries over the whole raster, then **one
+    /// image block per page**, then the NETSCAPE looping extension unless
+    /// `loop` asks for a single play. An unpaged raster is one page, so a
+    /// still is the same file it always was.
+    ///
+    /// The frame geometry, the per-frame delays and the loop count all come
+    /// off the raster: its page height, its `delay` array and its `loop`
+    /// field, which is where vips reads them too. Requires an 8-bit raster
     /// (`Gray8` / `Rgb8` / `Rgba8`); see the [module docs](crate::gif) for
-    /// the alpha threshold, the reserved transparent index, and where the
-    /// output deliberately differs from vips.
+    /// the alpha threshold, the reserved transparent index, the disposal
+    /// rule, and where the output deliberately differs from vips.
     ///
     /// # Errors
     ///
-    /// [`EncodeError::Encode`] for a raster that is not 8-bit, or whose
-    /// width or height exceeds the 65535-pixel GIF axis limit (vips rejects
-    /// the same case as `"frame too large"`, `cgifsave.c:744-750`), or if
-    /// the GIF writer itself fails.
+    /// [`EncodeError::Encode`] for
+    ///
+    /// * a raster that is not 8-bit;
+    /// * a **page** whose width or height exceeds the 65535-pixel GIF axis
+    ///   limit, which is per frame rather than per roll (vips rejects the
+    ///   same case as `"frame too large"`, `cgifsave.c:744-750`);
+    /// * a `delay` array present with a length other than the page count, or
+    ///   carrying a negative entry;
+    /// * a negative `loop`;
+    /// * a failure in the GIF writer itself.
     pub fn encode_gif(&self, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
         let width = self.width();
         // The frame is one page, not the whole raster: the logical screen
@@ -1088,9 +1100,15 @@ impl Raster {
     /// two-entry array on a four-page roll wrote centiseconds `2 3 0 0` and a
     /// six-entry one wrote `2 3 4 5`, both measured, and a delay of -10 ms
     /// came out as 65535 centiseconds, which is 655 seconds. All three are a
-    /// caller mistake given a silent answer, and the load side now guarantees
-    /// one entry per page, so a mismatch here can only come from a raster
-    /// built by hand.
+    /// caller mistake given a silent answer.
+    ///
+    /// Reaching the length refusal takes work, and that is deliberate rather
+    /// than assumed. The loader attaches one entry per page, and
+    /// [`Raster::carry_meta_from`] drops the array on any shape change for
+    /// the same reason it drops the page split, so an op that changes the
+    /// page count hands on a raster with no `delay` rather than a stale one.
+    /// `roll.extract_page(0).encode_gif(..)` used to fail here, which is how
+    /// that was found.
     fn gif_delays(&self, pages: u32) -> Result<Vec<u16>, EncodeError> {
         let Some(stored) = self.get_int_array("delay") else {
             return Ok(vec![0; pages as usize]);
@@ -3877,6 +3895,25 @@ mod tests {
             frames[0].payload, frames[1].payload,
             "identical pages dither identically, which they cannot if error crosses the seam"
         );
+
+        // The control the assertion above needs: two identical pages come out
+        // identical with dithering switched off as well, so equality alone
+        // does not say error diffusion ran. Requiring the dithered bytes to
+        // differ from the undithered ones is what makes this a test of the
+        // seam rather than of `dither == 0`.
+        let flat = source
+            .encode_gif(SaveOptions::default().with_bitdepth(3).with_dither(0.0))
+            .expect("encodes");
+        let (_, _, flat_frames) = wire_frames(&flat);
+        assert_eq!(flat_frames.len(), 2);
+        assert_eq!(
+            flat_frames[0].payload, flat_frames[1].payload,
+            "identical pages match without dithering too, which is why this test needs a control"
+        );
+        assert_ne!(
+            frames[0].payload, flat_frames[0].payload,
+            "dithering actually ran at 1.0"
+        );
     }
 
     /**
@@ -3978,6 +4015,105 @@ mod tests {
             [65_535, 65_535, 65_535, 1],
             "vips wrote 65535 0 4464 1 here, which turns a long delay into a short one"
         );
+    }
+
+    /**
+     * Tests that pulling one page out of an animation and saving it as a
+     * still works, which the delay-length refusal broke until an adversarial
+     * review found it. Works by round-tripping a two-page roll, extracting
+     * page 0, and encoding that.
+     * `Raster::extract` carries every attached field and drops only the page
+     * split, so the extracted page arrived carrying the roll's whole delay
+     * array and `encode_gif` refused it: "delay has 2 entries for 1 page(s)".
+     * The fix is in `carry_meta_from`, which now drops `delay` wherever it
+     * drops `page-height`, for the same reason: both describe the page split
+     * rather than the image, so neither survives a change of shape. Keeping
+     * the array would have been worse than refusing, since the first delay
+     * would then be written onto a page that is not the first.
+     * Input: page 0 of a two-page roll with delays `[40, 60]` -> Output: a
+     * one-frame GIF with no delay, and no `delay` field on the extracted
+     * raster.
+     */
+    #[test]
+    fn extracting_a_page_and_saving_it_drops_the_stale_delay_array() {
+        let mut source = roll(2);
+        source.set_field("delay", MetadataValue::IntArray(vec![40, 60]));
+        let bytes = source.encode_gif(SaveOptions::default()).expect("encodes");
+        let back = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("loads back");
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 60][..]));
+
+        let page = back.extract_page(0);
+        assert_eq!(page.pages_loaded(), 1);
+        assert_eq!(
+            page.get_field("delay"),
+            None,
+            "a one-page raster cannot carry a two-page delay array"
+        );
+        let still = page
+            .encode_gif(SaveOptions::default())
+            .expect("a page pulled out of an animation saves as a still");
+        let (screen, _, frames) = wire_frames(&still);
+        assert_eq!(screen, (2, 2));
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].delay_cs, 0);
+
+        // The control: the refusal is still there for a raster that really
+        // does carry a mismatched array, which is the only way left to build
+        // one.
+        let mut smuggled = roll(1);
+        smuggled.set_field("delay", MetadataValue::IntArray(vec![40, 60]));
+        assert!(smuggled.encode_gif(SaveOptions::default()).is_err());
+    }
+
+    /**
+     * Tests what a GIF that has been loaded and re-encoded comes out as,
+     * which is where "a still save is unchanged" stops being true. Works by
+     * loading a still fixture that carries no NETSCAPE block and encoding the
+     * result, then doing the same for a fixture that carries one.
+     * The loader attaches `loop`, so the re-encode honours it, and a file
+     * with no block loads as `loop = 1`, which writes no block back. That is
+     * a change from the still lane, which wrote a block holding zero
+     * unconditionally, and it is the better match: measured on vips 8.18.6,
+     * `loop = 1` writes no block. A raster built from scratch, carrying
+     * neither field, still writes the block cgif always writes.
+     * Input: three rasters, one with no `loop` and two loaded from files
+     * with and without a NETSCAPE block -> Output: block 0, no block, block
+     * 0.
+     */
+    #[test]
+    fn a_reloaded_still_carries_its_loop_count_back_out() {
+        let fresh = roll(1).encode_gif(SaveOptions::default()).expect("encodes");
+        assert_eq!(
+            wire_frames(&fresh).1,
+            Some(0),
+            "a raster carrying no loop field writes the block cgif writes"
+        );
+
+        for (block, expected) in [(None, None), (Some(0u16), Some(0u16))] {
+            let source = fixture(
+                (2, 2),
+                &ANIM_PALETTE,
+                0,
+                block,
+                &[anim_frame([1, 1, 1, 1], 1, 0)],
+            );
+            let loaded = decode_gif(&source, DecodeLimits::default()).expect("a valid GIF");
+            assert_eq!(
+                loaded.get_int("loop"),
+                Some(if block.is_none() { 1 } else { 0 })
+            );
+            let again = loaded.encode_gif(SaveOptions::default()).expect("encodes");
+            assert_eq!(
+                wire_frames(&again).1,
+                expected,
+                "a reload of a {block:?} file writes {expected:?} back"
+            );
+        }
     }
 
     #[test]
