@@ -1445,7 +1445,18 @@ impl Raster {
     /// `1 x height` image whose value at `y` is the column index of the
     /// first non-zero sample in row `y` (the image width when all zero).
     /// Both outputs are 16-bit with the input band count, positions
-    /// saturating at `65535`, matching the libvips `ushort` output.
+    /// saturating at `65535`.
+    ///
+    /// **That ceiling is a deviation, and the saturation is visible on any
+    /// image longer than 65535 along the axis being profiled.** libvips
+    /// emits `VIPS_FORMAT_INT` here, measured on 8.18.6 for every one of
+    /// the eight input formats, so its positions are exact up to
+    /// `i32::MAX`: on a 1x65537 all-zero image `vips profile` reports
+    /// `65537` where this reports `65535`. Note the signedness. `INT` is
+    /// the *signed* 32-bit carrier, so closing this gap is a payoff of the
+    /// signed carriers (issue #516) and not of the uint one (issue #517),
+    /// which is the opposite of what issue #532 assumes about the counter
+    /// family. Values are unaffected below the ceiling.
     pub fn profile(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
@@ -1495,8 +1506,17 @@ impl Raster {
     /// Returns `(columns, rows)`: `columns` is a `width x 1` image holding
     /// the per-band sum of each column; `rows` is a `1 x height` image
     /// holding the per-band sum of each row. Outputs are 16-bit and sums
-    /// saturate at `65535` (libvips promotes to a 32-bit format this crate
-    /// does not have).
+    /// saturate at `65535`.
+    ///
+    /// **The ceiling is a deviation and it is reached by any image with
+    /// more than 257 rows of full-scale 8-bit samples.** libvips promotes
+    /// to a 32-bit carrier this crate does not have, and *which* one
+    /// depends on the input, measured on 8.18.6: `UINT` for `uchar`,
+    /// `ushort` and `uint`, `INT` for `char`, `short` and `int`, and
+    /// `DOUBLE` for `float` and `double`. So matching vips here needs both
+    /// carrier families and not just the uint one (issues #517 and #516).
+    /// On a 1x65537 all-255 image `vips project` reports `16711935` where
+    /// this reports `65535`.
     pub fn project(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
@@ -4376,6 +4396,55 @@ mod tests {
         assert_eq!(columns.getpoint(10, 0), vec![0.0]);
         assert_eq!(columns.getpoint(70, 0), vec![500.0]);
         assert_eq!(rows.getpoint(0, 10), vec![500.0]);
+    }
+
+    /**
+     * Tests the carrier `profile` and `project` actually write, so the
+     * doc's claims about them have a check behind them and the day a wider
+     * carrier lands this goes red at the two places that must change.
+     * Works by asserting the output `PixelFormat` of both ops for a 1-band
+     * and a 3-band input, since the band count and the sample kind are
+     * chosen separately.
+     * Measured on vips 8.18.6: `profile` emits `VIPS_FORMAT_INT` for every
+     * one of the eight input formats and `project` emits `UINT` for the
+     * unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float
+     * ones, so both of these are deviations and neither is the `ushort` the
+     * doc used to claim (issue #759).
+     * Input: Gray8 and Rgb8 -> Output: Gray16 / Rgb16 from both ops.
+     */
+    #[test]
+    fn profile_and_project_carry_16_bit_samples() {
+        let one = gray(4, 3, vec![0, 0, 5, 0, 0, 7, 0, 0, 0, 0, 0, 0]);
+        let (pc, pr) = one.profile();
+        assert_eq!(pc.format(), PixelFormat::Gray16);
+        assert_eq!(pr.format(), PixelFormat::Gray16);
+        let (jc, jr) = one.project();
+        assert_eq!(jc.format(), PixelFormat::Gray16);
+        assert_eq!(jr.format(), PixelFormat::Gray16);
+
+        let three = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        let (pc3, _) = three.profile();
+        assert_eq!(pc3.format(), PixelFormat::Rgb16);
+        let (jc3, _) = three.project();
+        assert_eq!(jc3.format(), PixelFormat::Rgb16);
+    }
+
+    /**
+     * Tests that `profile` saturates a position past 65535 rather than
+     * wrapping, the deviation the 16-bit carrier forces.
+     * Works by profiling a 1x65537 all-zero image, whose columns entry is
+     * the height because the column never goes non-zero. The image is 64
+     * KiB, so reaching the ceiling costs nothing.
+     * Measured on vips 8.18.6, whose `INT` output holds the true value:
+     * `vips profile` on this image reports `65537`. libviprs reports the
+     * `65535` asserted here (issue #759).
+     * Input: 1x65537 of zeros -> Output: columns(0,0) == 65535, not 65537.
+     */
+    #[test]
+    fn profile_saturates_a_position_past_the_16_bit_ceiling() {
+        let tall = gray(1, 65_537, vec![0u8; 65_537]);
+        let (columns, _) = tall.profile();
+        assert_eq!(columns.getpoint(0, 0), vec![65535.0]);
     }
 
     /// project saturates sums past 65535 rather than wrapping.

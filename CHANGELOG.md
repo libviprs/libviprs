@@ -1736,6 +1736,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`profile`'s docs claimed its 16-bit saturating output matched "the libvips
+  `ushort` output". libvips emits `VIPS_FORMAT_INT`** (issue #759), measured on
+  8.18.6 for every one of the eight input formats. The word matters more than
+  it looks: `INT` is the *signed* 32-bit carrier, so `profile` is a payoff of
+  the signed carriers (issue #516), not of the uint one (issue #517).
+
+  Two neighbouring claims were under-specified in the same direction and are
+  corrected with the measured tables. `project` promotes to `UINT` for the
+  unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float ones,
+  so it needs both carrier families rather than just uint. The histogram
+  module's "libvips stores counts in 32-bit unsigned samples" swept in
+  `hist_find_indexed`, which emits `DOUBLE` for every input format and either
+  `combine` mode, and `hist_cum`, which follows its input across all four.
+
+  No value or format changes here: the saturation at `65535` stays until a
+  wider carrier lands. What changes is that the claims now have checks under
+  them. `profile` and `project` had no assertion on their output format
+  anywhere in the crate and `profile` had no saturation test at all, which is
+  how the wrong sentence survived. Six counter ops get a format pin and two
+  get a ceiling pin carrying the measured vips answer beside the libviprs one.
+
 - `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
   now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster
   with no alpha band (issue #704). `vips_interpolate_bicubic_interpolate` sends
