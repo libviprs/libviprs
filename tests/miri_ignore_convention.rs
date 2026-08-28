@@ -167,7 +167,7 @@ const ANCHOR_FILES: &[&str] = &[
 /// module out of date the moment `src/checksum.rs` adopts the convention, which
 /// is what issue #652 is about. The workflow file belongs to PR #644, so the
 /// correction to its comment goes with that PR, not this one.
-const EXPECTED_SRC_ANNOTATIONS: usize = 51;
+const EXPECTED_SRC_ANNOTATIONS: usize = 53;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation.
 const EXPECTED_SRC_MODULES: usize = 8;
