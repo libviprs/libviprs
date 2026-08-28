@@ -821,8 +821,15 @@ const MATRIX_UNSPECIFIED: u16 = 2;
 /// 4:2:0 data gets 124 of 1024 pixels wrong; using that one here gets 103.
 #[must_use]
 pub fn ycbcr_to_rgb_444(y: u8, cb: u8, cr: u8) -> [u8; 3] {
-    let _ = (y, cb, cr);
-    [0, 0, 0]
+    let luma = f64::from(y);
+    let cb = f64::from(cb) - 128.0;
+    let cr = f64::from(cr) - 128.0;
+    let clamp = |v: f64| -> u8 { v.round().clamp(0.0, 255.0) as u8 };
+    [
+        clamp(luma + 1.402 * cr),
+        clamp(luma - 0.344_136 * cb - 0.714_136 * cr),
+        clamp(luma + 1.772 * cb),
+    ]
 }
 
 /// libheif's YCbCr to RGB conversion for a **4:2:0** frame.
@@ -849,8 +856,15 @@ pub fn ycbcr_to_rgb_444(y: u8, cb: u8, cr: u8) -> [u8; 3] {
 /// over 2048 measured pixels.
 #[must_use]
 pub fn ycbcr_to_rgb_420(y: u8, cb: u8, cr: u8) -> [u8; 3] {
-    let _ = (y, cb, cr);
-    [0, 0, 0]
+    let base = 256 * i32::from(y) + 128;
+    let cb = i32::from(cb) - 128;
+    let cr = i32::from(cr) - 128;
+    let clamp = |v: i32| -> u8 { v.clamp(0, 255) as u8 };
+    [
+        clamp((base + 359 * cr) >> 8),
+        clamp((base - 88 * cb - 183 * cr) >> 8),
+        clamp((base + 454 * cb) >> 8),
+    ]
 }
 
 /// Left-justify a `bit_depth`-bit sample into the top of a `u16`.
@@ -863,8 +877,7 @@ pub fn ycbcr_to_rgb_420(y: u8, cb: u8, cr: u8) -> [u8; 3] {
 /// record measured and what `deep_samples_left_justify` pins.
 #[must_use]
 fn left_justify(sample: u16, bit_depth: u8) -> u16 {
-    let _ = bit_depth;
-    sample
+    sample << (16u8.saturating_sub(bit_depth))
 }
 
 // ---------------------------------------------------------------------------
