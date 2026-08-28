@@ -69,6 +69,35 @@
 //! path and hands the gain map on as metadata for `uhdr2scRGB` or a re-save
 //! to pick up. [`uhdr_to_scrgb`] is the operation that combines them.
 //!
+//! # What the round trip against libvips is bounded by, and what it is not
+//!
+//! #508 measured a container this crate wrote, expanded it both ways, and
+//! attributed the residual in the mean to this module's own gain-map
+//! resampler. That attribution is wrong and #760 re-measured it. The resampler
+//! is `crate::resample`'s now (see [`uhdr_to_scrgb`]) and it reproduces
+//! `vips resize` bit for bit at the scales a written container uses, so at
+//! those scales it contributes nothing at all. What is left is the two JPEG
+//! decoders.
+//!
+//! Measured on 8.18.6 over a 64x64 scRGB ramp written at quality 95 with
+//! `gain_map_shrink: 2`, expanded by `vips uhdr2scRGB` and by
+//! [`from_container`]:
+//!
+//! | comparison | result |
+//! |---|---|
+//! | the base half, `image` against `jpegload` | 100 of 12288 bytes differ, worst 2 |
+//! | the gain-map half, same two decoders | 4 of 1024 bytes differ, worst 1 |
+//! | the scRGB expansions, end to end | 1766 of 12288 samples differ, worst 0.0457 |
+//! | the same expansion handed **vips' own decoded halves** | 1644 of 12288 differ, worst **9.5e-07** |
+//!
+//! The last row is the isolation and the whole point of the table: give this
+//! module the halves vips decoded and the answers agree to `f32` ulp. So the
+//! visible residual is two JPEG decoders rounding a lossy image differently,
+//! amplified by a gain map, and nothing in this file can close it. Swapping
+//! the resampler moved **0 of 12288 samples** on that container, and improved
+//! the mean against vips from 0.01329% to 0.00432% on a 16x16 base with a 5x5
+//! gain map, where the scale is not a power of two.
+//!
 //! # Decode limits
 //!
 //! A UHDR file holds **two** images, so both are priced. The base and the
@@ -1005,93 +1034,55 @@ pub fn decode_uhdr(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     Ok(raster)
 }
 
-/// Scale a `uchar` gain map to the base image's size, the way
-/// `uhdr2scRGB` does with `vips_resize(..., VIPS_KERNEL_LINEAR)`.
-///
-/// The sampling convention is the one the capture measured rather than the
-/// textbook one. For an 8-wide gain map scaled to 16, libvips produces
-/// `0 0 18 36 54 72 90 108 126 144 162 180 198 216 234 252` from
-/// `0 36 72 108 144 180 216 252`, which is a linear interpolation at source
-/// position `j / scale - 0.5`, clamped to the ends. The usual
-/// half-pixel-centred spelling, `(j + 0.5) / scale - 0.5`, gives 27 where
-/// libvips gives 18.
-///
-/// That convention is pinned at scale 2 by
-/// `records.uhdr2scRGB_gainmap_resize`, which is the only scale the capture
-/// exercises; applying the same formula at other scales is an
-/// extrapolation from one measurement, and it is written down here rather
-/// than presented as parity. `crate::resample` implements the general
-/// libvips resize and this should eventually call it (issue filed).
-fn resize_gain_map(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    bands: usize,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let (sw, sh) = (src_width as usize, src_height as usize);
-    let (dw, dh) = (width as usize, height as usize);
-    if sw == dw && sh == dh {
-        return src.to_vec();
-    }
-    let sample = |axis_src: usize, axis_dst: usize, j: usize| -> (usize, usize, f64) {
-        #[expect(clippy::cast_precision_loss, reason = "image axes are far under 2^53")]
-        let scale = axis_dst as f64 / axis_src as f64;
-        #[expect(clippy::cast_precision_loss, reason = "image axes are far under 2^53")]
-        let pos = (j as f64 / scale - 0.5).clamp(0.0, (axis_src - 1) as f64);
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "pos is clamped into 0..=axis_src-1"
-        )]
-        let lo = pos.floor() as usize;
-        (lo, (lo + 1).min(axis_src - 1), pos - pos.floor())
-    };
-
-    let mut out = vec![0u8; dw * dh * bands];
-    for y in 0..dh {
-        let (y0, y1, fy) = sample(sh, dh, y);
-        for x in 0..dw {
-            let (x0, x1, fx) = sample(sw, dw, x);
-            for b in 0..bands {
-                let at = |yy: usize, xx: usize| f64::from(src[(yy * sw + xx) * bands + b]);
-                let top = at(y0, x0) + (at(y0, x1) - at(y0, x0)) * fx;
-                let bottom = at(y1, x0) + (at(y1, x1) - at(y1, x0)) * fx;
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "an interpolation between two u8 samples stays in 0..=255"
-                )]
-                let v = (top + (bottom - top) * fy).round() as u8;
-                out[(y * dw + x) * bands + b] = v;
-            }
-        }
-    }
-    out
-}
-
 /// Scale `gain_map` to `width` x `height`, the `vips_resize(..., "kernel",
 /// VIPS_KERNEL_LINEAR)` at `uhdr2scRGB.c:233-240`.
 ///
-/// Additive in the red commit and still delegating to the private
-/// [`resize_gain_map`] there, so the tests that pin what it must do compile
-/// against the name they are going to keep (issue #760).
+/// This is [`crate::resample`]'s resize and not a second one (issue #760).
+/// #508 wrote a private linear interpolator here, reproduced the one scale the
+/// oracle capture pins, and said in its own module doc that applying the same
+/// formula at another scale was an extrapolation from one data point. It was,
+/// and the extrapolation does not hold: `vips_resize` runs `reduce` below 1.0,
+/// which averages every input sample an output covers, where a two-neighbour
+/// interpolation picks two of them and aliases. Measured against
+/// `vips resize` 8.18.6 on a 12x9 gain map going to 4x3, the private copy
+/// missed 12 of 12 levels, the worst by 87 of 255; this misses none.
+///
+/// The two agree bit for bit at scale 1 and at scale 2, which is what the
+/// pinned `uhdr2scRGB_gainmap_resize` record and
+/// `a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest` still assert.
 ///
 /// # Errors
 ///
-/// [`UhdrError::Resample`] if the resize refuses the ratio.
+/// [`UhdrError::Resample`] if the resize refuses the ratio, and
+/// [`UhdrError::BadInput`] if it lands on a size other than the one asked for,
+/// which would otherwise be an out-of-bounds read in the transform.
 fn scale_gain_map(gain_map: &Raster, width: u32, height: u32) -> Result<Raster, UhdrError> {
-    let bands = gain_map.format().channels();
-    let px = resize_gain_map(
-        gain_map.data(),
-        gain_map.width().max(1),
-        gain_map.height().max(1),
-        bands,
-        width,
-        height,
-    );
-    Ok(Raster::new(width, height, gain_map.format(), px)?)
+    if gain_map.width() == width && gain_map.height() == height {
+        return Ok(gain_map.clone());
+    }
+    let out = gain_map.try_resize_with(
+        f64::from(width) / f64::from(gain_map.width().max(1)),
+        crate::resample::ResizeOptions {
+            kernel: crate::resample::ReduceKernel::Linear,
+            vscale: Some(f64::from(height) / f64::from(gain_map.height().max(1))),
+            ..crate::resample::ResizeOptions::default()
+        },
+    )?;
+    // `resize` sizes its output as `round(dim * scale)`, so a ratio that does
+    // not land back on the base's size is a refusal rather than a short read.
+    if (out.width(), out.height()) != (width, height) {
+        return Err(UhdrError::BadInput {
+            reason: format!(
+                "gain map {}x{} does not scale onto a {width}x{height} base, \
+                 the resize landed on {}x{}",
+                gain_map.width(),
+                gain_map.height(),
+                out.width(),
+                out.height()
+            ),
+        });
+    }
+    Ok(out)
 }
 
 /// Apply the gain map to the base image, the libvips `uhdr2scRGB`.
@@ -1172,14 +1163,8 @@ pub fn uhdr_to_scrgb(
     // "Anything else, nearest included, gives different pixels everywhere
     // the gainmap is not flat." So this resamples rather than indexes.
     let gain_bands = if mono { 1usize } else { 3 };
-    let gain_pixels = resize_gain_map(
-        gain_map.data(),
-        gain_map.width().max(1),
-        gain_map.height().max(1),
-        gain_bands,
-        width,
-        height,
-    );
+    let scaled = scale_gain_map(gain_map, width, height)?;
+    let gain_pixels = scaled.data();
 
     let base_pixels = base.data();
     let mut out = vec![0f32; (width as usize) * (height as usize) * 3];
@@ -1952,6 +1937,44 @@ mod tests {
         }
         assert!(differ <= 1, "{differ} of 40 levels differ from vips 8.18.6");
         assert_eq!(ties, differ, "every difference has to be a tie");
+    }
+
+    /**
+     * Issue #760. [`scale_gain_map`] refuses a resize that lands on a size
+     * other than the base's, because the transform indexes the scaled buffer
+     * directly and a short one would be an out-of-bounds read on a
+     * third-party file. `resize` sizes its output as `round(dim * scale)`
+     * over an `f64` quotient, so whether that can ever miss is a question
+     * about floating point rather than about this file.
+     *
+     * This is the answer: **it cannot**, over all 4096 source-to-target pairs
+     * in `1..=64` and five extreme ratios up to 65535. So the refusal arm is
+     * unreachable today, kept because the alternative is a panic on input
+     * nobody here wrote, and this sweep is what would go red first if
+     * `resize`'s rounding ever moved.
+     */
+    #[test]
+    fn the_gain_map_resize_always_lands_on_the_size_it_was_asked_for() {
+        let probe = |sw: u32, dw: u32| {
+            let g = Raster::new(sw, 1, PixelFormat::Gray8, vec![7u8; sw as usize]).unwrap();
+            let out = scale_gain_map(&g, dw, 1)
+                .unwrap_or_else(|e| panic!("{sw} -> {dw} was refused: {e}"));
+            assert_eq!(
+                (out.width(), out.height()),
+                (dw, 1),
+                "{sw} -> {dw} landed on {}x{}",
+                out.width(),
+                out.height()
+            );
+        };
+        for sw in 1..=64u32 {
+            for dw in 1..=64u32 {
+                probe(sw, dw);
+            }
+        }
+        for (sw, dw) in [(1u32, 60000u32), (60000, 1), (65535, 3), (3, 65535), (1, 1)] {
+            probe(sw, dw);
+        }
     }
 
     #[test]

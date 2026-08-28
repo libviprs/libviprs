@@ -1986,6 +1986,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`uhdr::uhdr_to_scrgb` scales the gain map through `crate::resample`**
+  instead of a private linear interpolator (issue #760). `uhdr2scRGB` scales
+  the gain map with `vips_resize(..., VIPS_KERNEL_LINEAR)`, and `vips_resize`
+  is not a bilinear point sample: below 1.0 it runs `reduce`, which averages
+  every input sample an output covers. #508's copy interpolated between two
+  neighbours at any scale, which is right at scale 1 and scale 2 (the only
+  ones the oracle capture pins, and both still bit-exact) and wrong anywhere
+  else. Measured against `vips resize` 8.18.6 on a 12x9 gain map scaled onto a
+  4x3 base: the copy missed **12 of 12** levels, the worst by 87 of 255; the
+  shared resampler misses none.
+
+  A gain map larger than its base is reachable, because `from_container` reads
+  whatever a file holds even though nothing writes one.
+
+  New `UhdrError::Resample` for a ratio the resize refuses, and
+  `UhdrError::BadInput` when the resize lands on a size other than the base's,
+  which would otherwise have been a short read.
+
+  This also corrects the attribution in #508's own measurement: the residual
+  between a container expanded here and by `vips uhdr2scRGB` is the two JPEG
+  decoders, not the resampler. Hand this module the halves vips decoded and
+  the two agree to `f32` ulp. See the `crate::uhdr` module docs for the table.
+
 - **Every operation in `crate::resample` carries the input's metadata onto its
   output** (issue #789). `resize`, `shrink`, `shrinkh`, `shrinkv`, `reduce`,
   `reduceh`, `reducev`, `affine`, `similarity`, `rotate`, `mapim` and
