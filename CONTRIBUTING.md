@@ -295,7 +295,7 @@ feature list is what it is; that is the house style and it is not optional.
 ## Allocation instruments: one shape, two questions
 
 There is now a counting `#[global_allocator]` in the core crate, in
-`tests/sharpen_canny_image_sized_allocations.rs`, and #696 is planning another
+`tests/convolution_image_sized_allocations.rs`, and #696 is planning another
 one to prove that every image-sized allocation on a path went through the
 fallible reservation helper. Two instruments answering roughly the same
 question is how a third gets invented, so the call is made here rather than
@@ -324,8 +324,8 @@ you write depends on which you are asking:
 - **A budget.** "This named operation costs exactly N image-sized allocations
   and M bytes a pixel." Pin the exact measured values, never a padded ceiling,
   and cross-check every row at two image sizes and two carriers so a constant
-  fitted to one image cannot pass as a rate. That is what the sharpen and canny
-  file does.
+  fitted to one image cannot pass as a rate. That is what the convolution
+  budget file does.
 - **A funnel.** "Every image-sized allocation on this path went through the
   fallible helper." Compare the same counter against the helper's
   `cfg(test)` hook consumptions. That is #696's, and the counter it needs is the
@@ -339,14 +339,23 @@ unguarded when it first landed, because nothing on the sharpen or canny path
 allocates through `realloc` or `alloc_zeroed`, and the positive control now
 exercises all four on purpose.
 
-**The cost this puts on anything touching the sharpen or canny path**, which is
+**The cost this puts on anything touching `src/convolution.rs`**, which is
 worth knowing before you start rather than when the suite goes red: the budgets
-there are pinned at exact values, six rows of two numbers, each cross-checked at
-two image sizes. A change to what either path holds live reddens three rows at
-once and needs all twelve cells re-measured with the same evidence that set
-them. That is intended, not a bug in the guard: it is the price of a budget with
-no slack in it, and a budget with slack in it would not have caught either of
-the mutations it exists for.
+there are pinned at exact values, **sixteen rows of two numbers**, each
+cross-checked at two image sizes. The file covers `conv`, `sobel`, `gaussblur`,
+`compass`, `sharpen` and `canny`, and the first four share one traversal, so a
+change to what `Scan` holds live reddens ten rows at once and a change to the
+sharpen or canny path reddens three. Whichever it is, the rows it moves need
+re-measuring with the same evidence that set them, and the file's own doc table
+is where the before-and-after goes. That is intended, not a bug in the guard: it
+is the price of a budget with no slack in it, and a budget with slack in it
+would not have caught either of the mutations it exists for, nor shown that
+#575's row window took `conv` from 27 bytes a pixel to 3.
+
+The file was called `sharpen_canny_image_sized_allocations.rs` until #575 put
+`conv`, `sobel`, `gaussblur` and `compass` rows in it. Same instrument, same
+accounting, one more set of rows, which is the rule above being followed rather
+than an exception to it.
 
 ## Before you push
 
