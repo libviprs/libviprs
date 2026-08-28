@@ -1921,6 +1921,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The crate has one fallible-plane helper instead of three private copies of
+  it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
+  `cfg(test)` probe over all of them that a check addresses **by site label**
+  rather than by position along a path (issue #696).
+
+  `arithmetic.rs`, `convolution.rs` and `colour.rs` had each grown their own
+  version of "reserve `len` elements fallibly and report
+  `RasterError::AllocationFailed`", with three signatures and three separate
+  test ceilings. `convolution.rs`'s had no ceiling at all when it was written,
+  so that module's fallible paths could not be driven the way `colour.rs`'s
+  were; `colour.rs`'s refused the *Nth* over-ceiling request on the thread, so a
+  dozen checks that read as naming a buffer were really naming a position, told
+  apart only by the byte sizes on the path happening to be unique. Three of the
+  colour fixtures carry an extra band for no other reason, one pair of buffers
+  could not be separated at all, and a check on either side of the boundary
+  could only ever see the sites inside its own module.
+
+  What lands here: `convolution.rs` and `colour.rs` on the shared helper, with
+  `raster::alloc_op_output` and `Raster::try_f32_samples` reserving through it
+  too, so an op output and a sample widening are on the same funnel as the
+  intermediates. Every site now carries a label like
+  `colour.import.lab_staging`, and `with_plane_cap_at` starves that one buffer
+  and nothing else. Two checks that could not be written before are: the
+  export fallback's PCS plane and its device buffer are the same 768 bytes on
+  an RGB profile, and under the ordinal the first of them could be reverted to
+  an infallible `Vec::with_capacity` with the suite green, because the other
+  took the refusal and reported the same number.
+
+  The ceiling also stopped answering before the reservation. It used to return
+  early, which left `try_reserve_exact` and an infallible `reserve_exact`
+  indistinguishable to every check that drove it, and is how fourteen of #689's
+  guards came to pass with the fallibility they guarded reverted; it now
+  poisons the request instead, so the same revert turns those checks red.
+
+  `raster.rs` gains a cross-module funnel check that pins, per entry point and
+  per module, exactly how many planes a path reserves. `try_sharpen` is the row
+  it exists for: one call crosses all three modules, and its six reservations
+  are the same six image-sized allocations
+  `tests/convolution_image_sized_allocations.rs` charges to it from the
+  allocator, so between the two nothing image-sized on that path is outside the
+  fallible helper.
+
+  One thing the mutation pass turned up while the funnel was being written, and
+  it is fixed here rather than filed: `try_plane_filled` fills to a length
+  computed from the geometry and its doc has said since it was
+  `alloc_colour_plane_filled` that this is a contract and not `capacity()`,
+  because `Vec::try_reserve_exact` may hand back more room than asked for. On
+  this allocator at these sizes it never does, so `out.resize(out.capacity(),
+  fill)` passed all eighty-one allocation checks in the crate. The probe now has
+  an over-reserve knob that makes the allocator's licence happen on purpose, and
+  the substitution goes red.
+
+  No public API moves and no behaviour changes: everything here is
+  `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
+  ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
+  outstanding; that file is held by another lane, so #696 stays open on it.
+
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
   stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
   keeps a `short` fixed-point copy of every mask, truncated toward zero and
@@ -2646,6 +2703,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Migration.** A caller reading the plot's height, or indexing rows from the
   top, gets one row fewer for a 16-bit histogram. Bars still grow from the
   bottom.
+
+- **`uhdr::uhdr_to_scrgb` scales the gain map through `crate::resample`**
+  instead of a private linear interpolator (issue #760). `uhdr2scRGB` scales
+  the gain map with `vips_resize(..., VIPS_KERNEL_LINEAR)`, and `vips_resize`
+  is not a bilinear point sample: below 1.0 it runs `reduce`, which averages
+  every input sample an output covers. #508's copy interpolated between two
+  neighbours at any scale, which is right at scale 1 and scale 2 (the only
+  ones the oracle capture pins, and both still bit-exact) and wrong anywhere
+  else. Measured against `vips resize` 8.18.6 on a 12x9 gain map scaled onto a
+  4x3 base: the copy missed **12 of 12** levels, the worst by 87 of 255; the
+  shared resampler misses none.
+
+  A gain map larger than its base is reachable, because `from_container` reads
+  whatever a file holds even though nothing writes one.
+
+  New `UhdrError::Resample` for a ratio the resize refuses, and
+  `UhdrError::BadInput` when the resize lands on a size other than the base's,
+  which would otherwise have been a short read.
+
+  This also corrects the attribution in #508's own measurement: the residual
+  between a container expanded here and by `vips uhdr2scRGB` is the two JPEG
+  decoders, not the resampler. Hand this module the halves vips decoded and
+  the two agree to `f32` ulp. See the `crate::uhdr` module docs for the table.
+
+- **Every operation in `crate::resample` carries the input's metadata onto its
+  output** (issue #789). `resize`, `shrink`, `shrinkh`, `shrinkv`, `reduce`,
+  `reduceh`, `reducev`, `affine`, `similarity`, `rotate`, `mapim` and
+  `thumbnail_image` all built their result with a bare `Raster::new` and
+  carried nothing: no interpretation, no resolution, no orientation, no ICC
+  profile and no field a caller attached. vips carries all of them, measured on
+  8.18.6 across two image shapes and fifteen ops.
+
+  The resolution is carried **verbatim** rather than rescaled with the factor,
+  which is what vips does and what #690 already measured for `zoom` and
+  `subsample`.
+
+  It is not only tags. #664 made the premultiply bracket read the
+  interpretation on a float carrier, because scRGB's alpha maximum is 1.0 where
+  sRGB's is 255, so while the tag was being dropped `resize(0.5).resize(0.5)`
+  read a different alpha ceiling on the second call from the first. An 8x8
+  `RgbaF32` chequerboard resized to half, twice, differed in 33 of 256 output
+  bytes on the tag alone, with both outputs coming back untagged.
+
+  `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
+  restamps they carried to work around this, which also removes two
+  image-sized clones from the linear and ICC thumbnail pipelines.
 
 - `EncodeError::Unsupported`'s own documentation no longer names four formats
   this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
