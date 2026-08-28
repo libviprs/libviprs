@@ -324,9 +324,22 @@ fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
 /// grouping can be asserted for the kinds no `PixelFormat` produces, since
 /// there is no raster to hand the op.
 ///
-/// The `max + 1` for the data-driven group is libviprs's own rule and does
-/// **not** match libvips, which plots `max` rows; that is issue #802 and it
-/// is deliberately not changed here.
+/// # The height rule, measured
+///
+/// `vips hist_plot` on 8.18.6, `ushort` input: `[0, 1]` plots 1 row,
+/// `[1, 1]` plots 1, `[0, 0, 0]` plots 1, `[0, 5]` plots 5, `[3, 9]` plots
+/// 9, `[100, 200]` plots 200 and `[65535, 0]` plots 65535. So the height is
+/// the largest count, floored at one, and **not** `max + 1`, which is what
+/// this returned before issue #802.
+///
+/// The `[3, 9]` row is the one that shows the floor is a literal zero
+/// rather than the smallest count: 9 rows, not 6. The full libvips rule is
+/// `max - min(0, min)`, and the second term only fires on a histogram
+/// holding a negative count (a `char` `[-5, -1]` plots 4 rows). Every
+/// carrier this crate has is unsigned and [`read_flat`] folds a negative
+/// sample into bin zero besides, so `values` cannot contain one and the
+/// term is left out rather than written as dead arithmetic. The signed
+/// carriers of issue #516 are where it starts to matter.
 #[inline]
 fn plot_height(kind: SampleKind, values: &[u32]) -> usize {
     match kind {
@@ -336,7 +349,7 @@ fn plot_height(kind: SampleKind, values: &[u32]) -> usize {
         | SampleKind::I16
         | SampleKind::U32
         | SampleKind::I32
-        | SampleKind::F32 => values.iter().copied().max().unwrap_or(0) as usize + 1,
+        | SampleKind::F32 => values.iter().copied().max().unwrap_or(0).max(1) as usize,
     }
 }
 
@@ -756,10 +769,15 @@ impl Raster {
     /// Plot a one-band histogram as a bar graph, like `vips_hist_plot`.
     ///
     /// The output is `N` columns wide for an `N`-element histogram. 8-bit
-    /// histograms plot 256 rows high; other depths plot `max + 1` rows
-    /// high, matching libvips. The result is a `Gray8` image: in column
-    /// `x`, the bottom `hist[x]` pixels are `255` and the rest `0`, so the
-    /// graph reads with its origin at the bottom left.
+    /// histograms plot 256 rows high whatever the counts are; every other
+    /// depth plots as many rows as the largest count, floored at one. Both
+    /// halves are measured against libvips 8.18.6 rather than asserted;
+    /// see [`plot_height`], and note that the second half used to say
+    /// `max + 1` and used to say that matched libvips (issue #802).
+    ///
+    /// The result is a `Gray8` image: in column `x`, the bottom `hist[x]`
+    /// pixels are `255` and the rest `0`, so the graph reads with its
+    /// origin at the bottom left.
     ///
     /// # Errors
     ///

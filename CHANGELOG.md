@@ -1834,6 +1834,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `hist_plot` plots one row too many for every histogram that is not 8-bit
+  (issue #802). Measured on vips 8.18.6, `vips hist_plot` of a `ushort`
+  `[2, 0, 3]` gives a **3x3** image where libviprs gave 3x4: the height is the
+  largest count, floored at one, not `max + 1`. The 8-bit fixed height of 256
+  was right and is unchanged.
+
+  The doc said the old number matched libvips, and nothing checked that.
+  `hist_plot_bar_geometry` pinned libviprs's own answer instead, so the claim
+  and the test agreed with each other and with the code, and with nothing else.
+  Both now compare against a measured sweep: `[0, 1]`, `[1, 1]` and `[0, 0, 0]`
+  plot 1 row, `[3, 9]` plots 9 (not 6, so the floor is a literal zero rather
+  than the smallest count), and `[65535, 0]` plots 65535.
+
+  **Migration.** A caller reading the plot's height, or indexing rows from the
+  top, gets one row fewer for a 16-bit histogram. Bars still grow from the
+  bottom.
+
 - `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
   containers whose allocation refusal is spent inside the `image` crate (issue
   #782). It has not been one since #686: WebP is decoded by libviprs, prices its
