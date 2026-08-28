@@ -124,27 +124,67 @@
 //!   an [`Extend::White`] tap is inked the way `vips_embed` inks one, from the
 //!   interpretation (`white_ink`, issue #667) and not from the sample depth,
 //!   and the measured cells match `vips embed --extend white` cell for cell.
-//!   They cannot match once the raster carries alpha. `vips_image_hasalpha()`
-//!   sends `vips_affine` through a premultiply into a **float** image before
-//!   it paints that border, so vips runs `FILL_LINE(float, ...)`, the byte
-//!   `memset` that produces 257 never happens, and the border lands on the
-//!   plain interpretation maximum instead. Measured on 8.18.6 by solving the
-//!   border ink back out of a half-pixel bicubic shift over a constant input:
+//!   They stop matching once the raster carries alpha, and the reason is not
+//!   the paint order (issue #692). `vips_affine_build` embeds **before** it
+//!   premultiplies (`affine.c:529`, then `affine.c:551`), so the border is
+//!   painted in the raster's own domain either way and `vips_region_paint`
+//!   memsets an integer carrier exactly as it does for a bare `vips_embed`.
+//!   What moves the value afterwards is that the premultiply / un-premultiply
+//!   pair does **not** cancel on that pixel: `vips_premultiply` builds its
+//!   multiplier from a **clipped** alpha, `nalpha = clip(a, 0, M) / M`, while
+//!   `vips_unpremultiply` builds its reciprocal from the **raw** one,
+//!   `factor = M / a`, deliberately ("we want over and undershoots on alpha
+//!   and RGB to cancel", `unpremultiply.c:78`). A border pixel holds the same
+//!   ink `E` in every band including alpha, so the round trip is
+//!   `E * clip(E, 0, M) / M * M / E`, which is `clip(E, 0, M)`: the ink comes
+//!   back clipped to the **interpretation's** ceiling.
 //!
-//!   | bands | tag | alpha | `embed` | `affine` |
-//!   |---|---|---|---|---|
-//!   | 3 | `srgb` | no | 65535 | 65534.7 |
-//!   | 4 | `srgb` | yes | 65535 | collapses to 255 |
-//!   | 3 | `scrgb` | no | 257 | 256.0 |
-//!   | 4 | `scrgb` | yes | 257 | collapses to 1 |
-//!   | 1 | `b-w` | no | 65535 | 65534.7 |
-//!   | 2 | `b-w` | yes | 65535 | collapses to 255 |
+//!   libviprs does the same arithmetic against its own ceiling, which is the
+//!   **depth's** on an unsigned carrier (`bracket_max_alpha`, issue #664), and
+//!   the white ink never exceeds that, so `clip(E, 0, D)` is just `E`. The two
+//!   therefore agree everywhere except where the tag's ceiling sits below the
+//!   carrier's depth. Measured on 8.18.6 with `--interpolate nearest`, whose
+//!   window is one pixel, so an output shifted one step off the input reads the
+//!   **pure** ink with no blend to solve back out:
 //!
-//!   The alpha rows differ in kind rather than degree: `--extend white` and
-//!   `--extend black` produce the same output there. libviprs paints the ink
-//!   first and premultiplies after, so on an alpha raster it keeps the memset
-//!   values, and the suite pins those three cells rather than leaving the gap
-//!   implied. Issue #692 tracks the reordering.
+//!   | carrier | bands | tag | `embed white` | `affine white` | libviprs |
+//!   |---|---|---|---|---|---|
+//!   | `uchar` | 3 | none / `srgb` | 255 | 255 | 255 |
+//!   | `uchar` | 4 | `srgb` | 255 | 255 | 255 |
+//!   | `uchar` | 4 | `scrgb` | 1 | 1 | 1 |
+//!   | `ushort` | 3 | `srgb` | 65535 | 65535 | 65535 |
+//!   | `ushort` | 4 | `srgb` | 65535 | **255** | 65535 |
+//!   | `ushort` | 3 | `scrgb` | 257 | 257 | 257 |
+//!   | `ushort` | 4 | `scrgb` | 257 | **1** | 257 |
+//!   | `ushort` | 4 | `rgb16` | 65535 | 65535 | 65535 |
+//!   | `ushort` | 2 | `b-w` | 65535 | **255** | 65535 |
+//!   | `float` | 4 | `srgb` / `scrgb` / `rgb16` | 255 / 1 / 65535 | same | same |
+//!
+//!   The three bold cells are the whole divergence, and every one of them is a
+//!   16-bit raster wearing an 8-bit tag. **libviprs does not follow vips here,
+//!   and that is decided rather than pending.** Two reasons, both measured:
+//!
+//!   1. The border ink is not separately settable. What comes out is
+//!      `clip(E, 0, ceiling)` for whatever ceiling the bracket uses, so
+//!      matching the pure-ink cell means either changing the ceiling or
+//!      pre-clipping the fill. Pre-clipping fixes the pure-ink pixels and
+//!      leaves every *blended* one wrong, because the two premultiplied spaces
+//!      are scaled differently: on a `ushort` `srgb` raster with alpha 200 a
+//!      real pixel of 25000 sits at 19608 in vips' premultiplied image and at
+//!      76.3 in this module's. A change that fixes the corner and not the
+//!      fringe looks like a fix and is not one.
+//!   2. Changing the ceiling means `bracket_max_alpha` following the tag on
+//!      unsigned carriers, which is exactly what #664 decided against, and the
+//!      price is not theoretical. `vips affine` on a constant-25000 `ushort`
+//!      RGBA tagged `srgb` returns **255 for every interior sample**, not just
+//!      at the border; tagged `scrgb` it returns 1; and with alpha 65535 a
+//!      colour of 25000 comes back as 97. libviprs returns 25000 in all three.
+//!
+//!   So the border follows the ceiling, the ceiling is #664's, and this module
+//!   is self-consistent under it. The suite pins both halves: the agreeing
+//!   cells so the divergence stays bounded to those three, and the interior
+//!   round-trip so the cost of adopting vips' reading is a number rather than
+//!   an assertion.
 //! * **Premultiplied alpha.** Like `vips_affine`, images with an alpha band
 //!   are premultiplied before interpolation and unpremultiplied afterwards
 //!   unless [`AffineOptions::premultiplied`] says the input already is. The
@@ -5628,49 +5668,84 @@ mod tests {
         }
     }
 
-    /// Issue #692, the cell where libviprs and vips do **not** agree, pinned
-    /// so the divergence is a recorded number rather than something implied by
-    /// the absence of a fixture.
+    /// Issue #692, the border ink on an alpha raster, and the reason this
+    /// module does not follow vips there.
     ///
-    /// `vips_affine` only reaches the `vips_embed` border in the raster's own
-    /// domain when `vips_image_hasalpha()` is false. With an alpha band it
-    /// premultiplies into a **float** image first and paints the border into
-    /// that, so `vips_region_paint` takes the `FILL_LINE(float, ...)` arm
-    /// (`region.c:936`), the byte `memset` that smears the ink (`region.c:922`)
-    /// never runs, and the border comes out at the plain interpretation max.
-    /// Measured on 8.18.6 by solving the ink back out of a half-pixel bicubic
-    /// shift over a constant input, since a nearest tap on the ring shows the
-    /// border only where the interpolator samples past the edge:
+    /// The cause is **not** the paint order. `vips_affine_build` embeds before
+    /// it premultiplies (`affine.c:529` then `affine.c:551`), so the ink is
+    /// memset into the raster's own domain either way and `vips_embed` on its
+    /// own gives the same byte pattern. What moves it is that the premultiply
+    /// pair does not cancel on that pixel: `vips_premultiply` takes a
+    /// **clipped** alpha into its multiplier, `nalpha = clip(a, 0, M) / M`,
+    /// and `vips_unpremultiply` takes the **raw** one into its reciprocal,
+    /// `factor = M / a`. Every band of a border pixel holds the same ink `E`,
+    /// so the round trip is `E * clip(E, 0, M) / M * M / E`, which is
+    /// `clip(E, 0, M)`. This module runs the same arithmetic against its own
+    /// ceiling, the depth's on an unsigned carrier (issue #664), and the white
+    /// ink never exceeds that, so `clip(E, 0, D)` is `E`.
+    ///
+    /// Measured on 8.18.6 with `--interpolate nearest`, whose window is one
+    /// pixel, so an output shifted one step off the input reads the **pure**
+    /// ink and nothing has to be solved back out of a blend. Both columns are
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate nearest --idx 1 --idy 1
+    /// --extend white`, read at pixel `(0, 0)`.
     ///
     /// ```text
-    /// bands  tag    alpha  embed  affine
-    /// 3      srgb   no     65535  65534.7   (~65535, the alpha-free claim)
-    /// 4      srgb   YES    65535  255       (--extend white == --extend black)
-    /// 3      scrgb  no     257    256.0     (~257)
-    /// 4      scrgb  YES    257    1
-    /// 1      b-w    no     65535  65534.7
-    /// 2      b-w    YES    65535  255
+    /// carrier  bands  tag      vips affine white   libviprs
+    /// uchar    4      srgb     255                 255      agree
+    /// uchar    4      scrgb    1                   1        agree
+    /// ushort   4      rgb16    65535               65535    agree
+    /// ushort   4      grey16   65535               65535    agree
+    /// ushort   4      srgb     255                 65535    DIFFER
+    /// ushort   4      scrgb    1                   257      DIFFER
+    /// ushort   4      b-w      255                 65535    DIFFER
+    /// float    4      srgb     255                 255      agree
+    /// float    4      scrgb    1                   1        agree
+    /// float    4      rgb16    65535               65535    agree
     /// ```
     ///
-    /// libviprs paints the white ink into the raster's own domain and
-    /// premultiplies afterwards, so it keeps the memset values on all three
-    /// alpha rows: 65535, 257, 65535 against vips' 255, 1, 255. That is what
-    /// this test asserts. #688 does not cause it. The fill before #688 was
-    /// [`SampleLayout::max`], which is 65535 here and wrong in the same
-    /// direction, and fixing it means moving the paint to the other side of
-    /// the premultiply in [`TapFetch`], a change to the ordering and not to
-    /// the ink... so it belongs to #692, and this cell is what #692 will flip.
+    /// Every differing cell is a 16-bit raster wearing an 8-bit tag, which is
+    /// the same condition #664 is about, and the agreeing cells are here as the
+    /// positive control: the comparison would report a difference if there were
+    /// one, so a divergence confined to three rows is a measurement rather than
+    /// a blind spot.
+    ///
+    /// [`affine_alpha_bracket_holds_the_image_where_vips_collapses_it`] carries
+    /// the reason not to follow.
+    ///
+    /// [`affine_alpha_bracket_holds_the_image_where_vips_collapses_it`]: self::affine_alpha_bracket_holds_the_image_where_vips_collapses_it
     #[test]
-    fn affine_white_on_an_alpha_raster_keeps_the_memset_ink() {
+    fn affine_white_on_an_alpha_raster_inks_the_depth_not_the_interpretation() {
         use Interpretation as I;
-        // (tag, what libviprs paints today, what vips 8.18.6 measures)
+        // (format, tag, what libviprs inks, what vips 8.18.6 inks)
         let cases = [
-            (I::Srgb, 65535.0, 255.0),
-            (I::ScRgb, 257.0, 1.0),
-            (I::Bw, 65535.0, 255.0),
+            (PixelFormat::Rgba8, I::Srgb, 255.0, 255.0),
+            (PixelFormat::Rgba8, I::ScRgb, 1.0, 1.0),
+            (PixelFormat::Rgba8, I::Rgb16, 255.0, 255.0),
+            (PixelFormat::Rgba16, I::Rgb16, 65535.0, 65535.0),
+            (PixelFormat::Rgba16, I::Grey16, 65535.0, 65535.0),
+            (PixelFormat::Rgba16, I::Srgb, 65535.0, 255.0),
+            (PixelFormat::Rgba16, I::ScRgb, 257.0, 1.0),
+            (PixelFormat::Rgba16, I::Bw, 65535.0, 255.0),
+            (PixelFormat::RgbaF32, I::Srgb, 255.0, 255.0),
+            (PixelFormat::RgbaF32, I::ScRgb, 1.0, 1.0),
+            (PixelFormat::RgbaF32, I::Rgb16, 65535.0, 65535.0),
         ];
-        for (tag, libviprs, vips) in cases {
-            let im = Raster::new(2, 2, PixelFormat::Rgba16, 7u16.to_ne_bytes().repeat(16))
+        let mut differing = 0usize;
+        for (format, tag, libviprs, vips) in cases {
+            let value = if format == PixelFormat::RgbaF32 && tag == I::ScRgb {
+                0.5
+            } else {
+                7.0
+            };
+            let bytes: Vec<u8> = (0..2 * 2 * 4)
+                .flat_map(|_| match format {
+                    PixelFormat::Rgba8 => vec![value as u8],
+                    PixelFormat::Rgba16 => (value as u16).to_ne_bytes().to_vec(),
+                    _ => (value as f32).to_ne_bytes().to_vec(),
+                })
+                .collect();
+            let im = Raster::new(2, 2, format, bytes)
                 .unwrap()
                 .copy()
                 .interpretation(tag)
@@ -5689,13 +5764,98 @@ mod tests {
             assert_eq!(
                 out.getpoint(0, 0),
                 vec![libviprs; 4],
-                "Rgba16 tagged {tag:?}: libviprs paints the memset ink; vips \
-                 gives {vips} because it premultiplies into float first (#692)"
+                "{format:?} tagged {tag:?}: the ink follows the depth ceiling; \
+                 vips 8.18.6 gives {vips} because its ceiling is the tag's (#692)"
             );
             assert_eq!(
                 out.getpoint(1, 1),
-                vec![7.0; 4],
-                "the image itself resamples unchanged"
+                vec![value; 4],
+                "{format:?} tagged {tag:?}: the image itself resamples unchanged"
+            );
+            differing += usize::from(libviprs != vips);
+        }
+        assert_eq!(
+            differing, 3,
+            "exactly three of these eleven cells diverge, and all three are a \
+             16-bit carrier under an 8-bit tag"
+        );
+    }
+
+    /// Issue #692, the reason the cells above are left alone.
+    ///
+    /// Following vips on the border means following it on the ceiling, because
+    /// the border comes out at `clip(ink, 0, ceiling)` and nothing else sets
+    /// it. Pre-clipping only the fill would fix the pure-ink pixel and leave
+    /// every blended one wrong, since the two premultiplied spaces are scaled
+    /// differently: on a `ushort` `srgb` raster with alpha 200, a colour of
+    /// 25000 sits at 19608 in vips' premultiplied image and at 76.3 in this
+    /// module's. So the real choice is whether `bracket_max_alpha` follows the
+    /// tag on an unsigned carrier, which is #664's question, and its price is
+    /// measured rather than argued.
+    ///
+    /// `vips affine in.v out.v "1 0 0 1" --interpolate nearest --idx 1 --idy 1`
+    /// on 8.18.6 over a constant `ushort` RGBA raster, read at an interior
+    /// pixel that never touches the border:
+    ///
+    /// ```text
+    /// tag     colour  alpha   vips interior      libviprs interior
+    /// srgb    25000   200     25000, alpha 200   25000, alpha 200
+    /// srgb    25000   25000   255,   alpha 255   25000, alpha 25000
+    /// srgb    25000   65535   97,    alpha 255   25000, alpha 65535
+    /// scrgb   25000   25000   1,     alpha 1     25000, alpha 25000
+    /// rgb16   25000   25000   25000, alpha 25000 25000, alpha 25000
+    /// ```
+    ///
+    /// The `srgb` and `scrgb` rows with a real alpha are the cost: vips reads a
+    /// 16-bit raster tagged `srgb` as having alpha in `0..=255`, so an ordinary
+    /// alpha of 25000 clips and the whole image collapses to the tag's ceiling.
+    /// It is not a border effect and it is not confined to unusual data. The
+    /// `rgb16` row is the positive control, the one tag whose ceiling matches
+    /// the depth, and there the two agree everywhere including the border.
+    ///
+    /// This test pins the libviprs column. The vips column is in the doc
+    /// comment because reproducing it would mean adopting the behaviour.
+    #[test]
+    fn affine_alpha_bracket_holds_the_image_where_vips_collapses_it() {
+        use Interpretation as I;
+        for (tag, alpha) in [
+            (I::Srgb, 200u16),
+            (I::Srgb, 25000),
+            (I::Srgb, 65535),
+            (I::ScRgb, 25000),
+            (I::Rgb16, 25000),
+        ] {
+            let bytes: Vec<u8> = (0..2 * 2)
+                .flat_map(|_| {
+                    let mut px = Vec::new();
+                    for _ in 0..3 {
+                        px.extend_from_slice(&25000u16.to_ne_bytes());
+                    }
+                    px.extend_from_slice(&alpha.to_ne_bytes());
+                    px
+                })
+                .collect();
+            let out = Raster::new(2, 2, PixelFormat::Rgba16, bytes)
+                .unwrap()
+                .copy()
+                .interpretation(tag)
+                .build()
+                .try_affine_with(
+                    [1.0, 0.0, 0.0, 1.0],
+                    Interpolator::Nearest,
+                    AffineOptions {
+                        oarea: Some([-1, -1, 4, 4]),
+                        extend: Extend::White,
+                        ..AffineOptions::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                out.getpoint(1, 1),
+                vec![25000.0, 25000.0, 25000.0, f64::from(alpha)],
+                "Rgba16 tagged {tag:?} with alpha {alpha}: the premultiply \
+                 bracket must round-trip the interior; vips collapses it to \
+                 the tag's ceiling (#692, #664)"
             );
         }
     }
