@@ -23,6 +23,10 @@
 //! | JPEG XL | `SourceError::Jxl(JxlError::AllocLimitExceeded)` |
 //! | NIfTI | *did not exist yet; it joined self-priced in #510* |
 //!
+//! JPEG 2000 is not in that table because it did not exist when it was
+//! measured: it landed in #501 on the shared shape from its first commit, and
+//! its row below is the one that says so.
+//!
 //! Two corrections to the table in #686, both from that run. WebP is **not**
 //! the one odd format on the `image` shape: JPEG, PNG and single-image TIFF
 //! report exactly the same thing. But the four are not alike underneath. In
@@ -274,6 +278,24 @@ fn priced_by_libviprs() -> Vec<Row> {
             price: 768,
         });
     }
+    // JPEG 2000 prices its own frame too, from the geometry the `SIZ` marker
+    // declares, before `hayro-jpeg2000` reserves anything. Unlike the JPEG XL
+    // row there is no second ceiling underneath it: the decoder takes no
+    // allocation tracker, so this is the only shape a budget refusal can
+    // arrive in and 4x4 is as small as the row needs to be.
+    if cfg!(feature = "jp2k") {
+        rows.push(Row {
+            format: "jp2k",
+            bytes: rgb8(4)
+                .encode_jp2k(Default::default())
+                .expect("jp2k fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: "JPEG 2000 component buffers",
+            price: 48,
+        });
+    }
     rows
 }
 
@@ -352,25 +374,28 @@ fn the_two_tables_account_for_every_container() {
     let self_priced = priced_by_libviprs().len();
     let image_backed = priced_by_the_image_crate().len();
 
-    // JPEG XL and AVIF are each only compiled in behind their own feature, so
-    // the self-priced table is one shorter for each that is off. Spelled out
-    // rather than hidden in a `cfg!` inside the sum, because a reader has to
-    // be able to check the arithmetic. The 8 are gif, radiance, fits, openexr,
-    // webp, uhdr, .v and nifti.
-    let expected_self_priced =
-        8 + usize::from(cfg!(feature = "jxl")) + usize::from(cfg!(feature = "avif"));
+    // JPEG XL, AVIF and JPEG 2000 are each only compiled in behind their own
+    // feature, so the self-priced table is one shorter for each that is off.
+    // Spelled out rather than hidden in a `cfg!` inside the sum, because a
+    // reader has to be able to check the arithmetic. The 8 unconditional rows
+    // are gif, radiance, fits, openexr, webp, uhdr, .v and nifti.
+    let expected_self_priced = 8
+        + usize::from(cfg!(feature = "jxl"))
+        + usize::from(cfg!(feature = "avif"))
+        + usize::from(cfg!(feature = "jp2k"));
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
     );
     assert_eq!(image_backed, 3, "the image-backed table changed size");
 
-    let absent_features =
-        usize::from(!cfg!(feature = "jxl")) + usize::from(!cfg!(feature = "avif"));
+    let absent_features = usize::from(!cfg!(feature = "jxl"))
+        + usize::from(!cfg!(feature = "avif"))
+        + usize::from(!cfg!(feature = "jp2k"));
     assert_eq!(
         self_priced + image_backed + absent_features,
-        13,
-        "the two tables must account for all thirteen containers libviprs sniffs, \
+        14,
+        "the two tables must account for all fourteen containers libviprs sniffs, \
          with no exclusions left; see SniffedFormat::ALL"
     );
 }

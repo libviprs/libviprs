@@ -350,7 +350,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// and the check green. Measured, not reasoned: three such deletions are in
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 272;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 273;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
