@@ -5427,6 +5427,230 @@ mod tests {
         );
     }
 
+    /// A raster wearing every part of the header block plus two attachments,
+    /// for the metadata sweep. `Rgb8` rather than a float carrier so the
+    /// tag is unambiguously *set* rather than inferred from the format.
+    fn meta_probe(w: u32, h: u32) -> Raster {
+        let mut r = Raster::new(
+            w,
+            h,
+            PixelFormat::Rgb8,
+            (0..(w * h * 3) as usize).map(|i| (i % 251) as u8).collect(),
+        )
+        .unwrap();
+        r.meta.interpretation = Some(Interpretation::ScRgb);
+        r.meta.xres = 5.0;
+        r.meta.yres = 7.0;
+        r.meta.orientation = 6;
+        r.set_icc_profile(&[1u8, 2, 3, 4]);
+        r.set_field(
+            "lane-564",
+            crate::imageio::MetadataValue::Str("carried".into()),
+        );
+        r
+    }
+
+    /// Issue #789. Every op in this module built its result with a bare
+    /// [`Raster::new`] or [`Raster::zeroed`] and carried nothing: no
+    /// interpretation, no resolution, no orientation, no ICC profile and no
+    /// field a caller attached. #717 fixed this shape at eighteen sites and
+    /// never reached here, because its census was `grep '\.meta = '` and this
+    /// module has no such line.
+    ///
+    /// Measured on 8.18.6 over an 8x8 and a 12x5 `.v` tagged
+    /// `--interpretation scrgb --xres 5 --yres 7`, carrying a 560-byte
+    /// AdobeRGB profile and a `VipsRefString` named `lane-564`: `resize`,
+    /// `shrink`, `shrinkh`, `shrinkv`, `reduce`, `reduceh`, `reducev`,
+    /// `affine`, `similarity`, `rotate`, `mapim`, `zoom`, `subsample`,
+    /// `thumbnail_image` and `thumbnail` all carry every one of them, at both
+    /// shapes and on both an upscale and a downscale.
+    ///
+    /// **The resolution is carried verbatim and not rescaled with the scale
+    /// factor.** `vips resize probe.v out.v 0.5` and `… 2` both come back
+    /// `xres: 5, yres: 6.9999606299212607`, the input's values to the last
+    /// bit. That is the same answer #690 measured for `zoom` and `subsample`
+    /// and it is worth stating, because rescaling is the plausible-looking
+    /// thing a resampler might do.
+    ///
+    /// [`Raster::extract_area`] is the control: it went onto the shared carry
+    /// in #740, so a run where it fails too is a broken probe rather than a
+    /// finding.
+    #[test]
+    fn every_resample_op_carries_the_header_block_and_the_attached_fields() {
+        for (w, h) in [(8u32, 8u32), (12, 5)] {
+            let s = meta_probe(w, h);
+            let index = {
+                let mut px: Vec<u8> = Vec::new();
+                for y in 0..4u32 {
+                    for x in 0..4u32 {
+                        px.extend((x as f32).to_ne_bytes());
+                        px.extend((y as f32).to_ne_bytes());
+                    }
+                }
+                Raster::new(
+                    4,
+                    4,
+                    PixelFormat::FloatF32(core::num::NonZeroU16::new(2).unwrap()),
+                    px,
+                )
+                .unwrap()
+            };
+            let cases: Vec<(&str, Raster)> = vec![
+                ("extract_area (control)", s.extract_area(0, 0, 4, 4)),
+                ("shrink 2", s.try_shrink(2.0, 2.0).unwrap()),
+                ("shrink 1.5", s.try_shrink(1.5, 1.5).unwrap()),
+                ("shrinkh 2", s.try_shrinkh(2).unwrap()),
+                ("shrinkv 2", s.try_shrinkv(2).unwrap()),
+                (
+                    "reduce 2",
+                    s.try_reduce(2.0, 2.0, ReduceKernel::Lanczos3).unwrap(),
+                ),
+                (
+                    "reduceh 2",
+                    s.try_reduceh(2.0, ReduceKernel::Lanczos3).unwrap(),
+                ),
+                (
+                    "reducev 2",
+                    s.try_reducev(2.0, ReduceKernel::Lanczos3).unwrap(),
+                ),
+                (
+                    "reduceh 1 (passthrough)",
+                    s.try_reduceh(1.0, ReduceKernel::Lanczos3).unwrap(),
+                ),
+                ("resize 0.5", s.try_resize(0.5).unwrap()),
+                ("resize 2", s.try_resize(2.0).unwrap()),
+                ("resize 1 (passthrough)", s.try_resize(1.0).unwrap()),
+                (
+                    "resize 0.5 nearest",
+                    s.try_resize_with(
+                        0.5,
+                        ResizeOptions {
+                            kernel: ReduceKernel::Nearest,
+                            ..ResizeOptions::default()
+                        },
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "resize 2 nearest",
+                    s.try_resize_with(
+                        2.0,
+                        ResizeOptions {
+                            kernel: ReduceKernel::Nearest,
+                            ..ResizeOptions::default()
+                        },
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "affine 1.5",
+                    s.try_affine([1.5, 0.0, 0.0, 1.5], Interpolator::Bilinear)
+                        .unwrap(),
+                ),
+                ("similarity 2", s.try_similarity(0.0, 2.0).unwrap()),
+                ("rotate 30", s.try_rotate(30.0).unwrap()),
+                (
+                    "mapim",
+                    s.try_mapim(&index, Interpolator::Bilinear).unwrap(),
+                ),
+                ("thumbnail_image 4", s.try_thumbnail_image(4).unwrap()),
+            ];
+            for (op, out) in cases {
+                let at = format!("{op} on a {w}x{h} raster");
+                assert_eq!(
+                    out.meta.interpretation,
+                    Some(Interpretation::ScRgb),
+                    "{at}: interpretation"
+                );
+                assert!(
+                    (out.meta.xres - 5.0).abs() < 1e-12 && (out.meta.yres - 7.0).abs() < 1e-12,
+                    "{at}: resolution is {} x {}, and vips carries 5 x 7 verbatim \
+                     rather than rescaling it",
+                    out.meta.xres,
+                    out.meta.yres
+                );
+                assert_eq!(out.meta.orientation, 6, "{at}: orientation");
+                assert_eq!(
+                    out.icc_profile(),
+                    Some(&[1u8, 2, 3, 4][..]),
+                    "{at}: ICC profile"
+                );
+                assert!(
+                    out.get_field("lane-564").is_some(),
+                    "{at}: the attached field"
+                );
+            }
+        }
+    }
+
+    /// Issue #789, the half that is not cosmetic. #664 made the premultiply
+    /// bracket read the **interpretation** on a float carrier, because scRGB's
+    /// alpha maximum is 1.0 where sRGB's is 255. While `resize` dropped the
+    /// tag, the second call in a chain saw a different carrier from the first
+    /// however the input was tagged, so `resize(0.5).resize(0.5)` could not
+    /// agree with itself.
+    ///
+    /// The probe is an 8x8 `RgbaF32` chequerboard alpha resized to half twice,
+    /// once from a `ScRgb`-tagged input and once from the same pixels
+    /// untagged. Before this change both outputs came back untagged and 33 of
+    /// the 256 output bytes differed; after it the tagged chain keeps its tag
+    /// and the two chains stay different, which is the correct answer rather
+    /// than the absence of one.
+    #[test]
+    fn a_chained_resize_keeps_reading_the_carrier_the_first_call_read() {
+        let px: Vec<u8> = (0..8 * 8usize)
+            .flat_map(|p| {
+                let a = if (p / 8 + p % 8) % 2 == 0 {
+                    1.0f32
+                } else {
+                    0.25
+                };
+                [0.8f32, 0.5, 0.2, a]
+            })
+            .flat_map(f32::to_ne_bytes)
+            .collect();
+        let untagged = Raster::new(8, 8, PixelFormat::RgbaF32, px).unwrap();
+        let tagged = untagged
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build();
+
+        let chain = |r: &Raster| r.try_resize(0.5).unwrap().try_resize(0.5).unwrap();
+        let from_tagged = chain(&tagged);
+        let from_untagged = chain(&untagged);
+
+        assert_eq!(
+            from_tagged.meta.interpretation,
+            Some(Interpretation::ScRgb),
+            "the tag has to survive the chain or the second call reads the \
+             wrong alpha ceiling"
+        );
+        assert_eq!(
+            from_untagged.meta.interpretation, None,
+            "and an untagged input stays untagged rather than acquiring one"
+        );
+        // The positive control on the whole test: the two carriers really do
+        // produce different pixels, so "the tag survived" is a claim about
+        // something observable.
+        let differing = from_tagged
+            .data()
+            .iter()
+            .zip(from_untagged.data())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 0,
+            "the scRGB and sRGB alpha ceilings must disagree on this fixture, \
+             or the tag carrying nothing would look the same as carrying it"
+        );
+        // And a single half-scale call agrees with the first step of the
+        // chain, which is what says the chain is consistent with itself.
+        assert_eq!(
+            tagged.try_resize(0.5).unwrap().meta.interpretation,
+            Some(Interpretation::ScRgb)
+        );
+    }
+
     /// Issue #733. `vips_interpolate_bilinear_interpolate` dispatches through
     /// `SWITCH_INTERPOLATE(BandFmt, BILINEAR_INT, BILINEAR_FLOAT)`, and `UCHAR`,
     /// `CHAR`, `USHORT` and `SHORT` all take `BILINEAR_INT`, which builds its
