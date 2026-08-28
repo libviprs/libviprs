@@ -1264,6 +1264,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `spcor` and `fastcor` stopped widening the whole image and stopped
+  materialising their results twice. Both read the image as a sliding window of
+  the template's rows, which is the same access pattern the convolution
+  traversal has, so both now share its row window; and both filled a whole
+  `Vec<f64>` in output order only to hand it to a builder that walked it once,
+  so both write into the output raster directly instead. At 4000x4000 `Rgb8`
+  with a 32x32 template, `spcor` peaks at 238 MiB rather than 967 MiB, 5.2 times
+  the input rather than 21, and `fastcor` reads the same. No output byte moves
+  (issue #791).
+
+  What is left whole is the **template**, which both read in full at every
+  output sample. That one is bounded by the operand a caller passes rather than
+  by the image.
+
 - `compass` stopped keeping a widened copy of every result. It convolves
   `times` times and combines the absolute results, and it used to widen each of
   those results to `f64` first and hold all `times` widenings live at once, to
