@@ -45,32 +45,29 @@ fn decode_webp_is_public_and_returns_an_eight_bit_raster() {
     assert_eq!(raster.interpretation(), libviprs::Interpretation::Srgb);
 }
 
-/// The options struct is a plain, `Default`, module-scoped type a caller
-/// can build with `..Default::default()`, which is the whole point of the
-/// format wave's naming verdict, and quality has no spelling in it.
+/// The options struct is a `#[non_exhaustive]`, `Default`, module-scoped type
+/// a caller outside the crate builds from `default()` through the `with_*`
+/// setters, and quality still has no spelling in it. It used to be a struct
+/// literal here, which is what issue #630 took away: this test compiles as an
+/// external crate, so it was itself the downstream caller the old "later
+/// fields can be added without a breaking change" promise would have broken.
 #[test]
 fn save_options_are_constructible_downstream() {
-    let explicit = webp::SaveOptions {
-        compression: webp::Compression::Lossless,
-        keep: webp::Keep::None,
-    };
-    let partial = webp::SaveOptions {
-        keep: webp::Keep::None,
-        ..Default::default()
-    };
+    let explicit = webp::SaveOptions::default()
+        .with_compression(webp::Compression::Lossless)
+        .with_keep(webp::Keep::None);
+    let partial = webp::SaveOptions::default().with_keep(webp::Keep::None);
     assert_eq!(explicit, partial);
-    assert_eq!(
-        webp::SaveOptions::default(),
-        webp::SaveOptions {
-            compression: webp::Compression::Lossless,
-            keep: webp::Keep::All,
-        }
-    );
+
+    let d = webp::SaveOptions::default();
+    assert_eq!(d.compression, webp::Compression::Lossless);
+    assert_eq!(d.keep, webp::Keep::All);
 }
 
 /// The lossless encoder is a true identity from outside the crate too,
 /// through both the buffer entry point and the file one.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn encode_and_save_round_trip_exactly() {
     let original = ramp();
     let bytes = original.encode_webp(webp::SaveOptions::default()).unwrap();
@@ -92,6 +89,7 @@ fn encode_and_save_round_trip_exactly() {
 /// `.webp` is a live row in both shared dispatchers, and the content
 /// sniffer routes the bytes back without help from the filename.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_shared_dispatchers_carry_webp() {
     let original = ramp();
     let dir = tempfile::tempdir().unwrap();

@@ -33,6 +33,7 @@ fn sample() -> Vec<u8> {
 /// count's canonical spelling: four bands is `RgbaF32`, which is the format
 /// `with_channels(4, 4)` names, and it reports alpha (issue #531).
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn decode_exr_is_public_and_returns_float_bands() {
     let raster = decode_exr(&sample(), DecodeLimits::default()).unwrap();
     assert_eq!(raster.width(), 8);
@@ -57,6 +58,7 @@ fn decode_exr_is_public_and_returns_float_bands() {
 /// the container is identified from its magic and never from the path
 /// extension (issue #563).
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_sniff_route_reaches_the_exr_codec_from_both_entry_points() {
     let bytes = sample();
     let direct = decode_exr(&bytes, DecodeLimits::default()).unwrap();
@@ -81,6 +83,7 @@ fn the_sniff_route_reaches_the_exr_codec_from_both_entry_points() {
 /// other than three or four readable. vips has no equivalent: it emits
 /// four bands for every file and says nothing about what is in them.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn channel_names_and_compression_are_readable_downstream() {
     let raster = decode_exr(&sample(), DecodeLimits::default()).unwrap();
     assert_eq!(
@@ -94,6 +97,7 @@ fn channel_names_and_compression_are_readable_downstream() {
 /// through `SourceError` as well as on its own. The UINT ceiling is the
 /// variant a caller is most likely to hit, so it is the one pinned here.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_typed_error_is_matchable_downstream() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -116,6 +120,7 @@ fn the_typed_error_is_matchable_downstream() {
 /// A caller can lower the decode budget and have it enforced on the
 /// declared data window, the same knob every other loader honours.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn decode_limits_apply_to_exr_downstream() {
     let limits = DecodeLimits::default().with_max_pixels(16);
     let err = decode_exr(&sample(), limits).unwrap_err();

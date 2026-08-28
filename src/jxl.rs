@@ -150,7 +150,7 @@
 //!   [`JxlError::CmykNotSupported`] is the refusal. Carrying the
 //!   inks through untouched means a CMYK route into
 //!   [`crate::colour`], which does hold a black channel
-//!   ([`Interpretation::Cmyk`](crate::conversion::Interpretation::Cmyk),
+//!   ([`Interpretation::Cmyk`],
 //!   the naive ink model and profiled CMYK through
 //!   [`Raster::icc_import`](crate::Raster::icc_import)) but has no edge
 //!   from this loader. So the refusal is a wiring gap and not a
@@ -322,7 +322,7 @@ pub enum JxlError {
         pixel_format: String,
     },
     /// The declared channel count has no
-    /// [`PixelFormat`](crate::pixel::PixelFormat) carrier.
+    /// [`PixelFormat`] carrier.
     ///
     /// Defensive: `jxl_oxide::PixelFormat` names at most five channels
     /// today, so nothing `jxl-oxide` can report reaches this. It exists
@@ -407,18 +407,31 @@ pub enum Compression {
 
 /// Options for [`Raster::encode_jxl`] (libvips `jxlsave` / `jxlsave_buffer`).
 ///
-/// Plain, `Default`, and module-scoped, so callers write
-/// `jxl::SaveOptions { compression, ..Default::default() }` and later
-/// fields can be added without a breaking change.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`DecodeLimits`]: start from
+/// [`SaveOptions::default`] and set what you need with the `with_*` builders,
+/// e.g. `jxl::SaveOptions::default().with_compression(compression)`. That is
+/// what makes "later fields can be added without a breaking change" true
+/// rather than merely written down (issue #630).
 ///
 /// There is no `keep` field, unlike [`crate::webp::SaveOptions`]: the
 /// encoder writes a bare codestream with no box container, so there is
 /// nowhere for an ICC profile, an EXIF block or an XMP packet to go.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// How to compress. Defaults to [`Compression::Lossless`], the only
     /// mode with an encoder behind it.
     pub compression: Compression,
+}
+
+impl SaveOptions {
+    /// Set the compression mode, returning the updated options.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
 }
 
 /// Decode JPEG XL bytes into a [`Raster`] (libvips `jxlload_buffer` at its
@@ -2151,6 +2164,7 @@ mod tests {
      */
     #[test]
     #[cfg(not(feature = "jxl"))]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn without_the_feature_every_entry_point_is_a_typed_refusal() {
         let err = decode_jxl(&LOSSLESS_RGB, DecodeLimits::default()).unwrap_err();
         assert!(
@@ -2199,6 +2213,7 @@ mod tests {
      */
     #[cfg(feature = "jxl")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn the_fuzz_corpus_decodes_or_fails_exactly_as_named() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fuzz")

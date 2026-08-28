@@ -4,7 +4,7 @@
 //! deprecated `s3` alias also enables it). It introduces an
 //! injectable [`ObjectStore`] trait so tests can swap in in-memory backends,
 //! plus a concrete [`ObjectStoreSink`] that conforms to the crate's
-//! [`TileSink`](crate::sink::TileSink) contract.
+//! [`TileSink`] contract.
 //!
 //! The real wire-level S3 client path is intentionally minimal in this
 //! implementation: the Phase 3 TDD suite exclusively uses test doubles via
