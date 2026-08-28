@@ -118,6 +118,7 @@ pub mod extensions;
 pub mod extract;
 pub mod fits;
 pub mod foreign_stubs;
+pub mod frames;
 pub mod freqfilt;
 pub mod geo;
 pub mod gif;
@@ -213,6 +214,7 @@ pub use foreign_stubs::{
     MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, magickload,
     magickload_with,
 };
+pub use frames::{FrameDelay, LoopCount, PageLayout};
 pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
