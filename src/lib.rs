@@ -96,6 +96,7 @@
 //! bundles every public knob into runnable examples.
 
 pub mod arithmetic;
+pub mod avif;
 pub mod bands;
 pub mod cancel;
 pub mod checksum;
@@ -262,6 +263,12 @@ pub use radiance::{RadianceError, decode_radiance};
 // already knows the bytes are a GIF and does not want to go through the
 // sniff route.
 pub use gif::{GifError, decode_gif};
+// `decode_avif` is re-exported beside its error type for the reason
+// `decode_exr` is: it is the direct entry point for a caller who already
+// knows the bytes are an AVIF. There is no encoder half to pair it with,
+// and unlike EXR that is a scope decision rather than an upstream gap:
+// `heifsave` exists and writes HEVC, which is exactly what this cannot do.
+pub use avif::{AvifError, decode_avif};
 // `decode_exr` is re-exported beside its error type for the same reason
 // `decode_radiance` is: it is the direct entry point for a caller who
 // already knows the bytes are an OpenEXR file. There is no encoder half
