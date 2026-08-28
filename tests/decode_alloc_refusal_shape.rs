@@ -30,12 +30,24 @@
 //! geometry to report. WebP had both and threw them away to look like the
 //! other three, so it moves onto the shared shape and the three do not.
 //!
-//! And the `.v` reader never consults `max_alloc_bytes` at all, which is issue
-//! #710 and is why `.v` is the one container missing from the tables below.
+//! And the `.v` reader consulted `max_alloc_bytes` nowhere at all, which was
+//! the third correction and became issue #710. It does now, so `.v` has a row
+//! in the first table rather than a comment saying why it has none:
+//! `decode_vips_bytes` prices its pixel buffer from the declared header
+//! geometry through the same `DecodeLimits::check_image_alloc` as every other
+//! self-priced container.
+//!
+//! What was wrong there was the contract rather than the safety. `.v` is not a
+//! decompression-bomb vector: the reader refuses a header promising more pixel
+//! data than the file physically holds, so the allocation was already bounded
+//! by the input length. But a caller who set `max_alloc_bytes` did not get it
+//! on one container out of ten, and the two entry points disagreed about the
+//! same run of bytes: `decode_file_with_limits` refuses an over-budget `.v` at
+//! the bounded whole-file read, while `decode_bytes_with_limits` served it.
 //!
 //! # What this file holds
 //!
-//! The five formats where **libviprs itself** prices a declared geometry and
+//! The six formats where **libviprs itself** prices a declared geometry and
 //! refuses it must all report one shape, `SourceError::AllocLimitExceeded`.
 //! The four where the `image` crate refuses keep reporting the `image` shape,
 //! and that is asserted here too so the split is a decision on the record
@@ -114,6 +126,22 @@ struct Row {
 /// at a budget of 1.
 fn priced_by_libviprs() -> Vec<Row> {
     let mut rows = vec![
+        // libviprs's own container, and the last one to get the budget.
+        // `decode_vips_bytes` applied `max_coord` and `max_pixels` and then
+        // went straight to the pixel copy, so a 36-byte raster decoded clean
+        // under a 35-byte ceiling (issue #710). The price is the declared
+        // geometry's product, which is also exactly the byte range the reader
+        // copies out of the file, so the row's `price` holds those two
+        // spellings together from outside the crate.
+        Row {
+            format: "v",
+            bytes: rgb8(4).encode_vips().expect("v fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            what: ".v pixel buffer",
+            price: 48,
+        },
         Row {
             format: "gif",
             bytes: rgb8(4).encode_gif(Default::default()).expect("gif fixture"),
@@ -273,19 +301,18 @@ fn refuse(row: &Row) -> SourceError {
 /// Neither half is sufficient alone: this one catches a row deleted here, that
 /// one catches a container added there.
 ///
-/// `.v` is the one container in neither table, deliberately, because it
-/// applies no allocation budget at all. That is issue #710 and the count below
-/// says so rather than leaving a reader to wonder whether it was forgotten.
+/// Every container has a row now. `.v` was the one in neither table, because
+/// it applied no allocation budget at all, and closing #710 is what let the
+/// exclusion term below be deleted rather than kept as a documented hole.
 #[test]
 fn the_two_tables_account_for_every_container() {
     let self_priced = priced_by_libviprs().len();
     let image_backed = priced_by_the_image_crate().len();
-    let excluded_no_budget_at_all = 1; // `.v`, issue #710
 
     // JPEG XL is only compiled in behind its feature, so the self-priced table
     // is one shorter without it. Spelled out rather than hidden in a `cfg!`
     // inside the sum, because a reader has to be able to check the arithmetic.
-    let expected_self_priced = if cfg!(feature = "jxl") { 7 } else { 6 };
+    let expected_self_priced = if cfg!(feature = "jxl") { 8 } else { 7 };
     assert_eq!(
         self_priced, expected_self_priced,
         "the self-priced table changed size"
@@ -294,10 +321,10 @@ fn the_two_tables_account_for_every_container() {
 
     let jxl_absent = if cfg!(feature = "jxl") { 0 } else { 1 };
     assert_eq!(
-        self_priced + image_backed + excluded_no_budget_at_all + jxl_absent,
+        self_priced + image_backed + jxl_absent,
         11,
-        "the two tables plus the documented exclusion must account for all eleven \
-         containers libviprs sniffs; see SniffedFormat::ALL"
+        "the two tables must account for all eleven containers libviprs sniffs, \
+         with no exclusions left; see SniffedFormat::ALL"
     );
 }
 
@@ -547,4 +574,102 @@ fn the_image_backed_decoders_still_report_the_image_shape() {
             row.format
         );
     }
+}
+
+/// Issue #710. The `.v` budget prices the pixel body at the header's declared
+/// sample depth, which is neither the file's length nor one byte per sample.
+///
+/// The `.v` row in `priced_by_libviprs` cannot see either mistake, and that is
+/// why this exists rather than being folded into the table. Its fixture is
+/// `Rgb8`, so a price that assumed one byte per sample would be the same
+/// number; and a price taken from the whole slice would still refuse at
+/// `price - 1`, because the file is longer than the body it holds. `.v` is the
+/// only container in either table whose body is a plain copy out of a longer
+/// file, and the only one carrying 2- and 4-byte samples, so both mistakes are
+/// live here and nowhere else.
+///
+/// The second half is the one that says what the budget means: at the body's
+/// price exactly, a file three times that long decodes. `max_alloc_bytes`
+/// bounds what the decoder allocates, not what the caller handed it. That is
+/// the whole difference between `check_image_alloc` and the bounded whole-file
+/// read `decode_file_with_limits` does first.
+#[test]
+fn the_v_budget_prices_the_declared_body_and_not_the_file() {
+    // 4x3 Rgb16: 24 samples of two bytes, so the body is 72 bytes.
+    let data: Vec<u8> = (0..72u32).map(|v| v as u8).collect();
+    let raster = Raster::new(4, 3, PixelFormat::Rgb16, data).expect("rgb16 fixture");
+    let bytes = raster.encode_vips().expect("v fixture");
+    assert!(
+        bytes.len() > 72,
+        "the fixture has to be longer than its body for this test to say \
+         anything, and it is {} bytes",
+        bytes.len()
+    );
+
+    let err = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(71))
+        .expect_err("a 72-byte body must be refused under a 71-byte ceiling");
+    let SourceError::AllocLimitExceeded {
+        what,
+        geometry,
+        needed_bytes,
+        ..
+    } = err
+    else {
+        panic!("not the shared shape: {err:?}");
+    };
+    assert_eq!(what, ".v pixel buffer", "label");
+    assert_eq!(
+        needed_bytes, 72,
+        "the price is width * height * bands * the declared sample depth"
+    );
+    let g = geometry.expect("a decoder that priced a declared geometry must report it");
+    assert_eq!((g.width, g.height, g.bands), (4, 3, 3), "reported geometry");
+
+    let ok = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(72))
+        .expect("a 72-byte body must decode under a 72-byte ceiling");
+    assert_eq!((ok.width(), ok.height()), (4, 3));
+    assert_eq!(ok.format(), PixelFormat::Rgb16);
+}
+
+/// Issue #710. A `.v` band count with no `PixelFormat` is still a format
+/// error, not an allocation refusal, however tight the budget is.
+///
+/// This pins an ordering decision rather than a behaviour: the budget check
+/// sits after `PixelFormat::with_channels` in `decode_vips_bytes`, so a header
+/// declaring more bands than a `PixelFormat` can hold comes back the way it
+/// always did. Moving the check one line earlier answers `AllocLimitExceeded`
+/// for the same file, which is a worse answer, because raising
+/// `max_alloc_bytes` would not make the file readable.
+///
+/// It takes a budget of 1 to see at all. At the default ceiling a 4x4 raster
+/// of 70000 bands is 1.1 MB and neither order refuses it, so the two spellings
+/// are indistinguishable and this test would be green either way.
+#[test]
+fn an_unrepresentable_v_band_count_is_a_format_error_not_a_budget_one() {
+    let mut bytes = rgb8(4).encode_vips().expect("v fixture");
+    // Offset 12 is the band count, and 70000 is past `u16::MAX`, which is
+    // where `PixelFormat::with_channels` gives up.
+    bytes[12..16].copy_from_slice(&70_000i32.to_ne_bytes());
+
+    let err = decode_bytes_with_limits(&bytes, DecodeLimits::default().with_max_alloc_bytes(1))
+        .expect_err("70000 bands is not a representable PixelFormat");
+    assert!(
+        matches!(err, SourceError::VipsFormat(ref m) if m.contains("70000")),
+        "an unrepresentable band count must stay a format error even under a \
+         budget that would also refuse it: {err:?}"
+    );
+
+    // The positive control: the same file under the same budget is genuinely
+    // over it, so the assertion above is about which check fires first and not
+    // about the file being fine.
+    let representable = rgb8(4).encode_vips().expect("v fixture");
+    let over = decode_bytes_with_limits(
+        &representable,
+        DecodeLimits::default().with_max_alloc_bytes(1),
+    )
+    .expect_err("48 bytes is over a 1-byte ceiling");
+    assert!(
+        over.is_alloc_limit(),
+        "the control must reach the budget: {over:?}"
+    );
 }
