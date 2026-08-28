@@ -1593,6 +1593,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+
 - `spcor` and `fastcor` stopped widening the whole image and stopped
   materialising their results twice. Both read the image as a sliding window of
   the template's rows, which is the same access pattern the convolution
