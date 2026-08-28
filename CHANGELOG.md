@@ -1616,6 +1616,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one file alone fails there rather than quietly un-mirroring the local gate,
   and it holds the docs job's own `name:` to naming every lint it denies.
 
+
 - `spcor` and `fastcor` stopped widening the whole image and stopped
   materialising their results twice. Both read the image as a sliding window of
   the template's rows, which is the same access pattern the convolution
