@@ -706,11 +706,11 @@ impl Raster {
         // stamped genuine-16 (the gate excludes it), so a float raster keeps
         // the base interpretation and is never mis-tagged as USHORT.
         if out_is_genuine16 {
-            out.meta.interpretation = Some(if colour == 1 {
+            out.set_interpretation(Some(if colour == 1 {
                 Interpretation::Grey16
             } else {
                 Interpretation::Rgb16
-            });
+            }));
         }
         Ok(out)
     }
