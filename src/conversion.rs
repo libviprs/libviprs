@@ -272,7 +272,7 @@ pub enum ConversionError {
     /// of panicking. Mirrors
     /// [`crate::arithmetic::ArithmeticError::FloatUnsupported`].
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
-    FloatFormatUnsupported {
+    FloatUnsupported {
         /// The operation that was asked for.
         op: &'static str,
     },
@@ -1797,8 +1797,9 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConversionError::EmptyInput`] for an empty list,
-    /// [`ConversionError::FloatFormatUnsupported`] if any input is a float
-    /// raster (the sample copy is unsigned-only),
+    /// [`ConversionError::FloatUnsupported`] if any input is a float raster
+    /// (the sample copy is unsigned-only, and unlike `try_join` this is the
+    /// guard that stops a panic rather than one that chooses an error type),
     /// [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`, the
     /// bound libvips declares on the property,
     /// [`ConversionError::AcrossOutOfRange`] for an explicit `across`
@@ -1818,11 +1819,24 @@ impl Raster {
         // The sample copy below is `read_flat` / `write_flat`, which are
         // unsigned-only and panic on 4-byte samples, so a float input has to
         // be refused here rather than panicking out of a fallible method.
-        // Same reason as `try_join`: `space_depth` maps Lab, Lch, OkLab,
+        //
+        // Unlike `try_join`, this really is the thing that stops a panic:
+        // `arrayjoin` blits the cells itself rather than delegating to
+        // `try_insert`, so there is no second guard underneath it. Removing it
+        // reaches `read_flat`'s `bpc == 4` arm, which is a `panic!`.
+        //
+        // With one caveat worth writing down, because the obvious test fixture
+        // misses it: that is only true once the band counts agree. A 3-band and
+        // a 4-band input are refused by the band check below before any sample
+        // is read, so an unguarded `arrayjoin` returns `BandCountMismatch`
+        // there rather than panicking. The panicking path needs matching band
+        // counts, and the test uses them.
+        //
+        // Float input is not exotic: `space_depth` maps Lab, Lch, OkLab,
         // OkLCh, XYZ, scRGB and Yxy all to F32, so a `colourspace` result is
         // already float.
         if images.iter().any(|i| i.format().is_float()) {
-            return Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" });
+            return Err(ConversionError::FloatUnsupported { op: "arrayjoin" });
         }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
         // vips does not clamp `across` to the image count: it lays out a grid
@@ -1975,10 +1989,12 @@ impl Raster {
     ///
     /// Checked here, before anything is placed or allocated:
     ///
-    /// * [`ConversionError::FloatFormatUnsupported`] if either input is a
-    ///   float raster. The placement path underneath reads samples as `u8`
-    ///   or `u16` and panics on 4-byte ones, so a float input is rejected
-    ///   up front rather than delegated into a panic.
+    /// * [`ConversionError::FloatUnsupported`] if either input is a float
+    ///   raster. [`Raster::try_insert`] refuses one itself since #694, so
+    ///   this is no longer what stops a panic; it is what keeps the refusal
+    ///   in the error type this signature promises, rather than surfacing an
+    ///   [`crate::extract::ExtractError`] naming an operation the caller did
+    ///   not call. It runs first, so it is the refusal that fires.
     /// * [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`,
     ///   the bound libvips declares on the property.
     /// * [`ConversionError::PlacementOffsetOverflow`] if the offset the
@@ -2010,6 +2026,11 @@ impl Raster {
     ///   leave the canvas. Neither is reachable through `join` as the
     ///   placement is computed today; they are listed because the crop can
     ///   raise them and a `#[non_exhaustive]` match should expect them.
+    /// * [`crate::extract::ExtractError::FloatUnsupported`], for the same
+    ///   reason: both delegates raise it on a float raster, and neither can
+    ///   be reached with one because the guard above returns first. Listing
+    ///   it is this module's own rule, and leaving it out was the thing
+    ///   #730 noticed.
     pub fn try_join(
         &self,
         other: &Raster,
@@ -2019,14 +2040,25 @@ impl Raster {
         background: Option<&[f64]>,
         align: Option<Align>,
     ) -> Result<Raster, ConversionError> {
-        // The placement path (`insert` -> `blit`) is unsigned-only and
-        // panics on 4-byte samples. Float input is not exotic: `space_depth`
-        // maps every one of Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to
-        // F32, so `im.colourspace(Lab).join(..)` arrives here as float.
-        // Reject it as a typed error rather than delegating into a panic
-        // from a fallible method.
+        // This used to be the thing that stopped a panic: the placement path
+        // (`insert` -> `blit`) was unsigned-only and paniced on 4-byte
+        // samples. #694 moved that guard into `try_insert`, so the delegated
+        // path now refuses a float raster itself and the panic is gone either
+        // way.
+        //
+        // The guard stays because of the *type*. Without it a float input
+        // arrives as `ConversionError::Extract(ExtractError::FloatUnsupported
+        // { op: "insert" })`, which names an operation the caller did not
+        // call, through a variant their `try_join` signature does not lead
+        // them to expect. With it they get `ConversionError::FloatUnsupported
+        // { op: "join" }`. It runs before the delegation, so it is the one
+        // that fires and `try_insert`'s is unreachable from here.
+        //
+        // Float input is not exotic: `space_depth` maps every one of Lab,
+        // Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to F32, so
+        // `im.colourspace(Lab).join(..)` arrives here as float.
         if self.format().is_float() || other.format().is_float() {
-            return Err(ConversionError::FloatFormatUnsupported { op: "join" });
+            return Err(ConversionError::FloatUnsupported { op: "join" });
         }
         let align = align.unwrap_or(Align::Low);
         let shim = shim.unwrap_or(0);
@@ -3890,7 +3922,7 @@ mod tests {
         for list in [[&ramp, &plain], [&plain, &ramp]] {
             assert!(matches!(
                 Raster::try_arrayjoin(&list, None, None),
-                Err(ConversionError::FloatFormatUnsupported { op: "arrayjoin" })
+                Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
             ));
         }
     }
@@ -4391,7 +4423,7 @@ mod tests {
         for (a, b) in [(&ramp, &join_a()), (&join_a(), &ramp)] {
             assert!(matches!(
                 a.try_join(b, JoinDirection::Horizontal, false, None, None, None),
-                Err(ConversionError::FloatFormatUnsupported { op: "join" })
+                Err(ConversionError::FloatUnsupported { op: "join" })
             ));
         }
     }

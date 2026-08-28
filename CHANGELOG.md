@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `ConversionError::FloatFormatUnsupported` is renamed
+  `ConversionError::FloatUnsupported` (issue #730). Three of the crate's four
+  float-refusal variants already spelled it that way
+  (`RasterError::FloatUnsupported`, `ArithmeticError::FloatUnsupported`,
+  `ExtractError::FloatUnsupported`), and the odd one out meant a caller asking
+  "did this refuse a float raster" had to carry an exception in the one
+  `matches!` they wanted. The enum is `#[non_exhaustive]`, so a caller with a
+  wildcard arm is unaffected; a caller matching the variant by name renames it.
+
+  Four enums is not the thing being fixed: each module owning its error type is
+  what gives a single-family caller a tight surface. A predicate per enum, the
+  shape `SourceError::is_alloc_limit` took in #686, was considered and not
+  taken: that one composes because it collapses five variants of *one* enum onto
+  a question, where this is one variant of each of four, so it would be four
+  impls that still cannot be called through a single type without a trait. The
+  set is now written down in one place, `src/error.rs`'s `OpError` module doc,
+  next to the existing note on matching raster failures.
+
 - Catching "the decode allocation budget refused this file" takes one call
   instead of seven match arms. `GifError::AllocLimitExceeded`,
   `FitsError::AllocLimitExceeded`, `ExrError::AllocLimitExceeded`,
@@ -1713,6 +1731,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depths, so a float `sub` under an unsigned `main` reaches the same sample
   copy. I found that by mutating the second check away and watching the tests
   stay green.
+
+- `Raster::try_join`'s float guard and its documentation say what they are for
+  (issue #730). The comment claimed the placement path underneath panics on
+  4-byte samples, which stopped being true when #694 moved that guard into
+  `try_insert`. The guard stays, because without it a float input surfaces as
+  `ConversionError::Extract(ExtractError::FloatUnsupported { op: "insert" })`,
+  naming an operation the caller did not call; with it they get
+  `ConversionError::FloatUnsupported { op: "join" }`. It runs before the
+  delegation, so `try_insert`'s refusal is unreachable from `join`.
+
+  `try_join`'s rustdoc lists the variants delegated from `try_insert`, including
+  ones that are not reachable, because "a `#[non_exhaustive]` match should expect
+  them". `ExtractError::FloatUnsupported` was missing from that list by the
+  module's own rule, and is now in it.
+
+  `try_arrayjoin`'s guard is **not** the same animal, and its comment used to say
+  it was: `arrayjoin` blits its cells with `read_flat` / `write_flat` itself
+  rather than delegating, so nothing underneath it would catch a float and
+  removing that guard restores a panic rather than changing an error type.
 
 - An attached ICC profile is dropped when the interpretation is retagged to a
   space it cannot describe, matching vips (issue #720). `try_colourspace(Bw)`
