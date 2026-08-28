@@ -306,16 +306,43 @@ fn the_engine_region_path_carries_the_metadata_into_the_tiles() {
 
     check_tiles(&sink, "DeepZoom");
 
-    // The Google layout takes a different padding path in `extract_tile`,
-    // including a branch for tiles that fall entirely outside the raster. A
-    // DeepZoom-only test leaves that branch unexercised, and the mutation sweep
-    // said so: removing its carry survived until this run was added.
-    let gplan = PyramidPlanner::new(32, 32, 16, 0, Layout::Google)
+    // The Google layout takes a different padding path in `extract_tile`, with
+    // three branches: a tile entirely outside the raster, a partial tile, and
+    // the whole-tile fast path. A DeepZoom-only test reaches none of the first
+    // two, and the mutation sweep said so twice: removing either carry survived
+    // until this run existed.
+    //
+    // The **size** matters as much as the layout, which the sweep also had to
+    // tell me. At 32x32 the Google canvas lands on tile boundaries and only the
+    // fast path runs, so both mutations still survived. A non-power-of-two size
+    // is what pushes tiles past the raster edge: with the carries removed, 40x40
+    // leaves 16 of its 21 tiles untagged where 32x32 and 64x64 leave none.
+    let gplan = PyramidPlanner::new(40, 40, 16, 0, Layout::Google)
         .unwrap()
         .plan();
+    let gdata: Vec<u8> = (0..(40usize * 40 * 3)).map(|i| (i % 251) as u8).collect();
+    let mut gsrc = Raster::new(40, 40, PixelFormat::Rgb8, gdata)
+        .unwrap()
+        .copy()
+        .interpretation(Interpretation::ScRgb)
+        .xres(5.0)
+        .yres(7.0)
+        .orientation(6)
+        .build();
+    gsrc.set_icc_profile(&vec![9u8; PROFILE_LEN]);
     let gsink = MemorySink::new();
-    generate_pyramid_region(&src, &gplan, &gsink, &EngineConfig::default(), 0, 0, 32, 32).unwrap();
-    check_tiles(&gsink, "Google");
+    generate_pyramid_region(
+        &gsrc,
+        &gplan,
+        &gsink,
+        &EngineConfig::default(),
+        0,
+        0,
+        40,
+        40,
+    )
+    .unwrap();
+    check_tiles(&gsink, "Google 40x40");
 }
 
 /// The per-tile assertions, shared by the two layouts.
