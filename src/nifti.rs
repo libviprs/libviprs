@@ -1056,6 +1056,17 @@ mod tests {
             .unwrap_or_else(|e| panic!("fixture {name} must be readable: {e}"))
     }
 
+    /// The four fixtures that decide the NIfTI-1 byte-order rule between
+    /// them, shared by the test that sweeps them and the test that holds the
+    /// capture's own record against that sweep, so the two cannot name
+    /// different sets.
+    const BYTE_ORDER_FIXTURES: [&str; 4] = [
+        "bad_sizeof_swapped.nii",
+        "dimedge_dim0_eight.nii",
+        "dimedge_dim0_zero.nii",
+        "endian_nifti1_int16_be.nii",
+    ];
+
     fn decoded(name: &str) -> Raster {
         decode_nifti(&fixture(name), DecodeLimits::default())
             .unwrap_or_else(|e| panic!("{name} should decode: {e}"))
@@ -1458,6 +1469,13 @@ mod tests {
             ("dimedge_dim0_zero.nii", Endian::Little),
             ("dimedge_dim0_eight.nii", Endian::Little),
         ];
+        let mut swept: Vec<&str> = cases.iter().map(|(name, _)| *name).collect();
+        swept.sort_unstable();
+        assert_eq!(
+            swept,
+            BYTE_ORDER_FIXTURES.to_vec(),
+            "the sweep and the capture check have to name the same four files"
+        );
         for (name, want) in cases {
             let bytes = fixture(name);
             let (version, sentinel) = header_version(&bytes).expect("version");
@@ -1486,6 +1504,58 @@ mod tests {
             ),
             "the whole header follows dim[0], not just the geometry"
         );
+    }
+
+    /**
+     * The capture and this module have to state the same byte-order rule.
+     *
+     * `oracle-captures/foreign-nifti/`'s `byte_order` record used to say the
+     * sentinel decides, which its own `bad_sizeof_swapped` measurement
+     * contradicts, and that is issue #752. Fixing prose fixes nothing on its
+     * own, so this reads the committed capture back and asserts it names the
+     * same four fixtures the test above sweeps. Renaming a fixture on either
+     * side, or quietly dropping one from the record, is now red.
+     *
+     * Input: `records.byte_order.which_byte_order_actually_wins` ->
+     * Output: the four fixture names, and a rule with four arms.
+     */
+    #[test]
+    fn the_capture_states_the_byte_order_rule_this_module_implements() {
+        // `include_str!`, not a read: the capture is a committed artefact, so
+        // coupling to it at compile time is both stronger (deleting it stops
+        // the crate building) and cheaper (this test reaches no filesystem, so
+        // it is not a Miri gate-killer the way a `read_to_string` would be).
+        const CAPTURE: &str = include_str!("../oracle-captures/foreign-nifti/oracle.json");
+        let doc: serde_json::Value = serde_json::from_str(CAPTURE).expect("the capture must parse");
+        let record = &doc["records"]["byte_order"]["which_byte_order_actually_wins"];
+        assert!(
+            !record.is_null(),
+            "the capture does not record which byte order actually wins (issue #752)"
+        );
+
+        let mut named: Vec<&str> = record["the_four_fixtures_that_force_it"]
+            .as_object()
+            .expect("the record lists the fixtures it rests on")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        named.sort_unstable();
+        assert_eq!(
+            named,
+            BYTE_ORDER_FIXTURES.to_vec(),
+            "the capture and dim0_decides_the_byte_order_and_the_sentinel_is_only_a_fallback \
+             must rest on the same fixtures"
+        );
+        assert_eq!(
+            record["rule"]
+                .as_array()
+                .expect("the record spells the rule out")
+                .len(),
+            4,
+            "the rule is dim[0] both ways, then sizeof_hdr both ways"
+        );
+        // The positive control that those four files exist and say what the
+        // record says is the sweep itself, which reads every one of them.
     }
 
     /**
