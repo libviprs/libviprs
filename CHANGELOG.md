@@ -711,6 +711,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Animated GIF save** (issue #573). `Raster::encode_gif` splits the raster by
+  its page height and writes one GIF frame per page, taking the per-frame
+  delays out of the `delay` field and the NETSCAPE loop block out of `loop`,
+  which is where vips reads them too: `gifsave` has no argument for either and
+  `cgifsave.c:753` reads them back off the image. A still save is unchanged
+  down to the bytes, because a raster with no page split is one page and a
+  raster with no `loop` field loops forever, which is the block cgif already
+  wrote.
+
+  The frame geometry is the page, not the roll, so the GIF axis limit applies
+  per frame: a 1x80000 roll of two 40000-row pages saves, and a 1x70000 still
+  does not.
+
+  **Four measured divergences from vips, each with a test carrying the
+  measurement.** A `delay` array whose length is not the page count is refused
+  where vips pads with zeros or truncates (a two-entry array on a four-page
+  roll wrote `2 3 0 0`, a six-entry one wrote `2 3 4 5`). A negative delay or
+  `loop` is refused where vips casts it unsigned, turning -10 ms into 655
+  seconds and `loop = -1` into 65536 plays. A delay past what the wire holds
+  saturates where vips wraps, turning 655360 ms into no delay at all and
+  700000 ms into 44.64 seconds. And a stored `page-height` that does not
+  divide the raster is refused at `try_set_page_height` rather than silently
+  collapsing at the save, which is what `vips gifsave --page-height 5` on a
+  12-row image does.
+
+  A field of the *wrong type* is ignored rather than refused, matching the
+  `page-height` and `n-pages` readers: an untrusted `.v` can leave anything
+  under any name, so a wrong type means "this is not the field I read", where
+  a negative integer means "this is the field and its value is impossible".
+
+  Disposal follows cgif, measured over five files: restore-to-background on
+  every frame but the last when the animation carries transparency, keep
+  otherwise. Under "keep" a transparent pixel on page 2 would show page 1
+  through it, because every frame written here covers the whole screen.
+
 - **Animated GIF load** (issue #572). `decode_gif_with` takes `gif::LoadOptions`
   carrying vips's `page` and `n`, composites the frames it selects and stacks
   them into one raster whose `page-height` is the logical screen height, which
