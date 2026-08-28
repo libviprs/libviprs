@@ -1221,6 +1221,31 @@ mod tests {
     }
 
     /**
+     * Tests `sat16` at the narrowing it owns, which the whole-op saturation
+     * test above cannot reach.
+     * Works by calling it directly with counts either side of the 16-bit
+     * ceiling and at the top of `u64`. Mutation showed why this is needed:
+     * two independent clamps produce the op's observable 65535, `sat16`
+     * here and `write_flat`'s `v.min(65535)`, so breaking either one alone
+     * leaves `hist_find_saturates_a_count_past_the_16_bit_ceiling` green.
+     * They are not redundant, they cover different ranges: `sat16` guards
+     * the `u64` to `u32` narrowing, which only a count above 4.29e9 can
+     * cross and which needs a four-billion-pixel image to reach through the
+     * op. Calling it directly costs nothing.
+     * Input: 0, 65535, 65536, u64::MAX -> Output: 0, 65535, 65535, 65535.
+     */
+    #[test]
+    fn sat16_clamps_at_the_ceiling_and_across_the_u32_narrowing() {
+        assert_eq!(sat16(0), 0);
+        assert_eq!(sat16(65_535), 65_535);
+        assert_eq!(sat16(65_536), 65_535);
+        // Above `u32::MAX`, where a bare `as u32` would wrap to 4294967295
+        // and `write_flat`'s clamp would then have nothing to catch.
+        assert_eq!(sat16(u64::MAX), 65_535);
+        assert_eq!(sat16(u64::from(u32::MAX) + 1), 65_535);
+    }
+
+    /**
      * Tests that `hist_find` saturates a bin count past 65535 rather than
      * wrapping, the deviation the 16-bit carrier forces.
      * Works by histogramming a 256x256 single-valued image, whose one
