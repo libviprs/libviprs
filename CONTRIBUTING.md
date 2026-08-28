@@ -126,13 +126,29 @@ Expect dev-dependencies and the `fuzz` member's tree in there too, since the
 metadata side covers the whole workspace while the tree side is one package and
 `normal,build` edges. `defmt` sitting in that output on a mac is the point.
 
-**Vendored native code.** Two crates, and only two, ship compilable C or
-assembly *and* a build script that can compile it:
+**Vendored native code.** Three crates ship compilable C or assembly *and* a
+build script that can compile it:
 
 | crate | native sources | reached by | what it emits |
 |---|---|---|---|
 | `blake3` 1.8.7 | 11 `.c`, 1 `.cpp`, 12 `.S`/`.asm` | **default**, a direct dependency | `cargo:rustc-link-lib=static=blake3_neon` and a link search into `OUT_DIR` |
 | `zstd-sys` 2.0.16 | 42 `.c`, 1 `.S` | `packfile` only | `cargo:rustc-link-lib=static=zstd` and a link search into `OUT_DIR` |
+| `rav1d` 1.1.0 | 48 `.asm`, 43 `.S`, 0 `.c` | `avif` only | **nothing**, because libviprs takes it with `default-features = false` |
+
+`rav1d` is in that table for what it *ships*, not for what it does. The scan
+is static (a crate ships native source and has a build script able to compile
+it) and `rav1d` carries the whole dav1d assembly whether or not it is asked to
+build any of it. libviprs asks it not to: the entire `mod asm` in its
+`build.rs` is `#[cfg(feature = "asm")]`, and the `avif` feature takes the crate
+with `default-features = false`, so no assembler runs and no object is
+produced. Measured, with a positive control: a debug build emits zero `.o` and
+zero `.a` under `target/debug/build/rav1d-*`, while `blake3` in the same tree
+emits `blake3_neon.o` and `libblake3_neon.a`.
+
+That matters for clause 1 as well as clause 3. With `asm` on, `rav1d` reaches
+for `nasm` on x86_64, and `nasm` is an assembler somebody has to install; with
+it off, `nasm-rs` is a dormant build-dependency and nothing looks for anything.
+That is the same shape as `pkg-config` under `packfile`.
 
 Both link directives are `static=` and both search paths point inside the
 target directory, which is the whole point: the library is built here, from
