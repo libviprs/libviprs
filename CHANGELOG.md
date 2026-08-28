@@ -701,6 +701,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loop; a NIfTI crate would supply the free half and leave every measured
   repair here anyway.
 
+- `PixelFormat::kind()` and the `SampleKind` enum it returns (`U8`, `U16`,
+  `F32`), plus `PixelFormat::with_kind()` alongside `with_channels()` (issue
+  #607). Reach for `kind()` whenever the question is how to *interpret* a
+  sample, and keep `bytes_per_channel()` for a stride or a buffer size.
+
+  Byte width has been standing in for sample kind throughout the crate, and it
+  cannot: four bytes means `f32` today and would mean `u32` under a uint
+  carrier (issue #517) or `i32` under the signed ones (issue #516). A `match`
+  keyed on the width needs a trailing `_` arm, and that arm reads a four-byte
+  integer as a float without a word from the compiler. `SampleKind` gives the
+  question one answer that a new carrier cannot slip past: every mapping off
+  it is a total match.
+
+  `SampleKind` also carries the per-kind constants the sample code used to
+  keep private copies of: `bytes()`, `is_float()`, `max_value()`,
+  `hist_bins()`, and `promote()`, which is the `vips__formatalike` order for
+  a two-image op whose inputs disagree. `max_value()` and `hist_bins()` are
+  `Option`, and `None` on `F32` is a statement rather than a gap: a float
+  carrier has no depth-implied ceiling and no value-indexed bin table.
+
+  `src/arithmetic.rs` and `src/histogram.rs` are converted and no longer name
+  a byte width at all: no `bytes_per_channel()`, and no `with_channels()`
+  either, since handing a width *back* to the constructor is the same
+  ambiguity in the other direction. Nothing they do changes; what changes is that
+  their sample readers and writers now fail to compile, rather than silently
+  misread, the day a carrier arrives. The other 22 modules still key on the
+  width and are tracked separately.
+
+  `SampleKind` lives at `libviprs::pixel::SampleKind`.
+
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
   reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
@@ -1764,6 +1794,207 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
+  containers whose allocation refusal is spent inside the `image` crate (issue
+  #782). It has not been one since #686: WebP is decoded by libviprs, prices its
+  own frame, and reports `SourceError::AllocLimitExceeded` with the declared
+  geometry attached. The predicate itself was right the whole time, so nothing a
+  caller wrote against it breaks; the bullet list beside it sent anyone matching
+  by shape to the wrong arm.
+
+  The list is pinned to the tables in `tests/decode_alloc_refusal_shape.rs` now.
+  Nothing held it before, because those tables pin their own size and what their
+  rows report, and neither of those sees a format moving out of one and leaving
+  its description behind.
+
+- **`profile`'s docs claimed its 16-bit saturating output matched "the libvips
+  `ushort` output". libvips emits `VIPS_FORMAT_INT`** (issue #759), measured on
+  8.18.6 for every one of the eight input formats. The word matters more than
+  it looks: `INT` is the *signed* 32-bit carrier, so `profile` is a payoff of
+  the signed carriers (issue #516), not of the uint one (issue #517).
+
+  Two neighbouring claims were under-specified in the same direction and are
+  corrected with the measured tables. `project` promotes to `UINT` for the
+  unsigned inputs, `INT` for the signed ones and `DOUBLE` for the float ones,
+  so it needs both carrier families rather than just uint. The histogram
+  module's "libvips stores counts in 32-bit unsigned samples" swept in
+  `hist_find_indexed`, which emits `DOUBLE` for every input format and either
+  `combine` mode, and `hist_cum`, which follows its input across all four.
+
+  No value or format changes here: the saturation at `65535` stays until a
+  wider carrier lands. What changes is that the claims now have checks under
+  them. `profile` and `project` had no assertion on their output format
+  anywhere in the crate and `profile` had no saturation test at all, which is
+  how the wrong sentence survived. Six counter ops get a format pin and two
+  get a ceiling pin carrying the measured vips answer beside the libviprs one.
+
+- The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
+  body it copies out of the file, priced from the declared header geometry
+  through the same `DecodeLimits::check_image_alloc` every other self-priced
+  decoder uses (issue #710). It applied `max_coord` and `max_pixels` and then
+  nothing else, so a 36-byte raster decoded clean under a 35-byte ceiling and
+  `.v` was the one container out of ten where setting the budget bought a
+  caller nothing.
+
+  **`.v` was never a decompression-bomb vector**, and that is worth saying
+  because the obvious reading is wrong. The reader refuses a header promising
+  more pixel data than the file physically holds, so the allocation was already
+  bounded by the input length, and no crafted small file ever got past it. What
+  was missing was the contract, in two visible ways. `Raster::new`'s 8 GiB
+  construction budget was the only ceiling in force, fifteen times the 512 MiB
+  decode default. And the two decode entry points disagreed about the same run
+  of bytes: `decode_file_with_limits` spends the budget on the bounded
+  whole-file read, `decode_bytes_with_limits` has no file to spend it on.
+  Measured before the change:
+
+  ```text
+  bytes 4x4 budget=47 (price 48) -> Ok((4, 4))
+  file  4x4 budget=47 (price 48) -> Err(AllocLimitExceeded {
+      what: "image file body", needed_bytes: 112, max_alloc_bytes: 47 })
+  ```
+
+  **What changes for a caller.** Only `decode_bytes_with_limits` and
+  `decode_bytes`, and only on a `.v` whose pixel body is over the budget. The
+  file entry points cannot change: a `.v` file is always its 64-byte header
+  plus the body plus any trailer, so a budget under the body's price is under
+  the file's length too and the whole-file read refuses first. On the in-memory
+  path a `.v` body over `max_alloc_bytes` now comes back as
+  `SourceError::AllocLimitExceeded { what: ".v pixel buffer", .. }` with the
+  declared geometry attached, where it used to decode. At the 512 MiB default
+  that is a `.v` over half a gigabyte handed to the crate as bytes.
+
+- `affine`, `mapim` and any `resize` above 1.0 with a bicubic upsize kernel are
+  now byte-identical to `vips affine --interpolate bicubic` on a `uchar` raster
+  with no alpha band (issue #704). `vips_interpolate_bicubic_interpolate` sends
+  that carrier to `bicubic_unsigned_int_tab`, which reads
+  `vips_bicubic_matrixi` (the Catmull-Rom coefficients truncated to 12-bit
+  fixed point) and accumulates as integers a row at a time, closing each row
+  and the column combine with `unsigned_fixed_round`. This module evaluated the coefficients in
+  `f64` at the grid offset #668 put them on, which is the last systematic
+  divergence on that path.
+
+  **This is deliberately less accurate, and that is the trade.** Against
+  Catmull-Rom evaluated at the true sub-pixel offset in exact rational
+  arithmetic, over 17814 interior samples of random `uchar` images, the mean
+  absolute error goes from 0.4371 LSB to 0.4798 and the worst case stays at
+  1 LSB. Some samples move the other way: vips is the closer of the two on
+  1355 of those 17814. The error both spellings already share from #668's
+  1/64 offset grid is 0.44 LSB, ten times the difference this makes.
+
+  What it buys is a gate that can see a regression. The bicubic allowance in
+  `affine_interpolators_match_libvips_oracle` goes from 30 bytes at delta 1 to
+  **zero**, joining `nohalo` and `lbb`, so a future 1-LSB drift on this path
+  goes red instead of landing inside a tolerance. That is the failure #668
+  itself documented: a false comment plus a tolerance wide enough to absorb it
+  is how a 2.3-magnitude divergence survived.
+
+  It is one carrier, not "the integer carriers". `USHORT` and `SHORT` take
+  `bicubic_unsigned_int32_tab`, which reads the `double` table, and an alpha
+  band routes through a premultiply into FLOAT first, so neither ever sees the
+  fixed point. Three tests pin those carriers so the new path cannot spread.
+
+- `affine`, `mapim` and `resize` are now byte-identical to
+  `vips affine --interpolate bicubic` on a **float** raster too, and on any
+  raster with an alpha band (issue #705). `bicubic_float<T>` sums each of the
+  four rows through `cubic_float<T>` and combines them through `cubic_float<T>`
+  again, and that helper returns `T`. Its arithmetic is `double` either way, so
+  with `T = float` all five sums are computed in `f64` and narrowed to `f32` on
+  the way out. This module accumulated in `f64` and narrowed once at the store.
+
+  The issue asked for the accumulation *order*, and that turned out to be a red
+  herring worth exactly zero bits: flat 16-term `f64` and row-then-column `f64`
+  are bit-identical, 0 of 1764 samples apart on a random 24x24, and both miss
+  the binary by the same 1.5259e-05 in the same 356 samples. Adding the per-row
+  narrowing takes that to 0 of 1764.
+
+  An alpha band comes along because `vips_affine_build` premultiplies into a
+  FLOAT image before it resamples, so an `Rgba16` raster takes the narrowing as
+  well. That is worth about 3 samples in 480 on real data, always on a rounding
+  boundary, and an `Rgba8` raster cannot see it at all because an 8-bit quantum
+  swallows an `f32` ulp whole.
+
+  Nothing else moves: the 16- and 32-bit integer carriers reach
+  `bicubic_float<double>`, which narrows nothing, and `BILINEAR_FLOAT`, `lbb`
+  and `nohalo` are one expression with a single narrowing at the store and were
+  already bit-exact.
+
+- Two more places where libvips quantises more coarsely than this module are
+  now measured, pinned and **kept** (issues #732 and #733), and the rule that
+  decided them, and that decided #704 the other way, is written into the module
+  docs. Against the exact answer in rational arithmetic, on real `affine`
+  output:
+
+  | | this module | libvips | libvips closer |
+  |---|---|---|---|
+  | #704 bicubic coefficients, `uchar` | 0.4371 LSB | 0.4798 LSB | 1355 of 17814 |
+  | #732 bicubic store, `ushort` | 0.0000 LSB | 0.4680 LSB | 0 of 1017 |
+  | #733 bilinear weights, `uchar` | 0.0000 LSB | 0.0252 LSB | 0 of 1113 |
+  | #733 bilinear weights, `ushort` | 0.0000 LSB | 6.2848 LSB | 0 of 1113 |
+
+  #704 was a coin toss taken for parity. These two are not: this module is
+  exact and libvips is not, on every sample. `bicubic_unsigned_int32_tab`
+  truncates its `double` store, a one-directional bias of -0.499 LSB that
+  darkens every resampled `ushort` image by half a level, and `BILINEAR_INT`
+  builds its four weights as 12-bit fixed point, worth up to 26 of 65535.
+
+  The pins are on a linear ramp, which both bilinear and Catmull-Rom reproduce
+  exactly, so the right answer is closed form and the tests do not have to
+  reimplement an interpolator to know it. Both directions are asserted, so the
+  divergence can neither grow nor quietly vanish.
+
+- `affine` and `mapim` convert the caller's `background` to the carrier once
+  before they resample, the way `vips_affine_build` runs `vips__vector_to_ink`
+  once before it embeds (issue #736). `vips_cast` clips and then truncates
+  toward zero on an integer carrier and narrows on a float one, so every tap
+  past the edge and every output pixel outside the transformed input is already
+  a carrier value in vips; this module carried the raw `f64` into both.
+
+  It was worth up to **75 of 255** on a byte carrier: `--background 400.9` is
+  ink 255 in vips and 400.9 in a `f64` convolution, and the difference survives
+  wherever the ink is weighted against real pixels. Measured over a 6x6
+  constant with five interpolators and three carriers, the whole table is now 0
+  differences except the two cells that belong to other issues (#732, #733) and
+  two float samples in a degenerate constant-ramp fixture that land exactly on
+  an `f32` rounding midpoint.
+
+  Callers passing an in-range integral background see no change. A fractional
+  one now truncates rather than rounding, and an out-of-range one clips, which
+  is what vips does and what the docs claimed the module already did.
+
+- The `resample` module docs said `Extend::White` diverges on an alpha raster
+  because `vips_affine` "premultiplies into a float image before it paints that
+  border", so `FILL_LINE(float, ...)` runs and the byte `memset` never does.
+  That is not what happens (issue #692). `vips_affine_build` embeds **before**
+  it premultiplies, so the ink is memset into the raster's own domain either
+  way. What moves the value is that the premultiply pair does not cancel on that
+  pixel: `vips_premultiply` takes a clipped alpha into its multiplier and
+  `vips_unpremultiply` takes the raw one into its reciprocal, so a border pixel
+  whose every band holds the same ink `E` comes back as `clip(E, 0, max_alpha)`.
+
+  **The divergence stays**, and that is now a decision with numbers behind it
+  rather than a to-do. The border follows whichever ceiling the premultiply
+  bracket uses, and this module's is the depth's on an unsigned carrier
+  (issue #664), so the two answers differ only where a tag's ceiling sits below
+  its carrier's depth: three cells out of eleven measured, all of them a 16-bit
+  raster wearing an 8-bit tag. Adopting vips' ceiling to close them costs the
+  whole image, not the border: `vips affine` on a constant-25000 `ushort` RGBA
+  tagged `srgb` returns **255 for every interior sample**, tagged `scrgb` it
+  returns 1, and with alpha 65535 a colour of 25000 comes back as 97. Clipping
+  only the border fill instead would fix the pure-ink pixel and leave every
+  blended one wrong, because the two premultiplied spaces are scaled
+  differently.
+
+  Both halves are pinned now: the agreeing cells so the divergence is bounded
+  to those three rather than assumed, and the interior round-trip so the price
+  of the other reading is a number.
+
+- `affine_interpolators_match_libvips_oracle` explained its 1-byte `bilinear`
+  allowance as "a single `.5` rounding tie". It is not: `SWITCH_INTERPOLATE`
+  sends `uchar` and `ushort` rasters to `BILINEAR_INT`, whose four weights are
+  12-bit fixed point as well. Modelling that reproduces the binary exactly and
+  modelling a tie does not. The comment now says so and issue #733 carries the
+  measurement.
 
 - `try_embed`, `try_gravity`, `try_insert` and `smartcrop`'s `Entropy` and
   `Attention` strategies return a new `ExtractError::FloatUnsupported` on a
