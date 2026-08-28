@@ -3802,6 +3802,36 @@ impl Raster {
 mod tests {
     use super::*;
 
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting no call to `PixelFormat::bytes_per_channel`
+     * survives in `src/arithmetic.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so a `match` keyed on the width silently takes a wrong arm for
+     * any carrier added later instead of failing to compile (issue #607).
+     * Input: `src/arithmetic.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn arithmetic_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("arithmetic.rs");
+        let needle = concat!("bytes_per_", "channel");
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn read_", "u32")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        assert_eq!(
+            SRC.matches(needle).count(),
+            0,
+            "{needle} is back in src/arithmetic.rs; dispatch on PixelFormat::kind() instead"
+        );
+    }
+
     /// A width x height Gray8 raster from a byte vector.
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
