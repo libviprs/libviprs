@@ -135,6 +135,7 @@ mod loom_checkpoint_dedupe;
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
+pub mod mat;
 pub mod matrix;
 pub mod morphology;
 pub mod mosaicing;
@@ -287,6 +288,11 @@ pub use fits::{FitsError, decode_fits};
 // There is no encoder half, and there is no libvips half either: the pinned
 // build reports `NIfTI load/save with libnifti: false` (issue #510).
 pub use nifti::{NiftiError, decode_nifti};
+// `decode_mat` is re-exported for the reason `decode_nifti` is: it is the
+// direct entry point for a caller who already knows the bytes are a MATLAB
+// level 5 file. There is no encoder half, because libvips registers no
+// `matsave` (issue #510).
+pub use mat::{MatError, decode_mat};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,

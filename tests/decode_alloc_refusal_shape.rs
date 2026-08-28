@@ -22,6 +22,7 @@
 //! | OpenEXR | `SourceError::Exr(ExrError::AllocLimitExceeded)` |
 //! | JPEG XL | `SourceError::Jxl(JxlError::AllocLimitExceeded)` |
 //! | NIfTI | *did not exist yet; it joined self-priced in #510* |
+//! | MATLAB | *did not exist yet; it joined self-priced in #510* |
 //!
 //! JPEG 2000 is not in that table because it did not exist when it was
 //! measured: it landed in #501 on the shared shape from its first commit, and
@@ -112,6 +113,16 @@ const AVIF: &[u8] = include_bytes!("../oracle-captures/foreign-avif/fixtures/rgb
 /// `vips niftisave` either (the pinned build has no NIfTI support at all,
 /// which is why the oracle for that module is `nifti_clib`).
 const NIFTI: &[u8] = include_bytes!("../oracle-captures/foreign-nifti/fixtures/dt2_uint8.nii");
+
+/// The MATLAB fixture the `mat` module's own budget tests use: a 128-byte
+/// MAT-5 header and one `mxUINT8` variable with `dims = [2, 3]`, which
+/// transposes to a 3x2 image, so `decode_mat` prices it at `3 * 2 * 1 * 1`
+/// = 6 bytes.
+///
+/// Included rather than encoded, for the reason the NIfTI one is: MAT is
+/// load-only here, there is no `Raster::encode_mat`, and `vips` registers no
+/// `matsave` either.
+const MAT: &[u8] = include_bytes!("../oracle-captures/foreign-mat/fixtures/base_2x3_uint8.mat");
 
 /// One container, the bytes to decode, and the price `decode_*` computes for
 /// its frame from the declared geometry.
@@ -216,6 +227,21 @@ fn priced_by_libviprs() -> Vec<Row> {
             priced_geometry: (2, 3, 1),
             sample_bytes: 1,
             what: "NIfTI voxel buffer",
+            price: 6,
+        },
+        // MATLAB declares its geometry in a dimensions subelement and then
+        // hands over a raw column-major array, which is the same
+        // decompression-bomb shape, twice over: the array can be declared
+        // ten gigapixels wide behind eight bytes of data, and a
+        // `miCOMPRESSED` element's inflated size is not declared anywhere
+        // (issue #510).
+        Row {
+            format: "mat",
+            bytes: MAT.to_vec(),
+            decoded: (3, 2),
+            priced_geometry: (3, 2, 1),
+            sample_bytes: 1,
+            what: "MAT sample buffer",
             price: 6,
         },
         // WebP prices its own frame from `output_buffer_size` and its own
@@ -377,9 +403,9 @@ fn the_two_tables_account_for_every_container() {
     // JPEG XL, AVIF and JPEG 2000 are each only compiled in behind their own
     // feature, so the self-priced table is one shorter for each that is off.
     // Spelled out rather than hidden in a `cfg!` inside the sum, because a
-    // reader has to be able to check the arithmetic. The 8 unconditional rows
-    // are gif, radiance, fits, openexr, webp, uhdr, .v and nifti.
-    let expected_self_priced = 8
+    // reader has to be able to check the arithmetic. The 9 unconditional rows
+    // are gif, radiance, fits, openexr, webp, uhdr, .v, nifti and mat.
+    let expected_self_priced = 9
         + usize::from(cfg!(feature = "jxl"))
         + usize::from(cfg!(feature = "avif"))
         + usize::from(cfg!(feature = "jp2k"));
@@ -394,8 +420,8 @@ fn the_two_tables_account_for_every_container() {
         + usize::from(!cfg!(feature = "jp2k"));
     assert_eq!(
         self_priced + image_backed + absent_features,
-        14,
-        "the two tables must account for all fourteen containers libviprs sniffs, \
+        15,
+        "the two tables must account for all fifteen containers libviprs sniffs, \
          with no exclusions left; see SniffedFormat::ALL"
     );
 }
