@@ -1221,6 +1221,36 @@ mod tests {
     }
 
     /**
+     * Tests that `write_flat` saturates into the kind rather than
+     * truncating, which is the contract its callers that do not pre-clamp
+     * rely on.
+     * Works by writing an over-ceiling value at each unsigned kind and
+     * reading it back through `read_flat`. Mutation found this one too:
+     * every op-level caller reaching `write_flat` today either goes
+     * through `sat16` or is bounded by an index, so dropping this clamp
+     * left all 60 histogram tests green even though a truncating write
+     * would turn 65536 into 0.
+     * Input: 300 at U8 and 70000 at U16 -> Output: 255 and 65535.
+     */
+    #[test]
+    fn write_flat_saturates_into_the_kind() {
+        let mut one = [0u8; 1];
+        write_flat(&mut one, SampleKind::U8, 0, 300);
+        assert_eq!(read_flat(&one, SampleKind::U8, 0), 255);
+
+        let mut two = [0u8; 2];
+        write_flat(&mut two, SampleKind::U16, 0, 70_000);
+        assert_eq!(read_flat(&two, SampleKind::U16, 0), 65_535);
+
+        // A value inside the kind is written through unchanged, so the
+        // saturations above are a clamp and not a constant.
+        write_flat(&mut one, SampleKind::U8, 0, 7);
+        assert_eq!(read_flat(&one, SampleKind::U8, 0), 7);
+        write_flat(&mut two, SampleKind::U16, 0, 4_242);
+        assert_eq!(read_flat(&two, SampleKind::U16, 0), 4_242);
+    }
+
+    /**
      * Tests `sat16` at the narrowing it owns, which the whole-op saturation
      * test above cannot reach.
      * Works by calling it directly with counts either side of the 16-bit
