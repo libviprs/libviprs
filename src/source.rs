@@ -441,7 +441,7 @@ pub enum SourceError {
 /// | Field | `image` raster path | native `.v` reader | TIFF page readers |
 /// |---|---|---|---|
 /// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
-/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
+/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in `decode_reader`, re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
 /// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
 /// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read (`.v`'s own uncompressed body is sized by its header, gated by `max_coord`/`max_pixels`) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
 /// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
@@ -471,7 +471,7 @@ pub enum SourceError {
 /// rejected inside the `image` crate via [`image::Limits`], so it arrives as
 /// [`SourceError::Decode`] wrapping [`image::ImageError::Limits`] — **not**
 /// [`SourceError::CoordLimitExceeded`], which is reserved for the
-/// `max_coord` check applied by [`decode_reader`] / the `.v` reader. Because
+/// `max_coord` check applied by `decode_reader` / the `.v` reader. Because
 /// the default `max_width` / `max_height` (65,535) sit far below the default
 /// `max_coord` (10,000,000), a raster dimension between those bounds trips
 /// the `image::Limits` path first; `CoordLimitExceeded` is what you see once
@@ -500,7 +500,7 @@ pub struct DecodeLimits {
     /// per decode on the declared header geometry — before any pixel
     /// allocation — by **every** decoder: the native `.v` reader and the
     /// `image`-crate raster path (PNG/JPEG/TIFF) alike, both routing
-    /// through [`DecodeLimits::check_coord`] and returning
+    /// through `DecodeLimits::check_coord` and returning
     /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This is
     /// the sole coordinate-ceiling knob: it replaced an earlier
     /// process-global whose races under concurrent jobs made the ceiling
@@ -745,7 +745,7 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 ///
 /// The decode is served through a process-global, bounded-LRU load cache
-/// (see [`LoadCache`]): the first load of a path is decoded from disk and
+/// (see `LoadCache`): the first load of a path is decoded from disk and
 /// cached, and every later call returns that cached raster even if the
 /// file has since changed on disk. Use [`decode_file_with_options`] with
 /// `revalidate = true` to force a re-read, or [`Raster::invalidate`] to
@@ -764,7 +764,7 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// since changed on disk. With `revalidate = true` the cache lookup is
 /// skipped, the file is re-read and decoded fresh, and the cache entry for
 /// `path` is refreshed so subsequent plain [`decode_file`] calls see the
-/// new image. See [`LoadCache`] for the caching contract and its
+/// new image. See `LoadCache` for the caching contract and its
 /// libvips-binding rationale.
 ///
 /// # Errors
@@ -809,7 +809,7 @@ impl Raster {
     /// memory) has nothing cached under a path, so this is a no-op for it.
     /// The recorded filename is canonicalized to the same identity the load
     /// keyed off, so invalidation reliably drops the entry even when this
-    /// raster's filename spells the path differently. See [`LoadCache`] for
+    /// raster's filename spells the path differently. See `LoadCache` for
     /// the caching contract.
     pub fn invalidate(&mut self) {
         if let Some(MetadataValue::Str(filename)) = self.fields.get("filename") {

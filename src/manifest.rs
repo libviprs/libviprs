@@ -559,7 +559,7 @@ impl Manifest {
     /// directories as needed.
     ///
     /// The write is atomic (staged `.tmp` sibling + rename via
-    /// [`crate::resume::atomic_write`]) so a crash mid-write cannot leave a
+    /// `crate::resume::atomic_write`) so a crash mid-write cannot leave a
     /// torn manifest, and the two on-disk copies cannot diverge (issue #124).
     pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
         let json = self.to_json_string()?;

@@ -68,7 +68,7 @@
 //! LZW is exactly lossless and deterministic in both directions, so the
 //! bitstream is not where the divergence lives. **Palette quantisation is.**
 //! vips quantises with libimagequant; libviprs uses the median-cut quantiser
-//! [`crate::encode::quantize_palette`] that already backs
+//! `crate::encode::quantize_palette` that already backs
 //! [`Raster::encode_png_palette`]. Two different algorithms pick two
 //! different palettes for the same image, so the bytes will never match and
 //! chasing that would be chasing the wrong thing.
@@ -222,7 +222,7 @@ pub struct SaveOptions {
     pub dither: f64,
     /// Bits per pixel, 1 to 8 (libvips `gifsave` `bitdepth`). Defaults to 8,
     /// as vips does. The palette holds at most `min(255, 1 << bitdepth)`
-    /// colours; see [`MAX_PALETTE_ENTRIES`] for why 8 does not mean 256.
+    /// colours; see `MAX_PALETTE_ENTRIES` for why 8 does not mean 256.
     pub bitdepth: u8,
 }
 

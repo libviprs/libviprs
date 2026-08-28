@@ -77,9 +77,31 @@
 //!   read the [`Extend`] mode (background 0 by default), reproducing the
 //!   one-pixel anti-aliased border of `vips_affine_gen`. `vips_affine` grows
 //!   that border by embedding the input with the caller's extend mode before
-//!   it resamples (`affine.c:534`), so an [`Extend::White`] tap is inked the
-//!   way `vips_embed` inks one, from the interpretation
-//!   (`white_ink`, issue #667), and not from the sample depth.
+//!   it resamples (`affine.c:534`), so on a raster **without** an alpha band
+//!   an [`Extend::White`] tap is inked the way `vips_embed` inks one, from the
+//!   interpretation (`white_ink`, issue #667) and not from the sample depth,
+//!   and the measured cells match `vips embed --extend white` cell for cell.
+//!   They cannot match once the raster carries alpha. `vips_image_hasalpha()`
+//!   sends `vips_affine` through a premultiply into a **float** image before
+//!   it paints that border, so vips runs `FILL_LINE(float, ...)`, the byte
+//!   `memset` that produces 257 never happens, and the border lands on the
+//!   plain interpretation maximum instead. Measured on 8.18.6 by solving the
+//!   border ink back out of a half-pixel bicubic shift over a constant input:
+//!
+//!   | bands | tag | alpha | `embed` | `affine` |
+//!   |---|---|---|---|---|
+//!   | 3 | `srgb` | no | 65535 | 65534.7 |
+//!   | 4 | `srgb` | yes | 65535 | collapses to 255 |
+//!   | 3 | `scrgb` | no | 257 | 256.0 |
+//!   | 4 | `scrgb` | yes | 257 | collapses to 1 |
+//!   | 1 | `b-w` | no | 65535 | 65534.7 |
+//!   | 2 | `b-w` | yes | 65535 | collapses to 255 |
+//!
+//!   The alpha rows differ in kind rather than degree: `--extend white` and
+//!   `--extend black` produce the same output there. libviprs paints the ink
+//!   first and premultiplies after, so on an alpha raster it keeps the memset
+//!   values, and the suite pins those three cells rather than leaving the gap
+//!   implied. Issue #692 tracks the reordering.
 //! * **Premultiplied alpha.** Like `vips_affine`, images with an alpha band
 //!   are premultiplied before interpolation and unpremultiplied afterwards
 //!   unless [`AffineOptions::premultiplied`] says the input already is. The
@@ -591,8 +613,11 @@ struct SampleLayout {
     /// interpretation rather than of the depth and comes from
     /// [`bracket_max_alpha`] instead (issue #664), and not the
     /// [`Extend::White`] ink either, which is a property of the interpretation
-    /// too and comes from [`white_ink`] (issue #667). The three agree on the
-    /// unsigned carriers and cannot on a float one.
+    /// too and comes from [`white_ink`] (issue #667). This ceiling and the
+    /// bracket's agree on the unsigned carriers and part only on a float one.
+    /// The white ink can differ from both on any carrier, because it follows
+    /// the tag the whole way down: `Rgb16` tagged `ScRgb` inks **257** where
+    /// this ceiling and the bracket's are both 65535.
     ///
     /// [`write`]: SampleLayout::write
     max: f64,
@@ -669,11 +694,11 @@ impl SampleLayout {
 /// accepts any tag without checking the depth, so an 8-bit buffer labelled
 /// `Rgb16` would premultiply against 65535 and come back black. [`crate::composite`]
 /// navigates the same trap for its own normalisation.
-fn bracket_max_alpha(src: &Raster) -> f64 {
-    if src.format().is_float() {
-        interpretation_max_alpha(src.interpretation())
+fn bracket_max_alpha(format: PixelFormat, interpretation: Interpretation) -> f64 {
+    if format.is_float() {
+        interpretation_max_alpha(interpretation)
     } else {
-        SampleLayout::of(src.format()).max
+        SampleLayout::of(format).max
     }
 }
 
@@ -934,7 +959,7 @@ impl TapFetch<'_> {
             h: i64::from(src.height()),
             bands: src.format().channels(),
             layout: SampleLayout::of(src.format()),
-            alpha_max: bracket_max_alpha(src),
+            alpha_max: bracket_max_alpha(src.format(), src.interpretation()),
             white: white_ink(src.format(), src.interpretation()),
             extend,
             background,
@@ -1963,7 +1988,7 @@ where
     if !bracket || !src.format().has_alpha() {
         return pipeline(src);
     }
-    let max = bracket_max_alpha(src);
+    let max = bracket_max_alpha(src.format(), src.interpretation());
     let work = premultiply_to_float(src, max)?;
     let reduced = pipeline(&work)?;
     unpremultiply_from_float(&reduced, src.format(), max)
@@ -4628,22 +4653,31 @@ mod tests {
     /// way `vips_embed` inks one: [`white_ink`], the interpretation's max
     /// alpha laid down by whichever paint mechanism the carrier picks.
     ///
+    /// **On a raster without an alpha band**, which is every fixture below.
+    /// That scope is the whole content of the claim, not a caveat on it: once
+    /// alpha is present vips premultiplies into float before it paints the
+    /// border and the two stop agreeing, which
+    /// `affine_white_on_an_alpha_raster_keeps_the_memset_ink` below pins.
+    ///
     /// Measured on 8.18.6 with `vips affine in.v out.v "1 0 0 1" --extend
     /// white --oarea "-1 -1 4 4" --interpolate nearest`, reading the corner.
-    /// It is the same twelve values `vips embed --extend white` gives, which
-    /// is the point:
+    /// It is the same table `vips embed --extend white` gives, cell for cell,
+    /// which is the point:
     ///
     /// ```text
-    /// carrier  multiband/b-w  srgb   rgb16  scrgb
-    /// uchar    255            255    255    1
-    /// ushort   65535          65535  65535  257
-    /// float    255            255    65535  1
+    /// carrier  multiband/b-w  srgb   rgb16  grey16  scrgb
+    /// uchar    255            255    255    255     1
+    /// ushort   65535          65535  65535  65535   257
+    /// float    255            255    65535  65535   1
     /// ```
     ///
+    /// The `grey16` column is the other one the old depth rule got wrong: its
+    /// float cell is 65535 where the depth gave 255, and nothing else in the
+    /// suite reaches it.
+    ///
     /// Nearest on the `-1` ring reads one tap and nothing else, so the corner
-    /// is the ink itself rather than a blend of it, and none of the carriers
-    /// here has an alpha band, so no premultiply round-trip stands between the
-    /// ink and the assertion.
+    /// is the ink itself rather than a blend of it, and no premultiply
+    /// round-trip stands between the ink and the assertion.
     #[test]
     fn affine_white_taps_ink_from_the_interpretation() {
         use Interpretation as I;
@@ -4652,6 +4686,7 @@ mod tests {
             (None, 255.0, 65535.0, 255.0),
             (Some(I::Srgb), 255.0, 65535.0, 255.0),
             (Some(I::Rgb16), 255.0, 65535.0, 65535.0),
+            (Some(I::Grey16), 255.0, 65535.0, 65535.0),
             (Some(I::ScRgb), 1.0, 257.0, 1.0),
         ];
         let float1 = PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap());
@@ -4694,6 +4729,78 @@ mod tests {
                     "the image itself resamples unchanged"
                 );
             }
+        }
+    }
+
+    /// Issue #692, the cell where libviprs and vips do **not** agree, pinned
+    /// so the divergence is a recorded number rather than something implied by
+    /// the absence of a fixture.
+    ///
+    /// `vips_affine` only reaches the `vips_embed` border in the raster's own
+    /// domain when `vips_image_hasalpha()` is false. With an alpha band it
+    /// premultiplies into a **float** image first and paints the border into
+    /// that, so `vips_region_paint` takes the `FILL_LINE(float, ...)` arm
+    /// (`region.c:936`), the byte `memset` that smears the ink (`region.c:922`)
+    /// never runs, and the border comes out at the plain interpretation max.
+    /// Measured on 8.18.6 by solving the ink back out of a half-pixel bicubic
+    /// shift over a constant input, since a nearest tap on the ring shows the
+    /// border only where the interpolator samples past the edge:
+    ///
+    /// ```text
+    /// bands  tag    alpha  embed  affine
+    /// 3      srgb   no     65535  65534.7   (~65535, the alpha-free claim)
+    /// 4      srgb   YES    65535  255       (--extend white == --extend black)
+    /// 3      scrgb  no     257    256.0     (~257)
+    /// 4      scrgb  YES    257    1
+    /// 1      b-w    no     65535  65534.7
+    /// 2      b-w    YES    65535  255
+    /// ```
+    ///
+    /// libviprs paints the white ink into the raster's own domain and
+    /// premultiplies afterwards, so it keeps the memset values on all three
+    /// alpha rows: 65535, 257, 65535 against vips' 255, 1, 255. That is what
+    /// this test asserts. #688 does not cause it. The fill before #688 was
+    /// [`SampleLayout::max`], which is 65535 here and wrong in the same
+    /// direction, and fixing it means moving the paint to the other side of
+    /// the premultiply in [`TapFetch`], a change to the ordering and not to
+    /// the ink... so it belongs to #692, and this cell is what #692 will flip.
+    #[test]
+    fn affine_white_on_an_alpha_raster_keeps_the_memset_ink() {
+        use Interpretation as I;
+        // (tag, what libviprs paints today, what vips 8.18.6 measures)
+        let cases = [
+            (I::Srgb, 65535.0, 255.0),
+            (I::ScRgb, 257.0, 1.0),
+            (I::Bw, 65535.0, 255.0),
+        ];
+        for (tag, libviprs, vips) in cases {
+            let im = Raster::new(2, 2, PixelFormat::Rgba16, 7u16.to_ne_bytes().repeat(16))
+                .unwrap()
+                .copy()
+                .interpretation(tag)
+                .build();
+            let out = im
+                .try_affine_with(
+                    [1.0, 0.0, 0.0, 1.0],
+                    Interpolator::Nearest,
+                    AffineOptions {
+                        oarea: Some([-1, -1, 4, 4]),
+                        extend: Extend::White,
+                        ..AffineOptions::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                out.getpoint(0, 0),
+                vec![libviprs; 4],
+                "Rgba16 tagged {tag:?}: libviprs paints the memset ink; vips \
+                 gives {vips} because it premultiplies into float first (#692)"
+            );
+            assert_eq!(
+                out.getpoint(1, 1),
+                vec![7.0; 4],
+                "the image itself resamples unchanged"
+            );
         }
     }
 }

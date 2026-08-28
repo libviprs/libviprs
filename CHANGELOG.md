@@ -9,54 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- `Extend::White` inks its fill from the raster's interpretation instead of
-  from its sample depth, so a float raster tagged `ScRgb` fills with `1.0` and
-  one tagged `Rgb16` with `65535` where both used to fill with `255` (issue
-  #667). That covers `embed` and `gravity` in `extract`, and the white taps
-  `affine` and the interpolating resamplers read outside the input. An untagged
-  raster keeps the fill it always had.
-
-  vips inks a white border with `(int) vips_interpretation_max_alpha(in->Type)`
-  (`embed.c:280`), so the tag picks the ink and the depth never does. libviprs
-  was reading the depth in two places that did not even agree with each other:
-  `TapFetch::fill_value` gave 255 for every float carrier, and `embed` computed
-  `bpc == 1 ? 255 : 65535`. Both go through one `white_ink` now, and
-  `colourspace(ScRgb)` hands back exactly the raster that made it visible, an
-  `RgbaF32` of scene-linear 0..1 samples that used to get a border 255 times
-  too bright.
-
-  There is a second half, and it is why the integer carriers move at all.
-  `vips_region_paint` only writes that ink as a number when the image is float
-  (`FILL_LINE(float, ...)`, `region.c:936`); on an integer image it `memset`s
-  the buffer with it (`region.c:922`), which keeps the low byte of the ink and
-  repeats that byte across every byte of the sample. On the ordinary tags it is
-  invisible, since 255 memset over a `u16` is 65535 again, which is why a
-  depth-derived ceiling has served this long. On scRGB it is very visible: the
-  ink is 1, so a `u8` raster tagged scRGB fills with 1 and a `u16` one with
-  `0x0101`, which is **257**.
-
-  I ported the 257. It is not white in any sense and it is plainly an artefact
-  of the paint mechanism, but it is what the oracle produces, and the other
-  reading of the intent (clamp the ink into the carrier's range, giving 1) is
-  not whiter, it is black. A `u16` buffer tagged scRGB is an incoherent thing
-  to be holding in the first place, so neither answer serves anybody... and a
-  port that quietly improves on the binary is one you can no longer check
-  against it.
-
-  Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend white`,
-  reading the corner. `vips affine --extend white` gives the same twelve values
-  because it builds its resampling border with `vips_embed` (`affine.c:534`):
-
-  | carrier | multiband | srgb | rgb16 | scrgb |
-  |---|---|---|---|---|
-  | uchar | 255 | 255 | 255 | 1 |
-  | ushort | 65535 | 65535 | 65535 | 257 |
-  | float | 255 | 255 | 65535 | 1 |
-
-  Float `embed` stays unimplemented rather than newly wrong: `read_s` and
-  `write_s` still panic on any depth that is not 1 or 2 bytes, so the float row
-  is `resample`'s alone for now.
-
 - `resize`, `shrink`, `reduce` and `affine` take the premultiply bracket's
   alpha ceiling from the raster's interpretation instead of from its storage
   depth, so a float raster tagged `ScRgb` brackets against `1.0` and one tagged
@@ -482,6 +434,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   un-premultiply — and that is now ported too, so the bracket cancels on a round
   trip. On the unsigned 8- and 16-bit carriers every one of these guards is
   inert, which is why nothing but the float resample paths moved.
+
+- `Extend::White` inks its fill from the raster's interpretation instead of
+  from its sample depth, so a float raster tagged `ScRgb` fills with `1.0` and
+  one tagged `Rgb16` with `65535` where both used to fill with `255` (issue
+  #667). That covers `embed` and `gravity` in `extract`, and the white taps
+  `affine` and the interpolating resamplers read outside the input. An untagged
+  raster keeps the fill it always had.
+
+  vips inks a white border with `(int) vips_interpretation_max_alpha(in->Type)`
+  (`embed.c:280`), so the tag picks the ink and the depth never does. libviprs
+  was reading the depth in two places that did not even agree with each other:
+  `TapFetch::fill_value` gave 255 for every float carrier, and `embed` computed
+  `bpc == 1 ? 255 : 65535`. Both go through one `white_ink` now, and
+  `colourspace(ScRgb)` hands back exactly the raster that made it visible, an
+  `RgbaF32` of scene-linear 0..1 samples that used to get a border 255 times
+  too bright.
+
+  There is a second half, and it is why the integer carriers move at all.
+  `vips_region_paint` only writes that ink as a number when the image is float
+  (`FILL_LINE(float, ...)`, `region.c:936`); on an integer image it `memset`s
+  the buffer with it (`region.c:922`), which keeps the low byte of the ink and
+  repeats that byte across every byte of the sample. On the ordinary tags it is
+  invisible, since 255 memset over a `u16` is 65535 again, which is why a
+  depth-derived ceiling has served this long. On scRGB it is very visible: the
+  ink is 1, so a `u8` raster tagged scRGB fills with 1 and a `u16` one with
+  `0x0101`, which is **257**.
+
+  I ported the 257. It is not white in any sense and it is plainly an artefact
+  of the paint mechanism, but it is what the oracle produces, and the other
+  reading of the intent (clamp the ink into the carrier's range, giving 1) is
+  not whiter, it is black. A `u16` buffer tagged scRGB is an incoherent thing
+  to be holding in the first place, so neither answer serves anybody... and a
+  port that quietly improves on the binary is one you can no longer check
+  against it.
+
+  Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend white`,
+  reading the corner:
+
+  | carrier | multiband | srgb | rgb16 | grey16 | scrgb |
+  |---|---|---|---|---|---|
+  | uchar | 255 | 255 | 255 | 255 | 1 |
+  | ushort | 65535 | 65535 | 65535 | 65535 | 257 |
+  | float | 255 | 255 | 65535 | 65535 | 1 |
+
+  Float `embed` stays unimplemented rather than newly wrong: `read_s` and
+  `write_s` still panic on any depth that is not 1 or 2 bytes, so the float row
+  is `resample`'s alone for now (issue #694).
+
+  `vips affine --extend white` reproduces that table cell for cell **on a
+  raster without an alpha band**, because it builds its resampling border with
+  `vips_embed` (`affine.c:534`). It cannot once the raster carries alpha:
+  `vips_image_hasalpha()` sends `vips_affine` through a premultiply into a
+  **float** image before it paints the border, so `FILL_LINE(float, ...)` runs,
+  the memset never happens, and the border lands on the plain interpretation
+  maximum. Measured on 8.18.6 by solving the ink back out of a half-pixel
+  bicubic shift over a constant input, since a plain identity never samples
+  past the edge and shows no border at all:
+
+  | bands | tag | alpha | `embed` | `affine` |
+  |---|---|---|---|---|
+  | 3 | `srgb` | no | 65535 | 65534.7 |
+  | 4 | `srgb` | yes | 65535 | collapses to 255 |
+  | 3 | `scrgb` | no | 257 | 256.0 |
+  | 4 | `scrgb` | yes | 257 | collapses to 1 |
+  | 1 | `b-w` | no | 65535 | 65534.7 |
+  | 2 | `b-w` | yes | 65535 | collapses to 255 |
+
+  The alpha rows differ in kind and not in degree, since `--extend white` and
+  `--extend black` produce the same output there. libviprs paints the ink into
+  the raster's own domain and premultiplies afterwards, so on an alpha raster
+  it keeps the memset values, and `affine_white_on_an_alpha_raster_keeps_the_memset_ink`
+  pins all three cells rather than leaving the gap implied. Moving the paint to
+  the other side of the premultiply is a change to the ordering rather than to
+  the ink, so it is issue #692's and not this one's.
 
 ### Added
 

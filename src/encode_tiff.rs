@@ -109,7 +109,7 @@
 //! `N - 1` unassociated-alpha extra samples, so it round-trips as a portable
 //! integer carrier and vips reads the file back with the same band count and
 //! samples. (A 4-band uchar/ushort raster is the named [`PixelFormat::Rgba8`] /
-//! [`PixelFormat::Rgba16`] and travels the RGBA path.) See [`encode_multiband`]
+//! [`PixelFormat::Rgba16`] and travels the RGBA path.) See `encode_multiband`
 //! for why the `BlackIsZero` layout is used in place of vips's RGB-plus-extra
 //! layout for `>= 3` bands.
 //!
@@ -118,7 +118,7 @@
 //! decoder rejects at every entry point (it funnels through `expand_chunk`,
 //! which calls `colortype()` and errors for RGB-with-extra). [`decode_tiff_page`]
 //! and [`Raster::tiff_load`] first relabel that file's `PhotometricInterpretation`
-//! tag from RGB to `BlackIsZero` (see [`normalize_multiband_photometric`]); the
+//! tag from RGB to `BlackIsZero` (see `normalize_multiband_photometric`); the
 //! relabel never alters a sample byte, so the decoder then reads the N-band
 //! raster as a `Multiband{N}` carrier with the exact samples vips stored.
 //!
