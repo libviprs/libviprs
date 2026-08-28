@@ -3879,28 +3879,34 @@ mod tests {
         );
     }
 
-    /// #575, #790: the whole-image widenings that are left are still reserved
-    /// fallibly, which after those two changes nothing else holds.
+    /// #575, #790, #791: what each operation still reserves, how many times,
+    /// and that the size of it is set by the mask or the template rather than
+    /// by the image.
     ///
-    /// The two correlations widen both operands, because they compare the
-    /// template against the image at every offset and read the whole template
-    /// per output sample. [`Raster::try_compass`] no longer widens anything:
-    /// #790 folds each result into the combine off its own bytes, so what its
-    /// arm of this test pins now is that the combine accumulator still goes
-    /// through [`try_buffer`] and that the number of reservations one compass
-    /// makes is three and not seven.
+    /// Three changes took the whole-image `f64` widenings out of this module
+    /// and each left a different residue, so this is one test with three arms
+    /// rather than three tests:
     ///
-    /// The count is the load-bearing half for compass, for the reason
-    /// `sharpen_scratch_planes_are_fallible_not_aborting` gives: `.collect()`
-    /// and [`try_buffer`] behave identically at every size a test can build,
-    /// so only the count moves. For the two correlations the ceiling reaches
-    /// the widening directly, because there is no window reservation in front
-    /// of it to fail first.
+    /// * **compass** reserves a window per traversal and one accumulator, and
+    ///   widens nothing: #790 folds each result into the combine off its own
+    ///   bytes.
+    /// * **the two correlations** reserve a window and widen the **template**,
+    ///   which they read whole at every output sample. The template is bounded
+    ///   by the operand a caller passes and not by the image, which is what
+    ///   the two ceilings below say: a correlation completes under a ceiling
+    ///   far below its own image, and under the same ceiling on an image four
+    ///   times as tall.
+    /// * and a ceiling under even the window is
+    ///   [`ConvolutionError::Raster`] rather than an abort, on both.
     ///
-    /// Mutated to check it: `.collect()` back inside [`samples_f64`] reddens
-    /// this test and **nothing else in the crate**.
+    /// The counts are the load-bearing half, for the reason
+    /// `sharpen_scratch_planes_are_fallible_not_aborting` gives: a `.collect()`
+    /// and a [`try_buffer`] read the same values at every size a test can
+    /// build, so only the count tells them apart. Mutated to check it:
+    /// `.collect()` back inside [`samples_f64`] reddens this test and **nothing
+    /// else in the crate**.
     #[test]
-    fn the_whole_image_widenings_that_are_left_are_reserved_fallibly() {
+    fn every_remaining_intermediate_is_reserved_fallibly_and_bounded_by_its_operand() {
         let im = noise_rgb(8, 6, 36);
         let template = noise_rgb(3, 3, 37);
         let mask = Kernel {
@@ -3917,33 +3923,49 @@ mod tests {
              nothing widens a result and nothing materialises the clipped samples"
         );
 
-        let (spcor, calls) = with_conv_buffer_probe(u64::MAX, || im.try_spcor(&template));
-        assert!(spcor.is_ok());
-        assert_eq!(
-            calls, 3,
-            "both operands are widened, and the output reserved"
-        );
-        let (capped, _) = with_conv_buffer_probe(16, || im.try_spcor(&template));
-        assert!(matches!(
-            capped,
-            Err(ConvolutionError::Raster(
-                RasterError::AllocationFailed { .. }
-            ))
-        ));
+        for (name, run) in [
+            (
+                "spcor",
+                (|a: &Raster, b: &Raster| a.try_spcor(b)) as fn(&Raster, &Raster) -> _,
+            ),
+            ("fastcor", |a: &Raster, b: &Raster| a.try_fastcor(b)),
+        ] {
+            let (ok, calls) = with_conv_buffer_probe(u64::MAX, || run(&im, &template));
+            assert!(ok.is_ok());
+            assert_eq!(
+                calls, 2,
+                "{name} reserves a row window over the image and widens the template, and \
+                 writes its result straight into the output raster"
+            );
 
-        let (fastcor, calls) = with_conv_buffer_probe(u64::MAX, || im.try_fastcor(&template));
-        assert!(fastcor.is_ok());
-        assert_eq!(
-            calls, 3,
-            "both operands are widened, and the output reserved"
-        );
-        let (capped, _) = with_conv_buffer_probe(16, || im.try_fastcor(&template));
-        assert!(matches!(
-            capped,
-            Err(ConvolutionError::Raster(
-                RasterError::AllocationFailed { .. }
-            ))
-        ));
+            // 64x64 `Rgb8` is 98304 bytes widened whole; a 3-row window is
+            // 4608, and this ceiling is twice that.
+            let ceiling = 9216;
+            let wide = noise_rgb(64, 64, 38);
+            let tall = noise_rgb(64, 256, 39);
+            for im in [&wide, &tall] {
+                let (out, _) = with_conv_buffer_probe(ceiling, || run(im, &template));
+                assert!(
+                    out.is_ok(),
+                    "{name} on a {}x{} image must complete under a ceiling of {ceiling} bytes: \
+                     the reservation is the template's height, not the image's (issue #791)",
+                    im.width(),
+                    im.height()
+                );
+            }
+
+            let (capped, _) = with_conv_buffer_probe(16, || run(&im, &template));
+            let got = capped.as_ref().map(|r| (r.width(), r.height(), r.format()));
+            assert!(
+                matches!(
+                    capped,
+                    Err(ConvolutionError::Raster(
+                        RasterError::AllocationFailed { .. }
+                    ))
+                ),
+                "an unservable {name} window must be a typed error, got {got:?}"
+            );
+        }
     }
 
     /// #575: the rolling window answers the same image the whole-image
