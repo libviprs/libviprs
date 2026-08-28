@@ -642,6 +642,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- AVIF still-image load, behind a new non-default **`avif`** feature
+  (issue #605). Build with `--features avif` and `decode_avif` reads an AV1
+  keyframe out of an ISOBMFF container, with alpha from an `auxl`-linked
+  auxiliary item, at 8, 10 and 12 bits; `.avif` becomes a live row in the
+  content sniffer, matching `ftyp` + the major brand `avif` at offset 4.
+
+  **It is deliberately not `heifload` parity, and the module says so at its
+  own entry point.** `heifload` also reads HEVC, AVC and JPEG payloads and
+  `heifsave` writes HEVC by default, so this covers one of four inputs and
+  none of the default output. An HEVC payload is refused by name rather than
+  as a generic parse failure, because that is the wall issue #498 closed on
+  and it has not moved. There is no save side and none is deferred: no
+  pure-Rust AV1 encoder is worth shipping in a pyramiding engine.
+
+  Pixels match vips exactly rather than approximately, which almost nothing
+  else in the foreign-format roadmap can claim. AV1 decode is bit-exact by
+  specification, and the colour step that is *not* fixed by any specification
+  is pinned against `oracle-captures/foreign-avif` frame by frame. That step
+  turned out to need two implementations: libheif reaches 4:4:4 and 4:2:0
+  through different arithmetic, float with round-to-nearest for one and 8.8
+  fixed point for the other, and measured over 1024 pixels each way the wrong
+  one is wrong on 103 and 124 pixels respectively, always by exactly one.
+  Chroma is upsampled nearest-neighbour, deeper bit depths left-justify the
+  way `heifload` does, and a monochrome AVIF still returns three bands.
+  Colour encodings that nothing in the tree can measure, which is 4:2:2,
+  limited range, BT.709 and BT.601 above 8 bits, are refused rather than
+  approximated.
+
+  The decoder is `rav1d` (BSD-2-Clause), +16 lock entries, cheaper than `jxl`
+  at +21 and `svg` at +29. It is taken with `default-features = false` so its
+  `asm` feature stays off, which means no assembler is required and no native
+  code is compiled: a debug build emits zero object files under
+  `target/debug/build/rav1d-*`. The ISOBMFF container walk is hand-rolled
+  rather than taken from `avif-parse`, which is MPL-2.0.
+
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
   reads both container forms, the bare `FF 0A` codestream and the boxed ISOBMFF
