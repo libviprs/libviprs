@@ -444,11 +444,17 @@ impl SourceError {
     ///   buffer against [`DecodeLimits::max_alloc_bytes`] itself;
     /// * [`SourceError::Decode`] carrying an `image` `LimitError` of kind
     ///   `InsufficientMemory`, which is the same ceiling spent inside the
-    ///   `image` crate's own decoder for JPEG, PNG, single-image TIFF and
-    ///   WebP;
+    ///   `image` crate's own decoder for JPEG, PNG and single-image TIFF;
     /// * [`JxlError::DecoderAllocLimitExceeded`](crate::jxl::JxlError::DecoderAllocLimitExceeded),
     ///   `jxl-oxide`'s internal allocation tracker refusing a buffer whose
     ///   size it does not report out.
+    ///
+    /// The second bullet named WebP as a fourth until issue #782. It has not
+    /// been one since #686: WebP is decoded by libviprs rather than by the
+    /// `image` crate, it prices its own frame, and it reports the first bullet
+    /// with the geometry attached. The list is pinned to the tables in
+    /// `tests/decode_alloc_refusal_shape.rs` now, so it cannot drift off them
+    /// again.
     ///
     /// Raising `max_alloc_bytes` is the response to all three, which is what
     /// makes one predicate the right shape rather than a convenience over

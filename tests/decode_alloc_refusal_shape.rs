@@ -49,9 +49,11 @@
 //!
 //! The six formats where **libviprs itself** prices a declared geometry and
 //! refuses it must all report one shape, `SourceError::AllocLimitExceeded`.
-//! The four where the `image` crate refuses keep reporting the `image` shape,
+//! The three where the `image` crate refuses keep reporting the `image` shape,
 //! and that is asserted here too so the split is a decision on the record
-//! rather than a gap.
+//! rather than a gap. Three, not four: WebP left that side in #686, and the
+//! prose here and in `SourceError::is_alloc_limit`'s doc went on saying four
+//! until #782.
 
 use libviprs::jxl::JxlError;
 use libviprs::source::{DecodeLimits, decode_bytes_with_limits};
@@ -530,18 +532,23 @@ fn is_alloc_limit_does_not_depend_on_the_jxl_feature() {
     );
 }
 
-/// Issue #686. The four formats the `image` crate refuses keep reporting the
+/// Issue #686. The three formats the `image` crate refuses keep reporting the
 /// `image` shape, and this is here so that is a decision rather than a gap.
 ///
-/// They are not a mechanical move. In all four the ceiling is spent inside
+/// They are not a mechanical move. In all three the ceiling is spent inside
 /// `image`'s own decoder through `Limits::reserve`, so there is no libviprs
-/// price to report and no declared geometry to attach; WebP reaches the same
-/// error deliberately, from its own pre-check, so that it refuses the same
-/// frames as its three siblings and says the same thing about them.
+/// price to report and no declared geometry to attach.
+///
+/// WebP was a fourth here until #686 moved it, and this doc went on saying so
+/// until #782. It still refuses the same *frames* as its three siblings, which
+/// is the part that was always true and is why the pre-check exists; what it no
+/// longer does is say the same *thing* about them, because it has a price and a
+/// declared geometry and reports both.
 ///
 /// This is what a caller still does about WebP, which #686 asks to be spelled
-/// out: exactly what they do about JPEG, PNG and TIFF, and
-/// [`SourceError::is_alloc_limit`] covers all four without them having to know.
+/// out: exactly what they do about JPEG, PNG and TIFF, because
+/// [`SourceError::is_alloc_limit`] covers all four shapes without them having
+/// to know which side of the split a container is on.
 #[test]
 fn the_image_backed_decoders_still_report_the_image_shape() {
     for row in priced_by_the_image_crate() {

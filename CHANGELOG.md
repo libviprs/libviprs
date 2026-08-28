@@ -1706,6 +1706,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SourceError::is_alloc_limit`'s documentation no longer lists WebP among the
+  containers whose allocation refusal is spent inside the `image` crate (issue
+  #782). It has not been one since #686: WebP is decoded by libviprs, prices its
+  own frame, and reports `SourceError::AllocLimitExceeded` with the declared
+  geometry attached. The predicate itself was right the whole time, so nothing a
+  caller wrote against it breaks; the bullet list beside it sent anyone matching
+  by shape to the wrong arm.
+
+  The list is pinned to the tables in `tests/decode_alloc_refusal_shape.rs` now.
+  Nothing held it before, because those tables pin their own size and what their
+  rows report, and neither of those sees a format moving out of one and leaving
+  its description behind.
+
 - The native `.v` reader applies `DecodeLimits::max_alloc_bytes` to the pixel
   body it copies out of the file, priced from the declared header geometry
   through the same `DecodeLimits::check_image_alloc` every other self-priced
