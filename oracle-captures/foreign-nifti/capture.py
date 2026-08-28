@@ -1148,13 +1148,66 @@ records["scl_slope_and_inter"] = {
 
 records["byte_order"] = {
     "what": "The format is endianness-sensitive and there is no flag for it. "
-            "Detection is entirely by sentinel: read sizeof_hdr as a native "
+            "The VERSION comes from the sentinel: read sizeof_hdr as a native "
             "int32, and if it is neither 348 nor 540, byte-swap it and try "
-            "again. Whichever way it matched decides both the version and the "
-            "byte order, and the loader then swaps the header AND the pixel "
-            "data in place. Both directions are captured; the big-endian "
-            "fixtures were produced by the library's own nifti_swap_as_nifti1 "
-            "/ nifti_swap_as_nifti2 and nifti_swap_Nbytes, not by hand.",
+            "again. The BYTE ORDER does not, on NIfTI-1, and this record used "
+            "to say it did. See which_byte_order_actually_wins below, which "
+            "is measured off four fixtures this same capture already writes. "
+            "Whichever way it is decided, the loader then swaps the header "
+            "AND the pixel data in place. Both directions are captured; the "
+            "big-endian fixtures were produced by the library's own "
+            "nifti_swap_as_nifti1 / nifti_swap_as_nifti2 and "
+            "nifti_swap_Nbytes, not by hand.",
+    "which_byte_order_actually_wins": {
+        "what": "MEASURED, and it is not the sentinel. bad_sizeof_swapped.nii "
+                "is a little-endian file with ONLY its four sentinel bytes "
+                "swapped, so sizeof_hdr matches 348 in the big-endian reading "
+                "alone. Under a sentinel-decides rule every field would be "
+                "read big-endian, dim would come back 768 512 768 256 and the "
+                "load would fail on the rank. It loads LSB_FIRST with dim "
+                "3 2 3 1 and hands back its twelve payload bytes, so dim[0] "
+                "is what won. Issue #752.",
+        "rule": [
+            "dim[0] read one way is in 1..=7 -> that way",
+            "else dim[0] read the other way is in 1..=7 -> the other way",
+            "else sizeof_hdr read one way is 348 -> that way",
+            "else sizeof_hdr read the other way is 348 -> the other way",
+        ],
+        "the_four_fixtures_that_force_it": {
+            "bad_sizeof_swapped.nii": "dim[0] reads 3 / 768, sizeof_hdr "
+                                      "matches swapped, loads LSB_FIRST. "
+                                      "Rules out the sentinel deciding.",
+            "endian_nifti1_int16_be.nii": "dim[0] reads 768 / 3, sizeof_hdr "
+                                          "matches swapped, loads MSB_FIRST. "
+                                          "Supplies the swapped arm.",
+            "dimedge_dim0_zero.nii": "dim[0] is 0 both ways, sizeof_hdr "
+                                     "matches native, loads LSB_FIRST. "
+                                     "Supplies the fallback.",
+            "dimedge_dim0_eight.nii": "dim[0] reads 8 / 2048, in range "
+                                      "neither way, loads LSB_FIRST and then "
+                                      "fails with `bad dim[0]`. Shows an "
+                                      "out-of-range dim[0] falls THROUGH to "
+                                      "the sentinel rather than being "
+                                      "refused at the byte-order step.",
+        },
+        "it_cannot_depend_on_host_order": "the reference reads dim[0] in the "
+                                          "host's order first, so a port on a "
+                                          "big-endian machine tries the other "
+                                          "one first. It cannot matter: a "
+                                          "rank in 1..=7 has a zero high "
+                                          "byte, so its swap is n * 256 and "
+                                          "never a rank, and 348 swapped is "
+                                          "1543503872. Neither test can match "
+                                          "both ways round.",
+        "nifti2_is_not_separated": "no fixture here distinguishes the two "
+                                   "rules for NIfTI-2, whose dim is int64 at "
+                                   "offset 16: every NIfTI-2 fixture is "
+                                   "wholly one byte order or wholly the "
+                                   "other, so the sentinel and dim[0] agree. "
+                                   "The prose above is not known to be wrong "
+                                   "there and is not known to be right "
+                                   "either.",
+    },
     "sentinel": {
         "nifti1": "sizeof_hdr == 348",
         "nifti2": "sizeof_hdr == 540",
