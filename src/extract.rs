@@ -39,7 +39,11 @@
 //!   fill new pixels with black (all-zero samples) unless an extend mode or
 //!   background vector says otherwise. Background constants are truncated
 //!   toward zero (matching libvips' `double`->integer cast) and clamped to
-//!   the sample depth (`0..=255` or `0..=65535`).
+//!   the sample depth (`0..=255` or `0..=65535`). [`Extend::White`] is the
+//!   one fill that does **not** come from the depth: its ink is a property of
+//!   the [`Interpretation`] and of the mechanism vips paints it with, so it
+//!   reads the tag rather than the depth ceiling (issue #667), and the variant
+//!   doc on [`Extend::White`] carries the measured table.
 //!   A background vector must have one entry (replicated across bands) or
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
@@ -67,6 +71,8 @@
 //! attention coordinates match the real fixtures (`sample.jpg`: 199, 234).
 //! The strategy is deterministic.
 
+use crate::arithmetic::interpretation_max_alpha;
+use crate::conversion::Interpretation;
 use crate::pixel::PixelFormat;
 use crate::raster::{Raster, RasterError};
 use crate::resample::{ReduceKernel, ResizeOptions};
@@ -137,7 +143,58 @@ pub enum Extend {
     /// Reflect the image at its edges (the edge pixel is duplicated, so a
     /// row `0 1 2` extends as `... 1 0 | 0 1 2 | 2 1 0 ...`).
     Mirror,
-    /// Fill with white (the depth maximum in every band).
+    /// Fill with white, which libvips takes from the image's
+    /// [`Interpretation`] and never from its depth. `vips_embed` inks the
+    /// border with `(int) vips_interpretation_max_alpha(in->Type)`
+    /// (`libvips/conversion/embed.c:280`): 65535 for
+    /// [`Interpretation::Rgb16`] / [`Interpretation::Grey16`], 1.0 for
+    /// [`Interpretation::ScRgb`], 255 for everything else.
+    ///
+    /// What reaches the pixels then depends on how `vips_region_paint`
+    /// (`libvips/iofuncs/region.c:909`) writes that `int`. A float carrier
+    /// gets it per band as a float (`FILL_LINE(float, ...)`, `region.c:936`),
+    /// so an scRGB float border is `1.0` and an RGB16 one `65535.0`. An
+    /// integer carrier gets `memset((char *) q, value, wd)` (`region.c:922`),
+    /// which keeps only the **low byte** of the ink and repeats that byte
+    /// across every byte of the sample. On the ordinary tags that is
+    /// invisible, since `0xff` memset over a `u16` is 65535 again, which is
+    /// why a depth-derived ceiling served this long. On scRGB it is very
+    /// visible: the ink is 1, so a `u8` raster tagged scRGB fills with 1 and a
+    /// `u16` one with `0x0101` = **257**. That is the paint mechanism showing
+    /// through rather than any kind of white, and it is ported as it stands,
+    /// because 257 is what a comparison against the oracle has to expect and
+    /// the other reading of the intent (clamp the ink into the carrier's
+    /// range, giving 1) is not whiter, it is black.
+    ///
+    /// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend
+    /// white`, reading the corner:
+    ///
+    /// ```text
+    /// carrier  multiband  srgb   rgb16  grey16  scrgb
+    /// uchar    255        255    255    255     1
+    /// ushort   65535      65535  65535  65535   257
+    /// float    255        255    65535  65535   1
+    /// ```
+    ///
+    /// # Which operations that table describes
+    ///
+    /// [`Extend`] is shared, and the ink does not land the same way at both
+    /// ends of it.
+    ///
+    /// [`Raster::embed`] and [`Raster::gravity`] paint it straight into the
+    /// output, so the table above is exactly what they give. They do not carry
+    /// the float row yet: both still refuse a float carrier rather than paint
+    /// it wrongly (issue #694).
+    ///
+    /// The resamplers that read this mode for taps landing outside the input
+    /// ([`Raster::affine`] and the interpolating forms in [`crate::resample`])
+    /// match the table only on a raster **without** an alpha band. Once alpha
+    /// is present `vips_affine` premultiplies into a **float** image before it
+    /// paints the border, so vips runs `FILL_LINE(float, ...)`, the byte
+    /// `memset` never happens, and its border comes out at the plain
+    /// interpretation maximum instead (255 for sRGB, 1 for scRGB). libviprs
+    /// paints the ink first and premultiplies after, so on an alpha raster it
+    /// keeps the memset values; issue #692 tracks that reordering.
     White,
     /// Fill with the background colour passed alongside the extend mode
     /// (black when the background is `None`).
@@ -270,6 +327,91 @@ fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
             "this extract operation does not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
+    }
+}
+
+/// The sample [`Extend::White`] paints: `vips_embed`'s interpretation-derived
+/// ink, laid down by whichever paint mechanism the carrier selects.
+///
+/// `vips_embed` inks a white border with
+/// `(int) vips_interpretation_max_alpha(in->Type)`
+/// (`libvips/conversion/embed.c:280`), which is 65535 for RGB16 / GREY16, 1.0
+/// for scRGB and 255 for everything else (`libvips/iofuncs/header.c:195`). So
+/// the **interpretation** picks the ink and the depth never does... but what
+/// reaches the pixels also depends on how `vips_region_paint`
+/// (`libvips/iofuncs/region.c:909`) writes that `int`:
+///
+/// * a float carrier gets it per band as a float (`FILL_LINE(float, ...)`,
+///   `region.c:936`), so an scRGB float border is `1.0` and an RGB16 one
+///   `65535.0`; while
+/// * an integer carrier gets `memset((char *) q, value, wd)` (`region.c:922`),
+///   which keeps only the **low byte** of the ink and repeats that byte across
+///   every byte of the sample.
+///
+/// The memset is invisible on the ordinary tags, which is why a depth-derived
+/// ceiling has served this long: 255 is `0xff`, and `0xff` memset over a `u16`
+/// is 65535, the depth maximum again. It is very visible on scRGB, where the
+/// ink is 1 and a `u16` sample comes back `0x0101` = **257**. That is not
+/// white in any sense, it is the paint mechanism showing through, and it is
+/// ported rather than rounded off: 257 is what a comparison against the oracle
+/// has to expect, and the alternative reading of the intent (clamp the ink into
+/// the carrier's range, giving 1) is not any whiter, it is black.
+///
+/// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend white`
+/// on a 4-band raster, reading the corner:
+///
+/// ```text
+/// carrier  multiband  srgb   rgb16  grey16  scrgb
+/// uchar    255        255    255    255     1
+/// ushort   65535      65535  65535  65535   257
+/// float    255        255    65535  65535   1
+/// ```
+///
+/// `vips affine --extend white` gives the same values **on a raster without an
+/// alpha band**, because it builds its resampling border with `vips_embed`
+/// (`affine.c:534`); that is [`crate::resample`]'s side of the same ink. It
+/// cannot once the raster carries alpha, because `vips_image_hasalpha()` sends
+/// `vips_affine` through a premultiply into a **float** image before it paints
+/// that border: `FILL_LINE(float, ...)` runs, the memset above never happens,
+/// and the border lands on the plain interpretation maximum (255 for sRGB, 1
+/// for scRGB) instead. libviprs paints the ink first and premultiplies after,
+/// so it keeps the memset ink there; issue #692 tracks the reordering and
+/// [`crate::resample`] pins the divergence.
+//
+// This is `pub(crate)`, so nothing public may link it: rustdoc renders a
+// `[white_ink]` from a public doc as literal brackets with no anchor. The two
+// public docs that used to do that, the module doc above and `Extend::White`,
+// inline what a caller needs instead. Nothing in CI stops that coming back yet.
+// `rustdoc::private_intra_doc_links` is warn-by-default and the doc gate denies
+// only `broken_intra_doc_links`, and denying the other one is not a one-line
+// change, because 33 sites across 13 files elsewhere in the tree trip it too.
+// Issue #697 carries the gate and the sweep together; it is deliberately not
+// here, since a doc-only conflict across those 13 files is the worst kind to
+// resolve while the lanes holding them are still open.
+#[inline]
+pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> f64 {
+    let ink = interpretation_max_alpha(interpretation);
+    // `memset` takes the ink as an `int` and converts it to `unsigned char`,
+    // so only the low byte survives, and it lands in every byte of the sample.
+    let byte = u32::from(ink as i32 as u8);
+    // Matched on the carrier rather than counted out over `bytes_per_channel()`,
+    // so that adding a format is a compile error here rather than a silent ink
+    // nobody checked against the oracle (the lever issue #633 landed). The
+    // numeric fan-out this replaces answered for every depth, including ones
+    // that do not exist: right by luck at 4 bytes, since vips measures `int` +
+    // scRGB as `0x01010101`, and wrong at 8, where the `u32` shift drops the
+    // high half. Neither would have failed to build.
+    match format {
+        // `FILL_LINE(float, ...)` writes the ink as a number, so a float
+        // carrier keeps it whole.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => ink,
+        PixelFormat::Gray8 | PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Multi8(_) => {
+            f64::from(byte)
+        }
+        PixelFormat::Gray16
+        | PixelFormat::Rgb16
+        | PixelFormat::Rgba16
+        | PixelFormat::Multi16(_) => f64::from((byte << 8) | byte),
     }
 }
 
@@ -510,7 +652,10 @@ impl Raster {
         let bpc = fmt.bytes_per_channel();
         let max = if bpc == 1 { 255u32 } else { 65535u32 };
         let ink: Vec<u32> = match extend {
-            Extend::White => vec![max; bands],
+            // The white ink comes from the interpretation, never from `max`;
+            // see [`white_ink`]. The `as u32` is exact for the 8- and 16-bit
+            // carriers, the only ones `write_s` below will accept anyway.
+            Extend::White => vec![white_ink(fmt, self.interpretation()) as u32; bands],
             Extend::Background => resolve_ink(bands, max, background)?,
             _ => vec![0; bands],
         };
@@ -1295,6 +1440,15 @@ mod tests {
         gray(4, 4, (0..16).collect())
     }
 
+    /// `im` carrying an explicit interpretation, or left untagged so
+    /// [`Interpretation::for_format`] answers for it.
+    fn tagged(im: Raster, tag: Option<Interpretation>) -> Raster {
+        match tag {
+            Some(t) => im.copy().interpretation(t).build(),
+            None => im,
+        }
+    }
+
     // -- extract_area / crop ------------------------------------------------
 
     #[test]
@@ -1375,16 +1529,95 @@ mod tests {
         assert_eq!(out.getpoint(3, 3), vec![9.0, 9.0, 9.0]);
     }
 
+    /// Issue #667, the whole measured table in one place, including the float
+    /// column [`Raster::embed`] itself cannot reach (`read_s` panics on a
+    /// float carrier, so float embed is unimplemented rather than wrong) and
+    /// the `uchar` + RGB16 cell, whose `255` is the `memset` keeping the low
+    /// byte of `65535`. That cell is only visible here: the sample writers
+    /// downstream truncate (`write_s`) or clamp (`SampleLayout::write`, over
+    /// in [`crate::resample`]) a 65535 into an 8-bit sample and land on 255 by
+    /// their own route, so an ink that skipped the truncation would paint the
+    /// same pixel anyway.
+    ///
+    /// The `grey16` column is here for the same reason. Its float cell is
+    /// 65535 where the depth rule this PR replaces gave 255, and it is the
+    /// other cell that moved without anybody having to tag a raster `Rgb16`,
+    /// so leaving it unasserted would let the whole `Grey16` arm regress
+    /// silently.
+    ///
+    /// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend
+    /// white`, reading the corner.
     #[test]
-    fn embed_white_fills_with_depth_max() {
-        let im = gray(1, 1, vec![7]);
-        let out = im.embed(1, 1, 3, 3, Extend::White, None);
-        assert_eq!(out.getpoint(0, 0), vec![255.0]);
-        assert_eq!(out.getpoint(1, 1), vec![7.0]);
+    fn white_ink_reproduces_the_measured_embed_table() {
+        use Interpretation as I;
+        let float3 = PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap());
+        // (carrier, multiband, srgb, rgb16, grey16, scrgb)
+        #[rustfmt::skip]
+        let cases = [
+            (PixelFormat::Rgb8,    255.0,   255.0,   255.0,   255.0,     1.0),
+            (PixelFormat::Rgb16, 65535.0, 65535.0, 65535.0, 65535.0,   257.0),
+            (float3,               255.0,   255.0, 65535.0, 65535.0,     1.0),
+        ];
+        for (fmt, multiband, srgb, rgb16, grey16, scrgb) in cases {
+            for (tag, want) in [
+                (I::Multiband, multiband),
+                (I::Srgb, srgb),
+                (I::Rgb16, rgb16),
+                (I::Grey16, grey16),
+                (I::ScRgb, scrgb),
+            ] {
+                assert_eq!(white_ink(fmt, tag), want, "{fmt:?} tagged {tag:?}");
+            }
+        }
+    }
 
-        let im16 = gray16(1, 1, &[7]);
-        let out16 = im16.embed(1, 1, 3, 3, Extend::White, None);
-        assert_eq!(out16.getpoint(0, 0), vec![65535.0]);
+    /// Issue #667. `Extend::White` inks from the **interpretation**, and the
+    /// depth only ever shows through the `memset` that paints an integer
+    /// carrier; see [`white_ink`].
+    ///
+    /// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend
+    /// white` reading the corner. The 8- and 16-bit columns are the two this
+    /// module can carry; the float column is [`crate::resample`]'s, since
+    /// [`read_s`] still refuses a float raster here:
+    ///
+    /// ```text
+    /// carrier  multiband  srgb   rgb16  grey16  scrgb
+    /// uchar    255        255    255    255     1
+    /// ushort   65535      65535  65535  65535   257
+    /// float    255        255    65535  65535   1
+    /// ```
+    ///
+    /// The untagged rows are the regression pins: `Gray8` resolves to
+    /// [`Interpretation::Bw`] and `Gray16` to [`Interpretation::Grey16`], and
+    /// both land on the depth maximum the old ink happened to give.
+    #[test]
+    fn embed_white_inks_the_interpretation_through_the_paint_memset() {
+        use Interpretation as I;
+        // (tag, uchar corner, ushort corner)
+        let cases = [
+            (None, 255.0, 65535.0),
+            (Some(I::Multiband), 255.0, 65535.0),
+            (Some(I::Srgb), 255.0, 65535.0),
+            (Some(I::Rgb16), 255.0, 65535.0),
+            (Some(I::Grey16), 255.0, 65535.0),
+            (Some(I::ScRgb), 1.0, 257.0),
+        ];
+        for (tag, want8, want16) in cases {
+            let out = tagged(gray(1, 1, vec![7]), tag).embed(1, 1, 3, 3, Extend::White, None);
+            assert_eq!(
+                out.getpoint(0, 0),
+                vec![want8],
+                "8-bit carrier, tag {tag:?}"
+            );
+            assert_eq!(out.getpoint(1, 1), vec![7.0], "the image itself is copied");
+
+            let out16 = tagged(gray16(1, 1, &[7]), tag).embed(1, 1, 3, 3, Extend::White, None);
+            assert_eq!(
+                out16.getpoint(0, 0),
+                vec![want16],
+                "16-bit carrier, tag {tag:?}"
+            );
+        }
     }
 
     #[test]
