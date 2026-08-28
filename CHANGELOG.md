@@ -2723,6 +2723,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anchors on capture scripts it knows are tracked before it reads anything into
   an absence.
 
+- Every `json.dump` and `json.dumps` in `oracle-captures/` now passes
+  `allow_nan=False`, so a capture that measures a non-finite value stops at the
+  write instead of putting a bare `NaN`, `Infinity` or `-Infinity` into a file
+  no strict parser will read (issue #682). Two of the twenty call sites already
+  had it, both from #674. The other eighteen are across twelve scripts.
+
+  Nothing was broken. Every committed capture parses strictly today, which is
+  what #674 fixed. The problem is where the failure lands: `json.dump` writes
+  the bare literal by default and Python's own `json.load` reads it straight
+  back, so a capture round-trips perfectly on the machine that took it and only
+  falls over for a reader in another language, months later, in a file nobody
+  suspects. The flag moves that to the moment somebody runs `python3
+  capture.py`, which costs a re-run and no investigation.
+
+  It is eighteen call sites and not twelve because `foreign-avif` and
+  `foreign-jp2k` hand-roll an encoder that keeps a leaf array on one line, and a
+  leaf is exactly where a float lives. Guarding only their top-level dump would
+  have left every pixel row unguarded. The rule is blanket for the same reason,
+  down to the two calls that only serialise a dict key: an exemption needs a
+  rule for who qualifies, and any such rule is something to argue past later.
+
+  No `oracle.json` changed. I drove each area's committed writer over its own
+  parsed capture with the flag on, including the two hand-rolled encoders, and
+  all fourteen come back byte for byte identical, so nothing in the tree was
+  passing a non-finite float to begin with.
+
+  `tests/oracle_capture_json.rs` holds it shut. It blanks Python comments and
+  the insides of string literals first, then finds each `json.dump(` in what is
+  left and reads that call's own bracketed argument list, so prose cannot answer
+  for code and a file with one guarded call out of four still fails, with the
+  line number of the one that is missing it. F-string fields count as code,
+  because `foreign-jp2k` keeps one of its four dumps inside one. A companion
+  test feeds the scanner a source whose only `allow_nan=False` is in a docstring
+  and a comment and fails if that reads as guarded.
+
 ## [0.4.0] — 2026-07-20
 
 ### Breaking
