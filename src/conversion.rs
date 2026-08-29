@@ -277,23 +277,6 @@ pub enum ConversionError {
         /// The operation that was asked for.
         op: &'static str,
     },
-    /// The raster carries a sample kind this operation has no
-    /// implementation for.
-    ///
-    /// The sibling of [`ConversionError::FloatUnsupported`] for the
-    /// carriers that are not float: the unsigned 32-bit one of issue #517,
-    /// and the signed ones of issue #516 when they land. A width-keyed
-    /// `match` would have read four `u32` bytes as an `f32` here instead
-    /// (issue #607), so this variant is what turns that misread into a
-    /// refusal the caller can see. Mirrors
-    /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
-    #[error("{op} does not support {kind:?} samples yet")]
-    UnsupportedSampleKind {
-        /// The operation that was asked for.
-        op: &'static str,
-        /// The sample kind it cannot read.
-        kind: SampleKind,
-    },
     /// A delegated band operation failed.
     #[error(transparent)]
     Band(#[from] BandError),
@@ -435,8 +418,15 @@ fn condition_is_true(data: &[u8], kind: SampleKind, i: usize) -> bool {
 /// #516 came through here between #516 and #909, which was a parity
 /// regression rather than an implementation: vips runs `gamma`,
 /// `falsecolour`, `msb`, `arrayjoin` and `join` on a `char` raster.
-/// [`ConversionError::UnsupportedSampleKind`] stays, because the enum is
-/// public and the variant is what a future unreadable kind would use.
+///
+/// That left `ConversionError`'s own `UnsupportedSampleKind` variant with
+/// no construction site anywhere in the crate, so issue #931 removed it. A
+/// caller of a `conversion` op still meets that refusal where it is still
+/// real, through [`ConversionError::Band`] and
+/// [`ConversionError::Extract`], because `bands` and `extract` both keep
+/// their own. `SampleKind` is `#[non_exhaustive]` and this `match` is
+/// exhaustive over it, so an eighth kind is a compile error here and
+/// whoever adds one decides what it answers.
 fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ConversionError> {
     let kind = r.format().kind();
     match kind {
