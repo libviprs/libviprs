@@ -3213,6 +3213,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`decode_avif` no longer writes the payload through a read-only pointer**
+  (issue #912). `decode_av1` filled the buffer `dav1d_data_create` hands back,
+  which is the documented dav1d sequence and correct against dav1d's C. Against
+  `rav1d` it is not: `From<Rav1dData> for Dav1dData` builds that pointer out of
+  a shared reference, so the tag it carries permits reads and nothing else, and
+  Miri reports the copy as undefined behaviour under **both** aliasing models,
+  `attempting a write access ... only grants SharedReadOnly permission` under
+  Stacked Borrows and `write access ... is forbidden ... state Frozen` under
+  `-Zmiri-tree-borrows`. Two models rather than one is what separates a model
+  being conservative from a pointer genuinely not being writable.
+
+  It now lends dav1d a buffer this crate allocated, through `dav1d_data_wrap`
+  and a free callback. The payload is copied exactly once either way, so
+  nothing about decode cost or behaviour moves: the eighteen `avif::tests` pass
+  unchanged. The free callback releases the buffer through the pointer it was
+  allocated under rather than the one dav1d hands back, because
+  `dav1d_data_wrap` rebuilds that one through `slice::from_raw_parts` and it
+  arrives read-only too.
+
+  Reachable from any AVIF file that decodes, so from untrusted bytes.
+
+  Miri is the only thing that can see this, and the Miri job cannot run the
+  AVIF feature (issue #675 has the measurement), so
+  `the_av1_input_buffer_is_lent_to_dav1d_rather_than_taken_from_it` holds the
+  shape of the call sequence in an ordinary test run instead. It reads the
+  FFI region with the comments stripped, because the sentence explaining why
+  `dav1d_data_create` is not used names it.
 - **The one-level bound in `src/webp.rs`'s docs is the opaque bound, and
   says so now.** Issue #917 measured a second divergence in the same
   `image-webp` blend, on the `dst_factor_a` term, reaching 26 levels on
