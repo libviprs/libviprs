@@ -277,6 +277,37 @@ fn run_lines_of_job(job: &str) -> Vec<&'static str> {
     out
 }
 
+/// What a `- run:` line is allowed to carry after the command a cell names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tail {
+    /// Nothing at all. A `cargo test` cell has to be exactly the cell:
+    /// `--no-run` compiles and runs zero tests and a trailing filter can
+    /// select none, and either leaves this module's "CI has to actually run
+    /// them" false while every assertion here stays green (issue #949).
+    Nothing,
+    /// Lint configuration after a `--` separator, which is how the Check &
+    /// Lint job spells `-D warnings`. Pairs only: a flag then a lint name, so
+    /// `-- some::filter` is not one.
+    LintFlags,
+}
+
+/// Whether one `- run:` line satisfies a cell's command.
+///
+/// This is `job_runs`' rule as it stands at `b06ba973`, lifted into a function
+/// so the table below can measure it. It accepts the command as a prefix
+/// followed by a space, whatever comes next.
+fn cell_matches(line: &str, command: &str, tail: Tail) -> bool {
+    let _ = tail;
+    line == command || line.starts_with(&format!("{command} "))
+}
+
+/// Whether `job` runs `command`, allowing `tail` after it.
+fn job_runs_with(job: &str, command: &str, tail: Tail) -> bool {
+    run_lines_of_job(job)
+        .iter()
+        .any(|line| cell_matches(line, command, tail))
+}
+
 /// Whether `job` runs exactly `command`.
 fn job_runs(job: &str, command: &str) -> bool {
     run_lines_of_job(job)
@@ -411,6 +442,92 @@ fn the_workflow_scanner_would_notice_a_missing_cell() {
     ));
 }
 
+/// A `- run:` line only satisfies a cell when it runs what the cell says.
+///
+/// `job_runs` accepts the cell's command as a **prefix followed by a space**,
+/// which the Check & Lint job needs (its lines end `-- -D warnings ..`) and
+/// which the Test job must not have: changing `cargo test --features jp2k` to
+/// `cargo test --features jp2k --no-run` left all six tests here green while
+/// the Test job compiled and ran nothing (issue #949).
+#[test]
+fn a_cell_is_not_satisfied_by_a_command_that_runs_nothing() {
+    const TEST_CELL: &str = "cargo test --features jp2k";
+    const LINT_CELL: &str = "cargo clippy --all-targets --features svg";
+    let cases: [(&str, &str, Tail, bool); 10] = [
+        (TEST_CELL, TEST_CELL, Tail::Nothing, true),
+        // The four ways a Test cell can be present and run nothing.
+        (
+            "cargo test --features jp2k --no-run",
+            TEST_CELL,
+            Tail::Nothing,
+            false,
+        ),
+        (
+            "cargo test --features jp2k -- imageio::tests",
+            TEST_CELL,
+            Tail::Nothing,
+            false,
+        ),
+        (
+            "cargo test --features jp2k --lib",
+            TEST_CELL,
+            Tail::Nothing,
+            false,
+        ),
+        (
+            "cargo test --features jp2k -- --skip decode",
+            TEST_CELL,
+            Tail::Nothing,
+            false,
+        ),
+        // A feature name is not a prefix of a longer one.
+        (
+            "cargo test --features jp2king",
+            TEST_CELL,
+            Tail::Nothing,
+            false,
+        ),
+        // The lint job's real spelling, which has to keep working.
+        (
+            "cargo clippy --all-targets --features svg -- -D warnings \
+             -W clippy::incompatible_msrv -W deprecated",
+            LINT_CELL,
+            Tail::LintFlags,
+            true,
+        ),
+        (LINT_CELL, LINT_CELL, Tail::LintFlags, true),
+        // and a lint cell that has grown something that is not a lint flag.
+        (
+            "cargo clippy --all-targets --features svg --no-deps -- -D warnings",
+            LINT_CELL,
+            Tail::LintFlags,
+            false,
+        ),
+        (
+            "cargo clippy --all-targets --features svg -- some::filter",
+            LINT_CELL,
+            Tail::LintFlags,
+            false,
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (line, command, tail, want) in cases {
+        let got = cell_matches(line, command, tail);
+        if got != want {
+            wrong.push(format!(
+                "{line:?} against {command:?} with {tail:?}: got {got}, want {want}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} cell-match rows are wrong:\n  {}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n  ")
+    );
+}
+
 /// `s3` has no cells of its own, so the one thing that keeps the alias
 /// resolving has to be asserted rather than assumed.
 #[test]
@@ -420,6 +537,25 @@ fn the_deprecated_s3_alias_is_still_built() {
         "`s3` is an alias with no code, so the build step is the only thing \
          standing between it and a silent break"
     );
+}
+
+/// Every `#[cfg(feature = "test-util")]` gate under `src/`, as
+/// `(files scanned, bare gates, gates seen)`.
+fn test_util_gates() -> (Vec<String>, Vec<String>, usize) {
+    const SINK_RS: &str = include_str!("../src/sink.rs");
+    let scanned = vec!["src/sink.rs".to_owned()];
+    let mut bare = Vec::new();
+    let mut seen = 0usize;
+    for (n, line) in SINK_RS.lines().enumerate() {
+        if !line.contains("feature = \"test-util\"") {
+            continue;
+        }
+        seen += 1;
+        if !line.contains("any(test,") && !line.contains("doc(cfg(") {
+            bare.push(format!("src/sink.rs:{}: {}", n + 1, line.trim()));
+        }
+    }
+    (scanned, bare, seen)
 }
 
 /// `test-util`'s row is the only one claiming a feature needs no CI cell at
@@ -432,17 +568,21 @@ fn the_deprecated_s3_alias_is_still_built() {
 /// which is the moment the row needs revisiting.
 #[test]
 fn test_util_is_only_ever_gated_alongside_cfg_test() {
-    const SINK_RS: &str = include_str!("../src/sink.rs");
-    let mut bare = Vec::new();
-    let mut seen = 0usize;
-    for (n, line) in SINK_RS.lines().enumerate() {
-        if !line.contains("feature = \"test-util\"") {
-            continue;
-        }
-        seen += 1;
-        if !line.contains("any(test,") && !line.contains("doc(cfg(") {
-            bare.push(format!("src/sink.rs:{}: {}", n + 1, line.trim()));
-        }
+    let (scanned, bare, seen) = test_util_gates();
+    assert!(
+        scanned.len() > 30,
+        "the scan reached {} files under src/, which cannot be right; the \
+         invariant is crate-wide and a scan of one file cannot hold it \
+         (issue #949). Files: {scanned:?}",
+        scanned.len()
+    );
+    for anchor in ["src/sink.rs", "src/colour.rs"] {
+        assert!(
+            scanned.iter().any(|f| f == anchor),
+            "the scan did not reach `{anchor}`, so a bare gate planted there \
+             would be invisible and no CI cell would compile the code behind \
+             it"
+        );
     }
     assert!(
         seen >= 3,
