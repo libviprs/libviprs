@@ -2868,29 +2868,32 @@ mod tests {
         // Measured with `/opt/homebrew/bin/vips` 8.18.6, not read off the
         // libvips headers: `vips cast base.v out.v <format>` for each format,
         // then the `i32` at header offset 20 of each file.
-        // `uint` (BandFmt 4) is deliberately not in this list any more:
-        // issue #517 gave it a carrier, so it decodes rather than refusing,
-        // and `a_uint_v_file_round_trips_through_the_carrier` below is what
-        // pins it instead. The three that remain are the signed kinds of
-        // issue #516, which still have no carrier.
-        let cases = [(1i32, "char"), (3, "short"), (5, "int")];
-        for (code, nickname) in cases {
+        // **This list is empty now, and that is the point.** Every
+        // `BandFmt` code libvips writes has a carrier: #517 gave `uint`
+        // one and #516 gave `char`, `short` and `int` theirs, so there is
+        // no sample kind left for this arm to refuse. The refusal path
+        // still exists, for a code libvips does not write at all, and the
+        // sweep below is what proves the reader still reaches it.
+        //
+        // The seven that decode are pinned by
+        // `every_band_format_code_round_trips_through_its_carrier`.
+        for code in [7i32, 8, 9, 42, -1] {
             let mut bytes = rgb_2x2().encode_vips_impl(false);
             bytes[20..24].copy_from_slice(&code.to_ne_bytes());
             let err = decode_vips_bytes(&bytes, DecodeLimits::default())
-                .expect_err("no libviprs PixelFormat carries that sample kind yet");
+                .expect_err("BandFmt {code} is not a libvips band format");
             let SourceError::VipsFormat(msg) = &err else {
-                panic!("a band format with no carrier is a format error: {err:?}");
+                panic!("an unknown band format is a format error: {err:?}");
             };
             assert!(
-                msg.contains(nickname),
-                "refusing BandFmt {code} must name it as {nickname}, got {msg:?}"
+                msg.contains(&code.to_string()),
+                "refusing BandFmt {code} must name the code, got {msg:?}"
             );
         }
 
-        // Positive control: the same probe on a code this build does carry
-        // decodes rather than refusing, so the three failures above are
-        // about the sample kind and not about the patched fixture.
+        // Positive control: the same probe on a code this build carries
+        // decodes rather than refusing, so the refusals above are about the
+        // code being unknown and not about the patched fixture.
         let ok = rgb_2x2().encode_vips_impl(false);
         assert_eq!(
             i32::from_ne_bytes(ok[20..24].try_into().unwrap()),
@@ -3134,6 +3137,76 @@ mod tests {
             i32::from_ne_bytes(re[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
             32
         );
+    }
+
+    /**
+     * Tests that **every** libvips `BandFmt` code round-trips through the
+     * carrier it names, which is the flat statement the two tests above
+     * could only make one code at a time.
+     * Works by encoding a raster of each of the seven sample kinds,
+     * asserting the header word libvips writes for it, decoding, and
+     * comparing the format back. The codes are the measured ones: 0
+     * uchar, 1 char, 2 ushort, 3 short, 4 uint, 5 int, 6 float. The
+     * `Bbits` column is what makes this worth doing as a sweep rather than
+     * per kind: three codes share 32 and two share 8, so a reader keyed on
+     * the width would pass four of the seven and fail three.
+     * Input: one 2x2 raster per kind -> Output: its own code, its own
+     * Bbits, and itself back.
+     */
+    #[test]
+    fn every_band_format_code_round_trips_through_its_carrier() {
+        // (kind, BandFmt code, Bbits), all measured with `vips cast` and
+        // then reading the i32 at header offset 20.
+        let cases = [
+            (SampleKind::U8, 0i32, 8i32),
+            (SampleKind::I8, 1, 8),
+            (SampleKind::U16, 2, 16),
+            (SampleKind::I16, 3, 16),
+            (SampleKind::U32, 4, 32),
+            (SampleKind::I32, 5, 32),
+            (SampleKind::F32, 6, 32),
+        ];
+        for (kind, code, bits) in cases {
+            let fmt = PixelFormat::with_kind(3, kind)
+                .expect("every sample kind has a carrier since issues #516 and #517");
+            let im = Raster::zeroed(2, 2, fmt).unwrap();
+            let bytes = im.encode_vips_impl(false);
+            assert_eq!(
+                i32::from_ne_bytes(
+                    bytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                code,
+                "{kind:?} must write BandFmt {code}"
+            );
+            assert_eq!(
+                i32::from_ne_bytes(bytes[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+                bits,
+                "{kind:?} must write Bbits {bits}"
+            );
+            let back = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .unwrap_or_else(|e| panic!("BandFmt {code} must decode: {e:?}"));
+            assert_eq!(
+                back.format(),
+                fmt,
+                "BandFmt {code} decoded to the wrong carrier"
+            );
+        }
+
+        // The control that says the width cannot decide this: codes 4, 5
+        // and 6 all carry Bbits 32 and are three different carriers, and
+        // codes 0 and 1 both carry Bbits 8.
+        let bits_of = |kind| {
+            let fmt = PixelFormat::with_kind(3, kind).unwrap();
+            let b = Raster::zeroed(2, 2, fmt).unwrap().encode_vips_impl(false);
+            i32::from_ne_bytes(b[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap())
+        };
+        assert_eq!(bits_of(SampleKind::U32), 32);
+        assert_eq!(bits_of(SampleKind::I32), 32);
+        assert_eq!(bits_of(SampleKind::F32), 32);
+        assert_eq!(bits_of(SampleKind::U8), 8);
+        assert_eq!(bits_of(SampleKind::I8), 8);
     }
 
     /**

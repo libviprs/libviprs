@@ -1181,76 +1181,102 @@ mod tests {
     }
 
     /**
-     * Tests that `with_kind` refuses the sample kinds no `PixelFormat`
-     * carries, rather than handing back a format of the same byte width
-     * (issues #516, #517).
-     * Works by asserting `None` for the three carrierless kinds at band
-     * counts that are themselves perfectly legal, with a positive control
-     * that `with_channels` at the same width *does* answer `Some` there, so
-     * the `None` cannot be passing for a band-count rejection. Also pins
-     * which format the width-keyed fall-through would have produced, since
-     * that silent retag is the whole reason for the refusal.
-     * `U32` left this list when issue #517 gave it a carrier.
-     * Input: (3, I16) -> None while (3, 2 bytes) -> Some(Rgb16); (3, U32)
-     * -> Some(Uint32(3)) while (3, 4 bytes) -> Some(FloatF32(3)).
+     * Tests that `with_kind` answers a distinct carrier for **every**
+     * sample kind, and that four of the seven are unreachable through the
+     * width-keyed constructor, which is the silent retag the kind-keyed one
+     * exists to prevent (issues #516, #517, #607).
+     * Works by asserting a format for all seven kinds at legal band counts,
+     * then pinning what `with_channels` answers at the same widths: it
+     * cannot reach `Int8`, `Int16`, `Int32` or `Uint32` at all, because a
+     * byte width does not name a carrier. This test used to assert `None`
+     * for the carrierless kinds; there are none left.
+     * Input: (3, I16) -> Some(Int16(3)) while (3, 2 bytes) -> Some(Rgb16);
+     * (3, U32) -> Some(Uint32(3)) while (3, 4 bytes) -> Some(FloatF32(3)).
      */
     #[test]
-    fn with_kind_refuses_a_kind_no_format_carries() {
+    fn with_kind_answers_a_distinct_carrier_for_every_kind() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        for kind in [SampleKind::I8, SampleKind::I16, SampleKind::I32] {
+        // Every kind has a carrier, and no two kinds share one.
+        let mut seen = Vec::new();
+        for kind in ALL_KINDS {
+            let fmt = PixelFormat::with_kind(3, kind)
+                .unwrap_or_else(|| panic!("{kind:?} has no carrier"));
+            assert_eq!(fmt.kind(), kind, "{kind:?} round-trips through with_kind");
+            assert!(!seen.contains(&fmt), "{fmt:?} is the carrier for two kinds");
+            seen.push(fmt);
+            assert_eq!(PixelFormat::with_kind(0, kind), None);
+            assert_eq!(PixelFormat::with_kind(65_536, kind), None);
+        }
+        // The four the width-keyed constructor cannot reach, each with the
+        // format it answers instead.
+        for kind in [
+            SampleKind::I8,
+            SampleKind::I16,
+            SampleKind::I32,
+            SampleKind::U32,
+        ] {
             for channels in [1usize, 2, 3, 4, 7] {
-                assert_eq!(
-                    PixelFormat::with_kind(channels, kind),
-                    None,
-                    "with_kind answered a format for the carrierless {kind:?}"
+                let by_kind =
+                    PixelFormat::with_kind(channels, kind).expect("every kind has a carrier");
+                let by_width = PixelFormat::with_channels(channels, kind.bytes())
+                    .expect("the control: the width does name some format here");
+                assert_ne!(
+                    by_kind, by_width,
+                    "the width-keyed constructor reached {kind:?}'s carrier"
                 );
-                // Positive control: the band count is fine and the width
-                // does name a format, so the `None` above is about the
-                // kind and nothing else.
-                assert!(
-                    PixelFormat::with_channels(channels, kind.bytes()).is_some(),
-                    "the control failed: {channels} channels at {} bytes names no format",
-                    kind.bytes()
+                assert_ne!(
+                    by_width.kind(),
+                    kind,
+                    "asking by width for {kind:?} answered a {:?} format",
+                    by_width.kind()
                 );
             }
         }
-        // What the width-keyed fall-through would have answered, which is
-        // an unsigned format for a signed kind and a float one for an
-        // integer kind.
+        // The exact retags the width-keyed constructor performs, spelled
+        // out because they are the whole reason `with_kind` exists: an
+        // unsigned format for a signed kind, and the float carrier for both
+        // 32-bit integer ones.
+        assert_eq!(
+            PixelFormat::with_channels(3, SampleKind::I8.bytes()),
+            Some(PixelFormat::Rgb8)
+        );
         assert_eq!(
             PixelFormat::with_channels(3, SampleKind::I16.bytes()),
             Some(PixelFormat::Rgb16)
         );
         assert_eq!(
+            PixelFormat::with_channels(3, SampleKind::I32.bytes()),
+            Some(PixelFormat::FloatF32(n(3)))
+        );
+        assert_eq!(
             PixelFormat::with_channels(3, SampleKind::U32.bytes()),
             Some(PixelFormat::FloatF32(n(3)))
         );
-        // And the retag the uint carrier would still suffer if anything
-        // reached it through the width, which is why `with_kind` exists.
         assert_eq!(
             PixelFormat::with_kind(3, SampleKind::U32),
             Some(PixelFormat::Uint32(n(3)))
         );
+        assert_eq!(
+            PixelFormat::with_kind(3, SampleKind::I32),
+            Some(PixelFormat::Int32(n(3)))
+        );
     }
 
     /**
-     * Tests that no `PixelFormat` reports a sample kind the crate has no
-     * carrier for, which is the claim every carrierless arm added in this
-     * change rests on.
+     * Tests both directions of the carrier relation, which is a flat
+     * statement now that issues #517 and #516 have landed all four missing
+     * carriers: every `PixelFormat` reports a `SampleKind`, and every
+     * `SampleKind` is reachable from a `PixelFormat`.
      * Works by sweeping every variant, including both spellings of the
-     * tuple carriers, and asserting the kind is one of the four carried
-     * ones, with a control that the sweep would have caught a fifth.
-     * Input: every `PixelFormat` -> U8, U16, U32 or F32.
+     * tuple carriers, and then sweeping `SampleKind` the other way. The
+     * second half is the one that used to assert the opposite, for `I8`,
+     * `I16` and `I32`.
+     * Input: every `PixelFormat` -> some kind; every kind -> some format.
      */
     #[test]
-    fn no_format_reports_a_carrierless_kind() {
+    fn every_kind_is_carried_and_every_carrier_reports_one() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        let carried = [
-            SampleKind::U8,
-            SampleKind::U16,
-            SampleKind::U32,
-            SampleKind::F32,
-        ];
+        let carried = ALL_KINDS;
         let formats = [
             PixelFormat::Gray8,
             PixelFormat::Gray16,
@@ -1268,18 +1294,27 @@ mod tests {
             PixelFormat::Uint32(n(1)),
             PixelFormat::Uint32(n(4)),
             PixelFormat::Uint32(n(7)),
+            PixelFormat::Int8(n(1)),
+            PixelFormat::Int8(n(7)),
+            PixelFormat::Int16(n(1)),
+            PixelFormat::Int16(n(7)),
+            PixelFormat::Int32(n(1)),
+            PixelFormat::Int32(n(4)),
+            PixelFormat::Int32(n(7)),
         ];
         for fmt in formats {
             assert!(
                 carried.contains(&fmt.kind()),
-                "{fmt:?} reports the carrierless {:?}",
-                fmt.kind()
+                "{fmt:?} reports a kind outside SampleKind, which cannot happen"
             );
         }
-        // Control: the membership test does discriminate, so the sweep
-        // above is not passing because `carried` accepts everything.
-        for kind in [SampleKind::I8, SampleKind::I16, SampleKind::I32] {
-            assert!(!carried.contains(&kind));
+        // The direction that used to be the interesting one, and now is
+        // the whole statement: **every** kind is reachable from some
+        // format. This test used to assert the opposite for three of them.
+        for kind in ALL_KINDS {
+            let fmt = PixelFormat::with_kind(1, kind)
+                .unwrap_or_else(|| panic!("{kind:?} has no carrier"));
+            assert_eq!(fmt.kind(), kind);
         }
     }
 
