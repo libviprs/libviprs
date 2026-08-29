@@ -1546,6 +1546,23 @@ pub(crate) enum SniffedFormat {
     /// MATLAB level 5, either byte order: `MATLAB 5.0` at offset 0 plus the
     /// version word and endian indicator at 124.
     Mat,
+    /// Binary and ASCII Netpbm, from the two-byte magic: `P2` and `P3` for
+    /// the ASCII forms, `P5` and `P6` for the binary ones.
+    ///
+    /// **Exactly the four [`crate::textio::decode_netpbm`] decodes.** vips
+    /// also reads `P1` and `P4`, the bitmap forms, and this crate reads
+    /// neither by any route, so claiming their magic here would put a row in
+    /// [`Self::ALL`] that cannot decode and break
+    /// `every_container_is_reachable_from_its_own_magic`. Issue #919 is that
+    /// gap, and the polarity trap in it.
+    ///
+    /// Two bytes and no more, which is as loose as `ppmload`'s own `is_a`:
+    /// measured on 8.18.6, a file opening `P5xyzzy` is accepted as `ppmload`
+    /// and then fails with `bad image dimensions`. A sniffer stricter than the
+    /// reference makes files vips reads unreachable, which is a parity gap
+    /// dressed as prudence, so the refusal goes where vips puts it, in the
+    /// loader, where re-tokenising the header gives it a type.
+    Netpbm,
     /// Analyze 7.5, from the `.hdr` half of the pair: a big-endian 348 in
     /// the four `sizeof_hdr` bytes at offset 0.
     ///
@@ -1585,7 +1602,8 @@ impl SniffedFormat {
             Self::Nifti => Some(Self::Avif),
             Self::Avif => Some(Self::Jp2k),
             Self::Jp2k => Some(Self::Mat),
-            Self::Mat => Some(Self::Analyze),
+            Self::Mat => Some(Self::Netpbm),
+            Self::Netpbm => Some(Self::Analyze),
             Self::Analyze => None,
         }
     }
@@ -1600,8 +1618,8 @@ impl SniffedFormat {
     /// [`sniff`] walks it, so both of those land on `cargo build` rather
     /// than only on `cargo test`. It used to be test-only, which meant the
     /// library itself compiled happily with a variant nothing could reach.
-    pub(crate) const ALL: [Self; 16] = {
-        let mut all = [Self::Vips; 16];
+    pub(crate) const ALL: [Self; 17] = {
+        let mut all = [Self::Vips; 17];
         let mut i = 1;
         while i < all.len() {
             all[i] = match all[i - 1].next() {
@@ -1915,6 +1933,28 @@ impl SniffedFormat {
             // first field and it is big-endian 348 in every Analyze header
             // ever written. There is no byte-order flag in the format, so
             // this four-byte prefix is the byte-order check as well.
+            // `image`'s Netpbm route is behind its `pnm` feature, which is
+            // `pnm = []`, an empty feature with no dependency behind it, so
+            // turning it on would cost nothing in the lock file. It is off
+            // anyway, because [`crate::textio`] already decodes `P2`, `P3`,
+            // `P5` and `P6` and has since #77, and the only thing the facade
+            // would add is `P1`, `P4` and the float `PF`, none of which
+            // `encode_ppm` writes either. A free-looking feature that buys
+            // decode paths with no matching encode paths is still a widening
+            // of what this crate claims (issue #910).
+            //
+            // Read whole rather than streamed because the ASCII forms are
+            // tokenised with a cursor over the buffer and the binary body is
+            // checked to be wholly present before anything is reserved.
+            Self::Netpbm => Route {
+                magics: &[
+                    Magic::Prefix(b"P2"),
+                    Magic::Prefix(b"P3"),
+                    Magic::Prefix(b"P5"),
+                    Magic::Prefix(b"P6"),
+                ],
+                decoder: Decoder::Native(crate::textio::decode_netpbm),
+            },
             Self::Analyze => Route {
                 magics: &[Magic::Prefix(crate::analyze::SIZEOF_HDR_BE)],
                 decoder: Decoder::Paired {
@@ -2089,10 +2129,10 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
 /// itself rather than only what the decoder does with the bytes afterwards.
 /// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
-/// FITS, OpenEXR, NIfTI, AVIF, JPEG 2000, MATLAB and Analyze: each one either
-/// parses its own container end to end or makes a second pass over the same
-/// bytes for metadata. Analyze is read whole twice over, because it is two
-/// files.
+/// FITS, OpenEXR, NIfTI, AVIF, JPEG 2000, MATLAB, Netpbm and Analyze: each one
+/// either parses its own container end to end or makes a second pass over the
+/// same bytes for metadata. Analyze is read whole twice over, because it is
+/// two files.
 ///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
@@ -3160,7 +3200,7 @@ mod tests {
         const ANALYZE_BAD_RANK: &[u8] = analyze_fixture!("rank8.hdr");
         const ANALYZE_BAD_SIZEOF: &[u8] = analyze_fixture!("sizeof_hdr_200.hdr");
         const ANALYZE_LE: &[u8] = analyze_fixture!("le_header.hdr");
-        let cases: [(&str, &[u8], Option<SniffedFormat>); 71] = [
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 80] = [
             (
                 "vips le",
                 &[0xb6, 0xa6, 0xf2, 0x08],
@@ -3403,6 +3443,46 @@ mod tests {
             // The near-miss that matters most, because it is one byte away:
             // an ICO file opens `00 00 01 00`.
             ("ico is not analyze", b"\x00\x00\x01\x00\x01\x00 \x20", None),
+            // Netpbm's four magics, one per form, plus the near-misses that
+            // matter. `P1` and `P4` are the bitmap forms **vips reads and
+            // this crate does not**, so they are deliberately not claimed:
+            // a row in `ALL` that cannot decode would break
+            // `every_container_is_reachable_from_its_own_magic`. Issue #919.
+            // `PF` is the float PFM, same story.
+            (
+                "netpbm p2 ascii grey",
+                b"P2\n2 2\n255\n0 1 2 3\n",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p3 ascii rgb",
+                b"P3\n1 1\n255\n0 1 2\n",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p5 binary grey",
+                b"P5\n2 2\n255\n\x00\x40\x80\xff",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p6 binary rgb",
+                b"P6\n1 1\n255\n\x00\x40\x80",
+                Some(SniffedFormat::Netpbm),
+            ),
+            // As loose as `ppmload`'s own `is_a`, measured: 8.18.6 accepts a
+            // file opening `P5xyzzy` as `ppmload` and then fails it with
+            // `bad image dimensions`. Refusing it here instead would make
+            // files vips reads unreachable, so the refusal stays in the
+            // loader where vips keeps its own.
+            (
+                "netpbm p5 with a junk header",
+                b"P5xyzzy not netpbm",
+                Some(SniffedFormat::Netpbm),
+            ),
+            ("netpbm p1 bitmap, unclaimed", b"P1\n2 2\n0 1 1 0\n", None),
+            ("netpbm p4 bitmap, unclaimed", b"P4\n2 2\n\xc0\x00", None),
+            ("netpbm pf float, unclaimed", b"PF\n2 2\n-1.0\n", None),
+            ("netpbm p7 pam, unclaimed", b"P7\nWIDTH 2\n", None),
             ("plain text", b"not an image at all", None),
             ("empty", b"", None),
             ("one byte of png", b"\x89", None),
@@ -3451,19 +3531,19 @@ mod tests {
      * `priced_by_libviprs` row, or wraps a crate that refuses internally the
      * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
      * else will say so.
-     * Input: `SniffedFormat::ALL.len()` -> Output: 16, which is what the two
+     * Input: `SniffedFormat::ALL.len()` -> Output: 17, which is what the two
      * tables plus the one documented exclusion account for.
      */
     #[test]
     fn adding_a_container_reddens_the_alloc_refusal_tables() {
         assert_eq!(
             SniffedFormat::ALL.len(),
-            16,
+            17,
             "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
              enumerates every container the decode allocation budget can refuse, in \
              two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
              wrapped crate refuses internally the way jxl-oxide does, then update this \
-             count. Today the 16 are: 12 self-priced (gif, radiance, fits, openexr, \
+             count. Today the 17 are: 13 self-priced (gif, radiance, fits, openexr, \
              jxl, webp which joined them in #686, uhdr which joined them in #508 and \
              prices two images rather than one, .v which joined them in #710, nifti \
              and mat which joined them in #510, avif which joined them in #605, and \
@@ -3609,6 +3689,11 @@ mod tests {
                 // `image` has no MATLAB route, and the container is a tagged
                 // element stream with zlib inside it (issue #510).
                 SniffedFormat::Mat => Kind::Native,
+                // `image`'s `pnm` route is off and `crate::textio` has
+                // decoded `P2`/`P3`/`P5`/`P6` since #77, so the facade would
+                // add only the forms this crate cannot write either
+                // (issue #910).
+                SniffedFormat::Netpbm => Kind::Native,
                 // Analyze is a `.hdr` plus an `.img`, and one buffer cannot
                 // carry both (issue #764).
                 SniffedFormat::Analyze => Kind::Paired,
@@ -3675,6 +3760,7 @@ mod tests {
                 SniffedFormat::Avif,
                 SniffedFormat::Jp2k,
                 SniffedFormat::Mat,
+                SniffedFormat::Netpbm,
                 SniffedFormat::Analyze,
             ],
             "decode_file_with_limits' doc names every container it reads whole, in \
