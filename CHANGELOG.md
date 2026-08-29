@@ -711,6 +711,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`.jp2` is a row in `Raster::save` and `"jp2k"` is one in
+  `Raster::encode_to_buffer`** (issue #770). JPEG 2000 was wired into the
+  content sniffer on the way in but into nothing shared on the way out, so
+  `save("x.jp2")` reported an unsupported extension and
+  `encode_to_buffer("jp2k")` an unsupported format, and the only route to the
+  encoder was `Raster::encode_jp2k` by name.
+
+  All five suffixes `jp2ksave` registers are live rows, and they are one arm
+  rather than five because vips writes the same bytes for all of them.
+  Measured on the pinned 8.18.6: `vips copy base.v out.EXT` over `jp2`, `j2k`,
+  `jpt`, `j2c` and `jpc` produces five files with one SHA-256 between them,
+  while `out.jp2000` is refused as an unknown format. So this is the one row in
+  the save table where the suffix does not pick the codec.
+
+  The extension route is gated on the feature, so without it the five fall
+  through to `UnsupportedExtension` like any other extension with no encoder
+  and the refusal message stops naming them. The format dispatch is **not**
+  gated, matching `"jxl"`: `encode_jp2k` without the feature already returns
+  `EncodeError::Unsupported { format: "jp2k" }`, so the row stays live and
+  reports the codec it cannot write rather than the caller's spelling.
+
+  `save_stripped` writes the same bytes as `save` here, because `jp2ksave.c`
+  has no code for an ICC profile, an EXIF block or an XMP packet. That is
+  asserted, with the `.webp` row beside it as the control that does differ.
+
+- **CI runs the non-default features it had been compiling out**, and a guard
+  so the next one cannot be forgotten (issues #772, #816). `jp2k`, `avif`,
+  `packfile`, `serde` and `tracing` all gate code behind
+  `#[cfg(feature = ...)]`, and no job named any of them, so those bodies were
+  compiled *out* and 53 assertions never ran: 24 for `jp2k`, 8 for `packfile`,
+  6 for `serde` (all of `tests/serde_wire.rs`, which opens
+  `#![cfg(feature = "serde")]`), 5 for `tracing`, and 10 for `avif` that are the
+  codec's entire oracle comparison and are `ignore`d without the feature.
+
+  The lint half was not hypothetical either: the first
+  `cargo clippy --all-targets --features packfile` ever run on this tree came
+  back **red**, on a `collapsible_if` in `src/sink_packfile.rs` that no job had
+  ever compiled. That is fixed here too.
+
+  The MSRV cells are measured rather than assumed. A feature needs one when it
+  pulls in a crate declaring no `rust-version`, because that is exactly what the
+  MSRV-aware resolver cannot see and `Cargo.lock` is not committed: `svg` adds
+  12 such crates, `avif` 9, `packfile` 5 and `jp2k` 1 (`openjpeg2-pure-rs`
+  0.1.1). All four pass `cargo +1.97 check --all-targets` today, so the cells
+  are a guard rather than a fix.
+
+  The same issue had already been filed three times, once per format (#502 for
+  `svg`, #500 for `jxl`, #772 for `jp2k`), because nothing checked the class.
+  `tests/ci_feature_coverage.rs` now does: it reads `Cargo.toml` and `ci.yml` at
+  compile time and asserts that `[features]` holds exactly the names an explicit
+  table covers, and that every cell the table claims is in the right job. A new
+  feature fails there until somebody writes down which jobs it belongs in, and
+  why.
+
 - **Animated GIF save** (issue #573). `Raster::encode_gif` splits the raster by
   its page height and writes one GIF frame per page, taking the per-frame
   delays out of the `delay` field and the NETSCAPE loop block out of `loop`,
@@ -2674,6 +2728,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing `jp2ksave` writes reaches any of this: it always starts at the grid
   origin, and every other fixture in `oracle-captures/foreign-jp2k/` reports
   `0 / 0` on both sides.
+
+- **Six tests reached the filesystem with no `#[cfg_attr(miri, ignore)]`, and
+  `merge-gate.yml` said none did** (issue #765). Any one of them ends the whole
+  Miri session on its first syscall, because #711 turned isolation on and Miri
+  aborts the run rather than failing the test.
+
+  The scanner in `tests/miri_ignore_convention.rs` could not have asked for
+  those annotations. It refuses to follow a call into the library on purpose,
+  since a production function that *can* open a path is not evidence that this
+  caller hands it one, and the measurement behind that choice is 46 spurious
+  marks if it does. So the six read as pure: three in `src/analyze.rs`, whose
+  two-file entry point resolves the `.img` from the `.hdr`'s path and therefore
+  has no buffer form to test, and three in `src/colour.rs` and `src/pdf.rs` that
+  hand an entry point a path which does not exist and assert on the error. Those
+  last three look like tests that never reach disk, and the `open` still
+  happens: Miri refuses the syscall before the kernel can answer `NotFound`.
+
+  Found by measuring rather than by reading. I ran every test binary single
+  threaded under a `DYLD_INSERT_LIBRARIES` interposer on `open`, `openat`,
+  `opendir`, `stat`, `lstat`, `access`, `mkdir`, `unlink`, `rename`, `symlink`,
+  `link`, `rmdir`, `readlink` and `chmod`, printing each path between libtest's
+  own `test NAME ...` and `ok` so every syscall lands on the test that made it.
+  2143 tests ran, 264 touched the filesystem, and six were in neither the
+  inventory nor the annotated set.
+
+  The same measurement retires the rest of #765's claim. It was filed when 21 of
+  `src/exr.rs`'s 22 tests and all of `src/nifti.rs` reached fixtures through a
+  `fixture()` helper the detector could not follow; #781 closed that, and the
+  interposer confirms it, since not one `exr` or `nifti` test comes back
+  untracked.
+
+- **A `#[cfg(test)]` helper that is not inside a `#[cfg(test)] mod` was outside
+  the filesystem follower's call graph entirely** (issue #833). The scope
+  predicate matched the attribute only when it sat on a `mod`, so a free `fn`
+  under it was filtered out and a test calling it read as pure however plainly
+  the helper called `std::fs::read`. Thirteen such helpers exist in `src/`
+  today, in eight files; none touches the filesystem, so widening the predicate
+  to any `#[cfg(test)]` item moved no count and no inventory row, and that is
+  luck rather than design.
+
+- **The Miri guard annotated one of its own tests for a filesystem access it
+  never makes** (issue #832). `the_filesystem_detector_follows_a_test_helper_but_not_the_library`
+  carried `// reads the repository source tree`, copied off the four siblings
+  that call `scan_repo()`; it calls `scan_source` on two inline `&str` fixtures
+  and made zero filesystem syscalls under the interposer, against thousands for
+  each of those siblings. That is one test the Miri gate can now actually run,
+  and one ledger row that had stopped meaning anything.
+
+- The morphology walkers dispatch on `SampleKind` instead of on the byte width
+  (issue #831, part of #748 and #607 step (b)). `sample_u32` and its write side
+  stepped **two bytes per sample for every width that is not one**, which is the
+  right stride for `u16` and half the right stride for any four-byte kind, so a
+  32-bit carrier would have walked the wrong pixels rather than merely read the
+  wrong type.
+
+  The half-stride walk was not reachable today and would not have been reachable
+  under a `U32` carrier either: `try_rank`, `try_countlines` and
+  `try_label_regions` all refuse `bytes_per_channel() == 4` first. The kinds a
+  width test cannot see are the signed ones, and those pass every one of those
+  guards: a one-byte signed raster would have been read as unsigned, and in the
+  rank window every negative sample sorts above every positive one. `morph`'s
+  own 8-bit guard had the same shape one width down. All four are keyed on the
+  kind now, through one `unsigned_8_or_16` predicate that is total over the
+  enum, and the two sample helpers match the kind with no wildcard arm.
+
+  Nothing moves for the three kinds a `PixelFormat` carries today. The float
+  refusal for `rank`, `countlines` and `label_regions` had no test before this,
+  which is why breaking the guard stayed green; it has one now.
+
+- Six modules read and write samples through the sample kind instead of the
+  byte width (issue #840, part of #748 and #607 step (b)). `composite`,
+  `create`, `freqfilt`, `mosaicing`, `raster_ops` and `textio` each carried
+  their own copy of the same three-arm `match`, whose trailing arm reads four
+  bytes as an `f32` whatever those bytes are, so a `u32` sample of `1` came
+  back as `1.4e-45`. Six copies of one function is the reason a new carrier
+  would be a six-place edit; they go through one `read_sample_f64` now, whose
+  match has no wildcard arm.
+
+  Three of the sites do more than read. `composite` takes its output depth from
+  `SampleKind::promote` rather than the wider of the two byte widths, and its
+  write-back clamp from `SampleKind::range` rather than a literal ceiling per
+  width, so a signed carrier would saturate at its own floor instead of at
+  zero. `mosaicing`'s merge dispatches the feathered blend on the kind, and the
+  four kinds with no `BlendSample` implementation get the new typed
+  `MosaicError::UnsupportedSampleKind` instead of being blended as float.
+  `mosaicing` also wrote `bytes_per_channel()` into the `VMJ1`
+  `mosaic-join-tree` header and read it back through the width-keyed
+  constructor, which is the `.v` `BandFmt` shape one layer in; that byte is a
+  sample-kind code now, keeping `1`, `2` and `4` for the three kinds that exist
+  so every blob already written still parses.
+
+  Nothing moves for the three kinds a `PixelFormat` carries today, and the
+  mutation sweep that says so found three gaps on the way: breaking the 16-bit
+  write in `new_from_image`, dropping the stride in `elem_f64`, and blending a
+  `Gray16` merge as `u8` all left the whole suite green, because every merge
+  fixture in the module was 8-bit or float. All three have a test now.
 
 - `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
   and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,

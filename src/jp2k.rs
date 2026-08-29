@@ -590,6 +590,20 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
     Err(EncodeError::unsupported("jp2k"))
 }
 
+/// The extension route's entry point (`imageio.rs`'s `.jp2` / `.j2k` / `.jpt`
+/// / `.j2c` / `.jpc` arm), at the `jp2ksave` defaults.
+///
+/// Takes no `keep_metadata`, for the same reason [`crate::jxl`]'s twin does
+/// not: there is nothing to drop. `jp2ksave.c` writes no ICC profile, no EXIF
+/// block and no XMP packet, so a stripped save and a kept one produce the same
+/// bytes and a flag here would be a promise with nothing behind it.
+#[cfg(feature = "jp2k")]
+pub(crate) fn encode_jp2k_for_save(raster: &Raster) -> Result<Vec<u8>, SaveError> {
+    raster
+        .encode_jp2k(SaveOptions::default())
+        .map_err(encode_to_save)
+}
+
 /// Carry an [`EncodeError`] onto the save spine, the way [`crate::jxl`] does:
 /// an I/O failure stays an I/O failure and everything else flattens onto the
 /// sink's message variant, which is the only shape [`SaveError::Encode`] has.

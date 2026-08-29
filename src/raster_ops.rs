@@ -10,23 +10,19 @@
 //! convention the resize and decode paths already use; float samples are
 //! likewise native-order `f32`.
 
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::Raster;
 
 /// Read the `n`-th channel sample at byte offset `off` as `f64`, honouring the
-/// format's sample type (native byte order for 16-bit and float).
+/// format's sample kind (native byte order for every multi-byte kind).
+///
+/// Goes through [`read_sample_f64`], the crate's one width-independent
+/// sample read. The width-keyed spelling this replaces read four bytes as
+/// an `f32` whatever they were, so a 32-bit integer carrier's `1` would
+/// have come out of `getpoint` as `1.4e-45` (issue #607).
 pub(crate) fn sample_f64(data: &[u8], off: usize, channel: usize, fmt: PixelFormat) -> f64 {
-    match fmt.bytes_per_channel() {
-        1 => data[off + channel] as f64,
-        2 => {
-            let b = off + channel * 2;
-            u16::from_ne_bytes([data[b], data[b + 1]]) as f64
-        }
-        _ => {
-            let b = off + channel * 4;
-            f32::from_ne_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]]) as f64
-        }
-    }
+    let kind = fmt.kind();
+    read_sample_f64(data, kind, off + channel * kind.bytes())
 }
 
 impl Raster {
@@ -124,12 +120,14 @@ impl Raster {
         let idx = |bands: usize, p: usize, c: usize| p * bands + if bands == 1 { 0 } else { c };
 
         // vips add promotion: uchar+uchar -> ushort; if either operand is
-        // 16-bit -> uint (carried here as f32; see the doc comment).
+        // 16-bit -> uint (carried here as f32; see the doc comment). Keyed
+        // on the kind, so a two-byte *signed* carrier would not be mistaken
+        // for the `ushort` this rule is about (issue #607).
         let promote_float =
-            self.format().bytes_per_channel() == 2 || other.format().bytes_per_channel() == 2;
+            self.format().kind() == SampleKind::U16 || other.format().kind() == SampleKind::U16;
 
         if promote_float {
-            let out_fmt = PixelFormat::with_channels(out_bands, 4)
+            let out_fmt = PixelFormat::with_kind(out_bands, SampleKind::F32)
                 .expect("out_bands is 1..=max(input bands), so the float format exists");
             let mut samples = Vec::with_capacity(pixels * out_bands);
             for p in 0..pixels {
@@ -144,7 +142,7 @@ impl Raster {
         } else {
             // Both operands are 8-bit: promote to 16-bit (vips uchar+uchar ->
             // ushort). The sum is at most 510, so `.min` never actually clips.
-            let out_fmt = PixelFormat::with_channels(out_bands, 2)
+            let out_fmt = PixelFormat::with_kind(out_bands, SampleKind::U16)
                 .expect("out_bands is 1..=max(input bands), so the 16-bit format exists");
             let mut out = vec![0u8; pixels * out_bands * 2];
             for p in 0..pixels {
@@ -172,10 +170,13 @@ impl Raster {
 /// `u16` pairs.
 fn read_sample(raster: &Raster, i: usize) -> u32 {
     let data = raster.data();
-    match raster.format().bytes_per_channel() {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
-        _ => panic!("read_sample: float rasters have no u32 sample view"),
+    let kind = raster.format().kind();
+    match kind {
+        SampleKind::U8 => data[i] as u32,
+        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            panic!("read_sample: {kind:?} has no unsigned 8/16-bit sample view")
+        }
     }
 }
 
@@ -262,7 +263,7 @@ mod tests {
         // 8-bit + 8-bit promotes to 16-bit; the gray band is added to each.
         let out = rgb.add(&gray);
         assert_eq!(out.format().channels(), 3);
-        assert_eq!(out.format().bytes_per_channel(), 2);
+        assert_eq!(out.format().kind(), SampleKind::U16);
         assert_eq!(out.getpoint(0, 0), vec![15.0, 25.0, 35.0]);
         // Broadcast is symmetric.
         assert_eq!(gray.add(&rgb).getpoint(0, 0), vec![15.0, 25.0, 35.0]);
@@ -307,8 +308,44 @@ mod tests {
     #[test]
     #[should_panic(expected = "float rasters are not supported")]
     fn add_float_panics() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let a = Raster::zeroed(2, 2, f1).unwrap();
         let _ = a.add(&a);
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/raster_ops.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would hand `getpoint` a 32-bit integer sample as `1.4e-45` (issue #607).
+     * Input: `src/raster_ops.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn raster_ops_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("raster_ops.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "sample_f64")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/raster_ops.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
     }
 }
