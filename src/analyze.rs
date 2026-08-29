@@ -1915,6 +1915,7 @@ mod tests {
      * 3x2 raster.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn a_pair_loads_from_either_name_and_from_the_bare_stem() {
         for name in ["base_2d_uchar.hdr", "base_2d_uchar.img", "base_2d_uchar"] {
             let path = format!("{FIXTURES}{name}");
@@ -1937,6 +1938,7 @@ mod tests {
      * path recorded.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn decode_file_reaches_the_pair_from_the_hdr() {
         let path = format!("{FIXTURES}base_2d_uchar.hdr");
         let raster = decode_file_with_limits(Path::new(&path), DecodeLimits::default())
@@ -1970,6 +1972,7 @@ mod tests {
      * `CoordLimitExceeded`.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened() {
         let path = format!("{FIXTURES}no_img.hdr");
         let err = decode_analyze_file(Path::new(&path), DecodeLimits::default())

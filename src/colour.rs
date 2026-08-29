@@ -4489,6 +4489,7 @@ mod tests {
      * bytes, and an unreadable profile path.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn icc_typed_errors() {
         let bare = Raster::zeroed(1, 1, PixelFormat::Rgb8).unwrap();
         assert!(matches!(
