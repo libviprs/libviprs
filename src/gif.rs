@@ -91,9 +91,9 @@
 //! | `interlaced` | `gint` | attached when some frame is stored interlaced |
 //! | `gif-palette` | `VipsArrayInt` | attached when no frame carries a local colour table |
 //! | `background` | `VipsArrayDouble` | not attached, see below |
-//! | `gif-loop` | `gint` | not attached, a deprecated alias for `loop` |
-//! | `gif-delay` | `gint` | not attached, a deprecated alias for `delay` |
-//! | `palette-bit-depth` | `gint` | not attached, a deprecated alias for `bits-per-sample` |
+//! | `gif-loop` | `gint` | attached, the deprecated alias for `loop` |
+//! | `gif-delay` | `gint` | attached, the deprecated alias for `delay` |
+//! | `palette-bit-depth` | `gint` | attached, the deprecated alias for `bits-per-sample` |
 //!
 //! `gif-palette` is the global colour table as one signed 32-bit word per
 //! entry, `0xFF << 24 | B << 16 | G << 8 | R`, so every entry is negative.
@@ -3881,6 +3881,242 @@ mod tests {
             page_bytes(&raster, 2),
             [0, 255, 0, 200, 100, 50],
             "frame 1's code 4 rewound to frame 0's colours, so the walk kept its place"
+        );
+    }
+
+    /**
+     * Tests that the three deprecated compatibility fields `gifload` attaches
+     * beside the modern ones come back too. Works by decoding four fixtures
+     * and reading `gif-delay`, `gif-loop` and `palette-bit-depth` off each.
+     * `nsgifload.c` writes all three: `gif-delay` is `delay[0] / 10`, so the
+     * first frame's delay back in the centiseconds the wire uses; `gif-loop`
+     * is `loop_max == 0 ? 0 : loop_max - 1`, which is the NETSCAPE count a
+     * file with a block carries and 0 for a file without one; and
+     * `palette-bit-depth` is a second copy of `bits-per-sample`.
+     * They are invisible to `vipsheader -a`, which lists no deprecated
+     * compatibility field on any loader, so every number here came from
+     * `vipsheader -f` on 8.18.6. Reading them with `-a` produces the opposite
+     * finding, that vips dropped them.
+     * Measured on exactly these files: a four-frame animation with delays
+     * `4 6 8 10` cs and a NETSCAPE count of 3 reports `gif-delay 4`,
+     * `gif-loop 3` and `palette-bit-depth 2`; a still with a zero delay and
+     * no block reports `0`, `0`, `2`; a still with no graphic control
+     * extension at all reports `10`, `0`, `2`; and an eight-entry table
+     * reports `palette-bit-depth 3`.
+     * Input: four GIFs -> Output: the three fields, on every one of them.
+     */
+    #[test]
+    fn the_deprecated_compatibility_fields_come_back_beside_the_modern_ones() {
+        let full = || Frame::full(4, 3, (0..12u8).map(|i| i % 4).collect());
+        let delayed = |cs: u16| Frame {
+            delay_cs: cs,
+            ..full()
+        };
+
+        let anim = fixture(
+            (4, 3),
+            &ANIM_PALETTE,
+            0,
+            Some(3),
+            &[delayed(4), delayed(6), delayed(8), delayed(10)],
+        );
+        let raster = decode_gif_with(
+            &anim,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(raster.get_int("gif-delay"), Some(4));
+        assert_eq!(raster.get_int("gif-loop"), Some(3));
+        assert_eq!(raster.get_int("palette-bit-depth"), Some(2));
+        // The controls the deprecated pair is derived from, so a fix that
+        // wrote the wrong one of the two is visible here rather than only in
+        // the numbers above.
+        assert_eq!(raster.get_int("loop"), Some(4));
+        assert_eq!(raster.get_int("bits-per-sample"), Some(2));
+
+        let still = fixture((4, 3), &ANIM_PALETTE, 0, None, &[delayed(0)]);
+        let raster = decode_bytes(&still).expect("decodes");
+        assert_eq!(
+            raster.get_int("gif-delay"),
+            Some(0),
+            "a still gets them too, and an explicit zero delay is zero"
+        );
+        assert_eq!(
+            raster.get_int("gif-loop"),
+            Some(0),
+            "no NETSCAPE block is `loop 1`, which is `gif-loop 0`"
+        );
+        assert_eq!(raster.get_int("palette-bit-depth"), Some(2));
+
+        let bare = fixture(
+            (4, 3),
+            &ANIM_PALETTE,
+            0,
+            None,
+            &[Frame {
+                control: false,
+                ..full()
+            }],
+        );
+        assert_eq!(
+            decode_bytes(&bare).expect("decodes").get_int("gif-delay"),
+            Some(10),
+            "no control extension is 10 centiseconds, the same default #866 is about"
+        );
+
+        // A different palette so `palette-bit-depth` is not a constant that
+        // any value would satisfy.
+        let wide: Vec<[u8; 3]> = (0..8u8).map(|i| [i * 30, 255 - i * 30, i * 17]).collect();
+        let eight = fixture(
+            (4, 3),
+            &wide,
+            0,
+            None,
+            &[Frame::full(4, 3, (0..12u8).map(|i| i % 8).collect())],
+        );
+        let raster = decode_bytes(&eight).expect("decodes");
+        assert_eq!(raster.get_int("palette-bit-depth"), Some(3));
+        assert_eq!(raster.get_int("bits-per-sample"), Some(3));
+    }
+
+    /**
+     * Tests that `gif-delay` follows the raster rather than the file, which
+     * is a deliberate divergence and the same one `delay` already makes.
+     * Works by loading two pages out of a four-frame file starting at page 2
+     * and reading both fields.
+     * vips reports the whole file's `delay` array whatever window was loaded
+     * and takes `gif-delay` from `delay[0]`, so on 8.18.6
+     * `anim4.gif[page=2,n=2]` reports `delay: 40 60 80 100` and `gif-delay:
+     * 4`, describing two frames the raster does not contain. This loader
+     * subsets `delay` to the loaded pages (the argument is in the module
+     * docs) and takes `gif-delay` from the same first element, so the two
+     * fields still agree with each other on the object carrying them.
+     * `src/webp.rs` does exactly this, off `delays.first()`, so the three
+     * animated loaders speak one dialect.
+     * Input: a four-frame GIF at `page = 2, n = 2` -> Output: `delay 80 100`
+     * and `gif-delay 8`.
+     */
+    #[test]
+    fn gif_delay_follows_the_loaded_window_the_way_delay_does() {
+        let frames: Vec<Frame> = [4u16, 6, 8, 10]
+            .into_iter()
+            .map(|cs| Frame {
+                delay_cs: cs,
+                ..Frame::full(2, 2, vec![0, 1, 2, 3])
+            })
+            .collect();
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(3), &frames);
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(2).with_n(2),
+        )
+        .expect("a valid GIF");
+        assert_eq!(delays(&raster), Some(vec![80, 100]));
+        assert_eq!(
+            raster.get_int("gif-delay"),
+            Some(8),
+            "the first delay of the raster, where vips reports the file's 4"
+        );
+        // The control: a full load of the same file does agree with vips.
+        let whole = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(whole.get_int("gif-delay"), Some(4));
+    }
+
+    /**
+     * Tests that a frame carrying no graphic control extension gets a delay
+     * of 100 ms, not 0. Works by decoding a still with no extension, a still
+     * whose extension holds an explicit zero, and a four-frame file whose
+     * second and fourth frames have no extension.
+     * libnsgif initialises `frame->info.delay` to 10 centiseconds when it
+     * allocates a frame and only a control extension overwrites it, so the
+     * default survives into `delay`. Measured on vips 8.18.6: the bare still
+     * reports `delay: 100`, the explicit-zero one reports `delay: 0`, and the
+     * mixed file reports `delay: 30 100 50 100`. libviprs reported 0 for
+     * every frame with no extension, because `gif` 0.14.2 resets the frame
+     * state per frame and reports `delay: 0` for both cases alike.
+     * The explicit zero is the control that makes this about the absent
+     * extension rather than a floor on small delays, and the 30 and 50 in the
+     * mixed file are the control that the fix did not simply overwrite every
+     * delay with the default.
+     * Input: three GIFs -> Output: 100, 0, and `30 100 50 100`.
+     */
+    #[test]
+    fn a_frame_with_no_control_extension_gets_a_hundred_milliseconds() {
+        let full = || Frame::full(4, 3, (0..12u8).map(|i| i % 4).collect());
+
+        let bare = fixture(
+            (4, 3),
+            &ANIM_PALETTE,
+            0,
+            None,
+            &[Frame {
+                control: false,
+                ..full()
+            }],
+        );
+        assert_eq!(
+            delays(&decode_bytes(&bare).expect("decodes")),
+            Some(vec![100]),
+            "no extension is libnsgif's 10 centisecond default"
+        );
+
+        let zero = fixture(
+            (4, 3),
+            &ANIM_PALETTE,
+            0,
+            None,
+            &[Frame {
+                delay_cs: 0,
+                ..full()
+            }],
+        );
+        assert_eq!(
+            delays(&decode_bytes(&zero).expect("decodes")),
+            Some(vec![0]),
+            "an extension holding zero really is zero, so this is not a floor"
+        );
+
+        let mixed = fixture(
+            (4, 3),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame {
+                    delay_cs: 3,
+                    ..full()
+                },
+                Frame {
+                    control: false,
+                    ..full()
+                },
+                Frame {
+                    delay_cs: 5,
+                    ..full()
+                },
+                Frame {
+                    control: false,
+                    ..full()
+                },
+            ],
+        );
+        let raster = decode_gif_with(
+            &mixed,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(
+            delays(&raster),
+            Some(vec![30, 100, 50, 100]),
+            "the rule is per frame, and the frames that do carry one keep it"
         );
     }
 
