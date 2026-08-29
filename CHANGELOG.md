@@ -2261,7 +2261,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not rescue it either, because `arithmetic::tests` spent 725s on 67 tests
   and then over twenty minutes inside one more without finishing, and seventeen
   of the sixty-two lib modules do not finish inside a 120 second bound. The
-  slice that replaces it is **584s for 436 tests**, with 116 ignored.
+  slice that replaces it is about ten minutes for 436 tests, with 116 ignored;
+  two runs on the same tree came out 584s and 635s.
 
   A module is in if Miri can run it to completion inside 120 seconds, which is
   mechanical rather than a judgement about which code deserves interpreting.
@@ -2288,7 +2289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Worth knowing before anyone quotes a duration from this job: libtest's
   `--report-time` under isolation reports Miri's virtual clock, not wall time.
-  The slice prints "finished in 1514.54s" for a run that took 584s.
+  The slice printed "finished in 1514.54s" for a run that took 584s and
+  "1502.30s" for one that took 635s.
 
 - **`histogram.rs` reads a bin index and a histogram's own count through two
   functions now, and only one of them folds at 65535** (issue #888). `read_flat`

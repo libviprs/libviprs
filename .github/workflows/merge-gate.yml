@@ -229,14 +229,16 @@ jobs:
       #     `hough_line_carries_more_than_65535_votes` without finishing.
       #   * Seventeen of the sixty-two modules in the lib target did not finish
       #     inside a 120 second bound, one module at a time.
-      #   * The slice below is **584s for 436 tests**, with 116
-      #     ignored.
+      #   * The slice below is about ten minutes for 436 tests, with 116
+      #     ignored. Two runs on the same tree came out 584s and 635s, so read
+      #     it as a range rather than a figure: this box is shared.
       #
       # Do not read libtest's own `--report-time` durations as seconds. Under
       # isolation Miri hands the program a virtual clock, so those numbers are
-      # interpreter time: the slice below reports "finished in 1514.54s" for a
-      # run that took 584s on the wall. Every duration in this comment is
-      # measured outside the process.
+      # interpreter time: the slice below reported "finished in 1514.54s" for a
+      # run that took 584s on the wall and "1502.30s" for one that took 635s.
+      # The virtual clock moved 12 seconds while the real one moved 51. Every
+      # duration in this comment is measured outside the process.
       #
       # It runs these modules and no others:
       #
