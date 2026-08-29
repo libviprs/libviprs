@@ -86,6 +86,7 @@
 //! | [`Str`](MetadataValue::Str) | `VipsRefString` | the string |
 //! | [`Blob`](MetadataValue::Blob) | `VipsBlob` | standard base64, padded, unwrapped |
 //! | [`IntArray`](MetadataValue::IntArray) | `VipsArrayInt` | decimals, each followed by one space |
+//! | [`DoubleArray`](MetadataValue::DoubleArray) | `VipsArrayDouble` | doubles, each followed by one space |
 //!
 //! The array spelling has a **trailing space**, which is not decoration.
 //! Measured on the pinned vips 8.18.6, `vips copy 'anim3.webp[n=-1]' out.v`
@@ -318,6 +319,19 @@ pub enum MetadataValue {
     /// [module docs](crate::imageio) for what that costs a value this crate
     /// hands back to vips.
     IntArray(Vec<i64>),
+    /// An ordered list of doubles (vips `VipsArrayDouble`): GIF's
+    /// `background`, and the second of the two array types the
+    /// `#[non_exhaustive]` note above was written for (issue #852).
+    ///
+    /// Separate from [`IntArray`](MetadataValue::IntArray) rather than folded
+    /// into it, because vips writes the two as different GTypes and a reader
+    /// asking for one does not accept the other. `background` holds three
+    /// colour-table bytes widened to doubles, so its values are always
+    /// integral and it would have fitted an int array numerically; a field of
+    /// the wrong type is one this crate's own readers ignore, which is the
+    /// rule #830 wrote for `loop` and `delay` on save, so it would have been
+    /// a field nobody reads.
+    DoubleArray(Vec<f64>),
 }
 
 impl MetadataValue {
@@ -410,8 +424,27 @@ impl MetadataValue {
         }
     }
 
+    /// The value as a slice of doubles, borrowed rather than copied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not [`MetadataValue::DoubleArray`]. An
+    /// [`IntArray`](MetadataValue::IntArray) does **not** coerce, and neither
+    /// does a scalar [`Double`](MetadataValue::Double), for the same reason
+    /// [`MetadataValue::as_int_array`] refuses an [`Int`](MetadataValue::Int):
+    /// vips writes them as different GTypes and a reader asking for one does
+    /// not accept the other.
+    #[track_caller]
+    pub fn as_double_array(&self) -> &[f64] {
+        match self {
+            Self::DoubleArray(v) => v,
+            other => panic!("metadata value is {}, not a double array", other.kind()),
+        }
+    }
+
     /// The type code returned by [`Raster::get_typeof`] for this value:
-    /// 1 int, 2 double, 3 string, 4 blob, 5 int array. These are libviprs
+    /// 1 int, 2 double, 3 string, 4 blob, 5 int array, 6 double array. These
+    /// are libviprs
     /// codes (the C library returns GObject `GType` numbers); the ported call
     /// sites only distinguish zero (absent) from non-zero (present).
     ///
@@ -424,6 +457,7 @@ impl MetadataValue {
             Self::Str(_) => 3,
             Self::Blob(_) => 4,
             Self::IntArray(_) => 5,
+            Self::DoubleArray(_) => 6,
         }
     }
 
@@ -443,6 +477,7 @@ impl MetadataValue {
             Self::Blob(b) => b.len(),
             Self::Str(s) => s.len(),
             Self::IntArray(v) => v.len(),
+            Self::DoubleArray(v) => v.len(),
             Self::Int(_) | Self::Double(_) => 1,
         }
     }
@@ -463,6 +498,7 @@ impl MetadataValue {
             Self::Str(_) => "a string",
             Self::Blob(_) => "a blob",
             Self::IntArray(_) => "an int array",
+            Self::DoubleArray(_) => "a double array",
         }
     }
 }
@@ -515,6 +551,16 @@ impl From<Vec<i64>> for MetadataValue {
 impl From<&[i64]> for MetadataValue {
     fn from(v: &[i64]) -> Self {
         Self::IntArray(v.to_vec())
+    }
+}
+impl From<Vec<f64>> for MetadataValue {
+    fn from(v: Vec<f64>) -> Self {
+        Self::DoubleArray(v)
+    }
+}
+impl From<&[f64]> for MetadataValue {
+    fn from(v: &[f64]) -> Self {
+        Self::DoubleArray(v.to_vec())
     }
 }
 
@@ -1314,6 +1360,26 @@ impl Raster {
         self.field_int_array(name)
     }
 
+    /// Read a metadata field as a slice of doubles (libvips
+    /// `vips_image_get_array_double`).
+    ///
+    /// The double-array twin of [`Raster::get_int_array`], with the same
+    /// rules: it answers the names [`Raster::get_field`] answers, borrows
+    /// rather than cloning, and returns `None` for an absent field or a value
+    /// of any other type, a [`MetadataValue::IntArray`] and a scalar
+    /// [`MetadataValue::Double`] included. GIF's `background` is the field
+    /// this exists for (issue #852).
+    pub fn get_double_array(&self, name: &str) -> Option<&[f64]> {
+        match name {
+            "width" | "height" | "bands" | "format" | "coding" | "interpretation" | "xoffset"
+            | "yoffset" | "xres" | "yres" | "orientation" => None,
+            other => match self.fields.get(other) {
+                Some(MetadataValue::DoubleArray(v)) => Some(v.as_slice()),
+                _ => None,
+            },
+        }
+    }
+
     /// Remove an attached field by setting its type to 0, the libvips
     /// removal idiom (`vips_image_set` with a zero `GType` /
     /// `vips_image_remove`). Removing an absent field is a no-op.
@@ -1743,6 +1809,10 @@ const GTYPE_BLOB: &str = "VipsBlob";
 /// `libvips/iofuncs/type.c`). Measured on the pinned 8.18.6: a three-frame
 /// animation's `delay` goes out as `100 100 100 `.
 const GTYPE_ARRAY_INT: &str = "VipsArrayInt";
+/// GType name for [`MetadataValue::DoubleArray`], carried the same way
+/// `VipsArrayInt` is: space-separated, with a trailing separator. Measured on
+/// the pinned 8.18.6, a GIF's `background` goes out as `71 112 76 `.
+const GTYPE_ARRAY_DOUBLE: &str = "VipsArrayDouble";
 
 /// The `type` attribute and character data for one [`MetadataValue`]; see
 /// the type table in the [module docs](crate::imageio).
@@ -1760,6 +1830,7 @@ fn xml_field_of(value: &MetadataValue) -> (&'static str, Cow<'_, str>) {
         MetadataValue::Str(s) => (GTYPE_STRING, Cow::Borrowed(s.as_str())),
         MetadataValue::Blob(b) => (GTYPE_BLOB, Cow::Owned(base64_encode(b))),
         MetadataValue::IntArray(v) => (GTYPE_ARRAY_INT, Cow::Owned(int_array_text(v))),
+        MetadataValue::DoubleArray(v) => (GTYPE_ARRAY_DOUBLE, Cow::Owned(double_array_text(v))),
     }
 }
 
@@ -1780,6 +1851,44 @@ fn int_array_text(values: &[i64]) -> String {
         out.push(' ');
     }
     out
+}
+
+/// The character data vips writes for a `VipsArrayDouble`: every element
+/// followed by one space, the last one included, the same shape
+/// [`int_array_text`] writes.
+///
+/// The elements go out in Rust's shortest round-tripping form, which is the
+/// choice [`xml_field_of`] already made for a scalar
+/// [`MetadataValue::Double`], so the two conventions inside one trailer agree
+/// with each other. vips uses `%.17g` and the two differ on the values you
+/// would expect: measured on 8.18.6 by hand-writing a trailer and rewriting
+/// it, `0.5`, `-1.25` and `3.0000000000000004` come back unchanged, `71.0`
+/// goes out of vips as `71` where this writes `71.0`, and `1e300` goes out of
+/// vips as `1.0000000000000001e+300` where this writes `1e300`. Every one of
+/// those parses back to the same `f64` through `g_ascii_strtod` and through
+/// Rust, so the difference is spelling rather than value, and matching vips
+/// here would mean making the scalar path inconsistent with it or changing
+/// how every existing `gdouble` field is written.
+fn double_array_text(values: &[f64]) -> String {
+    let mut out = String::new();
+    for v in values {
+        out.push_str(&format!("{v:?}"));
+        out.push(' ');
+    }
+    out
+}
+
+/// Parse the character data of a `VipsArrayDouble` field.
+///
+/// Whitespace-separated, and all or nothing, for the reasons
+/// [`parse_int_array_text`] gives. vips writes an integral element with no
+/// decimal point (`71`, not `71.0`) and an exponent as `1.0000000000000001e+300`,
+/// both of which Rust's `f64` parser reads, which is what makes a trailer
+/// vips wrote readable here.
+fn parse_double_array_text(text: &str) -> Option<Vec<f64>> {
+    text.split_whitespace()
+        .map(|t| t.parse::<f64>().ok())
+        .collect()
 }
 
 /// Parse the character data of a `VipsArrayInt` field.
@@ -2423,6 +2532,7 @@ fn read_vips_xml_trailer(trailer: &[u8], raster: &mut Raster) {
             GTYPE_STRING => Some(MetadataValue::Str(value)),
             GTYPE_BLOB => base64_decode(value.trim()).map(MetadataValue::Blob),
             GTYPE_ARRAY_INT => parse_int_array_text(&value).map(MetadataValue::IntArray),
+            GTYPE_ARRAY_DOUBLE => parse_double_array_text(&value).map(MetadataValue::DoubleArray),
             _ => None,
         };
         match known {
