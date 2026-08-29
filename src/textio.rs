@@ -379,8 +379,10 @@ impl Raster {
     /// name and by route gives the same answer (issue #563). It used to cap at
     /// `DEFAULT_MAX_ALLOC_BYTES` instead, **8 GiB** against the route
     /// default's **512 MiB**, so this entry point accepted declared sizes every
-    /// other container refused. [`crate::textio::decode_netpbm`] takes the
-    /// limits explicitly (issue #910).
+    /// other container refused. `decode_netpbm` takes the
+    /// limits explicitly (issue #910). Named rather than linked because it is
+    /// `pub(crate)` and this method's docs are public, which
+    /// `-D rustdoc::private_intra_doc_links` refuses.
     ///
     /// # Errors
     ///
