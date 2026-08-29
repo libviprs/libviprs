@@ -338,9 +338,12 @@ pub use streaming_mapreduce::{
 pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
 // `decode_webp` is re-exported for the reason `decode_radiance` is: it is
 // the format-specific decode entry point a caller reaches for when they
-// already know the bytes are WebP. The option types stay behind
-// `libviprs::webp::` so the crate root does not gain a second `SaveOptions`.
-pub use webp::decode_webp;
+// already know the bytes are WebP. `decode_webp_with` travels beside it the
+// way `decode_svg_with_limits` travels beside `decode_svg`: same entry
+// point, one more argument. The option types stay behind
+// `libviprs::webp::` so the crate root does not gain a second `SaveOptions`
+// or a second `LoadOptions`.
+pub use webp::{decode_webp, decode_webp_with};
 // `decode_jxl` is re-exported for the reason `decode_webp` and
 // `decode_radiance` are: it is the format-specific decode entry point a
 // caller reaches for when they already know the bytes are JPEG XL, and
@@ -349,7 +352,7 @@ pub use webp::decode_webp;
 // option types stay behind `libviprs::jxl::` so the crate root does not
 // gain a third `SaveOptions`.
 pub use jp2k::{Jp2kError, decode_jp2k};
-pub use jxl::{JxlError, decode_jxl};
+pub use jxl::{JxlError, decode_jxl, decode_jxl_with};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root
