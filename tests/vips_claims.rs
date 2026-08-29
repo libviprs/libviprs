@@ -182,16 +182,21 @@ fn the_white_ink_mechanism_reads_the_same_in_extract_and_in_resample() {
     }
 
     // And the corrected account has to be the one both files carry. The
-    // resample side is where #745 put it, and it is here as the positive
-    // control that this scan can find the phrase at all.
+    // phrase is the **arithmetic**, `clip(E, 0, M)`, and not the English
+    // around it: the first draft of this asserted "does not cancel", which
+    // the `**not**` markup in both files breaks into three tokens, so the
+    // assertion was passing on the fallback word `clipped` alone and would
+    // have passed on a file that said nothing about the mechanism.
+    const MECHANISM: &str = "clip(E, 0, M)";
     assert!(
-        RESAMPLE_RS.contains("does **not** cancel") || RESAMPLE_RS.contains("does not cancel"),
+        RESAMPLE_RS.contains(MECHANISM),
         "the corrected account lives in src/resample.rs; if this fails the \
          scan is looking for the wrong phrase, not the docs disagreeing"
     );
     assert!(
-        EXTRACT_RS.contains("does not cancel") || EXTRACT_RS.contains("clipped"),
-        "src/extract.rs must carry the corrected account too (issue #952)"
+        EXTRACT_RS.contains(MECHANISM),
+        "src/extract.rs must carry the corrected account too, and the \
+         arithmetic is what says it (issue #952)"
     );
 }
 
