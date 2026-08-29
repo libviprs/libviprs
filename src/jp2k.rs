@@ -2542,6 +2542,88 @@ mod tests {
         }
     }
 
+    /// Every `#[test]` in this file, as (line, name, doc block, body).
+    ///
+    /// The body is widened by one level of indirection: any `const` this file
+    /// declares whose name the body mentions is appended to it, so a test
+    /// that drives a table reaches the fixtures the table names. That is the
+    /// same one-hop rule `tests/miri_ignore_convention.rs` follows into a
+    /// test helper, and it is what keeps
+    /// `the_reversible_fixtures_decode_to_the_bytes_vips_produces` honest:
+    /// its doc names three fixtures its body reaches only through `EXACT`.
+    fn tests_with_docs_and_bodies(source: &str) -> Vec<(usize, String, String, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // `const NAME: ... ;`, from its first line to the first line that ends
+        // the item. Every const in this file is a single item terminated that
+        // way, and one that is not simply contributes a shorter block.
+        let mut consts: Vec<(String, String)> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix("const ") else {
+                continue;
+            };
+            let Some(name) = rest.split(':').next().map(str::trim) else {
+                continue;
+            };
+            let mut end = i;
+            while end < lines.len() && !lines[end].trim_end().ends_with(';') {
+                end += 1;
+            }
+            consts.push((
+                name.to_string(),
+                lines[i..=end.min(lines.len() - 1)].join("\n"),
+            ));
+        }
+
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let Some(name) = lines[i]
+                .trim_start()
+                .strip_prefix("fn ")
+                .and_then(|rest| rest.split('(').next())
+            else {
+                i += 1;
+                continue;
+            };
+            let mut attrs = i;
+            while attrs > 0 && lines[attrs - 1].trim_start().starts_with("#[") {
+                attrs -= 1;
+            }
+            if !lines[attrs..i].iter().any(|l| l.trim() == "#[test]") {
+                i += 1;
+                continue;
+            }
+            // The block doc above the attribute stack, if there is one.
+            let mut doc = String::new();
+            if attrs > 0 && lines[attrs - 1].trim().ends_with("*/") {
+                let mut start = attrs - 1;
+                while start > 0 && !lines[start].trim_start().starts_with("/**") {
+                    start -= 1;
+                }
+                doc = lines[start..attrs].join("\n");
+            }
+            // The body, to the closing brace at the function's own indent.
+            let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+            let closing = format!("{indent}}}");
+            let mut end = i + 1;
+            while end < lines.len() && lines[end] != closing {
+                end += 1;
+            }
+            let mut body = lines[i..=end.min(lines.len() - 1)].join("\n");
+            for (const_name, text) in &consts {
+                if body.contains(const_name.as_str()) {
+                    body.push('\n');
+                    body.push_str(text);
+                }
+            }
+            out.push((attrs, name.to_string(), doc, body));
+            i = end + 1;
+        }
+        out
+    }
+
     /**
      * Every `#[test]` in this file carries its own doc block, checked by
      * reading the file rather than by convention, because this file has
@@ -2550,7 +2632,7 @@ mod tests {
      * came off its function when two PRs merged minutes apart (#846 and
      * #855) and their hunks interleaved. Issue #869 filed that, #891 moved
      * the block, and it still did not land on its test: measured on
-     * `origin/main` while issue #905 was in flight, the block sat above the
+     * `origin/main` while issue #926 was in flight, the block sat above the
      * *band ceiling* test's own doc block, so that test's rendered doc
      * opened with a paragraph about image origins and the origin test had
      * none. Nothing went red. `cargo fmt --check` is clean, `make clippy`
@@ -2561,11 +2643,9 @@ mod tests {
      * A doc that drifted onto the wrong function is the failure mode, and
      * the observable half of it is that some other function ends up with
      * none, because a block doc comment always attaches to the item below
-     * it.
-     * So that is what this asserts, over the file's own text.
-     * Input: `src/jp2k.rs` -> Output: no `#[test]` whose nearest
-     * non-attribute line above is neither a block-comment terminator nor a
-     * `///` line, and a count of the tests scanned so a parse that stopped
+     * it. So that is what this asserts, over the file's own text.
+     * Input: `src/jp2k.rs` -> Output: no `#[test]` without a doc block of
+     * its own, and a count of the tests scanned so a parse that stopped
      * early cannot pass quietly.
      */
     #[test]
@@ -2574,32 +2654,12 @@ mod tests {
         // reason the fixtures above are `include_bytes!`: it keeps this off
         // `tests/miri_fs_test_inventory.txt`.
         let source = include_str!("jp2k.rs");
-        let lines: Vec<&str> = source.lines().collect();
-        let mut scanned = 0;
-        let mut undocumented = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            let Some(name) = line
-                .trim_start()
-                .strip_prefix("fn ")
-                .and_then(|rest| rest.split('(').next())
-            else {
-                continue;
-            };
-            // Walk up over the attribute stack. A `#[test]` anywhere in it is
-            // what makes this a test function rather than a helper.
-            let mut above = i;
-            while above > 0 && lines[above - 1].trim_start().starts_with("#[") {
-                above -= 1;
-            }
-            if !lines[above..i].iter().any(|l| l.trim() == "#[test]") {
-                continue;
-            }
-            scanned += 1;
-            let previous = lines[above.saturating_sub(1)].trim();
-            if !(previous.ends_with("*/") || previous.starts_with("///")) {
-                undocumented.push((above, name));
-            }
-        }
+        let tests = tests_with_docs_and_bodies(source);
+        let undocumented: Vec<(usize, &str)> = tests
+            .iter()
+            .filter(|(_, _, doc, _)| doc.is_empty())
+            .map(|(line, name, _, _)| (*line, name.as_str()))
+            .collect();
         assert!(
             undocumented.is_empty(),
             "these tests have no doc block of their own, which means their block is \
@@ -2610,9 +2670,79 @@ mod tests {
         // empty-result trap. This file has dozens of tests, so a number in
         // single figures means the walk stopped early.
         assert!(
-            scanned > 30,
-            "the scanner found only {scanned} tests in this file, so it is not reading \
-             what it thinks it is reading"
+            tests.len() > 30,
+            "the scanner found only {} tests in this file, so it is not reading what it \
+             thinks it is reading",
+            tests.len()
+        );
+    }
+
+    /**
+     * And the half the count cannot see: a doc block is on the test it
+     * describes, not merely on some test.
+     * "Every test has a doc" is satisfied perfectly by a block sitting above
+     * the wrong one, which is exactly the state issue #926 found: two blocks
+     * stacked on the band-ceiling test and none on the origin test. Position
+     * had drifted and content had not, so the content is what identifies the
+     * owner. Every doc block in this file names the fixtures its test drives,
+     * in an `Input:` line, so the check is that a fixture named in a doc is
+     * a fixture that test can reach.
+     * The reach is one hop, through a `const` the body names, because
+     * `the_reversible_fixtures_decode_to_the_bytes_vips_produces` documents
+     * three fixtures it touches only through `EXACT`. Without that hop the
+     * check would have a false positive on the day it landed, which is the
+     * fastest way to get a guard deleted.
+     * Input: `src/jp2k.rs` -> Output: no doc block naming a fixture its own
+     * test cannot reach, plus the count of fixture mentions actually
+     * checked, so a scan that found no fixture names at all cannot pass as
+     * a clean file.
+     */
+    #[test]
+    fn a_doc_block_names_fixtures_the_test_under_it_actually_reaches() {
+        let source = include_str!("jp2k.rs");
+        // Every committed fixture name, taken from the file's own string
+        // literals rather than from a second hand-written list.
+        let mut names: Vec<&str> = Vec::new();
+        for piece in source.split('"').skip(1).step_by(2) {
+            if [".j2k", ".jp2", ".bin"]
+                .iter()
+                .any(|suffix| piece.ends_with(suffix))
+                && !names.contains(&piece)
+            {
+                names.push(piece);
+            }
+        }
+        assert!(
+            names.len() > 20,
+            "the fixture scan found only {} names, so it is not reading the file it \
+             thinks it is reading",
+            names.len()
+        );
+
+        let mut checked = 0;
+        let mut stranded: Vec<(String, &str)> = Vec::new();
+        for (_, test, doc, body) in tests_with_docs_and_bodies(source) {
+            for name in &names {
+                if doc.contains(name) {
+                    checked += 1;
+                    if !body.contains(name) {
+                        stranded.push((test.clone(), name));
+                    }
+                }
+            }
+        }
+        assert!(
+            stranded.is_empty(),
+            "these doc blocks name a fixture their own test never touches, which is what \
+             a block sitting on the wrong function looks like: {stranded:?}"
+        );
+        // The positive control. An empty `stranded` proves nothing unless
+        // the scan actually found doc blocks naming fixtures, and this file
+        // has dozens.
+        assert!(
+            checked > 20,
+            "only {checked} fixture mentions were checked, so this passed by finding \
+             nothing rather than by finding nothing wrong"
         );
     }
 
