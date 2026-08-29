@@ -3033,6 +3033,44 @@ mod tests {
     use super::*;
     use crate::raster::{counting_planes, with_plane_cap_after, with_plane_cap_at};
 
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/colour.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the reader this replaced handed every colour route a
+     * `1.4e-45` for a `u32` sample of `1`, and the ICC import divided it by
+     * 255 instead of by its own ceiling (issue #607).
+     * Input: `src/colour.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn colour_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("colour.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "space_depth")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/colour.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
     /// Every site label this module owns starts with this, so one prefix counts
     /// the module's own plane reservations and leaves `convolution.rs`'s and the
     /// op outputs alone (issue #696).
