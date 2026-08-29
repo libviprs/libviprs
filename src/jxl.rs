@@ -224,6 +224,7 @@ use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jxl")]
 use crate::pixel::PixelFormat;
+use crate::pixel::SampleKind;
 #[cfg(feature = "jxl")]
 use crate::raster::buffer_len;
 use crate::raster::{Raster, RasterError};
@@ -301,6 +302,24 @@ pub enum JxlError {
     Decode {
         /// The underlying decoder failure, rendered through its `Display`.
         message: String,
+    },
+    /// The header describes a sample kind this loader has no stream type
+    /// for.
+    ///
+    /// Unreachable while [`PixelFormat`] carries only `U8`, `U16` and `F32`,
+    /// which are exactly the three arms the frame loop implements. It is
+    /// here so the carriers of issues #516 and #517 arrive as a typed
+    /// refusal rather than through the `_` arm that used to ask `jxl-oxide`
+    /// for `f32` samples for every width that was not one or two, and then
+    /// write float bit patterns into a raster tagged as an integer one
+    /// (issue #607). The same shape [`MosaicError::UnsupportedSampleKind`]
+    /// takes.
+    ///
+    /// [`MosaicError::UnsupportedSampleKind`]: crate::mosaicing::MosaicError::UnsupportedSampleKind
+    #[error("jxl: this build has no JPEG XL sample stream for {kind:?} samples")]
+    UnsupportedSampleKind {
+        /// The sample kind the frame buffer would have had to hold.
+        kind: SampleKind,
     },
     /// The bytes ran out before the decoder had what it needed, named by
     /// what was still missing.
@@ -782,7 +801,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
         width,
         height,
         u64::from(bands),
-        format.bytes_per_channel() as u64,
+        format.kind().bytes() as u64,
     )?;
     // `samples` sizes the frame buffer below, and clearing the budget
     // above is not what makes it safe to compute. `max_alloc_bytes` is a
@@ -821,7 +840,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
         width,
         roll_height,
         u64::from(bands),
-        format.bytes_per_channel() as u64,
+        format.kind().bytes() as u64,
     )?;
 
     let icc = image.rendered_icc();
@@ -870,7 +889,8 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
         .as_ref()
         .is_some_and(|delays| delays.iter().any(Option::is_some));
 
-    let sample_bytes = format.bytes_per_channel();
+    let kind = format.kind();
+    let sample_bytes = kind.bytes();
     let frame_bytes =
         samples
             .checked_mul(sample_bytes)
@@ -906,11 +926,19 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
         // else. Checked on every page, because a later frame is a later
         // chance to disagree.
         check_channel_count(bands, stream.channels())?;
-        match sample_bytes {
-            1 => {
+        // Keyed on the sample kind. The `_` arm this replaces asked
+        // `jxl-oxide` for `f32` samples for every width that was not one or
+        // two, so a four-byte integer carrier would have been filled with
+        // float bit patterns and read back as float (issue #607). The three
+        // kinds a `PixelFormat` can hold are the three arms; the rest are a
+        // typed refusal rather than a nearest guess, because picking a
+        // stream type for a carrier nobody has measured is how the `_` arm
+        // got it wrong in the first place.
+        match kind {
+            SampleKind::U8 => {
                 stream.write_to_buffer(&mut data[offset..offset + frame_bytes]);
             }
-            2 => {
+            SampleKind::U16 => {
                 scratch16.clear();
                 scratch16.resize(samples, 0u16);
                 stream.write_to_buffer(&mut scratch16);
@@ -919,7 +947,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
                     *out = sample.to_ne_bytes();
                 }
             }
-            _ => {
+            SampleKind::F32 => {
                 scratch32.clear();
                 scratch32.resize(samples, 0f32);
                 stream.write_to_buffer(&mut scratch32);
@@ -927,6 +955,9 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
                 for (sample, out) in scratch32.iter().zip(out) {
                     *out = sample.to_ne_bytes();
                 }
+            }
+            SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+                return Err(JxlError::UnsupportedSampleKind { kind }.into());
             }
         }
     }
@@ -1256,17 +1287,26 @@ fn carrier(bands: u32, is_float: bool, bits_per_sample: u32) -> Result<PixelForm
 /// count entirely.
 #[cfg(feature = "jxl")]
 fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
-    let bytes = format.bytes_per_channel();
-    match (is_grayscale, bytes) {
+    // Keyed on the sample kind. A byte width cannot separate the float
+    // carrier from a four-byte integer one, and those two want opposite
+    // tags: `scrgb` is linear light, and a `uint` raster is not (issue
+    // #607). The match is total, so a carrier added to `PixelFormat` has to
+    // name its tag here.
+    match (is_grayscale, format.kind()) {
         // One colour channel: `b-w` for uchar and float alike, `grey16`
         // for ushort.
-        (true, 2) => Interpretation::Grey16,
-        (true, _) => Interpretation::Bw,
+        (true, SampleKind::U16 | SampleKind::I16) => Interpretation::Grey16,
+        (
+            true,
+            SampleKind::U8 | SampleKind::I8 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32,
+        ) => Interpretation::Bw,
         // Three colour channels: sRGB, rgb16, or linear-light scRGB for
         // the float carrier.
-        (false, 4) => Interpretation::ScRgb,
-        (false, 2) => Interpretation::Rgb16,
-        (false, _) => Interpretation::Srgb,
+        (false, SampleKind::F32) => Interpretation::ScRgb,
+        (false, SampleKind::U16 | SampleKind::I16) => Interpretation::Rgb16,
+        (false, SampleKind::U8 | SampleKind::I8 | SampleKind::U32 | SampleKind::I32) => {
+            Interpretation::Srgb
+        }
     }
 }
 
@@ -1395,6 +1435,83 @@ mod tests {
     // Named explicitly rather than taken from the glob: the parent's
     // import is behind the feature and `ramp_rgb` is not.
     use crate::pixel::PixelFormat;
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/jxl.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: the frame loop's `_` arm asked `jxl-oxide` for `f32`
+     * samples for every width that was not one or two, and `interpretation`
+     * tagged the same widths `scrgb`, which is linear light and is not what
+     * a `uint` raster is (issue #607).
+     * Input: `src/jxl.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn jxl_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("jxl.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "interpretation")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/jxl.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the interpretation tag comes from the sample kind, so the
+     * three four-byte kinds do not all land on `scrgb`.
+     * Works by driving the tag function with the formats a `PixelFormat`
+     * carries and asserting the pairing, which is the `jxlload.c:698-737`
+     * table. `scrgb` is linear light and belongs to the float carrier
+     * alone; a width would hand it to `uint` and `int` as well.
+     * Input: grey and colour formats at each carried kind -> Output: the
+     * libvips tags.
+     */
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn the_jxl_tag_comes_from_the_sample_kind() {
+        use crate::pixel::SampleKind;
+        assert_eq!(interpretation(true, PixelFormat::Gray8), Interpretation::Bw);
+        assert_eq!(
+            interpretation(true, PixelFormat::Gray16),
+            Interpretation::Grey16
+        );
+        assert_eq!(
+            interpretation(true, PixelFormat::with_kind(1, SampleKind::F32).unwrap()),
+            Interpretation::Bw,
+            "one colour channel is b-w for uchar and float alike"
+        );
+        assert_eq!(
+            interpretation(false, PixelFormat::Rgb8),
+            Interpretation::Srgb
+        );
+        assert_eq!(
+            interpretation(false, PixelFormat::Rgb16),
+            Interpretation::Rgb16
+        );
+        assert_eq!(
+            interpretation(false, PixelFormat::RgbaF32),
+            Interpretation::ScRgb,
+            "scrgb is linear light, so it belongs to the float carrier alone"
+        );
+    }
     #[cfg(feature = "jxl")]
     use crate::source::DeclaredGeometry;
     #[cfg(feature = "jxl")]
@@ -2317,10 +2434,10 @@ mod tests {
         );
 
         // And again on a carrier wider than a byte, because an 8-bit frame
-        // cannot tell the sample size apart from 1: dropping
-        // `bytes_per_channel()` from the price leaves the 512x512 `Rgb8`
-        // case above answering exactly the same thing. A 256x256 `Rgb16`
-        // frame is 393216 bytes and only half that without it.
+        // cannot tell the sample size apart from 1: dropping the sample
+        // width from the price leaves the 512x512 `Rgb8` case above
+        // answering exactly the same thing. A 256x256 `Rgb16` frame is
+        // 393216 bytes and only half that without it.
         let deep = Raster::zeroed(256, 256, PixelFormat::Rgb16).unwrap();
         let deep_bytes = deep.encode_jxl(SaveOptions::default()).unwrap();
         let deep_price = 256u64 * 256 * 3 * 2;

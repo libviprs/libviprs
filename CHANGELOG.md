@@ -711,6 +711,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A gate against a byte width standing in for a sample kind**, which is what
+  issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
+  `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
+  than a lint because `#[non_exhaustive]` on `SampleKind` turns a *`match`*
+  into a compile error and does nothing at all to a *comparison*, which is
+  precisely the shape that keeps coming back: `jp2k.rs:3122` arrived after
+  #748's census was taken.
+
+  It parses rather than greps. A shell `grep` cannot tell code from prose, and
+  the first thing it would have failed on is `pixel.rs`'s comment explaining
+  why `canonical()` does **not** take the width shortcut, which is prose
+  arguing *for* the rule. The scanner strips comments (tracking string
+  literals, so a `//` inside one does not blind it) and it is proved on both
+  directions before it is trusted: a comparison in code is found, the same
+  text in each of the four comment forms is not.
+
+  Two code sites are left and neither is in a file this lane owns, so they are
+  named in a countdown with the lane that clears each. The assertion is set
+  equality both ways, like `tests/ci_feature_coverage.rs`: a new site anywhere
+  fails, and a listed site that has already been cleared **also** fails, so the
+  list can only shrink and cannot rot into an allowlist. When it is empty,
+  #607 closes.
+
+- `JxlError::UnsupportedSampleKind`, for a header describing a sample kind the
+  JPEG XL loader has no stream type for (issue #607). Unreachable while
+  `PixelFormat` carries only `U8`, `U16` and `F32`, which are exactly the
+  three arms the frame loop implements; it is there so the carriers of #516
+  and #517 arrive as a typed refusal instead of through the arm that used to
+  ask for `f32` samples and write float bit patterns into an integer raster.
+
+
+- **`"uhdr"` is a row in `Raster::encode_to_buffer`**, so Ultra HDR is reachable
+  from a shared save route and not only through `Raster::encode_uhdr` by name
+  (issue #809). It encodes at `uhdrsave`'s own default quality of 75, through
+  `uhdr::SaveOptions::default`, and `Raster::encode_to_target` gets it too.
+
+  One spelling and no file extension, both measured on the pinned vips 8.18.6.
+  `uhdrsave` registers an **empty** suffix list, `vips copy base.v out.uhdr` is
+  refused with "is not a known file format", and the four suffixes `uhdrload`
+  claims on the way in (`.jpg`, `.jpeg`, `.jpe`, `.jfif`, at priority 100
+  against `jpegload`'s 50) all route to `jpegsave` on the way out, whose output
+  `vips uhdrload` then refuses. So `Raster::save` gets **no** Ultra HDR row and
+  that absence is now pinned by a check rather than left as a gap somebody
+  closes later by making `.jpg` conditional on the raster's shape.
+
+  The row has an input contract the other rows do not, a 3-band `f32` raster
+  holding linear-light scRGB, and a raster that misses it is refused with
+  `EncodeError::InvalidParameter` naming the raster, not
+  `EncodeError::Unsupported` naming the format. This build can write Ultra HDR;
+  what is wrong is the input, and a caller can act on that.
 - GIF load attaches the three deprecated compatibility fields `gifload`
   attaches beside the modern ones: **`gif-delay`**, **`gif-loop`** and
   **`palette-bit-depth`** (issues #865, #875). `gif-delay` is the first delay
@@ -2091,6 +2141,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `connection::encode_to_target`'s doc no longer keeps its own copy of the
+  format list, and a check refuses to let one come back (issue #881). It named
+  `"jpeg"`, `"jpg"`, `"png"`, `"v"` and `"vips"`, which was the whole dispatch
+  when it was written and five of seventeen spellings by the time anybody
+  measured it, so a caller reading it concluded WebP was unsupported years
+  after it was wired.
+
+  `Raster::encode_to_buffer` sits on the same dispatch and its doc **was**
+  current, because two lanes updated it. Nothing connected the two, so they
+  drifted one lane at a time, and that is why #770, #809 and #880 could each go
+  unnoticed as long as they did.
+
+  The extension route has had a guard since the `.jxl` arm landed while the
+  refusal message still read "png, jpg/jpeg, gif, webp, and v/vips". This is
+  its twin: the check reads the dispatch's arm heads and the surviving doc list
+  out of the module's own source and requires the two sets to be equal, so an
+  arm added without the doc moving and a doc naming something with no arm
+  behind it are both red. It then requires `encode_to_target` to name none, so
+  the property being held is "there is one list" and not "the two copies
+  agree".
+
 - The crate has one fallible-plane helper instead of three private copies of
   it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
   `cfg(test)` probe over all of them that a check addresses **by site label**
@@ -2857,6 +2928,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+<<<<<<< HEAD
+=======
+- **`draw` and `raster` stop asking for a byte width too** (issues #748,
+  #607). `draw`'s `channel_at` / `set_channel_at` took a `bpc: usize` and
+  panicked on the `_` arm, so the refusal covered float and would have covered
+  the signed and 32-bit carriers only by accident; they take a `SampleKind`
+  and are total now. Its mask test was `bytes_per_channel() != 1`, which would
+  have accepted an `i8` mask as `u8`, and its `draw_smudge` ceiling was
+  `if bpc == 1 { 255 } else { 65535 }`, a sixteenth of a four-byte integer
+  kind's range. `raster`'s `try_new_from_memory` mapped a vips format
+  **nickname** through a byte width, which is #841's shape one layer over:
+  vips has `char`, `short`, `uint` and `int` nicknames as well, and a width
+  cannot tell `uint` from `float`. It names the kind now, so wiring a new
+  nickname in is one line.
+
+  The `!=` spelling in `draw` is worth naming: it is a width comparison that a
+  grep for `bytes_per_channel() ==` does not see. The new gate found it.
+
+- **The last five width-keyed sample sites are keyed on `SampleKind`**, which
+  finishes the sweep issue #748 opened (issues #748, #607). `colour.rs`,
+  `convolution.rs` and `jxl.rs` each carried a
+  `match bytes_per_channel() { 1, 2, _ }` whose trailing arm reads four bytes
+  as an `f32` whatever they are, so a `u32` sample of `1` arrives as
+  `1.4e-45`. All three dispatch on the sample kind now, with no wildcard arm,
+  so a kind added to `SampleKind` is a compile error rather than a silent
+  misread.
+
+  **Three more of the same shape that a count of `match` heads could not
+  see**, all in modules already being converted for the visible ones:
+
+  - `convolution`'s `RowWindow` kept the byte width in a `usize` field and
+    picked its widening arm from it. It is the traversal's hot path, so it is
+    the site a four-byte integer carrier would have hit hardest, and it is not
+    a `match` on an accessor, so nothing counted it.
+  - `convolution`'s `depth_max` answered 65535 for **every** width that was
+    not one, so a four-byte integer kind would have saturated at a sixteenth
+    of its range. It reads `SampleKind::max_value` now.
+  - `colour`'s `read_device_normalised` divided by 255 or by 65535 or clipped
+    to `0..255`, chosen by width. It divides by the kind's own ceiling now, so
+    `max_value()`'s `None` is what selects the float arm.
+
+  `colour.rs`'s private `SpaceDepth` enum is **gone**, which is issue #607
+  step (a)'s second half. It was a hand-rolled duplicate of three of
+  `SampleKind`'s seven variants and had already lost the four kinds the
+  carriers of #516 and #517 add; two enums answering "what are these bytes"
+  is exactly what #607 is about.
+
+  `jxl`'s frame loop and its interpretation tag are both total on the kind
+  now. The loop used to ask `jxl-oxide` for `f32` samples for any width that
+  was not one or two, and the tag handed `scrgb` to every four-byte kind,
+  which is linear light and is not what a `uint` raster is. Kinds with no
+  stream take a new `JxlError::UnsupportedSampleKind` rather than a nearest
+  guess, matching `MosaicError::UnsupportedSampleKind`.
+
+  Measured over the whole sweep, on the same scan the previous pass used:
+  width-keyed `match` heads went **12 -> 7 -> 2** and files carrying a width
+  spelling went **29 -> 22 -> 18**. Both remaining heads are outside this
+  work: `fits.rs:409` is already width-total, and `jp2k.rs:1721` arrived
+  after the census.
+
+
+>>>>>>> 5247737bff4f762865008f576c7436983cffcb76
 - **A 20-byte WebP file could panic the chunk walk on a 32-bit target**
   (issue #862). `opaque_blended_frame_offsets` steps over a RIFF chunk by
   `size + (size & 1)`, and only the outer addition was checked. `size` comes
@@ -2878,7 +3011,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds check, so the guard is a unit test on the step itself rather than a
   fixture, with one assertion written as an equality against `usize::BITS`
   so it says something true on both targets.
+<<<<<<< HEAD
 
+=======
+>>>>>>> 5247737bff4f762865008f576c7436983cffcb76
 - **The `.v` `BandFmt` wire tag comes from the sample kind, not from a byte
   width** (issue #841). `encode_vips` derived that header word through
   `match bpc { 1 => 0, 2 => 2, _ => 6 }`, so every four-byte sample kind that
