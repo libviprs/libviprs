@@ -490,22 +490,41 @@ fn width_comparisons(src: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Every `.rs` file under `dir`, as `(path relative to `dir`, full path)`.
+/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
+/// full path)`.
+///
+/// Recursive on purpose. `src/` is flat today, so a walk that stops at the top
+/// gives the same answer and the `files.len() > 30` control cannot tell them
+/// apart; the first `src/anything/mod.rs` added would exit this guard in
+/// silence (issue #949). `tests/miri_ignore_convention.rs` already recurses,
+/// and two of the three walks agreeing is not a rule.
 fn rs_files_under(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
-    let mut out: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-        .map(|p| {
-            (
-                p.file_name()
-                    .expect("a file has a name")
-                    .to_string_lossy()
-                    .into_owned(),
-                p,
-            )
-        })
-        .collect();
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|e| e.expect("cannot read a directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path
+                .file_name()
+                .expect("a directory entry has a name")
+                .to_string_lossy()
+                .into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if name.ends_with(".rs") {
+                out.push((rel, path));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
     out.sort();
     out
 }

@@ -276,11 +276,24 @@ const FS_MARKERS: &[&str] = &[
     // `Path` methods that stat the path even though they read like accessors.
     ".canonicalize()",
     ".exists()",
+    // `Path::try_exists` is the fallible twin of `.exists()` and stats just the
+    // same. It was missing, and an unannotated `#[test]` calling it left all
+    // fourteen tests in this file green while ending the whole Miri run on its
+    // first syscall (issue #949).
+    ".try_exists()",
     ".is_file()",
     ".is_dir()",
+    // Matched today only because `symlink(` above is a substring of it, which
+    // is not a property worth leaning on.
+    ".is_symlink()",
     ".metadata()",
     ".read_dir()",
     ".symlink_metadata()",
+    // The third constructor on `File`, beside `open` and `create` above: the
+    // `OpenOptions` builder reached through `File`. The bare spelling needs
+    // its own entry for the same reason those two do, since `use std::fs::File`
+    // sits at module scope where `fn_bodies` never reads it.
+    "File::options(",
 ];
 
 /// Substrings that mean "this function reaches `std::process`".
@@ -417,7 +430,19 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// and the check green. Measured, not reasoned: three such deletions are in
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 280;
+///
+/// 280 to 282 in #949, and the arithmetic is worth writing down because the
+/// change that moved it also *added* three markers. Three tests arrived
+/// (`test_util_is_only_ever_gated_alongside_cfg_test` walks `src/` now instead
+/// of reading one file, and both `the_walk_descends_into_subdirectories`
+/// guards read a directory) and one left
+/// (`the_crates_own_unsafe_stays_out_of_a_default_build` moved to
+/// `include_str!` and touches nothing any more). The three new markers,
+/// `.try_exists()`, `.is_symlink()` and `File::options(`, moved this by
+/// **zero**: nothing in the tree reaches the filesystem through those
+/// spellings today, which is exactly why an unannotated test using one was
+/// invisible.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 282;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
