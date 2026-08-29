@@ -14,6 +14,7 @@
 //! decodes from a byte slice like every other codec here, so what a caller
 //! writes against is this crate's own surface.
 
+use libviprs::pixel::SampleKind;
 use libviprs::source::{DecodeLimits, SourceError};
 use libviprs::{FitsError, Interpretation, PixelFormat, Raster, decode_fits};
 
@@ -138,8 +139,9 @@ fn declared_geometry_is_bounded_by_decode_limits() {
     ));
 }
 
-/// Every 8-bit, 16-bit and float carrier has a FITS spelling, so the
-/// encoder is total over `PixelFormat` and never has to refuse one.
+/// Every carrier has a FITS spelling, unsigned, signed (issue #516) and the
+/// unsigned 32-bit integer one (issue #517), so the encoder is total over
+/// `PixelFormat` and never has to refuse one.
 #[test]
 fn every_carrier_has_a_fits_spelling() {
     for (format, len) in [
@@ -149,6 +151,10 @@ fn every_carrier_has_a_fits_spelling() {
         (PixelFormat::Gray16, 24),
         (PixelFormat::Rgb16, 72),
         (PixelFormat::RgbaF32, 192),
+        (PixelFormat::with_kind(1, SampleKind::I8).unwrap(), 12),
+        (PixelFormat::with_kind(1, SampleKind::I16).unwrap(), 24),
+        (PixelFormat::with_kind(1, SampleKind::I32).unwrap(), 48),
+        (PixelFormat::with_kind(1, SampleKind::U32).unwrap(), 48),
     ] {
         let raster = Raster::new(4, 3, format, vec![7u8; len]).unwrap();
         assert!(
