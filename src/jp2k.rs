@@ -1542,15 +1542,20 @@ fn tile_count(size: u32, origin: u32, tile: u32) -> u32 {
 /// The interleaved output buffer's byte length, and whether the target can
 /// address it.
 ///
-/// **This is what the decode does today, hoisted so a test can drive it**
-/// (issue #951). `check_image_alloc` validates
-/// `width * height * bands * element_bytes` as a `u64` and hands it back, and
-/// the decode discards that answer. It then rebuilds half of it with
-/// [`crate::raster::buffer_len`], which validates `width * height * bands`
-/// and narrows *that*, and multiplies the result by `element_bytes` in
-/// `usize` at the allocation. The second multiply is checked by nothing, so
-/// the two halves of one product are validated against two different
+/// **One product, and it is the one the budget already cleared** (issue
+/// #951). `check_image_alloc_with_working_set` returns
+/// `width * height * bands * element_bytes` as a `u64`, widened and
+/// saturating; this takes that number and asks one question of it, which is
+/// whether the target can address it. It used to discard the return, rebuild
+/// half of it with [`crate::raster::buffer_len`], which validates
+/// `width * height * bands` and narrows *that*, and multiply the result by
+/// `element_bytes` in `usize` at the allocation, where nothing checked it.
+/// The two halves of one product were validated against two different
 /// ceilings.
+///
+/// The `.v` reader does exactly this: `check_image_alloc`'s `data_len` is
+/// what it narrows and what it slices the file with, so there is one
+/// spelling of the product there and not two. This is the same move.
 ///
 /// `address_space` is what makes the defect reachable from a test on any
 /// host. It is `usize::MAX` at the call site; a 32-bit value stands in for
@@ -1558,9 +1563,10 @@ fn tile_count(size: u32, origin: u32, tile: u32) -> u32 {
 /// this is a live bug and is not a target anyone here runs. Gating a test on
 /// `#[cfg(target_pointer_width = "32")]` would mean nothing ever ran it.
 ///
-/// A returned length above `address_space` is the bug: on that target
-/// `vec![0u8; len]` wraps it into an undersized buffer, and the `store` loop
-/// then indexes past the end.
+/// A length above `address_space` used to come back `Ok`, and on that target
+/// `vec![0u8; len]` wraps it into an undersized buffer with the `store` loop
+/// indexing past the end. It is a `SizeOverflow` now, carrying the real
+/// bytes per pixel rather than the band count the old spelling reported.
 #[cfg(feature = "jp2k")]
 fn frame_buffer_bytes(
     priced_bytes: u64,
@@ -1570,22 +1576,13 @@ fn frame_buffer_bytes(
     element_bytes: u64,
     address_space: u64,
 ) -> Result<u64, RasterError> {
-    // The price the budget check returned, which this spelling throws away.
-    let _ = priced_bytes;
-    let overflow = || RasterError::SizeOverflow {
-        width,
-        height,
-        bpp: bands as usize,
-    };
-    // `buffer_len`'s product and `buffer_len`'s narrowing check, in that
-    // order. This is the half that is checked.
-    let samples = u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|wh| wh.checked_mul(u64::from(bands)))
-        .filter(|samples| *samples <= address_space)
-        .ok_or_else(overflow)?;
-    // And the multiply the call site does afterwards, against nothing.
-    Ok(samples.saturating_mul(element_bytes))
+    // What a pixel really costs, bands times the sample width. The old
+    // spelling split that product in two and checked one half.
+    let bpp = (bands as usize).saturating_mul(element_bytes as usize);
+    if priced_bytes > address_space {
+        return Err(RasterError::SizeOverflow { width, height, bpp });
+    }
+    Ok(priced_bytes)
 }
 
 /// The `jp2k`-feature-on body of [`decode_jp2k`].
