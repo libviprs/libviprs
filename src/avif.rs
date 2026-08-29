@@ -1011,6 +1011,13 @@ pub fn decode_avif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     // An alpha item is a second `decode_item`, and its frame is live
     // alongside the primary's while `assemble` walks both, so it is a second
     // pair of buffers over a monochrome plane.
+    //
+    // That last term is held by `an_alpha_item_is_priced_as_a_second_frame`
+    // and **not** by the counting allocator, which is measured rather than
+    // assumed: dropping it leaves all four AVIF cases in
+    // `tests/decode_working_set.rs` green, because at 512x512 the four bytes
+    // a sample the primary frame is priced at have enough slack to cover the
+    // alpha frame too.
     let plane = u64::from(width).saturating_mul(u64::from(height));
     let chroma = if config.monochrome {
         0
