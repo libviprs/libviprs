@@ -4431,6 +4431,114 @@ mod tests {
     }
 
     /**
+     * Tests that the extension route reaches the TIFF writer that has been
+     * sitting in `src/encode_tiff.rs` the whole time (issue #948).
+     *
+     * `Raster::save_tiff` landed with the TIFF lane, with round-trip tests
+     * behind it, and neither save route ever grew a row. So `save("out.tif")`
+     * answered `UnsupportedExtension` from a crate that writes TIFF. That is
+     * the fourth time a writer has been wired to nothing (#770 jp2k, #809
+     * uhdr, #880 radiance, #882 netpbm), and `tests/save_route_coverage.rs`
+     * is what makes a fifth red rather than quiet.
+     *
+     * Both suffixes and only those two, measured on the pinned vips 8.18.6:
+     * `tiffsave`'s `vips -l` line reads `VipsForeignSaveTiffFile (tiffsave),
+     * save image to tiff file, nocache (.tif, .tiff), priority=0`, and
+     * `vips copy t.v out.EXT` over `.btf`, `.tf8`, `.bigtiff` and `.tfx` is
+     * refused with "is not a known file format" every time. Those four are
+     * the nearest misses and they are the control in
+     * `save_error_lists_exactly_the_wired_extensions`.
+     *
+     * The row writes uncompressed strips because that is `tiffsave`'s own
+     * default, measured rather than assumed: `vips tiffsave t.v d.tif` and
+     * `vips tiffsave t.v d2.tif --compression none` write byte-identical
+     * 240-byte files (SHA-256 `24b95890dda8c56f...`) while `--compression
+     * deflate` writes a different 254. Same call as the JPEG row taking
+     * `jpegsave`'s quality of 75 and the Ultra HDR row taking `uhdrsave`'s.
+     * `Raster::tiff_save` keeps Deflate for the reason its own doc gives;
+     * all three modes are lossless, so what differs is the size, which is
+     * why the assertion below is a round trip and not a byte comparison
+     * against either.
+     */
+    #[test]
+    fn the_extension_route_reaches_the_tiff_writer() {
+        let subject = rgb_2x2();
+
+        assert!(
+            saveable_extensions().contains("tif/tiff"),
+            "the refusal message must name the TIFF row: {}",
+            saveable_extensions()
+        );
+
+        let mut written = Vec::new();
+        for extension in ["tif", "tiff"] {
+            let bytes = subject
+                .encode_for_extension(extension, true)
+                .unwrap_or_else(|e| panic!(".{extension} must be a live row, got {e}"));
+            assert_eq!(
+                crate::source::sniff(&bytes),
+                Some(crate::source::SniffedFormat::Tiff),
+                ".{extension} must write something the sniffer calls a TIFF"
+            );
+            let back = Raster::tiff_load(&bytes)
+                .unwrap_or_else(|e| panic!(".{extension} must read back, got {e}"));
+            assert_eq!((back.width(), back.height()), (2, 2));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                ".{extension} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+            written.push(bytes);
+        }
+        assert_eq!(
+            written[0], written[1],
+            "both suffixes name one container, the way the five JPEG 2000 ones do"
+        );
+
+        // And the shared decoder reads it back, which is more than the Netpbm
+        // rows could say until #910.
+        let back = crate::decode_bytes(&written[0]).expect("a TIFF this crate writes decodes");
+        assert_eq!(back.data(), subject.data());
+    }
+
+    /**
+     * Tests that the TIFF row has nothing for the strip flag to drop
+     * (issue #948).
+     *
+     * This build's TIFF encoder writes the colour tags and the strips and
+     * nothing else: `encode_to_vec` hands the `tiff` crate a colour type and
+     * a pixel buffer and never touches an ICC profile, an EXIF block or an
+     * XMP packet. So a stripped save and a kept one write the same bytes,
+     * the same call the `.gif`, `.fits`, `.jp2`, `.hdr` and Netpbm rows make,
+     * with `.webp` beside it as the control that does differ.
+     *
+     * Unlike those five this one is a **gap** rather than a property of the
+     * container: TIFF has somewhere to put a profile and `tiffsave` uses it.
+     * The equality is pinned here on purpose, so the day the encoder learns
+     * to embed one this cell goes red and says so rather than the flag
+     * silently doing nothing.
+     */
+    #[test]
+    fn the_tiff_row_has_nothing_for_the_strip_flag_to_drop() {
+        let mut im = rgb_2x2();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("tif", true).unwrap(),
+            im.encode_for_extension("tif", false).unwrap(),
+            "this build's TIFF encoder embeds no metadata, so the flag has nothing to drop"
+        );
+        assert_ne!(
+            im.encode_for_extension("webp", true).unwrap(),
+            im.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
+    /**
      * Tests that a `.ppm` this crate writes reads back through the shared
      * decode entry points (issue #910).
      *
