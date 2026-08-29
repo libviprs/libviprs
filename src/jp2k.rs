@@ -2643,6 +2643,141 @@ mod tests {
     }
 
     /**
+     * A `colr` box the decoder cannot resolve no longer refuses the file
+     * (issues #771, #848, #849).
+     * Three enumerated colour spaces used to stop the decode dead where
+     * `jp2kload` reads the file and hands back pixels: anything openjpeg does
+     * not recognise (#771), e-YCC (#848), and CIELab on one component (#849).
+     * All three are `hayro-jpeg2000` resolving the `colr` box and refusing what
+     * it cannot map, and none of them is a property of the codestream, which
+     * decodes perfectly well.
+     * Every `want` here is `vips getpoint` on 8.18.6 over the same bytes, and
+     * the shape of the fix is that the enum never reaches the decoder at all:
+     * `crate::jp2k` reads it for the interpretation (#767) and for the inverse
+     * YCC, and hands the decoder a neutral one.
+     * Input: `rgb_lossless.jp2` and a wrapped `depth8u.j2k` at the four enums
+     * that used to refuse -> Output: a decode, with vips's pixel at (0, 0).
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_colr_box_the_decoder_cannot_resolve_no_longer_refuses_the_file() {
+        // (enum, vips's three bands at 0,0 on the retagged rgb_lossless.jp2,
+        // vips's one band at 0,0 on the wrapped depth8u.j2k).
+        let cases: &[(u32, [u8; 3], u8)] = &[
+            // Unrecognised, so vips takes UNSPECIFIED and touches nothing.
+            (99, [0, 0, 0], 0),
+            (20, [0, 0, 0], 0),
+            // e-YCC, which vips maps onto the same answer as sYCC, transform
+            // included: the 135 in the middle band is the inverse YCC running.
+            (24, [0, 135, 0], 0),
+            // CIELab, which openjpeg does not recognise either, so vips leaves
+            // the samples alone where the decoder used to convert them.
+            (14, [0, 0, 0], 0),
+        ];
+
+        for (enumcs, three, one) in cases {
+            let raster = decode_jp2k(
+                &retagged(fixture("rgb_lossless.jp2"), *enumcs),
+                DecodeLimits::default(),
+            )
+            .unwrap_or_else(|e| panic!("EnumCS {enumcs} on three components must decode: {e}"));
+            assert_eq!(
+                &raster.data()[..3],
+                three,
+                "EnumCS {enumcs}: vips reads {three:?} at (0, 0)"
+            );
+
+            let raster = decode_jp2k(
+                &wrapped(fixture("depth8u.j2k"), 5, 1, 1, 8, *enumcs),
+                DecodeLimits::default(),
+            )
+            .unwrap_or_else(|e| panic!("EnumCS {enumcs} on one component must decode: {e}"));
+            assert_eq!(
+                raster.data()[0],
+                *one,
+                "EnumCS {enumcs}: vips reads {one} at (0, 0)"
+            );
+        }
+    }
+
+    /**
+     * The inverse YCC follows the `colr` box's enum and the subsampling
+     * together, and the pixels stay vips's (issues #848, #771).
+     * This is the half of the fix that could go wrong quietly. The enum stops
+     * reaching the decoder, so `hayro-jpeg2000` stops running its own sYCC
+     * transform, and this module has to run it instead or a subsampled sYCC
+     * file comes back untransformed. The condition is openjpeg's: sYCC or
+     * e-YCC by enum, or an unspecified colour space over subsampled chroma.
+     * Every `want` is `vips getpoint FILE 0 0` on 8.18.6. The three lossy
+     * fixtures carry the tolerance their own pins carry, because the 9/7
+     * wavelet is float-specified; the tolerance is nowhere near wide enough to
+     * hide the failure this guards, since the same file read untransformed
+     * comes back at 30 in the first band against vips's 4.
+     * Input: the five container shapes that bracket the rule -> Output:
+     * transformed where vips transforms and not where it does not.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_inverse_ycc_follows_the_enum_and_the_subsampling_together() {
+        fn close(got: &[u8], want: [u8; 3], tolerance: i32, what: &str) {
+            for (band, want) in want.iter().enumerate() {
+                let delta = i32::from(got[band]) - i32::from(*want);
+                assert!(
+                    delta.abs() <= tolerance,
+                    "{what}: band {band} is {} where vips reads {want}, off by {delta} \
+                     against a tolerance of {tolerance}",
+                    got[band]
+                );
+            }
+        }
+
+        // A bare codestream with subsampled chroma: unspecified colour space,
+        // so the SIZ heuristic turns it on. Reversible, so this one is exact.
+        assert_eq!(&decoded("sub420.j2k").data()[..3], &[255, 87, 0]);
+
+        // The same subsampling inside a JP2 tagged sYCC, which is where the
+        // enum has to carry the decision now.
+        close(
+            decoded("chroma_sub_on.jp2").data(),
+            [4, 1, 241],
+            3,
+            "chroma_sub_on.jp2",
+        );
+        close(
+            decoded("chroma_tiny_sub_on.jp2").data(),
+            [75, 75, 75],
+            3,
+            "chroma_tiny_sub_on.jp2",
+        );
+
+        // A JP2 tagged sRGB with no subsampling: no transform either way.
+        close(
+            decoded("chroma_sub_off.jp2").data(),
+            [0, 1, 255],
+            3,
+            "chroma_sub_off.jp2",
+        );
+
+        // An unsubsampled JP2 tagged sYCC: the enum alone turns it on, which
+        // the container shape cannot say. Lossless fixture, so exact.
+        let sycc = decode_jp2k(
+            &retagged(fixture("rgb_lossless.jp2"), 18),
+            DecodeLimits::default(),
+        )
+        .expect("decodes");
+        assert_eq!(&sycc.data()[..3], &[0, 135, 0]);
+
+        // And the control that says the enum is doing it rather than the retag
+        // machinery: the same file at sRGB is untouched.
+        let srgb = decode_jp2k(
+            &retagged(fixture("rgb_lossless.jp2"), 16),
+            DecodeLimits::default(),
+        )
+        .expect("decodes");
+        assert_eq!(&srgb.data()[..3], &[0, 0, 0]);
+    }
+
+    /**
      * An enum openjpeg does not recognise falls back to the band count, which
      * is the arm that keeps every ordinary file working (issue #767).
      * `EnumCS 14` is CIELab and openjpeg maps it to nothing, so vips guesses
