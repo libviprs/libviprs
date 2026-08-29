@@ -51,6 +51,17 @@
 # follow a call into a *test* helper in the same file; what is left is the
 # library boundary, which it does not cross on purpose.
 #
+# #765 added six of those rows, and they came from a measurement rather than
+# from reading: every test binary run single threaded under a syscall interposer
+# on `open`, `stat` and eleven others, with each path attributed to the test
+# that made it. 2143 tests, 264 touching the filesystem, six of them in neither
+# this file nor the annotated set. Three are `src/analyze.rs`, whose two-file
+# entry point resolves the `.img` from the `.hdr`'s path and so has no buffer
+# form; three are `src/colour.rs` and `src/pdf.rs` handing an entry point a path
+# that does not exist and asserting on the error, where the `open` still happens
+# and Miri refuses it before the kernel can answer `NotFound`. That is the same
+# shape as `src/source.rs::decode_file_not_found`, which is in here already.
+#
 # To update: run `cargo test --test miri_ignore_convention`. The failure prints
 # a regenerated body you can paste in below this header. A `+ unannotated` line
 # in that output is a test that will end the next Miri run on its first
@@ -332,6 +343,12 @@ annotated   fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_tri
 annotated   fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
 annotated   fs-detected  tests/workspace_layout.rs::workspace_lockfile_pins_pdfium_render_to_the_fork
+annotated   not-detected src/analyze.rs::a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened
+annotated   not-detected src/analyze.rs::a_pair_loads_from_either_name_and_from_the_bare_stem
+annotated   not-detected src/analyze.rs::decode_file_reaches_the_pair_from_the_hdr
+annotated   not-detected src/colour.rs::icc_typed_errors
+annotated   not-detected src/pdf.rs::password_and_dpi_extract_return_a_clean_typed_error
+annotated   not-detected src/pdf.rs::pdf_info_with_password_passes_through_open_error
 annotated   not-detected src/source.rs::decode_file_not_found
 annotated   not-detected tests/dependency_policy.rs::every_links_key_is_on_the_allowlist
 annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confined_to_packfile
@@ -343,6 +360,5 @@ annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allocates_itself_ends_the_process
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
-annotated   not-detected tests/miri_ignore_convention.rs::the_filesystem_detector_follows_a_test_helper_but_not_the_library
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
 annotated   not-detected tests/workspace_layout.rs::root_workspace_contains_both_crates

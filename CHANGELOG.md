@@ -2684,6 +2684,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Six tests reached the filesystem with no `#[cfg_attr(miri, ignore)]`, and
+  `merge-gate.yml` said none did** (issue #765). Any one of them ends the whole
+  Miri session on its first syscall, because #711 turned isolation on and Miri
+  aborts the run rather than failing the test.
+
+  The scanner in `tests/miri_ignore_convention.rs` could not have asked for
+  those annotations. It refuses to follow a call into the library on purpose,
+  since a production function that *can* open a path is not evidence that this
+  caller hands it one, and the measurement behind that choice is 46 spurious
+  marks if it does. So the six read as pure: three in `src/analyze.rs`, whose
+  two-file entry point resolves the `.img` from the `.hdr`'s path and therefore
+  has no buffer form to test, and three in `src/colour.rs` and `src/pdf.rs` that
+  hand an entry point a path which does not exist and assert on the error. Those
+  last three look like tests that never reach disk, and the `open` still
+  happens: Miri refuses the syscall before the kernel can answer `NotFound`.
+
+  Found by measuring rather than by reading. I ran every test binary single
+  threaded under a `DYLD_INSERT_LIBRARIES` interposer on `open`, `openat`,
+  `opendir`, `stat`, `lstat`, `access`, `mkdir`, `unlink`, `rename`, `symlink`,
+  `link`, `rmdir`, `readlink` and `chmod`, printing each path between libtest's
+  own `test NAME ...` and `ok` so every syscall lands on the test that made it.
+  2143 tests ran, 264 touched the filesystem, and six were in neither the
+  inventory nor the annotated set.
+
+  The same measurement retires the rest of #765's claim. It was filed when 21 of
+  `src/exr.rs`'s 22 tests and all of `src/nifti.rs` reached fixtures through a
+  `fixture()` helper the detector could not follow; #781 closed that, and the
+  interposer confirms it, since not one `exr` or `nifti` test comes back
+  untracked.
+
+- **A `#[cfg(test)]` helper that is not inside a `#[cfg(test)] mod` was outside
+  the filesystem follower's call graph entirely** (issue #833). The scope
+  predicate matched the attribute only when it sat on a `mod`, so a free `fn`
+  under it was filtered out and a test calling it read as pure however plainly
+  the helper called `std::fs::read`. Thirteen such helpers exist in `src/`
+  today, in eight files; none touches the filesystem, so widening the predicate
+  to any `#[cfg(test)]` item moved no count and no inventory row, and that is
+  luck rather than design.
+
+- **The Miri guard annotated one of its own tests for a filesystem access it
+  never makes** (issue #832). `the_filesystem_detector_follows_a_test_helper_but_not_the_library`
+  carried `// reads the repository source tree`, copied off the four siblings
+  that call `scan_repo()`; it calls `scan_source` on two inline `&str` fixtures
+  and made zero filesystem syscalls under the interposer, against thousands for
+  each of those siblings. That is one test the Miri gate can now actually run,
+  and one ledger row that had stopped meaning anything.
+
 - The morphology walkers dispatch on `SampleKind` instead of on the byte width
   (issue #831, part of #748 and #607 step (b)). `sample_u32` and its write side
   stepped **two bytes per sample for every width that is not one**, which is the
