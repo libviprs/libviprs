@@ -657,16 +657,17 @@ fn load_still(container: &str, page: u32, n: i32) -> Result<Raster, libviprs::so
 /// The one-page refusal each loader reports, and whether it is the shared
 /// typed one.
 ///
-/// The three agree on **whether** to refuse a window past a still's only page.
-/// They do not agree on what to call it: WebP and JPEG XL report the shared
-/// `SourceError::PageOutOfRange`, and GIF reports
-/// `SourceError::Gif(GifError::BadPageNumber)`, its own variant carrying the
-/// same three numbers under different names. That is issue #845, filed before
-/// this file existed and rediscovered here from the cross-container angle,
-/// which is the corroboration rather than a second finding.
+/// The three agree on **whether** to refuse a window past a still's only page,
+/// and since #845 they agree on what to call it too: all three report
+/// `SourceError::PageOutOfRange`. GIF used to report a
+/// `GifError::BadPageNumber` of its own, carrying the same three numbers under
+/// different names, which this file rediscovered from the cross-container
+/// angle after it had already been filed.
 ///
-/// The last field turns `true` when #845 lands, the way `COMPAT_PAIR`'s does.
-const ONE_PAGE_REFUSAL: [(&str, bool); 3] = [("gif", false), ("webp", true), ("jxl", true)];
+/// The column stays now the gap is closed, for the reason the compatibility
+/// one does: a loader added with `false` has to say which issue its own
+/// variant is, rather than taking a quiet seat on a closed one.
+const ONE_PAGE_REFUSAL: [(&str, bool); 3] = [("gif", true), ("webp", true), ("jxl", true)];
 
 /// A still is a one-page file in every container, and every loader refuses the
 /// same windows against it.
@@ -701,7 +702,6 @@ const ONE_PAGE_REFUSAL: [(&str, bool); 3] = [("gif", false), ("webp", true), ("j
 /// each container reports today.
 #[test]
 fn a_still_is_one_page_in_every_container_and_refuses_the_same_windows() {
-    use libviprs::GifError;
     use libviprs::source::SourceError;
 
     for container in CONTAINERS {
@@ -738,13 +738,11 @@ fn a_still_is_one_page_in_every_container_and_refuses_the_same_windows() {
                 );
             } else {
                 assert!(
-                    matches!(
-                        err,
-                        SourceError::Gif(GifError::BadPageNumber { frames: 1, .. })
-                    ),
-                    "{where_}: issue #845, the GIF loader still has its own \
-                     variant for this refusal. If you have just collapsed the \
-                     two, flip this row in ONE_PAGE_REFUSAL. Got {err:?}"
+                    !matches!(err, SourceError::PageOutOfRange { .. }),
+                    "{where_}: this row says {container} still refuses with a \
+                     variant of its own, and it gave the shared one. If you \
+                     have just collapsed the two, flip the row in \
+                     ONE_PAGE_REFUSAL. Got {err:?}"
                 );
             }
         }
