@@ -2701,12 +2701,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compared before the fourth is believed. A frame where the two walks disagree
   keeps the decoder's answer, which is what every frame got before.
 
-- A background index past the end of the global colour table disposes to
-  colour table **entry 0**, not to black (issue #850). Measured on vips 8.18.6
-  with a palette whose entry 0 is `(9, 8, 7)`: a stored index of 200 reports
+- `background_rgb` falls back to colour table **entry 0** for an index the
+  table cannot serve, where it used to answer black, and its doc no longer
+  claims vips answers black either (issue #850). Measured on vips 8.18.6 with
+  a palette whose entry 0 is `(9, 8, 7)`: a stored index of 200 reports
   `background: 9 8 7` and disposes the canvas to it, where index 3 on the same
   table reports `0 0 255`. The fixture that pinned this before used a palette
-  whose entry 0 was black, so "black" and "entry 0" could not be told apart.
+  whose entry 0 was black, so "black" and "entry 0" could not be told apart,
+  and the doc and the test agreed with each other while neither agreed with
+  vips.
+
+  **No pixel moves today.** `gif` 0.14.2 clears `Decoder::bg_color()` to
+  `None` when the stored index is past the global palette, so the loader
+  already reached entry 0 through `index.unwrap_or(0)`, for the wrong reason.
+  That normalisation lives in a dependency and nothing in this module recorded
+  that the answer leaned on it; now the fallback is explicit and the reliance
+  is written down beside it.
 
 - `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
   and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,

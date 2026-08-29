@@ -909,6 +909,14 @@ pub fn decode_gif_with(
 /// same table reports `0 0 255`. The fixture the animated-load lane wrote for
 /// this used a palette whose entry 0 was black, so the two answers were
 /// indistinguishable and the wrong one went in.
+///
+/// The fallback is not reachable through [`decode_gif_with`] today, and that
+/// is worth writing down rather than relying on: `gif` 0.14.2 clears
+/// `Decoder::bg_color()` to `None` when the stored index is past the global
+/// palette (`reader/mod.rs:354-358`), so this function used to arrive at
+/// entry 0 through `index.unwrap_or(0)` for the wrong reason. A release that
+/// stopped normalising, or a second caller, would have turned that into wrong
+/// pixels with nothing in the way.
 fn background_rgb(global: Option<&[u8]>, index: Option<usize>) -> [u8; PALETTE_STRIDE] {
     // libnsgif substitutes a two-entry black-and-white table for a file that
     // declares no global one, and then reads entry 0 of it whatever the
@@ -1721,6 +1729,15 @@ mod tests {
         /// such frame anywhere in the file is what keeps `gif-palette` off
         /// the header (issue #828).
         local: Option<Vec<[u8; 3]>>,
+        /// Whether to write a graphic control extension at all. A frame
+        /// without one takes the default control, which is disposal 0, no
+        /// delay and no transparent index.
+        control: bool,
+        /// A comment extension written between the control extension and the
+        /// image descriptor, which is where a block that is not a control
+        /// extension can come between the two halves `ControlWalk` has to
+        /// keep together.
+        comment: Option<Vec<u8>>,
     }
 
     impl Frame {
@@ -1737,6 +1754,8 @@ mod tests {
                 delay_cs: 0,
                 disposal: 1,
                 local: None,
+                control: true,
+                comment: None,
             }
         }
     }
@@ -1796,15 +1815,25 @@ mod tests {
             out.push(0);
         }
         for frame in frames {
-            let mut flags = 0u8;
-            if frame.transparent.is_some() {
-                flags |= 1;
+            if frame.control {
+                let mut flags = 0u8;
+                if frame.transparent.is_some() {
+                    flags |= 1;
+                }
+                flags |= (frame.disposal & 7) << 2;
+                out.extend_from_slice(&[0x21, 0xF9, 4, flags]);
+                out.extend_from_slice(&frame.delay_cs.to_le_bytes());
+                out.push(frame.transparent.unwrap_or(0));
+                out.push(0);
             }
-            flags |= (frame.disposal & 7) << 2;
-            out.extend_from_slice(&[0x21, 0xF9, 4, flags]);
-            out.extend_from_slice(&frame.delay_cs.to_le_bytes());
-            out.push(frame.transparent.unwrap_or(0));
-            out.push(0);
+            if let Some(text) = &frame.comment {
+                out.extend_from_slice(&[0x21, 0xFE]);
+                for chunk in text.chunks(255) {
+                    out.push(chunk.len() as u8);
+                    out.extend_from_slice(chunk);
+                }
+                out.push(0);
+            }
             out.push(0x2C);
             out.extend_from_slice(&frame.left.to_le_bytes());
             out.extend_from_slice(&frame.top.to_le_bytes());
@@ -1991,6 +2020,8 @@ mod tests {
             delay_cs: 0,
             disposal: 1,
             local: None,
+            control: true,
+            comment: None,
         };
         let bytes = fixture((8, 8), &palette, 2, None, &[frame]);
         let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
@@ -2909,6 +2940,8 @@ mod tests {
             delay_cs,
             disposal,
             local: None,
+            control: true,
+            comment: None,
         }
     }
 
@@ -3481,6 +3514,15 @@ mod tests {
      * exactly these files: background indices 200 and 0 both dispose to
      * `9 8 7` and report `background: 9 8 7`, where index 3 disposes to blue
      * and reports `0 0 255`.
+     * This test **passes on both sides of issue #850**, and that is the
+     * point rather than a weakness. `gif` 0.14.2 clears `bg_color()` to
+     * `None` when the stored index is past the palette
+     * (`reader/mod.rs:354-358`), so the loader reached entry 0 by way of
+     * `index.unwrap_or(0)` before the fallback existed. The divergence lives
+     * one level down, in `background_rgb` itself, where
+     * `the_background_lookup_takes_a_whole_entry_or_none` holds it; this is
+     * the end-to-end fixture that says which answer is right, and it is the
+     * one the original should have been written with.
      * Input: the same two-frame GIF with background index 200, 0 and 3 ->
      * Output: entry 0 twice, then blue.
      */
@@ -3653,6 +3695,165 @@ mod tests {
                 "disposal {disposal} is {name}"
             );
         }
+    }
+
+    /**
+     * Tests that the raw disposal code survives the two things that can sit
+     * between a frame's graphic control extension and its pixels: another
+     * extension block, and a colour table on an earlier frame. Works by
+     * running disposal 4 behind a comment extension, and then behind a frame
+     * that carries a local colour table, and requiring the rewind both times.
+     * Both are places the second walk can lose its place, and both are
+     * **masked** by `reconcile_disposal`'s fallback: a walk that comes apart
+     * gives the answer libviprs gave before #827, so the pixels go quietly
+     * back to being wrong rather than failing loudly. The mutation sweep
+     * found exactly that, which is why the local table sits on the frame
+     * *before* the one carrying code 4: on the code-4 frame itself the walk
+     * has already returned that frame's control before it has to step over
+     * the table, so the fixture cannot see the mistake.
+     * Measured on vips 8.18.6 against exactly these two files. The comment
+     * one is `red red` then `green black`; the local-table one is
+     * `(200,100,50) (200,100,50)`, then `red red`, then `green
+     * (200,100,50)`, the last page being the rewind putting the first
+     * frame's colours back.
+     * Input: disposal 4 behind a comment extension, and behind a local
+     * colour table -> Output: the rewind in both.
+     */
+    #[test]
+    fn code_four_survives_a_comment_extension_and_an_earlier_local_table() {
+        let roll = |bytes: &[u8]| {
+            decode_gif_with(
+                bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF")
+        };
+        let dot = || Frame {
+            width: 1,
+            height: 1,
+            indices: vec![2],
+            ..Frame::full(1, 1, vec![2])
+        };
+
+        // A comment extension between the control extension and the image
+        // descriptor. Its payload is thirteen bytes rather than four, which
+        // is what stops it from being read as a control extension, and the
+        // label check is what stops it from being read as one anyway.
+        let commented = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            3,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    comment: Some(b"libviprs #827".to_vec()),
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                dot(),
+            ],
+        );
+        assert_eq!(
+            page_bytes(&roll(&commented), 1),
+            [0, 255, 0, 0, 0, 0],
+            "a comment extension does not displace the control extension"
+        );
+
+        // A local colour table on frame 0, which the walk has to step over
+        // to reach frame 1's control extension.
+        let local: Vec<[u8; 3]> = vec![[9, 8, 7], [200, 100, 50], [0, 255, 0], [1, 1, 1]];
+        let with_local = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            3,
+            Some(0),
+            &[
+                Frame {
+                    local: Some(local),
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                Frame {
+                    disposal: 4,
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                dot(),
+            ],
+        );
+        let raster = roll(&with_local);
+        assert_eq!(
+            page_bytes(&raster, 0),
+            [200, 100, 50, 200, 100, 50],
+            "frame 0 really did draw through its own table, not the global one"
+        );
+        assert_eq!(page_bytes(&raster, 1), [255, 0, 0, 255, 0, 0]);
+        assert_eq!(
+            page_bytes(&raster, 2),
+            [0, 255, 0, 200, 100, 50],
+            "frame 1's code 4 rewound to frame 0's colours, so the walk kept its place"
+        );
+    }
+
+    /**
+     * Tests that a frame carrying no graphic control extension at all takes
+     * the default control rather than the last frame's. Works by putting a
+     * frame with no extension between one that disposes with code 4 and one
+     * that paints a second dot, so an inherited disposal shows up as a
+     * missing dot two pages later.
+     * GIF89a lets a frame go without a control extension and the `gif` crate
+     * substitutes `Frame::default()` for it, so the second walk has to drop
+     * each extension after the image descriptor it belongs to rather than
+     * hold on to it. Measured on vips 8.18.6 against exactly this file: page
+     * 0 is `red red`, page 1 is `green black` and page 2 is `green blue`.
+     * Input: a three-frame 2x1 GIF whose middle frame has no control
+     * extension -> Output: the middle frame keeps the canvas, so the last
+     * page carries both dots.
+     */
+    #[test]
+    fn a_frame_with_no_control_extension_does_not_inherit_the_last_one() {
+        let bytes = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                Frame {
+                    width: 1,
+                    height: 1,
+                    indices: vec![2],
+                    control: false,
+                    ..Frame::full(1, 1, vec![2])
+                },
+                Frame {
+                    left: 1,
+                    width: 1,
+                    height: 1,
+                    indices: vec![3],
+                    ..Frame::full(1, 1, vec![3])
+                },
+            ],
+        );
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(page_bytes(&raster, 0), [255, 0, 0, 255, 0, 0]);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 0, 0, 0],
+            "frame 0's code 4 rewound the canvas before the middle frame drew"
+        );
+        assert_eq!(
+            page_bytes(&raster, 2),
+            [0, 255, 0, 0, 0, 255],
+            "and the middle frame kept it, so both dots are here"
+        );
     }
 
     /**
