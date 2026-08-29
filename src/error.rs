@@ -67,8 +67,8 @@
 //! |---|---|
 //! | [`RasterError::FloatUnsupported`] | the sample-reading raster helpers |
 //! | [`ArithmeticError::FloatUnsupported`] | the arithmetic family |
-//! | [`ExtractError::FloatUnsupported`] | `embed`, `gravity`, `insert`, `smartcrop`'s analysing strategies |
-//! | [`ConversionError::FloatUnsupported`] | `join`, `arrayjoin` |
+//! | [`ExtractError::FloatUnsupported`] | `smartcrop`'s analysing strategies |
+//! | [`ConversionError::FloatUnsupported`] | `gamma`, `falsecolour`, `msb` |
 //!
 //! Four enums is the consequence of the per-module split above and is not
 //! something to undo: a single-family caller still wants a tight surface. What
@@ -96,11 +96,14 @@
 //! through a single type without a trait. The names doing the work is cheaper
 //! and reads the same at every call site.
 //!
-//! A refusal can also be nested: `try_join` refuses float itself, so a caller
-//! sees `OpError::Conversion(ConversionError::FloatUnsupported)`, but the
-//! `try_insert` underneath would raise `ExtractError::FloatUnsupported` if it
-//! were reached. That is the same two-path shape the raster section above
-//! describes.
+//! The two op families the last two rows name shrank in issue #945, which
+//! carried a float raster through `embed`, `gravity`, `insert`, `join`,
+//! `arrayjoin` and `bandmean`. What is left in both rows is the ops that
+//! index a table by the sample value, and a float sample does not index one.
+//! A refusal can still be nested: a `conversion` op delegating to `bands` or
+//! `extract` surfaces their variants through [`ConversionError::Band`] and
+//! [`ConversionError::Extract`], which is the same two-path shape the raster
+//! section above describes.
 //!
 //! Wrapping is transparent — [`OpError`]'s `Display` and `source` delegate to
 //! the wrapped error via `#[error(transparent)]`, so no diagnostic detail is

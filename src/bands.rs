@@ -43,6 +43,11 @@
 //!   (`0..=255` or `0..=65535`) and rounded to nearest. libvips does not
 //!   exercise non-integral constants in its band tests, so the rounding mode
 //!   is our choice; round-to-nearest is documented here as the contract.
+//! * **Float rasters.** [`Raster::bandmean`] takes one and answers the plain
+//!   mean, accumulating at the sample's own width, which is what
+//!   `vips bandmean` answers (issue #945). Every other operation here still
+//!   refuses one with [`BandError::UnsupportedSampleKind`], because they
+//!   take a constant to clamp or a bitwise operator to apply.
 //! * **Negative band indices.** `extract_band(-1)` addresses the last band.
 //!   libvips itself has no negative indexing; the ported tests fold pyvips's
 //!   Python `im[-1]` sugar into the Rust call, so the resolution happens
@@ -71,11 +76,14 @@ pub enum BandError {
     /// The raster carries a sample kind the band operations have no
     /// implementation for.
     ///
-    /// The band ops read samples as unsigned integers, so they carry `U8`,
-    /// `U16` and the 32-bit unsigned carrier of issue #517, and refuse
-    /// float and the signed carriers of issue #516. It replaces a panic
-    /// whose message said "float rasters" over a raster that was not
-    /// float. Mirrors
+    /// The band ops that take a constant or a bitwise operator read samples
+    /// as integers, so they carry all six integer kinds (issues #517, #909)
+    /// and refuse float. It replaces a panic whose message said "float
+    /// rasters" over a raster that was not float.
+    ///
+    /// [`Raster::try_bandmean`] is not one of them since issue #945: it
+    /// carries a float raster and answers the plain mean vips answers, so a
+    /// refusal here is per operation rather than module-wide. Mirrors
     /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
     #[error("{op} does not support {kind:?} samples yet")]
     UnsupportedSampleKind {
@@ -150,10 +158,11 @@ pub enum BandError {
 ///
 /// The signed kinds sign-extend, so this is the numeric read and not the
 /// storage one. `F32` truncates toward zero, the `vips_cast` rounding, and
-/// is reachable only from a direct call today because the band ops still
-/// refuse a float raster for the reason they always have; `read_flat_reads_
-/// every_kind_at_its_own_stride` drives it anyway, so the arm is held by a
-/// test rather than by nothing.
+/// is reachable only from a direct call: `bandmean` carries a float raster
+/// since issue #945 and reads it through [`read_flat_v`], while the ops
+/// that still refuse one never get here with it.
+/// `read_flat_and_write_flat_round_trip_every_kind_at_its_own_stride`
+/// drives the arm anyway, so it is held by a test rather than by nothing.
 #[inline]
 fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> i64 {
     match kind {
@@ -208,6 +217,52 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
+/// Read the flat `i`-th sample as `f64`: [`read_flat`] widened so a float
+/// carrier travels through as a *value* rather than truncated to an integer
+/// (issue #945).
+///
+/// The six integer kinds go through [`read_flat`] rather than being spelled
+/// out again, which keeps one reader for them: `f64` represents every value
+/// of every one of those kinds exactly, `u32::MAX` and `i32::MIN` included,
+/// so the widening is lossless and this cannot disagree with the integer
+/// path. Enumerated rather than reached through a `_` arm, so adding a kind
+/// is a decision the compiler forces here too.
+#[inline]
+fn read_flat_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => read_flat(data, kind, i) as f64,
+        SampleKind::F32 => f64::from(f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+    }
+}
+
+/// Store the flat `i`-th sample from an `f64`: [`write_flat`] widened, the
+/// other half of [`read_flat_v`].
+///
+/// The integer kinds keep [`write_flat`]'s narrow exactly, so this stays a
+/// **store** and not a cast.
+#[inline]
+fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => write_flat(data, kind, i, v as i64),
+        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+    }
+}
+
 /// Clamp-and-round an `f64` constant into the sample range of an integer
 /// kind.
 ///
@@ -222,8 +277,9 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
 ///
 /// `F32` has no range to clip into, so the constant is carried as it is and
 /// [`write_flat`] narrows it; that is what `vips_cast` does on a float
-/// target ("narrows without clipping"). No band op reaches it today,
-/// because they all still refuse a float raster.
+/// target ("narrows without clipping"). No band op reaches it today:
+/// `bandmean` is the one that carries a float raster (issue #945) and it
+/// takes no constant, while `bandjoin_const` and the rest still refuse one.
 #[inline]
 fn const_to_sample(c: f64, kind: SampleKind) -> i64 {
     match kind.range() {
@@ -246,10 +302,13 @@ fn format_for(bands: usize, kind: SampleKind) -> Result<PixelFormat, BandError> 
 /// error rather than a panic out of a `Result`-returning method (the shape
 /// issue #694 landed).
 ///
-/// Float is the only refusal left. The three signed carriers went through
-/// here until issue #909 widened [`read_flat`] and [`write_flat`] to `i64`,
-/// and that refusal was a parity regression rather than an implementation:
-/// vips runs every one of these ops on a `char` raster and answers CHAR.
+/// Float is the only refusal left, and `bandmean` is no longer one of the
+/// callers. The three signed carriers went through here until issue #909
+/// widened [`read_flat`] and [`write_flat`] to `i64`, and that refusal was a
+/// parity regression rather than an implementation: vips runs every one of
+/// these ops on a `char` raster and answers CHAR. Issue #945 found the same
+/// thing one carrier further on for `bandmean`, which now reads through
+/// [`read_flat_v`] and takes a float raster.
 fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), BandError> {
     let kind = r.format().kind();
     match kind {
@@ -542,13 +601,21 @@ impl Raster {
     /// It disagrees with [`Raster::try_shrink`], which truncates toward
     /// zero on the same numbers. Two ops, two roundings, both matched.
     ///
+    /// **A float raster does not round at all**, and that is measured too
+    /// (issue #945). On `/opt/homebrew/bin/vips` 8.18.6 a two-band `float`
+    /// raster whose bands are `[1, 2, 100]` and `[2, 3, 101]` answers
+    /// `[1.5, 2.5, 100.5]`, where the same numbers as `uchar` answer
+    /// `[2, 3, 101]`. The float sum accumulates at **`f32`**, the sample's
+    /// own width, rather than at `f64`: three bands holding
+    /// `[16777216, 1, 1]` answer **5592405.5**, which is `16777216 / 3`
+    /// rounded to `f32`, and not the 5592406 an `f64` accumulator gives.
+    ///
     /// The result keeps `self`'s depth.
     ///
     /// # Errors
     ///
     /// Returns a wrapped [`RasterError`] if the result cannot be allocated.
     pub fn try_bandmean(&self) -> Result<Raster, BandError> {
-        reject_unreadable_kind("bandmean", self)?;
         let fmt = self.format();
         let bands = fmt.channels();
         let kind = fmt.kind();
@@ -557,10 +624,25 @@ impl Raster {
         let pixels = self.width() as usize * self.height() as usize;
         let mut out = vec![0u8; pixels * bpc];
         let data = self.data();
+        let float = kind.is_float();
         for p in 0..pixels {
-            let sum: i64 = (0..bands)
-                .map(|c| read_flat(data, kind, p * bands + c))
-                .sum();
+            let base = p * bands;
+            if float {
+                // `bandmean.c`'s loop declares its accumulator as the
+                // sample type, so a float raster sums at `f32` and divides
+                // at `f32`, and neither step rounds to an integer. Summing
+                // at `f64` is a different answer on a fixture that
+                // saturates the mantissa, which is why this narrows each
+                // read back rather than accumulating in the `f64` the
+                // reader hands over.
+                let mut sum = 0f32;
+                for c in 0..bands {
+                    sum += read_flat_v(data, kind, base + c) as f32;
+                }
+                write_flat_v(&mut out, kind, p, f64::from(sum / bands as f32));
+                continue;
+            }
+            let sum: i64 = (0..bands).map(|c| read_flat(data, kind, base + c)).sum();
             let bands64 = bands as i64;
             // Half away from zero. Rust's `/` truncates toward zero like
             // C's, so the rounding term has to follow the sign of the sum
@@ -970,7 +1052,8 @@ mod tests {
      * Works by driving each op on `Int8` samples and asserting the sample
      * values, with `Uint32` alongside as the control that the guard still
      * discriminates by kind, and a float raster as the control that the
-     * one remaining refusal is intact.
+     * refusals left are per op rather than module-wide: `bandjoin` still
+     * refuses one and `bandmean` carries it since issue #945.
      * Input: `Int8` `[-100, -1, 0, 100]` -> Output: the measured samples.
      */
     #[test]
@@ -1029,7 +1112,10 @@ mod tests {
         )
         .unwrap();
         assert!(u.try_bandmean().is_ok());
-        // Control: the one refusal left is float, and it is still there.
+        // Control: float is still refused by the ops that take a constant
+        // or a bitwise operator, and `bandmean` is the one that carries it
+        // since issue #945, so this is a per-op refusal rather than a
+        // module-wide one.
         let f = Raster::new(
             1,
             1,
@@ -1038,12 +1124,80 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            f.try_bandmean(),
+            f.try_bandjoin(&f),
             Err(BandError::UnsupportedSampleKind {
-                op: "bandmean",
+                op: "bandjoin",
                 kind: SampleKind::F32
             })
         ));
+        assert_eq!(f.try_bandmean().unwrap().getpoint(0, 0), vec![1.5]);
+    }
+
+    /// A `bands`-band `FloatF32` raster from `f32` sample values.
+    fn floatn(w: u32, h: u32, bands: u16, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(core::num::NonZeroU16::new(bands).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a float raster, read back as `f32`.
+    fn f32s(r: &Raster) -> Vec<f32> {
+        r.data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_ne_bytes(*c))
+            .collect()
+    }
+
+    /**
+     * Tests that `bandmean` carries a float raster and answers the plain
+     * mean vips answers, rather than refusing it.
+     * The refusal was posture 1, a parity regression, the same shape
+     * issue #909 closed for the signed carriers one paragraph up.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips bandmean` on a
+     * two-band `float` raster whose bands are `[1.5, -0.25, 3.75]` and
+     * `[10.5, -2.75, 0.125]` answers **FLOAT** `[6, -1.5, 1.9375]`, and
+     * on the bands `[1, 2, 100]` / `[2, 3, 101]` it answers
+     * **`[1.5, 2.5, 100.5]`** where the same numbers cast to `uchar`
+     * answer `[2, 3, 101]`. So the float path does **not** round.
+     * The accumulator is the **sample's own width**, not `f64`: three
+     * bands holding `[16777216, 1, 1]` answer **5592405.5** on the same
+     * binary, which is `16777216 / 3` rounded to `f32`. An `f64`
+     * accumulator answers 5592406, because it keeps both of the ones the
+     * `f32` sum drops off the end of the mantissa.
+     * Works by asserting all three rows. The first alone passes under
+     * either rounding rule, because every one of its means is already
+     * exact, and the first two alone pass at either accumulator width.
+     * Input: the two- and three-band float rasters above -> Output: the
+     * measured means, at `FloatF32(1)`.
+     */
+    #[test]
+    fn bandmean_carries_a_float_raster_issue_945() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let two = floatn(3, 1, 2, &[1.5, 10.5, -0.25, -2.75, 3.75, 0.125]);
+        let m = two.try_bandmean().unwrap();
+        assert_eq!(m.format(), PixelFormat::FloatF32(n(1)));
+        assert_eq!(f32s(&m), vec![6.0, -1.5, 1.9375]);
+
+        // The row that separates a float mean from a rounded one. vips
+        // answers 1.5 / 2.5 / 100.5 here and 2 / 3 / 101 on the `uchar`
+        // twin, so a float path still carrying the integer rounding term
+        // answers the second row.
+        let halves = floatn(3, 1, 2, &[1.0, 2.0, 2.0, 3.0, 100.0, 101.0]);
+        assert_eq!(f32s(&halves.try_bandmean().unwrap()), vec![1.5, 2.5, 100.5]);
+
+        // The row that pins the accumulator width. `f32` drops both of the
+        // ones off the end of its mantissa and answers 16777216 / 3; `f64`
+        // keeps them and answers 5592406.
+        let wide = floatn(1, 1, 3, &[16_777_216.0, 1.0, 1.0]);
+        assert_eq!(f32s(&wide.try_bandmean().unwrap()), vec![5_592_405.5]);
+
+        // Control: the integer dialect still rounds half away from zero on
+        // exactly those numbers, so the float answer is a property of the
+        // carrier rather than a dropped rounding step.
+        let u = Raster::new(3, 1, PixelFormat::Multi8(n(2)), vec![1, 2, 2, 3, 100, 101]).unwrap();
+        assert_eq!(u.try_bandmean().unwrap().data(), &[2, 3, 101]);
     }
 
     /**
@@ -1754,8 +1908,11 @@ mod tests {
      * typed error rather than panicking out of a `Result`, the shape issue
      * #694 landed, and that the message names the kind it was given rather
      * than claiming the raster is float.
-     * Works by handing a float raster to three band ops, with the uint
-     * carrier as the positive control that the guard is about the kind.
+     * Works by handing a float raster to the two band ops that still
+     * refuse one, with the uint carrier as the positive control that the
+     * guard is about the kind and `bandmean` as the control that the
+     * refusal is per op: it carries a float raster since issue #945, so a
+     * guard written module-wide reddens here instead.
      * Input: float -> Err(UnsupportedSampleKind { kind: F32 }); uint -> Ok.
      */
     #[test]
@@ -1768,7 +1925,7 @@ mod tests {
             1.5f32.to_ne_bytes().to_vec(),
         )
         .unwrap();
-        for got in [f.try_bandmean(), f.try_bandand(), f.try_bandjoin(&f)] {
+        for got in [f.try_bandand(), f.try_bandjoin(&f)] {
             assert!(
                 matches!(
                     got,
@@ -1781,9 +1938,11 @@ mod tests {
             );
         }
         assert_eq!(
-            f.try_bandmean().unwrap_err().to_string(),
-            "bandmean does not support F32 samples yet"
+            f.try_bandand().unwrap_err().to_string(),
+            "bandbool does not support F32 samples yet"
         );
+        // Control: `bandmean` left the refusing set in issue #945.
+        assert_eq!(f.try_bandmean().unwrap().getpoint(0, 0), vec![1.5]);
         // Positive control: the uint carrier passes all three.
         let u = uint32(1, 1, &[90_000]);
         assert!(u.try_bandmean().is_ok());
