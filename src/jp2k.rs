@@ -149,6 +149,24 @@
 //!   That third one libviprs does not read at all: `hayro-jpeg2000` refuses a
 //!   `colr` box it does not recognise. It is a refusal rather than a wrong
 //!   picture, and it is issue #771.
+//! * **The interpretation comes from the `colr` box, not the band count.**
+//!   `jp2kload` reads the box's `EnumCS` and maps openjpeg's five recognised
+//!   values onto a tag; anything else falls through to UNSPECIFIED, where it
+//!   guesses from the component count. This module does the same, and the
+//!   two rows that make it a rule rather than a coincidence are the ones where
+//!   the enum and the band count disagree: a **one**-component file tagged
+//!   CMYK is `cmyk`, and a **three**-component file tagged greyscale is `b-w`.
+//!   The element width picks between the flavours, so the same enum gives
+//!   `b-w` / `srgb` on an 8-bit file and `grey16` / `rgb16` on a 16-bit one.
+//!
+//!   One combination is outright broken in vips and is deliberately not
+//!   reproduced: a one-component file tagged sRGB, sYCC or e-YCC has its
+//!   header expanded to 3 bands by openjpeg while the tile decode still yields
+//!   1, so `vipsheader` reports `3 bands, srgb` and **any pixel read fails**.
+//!   This keeps the one real band and takes vips's tag, which is the half of
+//!   its answer that is not broken. The tag and the band count are independent
+//!   here, as [`Interpretation`] says
+//!   outright, so that costs nothing. Issue #767.
 //!
 //! # Divergences worth knowing about
 //!
@@ -173,13 +191,14 @@
 //!   agree on where the image is and disagree only on how much of it there is.
 //!   Nothing `jp2ksave` writes reaches either, since it always starts at the
 //!   grid origin.
-//! * **The `colr` box's enumerated colour space does not decide the tag
-//!   here.** `jp2kload` reads `EnumCS` and not the band count, so a
-//!   one-component file tagged CMYK comes back `cmyk` and a three-component
-//!   one tagged greyscale comes back `b-w`. This module takes
-//!   `hayro-jpeg2000`'s colour-space answer, which agrees with vips on all 22
-//!   decodable fixtures and would disagree on those two synthetic re-taggings.
-//!   Filed as issue #767.
+//! * **A `colr` box this module cannot get past.** Three enumerated colour
+//!   spaces are still refused by the decoder where vips reads the file:
+//!   e-YCC (`EnumCS 24`, issue #848), anything openjpeg does not recognise
+//!   (issue #771), and CIELab (`EnumCS 14`), which also moves the pixels
+//!   rather than the label on the shapes that do decode (issue #849). All
+//!   three are `hayro-jpeg2000`'s colour-space resolution deciding more than
+//!   it should, so they are one upstream change and none of them is
+//!   reachable from here.
 
 use std::path::Path;
 
@@ -642,6 +661,13 @@ struct ContainerLayout {
     /// The payload of a `METH=2` `colr` box, which is an ICC profile, copied
     /// verbatim and unvalidated the way `jp2kload` copies it.
     icc: Option<Vec<u8>>,
+    /// The `EnumCS` of a `METH=1` `colr` box, which is what decides the
+    /// interpretation for vips and now for this module too (#767).
+    ///
+    /// `None` for a bare codestream, which has no `colr` box at all, and for a
+    /// `METH=2` box, which carries a profile instead. Both fall back to the
+    /// decoder's resolved colour space, which is where they were before.
+    enum_cs: Option<u32>,
 }
 
 /// One top-level or sub-box, as an offset range into the file.
@@ -756,12 +782,17 @@ impl ContainerLayout {
                 .map(|b| b.start)
                 .ok_or_else(|| container("no jp2c box, so the file carries no codestream"))?;
             let mut icc = None;
+            let mut enum_cs = None;
             for header in top.iter().filter(|b| &b.kind == b"jp2h") {
-                icc = walk_boxes(bytes, header.start, header.end)?
-                    .into_iter()
+                let boxes = walk_boxes(bytes, header.start, header.end)?;
+                let colr: Vec<&[u8]> = boxes
+                    .iter()
                     .filter(|b| &b.kind == b"colr")
-                    .find_map(|b| icc_payload(&bytes[b.start..b.end]));
-                if icc.is_some() {
+                    .map(|b| &bytes[b.start..b.end])
+                    .collect();
+                icc = colr.iter().copied().find_map(icc_payload);
+                enum_cs = colr.iter().copied().find_map(enumerated_colour_space);
+                if icc.is_some() || enum_cs.is_some() {
                     break;
                 }
             }
@@ -769,12 +800,14 @@ impl ContainerLayout {
                 codestream,
                 bare: false,
                 icc,
+                enum_cs,
             })
         } else if bytes.starts_with(CODESTREAM_SIGNATURE) {
             Ok(Self {
                 codestream: 0,
                 bare: true,
                 icc: None,
+                enum_cs: None,
             })
         } else {
             Err(container(
@@ -795,6 +828,23 @@ impl ContainerLayout {
 fn icc_payload(payload: &[u8]) -> Option<Vec<u8>> {
     match payload.first() {
         Some(2) if payload.len() > 3 => Some(payload[3..].to_vec()),
+        _ => None,
+    }
+}
+
+/// The `EnumCS` inside a `METH=1` `colr` box, or `None` for any other method.
+///
+/// The other half of [`icc_payload`], reading the same three-byte prelude the
+/// other way: `METH = 1` means the next four bytes are an enumerated colour
+/// space rather than a profile. A box too short to hold one is `None` rather
+/// than an error, the way a `METH=2` box too short to hold a profile is, since
+/// the decoder is the thing that decides whether the file is readable at all.
+#[cfg(feature = "jp2k")]
+fn enumerated_colour_space(payload: &[u8]) -> Option<u32> {
+    match payload.first() {
+        Some(1) if payload.len() >= 7 => Some(u32::from_be_bytes([
+            payload[3], payload[4], payload[5], payload[6],
+        ])),
         _ => None,
     }
 }
@@ -1197,7 +1247,18 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     }
 
     let mut raster = Raster::new(width, height, format, buffer).map_err(Jp2kError::Raster)?;
-    raster.meta.interpretation = Some(interpretation(image.color_space(), element_bytes));
+    // The `colr` box's enumerated colour space decides this where there is
+    // one and openjpeg recognises it, because that is what `jp2kload` reads
+    // and the component count is not (#767). Everything else, which is a bare
+    // codestream, a `METH=2` profile box, or an enum openjpeg does not know,
+    // falls back to the decoder's resolved colour space and the band-count
+    // guess inside it, which is what vips's UNSPECIFIED arm does too.
+    raster.meta.interpretation = Some(
+        layout
+            .enum_cs
+            .and_then(|enumcs| enumerated_interpretation(enumcs, element_bytes))
+            .unwrap_or_else(|| interpretation(image.color_space(), element_bytes)),
+    );
     // Where the image sits on the reference grid, as the negative offset
     // `jp2kload` records and `extract_area` stamps for the same meaning
     // (#766, #721). Zero for everything `jp2ksave` writes, since it always
@@ -1385,7 +1446,6 @@ fn interpretation(colour: &hayro_jpeg2000::ColorSpace, element_bytes: u64) -> In
 /// the measurement: the enum that gives `b-w` and `srgb` on an 8-bit file
 /// gives `grey16` and `rgb16` on a 16-bit one.
 #[cfg(feature = "jp2k")]
-#[allow(dead_code)] // wired into the decode by the fix commit
 fn enumerated_interpretation(enumcs: u32, element_bytes: u64) -> Option<Interpretation> {
     let wide = element_bytes > 1;
     Some(match enumcs {

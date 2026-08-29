@@ -2709,6 +2709,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A JPEG 2000's `colr` box decides its interpretation, not its band count**
+  (issue #767). `jp2kload` reads the box's enumerated colour space and maps
+  openjpeg's five recognised values onto a tag; `decode_jp2k` was taking
+  `hayro-jpeg2000`'s resolved colour space instead, which agrees on every
+  ordinary file and disagrees wherever the enum and the component count
+  contradict each other.
+
+  The two rows that make it a rule, measured on the pinned 8.18.6 by retagging
+  `oracle-captures/foreign-jp2k/fixtures/rgb_lossless.jp2`'s `colr` box in
+  place: a **one**-component file tagged CMYK is `cmyk`, and a
+  **three**-component file tagged greyscale is `b-w`. Both used to come back
+  `srgb` here. The element width picks between the flavours, so the same enum
+  gives `b-w` / `srgb` on an 8-bit file and `grey16` / `rgb16` on a 16-bit one.
+
+  Anything openjpeg does not recognise falls back to the band-count guess,
+  which is where every file was before, and that arm is measured rather than
+  assumed: `EnumCS 14` (CIELab) behaves exactly like the undefined `99` across
+  all three shapes of the sweep, and two independent unrecognised values
+  agreeing is what makes it a fallback rather than a special case.
+
+  One combination is broken in vips and is deliberately not reproduced. A
+  one-component file tagged sRGB, sYCC or e-YCC has its header expanded to 3
+  bands by openjpeg while the tile decode still yields 1, so `vipsheader`
+  reports `3 bands, srgb` and any pixel read fails with "decoded image does not
+  match container". libviprs keeps the one real band and takes vips's tag,
+  which is the half of its answer that is not broken; `Interpretation` is
+  advisory metadata here and the pipeline does not validate it against the band
+  count, exactly as in libvips.
+
+  Three enums are still refused by the decoder where vips reads the file, all
+  of them `hayro-jpeg2000` deciding more than it should and none of them
+  reachable from this crate: e-YCC (#848), CIELab (#849, which moves the pixels
+  as well) and anything unrecognised (#771). The sweep in the tests carries
+  them as refusal cells and **fails if one starts decoding**, so an upstream
+  fix announces itself.
+
 - **A JPEG 2000 whose image starts away from the grid origin now says so**
   (issue #766). `decode_jp2k` attached no `xoffset` / `yoffset` at all, so a
   codestream declaring `XOsiz = 5, YOsiz = 7` came back looking as though it sat
