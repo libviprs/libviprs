@@ -198,7 +198,15 @@ jobs:
       # With the flag gone the run aborted on the first unannotated filesystem
       # test instead. #712 and #739 fixed that: 134 tests across 28 files took
       # the annotation, #781 found 72 more that reach the filesystem through a
-      # test helper, and #756 took the last four. So
+      # test helper, and #756 took the last four.
+      #
+      # That was where this comment stopped, and it was one measurement short.
+      # Six more reached the filesystem through a library entry point that opens
+      # the `Path` it is handed, which the scanner reads as pure on purpose, so
+      # they were in neither the inventory nor the annotated set and any one of
+      # them would still have ended the run. #765 found them by running every
+      # test binary under a syscall interposer rather than by reading, and
+      # annotated them. So
       # every filesystem-touching test carries the annotation
       # now: `tests/miri_ignore_convention.rs` refuses one that does not, its
       # exception list is empty, and `tests/miri_fs_test_inventory.txt` records
