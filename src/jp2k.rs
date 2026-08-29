@@ -376,8 +376,8 @@ pub enum Jp2kError {
     ///
     /// The shape is the one the module docs describe: a bare or unspecified
     /// colour space, three components, and subsampling on components 1 and
-    /// 2. vips does answer for it, and the answer is
-    /// unusable. Measured on the committed `sub420.j2k` written signed
+    /// 2. vips does answer for it, and the answer is unusable. Measured on
+    /// the committed `sub420.j2k` written signed
     /// instead of unsigned, vips subtracts the YCC offset **inside the
     /// component's own signed carrier**, so `-112 - 128` wraps to `16`, and
     /// then clamps the transform's result to the *unsigned* range before
