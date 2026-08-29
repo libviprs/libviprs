@@ -77,6 +77,13 @@
 //! 12     b2 0c       the last four white, where the input ended 255 255
 //! ```
 //!
+//! **The reader is the correct half of that, checked rather than assumed.**
+//! The same 5-wide picture hand-packed the way the spec says, left-aligned as
+//! `d0`, reads back through vips as `0 0 255 0 255`, which is the grey input
+//! thresholded. So `ppmload` is right and it is `ppmsave` that disagrees with
+//! it, and this decoder matches the reader. Without that control the table
+//! above has two readings and only one of them is true.
+//!
 //! Only a width that is a multiple of eight survives that. So matching the
 //! oracle's bytes means writing files the oracle itself misreads, and writing
 //! correct bytes means diverging from it; neither is parity. That is the same
