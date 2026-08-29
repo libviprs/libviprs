@@ -809,6 +809,23 @@ pub struct DecodeLimits {
     /// Maximum total pixel count (`width * height`).
     pub max_pixels: u64,
     /// Maximum number of bytes the decoder may allocate at one time.
+    ///
+    /// **At one time**, not per buffer, and the difference is the whole of
+    /// issues #892 and #944. Several decoders hold more than one image-sized
+    /// buffer at once, and some of those belong to the crate doing the
+    /// decoding rather than to libviprs: `image-webp` keeps a canvas and a
+    /// per-frame plane, `hayro-jpeg2000` keeps `f32` component data and
+    /// per-tile coefficients, `rav1d` keeps the YCbCr frame, and the GIF
+    /// loader holds a roll, a canvas and a disposal snapshot together. Each
+    /// of those decoders prices the sum, so a caller sizing a cgroup or
+    /// container limit from this number is sizing it from the peak. Four
+    /// used to price one buffer of the several and were measured decoding at
+    /// up to 6.45x what they said they needed.
+    ///
+    /// The consequence is that these decoders refuse files they used to
+    /// accept, at a budget between the raster and the peak. That is the
+    /// correct trade: a ceiling that is sometimes generous still bounds the
+    /// process, and one that is sometimes short bounds nothing.
     pub max_alloc_bytes: u64,
     /// Maximum number of pages (frames, IFDs) a multi-page file may declare
     /// before it is refused, default `100_000`. A TIFF's IFD chain is a
@@ -1057,6 +1074,53 @@ impl DecodeLimits {
             });
         }
         Ok(needed_bytes)
+    }
+
+    /// The same ceiling, for a decoder that holds buffers of its own beside
+    /// the frame it prices.
+    ///
+    /// [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) is documented as a
+    /// ceiling on **peak** memory, so pricing only the raster libviprs fills
+    /// is not a ceiling at all once the decode keeps planes alongside it. #892
+    /// found that for WebP, which prices `size + working_set` by hand; #944
+    /// found the same shape in three more decoders and this is where the
+    /// hand-rolled version stops being copied. `working_set` is every other
+    /// byte live at the peak, so `raster + working_set` is what the refusal
+    /// reports and what a caller should size a container limit from.
+    ///
+    /// The **return** is the raster alone, because that is the buffer the
+    /// caller is about to allocate; the working set belongs to somebody else
+    /// and the caller has no `Vec` to size from it.
+    ///
+    /// `geometry` stays the frame's, which is deliberate and is WebP's
+    /// precedent: the reported width, height and band count are what the
+    /// price started from, and the number beside them is larger because the
+    /// decode is larger. A refusal naming a geometry whose product *is* the
+    /// price would have to invent one.
+    pub(crate) fn check_image_alloc_with_working_set(
+        self,
+        what: &'static str,
+        width: u32,
+        height: u32,
+        bands: u64,
+        sample_bytes: u64,
+        working_set: u64,
+    ) -> Result<u64, SourceError> {
+        let raster = crate::raster::decode_alloc_bytes(width, height, bands, sample_bytes);
+        let needed_bytes = raster.saturating_add(working_set);
+        if self.exceeds_alloc_budget(needed_bytes) {
+            return Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry: Some(DeclaredGeometry {
+                    width,
+                    height,
+                    bands: u32::try_from(bands).unwrap_or(u32::MAX),
+                }),
+                needed_bytes,
+                max_alloc_bytes: self.max_alloc_bytes,
+            });
+        }
+        Ok(raster)
     }
 }
 
