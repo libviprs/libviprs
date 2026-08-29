@@ -232,7 +232,7 @@ impl Raster {
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
     /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
-    /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`,
+    /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
     /// `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
@@ -254,6 +254,16 @@ impl Raster {
     /// not a shortcut: `jp2ksave` hard-codes `OPJ_CODEC_JP2` and, measured on
     /// 8.18.6, writes byte-identical files under all five suffixes it
     /// registers.
+    ///
+    /// `"uhdr"` is Ultra HDR (gain-map JPEG, libvips `uhdrsave`) at that
+    /// saver's default quality of 75, and it is the **only** route to the
+    /// writer that takes a format name: `uhdrsave` registers no file suffix
+    /// at all, so [`Raster::save`] has no row for it. Unlike the rows above
+    /// it has an input contract, a 3-band `f32` raster holding linear-light
+    /// scRGB, and a raster that does not meet it is refused with
+    /// [`EncodeError::InvalidParameter`] naming the raster rather than
+    /// [`EncodeError::Unsupported`] naming the format: this build can write
+    /// Ultra HDR, and what is wrong is the input.
     ///
     /// # Errors
     ///
@@ -295,6 +305,23 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "jp2k" | "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => {
             raster.encode_jp2k(crate::jp2k::SaveOptions::default())
         }
+        // `uhdrsave`'s nickname, and the only name it has: measured on 8.18.6,
+        // `vips -l` gives `VipsForeignSaveUhdrFile (uhdrsave), save image in
+        // UltraHDR format, nocache (), priority=0`, an **empty** suffix list,
+        // and `vips copy base.v out.uhdr` is refused as an unknown format. So
+        // one spelling here and no row at all in the extension table, which is
+        // the reverse of the JPEG 2000 arm above.
+        //
+        // Not gated because there is nothing to gate: #508 wrote the container
+        // out of the JPEG codec the crate already required, so Ultra HDR costs
+        // no feature and no dependency.
+        //
+        // The default quality is `uhdrsave`'s own 75, through
+        // `uhdr::SaveOptions::default`, the same way the rows above take their
+        // codec's defaults. A caller who wants another quality or another
+        // gain-map scale factor calls `Raster::encode_uhdr` or
+        // `Raster::encode_uhdr_gainmap_scale`, which is where those knobs live.
+        "uhdr" => raster.encode_uhdr(crate::uhdr::SaveOptions::default().quality),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.
