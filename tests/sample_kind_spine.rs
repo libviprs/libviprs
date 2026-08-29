@@ -44,12 +44,7 @@
 ///
 /// Shrink this, never grow it. An entry whose site is gone fails the test, so
 /// clearing a site means deleting its line here in the same PR.
-const REMAINING: &[(&str, &str)] = &[
-    // The JPEG 2000 lane. Arrived after #748's census was taken, which is the
-    // argument for landing this gate rather than finishing the sweep and
-    // trusting review.
-    ("src/jp2k.rs", "jp2k"),
-];
+const REMAINING: &[(&str, &str)] = &[];
 
 /// Strip `//` line comments and `/* */` block comments, replacing them with
 /// spaces so byte offsets and line numbers survive.
