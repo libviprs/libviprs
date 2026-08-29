@@ -67,6 +67,21 @@
 //! one state where nothing checks that sentence. So zero demands a different
 //! sentence, and the transition is one red and one rewrite.
 //!
+//! # Why the module list is checked twice
+//!
+//! Since #675 the Miri job runs a named slice of the `--lib` target rather than
+//! the suite, because the suite does not finish. That means the command carries
+//! a long filter list, and a filter list on a shell line is not something
+//! anybody reads. So the workflow also states the modules in prose, and
+//! [`merge_gate_lists_exactly_the_modules_its_miri_command_runs`] holds the two
+//! against each other in both directions and against the `Makefile`.
+//!
+//! A gate whose prose describes a tree it does not check is worse than no gate,
+//! and this file already had one instance of exactly that: `merge-gate.yml`
+//! quoted "48 annotations across seven modules" for months after it stopped
+//! being true. The fix there was to stop quoting a number; the fix here is to
+//! check the claim rather than trust it.
+//!
 //! # Why it runs under Miri
 //!
 //! Every file this reads is pulled in with `include_str!` at compile time rather
@@ -76,6 +91,7 @@
 //! the three files forces a rebuild of this test.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// The hosted job.
 const WORKFLOW: &str = include_str!("../.github/workflows/merge-gate.yml");
@@ -596,5 +612,136 @@ fn merge_gate_states_the_backlog_as_a_bound_it_still_meets() {
         WORKFLOW.contains("tests/miri_fs_test_inventory.txt"),
         "`merge-gate.yml` no longer points at `tests/miri_fs_test_inventory.txt`. The exact \
          count deliberately lives there rather than here, so the workflow has to name it."
+    );
+}
+
+/// The sentence in `merge-gate.yml` that introduces the module list, and the
+/// anchor [`workflow_listed_modules`] reads it from.
+///
+/// The command is one long line, and nobody reads a filter list off a shell
+/// invocation. So the workflow states the list in prose as well, which means
+/// two places can disagree, which is what
+/// [`merge_gate_lists_exactly_the_modules_its_miri_command_runs`] exists for.
+const MODULE_LIST_INTRO: &str = "It runs these modules and no others:";
+
+/// The modules `merge-gate.yml` says the Miri job runs, read out of the comment
+/// block under [`MODULE_LIST_INTRO`].
+///
+/// The block is comment lines holding nothing but lowercase module names, and
+/// it ends at the first comment line that is empty or holds anything else. One
+/// empty comment line is allowed before the names start, because that is how
+/// the rest of this file spaces its paragraphs.
+fn workflow_listed_modules() -> BTreeSet<String> {
+    let lines: Vec<&str> = WORKFLOW.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_start().trim_start_matches('#').trim() == MODULE_LIST_INTRO)
+        .unwrap_or_else(|| {
+            panic!(
+                "`merge-gate.yml` no longer says `{MODULE_LIST_INTRO}`, so nothing states \
+                 which modules the Miri job runs. The command is one line of filters and \
+                 the prose is what makes it readable; keep both."
+            )
+        });
+
+    let mut modules = BTreeSet::new();
+    for line in &lines[start + 1..] {
+        let Some(body) = line.trim_start().strip_prefix('#') else {
+            break;
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            if modules.is_empty() {
+                continue;
+            }
+            break;
+        }
+        if !body
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ' ')
+        {
+            break;
+        }
+        modules.extend(body.split_whitespace().map(str::to_string));
+    }
+    modules
+}
+
+/// The module filters an invocation actually passes to libtest, with the `::`
+/// suffix removed.
+///
+/// Anything after `--` that is not a `module::` filter fails here rather than
+/// being ignored, because a stray filter is exactly the thing that would make
+/// the job quietly run less than the prose above it claims.
+fn commanded_modules(where_: &str, invocation: &Invocation) -> BTreeSet<String> {
+    let Some((_, filters)) = invocation.command.split_once(" -- ") else {
+        panic!(
+            "{where_}'s Miri command passes no test filters at all, so it runs the whole \
+             `--lib` target. That does not finish: see the measurements in the `miri` job's \
+             own comments. Command was `{}`.",
+            invocation.command
+        )
+    };
+
+    let mut modules = BTreeSet::new();
+    for token in filters.split_whitespace() {
+        let module = token.strip_suffix("::").unwrap_or_else(|| {
+            panic!(
+                "{where_}'s Miri command passes `{token}` after `--`, which is not a \
+                 `module::` filter. Every argument there has to be one, so the list in the \
+                 workflow's prose can be checked against the list the command runs."
+            )
+        });
+        assert!(
+            modules.insert(module.to_string()),
+            "{where_}'s Miri command names `{module}::` twice"
+        );
+    }
+    modules
+}
+
+#[test]
+fn the_miri_invocations_run_the_lib_target_only() {
+    for (where_, invocation) in [
+        ("Makefile", makefile_invocation()),
+        ("merge-gate.yml", workflow_invocation()),
+    ] {
+        assert!(
+            invocation.command.contains(" --lib "),
+            "{where_} runs Miri over every target rather than `--lib`. The fifty-odd \
+             integration targets are source-scanning gates and oracle pins: they read `src/` \
+             as text and compare sets, so the interpreter has almost nothing to interpret in \
+             them, and they cost a process start each. Dropping them is deliberate and the \
+             `miri` job's comments say so. Command was `{}`.",
+            invocation.command
+        );
+    }
+}
+
+#[test]
+fn merge_gate_lists_exactly_the_modules_its_miri_command_runs() {
+    let workflow = workflow_invocation();
+    let commanded = commanded_modules("merge-gate.yml", &workflow);
+    assert!(
+        !commanded.is_empty(),
+        "the Miri command runs no modules at all. This assertion is the positive control \
+         for the set comparison below, which a parser that found nothing would pass."
+    );
+
+    let listed = workflow_listed_modules();
+    assert_eq!(
+        listed, commanded,
+        "`merge-gate.yml` lists one set of modules under `{MODULE_LIST_INTRO}` and runs \
+         another. The prose is the only readable statement of what the Miri job covers, so \
+         a gate whose prose describes a tree it does not check is worse than no gate. Left \
+         is the prose, right is the command."
+    );
+
+    let makefile = commanded_modules("Makefile", &makefile_invocation());
+    assert_eq!(
+        makefile, commanded,
+        "`make miri` and the `miri` job run different module sets. The command comparison \
+         in `the_makefile_and_merge_gate_run_miri_the_same_way` catches this too; this says \
+         it in terms of the modules rather than as a diff of two long strings."
     );
 }
