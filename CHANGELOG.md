@@ -740,6 +740,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature fails there until somebody writes down which jobs it belongs in, and
   why.
 
+- **Animated GIF save** (issue #573). `Raster::encode_gif` splits the raster by
+  its page height and writes one GIF frame per page, taking the per-frame
+  delays out of the `delay` field and the NETSCAPE loop block out of `loop`,
+  which is where vips reads them too: `gifsave` has no argument for either and
+  `cgifsave.c:753` reads them back off the image.
+
+  A still built from scratch saves to the same bytes it always did, because a
+  raster with no page split is one page and a raster with no `loop` field
+  loops forever, which is the block cgif already wrote. A still that was
+  *loaded* from a GIF is a different matter, and worth saying out loud: the
+  loader attaches `loop`, so re-encoding one now honours it, and a source file
+  carrying no NETSCAPE block round-trips to a file carrying none, where before
+  it gained a block holding zero. That is the better match for vips, which
+  writes no block for `loop = 1`, and
+  `a_reloaded_still_carries_its_loop_count_back_out` pins all three cases.
+
+  The frame geometry is the page, not the roll, so the GIF axis limit applies
+  per frame: a 1x80000 roll of two 40000-row pages saves, and a 1x70000 still
+  does not.
+
+  **Four measured divergences from vips, each with a test carrying the
+  measurement.** A `delay` array whose length is not the page count is refused
+  where vips pads with zeros or truncates (a two-entry array on a four-page
+  roll wrote `2 3 0 0`, a six-entry one wrote `2 3 4 5`). A negative delay or
+  `loop` is refused where vips casts it unsigned, turning -10 ms into 655
+  seconds and `loop = -1` into 65536 plays. A delay past what the wire holds
+  saturates where vips wraps, turning 655360 ms into no delay at all and
+  700000 ms into 44.64 seconds. And a stored `page-height` that does not
+  divide the raster is refused at `try_set_page_height` rather than silently
+  collapsing at the save, which is what `vips gifsave --page-height 5` on a
+  12-row image does.
+
+  A field of the *wrong type* is ignored rather than refused, matching the
+  `page-height` and `n-pages` readers: an untrusted `.v` can leave anything
+  under any name, so a wrong type means "this is not the field I read", where
+  a negative integer means "this is the field and its value is impossible".
+
+  Disposal follows cgif, measured over five files: restore-to-background on
+  every frame but the last when the animation carries transparency, keep
+  otherwise. Under "keep" a transparent pixel on page 2 would show page 1
+  through it, because every frame written here covers the whole screen.
+
+  **`Raster` drops `delay` wherever it drops `page-height`.** The array holds
+  one entry per page, so it describes the page split rather than the image,
+  and an op that changes the shape hands on an array that no longer indexes
+  anything. `roll.extract_page(0).encode_gif(..)` found it: the extracted page
+  arrived carrying the roll's four delays and the save refused it. Dropping is
+  the same call the page split already gets, and for the same reason; keeping
+  it would have been worse than refusing, since the first delay would then be
+  written onto a page that is not the first. `merge_fields_from` refuses to
+  import one for the matching reason, so joining a still to an animation
+  cannot give the still that animation's timings.
+
+- **Animated GIF load** (issue #572). `decode_gif_with` takes `gif::LoadOptions`
+  carrying vips's `page` and `n`, composites the frames it selects and stacks
+  them into one raster whose `page-height` is the logical screen height, which
+  is the page roll `src/frames.rs` landed for. `decode_gif` is that with the
+  vips defaults, so a still load is unchanged down to the bytes.
+
+  **Delays come back in milliseconds**, which is the whole point of the issue.
+  The graphic control extension counts centiseconds and vips's `delay` counts
+  milliseconds, so a decoder that passes the number through is a silent factor
+  of ten that every other assertion still agrees with. `FrameDelay` carries the
+  unit in the type across that boundary, and `4 6 8 10` on the wire has to come
+  back `40 60 80 100`.
+
+  **The delay array covers the pages the raster holds**, one entry per page,
+  and that diverges from vips deliberately. vips reports the whole file's array
+  whatever window was loaded: `anim4.gif[page=2,n=2]` loads frames 2 and 3 and
+  still says `delay: 40 60 80 100`, so re-saving it writes 40 and 60
+  centiseconds onto frames whose real delays are 80 and 100. Both halves of
+  that were measured on the pinned 8.18.6 binary. Making `delay[i]` loaded page
+  `i`'s delay is what makes the array usable on the raster carrying it, and it
+  is the split `n-pages` already has: `n-pages` describes the file,
+  `pages_loaded` describes the raster.
+
+  Disposal and blending are libnsgif's, each rule measured by building the
+  fixture, running it through vips and pinning what came back. The one that
+  needs saying out loud is restore-to-background, which has two arms a single
+  fixture cannot see: the clear is transparent when the disposed frame declares
+  a transparent index and the background colour when it does not, and an index
+  past the end of the colour table is black. Reserved disposal codes 5, 6 and 7
+  keep the canvas, matching vips; code 4 is a tracked divergence (issue #827),
+  because the `gif` crate maps every code it does not know onto
+  `DisposalMethod::Any` and it arrives here indistinguishable from 0.
+
+  A window the file cannot serve is `GifError::BadPageNumber` rather than a
+  clamp, matching vips, which fails `[page=4]`, `[n=99]`, `[n=0]` and
+  `[page=3,n=3]` on a four-frame file with `bad page number`.
+
+  **The frame walk is bounded now, where the still loader's was not.** A GIF's
+  frame list has no count in its header, so the only way to know how long it
+  is, is to walk it, which is the exposure `DecodeLimits::max_pages` exists
+  for and which `decode_tiff_page` already honours for the IFD chain. GIF was
+  the one multi-page loader that did not consult it, and now does. The
+  per-frame index buffer is priced too: a frame may declare a rectangle far
+  larger than the logical screen (libnsgif clips such a frame rather than
+  refusing the file, and libviprs matches that), so a forty-byte file
+  declaring a 65535x65535 frame on a 1x1 screen used to allocate 4 GiB
+  through a budget that had only seen the 3-byte screen.
+
 - **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
   `decode_analyze_file` takes either half of the pair or the bare stem and
   resolves the other, `analyze::decode_analyze` takes the two buffers, and a
@@ -1187,6 +1288,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   width and are tracked separately.
 
   `SampleKind` lives at `libviprs::pixel::SampleKind`.
+
+- `SampleKind` names the four sample kinds no `PixelFormat` carries yet:
+  `I8`, `I16`, `I32` and `U32` (issue #798, towards #516 and #517). Two new
+  accessors come with them, `is_signed()` and `range()`, and `max_value()` is
+  now derived from `range()` so the two cannot drift.
+
+  The point of naming them before the carriers exist is that the answers are
+  the part that has to be *measured*, and measuring costs nothing now while
+  the carriers cost a crate-wide refactor. `promote()` is the case in point.
+  It is `vips__formatalike`, swept on vips 8.18.6 with
+  `vips boolean <a> <b> out and`, whose format table maps every integer format
+  to itself so the output format is the formatalike result rather than a
+  promotion of it. Four of the 36 integer pairs are ones "the wider kind wins"
+  gets wrong: `(U8, I8)` is two one-byte kinds promoting to a **two**-byte one,
+  `(I8, U16)` and `(U16, I16)` promote to **four** bytes, and `(U32, I8)` takes
+  its sign from the one-byte operand.
+
+  `PixelFormat::with_kind()` now returns `None` for a kind no format carries,
+  rather than falling through to `with_channels(channels, kind.bytes())`, which
+  would answer `Rgb16` for three bands of `I16` and `FloatF32(3)` for three
+  bands of `U32`. That silent retag is exactly what `with_kind()` exists to
+  prevent, so it refuses instead. `with_kind()` therefore has two reasons to
+  answer `None` and a caller that needs to tell them apart has to look at the
+  kind.
+
+  `src/arithmetic.rs` and `src/histogram.rs` handle the new kinds for real
+  rather than leaving a hole. Two behaviours are worth knowing. The rounding,
+  saturating write in `arithmetic` takes its floor from `range()` instead of a
+  literal `0.0`, since zero is the right floor for only three of the six
+  integer kinds; nothing moves on the carriers that exist. And `histogram`'s
+  bin-index read *folds* rather than widens, matching the `VipsStatisticClass`
+  input cast, measured: a `char` image of `[-128, -1, 0, 127]` histograms to
+  `bin 0 = 3` and `bin 127 = 1`, and a `uint` image whose largest sample is
+  70000 gives a 65536-wide histogram.
+
+  No `PixelFormat` produces any of the four, so nothing in the crate's
+  behaviour moves. What moves is that the decisions are made, measured and
+  pinned, so the carrier work in #516 and #517 is the `PixelFormat` variant and
+  the 22 modules of #748, and not this as well.
 
 - JPEG XL load and lossless save, behind a new non-default **`jxl`** feature
   (issues #500, #619, #620, #622). Build with `--features jxl` and `decode_jxl`
@@ -1809,6 +1949,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- The crate has one fallible-plane helper instead of three private copies of
+  it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
+  `cfg(test)` probe over all of them that a check addresses **by site label**
+  rather than by position along a path (issue #696).
+
+  `arithmetic.rs`, `convolution.rs` and `colour.rs` had each grown their own
+  version of "reserve `len` elements fallibly and report
+  `RasterError::AllocationFailed`", with three signatures and three separate
+  test ceilings. `convolution.rs`'s had no ceiling at all when it was written,
+  so that module's fallible paths could not be driven the way `colour.rs`'s
+  were; `colour.rs`'s refused the *Nth* over-ceiling request on the thread, so a
+  dozen checks that read as naming a buffer were really naming a position, told
+  apart only by the byte sizes on the path happening to be unique. Three of the
+  colour fixtures carry an extra band for no other reason, one pair of buffers
+  could not be separated at all, and a check on either side of the boundary
+  could only ever see the sites inside its own module.
+
+  What lands here: `convolution.rs` and `colour.rs` on the shared helper, with
+  `raster::alloc_op_output` and `Raster::try_f32_samples` reserving through it
+  too, so an op output and a sample widening are on the same funnel as the
+  intermediates. Every site now carries a label like
+  `colour.import.lab_staging`, and `with_plane_cap_at` starves that one buffer
+  and nothing else. Two checks that could not be written before are: the
+  export fallback's PCS plane and its device buffer are the same 768 bytes on
+  an RGB profile, and under the ordinal the first of them could be reverted to
+  an infallible `Vec::with_capacity` with the suite green, because the other
+  took the refusal and reported the same number.
+
+  The ceiling also stopped answering before the reservation. It used to return
+  early, which left `try_reserve_exact` and an infallible `reserve_exact`
+  indistinguishable to every check that drove it, and is how fourteen of #689's
+  guards came to pass with the fallibility they guarded reverted; it now
+  poisons the request instead, so the same revert turns those checks red.
+
+  `raster.rs` gains a cross-module funnel check that pins, per entry point and
+  per module, exactly how many planes a path reserves. `try_sharpen` is the row
+  it exists for: one call crosses all three modules, and its six reservations
+  are the same six image-sized allocations
+  `tests/convolution_image_sized_allocations.rs` charges to it from the
+  allocator, so between the two nothing image-sized on that path is outside the
+  fallible helper.
+
+  One thing the mutation pass turned up while the funnel was being written, and
+  it is fixed here rather than filed: `try_plane_filled` fills to a length
+  computed from the geometry and its doc has said since it was
+  `alloc_colour_plane_filled` that this is a contract and not `capacity()`,
+  because `Vec::try_reserve_exact` may hand back more room than asked for. On
+  this allocator at these sizes it never does, so `out.resize(out.capacity(),
+  fill)` passed all eighty-one allocation checks in the crate. The probe now has
+  an over-reserve knob that makes the allocator's licence happen on purpose, and
+  the substitution goes red.
+
+  No public API moves and no behaviour changes: everything here is
+  `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
+  ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
+  outstanding; that file is held by another lane, so #696 stays open on it.
 
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
   stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
@@ -2486,6 +2683,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- The morphology walkers dispatch on `SampleKind` instead of on the byte width
+  (issue #831, part of #748 and #607 step (b)). `sample_u32` and its write side
+  stepped **two bytes per sample for every width that is not one**, which is the
+  right stride for `u16` and half the right stride for any four-byte kind, so a
+  32-bit carrier would have walked the wrong pixels rather than merely read the
+  wrong type.
+
+  The half-stride walk was not reachable today and would not have been reachable
+  under a `U32` carrier either: `try_rank`, `try_countlines` and
+  `try_label_regions` all refuse `bytes_per_channel() == 4` first. The kinds a
+  width test cannot see are the signed ones, and those pass every one of those
+  guards: a one-byte signed raster would have been read as unsigned, and in the
+  rank window every negative sample sorts above every positive one. `morph`'s
+  own 8-bit guard had the same shape one width down. All four are keyed on the
+  kind now, through one `unsigned_8_or_16` predicate that is total over the
+  enum, and the two sample helpers match the kind with no wildcard arm.
+
+  Nothing moves for the three kinds a `PixelFormat` carries today. The float
+  refusal for `rank`, `countlines` and `label_regions` had no test before this,
+  which is why breaking the guard stayed green; it has one now.
+
+- `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
+  and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
+  `vips hist_find` of a `ushort` `[4096, 4096, 9]` gives width **4097** where
+  libviprs gave 65536: 65536 is the ceiling of the rule, not the rule. `uchar`
+  really is a fixed 256 even when the data maxes out at 3, and that half is
+  unchanged.
+
+  It follows the band selection too, which is the case a whole-image test
+  cannot separate: on a 16-bit image whose band 0 maxes at 10 and band 1 at
+  5000, `hist_find` is 5001 wide over both bands, `hist_find_band(0)` is 11 and
+  `hist_find_band(1)` is 5001. `hist_find_indexed` is sized the same way from
+  its index image.
+
+  `hist_equal` fuses `maplut(hist_norm(hist_cum(hist_find)))` into one pass and
+  was taking its table width from the depth, so it stopped being that
+  composition the moment `hist_find` moved. The visible consequence is at the
+  constant image: measured, a constant `uchar` band equalises to `255` and a
+  constant `ushort` band equalises to **itself**, because a table one value wide
+  normalises that value's single cumulative entry back to it. The doc said "a
+  constant band maps to the depth maximum" without the qualifier.
+
+  `bins_for` stays as it was, and the two functions now answer different
+  questions on purpose: `hist_find_ndim` uses it as the value **range** it
+  scales samples by, and that range is the depth's rather than the data's,
+  measured (a `ushort` `[0, 5, 10]` and a `uchar` `[0, 5, 10]` both put all
+  three samples in bin 0 at 10 bins).
+
+  **Migration.** A caller reading `hist_find`'s width, or indexing bins beyond
+  its own data's maximum, gets a narrower image for 16-bit input. `maplut`
+  already clips an out-of-range index to the last LUT entry, as libvips does,
+  so the equalisation chain absorbs the narrowing on its own.
+
+- `hist_plot` plots one row too many for every histogram that is not 8-bit
+  (issue #802). Measured on vips 8.18.6, `vips hist_plot` of a `ushort`
+  `[2, 0, 3]` gives a **3x3** image where libviprs gave 3x4: the height is the
+  largest count, floored at one, not `max + 1`. The 8-bit fixed height of 256
+  was right and is unchanged.
+
+  The doc said the old number matched libvips, and nothing checked that.
+  `hist_plot_bar_geometry` pinned libviprs's own answer instead, so the claim
+  and the test agreed with each other and with the code, and with nothing else.
+  Both now compare against a measured sweep: `[0, 1]`, `[1, 1]` and `[0, 0, 0]`
+  plot 1 row, `[3, 9]` plots 9 (not 6, so the floor is a literal zero rather
+  than the smallest count), and `[65535, 0]` plots 65535.
+
+  **Migration.** A caller reading the plot's height, or indexing rows from the
+  top, gets one row fewer for a 16-bit histogram. Bars still grow from the
+  bottom.
+
+- **`uhdr::uhdr_to_scrgb` scales the gain map through `crate::resample`**
+  instead of a private linear interpolator (issue #760). `uhdr2scRGB` scales
+  the gain map with `vips_resize(..., VIPS_KERNEL_LINEAR)`, and `vips_resize`
+  is not a bilinear point sample: below 1.0 it runs `reduce`, which averages
+  every input sample an output covers. #508's copy interpolated between two
+  neighbours at any scale, which is right at scale 1 and scale 2 (the only
+  ones the oracle capture pins, and both still bit-exact) and wrong anywhere
+  else. Measured against `vips resize` 8.18.6 on a 12x9 gain map scaled onto a
+  4x3 base: the copy missed **12 of 12** levels, the worst by 87 of 255; the
+  shared resampler misses none.
+
+  A gain map larger than its base is reachable, because `from_container` reads
+  whatever a file holds even though nothing writes one.
+
+  New `UhdrError::Resample` for a ratio the resize refuses, and
+  `UhdrError::BadInput` when the resize lands on a size other than the base's,
+  which would otherwise have been a short read.
+
+  This also corrects the attribution in #508's own measurement: the residual
+  between a container expanded here and by `vips uhdr2scRGB` is the two JPEG
+  decoders, not the resampler. Hand this module the halves vips decoded and
+  the two agree to `f32` ulp. See the `crate::uhdr` module docs for the table.
+
+- **Every operation in `crate::resample` carries the input's metadata onto its
+  output** (issue #789). `resize`, `shrink`, `shrinkh`, `shrinkv`, `reduce`,
+  `reduceh`, `reducev`, `affine`, `similarity`, `rotate`, `mapim` and
+  `thumbnail_image` all built their result with a bare `Raster::new` and
+  carried nothing: no interpretation, no resolution, no orientation, no ICC
+  profile and no field a caller attached. vips carries all of them, measured on
+  8.18.6 across two image shapes and fifteen ops.
+
+  The resolution is carried **verbatim** rather than rescaled with the factor,
+  which is what vips does and what #690 already measured for `zoom` and
+  `subsample`.
+
+  It is not only tags. #664 made the premultiply bracket read the
+  interpretation on a float carrier, because scRGB's alpha maximum is 1.0 where
+  sRGB's is 255, so while the tag was being dropped `resize(0.5).resize(0.5)`
+  read a different alpha ceiling on the second call from the first. An 8x8
+  `RgbaF32` chequerboard resized to half, twice, differed in 33 of 256 output
+  bytes on the tag alone, with both outputs coming back untagged.
+
+  `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
+  restamps they carried to work around this, which also removes two
+  image-sized clones from the linear and ICC thumbnail pipelines.
 
 - `EncodeError::Unsupported`'s own documentation no longer names four formats
   this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
