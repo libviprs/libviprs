@@ -97,7 +97,7 @@
 //!   surface; the ported tests never pass another value.
 
 use crate::imageio::MetadataValue;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::{Raster, RasterError};
 use std::sync::OnceLock;
 use thiserror::Error;
@@ -153,6 +153,15 @@ pub enum MosaicError {
     /// The `mosaic-join-tree` metadata failed to deserialize.
     #[error("corrupt mosaic metadata")]
     CorruptMosaicMetadata,
+    /// The images carry a sample kind the feathered blend has no
+    /// implementation for.
+    ///
+    /// Unreachable while [`PixelFormat`] carries only `U8`, `U16` and
+    /// `F32`: `merge` covers all three. It is here so that the carriers of
+    /// issues #516 and #517 arrive as a typed refusal instead of as an
+    /// `f32` read of four bytes that are not an `f32` (issue #607).
+    #[error("{op} does not support {kind:?} samples yet")]
+    UnsupportedSampleKind { op: &'static str, kind: SampleKind },
     /// Constructing a result raster failed (allocation budget, size
     /// overflow).
     #[error(transparent)]
@@ -680,10 +689,19 @@ fn merge_impl(
             }
         }
         let mut out = Raster::zeroed(st.oarea.width as u32, st.oarea.height as u32, ref_.format())?;
-        match ref_.format().bytes_per_channel() {
-            1 => render_merge::<u8>(&mut out, ref_, sec, &st, direction, mwidth),
-            2 => render_merge::<u16>(&mut out, ref_, sec, &st, direction, mwidth),
-            _ => render_merge::<f32>(&mut out, ref_, sec, &st, direction, mwidth),
+        // On the kind and not the width: the `_` arm this replaces
+        // monomorphised `render_merge::<f32>` for every width that was not 1
+        // or 2, so a 32-bit integer carrier would have been blended as float
+        // (issue #607). `BlendSample` is implemented for the three kinds a
+        // PixelFormat carries; the rest refuse rather than misread.
+        let kind = ref_.format().kind();
+        match kind {
+            SampleKind::U8 => render_merge::<u8>(&mut out, ref_, sec, &st, direction, mwidth),
+            SampleKind::U16 => render_merge::<u16>(&mut out, ref_, sec, &st, direction, mwidth),
+            SampleKind::F32 => render_merge::<f32>(&mut out, ref_, sec, &st, direction, mwidth),
+            SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 => {
+                return Err(MosaicError::UnsupportedSampleKind { op: "merge", kind });
+            }
         }
         out
     };
@@ -729,7 +747,7 @@ impl Drop for JoinTree {
                 Raster::new(
                     1,
                     1,
-                    PixelFormat::with_channels(1, 1).expect("1x1 gray"),
+                    PixelFormat::with_kind(1, SampleKind::U8).expect("1x1 gray"),
                     vec![0],
                 )
                 .expect("1x1 leaf raster"),
@@ -769,7 +787,7 @@ impl JoinTree {
                 out.extend_from_slice(&r.width().to_le_bytes());
                 out.extend_from_slice(&r.height().to_le_bytes());
                 out.extend_from_slice(&(r.format().channels() as u16).to_le_bytes());
-                out.push(r.format().bytes_per_channel() as u8);
+                out.push(kind_code(r.format().kind()));
                 out.extend_from_slice(r.data());
             }
             JoinTree::Join {
@@ -855,8 +873,8 @@ impl JoinTree {
                     let height = take_u32(cursor)?;
                     let ch = take(cursor, 2)?;
                     let channels = u16::from_le_bytes([ch[0], ch[1]]) as usize;
-                    let bpc = take(cursor, 1)?[0] as usize;
-                    let format = PixelFormat::with_channels(channels, bpc).ok_or_else(corrupt)?;
+                    let kind = kind_from_code(take(cursor, 1)?[0]).ok_or_else(corrupt)?;
+                    let format = PixelFormat::with_kind(channels, kind).ok_or_else(corrupt)?;
                     let len = (width as usize)
                         .checked_mul(height as usize)
                         .and_then(|p| p.checked_mul(format.bytes_per_pixel()))
@@ -951,22 +969,10 @@ fn scale_band0(src: &Raster, area: Rect) -> Result<GrayU8, MosaicError> {
         area.height as u32,
     )?;
     let bands = ex.format().channels();
-    let bpc = ex.format().bytes_per_channel();
+    let kind = ex.format().kind();
     let data = ex.data();
     let n = (area.width * area.height) as usize;
-    let sample = |i: usize| -> f64 {
-        let elem = i * bands;
-        match bpc {
-            1 => data[elem] as f64,
-            2 => u16::from_ne_bytes([data[elem * 2], data[elem * 2 + 1]]) as f64,
-            _ => f32::from_ne_bytes([
-                data[elem * 4],
-                data[elem * 4 + 1],
-                data[elem * 4 + 2],
-                data[elem * 4 + 3],
-            ]) as f64,
-        }
-    };
+    let sample = |i: usize| -> f64 { read_sample_f64(data, kind, i * bands * kind.bytes()) };
     let mut mn = f64::INFINITY;
     let mut mx = f64::NEG_INFINITY;
     for i in 0..n {
@@ -1567,19 +1573,11 @@ fn collect_leaves(node: &JoinTree, ox: i64, oy: i64, out: &mut Vec<PlacedLeaf>) 
     }
 }
 
-/// Read the flat element `i` of a raster as `f64` (any depth).
+/// Read the flat element `i` of a raster as `f64`, whatever its sample
+/// kind, through [`read_sample_f64`].
 fn elem_f64(r: &Raster, i: usize) -> f64 {
-    let data = r.data();
-    match r.format().bytes_per_channel() {
-        1 => data[i] as f64,
-        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64,
-        _ => f32::from_ne_bytes([
-            data[i * 4],
-            data[i * 4 + 1],
-            data[i * 4 + 2],
-            data[i * 4 + 3],
-        ]) as f64,
-    }
+    let kind = r.format().kind();
+    read_sample_f64(r.data(), kind, i * kind.bytes())
 }
 
 /// One overlap row of the balance system: the masked-mean statistics of
@@ -1679,6 +1677,44 @@ fn find_factors(stats: &[OverlapStat], nim: usize, gamma: f64) -> Result<Vec<f64
     Ok(fac)
 }
 
+/// The `VMJ1` leaf header's sample-kind byte.
+///
+/// The three codes a leaf can carry today are the byte widths the header
+/// always held (`1`, `2`, `4`), so every blob written before this existed
+/// still reads back as the kind it was written with. The gap codes are
+/// reserved for the kinds issues #516 and #517 add, and they are numbered
+/// so the byte can never again be mistaken for a width.
+///
+/// The match is total over [`SampleKind`], so a kind added to that enum
+/// fails to compile here rather than being written as somebody else's code.
+fn kind_code(kind: SampleKind) -> u8 {
+    match kind {
+        SampleKind::U8 => 1,
+        SampleKind::U16 => 2,
+        SampleKind::F32 => 4,
+        SampleKind::I8 => 5,
+        SampleKind::I16 => 6,
+        SampleKind::U32 => 7,
+        SampleKind::I32 => 8,
+    }
+}
+
+/// The inverse of [`kind_code`]: an unknown byte is corrupt metadata, not a
+/// guess. `0` and `3` never had a meaning, and the width spelling this
+/// replaced would have read a `3` as `None` from the constructor anyway.
+fn kind_from_code(code: u8) -> Option<SampleKind> {
+    Some(match code {
+        1 => SampleKind::U8,
+        2 => SampleKind::U16,
+        4 => SampleKind::F32,
+        5 => SampleKind::I8,
+        6 => SampleKind::I16,
+        7 => SampleKind::U32,
+        8 => SampleKind::I32,
+        _ => return None,
+    })
+}
+
 /// `transformf`: scale a leaf by its factor into a float raster. 8/16-bit
 /// depths go through the gamma lookup table
 /// `v -> (v^(1/gamma) * fac)^gamma`; float depths scale linearly; a
@@ -1686,14 +1722,24 @@ fn find_factors(stats: &[OverlapStat], nim: usize, gamma: f64) -> Result<Vec<f64
 fn transform_leaf(leaf: &Raster, fac: f64, gamma: f64) -> Result<Raster, MosaicError> {
     let bands = leaf.format().channels();
     let out_format =
-        PixelFormat::with_channels(bands, 4).ok_or(MosaicError::CorruptMosaicMetadata)?;
+        PixelFormat::with_kind(bands, SampleKind::F32).ok_or(MosaicError::CorruptMosaicMetadata)?;
     let mut out = Raster::zeroed(leaf.width(), leaf.height(), out_format)?;
     let n = leaf.width() as usize * leaf.height() as usize * bands;
-    let bpc = leaf.format().bytes_per_channel();
-    let lut: Option<Vec<f32>> = if fac == 1.0 || bpc == 4 {
+    // The gamma table is indexed by the sample value, so it exists exactly
+    // where a value-indexed table is the right shape. `hist_bins` is that
+    // question already answered, and it answers `None` for the 32-bit kinds
+    // as well as for float, where a 2^32-entry table is not a table
+    // (issue #607).
+    let kind = leaf.format().kind();
+    let lut: Option<Vec<f32>> = if fac == 1.0 || kind.is_float() {
         None
     } else {
-        let entries = if bpc == 1 { 256 } else { 65536 };
+        let Some(entries) = kind.hist_bins() else {
+            return Err(MosaicError::UnsupportedSampleKind {
+                op: "mosaic balance",
+                kind,
+            });
+        };
         Some(
             (0..entries)
                 .map(|v| ((v as f64).powf(1.0 / gamma) * fac).powf(gamma) as f32)
@@ -2672,6 +2718,44 @@ mod tests {
                  PixelFormat::kind() and PixelFormat::with_kind() instead"
             );
         }
+    }
+
+    /**
+     * Tests that the `VMJ1` leaf header's sample-kind byte is a bijection
+     * with [`SampleKind`], so a tree written by one build reads back as the
+     * kind it was written with rather than as whatever the code happens to
+     * mean now.
+     * Works by round-tripping every variant through `kind_code` and
+     * `kind_from_code`, and by checking the codes are distinct.
+     * Input: all seven kinds -> Output: each comes back as itself, seven
+     * distinct codes.
+     */
+    #[test]
+    fn the_leaf_kind_code_round_trips_every_kind() {
+        let kinds = [
+            SampleKind::U8,
+            SampleKind::U16,
+            SampleKind::F32,
+            SampleKind::I8,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ];
+        let mut codes = Vec::new();
+        for k in kinds {
+            let c = kind_code(k);
+            assert_eq!(kind_from_code(c), Some(k), "{k:?} did not round-trip");
+            codes.push(c);
+        }
+        codes.sort_unstable();
+        let before = codes.len();
+        codes.dedup();
+        assert_eq!(codes.len(), before, "two kinds share a header code");
+        // The codes that never had a meaning stay unreadable rather than
+        // resolving to a guess.
+        assert_eq!(kind_from_code(0), None);
+        assert_eq!(kind_from_code(3), None);
+        assert_eq!(kind_from_code(9), None);
     }
 
     /**
