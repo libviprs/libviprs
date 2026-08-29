@@ -2407,6 +2407,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Miri job runs a named slice of the `--lib` target instead of the whole
+  suite, and says so** (issue #675). It has never reported: three dispatched
+  runs were killed at the 90 minute ceiling and one went 4h13m. Removing
+  `-Zmiri-disable-isolation` and annotating every filesystem-touching test
+  moved that wall rather than removing it, and what was behind it is the clock.
+
+  Measured on wall time, ten cores, nightly-2026-08-20, isolation on:
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster` is 256
+  property cases at 10.2s each (33s, 53s and 94s at 2, 4 and 8 cases, linear),
+  so about 44 minutes for one test out of 1940. Skipping every property test
+  does not rescue it either, because `arithmetic::tests` spent 725s on 67 tests
+  and then over twenty minutes inside one more without finishing, and seventeen
+  of the sixty-two lib modules do not finish inside a 120 second bound. The
+  slice that replaces it is about ten minutes for 436 tests, with 116 ignored;
+  two runs on the same tree came out 584s and 635s.
+
+  A module is in if Miri can run it to completion inside 120 seconds, which is
+  mechanical rather than a judgement about which code deserves interpreting.
+  The workflow lists the modules it runs and the reason each excluded one is
+  excluded, and `tests/miri_invocation_parity.rs` now holds that prose against
+  the command in both directions and against the `Makefile` mirror.
+
+  **The job's own description of its coverage was wrong and is corrected.** It
+  claimed to check "a dozen image decoders"; the decoders' tests mostly open
+  fixture files, so they carry `#[cfg_attr(miri, ignore)]` and Miri skips them.
+  `exr` runs 1 test of 22, `nifti` 3 of 26, `encode_tiff` 6 of 31. What
+  survives is `webp` (32), `mat` (27), `radiance` (21), `analyze` (19) and
+  `avif` (9). A gate that describes a tree it does not check is worse than no
+  gate.
+
+  Three things Miri cannot do here, each measured rather than assumed: anything
+  that decodes a JPEG reaches `zune-jpeg`'s NEON IDCT and two intrinsics Miri
+  does not implement (aarch64 only, so the hosted x86_64 runner is probably
+  fine, and those modules stay out of both invocations so a local green and a
+  hosted green keep meaning the same thing); seven modules read the real clock,
+  which isolation refuses; and with `--features avif` the interpreter cannot get
+  past `rav1d`'s picture allocator, which gates its memory pool on
+  `ptr::fn_addr_eq`.
+
+  Worth knowing before anyone quotes a duration from this job: libtest's
+  `--report-time` under isolation reports Miri's virtual clock, not wall time.
+  The slice printed "finished in 1514.54s" for a run that took 584s and
+  "1502.30s" for one that took 635s.
+
 - **`histogram.rs` reads a bin index and a histogram's own count through two
   functions now, and only one of them folds at 65535** (issue #888). `read_flat`
   became `read_bin`, and `read_value` is the new one.
