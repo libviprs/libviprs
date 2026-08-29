@@ -53,6 +53,24 @@
 //!   [`decode_webp_with`] takes the `page` and `n` that ask for more,
 //!   stacking the frames into the toilet-roll layout
 //!   [`crate::frames`] describes (issue #569).
+//! * **A blended frame decodes one grey level low, and that is upstream.**
+//!   `image-webp` 0.2.4 runs its approximate alpha blend on opaque pixels
+//!   where libwebp copies them (`demux/anim_decode.c`,
+//!   `BlendPixelRowNonPremult` tests `src_alpha != 0xff` first), and with
+//!   `src_a = 255` the arithmetic is `s - 1` for every `s` from 1 to 255.
+//!   `vips webpsave` writes blending **on** for every frame after the first
+//!   of an opaque animation, so pages 1 and up of one come back a level
+//!   low; a transparent animation is written with blending off on every
+//!   frame and is byte-exact. Both measured, and both pinned.
+//!
+//!   libviprs used to rewrite the `ANMF` blend flag on frames whose `VP8L`
+//!   header declared no alpha, which made the opaque case exact. Issue #863
+//!   withdrew that: libwebp never reads the declaration, it tests each
+//!   pixel's own alpha, so a file whose header lied decoded to a different
+//!   picture (139 of 192 bytes, worst delta 228, measured on a crafted
+//!   file). There is no sound way to prove opacity from a header, so the
+//!   bounded upstream error is carried rather than traded for an unbounded
+//!   one this crate would own.
 //! * **Animated WebP can be read and never written.** No pure-Rust
 //!   encoder emits `ANIM`/`ANMF`: `image-webp` 0.2.4 writes one `VP8L`
 //!   chunk and has no animation surface at all, so [`SaveOptions`] has
@@ -113,7 +131,6 @@
 //! [`crate::radiance`] and [`crate::gif`]: a decoder's failures come from
 //! untrusted bytes, so a panicking spelling would have no honest caller.
 
-use std::borrow::Cow;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -133,17 +150,6 @@ use crate::source::{DeclaredGeometry, DecodeLimits, SourceError, resolve_page_ra
 /// `VP8L` the reference decoder then refuses. libviprs applies this
 /// ceiling instead of the crate's.
 pub const MAX_DIMENSION: u32 = 16383;
-
-/// The `ANMF` frame-info bit that turns alpha blending **off** for that
-/// frame (WebP container spec: the byte after the 24-bit frame duration,
-/// where bit 1 set means "do not blend").
-///
-/// libviprs sets it on frames that provably carry no transparency, and
-/// [`disable_blending_on_opaque_frames`] is where and why.
-const ANMF_NO_BLEND: u8 = 0b10;
-
-/// The `VP8L` signature byte, which every lossless bitstream opens with.
-const VP8L_SIGNATURE: u8 = 0x2f;
 
 /// The RIFF chunks libvips lifts into image metadata, paired with the
 /// field name it uses (`vips__webp_names`, `webp2vips.c:393-397`).
@@ -343,6 +349,11 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 /// [`crate::frames`] describes. [`decode_webp`] is this function at
 /// [`LoadOptions::default`].
 ///
+/// A page the file asks to have blended comes back **one grey level low on
+/// every non-zero channel**, which is `image-webp` 0.2.4 blending opaque
+/// pixels where libwebp copies them. The module docs have the arithmetic
+/// and the reason libviprs no longer tries to work around it (issue #863).
+///
 /// # What comes back attached
 ///
 /// On an animation, and on an animation only:
@@ -399,12 +410,7 @@ pub fn decode_webp_with(
     limits: DecodeLimits,
     options: LoadOptions,
 ) -> Result<Raster, SourceError> {
-    // Rewrite the blend flag of any frame that provably carries no
-    // transparency before the decoder sees it; the function says why, and
-    // it borrows rather than copies when there is nothing to rewrite.
-    let bytes = disable_blending_on_opaque_frames(bytes);
-    let mut decoder =
-        image_webp::WebPDecoder::new(Cursor::new(bytes.as_ref())).map_err(decode_error)?;
+    let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(decode_error)?;
     // Budget the metadata chunk reads before any of them run: `read_chunk`
     // refuses a chunk longer than this rather than allocating for it.
     decoder.set_memory_limit(usize::try_from(limits.max_alloc_bytes).unwrap_or(usize::MAX));
@@ -705,113 +711,16 @@ pub(crate) fn encode_webp_for_save(
 /// gives a `Some` far past the end of the buffer and the walk stops on the
 /// next `get`. Hoisting it makes the overflow reachable from a test on any
 /// target (issue #862).
+///
+/// `#[cfg(test)]` because its production caller was the blend-flag rewrite,
+/// which issue #863 removed: this module no longer walks the chunk chain
+/// itself, it hands the bytes straight to `image-webp`. The step stays
+/// because two test helpers still walk a file they built, and because the
+/// guard on it is the only thing standing between a 32-bit target and the
+/// panic if anything here ever walks a chunk chain again.
+#[cfg(test)]
 fn next_chunk(payload: usize, size: usize) -> Option<usize> {
     size.checked_add(size & 1)?.checked_add(payload)
-}
-
-/// Byte offsets of the `ANMF` frame-info bytes whose frame provably
-/// carries no transparency **and** asks to be alpha-blended anyway.
-///
-/// Walks the top-level RIFF chunk chain and reads each animation frame's
-/// own sub-chunk to decide, because that is where the answer is: a `VP8 `
-/// frame is lossy and has no alpha channel at all, a `VP8L` frame declares
-/// one in its `alpha_is_used` header bit, and an `ALPH` frame has one by
-/// construction. Anything it cannot parse is left alone.
-///
-/// Nothing is written here; see [`disable_blending_on_opaque_frames`] for
-/// why the offsets are wanted.
-fn opaque_blended_frame_offsets(bytes: &[u8]) -> Vec<usize> {
-    let mut offsets = Vec::new();
-    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
-        return offsets;
-    }
-    let mut cursor = 12usize;
-    while let Some(header) = bytes.get(cursor..cursor + 8) {
-        let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-        let payload = cursor + 8;
-        // An `ANMF` payload is a 16-byte frame header (x, y, width, height
-        // and duration as 24-bit fields, then the frame-info byte) and then
-        // one sub-chunk, whose own 8-byte header has to be inside it too.
-        if &header[..4] == b"ANMF"
-            && size >= 24
-            && let Some(frame) = bytes.get(payload..payload + size.min(29))
-            && frame.len() >= 24
-            && frame[15] & ANMF_NO_BLEND == 0
-        {
-            let opaque = match &frame[16..20] {
-                b"VP8 " => true,
-                // `VP8L`: signature byte, then 14 bits of width, 14 of
-                // height, then `alpha_is_used`, which is bit 28 of the
-                // little-endian word that follows the signature.
-                b"VP8L" => {
-                    frame.len() >= 29
-                        && frame[24] == VP8L_SIGNATURE
-                        && (u32::from_le_bytes(frame[25..29].try_into().unwrap()) >> 28) & 1 == 0
-                }
-                _ => false,
-            };
-            if opaque {
-                offsets.push(payload + 15);
-            }
-        }
-        // Chunk payloads are padded to an even length, and the walk stops
-        // rather than wrapping on a size a hostile file inflated. Both
-        // additions are checked inside `next_chunk`; doing only the outer
-        // one here is what issue #862 was.
-        cursor = match next_chunk(payload, size) {
-            Some(next) => next,
-            None => break,
-        };
-    }
-    offsets
-}
-
-/// Return `bytes` with alpha blending switched off on every animation
-/// frame that provably carries no transparency, borrowing the input
-/// unchanged when there is nothing to switch.
-///
-/// # Why a decoder needs this
-///
-/// libwebp does **not** blend a source pixel whose alpha is 255; it copies
-/// it (`demux/anim_decode.c`, `BlendPixelRowNonPremult`, which tests
-/// `src_alpha != 0xff` before calling the blend). `image-webp` 0.2.4 has
-/// the same approximate blend arithmetic and no such test, so it runs the
-/// approximation on opaque pixels too, and the approximation is not exact
-/// there: with `src_a = 255` the scale is `(1 << 24) / 255`, the product is
-/// `s * 255 * 65793 = s * 16777215`, and `>> 24` of that is `s - 1` for
-/// every `s` from 1 to 255.
-///
-/// So every opaque pixel of a blended frame comes back one grey level
-/// low. Measured on the pinned vips 8.18.6: `vips webpsave` on a four-page
-/// opaque roll writes frame 0 with blending off and frames 1, 2 and 3 with
-/// blending **on**, `vips rawsave 'x.webp[n=-1]'` reads back the original
-/// ramp, and libviprs read `74 20 38` where vips read `75 21 39`, on every
-/// channel of every page but the first.
-///
-/// Blending a fully opaque frame is the identity, so clearing the bit on
-/// exactly those frames cannot change the image and does route the decoder
-/// onto its exact copy path. The residue is a frame that declares alpha and
-/// asks to be blended, where the opaque pixels *inside* it are still one
-/// low; `vips webpsave` does not write that combination (a transparent roll
-/// comes out with blending off on every frame, measured), so no oracle
-/// fixture reaches it, and it is filed rather than hidden.
-///
-/// The clone is the whole file and it is deliberately not priced against
-/// [`DecodeLimits::max_alloc_bytes`]: it is one copy of a buffer the caller
-/// already holds rather than an expansion of it, and it only happens for a
-/// file that actually carries such a frame.
-/// `crate::encode_tiff`'s `normalize_multiband_photometric` makes the same
-/// trade for the same reason.
-fn disable_blending_on_opaque_frames(bytes: &[u8]) -> Cow<'_, [u8]> {
-    let offsets = opaque_blended_frame_offsets(bytes);
-    if offsets.is_empty() {
-        return Cow::Borrowed(bytes);
-    }
-    let mut owned = bytes.to_vec();
-    for offset in offsets {
-        owned[offset] |= ANMF_NO_BLEND;
-    }
-    Cow::Owned(owned)
 }
 
 /// The encoder colour type for a raster, or the reason there is none.
@@ -1553,6 +1462,44 @@ mod tests {
         103, 139, 19, 77, 143, 24, 88, 146, 29, 99, 149, 34, 110, 152,
     ];
 
+    /// The pixels `image-webp` 0.2.4 actually produces for a page `vips
+    /// webpsave` wrote with alpha blending switched **on**, given the pixels
+    /// vips reads out of the same bytes.
+    ///
+    /// Every channel comes back one grey level low, and zero stays zero.
+    /// That is not an approximation of the difference, it is the whole of
+    /// it: `image-webp` runs its approximate blend on opaque pixels where
+    /// libwebp copies them (`demux/anim_decode.c`,
+    /// `BlendPixelRowNonPremult`, which tests `src_alpha != 0xff` before
+    /// blending), and with `src_a = 255` the arithmetic is
+    /// `(s * 255 * ((1 << 24) / 255)) >> 24`, which is `s - 1` for every `s`
+    /// from 1 to 255.
+    ///
+    /// Issue #863 withdrew the workaround that used to hide this. It hid it
+    /// by reading the `VP8L` `alpha_is_used` header bit, which libwebp does
+    /// not consult at all, so a file whose header lied decoded to a
+    /// different picture: 139 of 192 bytes, worst delta 228. Carrying a
+    /// bounded upstream error beats introducing an unbounded one, and
+    /// pinning it here makes the day it is fixed upstream a red test rather
+    /// than a surprise.
+    ///
+    /// `vips webpsave` writes blending on for every frame after the first of
+    /// an **opaque** animation and off for every frame of a transparent one,
+    /// both measured, so this applies to pages 1 and up of `ANIM4_DELAY` and
+    /// to nothing at all in `ANIM4_RGBA`.
+    fn as_image_webp_blends(vips: &[u8]) -> Vec<u8> {
+        vips.iter().map(|v| v.saturating_sub(1)).collect()
+    }
+
+    /// `ANIM4_ROLL` as this build decodes it: page 0 exactly as vips reads
+    /// it, and pages 1, 2 and 3 through [`as_image_webp_blends`].
+    fn anim4_as_decoded() -> Vec<u8> {
+        let mut out = ANIM4_ROLL.to_vec();
+        let blended = as_image_webp_blends(&ANIM4_ROLL[36..]);
+        out[36..].copy_from_slice(&blended);
+        out
+    }
+
     /// Every frame of an animation, which is `n = -1` in vips.
     fn all_pages() -> LoadOptions {
         LoadOptions::default().with_n(-1)
@@ -1574,7 +1521,7 @@ mod tests {
             .expect("the four-frame capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 12));
         assert_eq!(raster.format(), PixelFormat::Rgb8);
-        assert_eq!(raster.data(), &ANIM4_ROLL[..]);
+        assert_eq!(raster.data(), &anim4_as_decoded()[..]);
         // The split the loader wrote and the split the reader derives are
         // the same one: `vipsheader -a 'x.webp[n=-1]'` reports
         // `page-height: 3` and `n-pages: 4`.
@@ -1635,7 +1582,7 @@ mod tests {
         )
         .expect("frames 1 and 2 exist");
         assert_eq!((raster.width(), raster.height()), (4, 6));
-        assert_eq!(raster.data(), &ANIM4_ROLL[36..108]);
+        assert_eq!(raster.data(), &anim4_as_decoded()[36..108]);
         assert_eq!(raster.pages_loaded(), 2);
         assert_eq!(raster.get_page_height(), 3);
         // Measured: `vipsheader -f delay 'x.webp[page=1,n=2]'` prints
@@ -1725,7 +1672,7 @@ mod tests {
             assert_eq!(raster.pages_loaded(), 1, "page {page}");
             assert_eq!(
                 raster.data(),
-                &ANIM4_ROLL[page as usize * 36..page as usize * 36 + 36],
+                &anim4_as_decoded()[page as usize * 36..page as usize * 36 + 36],
                 "page {page}"
             );
             assert_eq!(
@@ -1960,10 +1907,11 @@ mod tests {
     /// declare `alpha_is_used` and that vips wrote with blending switched
     /// **off** on every one of them.
     ///
-    /// The negative control for [`disable_blending_on_opaque_frames`]. The
-    /// opaque capture has blending on for frames 1, 2 and 3 and this one
-    /// has it off everywhere, so the rewrite has three frames to touch
-    /// there and none here, and the pixels have to be exact either way.
+    /// `vips webpsave` wrote blending **off** on every one of these four
+    /// frames, where the opaque capture has it on for frames 1, 2 and 3.
+    /// That asymmetry is the encoder protecting exactness: with blending
+    /// off nothing composites, so this file decodes byte-exact while the
+    /// opaque one goes through `image-webp`'s blend and loses a level.
     const ANIM4_RGBA: [u8; 550] = [
         0x52, 0x49, 0x46, 0x46, 0x1e, 0x02, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
         0x58, 0x0a, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x02, 0x00, 0x00,
@@ -2017,64 +1965,6 @@ mod tests {
         4, 92, 136, 234, 9, 103, 139, 251, 19, 77, 143, 220, 24, 88, 146, 237, 29, 99, 149, 254,
         34, 110, 152, 15,
     ];
-
-    /**
-     * Tests that the blend-flag rewrite finds exactly the frames whose
-     * pixels the decoder would otherwise lose a grey level on, and touches
-     * nothing else. Works by running the scanner over the opaque capture,
-     * the transparent one and a still, and checking the byte it names.
-     * Input: `ANIM4_DELAY`, `ANIM4_RGBA` and `LOSSLESS_RGB` -> Output:
-     * three offsets on the opaque animation and none on the other two, and
-     * a rewrite that borrows rather than clones where there is nothing to
-     * do.
-     */
-    #[test]
-    fn the_blend_rewrite_finds_the_opaque_blended_frames_and_only_those() {
-        // `vips webpsave` wrote frame 0 with blending off (frame-info 0x02)
-        // and frames 1, 2 and 3 with it on (0x00), all four `VP8L` with
-        // `alpha_is_used` clear. Those three are the ones the decoder gets
-        // wrong.
-        let offsets = opaque_blended_frame_offsets(&ANIM4_DELAY);
-        assert_eq!(offsets.len(), 3, "three blended opaque frames");
-        for offset in &offsets {
-            assert_eq!(
-                ANIM4_DELAY[*offset] & ANMF_NO_BLEND,
-                0,
-                "the scanner only names frames that ask to be blended"
-            );
-        }
-        let rewritten = disable_blending_on_opaque_frames(&ANIM4_DELAY);
-        assert!(matches!(rewritten, Cow::Owned(_)), "it had work to do");
-        for offset in &offsets {
-            assert_eq!(rewritten[*offset] & ANMF_NO_BLEND, ANMF_NO_BLEND);
-        }
-        // And nothing else moved: exactly three bytes differ.
-        let moved = rewritten
-            .iter()
-            .zip(ANIM4_DELAY.iter())
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(moved, 3);
-
-        // The transparent animation declares `alpha_is_used` on every
-        // frame, and vips wrote blending off on all four anyway, so there
-        // is nothing to name and nothing to clone.
-        assert!(opaque_blended_frame_offsets(&ANIM4_RGBA).is_empty());
-        assert!(matches!(
-            disable_blending_on_opaque_frames(&ANIM4_RGBA),
-            Cow::Borrowed(_)
-        ));
-        // A still has no `ANMF` chunk at all.
-        assert!(opaque_blended_frame_offsets(&LOSSLESS_RGB).is_empty());
-        assert!(matches!(
-            disable_blending_on_opaque_frames(&LOSSLESS_RGB),
-            Cow::Borrowed(_)
-        ));
-        // And a buffer that is not a RIFF container at all walks nowhere
-        // rather than reading past its end.
-        assert!(opaque_blended_frame_offsets(b"not a webp").is_empty());
-        assert!(opaque_blended_frame_offsets(&[]).is_empty());
-    }
 
     /// The 192 bytes `vips rawsave` writes for a **crafted** file: the
     /// transparent capture with blending switched on and `alpha_is_used`
@@ -2183,60 +2073,6 @@ mod tests {
     }
 
     /**
-     * Tests that a scanner asked about a frame that declares alpha and
-     * asks to be blended leaves it alone, which the two captures cannot
-     * show on their own: vips writes blending off on every frame of the
-     * transparent roll and on with no alpha on the opaque one, so the two
-     * conditions never come apart in a file the oracle produces. Works by
-     * clearing the no-blend bit on the transparent capture by hand, which
-     * is the combination no encoder here writes, and asking again.
-     * Input: `ANIM4_RGBA` with every frame's no-blend bit cleared ->
-     * Output: still no offsets, where the same edit to the opaque capture
-     * names all four frames.
-     */
-    #[test]
-    fn a_frame_that_declares_alpha_is_left_blended() {
-        // Clearing the bit everywhere is the only way to reach the fourth
-        // combination: `vips webpsave` writes blend-off + alpha for a
-        // transparent roll and blend-on + no-alpha for an opaque one, so
-        // blend-on + alpha has to be built.
-        let clear_all = |bytes: &[u8]| {
-            let mut owned = bytes.to_vec();
-            let mut cursor = 12usize;
-            while let Some(header) = owned.get(cursor..cursor + 8) {
-                let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-                if &header[..4] == b"ANMF" {
-                    owned[cursor + 8 + 15] &= !ANMF_NO_BLEND;
-                }
-                cursor = match next_chunk(cursor + 8, size) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
-            owned
-        };
-
-        let opaque = clear_all(&ANIM4_DELAY);
-        assert_eq!(
-            opaque_blended_frame_offsets(&opaque).len(),
-            4,
-            "with frame 0 blended too, all four opaque frames need the rewrite"
-        );
-
-        let transparent = clear_all(&ANIM4_RGBA);
-        assert!(
-            opaque_blended_frame_offsets(&transparent).is_empty(),
-            "a frame that declares alpha keeps its blending: switching it off \
-             would change the image, where switching it off on an opaque frame \
-             cannot"
-        );
-        // The edit really did happen, or the assertion above would pass on
-        // a buffer nothing had touched.
-        assert_ne!(transparent, ANIM4_RGBA.to_vec());
-        assert_ne!(opaque, ANIM4_DELAY.to_vec());
-    }
-
-    /**
      * Tests that the RIFF walk stops on a chunk size the file's own
      * arithmetic cannot represent, rather than panicking on the pad or
      * wrapping to an offset it has already passed. Works by calling the
@@ -2279,50 +2115,6 @@ mod tests {
         // range; one more byte of payload offset is what tips it over.
         assert_eq!(next_chunk(1, usize::MAX - 1), Some(usize::MAX));
         assert_eq!(next_chunk(2, usize::MAX - 1), None);
-    }
-
-    /**
-     * Tests that an `ANMF` too short to hold a `VP8L` header is walked past
-     * rather than indexed into, which no capture can show because every
-     * frame vips writes is longer than the header it declares. Works by
-     * building the shortest chunk the walker accepts, at the two sub-chunk
-     * tags that answer differently.
-     * Input: a hand-built `ANMF` of exactly 24 bytes, once naming `VP8L`
-     * and once naming `VP8 ` -> Output: no offset for the `VP8L` one,
-     * because its `alpha_is_used` bit is not in the file, and an offset for
-     * the `VP8 ` one, because a lossy frame has no alpha whatever follows.
-     */
-    #[test]
-    fn a_frame_too_short_to_read_is_walked_past_rather_than_indexed_into() {
-        // 24 bytes is the floor the walker accepts: a 16-byte frame header
-        // and an 8-byte sub-chunk header, with no sub-chunk payload at all.
-        // A `VP8L` signature and its `alpha_is_used` bit live in the five
-        // bytes after that, which this file does not have.
-        let truncated = |tag: &[u8; 4]| {
-            let mut out = Vec::from(*b"RIFF\x20\x00\x00\x00WEBPANMF\x18\x00\x00\x00");
-            out.extend_from_slice(&[0u8; 15]); // x, y, w, h, duration
-            out.push(0); // frame info: blending on
-            out.extend_from_slice(tag);
-            out.extend_from_slice(&[0u8; 4]); // the sub-chunk's own size
-            out
-        };
-
-        let lossless = truncated(b"VP8L");
-        assert_eq!(lossless.len(), 12 + 8 + 24);
-        assert!(
-            opaque_blended_frame_offsets(&lossless).is_empty(),
-            "a frame whose alpha bit is not in the file is not provably opaque"
-        );
-        assert!(matches!(
-            disable_blending_on_opaque_frames(&lossless),
-            Cow::Borrowed(_)
-        ));
-
-        // The lossy tag needs nothing past the header to answer, so the same
-        // truncation still names it. That is the positive control: the
-        // emptiness above is the length test firing, not the walk giving up.
-        let lossy = truncated(b"VP8 ");
-        assert_eq!(opaque_blended_frame_offsets(&lossy), vec![20 + 15]);
     }
 
     /**
@@ -2402,7 +2194,10 @@ mod tests {
 
         let back = decode_webp(&bytes, DecodeLimits::default()).expect("it reads back");
         assert_eq!((back.width(), back.height()), (4, 12));
-        assert_eq!(back.data(), &ANIM4_ROLL[..]);
+        // Re-encoded from what this build decoded, so the roll that comes
+        // back is that, not vips's original: the loss happened on the way
+        // in and a lossless save cannot undo it.
+        assert_eq!(back.data(), &anim4_as_decoded()[..]);
         assert_eq!(back.pages_loaded(), 1);
         for field in ["n-pages", "page-height", "delay", "loop"] {
             assert_eq!(back.get_field(field), None, "{field} on the round trip");

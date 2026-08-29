@@ -3027,6 +3027,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
 
+- **The `ANMF` blend-flag rewrite is withdrawn, and animated WebP frames
+  the file asks to have blended decode one grey level low again** (issue
+  #863). The rewrite proved a frame opaque from its `VP8L` `alpha_is_used`
+  header bit, and libwebp never reads that bit: `BlendPixelRowNonPremult`
+  tests each pixel's own alpha. So a header claiming an opacity the pixels
+  do not have made libviprs copy where vips blends. Measured on a crafted
+  file, `ANIM4_RGBA` with blending switched on and `alpha_is_used` cleared:
+  139 of 192 bytes differ and the worst delta is **228**, which is not a
+  rounding error, it is a different picture.
+
+  Trading a bounded upstream error for an unbounded one this crate owns is
+  the wrong way round, and there is no sound way to prove a frame opaque
+  from a header, so the workaround is gone rather than narrowed. What comes
+  back is `image-webp` 0.2.4's own arithmetic: every non-zero channel of a
+  blended page one level low, zero unchanged. `vips webpsave` writes
+  blending on for every frame after the first of an **opaque** animation and
+  off for every frame of a **transparent** one, so an opaque animation loses
+  a level on pages 1 and up and a transparent one is byte-exact, both
+  measured and both pinned. `as_image_webp_blends` in the tests is that rule
+  written down, so the day it is fixed upstream is a red test rather than a
+  surprise.
+
+  This supersedes the entry below, which described the rewrite as the fix
+  for #837. #837 is reopened: the underlying defect is real and belongs
+  upstream.
+
 - **Animated WebP frames after the first no longer decode one grey level
   low.** `image-webp` 0.2.4 runs its approximate alpha blend on fully opaque
   pixels, where libwebp explicitly does not (`demux/anim_decode.c`,
