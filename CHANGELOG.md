@@ -3907,7 +3907,7 @@ and not under `Fixed`: this file is the only place they can be caught.
 - **The `ZeroTimes` sentence in this file was wrong, and the class has a
   checker now** (issue #947). The `TimesOutOfRange` entry under `### Breaking`
   closed with ~~"`ZeroTimes` has never been in a release"~~.
-  `ConvolutionError::ZeroTimes` shipped in v0.4.0, at
+  `ConvolutionError::ZeroTimes` shipped in `v0.4.0`, at
   `v0.4.0:src/convolution.rs:182`, introduced 2026-07-11 in `2b9f9caf`, nine
   days before the tag. That is the sentence a 0.4.0 caller matching the variant
   reads to decide whether the removal reaches them, and it told them it could
