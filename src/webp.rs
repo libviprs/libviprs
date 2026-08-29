@@ -53,24 +53,39 @@
 //!   [`decode_webp_with`] takes the `page` and `n` that ask for more,
 //!   stacking the frames into the toilet-roll layout
 //!   [`crate::frames`] describes (issue #569).
-//! * **A blended frame decodes one grey level low, and that is upstream.**
-//!   `image-webp` 0.2.4 runs its approximate alpha blend on opaque pixels
-//!   where libwebp copies them (`demux/anim_decode.c`,
-//!   `BlendPixelRowNonPremult` tests `src_alpha != 0xff` first), and with
-//!   `src_a = 255` the arithmetic is `s - 1` for every `s` from 1 to 255.
-//!   `vips webpsave` writes blending **on** for every frame after the first
-//!   of an opaque animation, so pages 1 and up of one come back a level
-//!   low; a transparent animation is written with blending off on every
-//!   frame and is byte-exact. Both measured, and both pinned.
+//! * **An animation is composited here, not by `image-webp`** (issues #837
+//!   and #917). vips does not use libwebp's animation decoder either:
+//!   `webp2vips.c` pulls each frame with `WebPDemuxGetFrame` and
+//!   `WebPDecode` and composites them itself, so there are three
+//!   implementations and only one of them is the oracle.
 //!
-//!   libviprs used to rewrite the `ANMF` blend flag on frames whose `VP8L`
-//!   header declared no alpha, which made the opaque case exact. Issue #863
-//!   withdrew that: libwebp never reads the declaration, it tests each
-//!   pixel's own alpha, so a file whose header lied decoded to a different
-//!   picture (139 of 192 bytes, worst delta 228, measured on a crafted
-//!   file). There is no sound way to prove opacity from a header, so the
-//!   bounded upstream error is carried rather than traded for an unbounded
-//!   one this crate would own.
+//!   | | `dst_factor_a` | rounding |
+//!   |---|---|---|
+//!   | vips | `(dst_a * (255 - src_a) + 127) >> 8` | `+ (1 << 12)` before the shift |
+//!   | libwebp | `(dst_a * (256 - src_a)) >> 8` | none |
+//!   | `image-webp` | `div_by_255(dst_a * (255 - src_a))` | none |
+//!
+//!   The rounding term is the whole of #837: with an opaque source the
+//!   factor is 0 and the product is one short of `s << 24`, so vips carries
+//!   it back and the other two truncate, and every blended page came back a
+//!   grey level low. #917 is the same table one column over, on translucent
+//!   pixels, where the three disagree by up to 26 levels.
+//!
+//!   vips's compositing model is simpler than libwebp's, and porting
+//!   libwebp's first made the crafted header-lie fixture *worse*: clear the
+//!   previous frame's rectangle if it disposed to background, then paste
+//!   this frame, blending only when it is not the first and its own header
+//!   asks for it. No key frames, no per-pixel opacity test, no partial blend
+//!   ranges.
+//!
+//!   `image-webp` exposes no per-frame decode, so the frames are recovered
+//!   by clearing every `ANMF` blend bit, which turns `composite_frame` into
+//!   a verbatim copy of each frame's rectangle. That is done through a
+//!   reader that patches the bytes on the way past, so nothing is copied.
+//!   The patch claims nothing about the pixels, which is what separates it
+//!   from the rewrite issue #863 withdrew: that one read `alpha_is_used` as
+//!   proof of opacity and skipped work the oracle does, where this decides
+//!   what to do with a frame afterwards from the frame's own alpha.
 //! * **The band count is not the `VP8X` alpha flag on its own** (issue
 //!   #885). `webp2vips.c:413` starts there and `:464-471` turns alpha on for
 //!   an animation when **any** frame carries alpha of its own or is smaller
@@ -421,26 +436,27 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 /// libwebp skipping the blend for opaque pixels, which libwebp does do and
 /// which is not why vips agrees with it.
 ///
-/// The multiply is `i32` and **wrapping**, because vips's is: the macro is
-/// `int` arithmetic and `(255 * 255) * ((1 << 24) / 255)` is over
-/// `i32::MAX`, so an opaque white pixel overflows there and the answer comes
-/// back through the wrap. Reproducing that is what makes this match on the
-/// bright end; a `u64` product returns 254 where vips returns 255.
+/// The arithmetic is `u32` and cannot overflow, which is worth showing
+/// because vips's own is `int` and **can**: `sum` is at most `255 * blend_a`,
+/// since the two alphas it weights add up to `blend_a`, and `scale` is
+/// `(1 << 24) / blend_a`, so the product is bounded by `255 << 24`, which is
+/// 4,278,190,080 and fits a `u32` with room for the rounding term. vips's
+/// signed `int` version wraps at that size and gets the same answer back
+/// through two's complement, which is a thing to reproduce only if it
+/// changes an answer, and it does not.
 fn blend_over(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
     if src[3] == 0 {
         return dst;
     }
-    let src_a = i32::from(src[3]);
-    let factor = (i32::from(dst[3]) * (255 - src_a) + 127) >> 8;
+    let src_a = u32::from(src[3]);
+    let factor = (u32::from(dst[3]) * (255 - src_a) + 127) >> 8;
+    // At most 255, so it fits the alpha channel: `src_a + ((dst_a * (255 -
+    // src_a) + 127) >> 8)` peaks there.
     let blend_a = src_a + factor;
-    let scale = if blend_a == 0 {
-        0
-    } else {
-        (1i32 << 24) / blend_a
-    };
+    let scale = (1u32 << 24) / blend_a;
     let channel = |i: usize| -> u8 {
-        let sum = i32::from(src[i]) * src_a + i32::from(dst[i]) * factor;
-        ((sum.wrapping_mul(scale).wrapping_add(1 << 12)) >> 24) as u8
+        let sum = u32::from(src[i]) * src_a + u32::from(dst[i]) * factor;
+        ((sum * scale + (1 << 12)) >> 24) as u8
     };
     [
         channel(0),
@@ -2081,6 +2097,36 @@ mod tests {
         vips.iter().map(|v| v.saturating_sub(1)).collect()
     }
 
+    /// A two-frame 2x2 animation whose second frame carries every arm of the
+    /// blend at once, built with `cwebp` and `webpmux` because `vips
+    /// webpsave` writes blending off on a transparent animation and so
+    /// cannot produce one.
+    ///
+    /// Frame 0 is opaque red. Frame 1 asks to be blended and holds, in
+    /// order, two **fully transparent** pixels, one at alpha 128 and one
+    /// opaque. So one file exercises `src_a == 0`, `0 < src_a < 255` and
+    /// `src_a == 255`, which are three different paths through
+    /// `blend_over` and were one fixture short of being covered.
+    const TRANSLUCENT: [u8; 146] = [
+        0x52, 0x49, 0x46, 0x46, 0x8A, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x58, 0x0A, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x41, 0x4E, 0x49, 0x4D, 0x06, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x41,
+        0x4E, 0x4D, 0x46, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C, 0x0F, 0x00, 0x00,
+        0x00, 0x2F, 0x01, 0x40, 0x00, 0x00, 0x07, 0x10, 0xFD, 0x8F, 0xFE, 0x07, 0x22, 0xA2, 0xFF,
+        0x01, 0x00, 0x41, 0x4E, 0x4D, 0x46, 0x2E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C,
+        0x15, 0x00, 0x00, 0x00, 0x2F, 0x01, 0x40, 0x00, 0x10, 0x17, 0x30, 0xFF, 0x11, 0x02, 0x82,
+        0xA2, 0xE7, 0x4C, 0x0F, 0x2E, 0x4C, 0x42, 0x44, 0xFF, 0x43, 0x00,
+    ];
+
+    /// `TRANSLUCENT` as `vips rawsave 'translucent.webp[n=-1]'` reads it on
+    /// 8.18.6: a 2x4 RGBA roll of two pages.
+    const TRANSLUCENT_ROLL: [u8; 32] = [
+        255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0,
+        255, 127, 128, 0, 255, 0, 255, 0, 255,
+    ];
+
     /// Every frame of an animation, which is `n = -1` in vips.
     fn all_pages() -> LoadOptions {
         LoadOptions::default().with_n(-1)
@@ -2940,6 +2986,106 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(raster.format(), expected, "{name}");
         }
+    }
+
+    /**
+     * Tests that the first frame is pasted rather than blended, whatever its
+     * header asks for, which is vips's `frame_num > 1` guard
+     * (`webp2vips.c:711-714`). Works by driving the compositor directly with
+     * one translucent source pixel, at index 0 and at index 1 over the same
+     * canvas.
+     * No fixture reaches this, and that is the point: blending over the
+     * empty canvas is *nearly* the identity, because the destination alpha is
+     * zero so the factor is zero and the rounding term usually carries the
+     * value back. Usually. `scale` is `(1 << 24) / src_a` and the remainder
+     * it drops is `(1 << 24) mod src_a`, so at `src_a = 251` a channel of 255
+     * loses 31,875 against a rounding term of 4,096 and comes back **254**.
+     * That is the value used here, found by working out where the identity
+     * breaks rather than by trying values, and the mutation that drops the
+     * guard survived every animation fixture in this module before it.
+     * Input: one pixel at alpha 251 over an empty canvas, composited as
+     * frame 0 and as frame 1 -> Output: 255 for the first, 254 for the
+     * second.
+     */
+    #[test]
+    fn the_first_frame_is_pasted_rather_than_blended() {
+        let frame = AnimFrame {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            blend: true,
+            dispose: false,
+            has_alpha: true,
+        };
+        let source = [255u8, 255, 255, 251];
+
+        let mut first = Compositor::new(1, 1);
+        assert_eq!(
+            first.add(0, frame, &source),
+            &source,
+            "frame 0 is a paste, so it is the source pixel exactly"
+        );
+
+        let mut later = Compositor::new(1, 1);
+        let blended = later.add(1, frame, &source).to_vec();
+        assert_eq!(
+            blended,
+            vec![254, 254, 254, 251],
+            "and frame 1 blends, which at this alpha is not the identity"
+        );
+        assert_ne!(
+            blended,
+            source.to_vec(),
+            "so the two arms really do differ on this input"
+        );
+    }
+
+    /**
+     * Tests all three arms of the blend against vips on one file: a fully
+     * transparent source pixel, a translucent one and an opaque one.
+     * Works on `TRANSLUCENT`, whose frame 1 asks to be blended over an
+     * opaque red frame 0 and holds alpha 0, 0, 128 and 255 across its four
+     * pixels.
+     * vips's `blend_pixel` returns the destination untouched for a source
+     * alpha of 0, and that arm had no fixture: every animation here either
+     * blends nothing or blends pixels that are opaque or nearly so. The
+     * mutation that blends a transparent source anyway survived the whole
+     * suite, and it is not a no-op, because `blend_over` of a transparent
+     * source over a transparent destination gives `blend_a == 0` and a zero
+     * scale rather than the destination.
+     * Measured on vips 8.18.6 against exactly this file: page 1 is red,
+     * red, `(127, 128, 0)` and green, all opaque. The opaque pixel is the
+     * #837 case and comes back `(0, 255, 0)` rather than `(0, 254, 0)`; the
+     * translucent one is the #917 case and needs vips's rounding rather
+     * than libwebp's or `image-webp`'s.
+     * Input: a two-frame 2x2 animation -> Output: vips's bytes, exactly.
+     */
+    #[test]
+    fn every_arm_of_the_blend_matches_vips_on_one_file() {
+        let raster = decode_webp_with(&TRANSLUCENT, DecodeLimits::default(), all_pages())
+            .expect("the two-frame fixture decodes");
+        assert_eq!(raster.format(), PixelFormat::Rgba8);
+        assert_eq!(raster.data(), &TRANSLUCENT_ROLL[..]);
+
+        // Said again as the three arms, because the 32-byte comparison above
+        // passes for the wrong reason if the fixture is ever regenerated.
+        let page1 = &raster.data()[16..];
+        assert_eq!(
+            &page1[..4],
+            &[255, 0, 0, 255],
+            "a fully transparent source leaves the canvas alone"
+        );
+        assert_eq!(
+            &page1[8..12],
+            &[127, 128, 0, 255],
+            "a half-transparent source blends, with vips's rounding"
+        );
+        assert_eq!(
+            &page1[12..],
+            &[0, 255, 0, 255],
+            "and an opaque source is exact, not a level low"
+        );
     }
 
     /**
