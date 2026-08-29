@@ -2128,6 +2128,50 @@ mod tests {
     }
 
     /**
+     * Tests that an `ANMF` too short to hold a `VP8L` header is walked past
+     * rather than indexed into, which no capture can show because every
+     * frame vips writes is longer than the header it declares. Works by
+     * building the shortest chunk the walker accepts, at the two sub-chunk
+     * tags that answer differently.
+     * Input: a hand-built `ANMF` of exactly 24 bytes, once naming `VP8L`
+     * and once naming `VP8 ` -> Output: no offset for the `VP8L` one,
+     * because its `alpha_is_used` bit is not in the file, and an offset for
+     * the `VP8 ` one, because a lossy frame has no alpha whatever follows.
+     */
+    #[test]
+    fn a_frame_too_short_to_read_is_walked_past_rather_than_indexed_into() {
+        // 24 bytes is the floor the walker accepts: a 16-byte frame header
+        // and an 8-byte sub-chunk header, with no sub-chunk payload at all.
+        // A `VP8L` signature and its `alpha_is_used` bit live in the five
+        // bytes after that, which this file does not have.
+        let truncated = |tag: &[u8; 4]| {
+            let mut out = Vec::from(*b"RIFF\x20\x00\x00\x00WEBPANMF\x18\x00\x00\x00");
+            out.extend_from_slice(&[0u8; 15]); // x, y, w, h, duration
+            out.push(0); // frame info: blending on
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&[0u8; 4]); // the sub-chunk's own size
+            out
+        };
+
+        let lossless = truncated(b"VP8L");
+        assert_eq!(lossless.len(), 12 + 8 + 24);
+        assert!(
+            opaque_blended_frame_offsets(&lossless).is_empty(),
+            "a frame whose alpha bit is not in the file is not provably opaque"
+        );
+        assert!(matches!(
+            disable_blending_on_opaque_frames(&lossless),
+            Cow::Borrowed(_)
+        ));
+
+        // The lossy tag needs nothing past the header to answer, so the same
+        // truncation still names it. That is the positive control: the
+        // emptiness above is the length test firing, not the walk giving up.
+        let lossy = truncated(b"VP8 ");
+        assert_eq!(opaque_blended_frame_offsets(&lossy), vec![20 + 15]);
+    }
+
+    /**
      * Tests what saving an animation back as WebP actually does, which is
      * the read-only asymmetry made concrete: the roll comes out as one
      * tall still image, where `vips webpsave` on the same raster writes a

@@ -4391,28 +4391,32 @@ mod tests {
     /**
      * Tests that a count large enough to overflow the addition is refused
      * rather than wrapping into an accepted range. Works by asking for
-     * `i32::MAX` pages from page 2, where `page + count` overflows a `u32`
-     * only just, and from a page high enough that it wraps.
-     * Input: `page = 2` and `page = 4_000_000_000`, `n = i32::MAX`,
-     * `pages = 4` -> Output: a refusal both times.
+     * `i32::MAX` pages from a page near the top of the `u32` range, on a
+     * file long enough that the `page >= pages` guard does not fire first,
+     * which is the only way to reach the addition at all.
+     * Input: `page = u32::MAX - 1`, `n = i32::MAX`, `pages = u32::MAX` ->
+     * Output: a refusal, where a wrapping addition computes `2_147_483_645`
+     * and calls that a legal window.
      */
     #[test]
     fn a_count_that_overflows_the_end_is_refused() {
-        for page in [2u32, 4_000_000_000] {
-            let err =
-                resolve_page_range("webp", page, i32::MAX, 4).expect_err("the file has four pages");
-            assert!(
-                matches!(err, SourceError::PageOutOfRange { pages: 4, .. }),
-                "page={page} got {err:?}"
-            );
-        }
-        // The second one is the case a `saturating_add` would let through if
-        // the `end > pages` test were the only guard: 4_000_000_000 plus
-        // `i32::MAX` wraps back to 1_852_516_351, which is not larger than
-        // `pages` in the wrapping arithmetic a naive version would use.
-        assert_eq!(
-            4_000_000_000_u32.wrapping_add(i32::MAX as u32),
-            1_852_516_351
+        let page = u32::MAX - 1;
+        let err = resolve_page_range("webp", page, i32::MAX, u32::MAX)
+            .expect_err("the file does not hold that many pages");
+        assert!(
+            matches!(err, SourceError::PageOutOfRange { .. }),
+            "got {err:?}"
         );
+        // The number a wrapping addition would compute, spelled out so the
+        // reason this input separates the two is visible: it is smaller than
+        // `page`, so the `end > pages` arm never fires on it.
+        assert_eq!(page.wrapping_add(i32::MAX as u32), 2_147_483_645);
+
+        // And the ordinary in-range shape of the same request still refuses,
+        // through the `end > pages` arm rather than the overflow one.
+        assert!(matches!(
+            resolve_page_range("webp", 2, i32::MAX, 4),
+            Err(SourceError::PageOutOfRange { pages: 4, .. })
+        ));
     }
 }
