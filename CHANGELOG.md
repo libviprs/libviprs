@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The counting ops emit `Uint32` instead of a 16-bit format, and stop
+  saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
+  `hist_find_ndim`, `hist_cum`, `project`, `hough_line` and `hough_circle` all
+  count pixels, and a 16-bit counter is exhausted by any image over 256x256,
+  which is to say every real image. A 300x300 raster is 90000 pixels and the
+  count was 65535.
+
+  Breaking because the output **format** of seven ops changes, so anything
+  asserting on `.format()` moves. Sample *values* only change where they were
+  previously wrong, and every new number is the one vips gives, measured on
+  `/opt/homebrew/bin/vips` 8.18.6:
+
+  | call | before | after and vips |
+  |---|---|---|
+  | `hist_find` on 300x300 | 65535 | **90000** |
+  | `hist_find` on 256x256 of one value | 65535 | **65536** |
+  | `hist_cum` of `[60000, 60000, 60000]` | 60000, 65535, 65535 | **60000, 120000, 180000** |
+  | `project` down a 1x300 column of 255 | 65535 | **76500** |
+  | `hough_line` on a 70000-wide lit line | 65535 | **70000** |
+
+  That last row closes the accumulator deviation issue #495 recorded, which
+  existed only because there was no unsigned 32-bit carrier to hold the count.
+
+  **The issue's stated cause is partly wrong and the fix does not follow it.**
+  It says all five ops emit `VIPS_FORMAT_UINT`. Only `hist_find`,
+  `hist_find_ndim` and `hough_line` do that unconditionally; `hist_cum` and
+  `project` run a format table keyed on the input carrier, measured:
+
+  | op | uchar / ushort / uint | char / short / int | float | double |
+  |---|---|---|---|---|
+  | `hist_find`, `hist_find_ndim`, `hough_*` | UINT | UINT | UINT | - |
+  | `hist_cum` | UINT | INT | FLOAT | - |
+  | `project` | UINT | INT | DOUBLE | DOUBLE |
+
+  So `project` takes its output carrier from its input rather than writing one
+  constant, and `hist_cum` on a signed input is still a deviation until issue
+  #516 lands the signed carriers.
+
+  Two ops in the same family are deliberately **not** in this change:
+
+  - `hist_find_indexed` stays 16-bit. vips emits **DOUBLE** there whatever the
+    value image's carrier is, so it is a float decision rather than a `Uint32`
+    one, and it is issue #887.
+  - `profile` stays 16-bit. vips emits **INT** there for `uchar`, `ushort`,
+    `uint` and `float` alike, so it needs the signed carrier of issue #516.
+    Its values are coordinates bounded by the image dimension rather than
+    counts, so its ceiling only bites above 65535 pixels on an axis. Widening
+    it to `Uint32` would have been the wrong carrier for a reason no value
+    assertion would have caught.
+
 - Every public options struct is `#[non_exhaustive]` and grows a `with_*`
   builder setter per field, so a downstream struct literal no longer compiles
   (issue #630). Ten types: `gif::SaveOptions`, `jp2k::SaveOptions`,
@@ -711,6 +761,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
+  libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:
+  `hist_find`, `hist_cum`, `project` and the `hough_*` family all count pixels
+  and libvips emits every one of them as `uint`, so a 300x300 image already
+  overflows a 16-bit counter. Widening those counters onto it is issue #532 and
+  lands separately.
+
+  There is no named four-band spelling of it, so `Uint32(n)` is canonical at
+  every band count and carries no alias, unlike `FloatF32(4)` and `RgbaF32`.
+  Like the multiband and float variants it is a compute intermediate: the tile
+  sinks and the 8/16-bit container encoders refuse it with a typed error naming
+  it, rather than narrowing it behind the caller's back.
+
+  **`PixelFormat::with_kind` is the only constructor that reaches it.**
+  `with_channels(n, 4)` still answers the float carrier, because that is the
+  answer every existing caller asked for, and a byte width does not name a
+  carrier. That pair is the sharpest statement of issue #607 in the crate: two
+  constructors, one width, two different answers, and a test pinning both.
+
+  The ops that read samples one at a time carry it: `cast` both ways, `embed`,
+  `gravity`, `insert`, `bandjoin`, `bandjoin_const`, `bandmean`, the `bandbool`
+  family, `bandrank`, `extract_band`, `arrayjoin`, `ifthenelse`, `switch`,
+  `msb`, `flatten`, `falsecolour`, `gamma`, `downscale_half`, `downscale_to`
+  and `resize`. Every one of those answers were measured against
+  `/opt/homebrew/bin/vips` 8.18.6 rather than reasoned about, because vips
+  supports `uint` at all of them and preserves the value exactly: a 4x4 `uint`
+  image at 90000 comes back at 90000 from `resize 0.5`, `shrink 2 2` and
+  `bandmean`, `addalpha` appends 255, `embed --extend white` fills 4294967295,
+  `msb` gives 0 and `falsecolour` gives (174, 0, 0).
+
+  Two places where the answer is deliberately *not* vips's, both measured:
+
+  - **Narrowing.** libvips takes a `uint` sample through a signed `int` on the
+    way down, so on 8.18.6 a `uint` raster holding 2147483647 casts to `uchar`
+    255 and one holding 2147483648 casts to **0**, with the boundary exactly at
+    `INT_MAX`. `cast` clips at the target's ceiling instead, so both answer 255.
+  - **`resize`.** libviprs reads the reduce mask as `double` where vips reads
+    its 12-bit fixed-point copy, which is the divergence
+    `reduce_preserves_a_constant_where_the_vips_short_mask_does_not` already
+    pins on the narrower carriers. On a 4x4 `uint` ramp `vips resize 0.5`
+    answers 102360 and libviprs answers 102359; the same image cast to FLOAT
+    and resized by vips answers 102358.62, so the exact result rounds to
+    libviprs's number.
+
+  Two typed refusals replace panics out of `Result`-returning methods, the shape
+  issue #694 landed: `BandError::UnsupportedSampleKind` and
+  `ExtractError::UnsupportedSampleKind`, alongside
+  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
+  the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
+  over a raster that is not float. `smartcrop`'s entropy and attention
+  strategies keep a stricter guard and refuse the 32-bit carrier, because both
+  build a value-indexed table and `SampleKind::hist_bins` is `None` at 32 bits,
+  the same answer it gives for float.
+
+  `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
+  #858, which this stacks on): the `BandFmt` wire tag used to be written from a
+  byte width, and a byte width does not name a carrier.
 - **A gate against a byte width standing in for a sample kind**, which is what
   issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
   `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
@@ -2141,6 +2248,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`histogram.rs` reads a bin index and a histogram's own count through two
+  functions now, and only one of them folds at 65535** (issue #888). `read_flat`
+  became `read_bin`, and `read_value` is the new one.
+
+  Folding a 32-bit sample into the 16-bit table is what libvips does when it
+  casts a 32-bit input down before counting it, measured in #803, and it is
+  right as a **bin index**. It is wrong as a **count**: a count of 90000 is a
+  count of 90000. `hist_cum`, `hist_norm`, `hist_match`, `hist_ismonotonic`,
+  `hist_entropy`, `hist_plot` and `maplut`'s LUT entry all read counts through
+  the folding one.
+
+  Nothing changes today, because nothing in the crate can yet produce a count
+  above 65535. It goes in ahead of the widened counters of issue #532, because
+  widening them onto a folding read would have clamped every count straight back
+  to 65535 with every format assertion still passing.
+
+  Of the 30 call sites, 19 keep the fold and 11 lose it. Three functions read
+  both a few lines apart, `maplut`, `hist_find_indexed` and `hist_entropy`, and
+  they carry their own mutation rows.
+- `connection::encode_to_target`'s doc no longer keeps its own copy of the
+  format list, and a check refuses to let one come back (issue #881). It named
+  `"jpeg"`, `"jpg"`, `"png"`, `"v"` and `"vips"`, which was the whole dispatch
+  when it was written and five of seventeen spellings by the time anybody
+  measured it, so a caller reading it concluded WebP was unsupported years
+  after it was wired.
+
+  `Raster::encode_to_buffer` sits on the same dispatch and its doc **was**
+  current, because two lanes updated it. Nothing connected the two, so they
+  drifted one lane at a time, and that is why #770, #809 and #880 could each go
+  unnoticed as long as they did.
+
+  The extension route has had a guard since the `.jxl` arm landed while the
+  refusal message still read "png, jpg/jpeg, gif, webp, and v/vips". This is
+  its twin: the check reads the dispatch's arm heads and the surviving doc list
+  out of the module's own source and requires the two sets to be equal, so an
+  arm added without the doc moving and a doc naming something with no arm
+  behind it are both red. It then requires `encode_to_target` to name none, so
+  the property being held is "there is one list" and not "the two copies
+  agree".
+
 - The crate has one fallible-plane helper instead of three private copies of
   it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
   `cfg(test)` probe over all of them that a check addresses **by site label**
@@ -2935,6 +3082,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is made only for a file that needs one: an ordinary GIF is handed to the
   decoder untouched, which is asserted rather than assumed.
 
+- **`maplut` refuses a lookup table longer than 65536 elements**, the bound
+  libvips enforces (issue #894). `vips maplut` with a 70000-element table answers
+  "histograms must have not have more than 65536 elements" and exits non-zero,
+  measured on `/opt/homebrew/bin/vips` 8.18.6; libviprs accepted it.
+
+  Found while building #888's mutation table, as the explanation for a mutation
+  that would not redden. `maplut` reads an index and a LUT entry a line apart,
+  and pointing the index read at the non-folding reader changes nothing, because
+  the site already clamps with `.min(n_lut - 1)` and for any `n_lut <= 65536`
+  that clamp subsumes the fold at 65535 entirely. That argument only holds while
+  the table is bounded, and nothing bounded it: with a 70000-element table and a
+  sample of 68000, the folding read picks entry 65535 and the non-folding one
+  picks entry 68000. The missing bound was doing double duty as an accidental
+  correctness argument.
+
+- **`msb` accepted a float raster and shifted its bit pattern** (issue #860).
+  `vips msb` answers "msb: image must be integer" and exits non-zero, measured on
+  `/opt/homebrew/bin/vips` 8.18.6; libviprs answered `Ok(Gray8)` with the `f32`'s
+  exponent and sign in the output byte. Reachable the ordinary way, since every
+  `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is float,
+  so `im.colourspace(Lab).msb(None)` landed there. It is
+  `ConversionError::FloatUnsupported` now, and the integer carriers are
+  untouched.
+
+- **`addalpha` and `flatten` took their alpha ceiling from the byte width where
+  libvips takes it from the interpretation** (issues #859, #861). The two rules
+  agree on `uchar` and on a 16-bit raster tagged `grey16` / `rgb16`, which is
+  why nothing here caught it, and they part company everywhere else.
+
+  Measured on `/opt/homebrew/bin/vips` 8.18.6 with alpha 128: a `ushort` raster
+  tagged `b-w` holding 65535 flattens to **32896**, which is
+  `65535 * 128 / 255`, and the width rule answered 128. `addalpha` on that same
+  raster appends **255**, and the width rule appended 65535. `Multi16(n)` is
+  tagged `Multiband`, so any two-band 16-bit intermediate hit both. Both now
+  read `interpretation_max_alpha`, the source `white_ink` already reads (issue
+  #667), and the `Gray16` and `Rgb16` answers do not move because those rasters
+  are tagged `Grey16` / `Rgb16`. A background is scaled by the same denominator,
+  so it moved with it: `--background 10` on the `uchar` row gives 105 in both.
+
+  `flatten` also read its samples with the storage reader, so a float raster had
+  its `f32` bits reinterpreted as a `u32` and blended as an integer. It is one
+  numeric loop through `read_sample_f64` / `write_sample_f64` now, and
+  `vips flatten` on a float raster holding (200.5, 128) answers **100.643**,
+  which is what this answers. That path is reachable the ordinary way, since
+  every `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is
+  float.
+
+  And it **truncates** where it used to round half up, which is the `vips_cast`
+  on the way out of the op. On the `uchar` carrier with alpha 128, band 0 of 201
+  gives `201 * 128 / 255` = 100.894 and vips answers 100; 51 gives 25.6 and vips
+  answers 25.
+
+  `pixel::write_sample_f64` lands with it: the write counterpart of
+  `read_sample_f64`, dispatching on `SampleKind` with `vips_cast` edge
+  semantics (clip into the kind's range, truncate toward zero, `NaN` to zero).
+  Reading through the kind and writing through a byte width only moves the
+  misread to the other end of the loop (issue #607).
 - **`draw` and `raster` stop asking for a byte width too** (issues #748,
   #607). `draw`'s `channel_at` / `set_channel_at` took a `bpc: usize` and
   panicked on the `_` arm, so the refusal covered float and would have covered
@@ -2992,8 +3196,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling went **29 -> 22 -> 18**. Both remaining heads are outside this
   work: `fits.rs:409` is already width-total, and `jp2k.rs:1721` arrived
   after the census.
-
-
 - **A 20-byte WebP file could panic the chunk walk on a 32-bit target**
   (issue #862). `opaque_blended_frame_offsets` steps over a RIFF chunk by
   `size + (size & 1)`, and only the outer addition was checked. `size` comes
@@ -3397,6 +3599,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
+
+- **Refusing a window past a still's only page is a divergence, not parity,
+  and the docs say so now** (issue #893). `src/webp.rs` described the
+  refusal as what vips does. It is not: vips validates `page` and `n` only
+  when the file is animated, so `vips copy 'still.webp[page=5]'` succeeds
+  and hands back the one image, and so do `[n=2]`, `[page=1,n=2]` and even
+  `[n=0]`. All five measured with `vips copy` rather than `vipsheader`, so
+  the pixel phase really runs.
+
+  The behaviour is unchanged and deliberate: a caller who asked for page 5
+  and got page 0 has no way to tell, which is the same silent-wrong-answer
+  shape the delay subsetting avoids. All three animated loaders agree on it
+  and `tests/animation_dialect.rs` holds them to it. Only the sentence
+  claiming vips agreed was wrong, in both `src/webp.rs` and `src/jxl.rs`.
+
+- **The WebP decode budget covers what `image-webp` allocates, not only what
+  libviprs fills** (issue #892). `max_alloc_bytes` is a ceiling on peak
+  memory and it was out by a factor: the decoder keeps a full-size RGBA
+  canvas and a full-size per-frame buffer of its own, and `set_memory_limit`
+  bounds neither, because it is consulted only on metadata chunks. Measured
+  with a counting global allocator on 512x512 fixtures, peak live bytes
+  against the amount priced:
+
+  | file | load | ratio | slack, in RGBA planes of one frame |
+  |---|---|---|---|
+  | lossless animation | one page | 3.67x | 2.00 |
+  | lossless animation | every page | 2.36x | 2.05 |
+  | lossy animation | one page | 3.33x | 1.75 |
+  | lossy animation | every page | 2.42x | 2.13 |
+  | lossless still | | 2.39x | 1.04 |
+  | lossy still | | 1.68x | 0.51 |
+
+  The price now carries three RGBA planes of one frame for an animation and
+  two for a still, both upper bounds with a plane of headroom, because the
+  measurements are asymptotic and the fixed overheads dominate below about
+  512x512. `webp::DECODER_PLANES_ANIMATED` and `DECODER_PLANES_STILL` are
+  the two numbers, public so the guard can restate them.
+
+  **This refuses files it used to accept**, at the same `max_alloc_bytes`,
+  which is the point: the old ceiling did not bound the decode. The WebP row
+  in `tests/decode_alloc_refusal_shape.rs` moves from 48 to 176 and that
+  shared guard grows a `decoder_planes` column, since "the reported geometry
+  is the one the price came from" is no longer the whole rule for a decoder
+  that lives in another crate.
+
+  `tests/webp_decode_working_set.rs` holds the model from both sides on a
+  committed 512x512 fixture: the peak must not exceed the price, and the
+  price must not exceed twice the peak.
+
+- **Three reasons a JPEG XL frame has no duration stopped being one**
+  (issue #889). `frame_millis` returned an `Option` and the loader read
+  `None` as "this is a page of a multipage document", which also swallowed
+  a keyframe the decoder could not describe and a `tps_numerator` of zero.
+  The second fabricated a `0 ms` delay; the third turned **every** frame
+  into `None`, so a malformed animation read back with no `delay`, no
+  `loop` and no `gif-delay` at all and nothing said the file was broken.
+
+  It now returns a `Result<Option<..>>` with three answers, and there are
+  two new `JxlError` variants, `BadAnimationRate` and `FrameHeaderMissing`,
+  on an enum that is already `#[non_exhaustive]`. Both are defensive: the
+  bitstream encodes `tps_numerator` as `U32(100, 1000, 1 + u(10), 1 + u(30))`
+  whose smallest value in any arm is 1, and `num_loaded_keyframes` bounds
+  the index `frame_header` is asked for, so neither is reachable from a file
+  I could build. That is a read of the format's spec rather than a
+  measurement, and the reason to fix it anyway is that the collapse was
+  silent in the direction that matters.
+
+  One fabrication is left and is documented at the line: a sentinel frame
+  inside a file that is otherwise an animation still reads as `0 ms`.
+  libjxl writes the sentinel on every frame or on none, and vips maps it to
+  `-1`, which an unsigned delay has no spelling for.
+
+- **Every per-frame field follows the loaded window, and the docs now say
+  so** (issue #890). The deliberate `delay` subsetting takes `gif-delay`
+  with it, because `gif-delay` is the first delay in centiseconds, and only
+  the `delay` array was written down. Measured across five windows on both
+  loaders, using `vipsheader -f` rather than `-a`, which does not list the
+  compat fields at all:
+
+  | load | vips `gif-delay` | here |
+  |---|---|---|
+  | default | 4 | 4 |
+  | `page=1` | 4 | 7 |
+  | `page=1,n=2` | 4 | 7 |
+  | `page=2,n=2` | 4 | 20 |
+  | `page=3` | 4 | 1 |
+
+  The `page=2,n=2` row is the one that makes the rule legible rather than
+  anecdotal: 20 is 200 ms, which is neither the file's first delay nor the
+  window's second. Both `src/webp.rs` and `src/jxl.rs` carry the table now.
+
+  The same section also fixes an argument rather than code. `ANIM4_DELAY`'s
+  doc claimed 45 ms proves `gif-delay` rounds half to even, and it does
+  not: `rint(4.5)` is 4 under half-to-even **and** under truncation, so that
+  window only rules out half-up. It takes two windows, and the second is
+  `page=1`, where 67 ms gives 7 and truncation would give 6. The rule is
+  round-half-to-even and the code was right; the sentence under it was not.
+
+- **A WebP frame marked dispose-to-background is disposed** (issue #884).
+  `image-webp` 0.2.4 clears a disposed frame's rectangle only when a
+  background colour has been set, and it has none unless a caller sets one,
+  so the disposal step was skipped and the previous frame's pixels stayed on
+  the canvas under the next one. Measured on an `img2webp` fixture whose
+  frame 0 covers the canvas in red and disposes to background: vips reads
+  the area outside frame 1's square as the cleared canvas and libviprs read
+  it as red.
+
+  libviprs now asks for transparent black, which is what libwebp clears to.
+  It **ignores** the colour the `ANIM` chunk declares: the fixture declares
+  `0xFFFFFFFF` and a copy patched to opaque green reads back the same, both
+  measured, so the declared colour is a hint for a display environment
+  rather than something a decoder paints.
+
+  Nothing in `oracle-captures/foreign-webp` could have caught this, because
+  `vips webpsave` has no disposal knob and writes `dispose: none` on every
+  frame. The fixture is `img2webp`'s output with the vips read recorded
+  beside it.
+
+- **The `ANMF` blend-flag rewrite is withdrawn, and animated WebP frames
+  the file asks to have blended decode one grey level low again** (issue
+  #863). The rewrite proved a frame opaque from its `VP8L` `alpha_is_used`
+  header bit, and libwebp never reads that bit: `BlendPixelRowNonPremult`
+  tests each pixel's own alpha. So a header claiming an opacity the pixels
+  do not have made libviprs copy where vips blends. Measured on a crafted
+  file, `ANIM4_RGBA` with blending switched on and `alpha_is_used` cleared:
+  139 of 192 bytes differ and the worst delta is **228**, which is not a
+  rounding error, it is a different picture.
+
+  Trading a bounded upstream error for an unbounded one this crate owns is
+  the wrong way round, and there is no sound way to prove a frame opaque
+  from a header, so the workaround is gone rather than narrowed. What comes
+  back is `image-webp` 0.2.4's own arithmetic: every non-zero channel of a
+  blended page one level low, zero unchanged. `vips webpsave` writes
+  blending on for every frame after the first of an **opaque** animation and
+  off for every frame of a **transparent** one, so an opaque animation loses
+  a level on pages 1 and up and a transparent one is byte-exact, both
+  measured and both pinned. `as_image_webp_blends` in the tests is that rule
+  written down, so the day it is fixed upstream is a red test rather than a
+  surprise.
+
+  This supersedes the entry below, which described the rewrite as the fix
+  for #837. #837 is reopened: the underlying defect is real and belongs
+  upstream.
 
 - **Animated WebP frames after the first no longer decode one grey level
   low.** `image-webp` 0.2.4 runs its approximate alpha blend on fully opaque
