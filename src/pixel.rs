@@ -596,6 +596,60 @@ impl PixelFormat {
     }
 }
 
+/// Read the sample at byte offset `off` in `data` as `f64`, honouring
+/// `kind`.
+///
+/// This is the crate's one width-independent sample read, and issue #607 is
+/// why it exists. Six modules each carried their own
+/// `match bytes_per_channel() { 1 => u8, 2 => u16, _ => f32 }`, and that
+/// trailing arm reads four bytes as an `f32` whatever they actually are, so
+/// a `u32` sample of `1` comes back as `1.4e-45`. Dispatching on
+/// [`SampleKind`] answers every kind correctly instead, and the match below
+/// has no wildcard, so a kind added to that `#[non_exhaustive]` enum is a
+/// compile error here rather than a silent misread in six places.
+///
+/// `off` is a **byte** offset and not a sample index, because every caller
+/// already holds one (a row stride plus a channel step). For a flat sample
+/// index `i`, pass `i * kind.bytes()`.
+///
+/// Multi-byte samples are read in native byte order throughout, matching
+/// [`crate::raster_ops`]. The signed kinds sign-extend, so this is the
+/// *numeric* read. Where the storage bit pattern is wanted instead (the
+/// bitwise family, and the scans that only ask whether a sample is
+/// non-zero) [`crate::arithmetic`] keeps its own reader.
+///
+/// # Panics
+///
+/// Panics if `data` is shorter than `off + kind.bytes()`, the way any
+/// out-of-range slice index does.
+#[inline]
+pub(crate) fn read_sample_f64(data: &[u8], kind: SampleKind, off: usize) -> f64 {
+    match kind {
+        SampleKind::U8 => f64::from(data[off]),
+        SampleKind::I8 => f64::from(data[off] as i8),
+        SampleKind::U16 => f64::from(u16::from_ne_bytes([data[off], data[off + 1]])),
+        SampleKind::I16 => f64::from(i16::from_ne_bytes([data[off], data[off + 1]])),
+        SampleKind::U32 => f64::from(u32::from_ne_bytes([
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+        ])),
+        SampleKind::I32 => f64::from(i32::from_ne_bytes([
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+        ])),
+        SampleKind::F32 => f64::from(f32::from_ne_bytes([
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+        ])),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1457,5 +1511,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /**
+     * Tests that [`read_sample_f64`] reads every [`SampleKind`], including
+     * the signed and 32-bit kinds no `PixelFormat` carries yet (issues
+     * #516, #517), so a carrier landing later gets a real read rather than
+     * the four-bytes-are-a-float misread the width-keyed sites gave it
+     * (issue #607).
+     * Works by laying each kind's native-order bytes into a buffer at a
+     * non-zero byte offset and reading them back, so the offset arithmetic
+     * is exercised as well as the arm.
+     * Input: one representative value per kind, including a negative for
+     * each signed kind -> Output: the numeric value, sign-extended.
+     */
+    #[test]
+    fn read_sample_f64_reads_every_kind() {
+        // (kind, native-order bytes of one sample, numeric value)
+        let cases: [(SampleKind, Vec<u8>, f64); 11] = [
+            (SampleKind::U8, vec![0], 0.0),
+            (SampleKind::U8, vec![255], 255.0),
+            (SampleKind::I8, vec![0xFF], -1.0),
+            (SampleKind::I8, vec![0x80], -128.0),
+            (SampleKind::U16, 65535u16.to_ne_bytes().to_vec(), 65535.0),
+            (SampleKind::I16, (-1i16).to_ne_bytes().to_vec(), -1.0),
+            (
+                SampleKind::I16,
+                i16::MIN.to_ne_bytes().to_vec(),
+                f64::from(i16::MIN),
+            ),
+            // The site the width-keyed `_` arm got wrong: as an `f32` these
+            // four bytes are 1.4e-45, and as the `u32` they are they are 1.
+            (SampleKind::U32, 1u32.to_ne_bytes().to_vec(), 1.0),
+            (
+                SampleKind::U32,
+                u32::MAX.to_ne_bytes().to_vec(),
+                f64::from(u32::MAX),
+            ),
+            (SampleKind::I32, (-1i32).to_ne_bytes().to_vec(), -1.0),
+            (SampleKind::F32, 1.5f32.to_ne_bytes().to_vec(), 1.5),
+        ];
+        for (kind, bytes, want) in cases {
+            assert_eq!(bytes.len(), kind.bytes(), "{kind:?} bytes disagree");
+            // Lead with one sample of padding so a dropped offset shows up.
+            let mut buf = vec![0xAAu8; kind.bytes()];
+            buf.extend_from_slice(&bytes);
+            let got = read_sample_f64(&buf, kind, kind.bytes());
+            assert_eq!(got, want, "{kind:?} read back as {got} not {want}");
+        }
+    }
+
+    /**
+     * Tests that reading a sample through [`read_sample_f64`] agrees with
+     * the plain typed read for the three kinds a [`PixelFormat`] carries
+     * today, so converting the width-keyed sites onto it cannot have moved
+     * any current behaviour.
+     * Works by writing a `u8`, a `u16` and an `f32` and comparing the
+     * helper's answer against the same bytes read directly.
+     * Input: 200 / 40000 / -2.5 -> Output: the same three numbers.
+     */
+    #[test]
+    fn read_sample_f64_agrees_with_the_carried_kinds() {
+        assert_eq!(read_sample_f64(&[200], SampleKind::U8, 0), 200.0);
+        assert_eq!(
+            read_sample_f64(&40000u16.to_ne_bytes(), SampleKind::U16, 0),
+            40000.0
+        );
+        assert_eq!(
+            read_sample_f64(&(-2.5f32).to_ne_bytes(), SampleKind::F32, 0),
+            -2.5
+        );
     }
 }
