@@ -238,8 +238,17 @@ fn the_width_scanner_sees_code_and_not_comments() {
  * the list can only shrink.
  * Input: every Rust file under `src` -> Output: comparisons only in the
  * named files, and a comparison in each of them.
+ *
+ * Carries `#[cfg_attr(miri, ignore)]` because it walks `src/` and reads every
+ * file, which Miri's isolation layer refuses. Miri aborts the whole run on
+ * the first refused operation rather than failing one test, so an
+ * unannotated filesystem test takes the undefined-behaviour gate down and
+ * reports as "Miri failed" (issue #652). It is recorded in
+ * `tests/miri_fs_test_inventory.txt` too, which is what stops the annotation
+ * being deleted unnoticed.
  */
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn a_byte_width_is_never_compared_outside_the_named_countdown() {
     let named: Vec<&str> = REMAINING.iter().map(|&(f, _)| f).collect();
     let mut still_there: Vec<&str> = Vec::new();
