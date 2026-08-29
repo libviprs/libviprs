@@ -368,7 +368,8 @@ impl Raster {
     ///
     /// The pixel buffer is bounded before it is reserved: the declared
     /// geometry is priced against the allocation budget through
-    /// [`DecodeLimits::check_image_alloc`](crate::source::DecodeLimits::check_image_alloc),
+    /// `DecodeLimits::check_image_alloc` (named rather than linked: it is
+    /// `pub(crate)` and these docs are public),
     /// the binary body must be wholly present before any reservation, and the
     /// reservation itself is fallible, so a hostile header cannot force a
     /// multi-gigabyte allocation or a process abort. The inverse is
