@@ -707,6 +707,51 @@ mod tests {
         }
     }
 
+    /// `"ppm"` and `"pgm"` are live rows in the shared format dispatch and each
+    /// reaches its own Netpbm container (issue #882).
+    ///
+    /// Two spellings out of the five `ppmsave` registers, because the other
+    /// three name containers this build cannot write (`P4`, `PF`) or one vips
+    /// itself refuses (`.pnm`, which demands a `multiband` interpretation and
+    /// was refused for `srgb`, `b-w` and an explicitly-`multiband` image
+    /// alike). The three are the positive control here.
+    #[test]
+    fn encode_for_format_routes_ppm_and_pgm_to_their_own_containers() {
+        let rgb = Raster::new(8, 6, PixelFormat::Rgb8, vec![128u8; 8 * 6 * 3]).unwrap();
+        let gray = Raster::new(8, 6, PixelFormat::Gray8, vec![128u8; 8 * 6]).unwrap();
+
+        for spelling in ["ppm", "PPM", ".ppm", " Ppm "] {
+            let bytes = rgb
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(bytes, rgb.encode_ppm().unwrap());
+            assert!(bytes.starts_with(b"P6"));
+        }
+        let bytes = gray.encode_to_buffer("pgm").expect("pgm is a live row");
+        assert_eq!(bytes, gray.encode_ppm().unwrap());
+        assert!(bytes.starts_with(b"P5"));
+
+        // The band count has to match the container the spelling names.
+        assert!(matches!(
+            gray.encode_to_buffer("ppm"),
+            Err(EncodeError::InvalidParameter(_))
+        ));
+        assert!(matches!(
+            rgb.encode_to_buffer("pgm"),
+            Err(EncodeError::InvalidParameter(_))
+        ));
+
+        for miss in ["pbm", "pfm", "pnm", "netpbm"] {
+            assert!(
+                matches!(
+                    rgb.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} names a container this build cannot write"
+            );
+        }
+    }
+
     /// `"hdr"` is a live row in the shared format dispatch and it reaches the
     /// Radiance writer (issue #880).
     ///

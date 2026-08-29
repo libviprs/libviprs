@@ -4203,6 +4203,187 @@ mod tests {
         );
     }
 
+    /// A 2x2 single-band `Gray8` raster, which is what `.pgm` means.
+    fn gray_2x2() -> Raster {
+        Raster::new(2, 2, PixelFormat::Gray8, vec![0u8, 64, 128, 255]).unwrap()
+    }
+
+    /**
+     * Tests that `.ppm` and `.pgm` are rows and that the other three suffixes
+     * `ppmsave` registers are not (issue #882).
+     *
+     * This is the one format where a suffix picks a **container** rather than
+     * only a codec, and it is measured rather than reasoned. On the pinned
+     * vips 8.18.6, `ppmsave` registers `.pbm`, `.pgm`, `.ppm`, `.pfm` and
+     * `.pnm`, and each writes something different from the same input:
+     *
+     * ```text
+     * $ vips black base.v 8 6 --bands 3          # 3-band uchar srgb
+     * $ vips black g.v    8 6 --bands 1          # 1-band uchar b-w
+     * ```
+     *
+     * | suffix | from the 3-band | from the 1-band |
+     * |---|---|---|
+     * | `.ppm` | `P6`, 197 bytes | `P6`, 197 bytes, coerced up to sRGB |
+     * | `.pgm` | `P5`, 101 bytes, coerced down to mono | `P5`, 101 bytes |
+     * | `.pbm` | `P4`, 55 bytes | `P4`, 55 bytes |
+     * | `.pfm` | `PF`, 628 bytes | `Pf`, 244 bytes |
+     * | `.pnm` | refused | refused |
+     *
+     * `Raster::encode_ppm` writes `P5` and `P6` and nothing else, so `.pbm`
+     * and `.pfm` have no encoder behind them and are not rows. `.pnm` is not a
+     * row either, and that one is vips's own answer: it demands a `multiband`
+     * interpretation and refuses every input I handed it, `srgb`, `b-w` **and**
+     * an image explicitly copied to `multiband`, all three with
+     * `vips_colourspace: no known route from '...' to 'multiband'`.
+     *
+     * That keeps this table what it has always been, a strict **subset** of
+     * what vips registers: every row here is a row vips has, and the gap is
+     * always in the safe direction.
+     */
+    #[test]
+    fn ppm_and_pgm_are_the_two_netpbm_containers_this_build_writes() {
+        let rgb = rgb_2x2();
+        let gray = gray_2x2();
+
+        let p6 = rgb
+            .encode_for_extension("ppm", true)
+            .expect(".ppm is a row");
+        assert_eq!(p6, rgb.encode_ppm().unwrap());
+        assert!(p6.starts_with(b"P6"), "`.ppm` is the colour container");
+
+        let p5 = gray
+            .encode_for_extension("pgm", true)
+            .expect(".pgm is a row");
+        assert_eq!(p5, gray.encode_ppm().unwrap());
+        assert!(p5.starts_with(b"P5"), "`.pgm` is the greyscale container");
+
+        assert!(saveable_extensions().contains("ppm"));
+        assert!(saveable_extensions().contains("pgm"));
+
+        // The three `ppmsave` registers that this build cannot write.
+        for extension in ["pbm", "pfm", "pnm"] {
+            assert!(
+                matches!(
+                    rgb.encode_for_extension(extension, true),
+                    Err(SaveError::UnsupportedExtension { .. })
+                ),
+                ".{extension} has no encoder behind it and must not be a row"
+            );
+            assert!(!saveable_extensions().contains(extension));
+        }
+    }
+
+    /**
+     * Tests that each Netpbm row refuses the band count its suffix does not
+     * mean, rather than writing the other container under the wrong name
+     * (issue #882).
+     *
+     * `Raster::encode_ppm` picks its magic from the **band count**: `P5` for
+     * one, `P6` for three. `ppmsave` picks it from the **suffix** and converts
+     * the colourspace to suit. Where the two disagree, this refuses, for the
+     * reason the `.hdr` row refuses (#880): no row in this table converts, and
+     * these are not going to be the first. Without the check the routes would
+     * write a `P5` body into a file called `.ppm`, which is the one outcome
+     * neither vips nor Netpbm would recognise as correct.
+     *
+     * The refusal must not read as `UnsupportedExtension`: this build has a
+     * Netpbm encoder, and the raster is what does not fit.
+     */
+    #[test]
+    fn each_netpbm_row_refuses_the_band_count_its_suffix_does_not_mean() {
+        for (extension, wrong) in [("ppm", gray_2x2()), ("pgm", rgb_2x2())] {
+            let err = wrong.encode_for_extension(extension, true).unwrap_err();
+            assert!(
+                !matches!(err, SaveError::UnsupportedExtension { .. }),
+                ".{extension} has an encoder; the band count is what is wrong, got {err}"
+            );
+            assert!(
+                err.to_string().contains("band"),
+                "the refusal must say what is wrong with the raster, got {err}"
+            );
+        }
+        // Positive control: each row does write its own band count.
+        assert!(rgb_2x2().encode_for_extension("ppm", true).is_ok());
+        assert!(gray_2x2().encode_for_extension("pgm", true).is_ok());
+    }
+
+    /**
+     * Tests that the Netpbm rows have nothing for the strip flag to drop
+     * (issue #882).
+     *
+     * A binary Netpbm file is a three-line ASCII header and the raster body.
+     * There is no ICC profile, no EXIF block and no XMP packet anywhere in the
+     * format, so a stripped save and a kept one write the same bytes. Same
+     * call as the `.gif`, `.fits`, `.jp2` and `.hdr` rows, and `.webp` beside
+     * it as the control that does differ under the flag.
+     */
+    #[test]
+    fn the_netpbm_rows_have_nothing_for_the_strip_flag_to_drop() {
+        let mut im = rgb_2x2();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("ppm", true).unwrap(),
+            im.encode_for_extension("ppm", false).unwrap(),
+            "Netpbm carries no metadata, so the strip flag has nothing to drop"
+        );
+        assert_ne!(
+            im.encode_for_extension("webp", true).unwrap(),
+            im.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
+    /**
+     * Tests that a `.ppm` this crate writes does **not** read back through the
+     * shared decode entry points, which is the one asymmetry these rows
+     * introduce (issues #882, #910).
+     *
+     * Every other row in the save table writes a container `decode_file` can
+     * read. Netpbm cannot, and it is not close: `source::sniff` has no variant
+     * for it, so `decode_file_with_limits` falls through to `image`'s
+     * `with_guessed_format`, which recognises the container and then refuses
+     * it because `Cargo.toml` builds `image` without the `pnm` feature. The
+     * refusal naming `Pnm` exactly is what says the guess worked and the codec
+     * was absent.
+     *
+     * `Raster::ppm_load` is the positive control and the way back in: the
+     * bytes are a valid Netpbm file, and what is missing is the route.
+     *
+     * This is pinned rather than left implicit because a reader who finds
+     * `save("x.ppm")` working will reasonably expect `decode_file("x.ppm")` to
+     * work, and because the day #910 lands this check is what says so.
+     */
+    #[test]
+    fn a_netpbm_this_crate_writes_does_not_read_back_through_the_shared_decoder() {
+        let written = rgb_2x2()
+            .encode_for_extension("ppm", true)
+            .expect(".ppm is a row");
+
+        // The way back in that does work, first, so the rest is about the
+        // route and not about the bytes.
+        let back = Raster::ppm_load(&written).expect("ppm_load reads what encode_ppm wrote");
+        assert_eq!((back.width(), back.height()), (2, 2));
+        assert_eq!(back.data(), rgb_2x2().data());
+
+        // And the two shared entry points, which do not.
+        assert!(
+            crate::source::sniff(&written).is_none(),
+            "Netpbm is not a sniffed container (issue #910)"
+        );
+        assert!(
+            crate::decode_bytes(&written).is_err(),
+            "decode_bytes cannot read a Netpbm file this build wrote (issue #910)"
+        );
+        // Positive control on the assertions above: a row that does round-trip.
+        let png = rgb_2x2().encode_for_extension("png", true).unwrap();
+        assert!(crate::source::sniff(&png).is_some());
+        assert!(crate::decode_bytes(&png).is_ok());
+    }
+
     /**
      * Tests that the `UnsupportedExtension` message names exactly the
      * extensions this build has an encoder behind, so the string and the
