@@ -151,6 +151,39 @@ use crate::source::{DeclaredGeometry, DecodeLimits, SourceError, resolve_page_ra
 /// ceiling instead of the crate's.
 pub const MAX_DIMENSION: u32 = 16383;
 
+/// How many RGBA planes of one frame `image-webp` 0.2.4 needs **beside** the
+/// buffer libviprs is filling, when decoding an animation.
+///
+/// `DecodeLimits::max_alloc_bytes` is a ceiling on peak memory, and pricing
+/// only the raster left it out by a factor: the decoder keeps a full-size
+/// RGBA canvas and a full-size per-frame buffer of its own, and
+/// `set_memory_limit` does not bound either, because it is consulted only in
+/// `read_chunk`, which is metadata rather than pixels (issue #892).
+///
+/// Measured with a counting global allocator on 512x512 fixtures, as peak
+/// live bytes against the amount priced:
+///
+/// | file | load | ratio | slack, in RGBA planes of one frame |
+/// |---|---|---|---|
+/// | lossless animation | one page | 3.67x | 2.00 |
+/// | lossless animation | every page | 2.36x | 2.05 |
+/// | lossy animation | one page | 3.33x | 1.75 |
+/// | lossy animation | every page | 2.42x | 2.13 |
+/// | lossless still | | 2.39x | 1.04 |
+/// | lossy still | | 1.68x | 0.51 |
+///
+/// Three and two rather than 2.13 and 1.04 because the measurements are
+/// asymptotic: below about 512x512 the decoder's fixed overheads dominate
+/// and the slack is larger in relative terms. The headroom is a plane, and
+/// `tests/webp_decode_working_set.rs` holds it from both sides, so neither
+/// an upstream regression nor an over-generous ceiling passes unnoticed.
+pub const DECODER_PLANES_ANIMATED: u64 = 3;
+
+/// The same, for a still: `image-webp` keeps one temporary RGBA plane it
+/// narrows into the caller's RGB buffer rather than a canvas and a frame.
+/// See [`DECODER_PLANES_ANIMATED`] for the measurements.
+pub const DECODER_PLANES_STILL: u64 = 2;
+
 /// The RIFF chunks libvips lifts into image metadata, paired with the
 /// field name it uses (`vips__webp_names`, `webp2vips.c:393-397`).
 ///
@@ -518,7 +551,21 @@ pub fn decode_webp_with(
     // for rather than a declared product, so it goes through `check_alloc`
     // with the geometry attached by hand rather than through
     // `check_image_alloc`, which would recompute it.
-    if limits.exceeds_alloc_budget(size as u64) {
+    // Plus what the decoder allocates beside it, which the ceiling has to
+    // cover or it is not a ceiling: see `DECODER_PLANES_ANIMATED` for the
+    // measurement. Widened to `u64` and saturated, because the sum can pass
+    // `usize` on a 32-bit target where the roll alone did not.
+    let planes = if animated {
+        DECODER_PLANES_ANIMATED
+    } else {
+        DECODER_PLANES_STILL
+    };
+    let working_set = u64::from(width)
+        .saturating_mul(u64::from(page_height))
+        .saturating_mul(4)
+        .saturating_mul(planes);
+    let priced = (size as u64).saturating_add(working_set);
+    if limits.exceeds_alloc_budget(priced) {
         return Err(SourceError::AllocLimitExceeded {
             what: "WebP frame buffer",
             geometry: Some(DeclaredGeometry {
@@ -526,7 +573,7 @@ pub fn decode_webp_with(
                 height,
                 bands: format.channels() as u32,
             }),
-            needed_bytes: size as u64,
+            needed_bytes: priced,
             max_alloc_bytes: limits.max_alloc_bytes,
         });
     }
@@ -1336,12 +1383,16 @@ mod tests {
             })
         ));
         // The allocation budget is separate: 12 pixels are inside every
-        // pixel ceiling above and still need 36 bytes of frame buffer.
+        // pixel ceiling above and still need a frame buffer.
         //
         // It reports libviprs's own shape, with the geometry and the price it
         // computed. This used to fabricate an `image::ImageError::Limits` to
         // look like the three formats `image` refuses from inside its own
         // decoder, which threw away both (issue #686).
+        //
+        // The price is 36 for the 4x3 RGB frame plus 144 for the three RGBA
+        // planes `image-webp` allocates beside it, because this file is an
+        // animation (issue #892). The geometry reported is still the frame's.
         let starved = DecodeLimits::default().with_max_alloc_bytes(8);
         let err = decode_webp(&ANIM3, starved).expect_err("8 bytes is not a 4x3 RGB frame");
         assert!(
@@ -1354,7 +1405,7 @@ mod tests {
                         height: 3,
                         bands: 3,
                     }),
-                    needed_bytes: 36,
+                    needed_bytes: 180,
                     max_alloc_bytes: 8,
                 }
             ),
@@ -1928,17 +1979,20 @@ mod tests {
             Err(SourceError::CoordLimitExceeded { height: 12, .. })
         ));
 
-        // And the allocation budget prices four frames, 144 bytes, not one
-        // frame's 36.
-        let alloc = DecodeLimits::default().with_max_alloc_bytes(100);
+        // And the allocation budget prices four frames, not one. Both
+        // prices carry the same 144 bytes of decoder working set, three
+        // RGBA planes of a 4x3 frame (issue #892), so the difference
+        // between them is the roll: 36 + 144 = 180 for one page and
+        // 144 + 144 = 288 for four. A budget of 200 sits between.
+        let alloc = DecodeLimits::default().with_max_alloc_bytes(200);
         assert!(decode_webp_with(&ANIM4_DELAY, alloc, LoadOptions::default()).is_ok());
         let err = decode_webp_with(&ANIM4_DELAY, alloc, all_pages())
-            .expect_err("144 bytes is over a 100-byte budget");
+            .expect_err("288 bytes is over a 200-byte budget");
         assert!(
             matches!(
                 err,
                 SourceError::AllocLimitExceeded {
-                    needed_bytes: 144,
+                    needed_bytes: 288,
                     geometry: Some(DeclaredGeometry {
                         width: 4,
                         height: 12,

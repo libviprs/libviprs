@@ -3027,6 +3027,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
 
+- **The WebP decode budget covers what `image-webp` allocates, not only what
+  libviprs fills** (issue #892). `max_alloc_bytes` is a ceiling on peak
+  memory and it was out by a factor: the decoder keeps a full-size RGBA
+  canvas and a full-size per-frame buffer of its own, and `set_memory_limit`
+  bounds neither, because it is consulted only on metadata chunks. Measured
+  with a counting global allocator on 512x512 fixtures, peak live bytes
+  against the amount priced:
+
+  | file | load | ratio | slack, in RGBA planes of one frame |
+  |---|---|---|---|
+  | lossless animation | one page | 3.67x | 2.00 |
+  | lossless animation | every page | 2.36x | 2.05 |
+  | lossy animation | one page | 3.33x | 1.75 |
+  | lossy animation | every page | 2.42x | 2.13 |
+  | lossless still | | 2.39x | 1.04 |
+  | lossy still | | 1.68x | 0.51 |
+
+  The price now carries three RGBA planes of one frame for an animation and
+  two for a still, both upper bounds with a plane of headroom, because the
+  measurements are asymptotic and the fixed overheads dominate below about
+  512x512. `webp::DECODER_PLANES_ANIMATED` and `DECODER_PLANES_STILL` are
+  the two numbers, public so the guard can restate them.
+
+  **This refuses files it used to accept**, at the same `max_alloc_bytes`,
+  which is the point: the old ceiling did not bound the decode. The WebP row
+  in `tests/decode_alloc_refusal_shape.rs` moves from 48 to 176 and that
+  shared guard grows a `decoder_planes` column, since "the reported geometry
+  is the one the price came from" is no longer the whole rule for a decoder
+  that lives in another crate.
+
+  `tests/webp_decode_working_set.rs` holds the model from both sides on a
+  committed 512x512 fixture: the peak must not exceed the price, and the
+  price must not exceed twice the peak.
+
 - **Three reasons a JPEG XL frame has no duration stopped being one**
   (issue #889). `frame_millis` returned an `Option` and the loader read
   `None` as "this is a page of a multipage document", which also swallowed
