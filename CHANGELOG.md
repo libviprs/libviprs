@@ -870,6 +870,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and #517 arrive as a typed refusal instead of through the arm that used to
   ask for `f32` samples and write float bit patterns into an integer raster.
 
+- **`.ppm` and `.pgm` are rows in `Raster::save`, and `"ppm"` and `"pgm"` are
+  rows in `Raster::encode_to_buffer`** (issue #882). `Raster::encode_ppm` has
+  written binary Netpbm since #77 and neither shared save route could reach it.
+
+  Two of the five suffixes `ppmsave` registers, and the reason it is two is
+  measured on the pinned vips 8.18.6. Those five are five different containers,
+  not five spellings of one: from the same input, `.ppm` writes a `P6`, `.pgm` a
+  `P5`, `.pbm` a `P4` and `.pfm` a `PF`, with a colourspace conversion behind
+  each so the file matches the suffix whatever it was handed. `.pnm` writes
+  nothing at all: it demands a `multiband` interpretation and was refused for
+  `srgb`, for `b-w` **and** for an image explicitly copied to `multiband`, every
+  time with `vips_colourspace: no known route from '...' to 'multiband'`.
+
+  `encode_ppm` writes `P5` and `P6` and nothing else, so `.pbm` and `.pfm` have
+  no encoder to route to and are not rows, and `.pnm` is not a row because vips
+  has not got one either. The table stays what it has always been, a strict
+  **subset** of what vips registers: every row is a row vips has, and the gap is
+  always in the safe direction.
+
+  **The suffix names the container, which no other row does.** `encode_ppm`
+  picks `P5` or `P6` from the band count; `ppmsave` picks it from the suffix and
+  converts to suit. Where the two disagree the row refuses, the same call `.hdr`
+  makes: no row in this table converts, and these are not going to be the first.
+  The alternative is a `P5` body in a file called `.ppm`, which is the one
+  outcome neither vips nor Netpbm reads as correct. The refusal names the band
+  count and does not read as `UnsupportedExtension`, because this build does
+  have a Netpbm encoder.
+
+  `keep_metadata` has nothing to act on: a binary Netpbm file is a three-line
+  ASCII header and the raster body, with nowhere for a profile, an EXIF block or
+  an XMP packet to live. Asserted, with `.webp` beside it as the control.
+
+  **One asymmetry, pinned rather than left implicit.** Netpbm is the only save
+  row whose output this crate cannot read back: `source::sniff` has no variant
+  for it and `image` is built without its `pnm` feature, so `decode_bytes`
+  recognises the container and refuses it, while `Raster::ppm_load` reads it
+  fine. Measured with a probe rather than inferred from an absent grep hit, and
+  filed as issue #910, which is a container addition and moves all six guarded
+  sites. A check now says so, so the day #910 lands it is the thing that goes
+  red.
+
 - **`.hdr` is a row in `Raster::save` and `"hdr"` is one in
   `Raster::encode_to_buffer`** (issue #880). Radiance had a matched
   `float2rad` encoder since #589 and no shared save route could reach it, so
