@@ -643,7 +643,7 @@ impl Manifest {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use libviprs::manifest::{ManifestBuilder, ChecksumAlgo};
 /// let builder = ManifestBuilder::new()
 ///     .with_checksums(ChecksumAlgo::Blake3)

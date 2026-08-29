@@ -23,7 +23,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use std::sync::Arc;
 //! use libviprs::extensions::Extensions;
 //!
