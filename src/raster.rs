@@ -2117,6 +2117,49 @@ mod tests {
     }
 
     /**
+     * The same contract on [`try_plane_len_filled`], which is the form the
+     * scratch planes in [`crate::arithmetic`] reserve through: it fills to the
+     * `len` it was handed, not to whatever the allocator rounded the
+     * reservation up to.
+     *
+     * A separate cell rather than an arm of the one above, because the two
+     * forms compute their length differently and the mutation pass proved the
+     * difference matters: substituting `out.resize(out.capacity(), fill)` into
+     * `try_plane_len_filled` left the whole suite green, exactly as the same
+     * substitution into `try_plane_filled` did before that cell existed
+     * (issue #696). One over-reserve knob, two contracts, two checks.
+     *
+     * The capacity assertion is the positive control on the hook, for the same
+     * reason it is there above.
+     */
+    #[test]
+    fn a_filled_plane_sized_in_elements_is_as_long_as_its_len_and_not_its_capacity() {
+        const EXTRA: usize = 4096;
+        const LEN: usize = 150;
+        let plane = with_plane_over_reserve(EXTRA, || {
+            try_plane_len_filled::<u8>("test.filled_len", 8, 8, LEN, 7u8)
+        })
+        .expect("a 150-byte plane is servable");
+
+        assert!(
+            plane.capacity() >= LEN + EXTRA,
+            "the over-reserve has to have happened, or the length check below \
+             passes for the ordinary reason and says nothing; capacity is {}",
+            plane.capacity()
+        );
+        assert_eq!(
+            plane.len(),
+            LEN,
+            "the length is the one the caller asked for, however much room the \
+             allocator handed back"
+        );
+        assert!(
+            plane.iter().all(|&b| b == 7),
+            "and every element of that length is the fill"
+        );
+    }
+
+    /**
      * Tests that the ceiling refuses the site it names and no other, which is
      * the whole difference between a label and the ordinal the three private
      * ceilings kept (issue #696).
@@ -2272,14 +2315,6 @@ mod tests {
         convolution: usize,
         /// Reservations at a `colour.` site.
         colour: usize,
-        /// Reservations at an `arithmetic.` site.
-        ///
-        /// Zero on every row, and that is the assertion: none of these paths
-        /// reaches into `arithmetic.rs`. The counts for the ops that *do*
-        /// reserve there live in `arithmetic.rs`'s own funnel check, next to
-        /// the radius ranges and window sizes those rows need, the same way
-        /// the ICC entry points live in `colour.rs` (issue #696).
-        arithmetic: usize,
     }
 
     /// The 3x3 box blur the `conv` and `compass` rows run.
@@ -2304,7 +2339,6 @@ mod tests {
             widenings: 0,
             convolution: 1,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_conv, float arm",
@@ -2313,7 +2347,6 @@ mod tests {
             widenings: 0,
             convolution: 1,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_sobel",
@@ -2322,7 +2355,6 @@ mod tests {
             widenings: 0,
             convolution: 1,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_gaussblur, integer arm",
@@ -2331,7 +2363,6 @@ mod tests {
             widenings: 0,
             convolution: 2,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_compass, Max over 4 rounds",
@@ -2348,7 +2379,6 @@ mod tests {
             widenings: 4,
             convolution: 5,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_sharpen",
@@ -2357,7 +2387,6 @@ mod tests {
             widenings: 1,
             convolution: 3,
             colour: 2,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_canny, float arm",
@@ -2366,7 +2395,6 @@ mod tests {
             widenings: 2,
             convolution: 4,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_canny, uchar arm",
@@ -2375,7 +2403,6 @@ mod tests {
             widenings: 0,
             convolution: 4,
             colour: 0,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_de00",
@@ -2384,7 +2411,6 @@ mod tests {
             widenings: 0,
             convolution: 0,
             colour: 4,
-            arithmetic: 0,
         },
         Funnel {
             op: "try_colourspace to Labs",
@@ -2393,7 +2419,6 @@ mod tests {
             widenings: 0,
             convolution: 0,
             colour: 1,
-            arithmetic: 0,
         },
     ];
 
@@ -2417,8 +2442,10 @@ mod tests {
      * magic constant and moves for any reason at all; the split says which
      * module changed, and the total is then asserted to be the sum of the
      * parts, so a **fifth** prefix joining the funnel is caught too rather than
-     * being quietly absorbed. `arithmetic.` is the fifth column and is zero
-     * on every row here; its own counts are in `arithmetic.rs`.
+     * being quietly absorbed, and `arithmetic.` reaching one of these paths is
+     * caught that way. Its own rows are counted in `arithmetic.rs`, next to
+     * the radius ranges and window sizes they need, the same way the ICC entry
+     * points are counted in `colour.rs`.
      *
      * # What this counts, and what the neighbouring instrument counts
      *
@@ -2462,7 +2489,6 @@ mod tests {
                 ("f32 widenings", count(PLANE_F32_SAMPLES), row.widenings),
                 ("convolution planes", count("convolution."), row.convolution),
                 ("colour planes", count("colour."), row.colour),
-                ("arithmetic planes", count("arithmetic."), row.arithmetic),
             ];
             for (what, got, want) in parts {
                 assert_eq!(
@@ -2476,7 +2502,7 @@ mod tests {
             let sum: usize = parts.iter().map(|(_, got, _)| got).sum();
             assert_eq!(
                 total, sum,
-                "{} made {total} reservations and only {sum} of them are under one of the five \
+                "{} made {total} reservations and only {sum} of them are under one of the four \
                  prefixes above: a module joined the funnel and no row here names it",
                 row.op
             );
