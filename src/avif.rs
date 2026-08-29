@@ -1213,7 +1213,13 @@ fn decode_av1(
     unsafe extern "C" {
         fn dav1d_default_settings(s: *mut Dav1dSettings);
         fn dav1d_open(c_out: *mut *mut c_void, s: *const Dav1dSettings) -> c_int;
-        fn dav1d_data_create(buf: *mut Dav1dData, sz: usize) -> *mut u8;
+        fn dav1d_data_wrap(
+            buf: *mut Dav1dData,
+            ptr: *const u8,
+            sz: usize,
+            free_callback: Option<unsafe extern "C" fn(*const u8, *mut c_void)>,
+            user_data: *mut c_void,
+        ) -> c_int;
         fn dav1d_data_unref(buf: *mut Dav1dData);
         fn dav1d_send_data(c: *mut c_void, data: *mut Dav1dData) -> c_int;
         fn dav1d_get_picture(c: *mut c_void, out: *mut Dav1dPicture) -> c_int;
@@ -1253,6 +1259,38 @@ fn decode_av1(
         }
     }
 
+    /// The payload buffer this crate lends the decoder, and what it takes to
+    /// give the allocation back.
+    ///
+    /// The pointer is the one [`Box::into_raw`] produced, kept so the buffer
+    /// is released through the tag it was allocated under. The pointer dav1d
+    /// hands back to a free callback is not that one: `dav1d_data_wrap`
+    /// rebuilds it through `slice::from_raw_parts`, so it arrives read-only
+    /// and deallocating through it would be the same defect this whole route
+    /// exists to avoid.
+    struct Lent {
+        ptr: *mut u8,
+        len: usize,
+    }
+
+    /// Give the lent buffer back. dav1d calls this exactly once, from the
+    /// last `dav1d_data_unref` on the `Dav1dData` that wrapped it.
+    ///
+    /// # Safety
+    ///
+    /// `cookie` is the `Box<Lent>` leaked below, or null.
+    unsafe extern "C" fn give_back(_data: *const u8, cookie: *mut c_void) {
+        if cookie.is_null() {
+            return;
+        }
+        // SAFETY: the caller passes back the cookie `dav1d_data_wrap` was
+        // given, which is the leaked `Box<Lent>`, once.
+        let lent = unsafe { Box::from_raw(cookie.cast::<Lent>()) };
+        // SAFETY: `ptr` and `len` came from `Box::into_raw` on a
+        // `Box<[u8]>` of exactly that length, so this is the same box.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(lent.ptr, lent.len)) });
+    }
+
     // SAFETY: every call below is the documented dav1d sequence, on pointers
     // this function owns for the whole call. `settings`, `data` and `picture`
     // are stack locals that outlive the calls taking them; the context is
@@ -1282,13 +1320,27 @@ fn decode_av1(
         }
 
         let mut data = Data(MaybeUninit::<Dav1dData>::zeroed().assume_init());
-        let buffer = dav1d_data_create(&mut data.0, payload.len());
-        if buffer.is_null() {
+        // Lend dav1d a buffer this crate allocated rather than filling the
+        // one `dav1d_data_create` hands back. That call returns a pointer
+        // `rav1d` derives from a shared reference (`From<Rav1dData> for
+        // Dav1dData` builds it with `data.as_ref()`), so the tag it carries
+        // permits reads and nothing else, and writing the payload through it
+        // is undefined behaviour under both Stacked Borrows and Tree Borrows.
+        // Miri reports it on the first AVIF fixture that decodes. The wrap
+        // route costs the same single copy and writes only through a pointer
+        // this function owns.
+        let lent: Box<[u8]> = payload.to_vec().into_boxed_slice();
+        let len = lent.len();
+        let ptr = Box::into_raw(lent).cast::<u8>();
+        let cookie = Box::into_raw(Box::new(Lent { ptr, len })).cast::<c_void>();
+        if dav1d_data_wrap(&mut data.0, ptr, len, Some(give_back), cookie) != 0 {
+            // The wrap failed, so dav1d never took the buffer and will never
+            // call `give_back`. Reclaim it here instead of leaking it.
+            give_back(ptr, cookie);
             return Err(AvifError::Decode {
                 message: "could not allocate the AV1 input buffer".into(),
             });
         }
-        std::ptr::copy_nonoverlapping(payload.as_ptr(), buffer, payload.len());
 
         if dav1d_send_data(decoder.0, &mut data.0) != 0 {
             return Err(AvifError::Decode {
@@ -1419,6 +1471,85 @@ unsafe fn read_picture(picture: &Dav1dPicture, nclx: Option<Nclx>) -> Result<Fra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The region of this file that talks to dav1d, with every comment
+    /// stripped, so the checks below read code and not prose.
+    ///
+    /// It runs from the `extern "C"` block to the top of [`read_picture`],
+    /// which is exactly the span [`decode_av1`] owns. Counting over the whole
+    /// file would be wrong in the way this epic keeps rediscovering: the
+    /// sentence explaining *why* `dav1d_data_create` is not used names it, so a
+    /// whole-file count of the name would be satisfied by the prose arguing
+    /// against it.
+    fn ffi_region_without_comments() -> String {
+        let source = include_str!("avif.rs");
+        let start = source
+            .find("    unsafe extern \"C\" {")
+            .expect("the dav1d `extern \"C\"` block moved or was renamed");
+        let end = source[start..]
+            .find("unsafe fn read_picture(")
+            .map(|offset| start + offset)
+            .expect("`read_picture` moved or was renamed");
+        source[start..end]
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The AV1 input buffer is one this crate allocated, and dav1d is lent it
+    /// rather than asked for one.
+    ///
+    /// `dav1d_data_create` hands back a pointer for the caller to fill, and in
+    /// `rav1d` that pointer is built out of a shared reference, so it carries a
+    /// read-only tag and writing the payload through it is undefined behaviour
+    /// under both Stacked Borrows and Tree Borrows (issue #912). Miri says so
+    /// on the first AVIF fixture that decodes, and nothing else can: the write
+    /// is well-behaved at runtime today, so no assertion about pixels or
+    /// timings will ever go red on it.
+    ///
+    /// That leaves the shape of the call as the only thing an ordinary test
+    /// run can hold, so this holds it. It is weaker than running Miri, and it
+    /// is what stops the two lines going back in unnoticed.
+    ///
+    /// The `dav1d_data_wrap` count is the positive control. A zero has two
+    /// explanations, one of which is a scanner that found nothing at all, and
+    /// two matches for the replacement rule out the anchors having drifted off
+    /// the region.
+    #[test]
+    fn the_av1_input_buffer_is_lent_to_dav1d_rather_than_taken_from_it() {
+        let region = ffi_region_without_comments();
+
+        let wraps = region.matches("dav1d_data_wrap(").count();
+        assert_eq!(
+            wraps, 2,
+            "expected the `dav1d_data_wrap` declaration and its one call in the FFI \
+             region, found {wraps}. If this is 0 the scanner is looking at the wrong \
+             span and every other assertion here is worthless."
+        );
+
+        let creates = region.matches("dav1d_data_create").count();
+        assert_eq!(
+            creates, 0,
+            "`dav1d_data_create` is back in the dav1d call sequence ({creates} \
+             mentions in code). The buffer it returns carries a read-only tag in \
+             `rav1d`, so filling it is undefined behaviour under both aliasing \
+             models (issue #912). Allocate the payload here and lend it through \
+             `dav1d_data_wrap` instead."
+        );
+
+        let copies = region.matches("copy_nonoverlapping").count();
+        assert_eq!(
+            copies, 0,
+            "the FFI region copies through a raw pointer again ({copies} sites). \
+             The payload is copied by `to_vec` into an allocation this function \
+             owns; a `copy_nonoverlapping` here is how issue #912 was written the \
+             first time."
+        );
+    }
 
     /// The lossless 8-bit fixture, which is the bit-exactness anchor for the
     /// whole module: `heifsave --lossless --bitdepth 8` writes AV1 with
