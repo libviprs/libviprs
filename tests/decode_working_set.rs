@@ -48,11 +48,18 @@
 //!     --Q 50 --effort 0 --subsample-mode off --keep none
 //! ```
 //!
-//! Three rather than one because the AVIF working set is the shape of the
+//! Four rather than one because the AVIF working set is the shape of the
 //! decoded frame, so subsampling and the alpha item are exactly the two terms
 //! that move: 4:4:4 keeps three full planes, 4:2:0 keeps one and two quarters,
 //! and an alpha item is a second frame held while the first is assembled. A
-//! single 4:4:4 fixture would leave both untested.
+//! single 4:4:4 fixture would leave both untested, and the 4:2:0-with-alpha
+//! one is there because at 4:4:4 the alpha term can be dropped and the bound
+//! still holds.
+//!
+//! ```text
+//! vips heifsave rampa.png rgba420_512.avif --compression av1 --bitdepth 8 \
+//!     --Q 50 --effort 0 --subsample-mode on  --keep none
+//! ```
 //!
 //! Every fixture arrives through `include_bytes!`, so nothing here touches
 //! the filesystem at run time and no row belongs in
@@ -76,6 +83,15 @@ const AVIF_420: &[u8] = include_bytes!("fixtures/rgb420_512.avif");
 /// 4:4:4 8-bit with an alpha item, which is a **second** decoded frame held
 /// alongside the first while `assemble` runs.
 const AVIF_444A: &[u8] = include_bytes!("fixtures/rgba444_512.avif");
+/// 4:2:0 8-bit with an alpha item, which is the case that makes the alpha
+/// term of the price load bearing.
+///
+/// At 4:4:4 the primary frame is three full planes and the slack in that term
+/// happens to cover the alpha frame as well, so dropping the alpha term does
+/// not break the bound. At 4:2:0 the primary frame is one and a half planes
+/// and the alpha frame is a full one, so the term is the difference between
+/// bounding this decode and not.
+const AVIF_420A: &[u8] = include_bytes!("fixtures/rgba420_512.avif");
 
 thread_local! {
     /// Live bytes and the high-water mark, per thread, because the harness
@@ -151,8 +167,7 @@ fn ramp(dim: u32, bands: u32) -> Raster {
     } else {
         PixelFormat::Rgb8
     };
-    Raster::new(dim, dim, format, (0..n).map(|v| (v / 7) as u8).collect())
-        .expect("ramp fixture")
+    Raster::new(dim, dim, format, (0..n).map(|v| (v / 7) as u8).collect()).expect("ramp fixture")
 }
 
 /// One container, at a geometry big enough for its planes to be the budget.
@@ -180,12 +195,7 @@ fn cases() -> Vec<Case> {
         },
     ];
     if cfg!(feature = "avif") {
-        for (bytes, note) in [
-            (AVIF_444, "4:4:4"),
-            (AVIF_420, "4:2:0"),
-            (AVIF_444A, "4:4:4 with alpha"),
-        ] {
-            let _ = note;
+        for bytes in [AVIF_444, AVIF_420, AVIF_444A, AVIF_420A] {
             cases.push(Case {
                 format: "avif",
                 label: "AVIF frame buffer",
@@ -206,8 +216,9 @@ fn cases() -> Vec<Case> {
 /// What the decoder charges for `case`, taken from its own refusal rather
 /// than restated.
 fn priced(case: &Case) -> u64 {
-    let err = decode_bytes_with_limits(&case.bytes, DecodeLimits::default().with_max_alloc_bytes(1))
-        .expect_err("a one-byte budget must refuse every case here");
+    let err =
+        decode_bytes_with_limits(&case.bytes, DecodeLimits::default().with_max_alloc_bytes(1))
+            .expect_err("a one-byte budget must refuse every case here");
     let SourceError::AllocLimitExceeded {
         what, needed_bytes, ..
     } = err
@@ -231,8 +242,8 @@ fn peak(case: &Case) -> i64 {
             DecodeLimits::default().with_max_alloc_bytes(u64::MAX),
         )
     });
-    let decoded =
-        decoded.unwrap_or_else(|e| panic!("{}: must decode with the budget lifted: {e}", case.format));
+    let decoded = decoded
+        .unwrap_or_else(|e| panic!("{}: must decode with the budget lifted: {e}", case.format));
     assert_eq!(
         (decoded.width(), decoded.height()),
         (512, 512),

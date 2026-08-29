@@ -651,7 +651,11 @@ struct FileScan {
 /// * [`SourceError::Gif`] wrapping [`GifError::Decode`] for bytes that are
 ///   not a GIF or that are malformed, [`GifError::NoFrames`] for a file with
 ///   no frames, or [`SourceError::AllocLimitExceeded`] when the declared
-///   geometry is over [`DecodeLimits::max_alloc_bytes`].
+///   geometry is over [`DecodeLimits::max_alloc_bytes`]. The price is every
+///   buffer the walk holds at once, not one of them: the roll, the canvas,
+///   the snapshot a "restore to previous" disposal rewinds to and one frame
+///   of palette indices (issue #944). That makes this stricter than it was,
+///   by about a factor of three for a still.
 /// * [`SourceError::CoordLimitExceeded`] when either axis exceeds
 ///   [`DecodeLimits::max_coord`].
 /// * [`SourceError::DimensionLimitExceeded`] when `width * height` exceeds
@@ -703,25 +707,8 @@ pub fn decode_gif_with(
     let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    // The price and the comparison are the crate's, not this module's
-    // (issue #632). This one used to be a plain `*`, safe only because a
-    // GIF states its logical screen in `u16` and so cannot reach a product
-    // a `u64` will not hold; nothing in the expression said so, and the
-    // three codecs that copied the shape do not have that guarantee.
-    // `decode_alloc_bytes` saturates, so the guarantee is no longer load
-    // bearing. The price, the comparison and now the reporting are all the
-    // crate's: this used to build a `GifError::AllocLimitExceeded` of its
-    // own, one of five variants re-tagging the same refusal, which #686
-    // collapsed onto `SourceError::AllocLimitExceeded`.
-    //
-    // `bands` is what the canvas actually costs, four with a transparent index
-    // and three without, which is the count fifteen lines up and the count the
-    // refusal reports.
-    limits.check_image_alloc("GIF canvas", width, height, bands as u64, 1)?;
-
-    // The roll is `pages` screens stacked, and it is priced separately from
-    // the canvas because it is a separate allocation and, for an animation,
-    // much the larger of the two.
+    // The roll is `pages` screens stacked, and it is the larger of the two
+    // buffers for an animation.
     //
     // The product is taken in `u64` and *checked* rather than saturated. A
     // saturating narrow would substitute a `u32::MAX` height that is smaller
@@ -737,8 +724,65 @@ pub fn decode_gif_with(
     if pages > 1 {
         limits.check_coord(width, roll_height)?;
         limits.check_pixels(width, roll_height)?;
-        limits.check_image_alloc("GIF animation", width, roll_height, bands as u64, 1)?;
     }
+
+    // The price and the comparison are the crate's, not this module's
+    // (issue #632). This one used to be a plain `*`, safe only because a
+    // GIF states its logical screen in `u16` and so cannot reach a product
+    // a `u64` will not hold; nothing in the expression said so, and the
+    // three codecs that copied the shape do not have that guarantee.
+    // `decode_alloc_bytes` saturates, so the guarantee is no longer load
+    // bearing. The price, the comparison and now the reporting are all the
+    // crate's: this used to build a `GifError::AllocLimitExceeded` of its
+    // own, one of five variants re-tagging the same refusal, which #686
+    // collapsed onto `SourceError::AllocLimitExceeded`.
+    //
+    // `bands` is what the canvas actually costs, four with a transparent index
+    // and three without, which is the count fifteen lines up and the count the
+    // refusal reports.
+    //
+    // **One check, not two, and it prices the whole live set** (issue #944).
+    // `max_alloc_bytes` is a ceiling on peak memory, and this module holds
+    // four buffers at once: the roll it is filling, the canvas each frame is
+    // composited on, the snapshot a "restore to previous" disposal rewinds
+    // to, and one frame's palette indices. Pricing them one at a time against
+    // the same ceiling let a single-page 1024x1024 GIF peak at 2.35x what its
+    // refusal said it needed, so a caller sizing a container limit from the
+    // message was killed by a factor. Measured with a counting global
+    // allocator in `tests/decode_working_set.rs`; the model lands within half
+    // a percent of the peak, and the rest is the `gif` crate's own fixed
+    // buffers.
+    //
+    // The snapshot is priced whether or not any frame asks for it, which
+    // over-prices a file with no "restore to previous" disposal by one
+    // canvas. That is the trade #892 made for WebP: a ceiling that is
+    // sometimes generous still bounds the peak, and one that is sometimes
+    // short does not bound anything.
+    let canvas_bytes = crate::raster::decode_alloc_bytes(width, height, bands as u64, 1);
+    // The canvas, the snapshot, and one screen-sized frame of palette
+    // indices, which is everything live beside whichever buffer the geometry
+    // below names. A frame *larger* than the screen is priced again where it
+    // is read, because nothing up here can know its rectangle.
+    let working_set = canvas_bytes
+        .saturating_mul(2)
+        .saturating_add(crate::raster::decode_alloc_bytes(width, height, 1, 1));
+    // The geometry follows the buffer the price is built around: the roll for
+    // an animation, the single screen for a still. Both labels survive from
+    // when these were two checks, and they still say which of the two a
+    // caller is looking at.
+    let (what, priced_height) = if pages > 1 {
+        ("GIF animation", roll_height)
+    } else {
+        ("GIF canvas", height)
+    };
+    limits.check_image_alloc_with_working_set(
+        what,
+        width,
+        priced_height,
+        bands as u64,
+        1,
+        working_set,
+    )?;
 
     // The canvas starts fully transparent and stays that way outside the
     // frame rectangle. libnsgif renders frame 0 over a cleared buffer and
@@ -751,10 +795,15 @@ pub fn decode_gif_with(
     // can raise `max_alloc_bytes` past 4 GiB there.
     let page_bytes = buffer_len(width, height, bands).map_err(GifError::Raster)?;
     let mut canvas = vec![0u8; page_bytes];
-    let mut data = vec![0u8; buffer_len(width, roll_height, bands).map_err(GifError::Raster)?];
+    let roll_bytes = buffer_len(width, roll_height, bands).map_err(GifError::Raster)?;
+    let mut data = vec![0u8; roll_bytes];
+    // What stays live for the whole walk: the roll, the canvas, and the
+    // snapshot the canvas is copied into. Every per-frame price below is
+    // added to this rather than compared with the budget on its own.
+    let roll_and_canvas = (roll_bytes as u64).saturating_add(canvas_bytes.saturating_mul(2));
     // The snapshot a "restore to previous" disposal rewinds to. Allocated
-    // lazily, and not priced again: it is the same size as the canvas, which
-    // the budget has already cleared, and the budget is per allocation.
+    // lazily. It is priced with the canvas up top rather than here, because
+    // the budget is a ceiling on the peak and this is live at the peak.
     let mut previous: Vec<u8> = Vec::new();
     let mut delays: Vec<i64> = Vec::with_capacity(pages as usize);
     let global = decoder.global_palette().map(<[u8]>::to_vec);
@@ -800,7 +849,19 @@ pub fn decode_gif_with(
         // 4 GiB allocation off a forty-byte file. Priced here, through the
         // crate's own budget, because the screen price two dozen lines up
         // does not cover it and the animation walk does this once per frame.
-        let indices_bytes = limits.check_image_alloc("GIF frame indices", fw, fh, 1, 1)?;
+        // Priced against everything already live rather than on its own
+        // (issue #944): the roll, the canvas and the snapshot are all still
+        // held while this buffer is reserved, so a frame that fits the
+        // remaining budget on its own can still take the process past the
+        // ceiling. `roll_and_canvas` is that live set.
+        let indices_bytes = limits.check_image_alloc_with_working_set(
+            "GIF frame indices",
+            fw,
+            fh,
+            1,
+            1,
+            roll_and_canvas,
+        )?;
         let mut indices =
             vec![
                 0u8;
@@ -3110,32 +3171,38 @@ mod tests {
         let starved = DecodeLimits::default().with_max_alloc_bytes(4);
         match decode_gif(&bytes, starved) {
             Err(SourceError::AllocLimitExceeded { needed_bytes, .. }) => {
-                assert_eq!(needed_bytes, 4 * 4 * 3);
+                // The roll, the canvas, the restore-to-previous snapshot and
+                // one screen of palette indices, which is the whole live set
+                // rather than one buffer of it (issue #944).
+                assert_eq!(needed_bytes, 3 * (4 * 4 * 3) + 4 * 4);
             }
             other => panic!("expected AllocLimitExceeded, got {other:?}"),
         }
     }
 
     /**
-     * Tests that the allocation budget bites at exactly the byte the
-     * declared canvas costs, and not one byte either side. The case above
-     * refuses at a budget of four against a price of forty-eight, which a
-     * price wrong by a factor would also refuse; this one cannot pass
-     * unless the price is exact.
-     * Input: the 4x4 opaque fixture at `max_alloc_bytes` 48 then 47 ->
+     * Tests that the allocation budget bites at exactly the byte the decode
+     * costs, and not one byte either side. The case above refuses at a budget
+     * of four, which a price wrong by a factor would also refuse; this one
+     * cannot pass unless the price is exact.
+     * The price is the whole live set and not the canvas alone (issue #944):
+     * three 4x4 RGB screens, for the roll, the canvas and the snapshot a
+     * "restore to previous" disposal rewinds to, plus one 4x4 buffer of
+     * palette indices. 144 + 16 = 160.
+     * Input: the 4x4 opaque fixture at `max_alloc_bytes` 160 then 159 ->
      * Output: a clean 4x4 three-band decode, then `AllocLimitExceeded
-     * { needed: 48 }`.
+     * { needed: 160 }`.
      */
     #[test]
     fn the_canvas_budget_bites_at_exactly_the_declared_price() {
         let bytes = opaque_fixture();
-        let exact = DecodeLimits::default().with_max_alloc_bytes(48);
-        let raster = decode_gif(&bytes, exact).expect("48 bytes is exactly a 4x4 RGB canvas");
+        let exact = DecodeLimits::default().with_max_alloc_bytes(160);
+        let raster = decode_gif(&bytes, exact).expect("160 bytes is exactly a 4x4 RGB decode");
         assert_eq!((raster.width(), raster.height()), (4, 4));
         assert_eq!(raster.format(), PixelFormat::Rgb8);
 
-        let short = DecodeLimits::default().with_max_alloc_bytes(47);
-        let err = decode_gif(&bytes, short).expect_err("47 bytes is one short of the canvas");
+        let short = DecodeLimits::default().with_max_alloc_bytes(159);
+        let err = decode_gif(&bytes, short).expect_err("159 bytes is one short of the decode");
         assert!(
             matches!(
                 err,
@@ -3146,8 +3213,8 @@ mod tests {
                         height: 4,
                         bands: 3,
                     }),
-                    needed_bytes: 48,
-                    max_alloc_bytes: 47,
+                    needed_bytes: 160,
+                    max_alloc_bytes: 159,
                 }
             ),
             "{err:?}"
@@ -5643,8 +5710,10 @@ mod tests {
             }],
         );
 
-        let err = decode_gif(&bytes, DecodeLimits::default().with_max_alloc_bytes(15))
-            .expect_err("16 bytes of indices is over a 15-byte budget");
+        // 16 bytes of indices, on top of the 1x1 roll, canvas and snapshot
+        // that are all still live when this buffer is reserved (issue #944).
+        let err = decode_gif(&bytes, DecodeLimits::default().with_max_alloc_bytes(24))
+            .expect_err("16 bytes of indices over a 9-byte live set is over a 24-byte budget");
         assert!(
             matches!(
                 err,
@@ -5655,15 +5724,15 @@ mod tests {
                         height: 4,
                         bands: 1,
                     }),
-                    needed_bytes: 16,
-                    max_alloc_bytes: 15,
+                    needed_bytes: 25,
+                    max_alloc_bytes: 24,
                 }
             ),
             "{err:?}"
         );
 
-        let raster = decode_gif(&bytes, DecodeLimits::default().with_max_alloc_bytes(16))
-            .expect("16 bytes is exactly the frame's indices");
+        let raster = decode_gif(&bytes, DecodeLimits::default().with_max_alloc_bytes(25))
+            .expect("25 bytes is exactly the live set plus the frame's indices");
         assert_eq!((raster.width(), raster.height()), (1, 1), "the frame clips");
     }
 
@@ -5706,9 +5775,12 @@ mod tests {
      * before it is built, so a four-frame load cannot slip through on a
      * one-frame price. Works by loading a four-frame fixture at the exact
      * roll price and one byte under it.
-     * The price is `width * page-height * pages * bands`: 2 * 2 * 4 * 3 = 48
-     * bytes for this fixture, where the single 2x2 canvas is 12.
-     * Input: a four-frame 2x2 GIF at budgets 48 and 47 -> Output: a roll,
+     * The roll is `width * page-height * pages * bands`: 2 * 2 * 4 * 3 = 48
+     * bytes for this fixture, where the single 2x2 canvas is 12. Since #944
+     * the price is the whole live set, so it is that roll plus the canvas,
+     * the restore-to-previous snapshot and one 2x2 buffer of palette
+     * indices: 48 + 24 + 4 = 76.
+     * Input: a four-frame 2x2 GIF at budgets 76 and 75 -> Output: a roll,
      * then `SourceError::AllocLimitExceeded` naming the roll geometry.
      */
     #[test]
@@ -5719,18 +5791,18 @@ mod tests {
 
         let raster = decode_gif_with(
             &bytes,
-            DecodeLimits::default().with_max_alloc_bytes(48),
+            DecodeLimits::default().with_max_alloc_bytes(76),
             all,
         )
-        .expect("48 bytes is exactly the 2x8 RGB roll");
+        .expect("76 bytes is exactly the 2x8 RGB roll and what is held beside it");
         assert_eq!(raster.height(), 8);
 
         let err = decode_gif_with(
             &bytes,
-            DecodeLimits::default().with_max_alloc_bytes(47),
+            DecodeLimits::default().with_max_alloc_bytes(75),
             all,
         )
-        .expect_err("47 bytes is one short of the roll");
+        .expect_err("75 bytes is one short of the roll and its working set");
         assert!(
             matches!(
                 err,
@@ -5741,8 +5813,8 @@ mod tests {
                         height: 8,
                         bands: 3,
                     }),
-                    needed_bytes: 48,
-                    max_alloc_bytes: 47,
+                    needed_bytes: 76,
+                    max_alloc_bytes: 75,
                 }
             ),
             "{err:?}"

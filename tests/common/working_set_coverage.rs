@@ -60,11 +60,20 @@ pub fn unmeasured() -> Vec<(&'static str, &'static str)> {
         // itself sized: the bytes priced are the bytes allocated, and there
         // is no second crate holding planes beside them. That is an argument
         // rather than a measurement, which is why they are on this list.
-        ("v", "decoded in-crate, straight out of the file's own byte range"),
-        ("ppm", "decoded in-crate from the ASCII or binary sample run"),
+        (
+            "v",
+            "decoded in-crate, straight out of the file's own byte range",
+        ),
+        (
+            "ppm",
+            "decoded in-crate from the ASCII or binary sample run",
+        ),
         ("fits", "decoded in-crate from the raw data unit"),
         ("nifti", "decoded in-crate from the raw voxel array"),
-        ("mat", "decoded in-crate from the (possibly inflated) array element"),
+        (
+            "mat",
+            "decoded in-crate from the (possibly inflated) array element",
+        ),
         // And these three have no way to reach an asymptotic geometry from
         // this crate: there is no encoder for them here, and every committed
         // fixture is a few pixels across, where a decoder's fixed overheads
