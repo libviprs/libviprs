@@ -189,9 +189,13 @@ fn raw_string_start(b: &[u8], i: usize) -> Option<(usize, usize)> {
     if prev_ident {
         return None;
     }
+    // `c"..."` needs nothing here: it falls through to the plain `"` branch
+    // a byte later and is masked correctly by luck. `cr"..."` does need to
+    // be here, the same as `br"..."` beside it, kept in step with
+    // `tests/sample_kind_spine.rs`'s copy (issue #940's panel).
     let mut k = if b[i] == b'r' {
         i + 1
-    } else if b[i] == b'b' && i + 1 < b.len() && b[i + 1] == b'r' {
+    } else if (b[i] == b'b' || b[i] == b'c') && i + 1 < b.len() && b[i + 1] == b'r' {
         i + 2
     } else {
         return None;
@@ -300,6 +304,10 @@ fn the_scanner_reads_code_and_not_prose() {
         (
             "a lifetime on the line the block is on",
             "fn f<'a>(s: &'a str) -> bool { let t: &'static str = \"n\"; unsafe { h(t) } }\n",
+        ),
+        (
+            "a raw C-string holding an unmatched quote, issue #940's panel",
+            "fn f() { let _ = cr#\"an unmatched \" quote\"#; }\nfn g() { unsafe { h() } }\n",
         ),
     ] {
         // Collected rather than asserted row by row, so one run names every
