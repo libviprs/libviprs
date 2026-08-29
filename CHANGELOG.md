@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`GifError::BadPageNumber` is gone**, folded into the
+  `SourceError::PageOutOfRange` the WebP and JPEG XL loaders already report
+  (issue #845). One refusal had two typed spellings, carrying the same three
+  numbers under different names (`frames` against `pages`) with the same
+  message bar the word before the colon, because GIF landed its animated load
+  in the same batch as the other two and put its refusal where every
+  self-decoded codec in this crate puts one.
+
+  `GifError` is `#[non_exhaustive]`, so a caller with a wildcard arm is
+  unaffected and a caller matching the variant by name moves to
+  `SourceError::PageOutOfRange { format: "gif", page, n, pages }`. That is the
+  same shape #686's collapse of five `AllocLimitExceeded` variants took.
+
+  `gif::LoadOptions::window` was a second copy of `source::resolve_page_range`
+  and is now a call to it. The two were written against each other field for
+  field so that folding them would be a deletion rather than a redesign, and it
+  was: the whole rule went, and every measurement behind it already lived on
+  the shared one.
 - **`hist_find_indexed` sums onto `FloatF32` instead of a 16-bit format**
   (issue #887). Breaking for the same reason #532 is: the output format changes.
 
