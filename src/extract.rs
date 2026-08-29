@@ -43,10 +43,12 @@
 //!   one fill that does **not** come from the depth: its ink is a property of
 //!   the [`Interpretation`] and of the mechanism vips paints it with, so it
 //!   reads the tag rather than the depth ceiling (issue #667), and the variant
-//!   doc on [`Extend::White`] carries the measured table. That table's float
-//!   column belongs to the resamplers: `embed` and `gravity` refuse a float
-//!   raster outright with [`ExtractError::FloatUnsupported`], so no `Extend`
-//!   mode ever inks one here (issue #694).
+//!   doc on [`Extend::White`] carries the measured table, float column
+//!   included: `embed` and `gravity` carry a float raster since issue #945,
+//!   and its border comes out at the interpretation maximum as a number
+//!   rather than as the repeated ink byte an integer carrier gets. On a
+//!   float carrier the background constant is carried whole rather than
+//!   truncated, which is the other half of the same rule.
 //!   A background vector must have one entry (replicated across bands) or
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
@@ -111,15 +113,19 @@ pub enum ExtractError {
     /// An extract operation that reads and writes individual samples was
     /// given a float raster.
     ///
-    /// `embed`, `gravity`, `insert` and `smartcrop`'s `Entropy` and
-    /// `Attention` strategies copy samples through an unsigned 8/16-bit
-    /// path, so a float carrier has nowhere to land; cast to an unsigned
-    /// format first. They used to **panic** out of a `Result` signature
-    /// instead (issue #694), which is the shape [`ArithmeticError`] already
-    /// fixed for `recomb` and `stdif` in #631, and this mirrors it.
+    /// **Only `smartcrop`'s `Entropy` and `Attention` strategies raise this
+    /// now.** Both build a value-indexed table over the sample values, and a
+    /// float sample does not index one; cast to an unsigned format first.
     ///
-    /// The rest of this module takes a float raster unchanged, because it
-    /// copies whole pixels byte-wise rather than reading samples:
+    /// `embed`, `gravity` and `insert` raised it until issue #945, and that
+    /// refusal was a parity regression: vips runs all three on a `float`
+    /// raster and answers FLOAT. They used to **panic** out of a `Result`
+    /// signature instead (issue #694), which is the shape
+    /// [`ArithmeticError`] already fixed for `recomb` and `stdif` in #631;
+    /// #694 mirrored it, and #945 then asked which posture the refusal was.
+    ///
+    /// The rest of this module has always taken a float raster unchanged,
+    /// because it copies whole pixels byte-wise rather than reading samples:
     /// `extract_area`, `crop`, `replicate`, `zoom`, `subsample`, and
     /// `smartcrop`'s four pure-geometry strategies (`Centre`, `Low`, `High`,
     /// `All`).
@@ -134,11 +140,11 @@ pub enum ExtractError {
     /// implementation for.
     ///
     /// The sibling of [`ExtractError::FloatUnsupported`] for the carriers
-    /// that are not float. `embed`, `gravity` and `insert` carry the
-    /// unsigned 32-bit one of issue #517, so this reaches them only for
-    /// the signed carriers of issue #516; `smartcrop`'s entropy and
-    /// attention strategies also refuse `Uint32`, because both build a
-    /// value-indexed table and 2^32 bins is not a table. Mirrors
+    /// that are not float, and like it, only `smartcrop`'s entropy and
+    /// attention strategies raise it: they refuse `Uint32` and `Int32` as
+    /// well as float, because all three build a value-indexed table and
+    /// 2^32 bins is not a table. `embed`, `gravity` and `insert` carry
+    /// every carrier there is (issues #517, #909, #945). Mirrors
     /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
     #[error("{op} does not support {kind:?} samples yet")]
     UnsupportedSampleKind {
@@ -233,11 +239,11 @@ pub enum Extend {
     /// ends of it.
     ///
     /// [`Raster::embed`] and [`Raster::gravity`] paint it straight into the
-    /// output, so the table above is exactly what they give. They do not carry
-    /// the float row: both refuse a float carrier rather than paint it
-    /// wrongly, with [`ExtractError::FloatUnsupported`] out of the `try_`
-    /// forms. That used to be a **panic** out of a `Result` signature, which
-    /// this doc's float row made easy to walk into (issue #694).
+    /// output, so the table above is exactly what they give, float row
+    /// included. They refused a float carrier between issues #694 and #945,
+    /// and before #694 they panicked out of a `Result` signature, which this
+    /// doc's float row made easy to walk into. Both are gone: the float row
+    /// is now reachable through the op the table describes.
     ///
     /// The resamplers that read this mode for taps landing outside the input
     /// ([`Raster::affine`] and the interpolating forms in [`crate::resample`])
@@ -423,6 +429,70 @@ fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
+/// Read the flat `i`-th sample as `f64`: [`read_s`] widened so a float
+/// carrier travels through as a *value* rather than truncated to an integer
+/// (issue #945).
+///
+/// This is #909's move made a second time, one carrier family further on.
+/// `read_s` is total over [`SampleKind`], so `embed` and `insert` compiled
+/// on a float raster the whole time; what they could not do was carry the
+/// fraction, because the pipeline between the read and the store was an
+/// `i64`. Measured on `/opt/homebrew/bin/vips` 8.18.6, `vips embed` on a
+/// 3x1 `float` raster holding `[1.5, -0.25, 3.75]` answers FLOAT with those
+/// three samples intact, so truncating them was a parity regression rather
+/// than an implementation.
+///
+/// The six integer kinds go through [`read_s`] rather than being spelled
+/// out again, which keeps one reader for them: `f64` represents every value
+/// of every one of those kinds exactly, `u32::MAX` and `i32::MIN`
+/// included, so the widening is lossless and this cannot disagree with the
+/// integer path. Enumerated rather than reached through a `_` arm, so
+/// adding a kind is a decision the compiler forces here too.
+#[inline]
+fn read_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => read_s(data, kind, i) as f64,
+        SampleKind::F32 => f64::from(f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+    }
+}
+
+/// Store the flat `i`-th sample from an `f64`: [`write_s`] widened, the
+/// other half of [`read_v`].
+///
+/// The integer kinds keep [`write_s`]'s narrow exactly, which is the part
+/// that has to survive: it is a **store** and not a cast, and
+/// [`Extend::White`] depends on the difference. `white_ink` answers 255 for
+/// a one-byte carrier of either signedness because the ink is a byte
+/// pattern, and `255 as i8` is the `-1` vips fills a `char` border with. A
+/// clipping store would answer 127 there, which is not the measured ink and
+/// not white either.
+///
+/// So the `f64` narrows to `i64` first and then goes through the same
+/// store, rather than through [`crate::pixel::write_sample_f64`], whose
+/// clip-and-truncate is right for a cast and wrong for this.
+#[inline]
+fn write_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => write_s(data, kind, i, v as i64),
+        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+    }
+}
+
 /// The sample [`Extend::White`] paints: `vips_embed`'s interpretation-derived
 /// ink, laid down by whichever paint mechanism the carrier selects.
 ///
@@ -529,7 +599,8 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
 
 /// Truncate (toward zero) and clamp an `f64` background constant into the
 /// carrier's own range, matching the C `double`->integer cast libvips
-/// performs when it casts a background colour to the image format.
+/// performs when it casts a background colour to the image format, or carry
+/// it whole where the carrier has no range (a float one).
 ///
 /// The floor is the range's, not a literal `0.0`: that is the third hazard
 /// class issue #909 names, and it is observable. Measured on
@@ -538,11 +609,21 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
 /// and **127** for 200, so it clips at both ends and a `clamp(0.0, max)`
 /// would have turned every negative background into black.
 #[inline]
-fn ink_value(v: f64, lo: i64, hi: i64) -> i64 {
-    if v.is_nan() {
-        0
-    } else {
-        v.trunc().clamp(lo as f64, hi as f64) as i64
+fn ink_value(v: f64, range: Option<(i64, i64)>) -> f64 {
+    match range {
+        Some((lo, hi)) => {
+            if v.is_nan() {
+                0.0
+            } else {
+                v.trunc().clamp(lo as f64, hi as f64)
+            }
+        }
+        // A float carrier has no range to clip into and no integer to
+        // truncate to, so the constant is carried as it is. Measured on
+        // `/opt/homebrew/bin/vips` 8.18.6: `vips embed --extend background
+        // --background -0.5` on a `float` raster fills **-0.5**, where the
+        // `char` twin fills 0 (issue #945).
+        None => v,
     }
 }
 
@@ -552,14 +633,13 @@ fn ink_value(v: f64, lo: i64, hi: i64) -> i64 {
 /// full-length vector is used per band; any other length is a typed error.
 fn resolve_ink(
     bands: usize,
-    range: (i64, i64),
+    range: Option<(i64, i64)>,
     background: Option<&[f64]>,
-) -> Result<Vec<i64>, ExtractError> {
-    let (lo, hi) = range;
+) -> Result<Vec<f64>, ExtractError> {
     match background {
-        None => Ok(vec![0; bands]),
-        Some(bg) if bg.len() == 1 => Ok(vec![ink_value(bg[0], lo, hi); bands]),
-        Some(bg) if bg.len() == bands => Ok(bg.iter().map(|&v| ink_value(v, lo, hi)).collect()),
+        None => Ok(vec![0.0; bands]),
+        Some(bg) if bg.len() == 1 => Ok(vec![ink_value(bg[0], range); bands]),
+        Some(bg) if bg.len() == bands => Ok(bg.iter().map(|&v| ink_value(v, range)).collect()),
         Some(bg) => Err(ExtractError::BackgroundLengthMismatch {
             expected: bands,
             got: bg.len(),
@@ -602,7 +682,7 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
             let di = (oy as usize * dstride + ox as usize) * dbands;
             for c in 0..dbands {
                 let sc = if sbands == 1 { 0 } else { c };
-                write_s(ddata, dkind, di + c, read_s(sdata, skind, si + sc));
+                write_v(ddata, dkind, di + c, read_v(sdata, skind, si + sc));
             }
         }
     }
@@ -610,7 +690,7 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
 
 /// Fill every pixel of `dst` with the per-band `ink` samples. Used to lay
 /// down the `insert` background before the inputs are blitted on top.
-fn fill_ink(dst: &mut Raster, ink: &[i64]) {
+fn fill_ink(dst: &mut Raster, ink: &[f64]) {
     let bands = dst.format().channels();
     let kind = dst.format().kind();
     let count = dst.width() as usize * dst.height() as usize;
@@ -618,7 +698,7 @@ fn fill_ink(dst: &mut Raster, ink: &[i64]) {
     for p in 0..count {
         let di = p * bands;
         for (c, &v) in ink.iter().enumerate() {
-            write_s(data, kind, di + c, v);
+            write_v(data, kind, di + c, v);
         }
     }
 }
@@ -645,42 +725,31 @@ fn negated_origin(v: u32) -> i32 {
     i32::try_from(-i64::from(v)).unwrap_or(i32::MIN)
 }
 
-/// Refuse a float raster for an operation that reads samples through
-/// [`read_s`] / [`write_s`] (issue #694).
+/// Refuse a float raster for an operation that cannot read one.
 ///
-/// **Where this sits relative to the other checks**, because the four entry
-/// points do not agree and the difference is observable. `try_embed` and
-/// `try_gravity` reject float *before* the zero-canvas check, so
-/// `try_embed(.., 0, 0, ..)` on a float raster reports `FloatUnsupported`
-/// where it used to report `EmptyArea`. `try_insert` rejects after the
-/// band-count check and `try_smartcrop` after both geometry checks.
+/// **Only `smartcrop`'s two analysing strategies are left**, through
+/// [`reject_untabulated_kind`]. `embed`, `gravity` and `insert` went through
+/// here until issue #945 widened the sample pipeline to `f64` ([`read_v`] /
+/// [`write_v`]), and that refusal was a parity regression rather than an
+/// implementation, the same thing #909 found one carrier family earlier:
+/// measured on `/opt/homebrew/bin/vips` 8.18.6, `vips embed`, `vips gravity`
+/// and `vips insert` all run on a `float` raster and answer FLOAT with the
+/// fractions intact. Issue #694 turned the panics into typed errors, which
+/// was an improvement; what it did not ask was which posture the refusal is.
 ///
-/// That is deliberate rather than an accident of where the line went. The
-/// carrier is a property of the input the caller already holds, and the
-/// geometry is a property of the arguments they just passed, so reporting the
-/// carrier first tells them the thing they cannot fix by changing an argument.
-/// Where an op has a *cheaper* structural check that also names an input
-/// (`insert`'s band count), that one goes first, because it is the same class
-/// of answer and it is already there.
-///
-/// The predicate is [`PixelFormat::is_float`], which covers **both** spellings
-/// of a float layout, `RgbaF32` and `FloatF32(n)`. This crate has two on
-/// purpose (#531), and a guard that is right for one and wrong for the other
-/// is invisible to a suite that only builds one of them; the tests build both.
+/// The predicate is the kind rather than [`PixelFormat::is_float`], so it
+/// covers **both** spellings of a float layout, `RgbaF32` and `FloatF32(n)`.
+/// This crate has two on purpose (#531), and a guard that is right for one
+/// and wrong for the other is invisible to a suite that only builds one of
+/// them; the tests build both.
 ///
 /// The split in this module is not about the operation, it is about how the
 /// operation moves pixels. `extract_area`, `crop`, `replicate`, `zoom` and
 /// `subsample` copy whole pixels byte-wise, so the sample depth never comes
-/// up and a float carrier travels through untouched. `embed`, `gravity`,
-/// `insert` and `smartcrop`'s two analysing strategies read and write
-/// individual samples through a `u32`, and there is no float on that path.
-///
-/// So the guard sits at each of those four entry points rather than inside
-/// `read_s`, which would cost a branch on every sample of every op to say
-/// something that is already decided before the first one.
-///
-/// This mirrors [`reject_float_input`](crate::arithmetic) in `arithmetic.rs`,
-/// which #631 added for `recomb` and `stdif`. Same problem, same shape.
+/// up. `embed`, `gravity` and `insert` read and write individual samples,
+/// and now do it through an `f64`. `smartcrop`'s entropy and attention
+/// strategies build a *value-indexed table*, which is a different question
+/// again and the one this still answers.
 #[inline]
 fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
     let kind = r.format().kind();
@@ -697,6 +766,8 @@ fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ExtractErr
 
 /// The stricter guard, for the two smartcrop strategies that build a
 /// value-indexed table.
+///
+/// The only caller of [`reject_unreadable_kind`] left, since #945.
 ///
 /// `region_entropy` allocates one bin per sample value and `rgb_planes`
 /// divides by a fixed 8- or 16-bit scale, so those two need a kind whose
@@ -726,27 +797,32 @@ fn reject_untabulated_kind(op: &'static str, r: &Raster) -> Result<(), ExtractEr
 
 /// Unwrap an extract-op result for the panicking ported-test surface.
 ///
-/// Most [`ExtractError`] variants do not name the failing op, so the panic
-/// prefixes `"<op>: "` for context. [`ExtractError::FloatUnsupported`] is the
-/// exception: it embeds the op in its own `Display`, so prefixing it here as
-/// well doubles the name (`"embed: embed does not support float rasters yet
-/// ..."`). That is issue #339's defect, which `expect_arith` in
-/// `arithmetic.rs` already fixes for the same variant on that side; #694
-/// mirrored the error shape and not this wrapper, so it arrived here too.
-/// That one variant is emitted verbatim; every other variant keeps the prefix.
+/// [`ExtractError`] variants here do not name the failing op, so the panic
+/// prefixes `"<op>: "` for context.
+///
+/// There used to be a second arm, emitting [`ExtractError::FloatUnsupported`]
+/// verbatim because it embeds the op in its own `Display` and prefixing it as
+/// well doubled the name (issue #339, mirrored here by #694). None of this
+/// function's callers can raise that variant since issue #945 carried the
+/// float raster through `embed`, `gravity` and `insert`, so the arm went with
+/// the refusal rather than staying as a branch nothing can reach.
+/// [`expect_smartcrop`] keeps it, because `smartcrop` still refuses.
 #[inline]
 #[track_caller]
 fn expect_extract(op: &str, r: Result<Raster, ExtractError>) -> Raster {
     match r {
         Ok(v) => v,
-        Err(e @ ExtractError::FloatUnsupported { .. }) => panic!("{e}"),
         Err(e) => panic!("{op}: {e}"),
     }
 }
 
 /// Unwrap a smartcrop result for the panicking ported-test surface.
 ///
-/// Same doubling rule as [`expect_extract`].
+/// [`ExtractError::FloatUnsupported`] embeds the op in its own `Display`, so
+/// prefixing it here as well doubles the name (`"smartcrop: smartcrop does
+/// not support float rasters yet ..."`), which is issue #339's defect.
+/// That one variant is emitted verbatim; every other variant keeps the
+/// prefix.
 #[inline]
 #[track_caller]
 fn expect_smartcrop(r: Result<(Raster, i32, i32), ExtractError>) -> (Raster, i32, i32) {
@@ -846,10 +922,14 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
-    /// [`ExtractError::BackgroundLengthMismatch`] for a bad background
-    /// vector, or [`ExtractError::FloatUnsupported`] on a float raster: this
-    /// copies samples through an unsigned 8/16-bit path, so cast first
-    /// (issue #694).
+    /// or [`ExtractError::BackgroundLengthMismatch`] for a bad background
+    /// vector.
+    ///
+    /// Every carrier goes through, float included (issue #945). On a float
+    /// raster the background is carried whole rather than truncated into an
+    /// integer, matching vips: measured on `/opt/homebrew/bin/vips` 8.18.6,
+    /// `--background -0.5` fills **-0.5** on a `float` raster and 0 on its
+    /// `char` twin.
     pub fn try_embed(
         &self,
         x: i32,
@@ -859,7 +939,6 @@ impl Raster {
         extend: Extend,
         background: Option<&[f64]>,
     ) -> Result<Raster, ExtractError> {
-        reject_unreadable_kind("embed", self)?;
         self.embed_impl(x as i64, y as i64, width, height, extend, background)
     }
 
@@ -888,11 +967,10 @@ impl Raster {
     /// Shared embed kernel with an `i64` origin so `gravity` cannot
     /// overflow the public `i32` surface on extreme canvas sizes.
     ///
-    /// Both callers reject a float raster before they get here, because the
-    /// refusal has to name the public operation and this kernel cannot see
-    /// which one called (issue #694). The `debug_assert` below is what holds
-    /// that rather than this sentence: the suite runs in debug, so a third
-    /// caller added without a guard trips it in the first test that reaches it.
+    /// Total over [`SampleKind`] since issue #945: the samples move through
+    /// [`read_v`] / [`write_v`], so there is no carrier for a caller to
+    /// reject first and the `debug_assert` that used to hold that contract
+    /// is gone with it.
     fn embed_impl(
         &self,
         x: i64,
@@ -905,27 +983,21 @@ impl Raster {
         if width == 0 || height == 0 {
             return Err(ExtractError::EmptyArea);
         }
-        debug_assert!(
-            !self.format().is_float(),
-            "embed_impl's callers must reject a float raster first; \
-             see reject_unreadable_kind (issue #694)"
-        );
         let fmt = self.format();
         let bands = fmt.channels();
         let kind = fmt.kind();
         let bpc = kind.bytes();
-        let range = kind
-            .range()
-            .expect("an integer kind has a range; float is refused before here");
-        let ink: Vec<i64> = match extend {
+        let range = kind.range();
+        let ink: Vec<f64> = match extend {
             // The white ink comes from the interpretation, never from the
             // range; see [`white_ink`]. It is a byte pattern rather than a
             // number, so it is *not* clipped: `white_ink` answers 255 for a
-            // one-byte carrier of either signedness and `write_s` narrows
-            // that to the `-1` vips fills a `char` border with.
-            Extend::White => vec![white_ink(fmt, self.interpretation()) as i64; bands],
+            // one-byte carrier of either signedness and `write_v` narrows
+            // that to the `-1` vips fills a `char` border with, while a
+            // float carrier keeps the ink as a number.
+            Extend::White => vec![white_ink(fmt, self.interpretation()); bands],
             Extend::Background => resolve_ink(bands, range, background)?,
-            _ => vec![0; bands],
+            _ => vec![0.0; bands],
         };
         let (w, h) = (self.width() as i64, self.height() as i64);
         let sstride = self.width() as usize;
@@ -949,12 +1021,12 @@ impl Raster {
                     Some((sx, sy)) => {
                         let si = (sy as usize * sstride + sx as usize) * bands;
                         for c in 0..bands {
-                            write_s(&mut out, kind, di + c, read_s(data, kind, si + c));
+                            write_v(&mut out, kind, di + c, read_v(data, kind, si + c));
                         }
                     }
                     None => {
                         for (c, &v) in ink.iter().enumerate() {
-                            write_s(&mut out, kind, di + c, v);
+                            write_v(&mut out, kind, di + c, v);
                         }
                     }
                 }
@@ -975,10 +1047,9 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
-    /// [`ExtractError::BackgroundLengthMismatch`] for a bad background
-    /// vector, or [`ExtractError::FloatUnsupported`] on a float raster: this
-    /// copies samples through an unsigned 8/16-bit path, so cast first
-    /// (issue #694).
+    /// or [`ExtractError::BackgroundLengthMismatch`] for a bad background
+    /// vector. Every carrier goes through, float included, exactly as in
+    /// [`Raster::try_embed`], which this delegates to (issue #945).
     pub fn try_gravity(
         &self,
         direction: CompassDirection,
@@ -1003,7 +1074,6 @@ impl Raster {
             D::SouthWest => (0, by),
             D::NorthWest => (0, 0),
         };
-        reject_unreadable_kind("gravity", self)?;
         self.embed_impl(x, y, width, height, extend, background)
     }
 
@@ -1199,11 +1269,13 @@ impl Raster {
     /// Returns [`ExtractError::BandCountMismatch`] for incompatible band
     /// counts, [`ExtractError::BackgroundLengthMismatch`] for a background
     /// vector whose length is neither 1 nor the band count,
-    /// [`ExtractError::SizeOverflow`] if the expanded canvas would not fit
-    /// `u32` dimensions, or [`ExtractError::FloatUnsupported`] if **either**
-    /// input is a float raster: the result takes the wider of the two depths,
-    /// so a float `sub` reaches the sample copy exactly as a float `self` does
-    /// (issue #694).
+    /// or [`ExtractError::SizeOverflow`] if the expanded canvas would not
+    /// fit `u32` dimensions.
+    ///
+    /// Every carrier goes through, float included (issue #945). The result
+    /// takes the promotion of the two input kinds, so a float `sub` under an
+    /// integer `main` gives a float canvas, which is what `vips insert`
+    /// answers for the same pair.
     pub fn try_insert(
         &self,
         sub: &Raster,
@@ -1217,18 +1289,14 @@ impl Raster {
         if mb != sb && mb != 1 && sb != 1 {
             return Err(ExtractError::BandCountMismatch { main: mb, sub: sb });
         }
-        // Both inputs, because the result's depth is the wider of the two, so
-        // a float `sub` reaches the sample copy just as a float `self` does.
-        reject_unreadable_kind("insert", self)?;
-        reject_unreadable_kind("insert", sub)?;
         let bands = mb.max(sb);
         // Through `SampleKind::promote`, not the wider byte width: a width
         // cannot order the carriers, and four bytes answers float for a
         // `uint` input (issues #517, #607).
         let kind = self.format().kind().promote(sub.format().kind());
-        let range = kind
-            .range()
-            .expect("an integer kind has a range; float is refused above");
+        // `None` for a float carrier, which is what tells `resolve_ink` to
+        // carry the background whole rather than truncate it (issue #945).
+        let range = kind.range();
         // Resolve the fill up front so a bad background vector errors even
         // when `expand` leaves no visible gap.
         let ink = resolve_ink(bands, range, background)?;
@@ -1253,7 +1321,10 @@ impl Raster {
         // Pre-fill with the background so uncovered pixels keep it; `blit`
         // then overwrites the pixels the two inputs actually cover. A black
         // (all-zero) ink is already the zeroed state, so skip the fill.
-        if ink.iter().any(|&v| v != 0) {
+        // Compared through the bit pattern rather than against `0.0`,
+        // because a float carrier can be asked for -0.0 and that is a
+        // different sample from the +0.0 the buffer starts at.
+        if ink.iter().any(|&v| v.to_bits() != 0) {
             fill_ink(&mut out, &ink);
         }
         blit(&mut out, self, -ox, -oy);
@@ -2748,21 +2819,25 @@ mod tests {
         Raster::new(w, h, PixelFormat::RgbaF32, data).expect("rgbaf32 fixture")
     }
 
-    /// Issue #694. The four entry points that read samples through
-    /// [`read_s`] / [`write_s`] return a typed refusal on a float raster
-    /// instead of panicking out of a `Result` signature.
+    /// Issues #694 and #945. Every sample-reading entry point here takes a
+    /// float raster and answers a float raster.
     ///
-    /// The issue names `try_embed` and `try_gravity`. I probed all of
-    /// `src/extract.rs` and it is four, plus two of `smartcrop`'s six
-    /// strategies, which is the next test.
+    /// This replaces `the_sample_reading_ops_refuse_a_float_raster_instead_of_panicking`,
+    /// which asserted the typed refusal #694 shipped. That refusal was the
+    /// right thing against the panic it replaced and the wrong thing against
+    /// vips, which runs every one of these on a `float` raster and answers
+    /// FLOAT, so it is retired the way #909's was: **replaced by value
+    /// assertions rather than deleted as though it had been wrong.**
     ///
-    /// Every `Extend` mode is here rather than just `White`, because the panic
-    /// is in the sample copy and not in the ink: `Black`, `Copy`, `Repeat`,
-    /// `Mirror` and `Background` reach it exactly as `White` does, so a fix
-    /// that only guarded the inking path would leave five of six still
-    /// panicking.
+    /// The case list is #694's, unchanged, because it is what makes the sweep
+    /// worth having. Every `Extend` mode is here rather than just `White`,
+    /// because the sample copy and the ink are different code: a fix that only
+    /// taught the inking path about float would leave five of six modes
+    /// answering the wrong samples. Both float spellings are here for the
+    /// same reason (#531), and both sides of `insert`, since the result takes
+    /// the promotion of the two kinds.
     #[test]
-    fn the_sample_reading_ops_refuse_a_float_raster_instead_of_panicking() {
+    fn the_sample_reading_ops_carry_a_float_raster_issue_945() {
         let im = floatf(3, 8, 8);
         let sub = floatf(3, 2, 2);
         let bg = [1.0f64, 2.0, 3.0];
@@ -2827,9 +2902,11 @@ mod tests {
             ),
         ];
         for (name, got) in cases {
+            let out = got.unwrap_or_else(|e| panic!("{name} must carry a float raster: {e}"));
             assert!(
-                matches!(got, Err(ExtractError::FloatUnsupported { .. })),
-                "{name} must refuse a float raster rather than panic, got {got:?}"
+                out.format().is_float(),
+                "{name} must answer a float raster, got {:?}",
+                out.format()
             );
         }
     }
@@ -2897,74 +2974,93 @@ mod tests {
         }
     }
 
-    /// Issue #694. The kernel's `debug_assert` fires, so the sentence saying
-    /// it is what holds the guard rather than a comment is itself held.
+    /// Issues #694 and #945. The kernel itself is total over the carriers,
+    /// which is what retires the `debug_assert` that used to stand in for a
+    /// guard at its two callers.
     ///
-    /// `embed_impl` takes the guard on trust because the refusal has to name
-    /// the public operation and the kernel cannot see which of its two callers
-    /// came in. Deleting the assert leaves the suite green, since there is no
-    /// third caller today, so without this the claim was exactly the shape
-    /// #700 was filed about. The release net is still `write_s`'s own panic,
-    /// so nothing is weaker than before either way.
+    /// This replaces `embed_impl_asserts_its_callers_rejected_float_first`.
+    /// That assert was the right thing while `embed_impl` could not read a
+    /// float sample: it held a contract the callers had to keep, and #700's
+    /// argument was that a sentence in a doc is not a guard. The contract is
+    /// gone rather than unheld, so the cell that replaces it drives the
+    /// kernel directly on the carrier the assert used to refuse.
+    ///
+    /// Called on `embed_impl` and not on `try_embed`, deliberately: a third
+    /// caller added tomorrow reaches this kernel, and this says what it gets.
     #[test]
-    #[should_panic(expected = "callers must reject a float raster first")]
-    fn embed_impl_asserts_its_callers_rejected_float_first() {
-        let _ = floatf(3, 8, 8).embed_impl(1, 1, 12, 12, Extend::Black, None);
+    fn embed_impl_carries_a_float_raster_issue_945() {
+        let im = float1(3, 1, &[1.5, -0.25, 3.75]);
+        let out = im
+            .embed_impl(1, 0, 5, 1, Extend::Black, None)
+            .expect("the kernel takes every carrier");
+        assert_eq!(f32s(&out), vec![0.0, 1.5, -0.25, 3.75, 0.0]);
     }
 
     /// Issue #694 against #339. The panicking forms do not double the op name.
     ///
-    /// `expect_extract` prefixes `"<op>: "` because most `ExtractError`
-    /// variants do not say which operation failed. `FloatUnsupported` does, so
-    /// prefixing it too gave `"embed: embed does not support float rasters
-    /// yet"`. `arithmetic.rs` already fixed exactly this for its own
-    /// `FloatUnsupported` and named #339 while doing it; #694 mirrored the
-    /// error shape and not the wrapper, so the defect arrived here with it.
+    /// `expect_smartcrop` emits `FloatUnsupported` verbatim because that
+    /// variant embeds the op in its own `Display`, and prefixing it too gave
+    /// `"smartcrop: smartcrop does not support float rasters yet"`.
+    /// `arithmetic.rs` fixed exactly this for its own `FloatUnsupported` and
+    /// named #339 while doing it; #694 mirrored the error shape and not the
+    /// wrapper, so the defect arrived here with it.
+    ///
+    /// `smartcrop` is the only op left that can raise that variant, since
+    /// #945 carried the float raster through `embed`, `gravity` and `insert`.
+    /// So the other three rows are now the **inverse** control: they take a
+    /// variant that does *not* name itself (`EmptyArea`) and prove the prefix
+    /// is still applied, which is what stops "never prefix anything" passing
+    /// this test.
     #[test]
     fn the_panicking_forms_do_not_say_the_op_twice() {
-        let im = floatf(3, 8, 8);
+        let text_of = |call: Box<dyn FnOnce()>| -> String {
+            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+                .expect_err("must panic");
+            msg.downcast_ref::<String>()
+                .cloned()
+                .or_else(|| msg.downcast_ref::<&str>().map(ToString::to_string))
+                .expect("panic payload is a string")
+        };
+
+        // The self-naming variant, emitted verbatim.
+        let text = text_of(Box::new(move || {
+            floatf(3, 8, 8).smartcrop(4, 4, SmartcropInteresting::Entropy);
+        }));
+        assert_eq!(
+            text.matches("smartcrop does not support float").count()
+                + text.matches("smartcrop: ").count(),
+            1,
+            "the op name must appear once, got {text:?}"
+        );
+
+        // The control: a variant that names nothing still gets the prefix, on
+        // every panicking form that used to be in the list above.
         for (op, call) in [
             (
                 "embed",
                 Box::new(move || {
-                    floatf(3, 8, 8).embed(1, 1, 12, 12, Extend::Black, None);
+                    floatf(3, 8, 8).embed(1, 1, 0, 0, Extend::Black, None);
                 }) as Box<dyn FnOnce()>,
             ),
             (
                 "gravity",
                 Box::new(move || {
-                    floatf(3, 8, 8).gravity(CompassDirection::Centre, 12, 12);
+                    floatf(3, 8, 8).gravity(CompassDirection::Centre, 0, 0);
                 }),
             ),
             (
                 "insert",
                 Box::new(move || {
-                    floatf(3, 8, 8).insert(&floatf(3, 2, 2), 1, 1, false);
-                }),
-            ),
-            (
-                "smartcrop",
-                Box::new(move || {
-                    floatf(3, 8, 8).smartcrop(4, 4, SmartcropInteresting::Entropy);
+                    floatf(3, 8, 8).insert(&floatf(2, 2, 2), 1, 1, false);
                 }),
             ),
         ] {
-            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
-                .expect_err("must panic");
-            let text = msg
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| msg.downcast_ref::<&str>().map(ToString::to_string))
-                .expect("panic payload is a string");
-            assert_eq!(
-                text.matches(&format!("{op} does not support float"))
-                    .count()
-                    + text.matches(&format!("{op}: ")).count(),
-                1,
-                "the op name must appear once, got {text:?}"
+            let text = text_of(call);
+            assert!(
+                text.starts_with(&format!("{op}: ")),
+                "a variant that does not name itself must keep the prefix, got {text:?}"
             );
         }
-        drop(im);
     }
 
     /// Issue #694. The refusal names the operation, so a caller reading the
@@ -2973,25 +3069,45 @@ mod tests {
     /// The old panic said "this extract operation", which is the whole problem
     /// in miniature: it reached the caller as a process-visible panic out of a
     /// `Result` signature, and it did not even say which operation.
+    ///
+    /// `smartcrop` is the only op here that still refuses a carrier, since
+    /// #945, so both of its refusing strategies are swept and both refusal
+    /// variants with them: `FloatUnsupported` on a float raster and
+    /// `UnsupportedSampleKind` on a `uint` one, because a value-indexed table
+    /// is the wrong shape for either.
     #[test]
     fn the_float_refusal_names_the_operation() {
-        let im = floatf(3, 8, 8);
-        for (want, got) in [
-            ("embed", im.try_embed(1, 1, 12, 12, Extend::Black, None)),
-            (
-                "gravity",
-                im.try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None),
-            ),
-            ("insert", im.try_insert(&floatf(3, 2, 2), 1, 1, false, None)),
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let f = floatf(3, 8, 8);
+        let u = Raster::zeroed(8, 8, PixelFormat::Uint32(n(3))).expect("uint fixture");
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
         ] {
-            let e = got.expect_err("must refuse");
+            let e = f
+                .try_smartcrop(4, 4, interesting, false)
+                .expect_err("must refuse a float raster");
             assert!(
-                matches!(&e, ExtractError::FloatUnsupported { op } if *op == want),
-                "expected the refusal to name {want}, got {e:?}"
+                matches!(&e, ExtractError::FloatUnsupported { op } if *op == "smartcrop"),
+                "expected the refusal to name smartcrop, got {e:?}"
             );
             assert!(
-                e.to_string().contains(want),
+                e.to_string().contains("smartcrop"),
                 "the message a caller prints must name the op: {e}"
+            );
+
+            let e = u
+                .try_smartcrop(4, 4, interesting, false)
+                .expect_err("must refuse a uint raster");
+            assert!(
+                matches!(
+                    &e,
+                    ExtractError::UnsupportedSampleKind {
+                        op: "smartcrop",
+                        kind: SampleKind::U32
+                    }
+                ),
+                "expected the refusal to name smartcrop, got {e:?}"
             );
         }
     }
@@ -3381,9 +3497,10 @@ mod tests {
      * **127** for 200. `vips insert` copies the sub-image's samples
      * unchanged.
      * Works by asserting each of those fills and the copied samples, with
-     * `Uint32` as the control that the guard still discriminates by kind
-     * and a float raster as the control that the one refusal left is
-     * intact.
+     * `Uint32` as the control that the copy still discriminates by kind
+     * and a float raster as the control that the byte-pattern ink is a
+     * property of the integer carriers: #945 carried float through these
+     * ops too, and its white border is 255 rather than -1.
      * Input: `Int8` `[-100, -1, 0, 100]` -> Output: the measured canvases.
      */
     #[test]
@@ -3442,7 +3559,9 @@ mod tests {
                 .try_embed(1, 1, 3, 3, Extend::White, None)
                 .is_ok()
         );
-        // Control: float is the one refusal left, and it still names the op.
+        // Control: the float carrier goes through too, since #945, and it
+        // keeps the ink as a *number* where the `char` row above keeps it as
+        // a byte pattern. That is the pair the two paths are told apart by.
         let f = Raster::new(
             1,
             1,
@@ -3450,10 +3569,9 @@ mod tests {
             1.5f32.to_ne_bytes().to_vec(),
         )
         .unwrap();
-        assert!(matches!(
-            f.try_embed(1, 1, 3, 3, Extend::White, None),
-            Err(ExtractError::FloatUnsupported { op: "embed" })
-        ));
+        let fw = f.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(f32s(&fw)[0], 255.0);
+        assert_eq!(f32s(&fw)[4], 1.5);
     }
 
     /// A one-band `FloatF32` raster from `f32` sample values.
@@ -3600,44 +3718,56 @@ mod tests {
 
     /**
      * Tests that the background ink clips into each carrier's own range at
-     * both ends, driven directly rather than through an op, so the arms no
-     * op can reach are held by something.
+     * both ends, and is carried whole where there is no range, driven
+     * directly rather than through an op so the arms no op can reach are
+     * held by something.
      * Works by sweeping [`ALL_KINDS`] and pushing one constant past each
      * end of every integer kind's range, with `NaN` beside them because
      * `clamp` passes `NaN` through and the explicit zero arm is what stops
-     * it landing on a carrier value by accident.
-     * Input: -300 and 1e12 at every integer kind -> Output: that kind's
-     * `range()` endpoints; `NaN` -> 0.
+     * it landing on a carrier value by accident. `F32` is not skipped: it
+     * is the arm issue #945 added and the one `vips embed --extend
+     * background --background -0.5` measures at **-0.5** on a `float`
+     * raster against 0 on its `char` twin.
+     * Input: -300, 1e12, -1.9 and `NaN` at every kind -> Output: that
+     * kind's `range()` endpoints, or the number itself at `F32`.
      */
     #[test]
     fn ink_value_clips_into_every_carrier_at_both_ends() {
         for kind in ALL_KINDS {
-            let Some((lo, hi)) = kind.range() else {
+            let range = kind.range();
+            let Some((lo, hi)) = range else {
+                // The float arm: no range, no truncation, so every one of
+                // these constants comes back untouched.
+                assert_eq!(ink_value(-300.0, range), -300.0, "{kind:?} floor");
+                assert_eq!(ink_value(1e12, range), 1e12, "{kind:?} ceiling");
+                assert_eq!(ink_value(-1.9, range), -1.9, "{kind:?} fraction");
+                assert_eq!(ink_value(-0.5, range), -0.5, "{kind:?} measured cell");
+                assert!(ink_value(f64::NAN, range).is_nan(), "{kind:?} NaN");
                 continue;
             };
             assert_eq!(
-                ink_value(-300.0, lo, hi),
-                (-300i64).max(lo),
+                ink_value(-300.0, range),
+                (-300i64).max(lo) as f64,
                 "{kind:?} floor"
             );
             assert_eq!(
-                ink_value(1e12, lo, hi),
-                1_000_000_000_000i64.min(hi),
+                ink_value(1e12, range),
+                1_000_000_000_000i64.min(hi) as f64,
                 "{kind:?} ceiling"
             );
-            assert_eq!(ink_value(f64::NAN, lo, hi), 0, "{kind:?} NaN");
+            assert_eq!(ink_value(f64::NAN, range), 0.0, "{kind:?} NaN");
             // Truncation toward zero, not flooring: the two differ only on
             // a negative fraction, which is exactly what a signed carrier
             // adds. `vips_cast` truncates.
             assert_eq!(
-                ink_value(-1.9, lo, hi),
-                if lo < 0 { -1 } else { 0 },
+                ink_value(-1.9, range),
+                if lo < 0 { -1.0 } else { 0.0 },
                 "{kind:?}"
             );
         }
         // The pair a per-width rule would collide, stated directly.
-        assert_eq!(ink_value(-50.0, -128, 127), -50);
-        assert_eq!(ink_value(-50.0, 0, 255), 0);
+        assert_eq!(ink_value(-50.0, Some((-128, 127))), -50.0);
+        assert_eq!(ink_value(-50.0, Some((0, 255))), 0.0);
     }
 
     /**

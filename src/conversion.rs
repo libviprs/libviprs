@@ -262,15 +262,16 @@ pub enum ConversionError {
         y: i64,
     },
     /// The operation was handed a float raster it cannot read yet.
-    /// [`Raster::try_join`] and [`Raster::try_arrayjoin`] return this
-    /// instead of running into the unsigned-only sample copy, which reads
-    /// samples as `u8` or `u16` and panics on 4-byte ones. Float input is
-    /// ordinary rather than exotic here: every `colourspace` result for
-    /// Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is a float raster, so
-    /// `im.colourspace(Lab)` is already one. Real vips handles float on
-    /// both operations, so this is a libviprs limitation rather than
-    /// parity; it is a typed error so a fallible method reports it instead
-    /// of panicking. Mirrors
+    /// [`Raster::try_gamma`], [`Raster::try_falsecolour`] and
+    /// [`Raster::try_msb`] return this: all three index a 256-entry table
+    /// by the sample, which a float sample does not do.
+    ///
+    /// [`Raster::try_join`] and [`Raster::try_arrayjoin`] returned it until
+    /// issue #945, and that was a parity regression rather than an
+    /// implementation, because vips runs both on a `float` raster and
+    /// answers FLOAT. Float input was never exotic here: every
+    /// `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy
+    /// is a float raster, so `im.colourspace(Lab)` is already one. Mirrors
     /// [`crate::arithmetic::ArithmeticError::FloatUnsupported`].
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
     FloatUnsupported {
@@ -378,6 +379,53 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
+/// Read the flat `i`-th sample as `f64`: [`read_flat`] widened so a float
+/// carrier travels through as a *value* rather than truncated to an integer
+/// (issue #945).
+///
+/// The six integer kinds go through [`read_flat`] rather than being spelled
+/// out again, which keeps one reader for them: `f64` represents every value
+/// of every one of those kinds exactly, `u32::MAX` and `i32::MIN` included,
+/// so the widening is lossless and this cannot disagree with the integer
+/// path. Enumerated rather than reached through a `_` arm, so adding a kind
+/// is a decision the compiler forces here too.
+#[inline]
+fn read_flat_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => read_flat(data, kind, i) as f64,
+        SampleKind::F32 => f64::from(f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+    }
+}
+
+/// Store the flat `i`-th sample from an `f64`: [`write_flat`] widened, the
+/// other half of [`read_flat_v`].
+///
+/// The integer kinds keep [`write_flat`]'s narrow exactly, so this stays a
+/// **store** and not a cast: every caller copies a sample it read at the
+/// same kind, or one promoted into a kind that holds it.
+#[inline]
+fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => write_flat(data, kind, i, v as i64),
+        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+    }
+}
+
 /// Whether the flat `i`-th sample of a condition raster selects its
 /// branch, for [`Raster::try_ifthenelse`] and [`Raster::try_switch`].
 ///
@@ -413,11 +461,14 @@ fn condition_is_true(data: &[u8], kind: SampleKind, i: usize) -> bool {
 /// cannot read, as a typed error rather than as a panic out of a
 /// `Result`-returning method (the shape issue #694 landed).
 ///
-/// Float is the only refusal left, and it is the one the crate has
-/// documented and tested all along. The three signed carriers of issue
-/// #516 came through here between #516 and #909, which was a parity
-/// regression rather than an implementation: vips runs `gamma`,
-/// `falsecolour`, `msb`, `arrayjoin` and `join` on a `char` raster.
+/// Float is the only refusal left, and `gamma`, `falsecolour` and `msb`
+/// are the only callers: all three index a 256-entry table by the sample.
+/// The three signed carriers of issue #516 came through here between #516
+/// and #909, which was a parity regression rather than an implementation:
+/// vips runs `gamma`, `falsecolour`, `msb`, `arrayjoin` and `join` on a
+/// `char` raster. Issue #945 found the same thing one carrier further on
+/// for `arrayjoin` and `join`, which now carry a float raster and no
+/// longer call this.
 ///
 /// That left `ConversionError`'s own `UnsupportedSampleKind` variant with
 /// no construction site anywhere in the crate, so issue #931 removed it. A
@@ -1978,9 +2029,6 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConversionError::EmptyInput`] for an empty list,
-    /// [`ConversionError::FloatUnsupported`] if any input is a float raster
-    /// (the sample copy is unsigned-only, and unlike `try_join` this is the
-    /// guard that stops a panic rather than one that chooses an error type),
     /// [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`, the
     /// bound libvips declares on the property,
     /// [`ConversionError::AcrossOutOfRange`] for an explicit `across`
@@ -1996,28 +2044,6 @@ impl Raster {
     ) -> Result<Raster, ConversionError> {
         if images.is_empty() {
             return Err(ConversionError::EmptyInput { op: "arrayjoin" });
-        }
-        // The sample copy below is `read_flat` / `write_flat`, which are
-        // unsigned-only and panic on 4-byte samples, so a float input has to
-        // be refused here rather than panicking out of a fallible method.
-        //
-        // Unlike `try_join`, this really is the thing that stops a panic:
-        // `arrayjoin` blits the cells itself rather than delegating to
-        // `try_insert`, so there is no second guard underneath it. Removing it
-        // reaches `read_flat`'s `bpc == 4` arm, which is a `panic!`.
-        //
-        // With one caveat worth writing down, because the obvious test fixture
-        // misses it: that is only true once the band counts agree. A 3-band and
-        // a 4-band input are refused by the band check below before any sample
-        // is read, so an unguarded `arrayjoin` returns `BandCountMismatch`
-        // there rather than panicking. The panicking path needs matching band
-        // counts, and the test uses them.
-        //
-        // Float input is not exotic: `space_depth` maps Lab, Lch, OkLab,
-        // OkLCh, XYZ, scRGB and Yxy all to F32, so a `colourspace` result is
-        // already float.
-        for img in images {
-            reject_unreadable_kind("arrayjoin", img)?;
         }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
         // vips does not clamp `across` to the image count: it lays out a grid
@@ -2107,7 +2133,7 @@ impl Raster {
                     let oi = ((oy + y) * out_w as usize + ox + x) * bands;
                     for b in 0..bands {
                         let sb = if ichannels == 1 { 0 } else { b };
-                        write_flat(odata, kind, oi + b, read_flat(idata, ikind, si + sb));
+                        write_flat_v(odata, kind, oi + b, read_flat_v(idata, ikind, si + sb));
                     }
                 }
             }
@@ -2148,13 +2174,13 @@ impl Raster {
     /// the remainder (and any trailing empty cells and shim gaps) is
     /// filled with black, libvips' default background. Band counts are
     /// aligned like libvips `bandalike` (a one-band image is replicated up
-    /// to the widest count) and depths promote numerically to the widest
-    /// input. The result carries the metadata of the first image, except
-    /// that a band promotion drops the interpretation so it is inferred
-    /// from the result format instead of describing the first image's
-    /// narrower band count. Float rasters are not supported yet on any
-    /// input. Panicking form of [`Raster::try_arrayjoin`], matching the
-    /// ported-test call surface.
+    /// to the widest count) and depths promote through
+    /// [`SampleKind::promote`], so a float cell makes the grid float. The
+    /// result carries the metadata of the first image, except that a band
+    /// promotion drops the interpretation so it is inferred from the result
+    /// format instead of describing the first image's narrower band count.
+    /// Panicking form of [`Raster::try_arrayjoin`], matching the ported-test
+    /// call surface.
     ///
     /// # Panics
     ///
@@ -2174,12 +2200,6 @@ impl Raster {
     ///
     /// Checked here, before anything is placed or allocated:
     ///
-    /// * [`ConversionError::FloatUnsupported`] if either input is a float
-    ///   raster. [`Raster::try_insert`] refuses one itself since #694, so
-    ///   this is no longer what stops a panic; it is what keeps the refusal
-    ///   in the error type this signature promises, rather than surfacing an
-    ///   [`crate::extract::ExtractError`] naming an operation the caller did
-    ///   not call. It runs first, so it is the refusal that fires.
     /// * [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`,
     ///   the bound libvips declares on the property.
     /// * [`ConversionError::PlacementOffsetOverflow`] if the offset the
@@ -2211,11 +2231,13 @@ impl Raster {
     ///   leave the canvas. Neither is reachable through `join` as the
     ///   placement is computed today; they are listed because the crop can
     ///   raise them and a `#[non_exhaustive]` match should expect them.
-    /// * [`crate::extract::ExtractError::FloatUnsupported`], for the same
-    ///   reason: both delegates raise it on a float raster, and neither can
-    ///   be reached with one because the guard above returns first. Listing
-    ///   it is this module's own rule, and leaving it out was the thing
-    ///   #730 noticed.
+    ///
+    /// Every carrier goes through, float included (issue #945). Neither
+    /// delegate refuses one any more, so the guard that used to sit here to
+    /// keep the refusal in this signature's own error type went with them.
+    /// Float input was never exotic: `space_depth` maps Lab, Lch, OkLab,
+    /// OkLCh, XYZ, scRGB and Yxy all to `F32`, so
+    /// `im.colourspace(Lab).join(..)` arrives here as float.
     pub fn try_join(
         &self,
         other: &Raster,
@@ -2225,25 +2247,6 @@ impl Raster {
         background: Option<&[f64]>,
         align: Option<Align>,
     ) -> Result<Raster, ConversionError> {
-        // This used to be the thing that stopped a panic: the placement path
-        // (`insert` -> `blit`) was unsigned-only and paniced on 4-byte
-        // samples. #694 moved that guard into `try_insert`, so the delegated
-        // path now refuses a float raster itself and the panic is gone either
-        // way.
-        //
-        // The guard stays because of the *type*. Without it a float input
-        // arrives as `ConversionError::Extract(ExtractError::FloatUnsupported
-        // { op: "insert" })`, which names an operation the caller did not
-        // call, through a variant their `try_join` signature does not lead
-        // them to expect. With it they get `ConversionError::FloatUnsupported
-        // { op: "join" }`. It runs before the delegation, so it is the one
-        // that fires and `try_insert`'s is unreachable from here.
-        //
-        // Float input is not exotic: `space_depth` maps every one of Lab,
-        // Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to F32, so
-        // `im.colourspace(Lab).join(..)` arrives here as float.
-        reject_unreadable_kind("join", self)?;
-        reject_unreadable_kind("join", other)?;
         let align = align.unwrap_or(Align::Low);
         let shim = shim.unwrap_or(0);
         // libvips carries this bound in the property declaration, so
@@ -4135,26 +4138,42 @@ mod tests {
     }
 
     /**
-     * Tests that a float input is a typed error rather than a panic out of
-     * a fallible method. `arrayjoin`'s sample copy is `read_flat` /
-     * `write_flat`, which are unsigned-only, and a float raster is ordinary
-     * input: every `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ,
-     * scRGB and Yxy is float. Real vips handles it (`vips arrayjoin
-     * "af.v a.v" out.v` gives `6x2 float`), so this is a libviprs
-     * limitation reported honestly rather than parity.
-     * Works by putting the float `grey` ramp in each list position.
-     * Input: FloatF32 2x2 ramp beside a Gray8 1x1.
+     * Tests that a **mixed** float and integer grid promotes to float and
+     * keeps both cells' samples, which is the case a same-carrier fixture
+     * cannot reach.
+     * This replaces `try_arrayjoin_float_input_is_a_typed_error_not_a_panic`,
+     * which asserted the refusal and said in its own doc that vips handles
+     * this and the crate did not; issue #945 is that sentence acted on.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6:
+     * `vips arrayjoin "rf.v pu.v" out.v` over a 2x2 `float` `[0,1,2,3]` and
+     * a 1x1 `uchar` `7` answers a **4x2 float** grid holding
+     * `[0, 1, 7, 0 / 2, 3, 0, 0]`, and with the operands the other way
+     * round `[7, 0, 0, 1 / 0, 0, 2, 3]`. The cell is the size of the
+     * largest input and the short cell's remainder is background, which is
+     * why the 7 sits alone in a 2x2 cell.
+     * Works by driving both operand orders, because the promotion is a
+     * `reduce` over the list and an implementation taking the first
+     * image's kind passes the first order and fails the second.
+     * Input: FloatF32 2x2 beside a Gray8 1x1 -> Output: the measured grids.
      */
     #[test]
-    fn try_arrayjoin_float_input_is_a_typed_error_not_a_panic() {
-        let ramp = Raster::grey(2, 2, false);
-        assert!(ramp.format().is_float());
-        let plain = gray8(1, 1, vec![1]);
-        for list in [[&ramp, &plain], [&plain, &ramp]] {
-            assert!(matches!(
-                Raster::try_arrayjoin(&list, None, None),
-                Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
-            ));
+    fn arrayjoin_promotes_a_mixed_float_and_integer_grid_issue_945() {
+        let ramp = float1(2, 2, &[0.0, 1.0, 2.0, 3.0]);
+        let plain = gray8(1, 1, vec![7]);
+        for (list, want) in [
+            (
+                [&ramp, &plain],
+                vec![0.0f32, 1.0, 7.0, 0.0, 2.0, 3.0, 0.0, 0.0],
+            ),
+            (
+                [&plain, &ramp],
+                vec![7.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 3.0],
+            ),
+        ] {
+            let out = Raster::try_arrayjoin(&list, None, None).unwrap();
+            assert_eq!((out.width(), out.height()), (4, 2));
+            assert!(out.format().is_float(), "got {:?}", out.format());
+            assert_eq!(f32s(&out), want);
         }
     }
 
@@ -4638,25 +4657,46 @@ mod tests {
     }
 
     /**
-     * Tests that a float input comes back as a typed error rather than
-     * panicking out of a fallible method. The placement path underneath
-     * reads samples as u8 or u16 and panics on 4-byte ones, and float input
-     * is ordinary here: `space_depth` maps Lab, Lch, OkLab, OkLCh, XYZ,
-     * scRGB and Yxy all to F32, so `im.colourspace(Lab).join(..)` is a
-     * float join. Works by joining against the float `grey` ramp in each
-     * operand position.
-     * Input: FloatF32 2x2 ramp on either side of a Gray8 3x2.
+     * Tests that a **mixed** float and integer join promotes to float and
+     * keeps both operands' samples.
+     * This replaces `try_join_float_input_is_a_typed_error_not_a_panic`,
+     * which asserted the refusal; issue #945 retires it, because float
+     * input was never exotic here (`space_depth` maps Lab, Lch, OkLab,
+     * OkLCh, XYZ, scRGB and Yxy all to `F32`, so
+     * `im.colourspace(Lab).join(..)` is a float join).
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6:
+     * `vips join rf.v qu.v out.v horizontal` over a 2x2 `float` `[0,1,2,3]`
+     * and a 3x2 `uchar` `[10,20,30,40,50,60]` answers a **5x2 float** image
+     * holding `[0, 1, 10, 20, 30 / 2, 3, 40, 50, 60]`.
+     * Works by driving both operand orders, since the promotion has to be
+     * symmetric and the placement is not.
+     * Input: FloatF32 2x2 on either side of a Gray8 3x2 -> Output: the
+     * measured rows.
      */
     #[test]
-    fn try_join_float_input_is_a_typed_error_not_a_panic() {
-        let ramp = Raster::grey(2, 2, false);
-        assert!(ramp.format().is_float());
-        for (a, b) in [(&ramp, &join_a()), (&join_a(), &ramp)] {
-            assert!(matches!(
-                a.try_join(b, JoinDirection::Horizontal, false, None, None, None),
-                Err(ConversionError::FloatUnsupported { op: "join" })
-            ));
-        }
+    fn join_promotes_a_mixed_float_and_integer_pair_issue_945() {
+        let ramp = float1(2, 2, &[0.0, 1.0, 2.0, 3.0]);
+        let plain = gray8(3, 2, vec![10, 20, 30, 40, 50, 60]);
+        let out = ramp
+            .try_join(&plain, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!((out.width(), out.height()), (5, 2));
+        assert!(out.format().is_float(), "got {:?}", out.format());
+        assert_eq!(
+            f32s(&out),
+            vec![0.0f32, 1.0, 10.0, 20.0, 30.0, 2.0, 3.0, 40.0, 50.0, 60.0]
+        );
+
+        // The other operand order, which places the integer image first and
+        // still has to answer float.
+        let flipped = plain
+            .try_join(&ramp, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert!(flipped.format().is_float(), "got {:?}", flipped.format());
+        assert_eq!(
+            f32s(&flipped),
+            vec![10.0f32, 20.0, 30.0, 0.0, 1.0, 40.0, 50.0, 60.0, 2.0, 3.0]
+        );
     }
 
     /**
@@ -5355,7 +5395,9 @@ mod tests {
      * the shape issue #694 landed.
      * Works by handing a float raster to each guarded op, and by asserting
      * that the same ops accept the uint carrier, so the guard is about the
-     * kind and not a blanket refusal of anything unusual.
+     * kind and not a blanket refusal of anything unusual. `arrayjoin` left
+     * the guarded set in issue #945 and stays here as the control that the
+     * two remaining refusals are individual rather than module-wide.
      * Input: float -> Err(FloatUnsupported { op }); uint -> Ok.
      */
     #[test]
@@ -5376,15 +5418,16 @@ mod tests {
             f.try_falsecolour(),
             Err(ConversionError::FloatUnsupported { op: "falsecolour" })
         ));
-        assert!(matches!(
-            Raster::try_arrayjoin(&[&f, &f], None, None),
-            Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
-        ));
-        // Positive control: the uint carrier goes through every one of
-        // them, so these are refusals of a kind and not of a stride.
+        // Positive control: the uint carrier goes through both of them, so
+        // these are refusals of a kind and not of a stride.
         let u = uint32(1, 1, &[90_000]);
         assert!(u.try_gamma(None).is_ok());
         assert!(u.try_falsecolour().is_ok());
+        // And `arrayjoin` is no longer in the refusing set at all: #945
+        // carried the float raster through it, so it stands here as the
+        // control that the two above are individual refusals rather than a
+        // module-wide one.
+        assert!(Raster::try_arrayjoin(&[&f, &f], None, None).is_ok());
         assert!(Raster::try_arrayjoin(&[&u, &u], None, None).is_ok());
     }
 
@@ -5541,8 +5584,9 @@ mod tests {
      * `vips arrayjoin` on two `char` rasters both answer CHAR with every
      * sample copied.
      * Works by joining a `char` column with a second one and reading the
-     * samples back, with a float raster as the control that the guard is
-     * intact and still names its own variant.
+     * samples back, with a float raster as the control that the copy is
+     * total over the carriers rather than passing because the signed rows
+     * happen to be the only ones tried.
      * Input: two `char` columns -> Output: the samples side by side.
      */
     #[test]
@@ -5556,17 +5600,11 @@ mod tests {
         let g = Raster::try_arrayjoin(&[&a, &b], None, None).unwrap();
         assert_eq!(i8s(&g), vec![-100, -101, -1, 2, 0, -1, 100, 101]);
 
-        let f = Raster::new(
-            1,
-            1,
-            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
-            1.5f32.to_ne_bytes().to_vec(),
-        )
-        .unwrap();
-        assert!(matches!(
-            Raster::try_arrayjoin(&[&f, &f], None, None),
-            Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
-        ));
+        // Control: the float carrier goes through too, since #945, so the
+        // signed rows above are not passing because everything is accepted.
+        let f = float1(1, 1, &[1.5]);
+        let fj = Raster::try_arrayjoin(&[&f, &f], None, None).unwrap();
+        assert_eq!(f32s(&fj), vec![1.5, 1.5]);
     }
 
     /// A one-band `FloatF32` raster from `f32` sample values.
