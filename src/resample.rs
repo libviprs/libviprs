@@ -426,7 +426,7 @@ use crate::arithmetic::{interpretation_max_alpha, unpremultiply_factor};
 use crate::colour::{ColourError, Intent, Pcs};
 use crate::conversion::Interpretation;
 use crate::extract::{Extend, ExtractError, white_ink};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_sample_f64};
 use crate::raster::{Raster, RasterError};
 use crate::source::SourceError;
 use std::f64::consts::PI;
@@ -988,14 +988,22 @@ fn fixed_round(v: i64) -> i64 {
     (v + (INTERPOLATE_SCALE >> 1)) >> INTERPOLATE_SHIFT
 }
 
-/// Per-format sample layout: bytes per channel and float flag.
+/// Per-format sample layout: the sample kind, its byte width, and the
+/// storage ceiling.
+///
+/// The kind is the field that decides how bytes are read, and the width is
+/// kept beside it only as a stride. They used to be one number, and the
+/// `else` branch of `bpc == 2` read four bytes as a `u16` pair, so a
+/// `uint` raster resized to 144 where it should have stayed at 90000
+/// (issues #517, #607).
 #[derive(Clone, Copy)]
 struct SampleLayout {
+    kind: SampleKind,
     bpc: usize,
     is_float: bool,
     /// Sample ceiling for the **storage** arithmetic: what [`write`] rounds
-    /// and clamps an unsigned sample into. 255 for 8-bit and float, 65535 for
-    /// 16-bit.
+    /// and clamps an unsigned sample into. 255 for 8-bit and float, 65535
+    /// for 16-bit, and the kind's own ceiling for the wider carriers.
     ///
     /// Not the premultiply denominator, which is a property of the
     /// interpretation rather than of the depth and comes from
@@ -1013,49 +1021,39 @@ struct SampleLayout {
 
 impl SampleLayout {
     fn of(format: PixelFormat) -> Self {
-        let bpc = format.bytes_per_channel();
-        let is_float = format.is_float();
-        let max = if is_float {
-            255.0
-        } else if bpc == 2 {
-            65535.0
-        } else {
-            255.0
+        let kind = format.kind();
+        let bpc = kind.bytes();
+        let is_float = kind.is_float();
+        // A float carrier's storage convention here is the crate's `0..255`
+        // one, which is why it does not come off the kind; every integer
+        // kind's ceiling does.
+        let max = match kind.max_value() {
+            Some(m) => f64::from(m),
+            None => 255.0,
         };
-        Self { bpc, is_float, max }
+        Self {
+            kind,
+            bpc,
+            is_float,
+            max,
+        }
     }
 
     /// Read sample `i` (flat sample index, not byte index) as `f64`.
     fn read(self, data: &[u8], i: usize) -> f64 {
-        let o = i * self.bpc;
-        if self.is_float {
-            f64::from(f32::from_ne_bytes([
-                data[o],
-                data[o + 1],
-                data[o + 2],
-                data[o + 3],
-            ]))
-        } else if self.bpc == 2 {
-            f64::from(u16::from_ne_bytes([data[o], data[o + 1]]))
-        } else {
-            f64::from(data[o])
-        }
+        read_sample_f64(data, self.kind, i * self.bpc)
     }
 
     /// Write sample `i` from `f64`, rounding half up and clamping for the
     /// unsigned formats and storing raw `f32` for the float formats.
     fn write(self, data: &mut [u8], i: usize, v: f64) {
         let o = i * self.bpc;
-        if self.is_float {
-            data[o..o + 4].copy_from_slice(&(v as f32).to_ne_bytes());
-        } else {
-            let r = (v + 0.5).floor().clamp(0.0, self.max);
-            if self.bpc == 2 {
-                data[o..o + 2].copy_from_slice(&(r as u16).to_ne_bytes());
-            } else {
-                data[o] = r as u8;
-            }
-        }
+        // `write_sample_f64` truncates toward zero and clamps into the
+        // kind's own range, so pre-rounding here keeps the round-half-up
+        // this resampler has always done while the clamp is stated once
+        // per kind rather than once per branch.
+        let rounded = if self.is_float { v } else { (v + 0.5).floor() };
+        write_sample_f64(data, self.kind, o, rounded);
     }
 }
 
