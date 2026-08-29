@@ -80,6 +80,9 @@ MIRI_TOOLCHAIN ?= nightly-2026-08-20
 ## lets the crate compile under nightly at all (#643), and
 ## `--cfg sha2_backend="soft"` keeps the run off sha2's aarch64 NEON path, which
 ## aborts it on a Stacked Borrows violation about 30 seconds in (#707).
+## That abort needs `cpufeatures` 0.3.1 or newer in the resolved graph:
+## below it the Miri shim never selects the NEON path, so a stale lock
+## cannot reproduce #707 and reads as though it is already fixed (#731).
 ##
 ## What this cannot mirror is the compiler. The hosted job resolves whatever
 ## `dtolnay/rust-toolchain@nightly` gives it on the day, and this pins a date,
