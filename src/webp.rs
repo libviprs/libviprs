@@ -1341,8 +1341,7 @@ fn chunk_bounds(payload: u64, size: u32, addr_max: u64) -> Option<ChunkBounds> {
     let size = u64::from(size);
     let end = payload.checked_add(size)?;
     let next = end.checked_add(size & 1)?;
-    let _ = addr_max;
-    Some(ChunkBounds { end, next })
+    (next <= addr_max).then_some(ChunkBounds { end, next })
 }
 
 /// The encoder colour type for a raster, or the reason there is none.
