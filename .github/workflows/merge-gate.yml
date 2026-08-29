@@ -116,11 +116,23 @@ jobs:
   # prediction of this job.
   #
   # It is real coverage rather than decoration, which is the bar for keeping a
-  # check at all, but be precise about whose code it covers. This crate has no
-  # `unsafe` of its own: all four matches for the word under `src/` are in
-  # comments. So Miri here checks the `unsafe` in the dependencies the tests
+  # check at all, but be precise about whose code it covers. The default Miri
+  # invocation reaches none of this crate's own `unsafe`, and the one place it
+  # lives is a single feature flag away: `src/avif.rs` carries ten real blocks,
+  # a dav1d FFI boundary with an `unsafe extern "C"`, a raw pointer `as_ref()`
+  # and pointer arithmetic with an unaligned read. All of it is behind
+  # `#[cfg(feature = "avif")]`, and `default = []`, so a bare `cargo miri test`
+  # compiles every one of them out. Running Miri with `--features avif` would
+  # not, and that is the interesting case rather than a hazard to avoid.
+  #
+  # So by default Miri here checks the `unsafe` in the dependencies the tests
   # reach, which is a dozen image decoders plus the colour and hash crates, and
   # that is the surface #642 was filed about in the first place.
+  #
+  # This paragraph used to say the crate had no `unsafe` at all, "all four
+  # matches for the word under `src/` are in comments". It was wrong, nothing
+  # checked it, and it sent issue #675 looking in the wrong place.
+  # `tests/unsafe_inventory.rs` now holds it to the tree (issue #897).
   #
   # The tree is maintained for it: every filesystem-touching test is meant to
   # carry a `#[cfg_attr(miri, ignore)]` naming the isolation limit it works
