@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`profile` emits `Int32` and stops saturating at 65535** (issues #516, #759).
+  Breaking because the output format changes, and a live defect until now:
+  positions on any axis longer than 65535 were wrong. On a 1x65537 all-zero
+  image `vips profile` reports **65537** and this reported 65535.
+
+  Note the signedness. vips emits `VIPS_FORMAT_INT` there for every one of the
+  eight input formats, measured on `/opt/homebrew/bin/vips` 8.18.6, so closing
+  this needed the **signed** carrier and not the unsigned one issue #532 widened
+  the counters onto. That is the opposite of what #532 assumes about the counter
+  family, and it is why `profile` was left out of that change with a mutation row
+  asserting it had been.
+
+- **`project` sums a signed input into `Int32`** rather than the float carrier
+  (issue #516), which is the second row of the table #532 opened. The measured
+  table is `UINT` for `uchar` / `ushort` / `uint`, `INT` for `char` / `short` /
+  `int`, and `DOUBLE` for `float` and `double`. A negative sum survives now
+  instead of clipping at zero. The float row is still a deviation: this crate
+  has no `f64` carrier, so it sums into `FloatF32`.
+
 - **The counting ops emit `Uint32` instead of a 16-bit format, and stop
   saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
   `hist_find_ndim`, `hist_cum`, `project`, `hough_line` and `hough_circle` all
@@ -782,6 +801,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one trailer should not carry two conventions. Every one of those spellings
   parses back to the same `f64` on both sides, so the difference is spelling
   and not value.
+- **The signed pixel carriers**, `PixelFormat::Int8`, `Int16` and `Int32`: the
+  libvips `VIPS_FORMAT_CHAR`, `SHORT` and `INT` ones (issue #516). With issue
+  #517's `Uint32` before them, **every `SampleKind` now has a `PixelFormat`
+  behind it**, so `PixelFormat::with_kind` is total and never answers `None` for
+  a kind.
+
+  `with_channels` still cannot reach four of the seven, and that is deliberate:
+  a byte width does not name a carrier. Two bytes answers `Rgb16` where the
+  caller may have meant `Int16`, and four bytes answers the float carrier where
+  they may have meant `Uint32` or `Int32`. `with_kind` is the constructor that
+  cannot be asked ambiguously.
+
+  Like the other tuple carriers these are compute intermediates with no named
+  spelling, so `Int8(n)` is canonical at every band count, and they follow the
+  same four-band alpha rule.
+
+  Three refusals, each measured rather than assumed:
+
+  - The `image` crate has **no signed colour type at any width**, so the PNG and
+    JPEG encoders and both tile sinks refuse all three. `Int8` is one byte and
+    there is still no signed L8, so this is not a width question.
+  - JPEG 2000 refuses `Int32` and `Uint32` because vips does not read either
+    back: with `--lossless`, `int` 7 returns as 14 and `uint` 7 as 2147483662.
+  - JPEG 2000 refuses `Int8` and `Int16` for a different reason. With
+    `--lossless`, `char` and `short` rasters holding `[-5, 100, -100, 7]`
+    round-trip **exactly**, so the format carries signed samples and this
+    encoder cannot write them. That is a gap rather than a limit and is issue
+    #905; writing them unsigned would turn -5 into 251.
+
+  The ops whose sample helpers return `u32` refuse the signed carriers with the
+  typed error issue #517 added, rather than misreading them: `gamma`,
+  `falsecolour`, `msb`, `addalpha`, `bandmean`, `bandbool`, `embed`, `insert`
+  and the box filters. Widening those to `i64` is the remainder of #516's parity
+  work.
 
 - **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
   libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:

@@ -3230,6 +3230,109 @@ mod tests {
     }
 
     /**
+     * Tests the `Extend::White` ink for every carrier, including the three
+     * signed ones, which no op-level test can reach while `embed` refuses
+     * them (issue #909).
+     * Works by calling [`white_ink`] directly under the `b-w` tag, whose
+     * `max_alpha` is 255, so the ink byte is 0xFF and the answer is that
+     * byte replicated across the sample width. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6: `vips embed --extend white` fills
+     * 255 on `uchar`, 65535 on `ushort`, 4294967295 on `uint`, and **-1**
+     * on `char`, `short` and `int` alike, which are the same three
+     * patterns read signed. The signedness appears at the store and not
+     * here, because `memset` fills bytes and does not know the type.
+     * Input: each carrier under `b-w` -> Output: 255, 65535, 4294967295 by
+     * width, whatever the signedness.
+     */
+    #[test]
+    fn white_ink_replicates_the_ink_byte_across_every_carrier() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let bw = Interpretation::Bw;
+        // (format, the value the bytes hold, read unsigned)
+        let cases = [
+            (PixelFormat::Gray8, 255.0),
+            (PixelFormat::Int8(n(1)), 255.0),
+            (PixelFormat::Gray16, 65535.0),
+            (PixelFormat::Int16(n(1)), 65535.0),
+            (PixelFormat::Uint32(n(1)), 4_294_967_295.0),
+            (PixelFormat::Int32(n(1)), 4_294_967_295.0),
+        ];
+        for (fmt, want) in cases {
+            assert_eq!(
+                white_ink(fmt, bw),
+                want,
+                "{fmt:?} inks the wrong pattern; vips fills the same bytes for a \
+                 signed carrier as for its unsigned twin of the same width"
+            );
+        }
+        // The pairs that share a width and must agree, which is what a
+        // per-width arm gets right by luck and a per-carrier arm has to
+        // state: one byte, two bytes, four bytes.
+        assert_eq!(
+            white_ink(PixelFormat::Int8(n(1)), bw),
+            white_ink(PixelFormat::Gray8, bw)
+        );
+        assert_eq!(
+            white_ink(PixelFormat::Int16(n(1)), bw),
+            white_ink(PixelFormat::Gray16, bw)
+        );
+        assert_eq!(
+            white_ink(PixelFormat::Int32(n(1)), bw),
+            white_ink(PixelFormat::Uint32(n(1)), bw)
+        );
+        // And the control that the widths really differ, so the three
+        // equalities above are not all comparing the same number.
+        assert_ne!(
+            white_ink(PixelFormat::Gray8, bw),
+            white_ink(PixelFormat::Gray16, bw)
+        );
+    }
+
+    /**
+     * Tests that the sample-level extract ops refuse the signed carriers
+     * with a typed error rather than misreading them, and **pins that as
+     * an interim rather than as parity**.
+     * `vips embed --extend white` and `vips insert` both accept a `char`
+     * raster and return CHAR, measured on 8.18.6, so this refusal is a
+     * parity regression held open on purpose while the `u32`-returning
+     * sample helpers are widened to `i64`. That is issue **#909**, and
+     * when it lands these assertions should be *replaced by value
+     * assertions*, not deleted as though they had been wrong.
+     * Works by asserting the typed error for all three signed carriers,
+     * with the unsigned 32-bit one as the control that the guard
+     * discriminates by kind rather than refusing anything unfamiliar.
+     * Input: Int8 / Int16 / Int32 -> Err(UnsupportedSampleKind); Uint32 ->
+     * Ok.
+     */
+    #[test]
+    fn embed_refuses_the_signed_carriers_for_now_issue_909() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        for fmt in [
+            PixelFormat::Int8(n(1)),
+            PixelFormat::Int16(n(1)),
+            PixelFormat::Int32(n(1)),
+        ] {
+            let r = Raster::zeroed(1, 1, fmt).unwrap();
+            let got = r.try_embed(1, 1, 3, 3, Extend::White, None);
+            assert!(
+                matches!(
+                    got,
+                    Err(ExtractError::UnsupportedSampleKind { op: "embed", .. })
+                ),
+                "{fmt:?} must be refused by kind while #909 is open, got {got:?}"
+            );
+        }
+        // Control: the guard is about the kind, and the unsigned 32-bit
+        // carrier of issue #517 still goes through.
+        assert!(
+            Raster::zeroed(1, 1, PixelFormat::Uint32(n(1)))
+                .unwrap()
+                .try_embed(1, 1, 3, 3, Extend::White, None)
+                .is_ok()
+        );
+    }
+
+    /**
      * Tests that `embed` carries the unsigned 32-bit carrier: it copies
      * the source samples at the right stride and inks the border with the
      * carrier's own white.

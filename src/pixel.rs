@@ -897,7 +897,9 @@ mod tests {
     #[test]
     fn kind_agrees_with_width_and_floatness() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        for fmt in [
+        // The named variants, spelled out because they have no `with_kind`
+        // spelling to be generated from.
+        let named = [
             PixelFormat::Gray8,
             PixelFormat::Gray16,
             PixelFormat::Rgb8,
@@ -908,8 +910,16 @@ mod tests {
             PixelFormat::Multi8(n(7)),
             PixelFormat::Multi16(n(7)),
             PixelFormat::FloatF32(n(7)),
-            PixelFormat::Uint32(n(7)),
-        ] {
+        ];
+        // And every carrier, generated from `ALL_KINDS` rather than listed.
+        // Mutation is why: this was a hand-written list, and putting `Int8`
+        // at four bytes left it green, because the list had never been
+        // extended past `Uint32` when issue #516 added three more.
+        let generated: Vec<PixelFormat> = ALL_KINDS
+            .iter()
+            .map(|&k| PixelFormat::with_kind(7, k).expect("every kind has a carrier"))
+            .collect();
+        for fmt in named.into_iter().chain(generated) {
             assert_eq!(
                 fmt.kind().bytes(),
                 fmt.bytes_per_channel(),
@@ -920,7 +930,20 @@ mod tests {
                 fmt.is_float(),
                 "kind floatness disagrees for {fmt:?}"
             );
+            assert_eq!(
+                fmt.bytes_per_pixel(),
+                fmt.channels() * fmt.bytes_per_channel(),
+                "bytes_per_pixel disagrees for {fmt:?}"
+            );
         }
+        // The exact widths, pinned per kind, so the identity above cannot
+        // pass with two accessors that are wrong together.
+        assert_eq!(SampleKind::I8.bytes(), 1);
+        assert_eq!(SampleKind::I16.bytes(), 2);
+        assert_eq!(SampleKind::I32.bytes(), 4);
+        assert_eq!(PixelFormat::Int8(n(7)).bytes_per_channel(), 1);
+        assert_eq!(PixelFormat::Int16(n(7)).bytes_per_channel(), 2);
+        assert_eq!(PixelFormat::Int32(n(7)).bytes_per_channel(), 4);
     }
 
     /**
@@ -946,6 +969,29 @@ mod tests {
         assert_eq!(PixelFormat::Uint32(n(1)).kind(), SampleKind::U32);
         assert_eq!(PixelFormat::Uint32(n(4)).kind(), SampleKind::U32);
         assert_eq!(PixelFormat::Uint32(n(5)).kind(), SampleKind::U32);
+        assert_eq!(PixelFormat::Int8(n(1)).kind(), SampleKind::I8);
+        assert_eq!(PixelFormat::Int8(n(5)).kind(), SampleKind::I8);
+        assert_eq!(PixelFormat::Int16(n(1)).kind(), SampleKind::I16);
+        assert_eq!(PixelFormat::Int32(n(1)).kind(), SampleKind::I32);
+        // The three pairs that share a byte width and are not the same
+        // carrier, which is what a width-keyed `match` cannot tell apart:
+        // one byte, two bytes, and the three-way tie at four.
+        assert_ne!(
+            PixelFormat::Int8(n(5)).kind(),
+            PixelFormat::Multi8(n(5)).kind()
+        );
+        assert_ne!(
+            PixelFormat::Int16(n(5)).kind(),
+            PixelFormat::Multi16(n(5)).kind()
+        );
+        assert_ne!(
+            PixelFormat::Int32(n(5)).kind(),
+            PixelFormat::Uint32(n(5)).kind()
+        );
+        assert_ne!(
+            PixelFormat::Int32(n(5)).kind(),
+            PixelFormat::FloatF32(n(5)).kind()
+        );
         // The pair that shares a byte width and is not the same carrier,
         // which is what issue #517 adds and what a width-keyed `match`
         // cannot tell apart.

@@ -1092,35 +1092,68 @@ mod tests {
     }
 
     /**
-     * Tests that the unsigned 32-bit carrier round-trips through the
-     * manifest wire tag, and that its tag is read before the width-keyed
-     * tail so it cannot fall into the four-byte float arm (issue #517).
-     * Works by serialising a `Uint32` format, asserting the exact tag
-     * string, and reading it back, with the float carrier at the same band
-     * count as the control that the two tags are distinct and neither
-     * reads as the other.
-     * Input: Uint32(3) -> "uint32:3" -> Uint32(3); FloatF32(3) ->
-     * "floatf32:3" -> FloatF32(3).
+     * Tests that all four kind-tagged carriers round-trip through the
+     * manifest wire tag, and that their tags are read before the
+     * width-keyed tail so none can fall into an arm keyed on a byte depth
+     * (issues #516, #517).
+     * Works by serialising each carrier at four band counts, asserting the
+     * exact tag string, and reading it back. The controls at the end are
+     * the point: `int8` and `multi8` share a byte width, as do `int16` and
+     * `multi16`, and `uint32`, `int32` and `floatf32` are a three-way tie
+     * at four bytes, so a width-keyed serializer cannot tell six of these
+     * apart and this shows all six with distinct tags.
+     * Input: Int16(3) -> "int16:3" -> Int16(3), and so on for the four.
      */
     #[test]
-    fn uint32_round_trips_through_the_manifest_tag() {
+    fn every_kind_tagged_carrier_round_trips_through_the_manifest_tag() {
         let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
-        for bands in [1u16, 3, 4, 7] {
-            let fmt = PixelFormat::Uint32(n(bands));
-            let json = serde_json::to_string(&SourceMetadata {
+        // The four carriers with no named spelling and no width-keyed one,
+        // each with the exact tag it must write. Driven off a table rather
+        // than written per carrier, because mutation caught this list
+        // holding only `Uint32` after issue #516 added three more:
+        // tagging `Int16` as `int8` left it green.
+        let carriers: [(fn(core::num::NonZeroU16) -> PixelFormat, &str); 4] = [
+            (PixelFormat::Uint32, "uint32"),
+            (PixelFormat::Int8, "int8"),
+            (PixelFormat::Int16, "int16"),
+            (PixelFormat::Int32, "int32"),
+        ];
+        for (make, tag) in carriers {
+            for bands in [1u16, 3, 4, 7] {
+                let fmt = make(n(bands));
+                let json = serde_json::to_string(&SourceMetadata {
+                    width: 4,
+                    height: 4,
+                    pixel_format: fmt,
+                    bytes_hash: None,
+                })
+                .unwrap();
+                assert!(
+                    json.contains(&format!("\"{tag}:{bands}\"")),
+                    "the tag for {fmt:?} is not {tag}:{bands} in {json}"
+                );
+                let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.pixel_format, fmt);
+            }
+        }
+        // The three carriers that share a byte width with another and must
+        // still get their own tag, which is what a width-keyed serializer
+        // cannot do: 1 byte, 2 bytes, and the three-way tie at 4.
+        let tag_of = |fmt: PixelFormat| {
+            serde_json::to_string(&SourceMetadata {
                 width: 4,
                 height: 4,
                 pixel_format: fmt,
                 bytes_hash: None,
             })
-            .unwrap();
-            assert!(
-                json.contains(&format!("\"uint32:{bands}\"")),
-                "the tag for {fmt:?} is not uint32:{bands} in {json}"
-            );
-            let back: SourceMetadata = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.pixel_format, fmt);
-        }
+            .unwrap()
+        };
+        assert!(tag_of(PixelFormat::Int8(n(3))).contains("\"int8:3\""));
+        assert!(tag_of(PixelFormat::Multi8(n(3))).contains("\"rgb8\""));
+        assert!(tag_of(PixelFormat::Int16(n(3))).contains("\"int16:3\""));
+        assert!(tag_of(PixelFormat::Int32(n(3))).contains("\"int32:3\""));
+        assert!(tag_of(PixelFormat::Uint32(n(3))).contains("\"uint32:3\""));
+        assert!(tag_of(PixelFormat::FloatF32(n(3))).contains("\"floatf32:3\""));
         // Control: the float carrier of the same width keeps its own tag
         // and reads back as itself, so the two four-byte carriers are not
         // one tag with two names.
