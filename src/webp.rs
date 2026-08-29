@@ -1991,6 +1991,32 @@ mod tests {
     ];
 
     /**
+     * Tests the arithmetic of the upstream loss on its own, at the values
+     * the fixture cannot reach. Works by calling the rule directly, because
+     * `ANIM4_ROLL` has no zero byte anywhere in the pages the loss applies
+     * to, so a fixture comparison cannot tell "one level low" from "one
+     * level low and zero wraps to 255".
+     * Input: `[0, 1, 2, 128, 255]` -> Output: `[0, 0, 1, 127, 254]`, which
+     * is `s - 1` for every `s` from 1 to 255 and zero unchanged.
+     */
+    #[test]
+    fn the_upstream_loss_is_one_level_and_zero_stays_zero() {
+        assert_eq!(
+            as_image_webp_blends(&[0, 1, 2, 128, 255]),
+            vec![0, 0, 1, 127, 254]
+        );
+        // The zero is the whole point of this test existing: the blend
+        // computes `(0 * 255 * 65793) >> 24`, which is 0 and not 255, and
+        // the only byte in `ANIM4_ROLL` that could have shown it sits in
+        // page 0, which is never blended.
+        assert!(
+            !ANIM4_ROLL[36..].contains(&0),
+            "if a zero ever appears in a blended page, this test stops being \
+             the only thing pinning that arm"
+        );
+    }
+
+    /**
      * Tests that a header lying about transparency cannot make this loader
      * skip a blend libwebp performs, which is the whole soundness question
      * behind the blend-flag rewrite. Works by building the file vips will
