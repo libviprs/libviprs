@@ -37,7 +37,8 @@ readers only need one group.
   `#[non_exhaustive]`, and two changes alter what goes into a `.v` file on
   disk.
 
-The independent items are the allocation-refusal collapse (#686), the
+The independent items are the allocation-refusal collapse (#686), the decode
+budget becoming a real peak ceiling for jp2k, gif and avif (#944), the
 `ConversionError::FloatUnsupported` rename (#730), `compass`'s `times` range
 (#547), `arrayjoin`'s `across` clamp (#577), `decode_tiff_page`'s page index
 (#566) and `GifError::BadPageNumber` (#845).
@@ -50,6 +51,50 @@ they live in the file format rather than in the API, which is why they are here
 and not under `Fixed`: this file is the only place they can be caught.
 
 ### Breaking
+
+- **The JPEG 2000, GIF and AVIF decode budgets cover what the decode really
+  holds, so each refuses files it used to accept** (issue #944).
+  `DecodeLimits::max_alloc_bytes` is documented as "the maximum number of bytes
+  the decoder may allocate at one time", and for these three it was the size of
+  the one buffer libviprs fills. Measured with a counting global allocator at
+  512x512, against the price each decoder reported for itself:
+
+  | container | priced | peak | ratio |
+  |---|---|---|---|
+  | JPEG 2000 | 786,432 | 8,484,900 | **10.79x** |
+  | AVIF, 4:4:4 | 786,432 | 3,062,683 | **3.89x** |
+  | AVIF, 4:4:4 with alpha | 1,048,576 | 3,146,459 | **3.00x** |
+  | AVIF, 4:2:0 | 786,432 | 1,860,371 | **2.37x** |
+  | GIF | 786,432 | 1,873,784 | **2.38x** |
+  | WebP, priced since #686 and #892 | | | under 1 |
+
+  So a caller sizing a cgroup limit from `max_alloc_bytes` was killed at up to
+  that factor, and the refusal message understated by the same one, which sends
+  anyone tuning from the error to the wrong number.
+
+  Each of the three now prices the whole live set. JPEG 2000 adds
+  `hayro-jpeg2000`'s `f32` component data and its per-tile coefficient storage;
+  AVIF adds the decoded YCbCr frame, whose planes follow `av1C`'s subsampling,
+  and a second frame for an alpha item; GIF adds the canvas, the
+  restore-to-previous snapshot and one frame of palette indices beside the roll
+  it was already pricing.
+
+  **This is the same trade #892 made for WebP**: the price is now between 1.27x
+  and 1.76x the measured peak, so a file that fitted between the old price and
+  the new one is refused. Raising `max_alloc_bytes` is the answer, and the
+  number in the message is now the number to raise it to. A ceiling that is
+  sometimes generous still bounds the process; one that is sometimes short
+  bounds nothing.
+
+  The refusals keep their labels (`"JPEG 2000 component buffers"`,
+  `"AVIF frame buffer"`, `"GIF canvas"`, `"GIF animation"`,
+  `"GIF frame indices"`) and keep reporting the geometry the price started
+  from, so `needed_bytes` is now larger than the product of the geometry beside
+  it. That is WebP's shape since #686 and not a new one.
+
+  `tests/decode_working_set.rs` is the guard, and it reads the price out of the
+  decoder's own refusal rather than restating a model, so it cannot pass by
+  agreeing with itself.
 
 - **`ConversionError::UnsupportedSampleKind` is removed** (issue #931). Nothing
   in the crate could construct it. It was the sibling of
