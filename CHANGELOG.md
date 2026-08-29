@@ -3076,6 +3076,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An animated WebP's band count follows the rule vips applies rather than the
+  `VP8X` alpha flag alone (issue #885). `webp2vips.c:413` starts from the flag
+  and `:464-471` turns alpha on when **any** frame carries alpha of its own or
+  is smaller than the canvas, the second because a frame that does not cover
+  the canvas leaves the area around it transparent. libwebp's demuxer computes
+  the per-frame half from an `ALPH` chunk or the `VP8L` header's
+  `alpha_is_used` bit (`demux.c:204,245`).
+
+  `image-webp` reads the flag and nothing else, so a file with a sub-canvas
+  frame came back three-band and the transparent area came back as opaque
+  black. That is lost data rather than a wrong label: measured on vips 8.18.6,
+  the same file reports four bands and an alpha of 0 outside the frame.
+
+  The fix hands the decoder the file with the flag set, so the RGBA canvas it
+  already keeps internally comes back whole. That is sound where the blend-flag
+  rewrite #863 withdrew was not, and the difference matters: the alpha flag is
+  an output-format switch inside `image-webp`, deciding only whether the fourth
+  channel is dropped on the way out, so moving it cannot change a decoded
+  value. The blend flag decided arithmetic, from a header field libwebp never
+  consults. The copy is priced through `DecodeLimits` and is made only for a
+  file the rule moves, which is no file `vips webpsave` writes.
+
 - Two GIFs that decode in vips and did not decode here now decode, because the
   loader hands the decoder the same file in the shape it will read (issues
   #851, #879). Both were filed as "upstream refuses it first, nothing here
