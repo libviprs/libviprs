@@ -5000,9 +5000,20 @@ mod tests {
 
         let narrow = frame_buffer_bytes(priced, w, h, bands, element_bytes, thirty_two);
         assert!(
-            matches!(narrow, Err(RasterError::SizeOverflow { .. })),
+            matches!(
+                narrow,
+                Err(RasterError::SizeOverflow {
+                    width: 32768,
+                    height: 32767,
+                    // Four bands at two bytes each. The old spelling reported
+                    // the band count here, which is the same number the
+                    // second, unchecked multiply was missing.
+                    bpp: 8,
+                })
+            ),
             "a length a 32-bit target cannot address must be refused, not \
-             wrapped into an undersized buffer: {narrow:?}"
+             wrapped into an undersized buffer, and the refusal must name what \
+             a pixel really costs: {narrow:?}"
         );
 
         // And the sample count on its own *does* fit, which is why
