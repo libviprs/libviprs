@@ -2596,6 +2596,94 @@ mod tests {
     use super::*;
     use crate::source::{decode_bytes, decode_file};
 
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/imageio.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. This module is the one
+     * where a width standing in for a kind reaches a **file**: the `.v`
+     * `BandFmt` word was written from a byte width, so a four-byte integer
+     * raster was tagged `float` on disk and read back as float on a later
+     * run, and `fuzz_decode` reaches the read half of the same word from
+     * untrusted bytes (issues #841, #607).
+     * Input: `src/imageio.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn imageio_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("imageio.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "encode_vips_impl")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        assert!(
+            SRC.contains(concat!("fn band_format_", "code")),
+            "the .v BandFmt word must come from a SampleKind table, not from \
+             a byte width"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/imageio.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the `.v` reader names the sample format it is refusing, for
+     * the four `VipsBandFormat` codes libvips writes that no libviprs
+     * [`PixelFormat`] carries yet: 1 `char`, 3 `short`, 4 `uint`, 5 `int`.
+     * A reader that only knows 0, 2 and 6 cannot tell "this is a real vips
+     * file this build has no carrier for" from "these bytes are not a band
+     * format at all", and those two want different answers from a caller.
+     * Works by patching the `BandFmt` word of a real encoded fixture and
+     * asserting the error text carries the vips nickname for that code.
+     * Input: a 2x2 RGB `.v` retagged 1 / 3 / 4 / 5 -> Output: a format error
+     * naming char / short / uint / int.
+     */
+    #[test]
+    fn the_v_reader_names_the_sample_format_it_cannot_carry() {
+        // Measured with `/opt/homebrew/bin/vips` 8.18.6, not read off the
+        // libvips headers: `vips cast base.v out.v <format>` for each format,
+        // then the `i32` at header offset 20 of each file.
+        let cases = [(1i32, "char"), (3, "short"), (4, "uint"), (5, "int")];
+        for (code, nickname) in cases {
+            let mut bytes = rgb_2x2().encode_vips_impl(false);
+            bytes[20..24].copy_from_slice(&code.to_ne_bytes());
+            let err = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .expect_err("no libviprs PixelFormat carries that sample kind yet");
+            let SourceError::VipsFormat(msg) = &err else {
+                panic!("a band format with no carrier is a format error: {err:?}");
+            };
+            assert!(
+                msg.contains(nickname),
+                "refusing BandFmt {code} must name it as {nickname}, got {msg:?}"
+            );
+        }
+
+        // Positive control: the same probe on the three codes this build does
+        // carry decodes rather than refusing, so the four failures above are
+        // about the sample kind and not about the patched fixture.
+        let ok = rgb_2x2().encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(ok[20..24].try_into().unwrap()),
+            0,
+            "an 8-bit fixture is BandFmt 0 (uchar)"
+        );
+        assert!(decode_vips_bytes(&ok, DecodeLimits::default()).is_ok());
+    }
+
     #[test]
     fn metadata_value_len_reports_blob_and_string_bytes() {
         // The foreign magickload cell asserts `icc.len() == 564` on the ICC
