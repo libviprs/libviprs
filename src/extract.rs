@@ -448,6 +448,13 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
         | PixelFormat::Rgb16
         | PixelFormat::Rgba16
         | PixelFormat::Multi16(_) => f64::from((byte << 8) | byte),
+        // `memset` fills every byte of the sample, so a four-byte integer
+        // carrier gets the ink byte replicated four times. Measured:
+        // `vips embed --extend white` on a one-band `uint` raster fills
+        // 4294967295 (`0xFFFFFFFF`) and on an `int` one fills -1, the same
+        // bytes read signed. The comment above about `int` + scRGB
+        // measuring `0x01010101` is the low-ink end of the same rule.
+        PixelFormat::Uint32(_) => f64::from((byte << 24) | (byte << 16) | (byte << 8) | byte),
     }
 }
 

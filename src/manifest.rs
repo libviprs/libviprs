@@ -286,6 +286,7 @@ mod pixel_format_serde {
             PixelFormat::Multi8(n) => format!("multi8:{n}"),
             PixelFormat::Multi16(n) => format!("multi16:{n}"),
             PixelFormat::FloatF32(n) => format!("floatf32:{n}"),
+            PixelFormat::Uint32(n) => format!("uint32:{n}"),
         };
         s.serialize_str(&name)
     }
