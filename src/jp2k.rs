@@ -1785,7 +1785,10 @@ fn num_resolutions(width: u32, height: u32) -> i32 {
 ///
 /// [`EncodeError::Encode`] for the float carriers, which is what
 /// `vips jp2ksave` does with a `float` or `double` image: it fails with `not
-/// an integer format` rather than quantising behind the caller's back.
+/// an integer format` rather than quantising behind the caller's back; for
+/// the 32-bit integer carriers, which vips accepts and then fails to read
+/// back; and for the signed 8- and 16-bit ones, which JPEG 2000 does carry
+/// and this encoder does not yet write (issues #516, #905).
 #[cfg(feature = "jp2k")]
 fn sample_depth(format: PixelFormat) -> Result<(u8, usize), EncodeError> {
     match format {
@@ -1808,10 +1811,26 @@ fn sample_depth(format: PixelFormat) -> Result<(u8, usize), EncodeError> {
         // 2^31 plus roughly twice the sample. No value survives. So there
         // is nothing to be faithful to here, and a typed refusal is the
         // implementation rather than a gap (issue #517).
-        PixelFormat::Uint32(_) => Err(EncodeError::encode(format!(
+        PixelFormat::Uint32(_) | PixelFormat::Int32(_) => Err(EncodeError::encode(format!(
             "jp2k: this encoder writes 8- and 16-bit samples and {format:?} is 32-bit; \
-             cast to an unsigned 8/16-bit format first (vips jp2ksave accepts a uint \
-             image but does not read it back: 70000 returns as 2147622912)"
+             cast to an 8/16-bit format first (vips jp2ksave accepts a 32-bit image \
+             but does not read it back: with --lossless, uint 7 returns as 2147483662 \
+             and int 7 returns as 14)"
+        ))),
+        // The signed 8- and 16-bit carriers are a different refusal, and
+        // the distinction is measured rather than assumed. JPEG 2000 has a
+        // per-component `sgnd` flag and vips round-trips both of them
+        // **exactly**: with `--lossless`, `char` and `short` rasters
+        // holding `[-5, 100, -100, 7]` come back unchanged, where `int` and
+        // `uint` do not. So this is a gap in *this* encoder, which has no
+        // signed component support, and not a limit of the format. Writing
+        // the samples as unsigned would be the silent wrong answer: -5
+        // would come back as 251. Tracked as issue #905.
+        PixelFormat::Int8(_) | PixelFormat::Int16(_) => Err(EncodeError::encode(format!(
+            "jp2k: this encoder writes unsigned components and {format:?} is signed; \
+             cast to an unsigned format first (JPEG 2000 does carry signed samples \
+             and vips round-trips them losslessly, so this is issue #905 rather than \
+             a format limit)"
         ))),
     }
 }

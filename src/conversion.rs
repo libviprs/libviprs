@@ -517,7 +517,10 @@ impl Interpretation {
             PixelFormat::Multi8(_)
             | PixelFormat::Multi16(_)
             | PixelFormat::FloatF32(_)
-            | PixelFormat::Uint32(_) => Self::Multiband,
+            | PixelFormat::Uint32(_)
+            | PixelFormat::Int8(_)
+            | PixelFormat::Int16(_)
+            | PixelFormat::Int32(_) => Self::Multiband,
         }
     }
 }
