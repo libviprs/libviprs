@@ -352,13 +352,22 @@ fn write_u32(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
 /// the "samples are non-negative" assumption issue #607 names as the
 /// expensive half of #516.
 ///
-/// `max` stays a parameter because callers cap below the kind's ceiling
-/// (`profile` and the hough accumulators pass `65535.0` regardless of what
-/// the kind could hold).
+/// `max` stays a parameter because a caller can cap below the kind's
+/// ceiling: `profile` passes `65535.0` on a 16-bit carrier it has not
+/// moved off yet, since vips emits `INT` there and that needs issue #516.
+/// `project` passes the kind's own ceiling (issue #532).
 #[inline]
 fn write_f64(data: &mut [u8], kind: SampleKind, i: usize, v: f64, max: f64) {
-    // A float kind has no range; `write_u32` below refuses it anyway, so
-    // the floor it never reads is immaterial.
+    // A float carrier has neither a range nor a rounding step, so `max`
+    // does not apply to it and the value is stored as it is. This arm
+    // exists because `project` sums a float input into a float output:
+    // vips emits `DOUBLE` there and `FloatF32` is the nearest kind this
+    // crate has (issue #532). Before it, `write_u32` refused the kind and
+    // the op panicked.
+    if kind.is_float() {
+        data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+        return;
+    }
     let min = kind.range().map_or(0.0, |(lo, _)| lo as f64);
     let v = if v.is_nan() {
         0.0
@@ -1508,24 +1517,36 @@ impl Raster {
     ///
     /// Returns `(columns, rows)`: `columns` is a `width x 1` image holding
     /// the per-band sum of each column; `rows` is a `1 x height` image
-    /// holding the per-band sum of each row. Outputs are 16-bit and sums
-    /// saturate at `65535`.
+    /// holding the per-band sum of each row.
     ///
-    /// **The ceiling is a deviation and it is reached by any image with
-    /// more than 257 rows of full-scale 8-bit samples.** libvips promotes
-    /// to a 32-bit carrier this crate does not have, and *which* one
-    /// depends on the input, measured on 8.18.6: `UINT` for `uchar`,
-    /// `ushort` and `uint`, `INT` for `char`, `short` and `int`, and
-    /// `DOUBLE` for `float` and `double`. So matching vips here needs both
-    /// carrier families and not just the uint one (issues #517 and #516).
-    /// On a 1x65537 all-255 image `vips project` reports `16711935` where
-    /// this reports `65535`.
+    /// The output carrier follows the input, which is the table libvips
+    /// runs and which was measured on 8.18.6: `UINT` for `uchar`, `ushort`
+    /// and `uint`, `INT` for `char`, `short` and `int`, and `DOUBLE` for
+    /// `float` and `double`. Issue #517's carrier covers the first row, so
+    /// an unsigned input now sums into `Uint32` and a 300x300 image
+    /// reports 60000 rather than saturating at 65535 (issue #532).
+    ///
+    /// Two rows are still deviations, and both are carrier gaps rather
+    /// than arithmetic ones. A signed input wants `INT`, which needs issue
+    /// #516. A float input wants `DOUBLE`, which this crate has no carrier
+    /// for at all, so it sums into `FloatF32`: exact to 2^24 rather than
+    /// to 2^53.
     pub fn project(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
         let (w, h) = (self.width() as usize, self.height() as usize);
-        let out_fmt = PixelFormat::with_kind(bands, SampleKind::U16)
+        // The libvips format table, spelled per kind rather than as one
+        // carrier, because it is not one carrier: see the doc above.
+        let out_kind = match kind {
+            SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => SampleKind::U32,
+            SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => SampleKind::F32,
+        };
+        let out_fmt = PixelFormat::with_kind(bands, out_kind)
             .expect("band count unchanged, so the output format exists");
+        let out_max = match out_kind.max_value() {
+            Some(m) => f64::from(m),
+            None => f64::MAX,
+        };
         let data = self.data();
 
         // `col_sums` / `row_sums` are input-scaled — a wide, short raster
@@ -1559,11 +1580,11 @@ impl Raster {
         }
         let mut cols = op_output_or_panic(self.width(), 1, out_fmt);
         for (i, &s) in col_sums.iter().enumerate() {
-            write_f64(&mut cols, SampleKind::U16, i, s, 65535.0);
+            write_f64(&mut cols, out_kind, i, s, out_max);
         }
         let mut rows = op_output_or_panic(1, self.height(), out_fmt);
         for (i, &s) in row_sums.iter().enumerate() {
-            write_f64(&mut rows, SampleKind::U16, i, s, 65535.0);
+            write_f64(&mut rows, out_kind, i, s, out_max);
         }
         (
             Raster::from_op_output(self.width(), 1, out_fmt, cols)
@@ -3592,11 +3613,10 @@ impl Raster {
     /// Every non-zero sample votes for the lines through its pixel, and the
     /// **binning** of those votes is vips-exact: the accumulator cell each
     /// vote lands in matches vips 8.18.4 `hough_line` cell-for-cell (see the
-    /// oracle-pinned tests). The output is a single-band 16-bit accumulator:
-    /// column `i` is the angle bin `theta = 180deg * i / 256`. The vote
-    /// *counts* carried in those cells are ushort rather than vips's uint and
-    /// saturate at `65535` — an intentional format deviation, documented
-    /// below, that leaves the "vips-exact" claim scoped to the binning only.
+    /// oracle-pinned tests). The output is a single-band 32-bit unsigned
+    /// accumulator, the same `uint` carrier vips uses: column `i` is the
+    /// angle bin `theta = 180deg * i / 256`, and the vote counts in those
+    /// cells are the counts (issues #495, #532).
     ///
     /// vips normalizes the pixel coordinates by the image **diagonal**
     /// `d = sqrt(w^2 + h^2)` — not by width/height separately — so
@@ -3611,22 +3631,18 @@ impl Raster {
     /// A peak at `(i, ri)` therefore decodes as angle `180 * i / width` and
     /// signed pixel distance `(2 * ri / height - 1) * sqrt(w^2 + h^2)`.
     ///
-    /// # Intentional accumulator-format deviation from vips (#495)
+    /// # The accumulator format, and the deviation that used to be here
     ///
-    /// vips 8.18.4 emits the `hough_line` accumulator as a **32-bit `uint`**
-    /// image whose cells hold the full collinear-vote count with **no
-    /// saturation** (confirmed: `vipsheader` reports `uint`, and a 70000-wide
-    /// lit line peaks at exactly `70000`). This crate has no unsigned 32-bit
-    /// pixel format, so the accumulator is carried as `Gray16` (ushort) and
-    /// every cell is clamped with `v.min(0xFFFF)`. The two therefore diverge
-    /// only when a single accumulator cell would exceed `65535` — i.e. when
-    /// more than 65535 collinear lit pixels concentrate into one bin, which
-    /// requires an image dimension above 65535 (vips accepts such images).
-    /// On that case vips reports the true count while this op reports `65535`.
-    /// The *binning* (which cell each vote lands in) is unaffected and stays
-    /// vips-exact; only the cell's carrier width and the >65535 saturation
-    /// differ. This mirrors the format deviation disclosed for
-    /// [`Raster::hough_circle`] and is tracked by issue #495.
+    /// vips emits the `hough_line` accumulator as a **32-bit `uint`** image
+    /// whose cells hold the full collinear-vote count with no saturation
+    /// (`vipsheader` reports `uint`, and a 70000-wide lit line peaks at
+    /// exactly 70000). This crate had no unsigned 32-bit pixel format, so
+    /// the accumulator was carried as `Gray16` and every cell was clamped
+    /// with `v.min(0xFFFF)`, which diverged the moment more than 65535
+    /// collinear lit pixels landed in one bin. Issue #517 added the
+    /// carrier and issue #532 moved the accumulator onto it, so the two
+    /// agree now: the 70000-wide line peaks at 70000 here too. Issue #495
+    /// tracked the old deviation.
     ///
     /// The angle terms are read from a `sin` lookup table indexed by
     /// `i` and `i + width/2` (vips uses `sin[i + width/2]` for the cosine
@@ -3676,15 +3692,14 @@ impl Raster {
             }
         }
 
-        // vips carries the accumulator as uint; this crate has no unsigned
-        // 32-bit format, so it is emitted as Gray16 and cells are clamped at
-        // 65535 (an intentional, documented deviation — see the rustdoc and
-        // issue #495). The u32 accumulator above keeps the binning exact; only
-        // cells with >65535 votes (a >65535-pixel collinear line) saturate.
-        let out_fmt = PixelFormat::with_kind(1, SampleKind::U16).expect("Gray16 exists");
+        // vips carries the accumulator as `uint` and so does this now: the
+        // cells hold the full collinear-vote count with no clamp, which is
+        // what issue #532 closes and what issue #495 recorded as a
+        // deviation while there was no 32-bit unsigned carrier to hold it.
+        let out_fmt = PixelFormat::with_kind(1, SampleKind::U32).expect("the uint carrier exists");
         let mut out = op_output_or_panic(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt);
         for (i, &v) in acc.iter().enumerate() {
-            write_u32(&mut out, SampleKind::U16, i, v.min(0xFFFF));
+            write_u32(&mut out, SampleKind::U32, i, v);
         }
         Raster::from_op_output(HOUGH_LINE_WIDTH, HOUGH_LINE_HEIGHT, out_fmt, out)
             .expect("hough accumulator is well-formed")
@@ -3745,7 +3760,7 @@ impl Raster {
             });
         }
         let radii = (max_radius - min_radius + 1) as usize;
-        let out_fmt = format_for(radii, SampleKind::U16)?;
+        let out_fmt = format_for(radii, SampleKind::U32)?;
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
         let (w, h) = (self.width() as usize, self.height() as usize);
@@ -3818,7 +3833,7 @@ impl Raster {
 
         let mut out = alloc_op_output(self.width(), self.height(), out_fmt)?;
         for (i, &v) in acc.iter().enumerate() {
-            write_u32(&mut out, SampleKind::U16, i, v.min(0xFFFF));
+            write_u32(&mut out, SampleKind::U32, i, v);
         }
         Ok(Raster::from_op_output(
             self.width(),
@@ -4694,20 +4709,47 @@ mod tests {
      * Input: Gray8 and Rgb8 -> Output: Gray16 / Rgb16 from both ops.
      */
     #[test]
-    fn profile_and_project_carry_16_bit_samples() {
+    fn project_carries_32_bit_samples_and_profile_still_does_not() {
+        let uint = |bands: u16| PixelFormat::Uint32(core::num::NonZeroU16::new(bands).unwrap());
         let one = gray(4, 3, vec![0, 0, 5, 0, 0, 7, 0, 0, 0, 0, 0, 0]);
+        let (jc, jr) = one.project();
+        assert_eq!(jc.format(), uint(1));
+        assert_eq!(jr.format(), uint(1));
+
+        let three = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        let (jc3, _) = three.project();
+        assert_eq!(jc3.format(), uint(3));
+
+        // A float input wants vips's `DOUBLE`, which this crate has no
+        // carrier for, so `project` sums into `FloatF32`: the nearest kind
+        // rather than the nearest width. Measured on 8.18.6, `vips project`
+        // on a float raster reports DOUBLE.
+        let f = Raster::new(
+            2,
+            1,
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            [1.5f32, 2.5].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        )
+        .unwrap();
+        let (fc, _) = f.project();
+        assert_eq!(
+            fc.format(),
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap()),
+            "a float input must not be summed into an integer carrier"
+        );
+
+        // `profile` deliberately stays 16-bit, and it is not an oversight.
+        // `vips profile` emits **INT**, not UINT, for `uchar`, `ushort`,
+        // `uint` and `float` inputs alike, measured on 8.18.6, so it needs
+        // the signed carrier of issue #516 rather than the unsigned one of
+        // #517. Widening it to `Uint32` here would be the wrong carrier for
+        // a reason no value assertion would catch, since its values are
+        // coordinates bounded by the image dimension rather than counts.
         let (pc, pr) = one.profile();
         assert_eq!(pc.format(), PixelFormat::Gray16);
         assert_eq!(pr.format(), PixelFormat::Gray16);
-        let (jc, jr) = one.project();
-        assert_eq!(jc.format(), PixelFormat::Gray16);
-        assert_eq!(jr.format(), PixelFormat::Gray16);
-
-        let three = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
         let (pc3, _) = three.profile();
         assert_eq!(pc3.format(), PixelFormat::Rgb16);
-        let (jc3, _) = three.project();
-        assert_eq!(jc3.format(), PixelFormat::Rgb16);
     }
 
     /**
@@ -4730,10 +4772,17 @@ mod tests {
 
     /// project saturates sums past 65535 rather than wrapping.
     #[test]
-    fn project_saturates() {
-        let im = gray(1, 300, vec![255; 300]); // column sum 76500 > 65535
+    fn project_carries_a_sum_past_the_16_bit_ceiling() {
+        // A 1x300 column of 255 sums to 76500, which is the number issue
+        // #532 quotes from `vips project` on its 300x300 fixture and which
+        // this used to report as 65535.
+        let im = gray(1, 300, vec![255; 300]);
         let (columns, _) = im.project();
-        assert_eq!(columns.getpoint(0, 0), vec![65535.0]);
+        assert_eq!(
+            columns.format(),
+            PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap())
+        );
+        assert_eq!(columns.getpoint(0, 0), vec![76500.0]);
     }
 
     // ---- constant arithmetic ----
@@ -6693,12 +6742,17 @@ mod tests {
     /// 70000x1 uchar line = 70000) while this op saturates to 65535. Peak
     /// location still agrees; only the >65535 count is clamped.
     #[test]
-    fn hough_line_saturates_above_65535_votes_deviation() {
+    fn hough_line_carries_more_than_65535_votes() {
         let w = 70000usize;
         let acc = gray(w as u32, 1, vec![255u8; w]).hough_line();
+        assert_eq!(
+            acc.format(),
+            PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap())
+        );
         let (peak, x, y) = acc.maxpos();
-        // vips reports the uncapped 70000 here; core clamps to u16::MAX.
-        assert_eq!(peak, 65535.0, "ushort accumulator saturates (vips: 70000)");
+        // vips reports 70000 here and this used to clamp to u16::MAX, which
+        // is the deviation issue #495 recorded and #532 closes.
+        assert_eq!(peak, 70000.0, "the vote accumulator saturated");
         assert_eq!(
             (x, y),
             (128, 128),
@@ -6717,6 +6771,12 @@ mod tests {
         let acc = im.hough_circle(35, 45);
         assert_eq!((acc.width(), acc.height()), (100, 100));
         assert_eq!(acc.format().channels(), 11);
+        // The accumulator is `uint`, as vips's is: one band per radius,
+        // counts unclamped (issues #495, #532).
+        assert_eq!(
+            acc.format(),
+            PixelFormat::Uint32(core::num::NonZeroU16::new(11).unwrap())
+        );
 
         let (_votes, x, y) = acc.maxpos();
         assert!((x as f64 - 50.0).abs() < 2.0, "centre x ~50, got {x}");
