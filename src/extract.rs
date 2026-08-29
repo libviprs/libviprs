@@ -348,49 +348,78 @@ pub enum SmartcropInteresting {
 // Sample-level helpers
 // ---------------------------------------------------------------------------
 
-/// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]).
+/// Read the flat `i`-th sample as `i64` (native byte order, matching
+/// [`crate::raster_ops`]).
 ///
-/// Unsigned kinds only, and keyed on the kind rather than on a byte width
-/// so the 32-bit unsigned carrier is read as the `u32` it is instead of
-/// falling into whichever arm four bytes happened to select (issues #517,
-/// #607). The panic arm is a backstop behind [`reject_unreadable_kind`]
-/// and names the kind it was handed rather than claiming the raster is
-/// float. (The pure byte-copy paths like `extract_area` are
-/// depth-agnostic and handle every carrier fine.)
+/// `i64` and total over [`SampleKind`], which is issue #909 on this side:
+/// the `u32` this used to return could not hold a negative, so `embed`,
+/// `gravity` and `insert` refused the three signed carriers of issue #516
+/// even though `vips embed --extend white` and `vips insert` both accept a
+/// `char` raster and answer CHAR, measured on `/opt/homebrew/bin/vips`
+/// 8.18.6. The shape is [`crate::convolution`]'s `put_sample`, total
+/// since #748.
+///
+/// Keyed on the kind rather than on a byte width, so the three four-byte
+/// kinds stay three different reads (issues #517, #607). The signed kinds
+/// sign-extend, so this is the numeric read; `F32` truncates toward zero
+/// the way `vips_cast` does, and is reachable only from a direct call
+/// because these ops still refuse a float raster. (The pure byte-copy
+/// paths like `extract_area` are depth-agnostic and handle every carrier
+/// fine.)
 #[inline]
-fn read_s(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+fn read_s(data: &[u8], kind: SampleKind, i: usize) -> i64 {
     match kind {
-        SampleKind::U8 => data[i] as u32,
-        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        SampleKind::U32 => u32::from_ne_bytes([
+        SampleKind::U8 => i64::from(data[i]),
+        SampleKind::I8 => i64::from(data[i] as i8),
+        SampleKind::U16 => i64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::I16 => i64::from(i16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::U32 => i64::from(u32::from_ne_bytes([
             data[4 * i],
             data[4 * i + 1],
             data[4 * i + 2],
             data[4 * i + 3],
-        ]),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
-            "this extract operation does not support {kind:?} samples yet; \
-             cast to an unsigned format first"
-        ),
+        ])),
+        SampleKind::I32 => i64::from(i32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::F32 => f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]) as i64,
     }
 }
 
-/// Write the flat `i`-th sample. `v` must already fit the kind.
-/// Unsigned kinds only; see [`read_s`].
+/// Store the flat `i`-th sample. `v` must already fit the kind.
+///
+/// A store and not a cast, the contract [`crate::convolution`]'s
+/// `put_sample` carries: every caller copies a sample read at the same
+/// kind or writes an ink [`resolve_ink`] has already clipped into the
+/// carrier's range. The one deliberate narrow is [`Extend::White`], whose
+/// ink is a **byte pattern** rather than a number: `white_ink` answers 255
+/// for a one-byte carrier whatever its signedness, and `255 as i8` is the
+/// `-1` vips fills a `char` border with.
+/// Total over [`SampleKind`]; see [`read_s`].
 #[inline]
-fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
+fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     match kind {
         SampleKind::U8 => data[i] = v as u8,
+        SampleKind::I8 => data[i] = v as i8 as u8,
         SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
             data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        SampleKind::U32 => data[4 * i..4 * i + 4].copy_from_slice(&v.to_ne_bytes()),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
-            "this extract operation does not support {kind:?} samples yet; \
-             cast to an unsigned format first"
-        ),
+        SampleKind::I16 => {
+            let b = (v as i16).to_ne_bytes();
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
+        }
+        SampleKind::U32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as u32).to_ne_bytes()),
+        SampleKind::I32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_ne_bytes()),
+        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
     }
 }
 
@@ -498,15 +527,22 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
     }
 }
 
-/// Truncate (toward zero) and clamp an `f64` background constant into
-/// `0..=max`, matching the C `double`->integer cast libvips performs when
-/// it casts a background colour to the image format.
+/// Truncate (toward zero) and clamp an `f64` background constant into the
+/// carrier's own range, matching the C `double`->integer cast libvips
+/// performs when it casts a background colour to the image format.
+///
+/// The floor is the range's, not a literal `0.0`: that is the third hazard
+/// class issue #909 names, and it is observable. Measured on
+/// `/opt/homebrew/bin/vips` 8.18.6, `vips embed --extend background` on a
+/// `char` raster fills **-50** for `--background -50`, **-128** for -200
+/// and **127** for 200, so it clips at both ends and a `clamp(0.0, max)`
+/// would have turned every negative background into black.
 #[inline]
-fn ink_value(v: f64, max: u32) -> u32 {
+fn ink_value(v: f64, lo: i64, hi: i64) -> i64 {
     if v.is_nan() {
         0
     } else {
-        v.trunc().clamp(0.0, max as f64) as u32
+        v.trunc().clamp(lo as f64, hi as f64) as i64
     }
 }
 
@@ -516,13 +552,14 @@ fn ink_value(v: f64, max: u32) -> u32 {
 /// full-length vector is used per band; any other length is a typed error.
 fn resolve_ink(
     bands: usize,
-    max: u32,
+    range: (i64, i64),
     background: Option<&[f64]>,
-) -> Result<Vec<u32>, ExtractError> {
+) -> Result<Vec<i64>, ExtractError> {
+    let (lo, hi) = range;
     match background {
         None => Ok(vec![0; bands]),
-        Some(bg) if bg.len() == 1 => Ok(vec![ink_value(bg[0], max); bands]),
-        Some(bg) if bg.len() == bands => Ok(bg.iter().map(|&v| ink_value(v, max)).collect()),
+        Some(bg) if bg.len() == 1 => Ok(vec![ink_value(bg[0], lo, hi); bands]),
+        Some(bg) if bg.len() == bands => Ok(bg.iter().map(|&v| ink_value(v, lo, hi)).collect()),
         Some(bg) => Err(ExtractError::BackgroundLengthMismatch {
             expected: bands,
             got: bg.len(),
@@ -573,7 +610,7 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
 
 /// Fill every pixel of `dst` with the per-band `ink` samples. Used to lay
 /// down the `insert` background before the inputs are blitted on top.
-fn fill_ink(dst: &mut Raster, ink: &[u32]) {
+fn fill_ink(dst: &mut Raster, ink: &[i64]) {
     let bands = dst.format().channels();
     let kind = dst.format().kind();
     let count = dst.width() as usize * dst.height() as usize;
@@ -648,11 +685,13 @@ fn negated_origin(v: u32) -> i32 {
 fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
     let kind = r.format().kind();
     match kind {
-        SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => Ok(()),
+        SampleKind::U8
+        | SampleKind::U16
+        | SampleKind::U32
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::I32 => Ok(()),
         SampleKind::F32 => Err(ExtractError::FloatUnsupported { op }),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => {
-            Err(ExtractError::UnsupportedSampleKind { op, kind })
-        }
     }
 }
 
@@ -666,6 +705,16 @@ fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ExtractErr
 /// for the same reason it answers `None` for float: 2^32 bins is not a
 /// table. Without this the `uint` carrier would index a 65536-entry
 /// histogram with a sample of 90000 and panic out of a `Result`.
+///
+/// The signed one- and two-byte carriers pass, because
+/// [`SampleKind::hist_bins`] answers by width and both scorers clip a
+/// negative sample the way vips does rather than indexing with it. That is
+/// measured rather than assumed: on `/opt/homebrew/bin/vips` 8.18.6,
+/// `vips smartcrop` picks the **same** 16x16 crop from a `char` raster as
+/// from its clipped `uchar` twin, on a fixture whose only texture once
+/// negatives fold to zero sits in the positive half, under both
+/// `--interesting entropy` and `--interesting attention`. Scored on the
+/// raw signed values the noisy negative half would have won.
 fn reject_untabulated_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
     reject_unreadable_kind(op, r)?;
     let kind = r.format().kind();
@@ -865,15 +914,17 @@ impl Raster {
         let bands = fmt.channels();
         let kind = fmt.kind();
         let bpc = kind.bytes();
-        let max = kind
-            .max_value()
-            .expect("an unsigned kind has a ceiling; float is refused before here");
-        let ink: Vec<u32> = match extend {
-            // The white ink comes from the interpretation, never from `max`;
-            // see [`white_ink`]. The `as u32` is exact for every unsigned
-            // carrier, the only ones `write_s` below will accept anyway.
-            Extend::White => vec![white_ink(fmt, self.interpretation()) as u32; bands],
-            Extend::Background => resolve_ink(bands, max, background)?,
+        let range = kind
+            .range()
+            .expect("an integer kind has a range; float is refused before here");
+        let ink: Vec<i64> = match extend {
+            // The white ink comes from the interpretation, never from the
+            // range; see [`white_ink`]. It is a byte pattern rather than a
+            // number, so it is *not* clipped: `white_ink` answers 255 for a
+            // one-byte carrier of either signedness and `write_s` narrows
+            // that to the `-1` vips fills a `char` border with.
+            Extend::White => vec![white_ink(fmt, self.interpretation()) as i64; bands],
+            Extend::Background => resolve_ink(bands, range, background)?,
             _ => vec![0; bands],
         };
         let (w, h) = (self.width() as i64, self.height() as i64);
@@ -1175,12 +1226,12 @@ impl Raster {
         // cannot order the carriers, and four bytes answers float for a
         // `uint` input (issues #517, #607).
         let kind = self.format().kind().promote(sub.format().kind());
-        let max = kind
-            .max_value()
-            .expect("an unsigned kind has a ceiling; float is refused above");
+        let range = kind
+            .range()
+            .expect("an integer kind has a range; float is refused above");
         // Resolve the fill up front so a bad background vector errors even
         // when `expand` leaves no visible gap.
-        let ink = resolve_ink(bands, max, background)?;
+        let ink = resolve_ink(bands, range, background)?;
         let fmt = PixelFormat::with_kind(bands, kind)
             .expect("band count is bounded by the two input formats, and the kind is carried");
         let (ox, oy, ow, oh) = if expand {
@@ -1384,7 +1435,13 @@ fn region_entropy(im: &Raster, x: i64, y: i64, w: i64, h: i64) -> f64 {
         for xx in x..x + w {
             let base = (yy as usize * stride + xx as usize) * bands;
             for c in 0..bands {
-                hist[read_s(data, kind, base + c) as usize] += 1;
+                // `vips_hist_find` clips a sample into the bin table rather
+                // than indexing with it, so every negative lands in bin
+                // zero. Measured on 8.18.6: a `char` image holding
+                // `[-100, -1, 0, 100]` histograms to `bin 0 = 3` and
+                // `bin 100 = 1` (issue #909).
+                let bin = read_s(data, kind, base + c).clamp(0, bins as i64 - 1);
+                hist[bin as usize] += 1;
             }
         }
     }
@@ -1472,7 +1529,11 @@ fn rgb_planes(im: &Raster) -> [Vec<f64>; 3] {
     for i in 0..w * h {
         for (c, plane) in planes.iter_mut().enumerate() {
             let sc = if bands >= 3 { c } else { 0 };
-            plane[i] = read_s(data, kind, i * bands + sc) as f64 / scale;
+            // Clipped at zero, the bottom half of the `vips_cast` to
+            // uchar the attention path scores through. The unsigned
+            // carriers cannot reach the clamp, so this is the signed
+            // carriers' arm and nothing else (issue #909).
+            plane[i] = read_s(data, kind, i * bands + sc).max(0) as f64 / scale;
         }
     }
     planes
@@ -1675,6 +1736,19 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
 mod tests {
     use super::*;
     use crate::imageio::MetadataValue;
+    use crate::pixel::ALL_KINDS;
+
+    /// A one-band `Int8` raster from signed sample values.
+    fn int8(w: u32, h: u32, vals: &[i8]) -> Raster {
+        let data: Vec<u8> = vals.iter().map(|v| *v as u8).collect();
+        let fmt = PixelFormat::Int8(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of an `Int8` raster, read back signed.
+    fn i8s(r: &Raster) -> Vec<i8> {
+        r.data().iter().map(|b| *b as i8).collect()
+    }
 
     /// A width x height Gray8 raster from a byte vector.
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
@@ -3289,47 +3363,189 @@ mod tests {
     }
 
     /**
-     * Tests that the sample-level extract ops refuse the signed carriers
-     * with a typed error rather than misreading them, and **pins that as
-     * an interim rather than as parity**.
-     * `vips embed --extend white` and `vips insert` both accept a `char`
-     * raster and return CHAR, measured on 8.18.6, so this refusal is a
-     * parity regression held open on purpose while the `u32`-returning
-     * sample helpers are widened to `i64`. That is issue **#909**, and
-     * when it lands these assertions should be *replaced by value
-     * assertions*, not deleted as though they had been wrong.
-     * Works by asserting the typed error for all three signed carriers,
-     * with the unsigned 32-bit one as the control that the guard
-     * discriminates by kind rather than refusing anything unfamiliar.
-     * Input: Int8 / Int16 / Int32 -> Err(UnsupportedSampleKind); Uint32 ->
-     * Ok.
+     * Tests that the sample-level extract ops carry the three signed
+     * carriers, with the samples vips produces.
+     * This replaces `embed_refuses_the_signed_carriers_for_now_issue_909`,
+     * which asserted the typed refusal #516 shipped and said in its own
+     * doc that it should be **replaced by value assertions rather than
+     * deleted as though it had been wrong**. It was not wrong: the
+     * refusal was the right interim while `read_s` returned a `u32` that
+     * could not hold a negative, and it was a parity regression the whole
+     * time, which is what issue #909 closes.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 on a 2x2 `char` raster
+     * holding `[-100, -1, 0, 100]`, embedded at (1, 1) in a 4x4 canvas:
+     * `--extend white` fills **-1** (the all-bits-set byte a `memset`
+     * lays down, read signed), `--extend black` fills 0, and
+     * `--extend background` clips the constant into the carrier at both
+     * ends, filling -50 for `--background -50`, **-128** for -200 and
+     * **127** for 200. `vips insert` copies the sub-image's samples
+     * unchanged.
+     * Works by asserting each of those fills and the copied samples, with
+     * `Uint32` as the control that the guard still discriminates by kind
+     * and a float raster as the control that the one refusal left is
+     * intact.
+     * Input: `Int8` `[-100, -1, 0, 100]` -> Output: the measured canvases.
      */
     #[test]
-    fn embed_refuses_the_signed_carriers_for_now_issue_909() {
+    fn the_extract_ops_carry_the_signed_carriers() {
         let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
-        for fmt in [
-            PixelFormat::Int8(n(1)),
-            PixelFormat::Int16(n(1)),
-            PixelFormat::Int32(n(1)),
-        ] {
-            let r = Raster::zeroed(1, 1, fmt).unwrap();
-            let got = r.try_embed(1, 1, 3, 3, Extend::White, None);
-            assert!(
-                matches!(
-                    got,
-                    Err(ExtractError::UnsupportedSampleKind { op: "embed", .. })
-                ),
-                "{fmt:?} must be refused by kind while #909 is open, got {got:?}"
+        let one = int8(2, 2, &[-100, -1, 0, 100]);
+
+        let white = one.try_embed(1, 1, 4, 4, Extend::White, None).unwrap();
+        assert_eq!(white.format(), PixelFormat::Int8(n(1)));
+        #[rustfmt::skip]
+        assert_eq!(i8s(&white), vec![
+            -1,   -1, -1, -1,
+            -1, -100, -1, -1,
+            -1,    0, 100, -1,
+            -1,   -1, -1, -1,
+        ]);
+
+        let black = one.try_embed(1, 1, 4, 4, Extend::Black, None).unwrap();
+        #[rustfmt::skip]
+        assert_eq!(i8s(&black), vec![
+            0,    0,   0, 0,
+            0, -100,  -1, 0,
+            0,    0, 100, 0,
+            0,    0,   0, 0,
+        ]);
+
+        // The background clips at **both** ends, which a `clamp(0, max)`
+        // floor gets wrong for every negative constant.
+        for (bg, want) in [(-50.0, -50i8), (-200.0, -128), (200.0, 127)] {
+            let r = one
+                .try_embed(1, 1, 4, 4, Extend::Background, Some(&[bg]))
+                .unwrap();
+            assert_eq!(
+                i8s(&r)[0],
+                want,
+                "background {bg} must clip into the carrier, not into 0..=max"
             );
         }
-        // Control: the guard is about the kind, and the unsigned 32-bit
-        // carrier of issue #517 still goes through.
+
+        // insert copies the sub-image's samples, negatives included.
+        let sub = int8(2, 2, &[-101, 2, -1, 101]);
+        let inserted = one.try_insert(&sub, 0, 0, false, None).unwrap();
+        assert_eq!(i8s(&inserted), vec![-101, 2, -1, 101]);
+
+        // gravity is embed under another name, so the same ink rule holds.
+        let grav = one
+            .try_gravity(CompassDirection::Centre, 4, 4, Extend::White, None)
+            .unwrap();
+        assert_eq!(i8s(&grav)[0], -1);
+
+        // Control: the unsigned 32-bit carrier of issue #517 still goes
+        // through, so this is a refusal of a kind and not of a stride.
         assert!(
             Raster::zeroed(1, 1, PixelFormat::Uint32(n(1)))
                 .unwrap()
                 .try_embed(1, 1, 3, 3, Extend::White, None)
                 .is_ok()
         );
+        // Control: float is the one refusal left, and it still names the op.
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            f.try_embed(1, 1, 3, 3, Extend::White, None),
+            Err(ExtractError::FloatUnsupported { op: "embed" })
+        ));
+    }
+
+    /**
+     * Tests that this module's sample reader and writer round-trip every
+     * sample kind at its own stride and its own signedness.
+     * It exists because **no op-level test can catch a read-side
+     * signedness bug here**: `embed` and `insert` read a sample and write
+     * it back at the same kind, so reading `char` -100 as 156 and storing
+     * `156 as i8` gives -100 again and the canvas is identical. Mutating
+     * `read_s`'s `I8` arm to an unsigned read left all 74 tests in this
+     * module green, a real NO TEST REDDENS, and the round trip is what
+     * cancelled it. This cell does not cancel: `write_s` stores the two's
+     * complement and the read has to give the number back, so an unsigned
+     * read answers 255 where -1 was written.
+     * Works by sweeping [`ALL_KINDS`] rather than a hand-written list, and
+     * by writing at sample index 1 of a two-sample buffer so a wrong
+     * stride overwrites index 0 and is caught by the neighbour assertion.
+     * Input: each kind's `range()` endpoints and 0 -> Output: the same
+     * numbers back, index 0 still zero.
+     */
+    #[test]
+    fn read_s_and_write_s_round_trip_every_kind_at_its_own_stride() {
+        for kind in ALL_KINDS {
+            let bytes = kind.bytes();
+            let cases: [i64; 3] = match kind.range() {
+                Some((lo, hi)) => [lo, 0, hi],
+                None => [-128, 0, 127],
+            };
+            for v in cases {
+                let mut buf = vec![0u8; bytes * 2];
+                write_s(&mut buf, kind, 1, v);
+                assert_eq!(read_s(&buf, kind, 1), v, "{kind:?} did not round-trip {v}");
+                assert!(
+                    buf[..bytes].iter().all(|&b| b == 0),
+                    "{kind:?} wrote outside sample 1, so its stride is wrong"
+                );
+            }
+        }
+        // The width collisions, stated directly. `-1` is the same byte in
+        // both one-byte kinds and a different number, which is the exact
+        // substitution the round trip through an op cannot see.
+        let mut b8 = vec![0u8; 1];
+        write_s(&mut b8, SampleKind::I8, 0, -1);
+        assert_eq!(b8[0], 0xFF);
+        assert_eq!(read_s(&b8, SampleKind::U8, 0), 255);
+        assert_eq!(read_s(&b8, SampleKind::I8, 0), -1);
+        let mut b32 = vec![0u8; 4];
+        write_s(&mut b32, SampleKind::I32, 0, -1);
+        assert_eq!(read_s(&b32, SampleKind::U32, 0), 4_294_967_295);
+        assert_eq!(read_s(&b32, SampleKind::I32, 0), -1);
+    }
+
+    /**
+     * Tests that the background ink clips into each carrier's own range at
+     * both ends, driven directly rather than through an op, so the arms no
+     * op can reach are held by something.
+     * Works by sweeping [`ALL_KINDS`] and pushing one constant past each
+     * end of every integer kind's range, with `NaN` beside them because
+     * `clamp` passes `NaN` through and the explicit zero arm is what stops
+     * it landing on a carrier value by accident.
+     * Input: -300 and 1e12 at every integer kind -> Output: that kind's
+     * `range()` endpoints; `NaN` -> 0.
+     */
+    #[test]
+    fn ink_value_clips_into_every_carrier_at_both_ends() {
+        for kind in ALL_KINDS {
+            let Some((lo, hi)) = kind.range() else {
+                continue;
+            };
+            assert_eq!(
+                ink_value(-300.0, lo, hi),
+                (-300i64).max(lo),
+                "{kind:?} floor"
+            );
+            assert_eq!(
+                ink_value(1e12, lo, hi),
+                1_000_000_000_000i64.min(hi),
+                "{kind:?} ceiling"
+            );
+            assert_eq!(ink_value(f64::NAN, lo, hi), 0, "{kind:?} NaN");
+            // Truncation toward zero, not flooring: the two differ only on
+            // a negative fraction, which is exactly what a signed carrier
+            // adds. `vips_cast` truncates.
+            assert_eq!(
+                ink_value(-1.9, lo, hi),
+                if lo < 0 { -1 } else { 0 },
+                "{kind:?}"
+            );
+        }
+        // The pair a per-width rule would collide, stated directly.
+        assert_eq!(ink_value(-50.0, -128, 127), -50);
+        assert_eq!(ink_value(-50.0, 0, 255), 0);
     }
 
     /**
