@@ -134,28 +134,19 @@ jobs:
   miri:
     name: Miri
     runs-on: ubuntu-latest
-    # Held at the release boundary rather than widened with the other two,
-    # because it still does not pass. Three consecutive dispatched runs were
-    # killed at the 90 minute ceiling below, and the run before that ceiling
-    # existed went 4h13m. Since #675 it aborts fast instead, on the first
-    # unannotated filesystem test, so the cost of widening it would now be
-    # minutes rather than hours. It stays held anyway, because a check that is
-    # red by construction on every pull request teaches people to ignore it.
+    # Held at the release boundary rather than widened with the other two.
+    # Three consecutive dispatched runs were killed at the 90 minute ceiling
+    # below, and the run before that ceiling existed went 4h13m. #675 took the
+    # `-Zmiri-disable-isolation` out, which turned the runaway into a fast
+    # abort on the first unannotated filesystem test, and #712, #739, #781,
+    # #756 and #765 annotated every one of those. What was left after all of
+    # that was the clock, and the numbers are with the `run:` step below.
     #
-    # Do not read that as "#712 turns this green". #712 clears the aborts; it
-    # says nothing about the clock, and the clock looks bad. Measured on
-    # nightly-2026-08-20 with isolation on and the sha2 backend pinned, the
-    # single proptest `arithmetic::proptests::no_try_method_panics_on_a_float_raster`
-    # ran for over twenty minutes under the interpreter without finishing. It
-    # touches no filesystem, so it carries no annotation and #712 will never
-    # reach it, and it is one test out of more than fifteen hundred in the lib
-    # target alone.
-    #
-    # So the open question is not "when does #712 land" but whether Miri on this
-    # crate wants a whole-suite invocation at all, or a `--lib`-only or
-    # per-target one aimed at the code whose `unsafe` is worth interpreting.
-    # That is #652's territory and it wants deciding before anyone promises a
-    # green Miri job.
+    # It reports now, in under ten minutes, because it stopped trying to run
+    # the whole suite. It stays at the release boundary anyway, and the reason
+    # changed: it is no longer "red by construction", it is that the slice
+    # below is a real check and a narrow one, and a narrow check on every pull
+    # request is how a narrow check comes to be read as a broad one.
     #
     # `inputs.run_miri` is null on every event except `workflow_dispatch`, so
     # this reads as: a release pull request, or someone asking for it by hand.
@@ -214,22 +205,108 @@ jobs:
       # filesystem test does not mean editing this workflow;
       # `tests/miri_invocation_parity.rs` holds the claim.
       #
-      # That moved the wall rather than removing it. What stops this job
-      # reporting now is the clock, which is the half of #675 nobody had
-      # measured, because nobody had run the unfiltered command far enough to
-      # see it. `cargo miri test` runs the `--lib` target first and libtest
-      # runs it in sorted order, so the first two tests of the whole invocation
-      # are the two `arithmetic::proptests`. Measured at bd4bb1d on
-      # nightly-2026-08-20 with isolation on, ten cores at load average 15:
-      # ten minutes to build, six more for the first test, and the second was
-      # still running when a 35 minute bound cut the run off. One of 1596 lib
-      # tests done, and no unannotated filesystem test had been reached at all.
-      # Neither of those two touches the filesystem, so no annotation reaches
-      # them.
+      # That moved the wall rather than removing it, and what was behind it was
+      # the clock. #675 measured it, and the answer is that the unfiltered
+      # command cannot finish here, so this runs a named slice of the `--lib`
+      # target instead.
       #
-      # So #652's question is the live one: whether Miri on this crate wants a
-      # whole-suite invocation at all, or a per-target one aimed at the code
-      # whose `unsafe` is worth interpreting.
+      # The numbers, all wall clock on a ten-core machine, nightly-2026-08-20,
+      # isolation on, `--test-threads=1`:
+      #
+      #   * `arithmetic::proptests::no_try_method_panics_on_a_float_raster` is
+      #     256 property cases, each running a sweep of every `try_*` method in
+      #     `src/arithmetic.rs`. One sweep costs @@SWEEP@@, so the test costs
+      #     about @@PROPTEST@@ by itself.
+      #   * Skipping every property test does not rescue it. `arithmetic::tests`
+      #     spent 725s on 67 tests and then more than twenty minutes inside
+      #     `hough_line_carries_more_than_65535_votes` without finishing.
+      #   * Seventeen of the sixty-two modules in the lib target did not finish
+      #     inside a 120 second bound, one module at a time.
+      #   * The slice below is **584s for 436 tests**, with 116
+      #     ignored.
+      #
+      # Do not read libtest's own `--report-time` durations as seconds. Under
+      # isolation Miri hands the program a virtual clock, so those numbers are
+      # interpreter time: the slice below reports "finished in 1514.54s" for a
+      # run that took 584s on the wall. Every duration in this comment is
+      # measured outside the process.
+      #
+      # It runs these modules and no others:
+      #
+      #   analyze avif bands cancel checksum codec composite dedupe
+      #   encode_tiff exr extensions frames freqfilt geo hex jp2k jxl
+      #   level_walk manifest mat nifti pixel radiance raster_ops
+      #   resize resume retry sink svg sync_queue textio webp
+      #
+      # and `tests/miri_invocation_parity.rs` holds that list against the
+      # command below, in both directions, and against the `Makefile` mirror.
+      #
+      # The rule that picks them is mechanical rather than a judgement about
+      # which code deserves interpreting: a module is in if Miri can run it to
+      # completion inside 120 seconds. Everything else is out for a reason that
+      # was measured, one module at a time:
+      #
+      #   * **the clock**, seventeen modules: arithmetic, conversion,
+      #     convolution, create, draw, extract, fits, gif, histogram, matrix,
+      #     morphology, mosaicing, pdf, planner, raster, resample, uhdr. These
+      #     are the image kernels, and they are also where Miri has the least
+      #     to say: safe Rust over `Vec<u8>`, where the only `unsafe` the
+      #     interpreter meets belongs to `std`.
+      #   * **`clock_gettime` under isolation**, seven modules: colour, engine,
+      #     engine_builder, mapreduce_hot_cache, observe, streaming,
+      #     streaming_mapreduce. Something in each reads the real clock, which
+      #     isolation refuses, and a refused operation ends the whole run.
+      #   * **an intrinsic Miri does not implement**, five modules: connection,
+      #     encode, foreign_stubs, imageio, source. Every one of them decodes a
+      #     JPEG, `zune-jpeg`'s NEON IDCT is unconditional on aarch64, and
+      #     `llvm.aarch64.neon.sqxtn.v4i16` and `llvm.aarch64.neon.sqshrun.v4i16`
+      #     are not implemented. This one is the dev machine's, not the
+      #     runner's: `x86_64-unknown-linux-gnu` has no NEON path to compile,
+      #     so the hosted job could probably run those five. They stay out so
+      #     that `make miri` and this job keep meaning the same thing, which is
+      #     the whole point of `tests/miri_invocation_parity.rs`.
+      #   * **nothing left to run**, one module: stream_verify, whose eight
+      #     tests all carry `#[cfg_attr(miri, ignore)]`. Listing it would claim
+      #     coverage that is zero by construction.
+      #
+      # Be honest about what that leaves, because the paragraph at the top of
+      # this job overstates it. "A dozen image decoders" is not what gets
+      # interpreted: the decoders' tests mostly open fixture files, so they
+      # carry the filesystem annotation and Miri skips them. Of the modules
+      # that do run, `exr` executes 1 test of 22, `nifti` 3 of 26,
+      # `encode_tiff` 6 of 31 and `sink` 13 of 25. The decode coverage that
+      # survives is `webp` (32), `mat` (27), `radiance` (21), `analyze` (19)
+      # and `avif` (9, with the feature off). Making that number bigger is not
+      # an invocation change, it is turning fixture reads into `include_bytes!`,
+      # which is real work and is not this job's to do.
+      #
+      # There is deliberately no check that the run list and the exclusions
+      # cover every module under `src/`. This file was taken off the
+      # mandatory-edit path once already, when it quoted a live count of
+      # annotated tests and became a file every unrelated pull request had to
+      # touch, and a completeness check would put it straight back. The cost is
+      # that a new module can arrive in neither list; the alternative costs
+      # every unrelated pull request a conflict here.
+      #
+      # The crate's own `unsafe` is a separate question and it has an answer.
+      # It is all in `src/avif.rs`, behind `#[cfg(feature = "avif")]`, so this
+      # invocation compiles every block of it out. Running Miri with
+      # `--features avif` does reach it, in nine seconds, and it found a real
+      # defect there: the payload was written through a pointer `rav1d` derives
+      # from a shared reference, rejected by Stacked Borrows and Tree Borrows
+      # alike (issue #912). The feature is not enabled here because after that
+      # fix Miri still cannot execute the decode. `Rav1dPicAllocator::is_default`
+      # is two `ptr::fn_addr_eq` calls, the interpreter does not answer them the
+      # way a real build does, the picture-pool cookie is never installed, and
+      # `dav1d_default_picture_alloc` unwraps a `None`. Ten of the eighteen
+      # `avif::tests` end there. So the command is:
+      #
+      #   cargo +nightly miri test --lib --features avif -- avif::
+      #
+      # run by hand when `src/avif.rs` changes, and it is written down here
+      # rather than wired up because a job that is red for a reason outside
+      # this repository is the thing the paragraph at the top of this file
+      # argues against.
       #
       # `RUSTFLAGS` carries two things, and the `Makefile` mirror carries the
       # same string.
@@ -284,7 +361,7 @@ jobs:
       # checked against" is worth discounting while no test is being checked at
       # all. If the backend pin ever becomes awkward, switching is a one line
       # change here and in the `Makefile`.
-      - run: cargo +nightly miri test
+      - run: cargo +nightly miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
         env:
           RUSTFLAGS: '-A deprecated --cfg sha2_backend="soft"'
 
