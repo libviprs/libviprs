@@ -2786,6 +2786,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `make clippy` is green again on `main` (issue #869). Two `src/jp2k.rs`
+  errors, both only visible under the `jp2k` feature, landed when the origin
+  work and the `colr` work merged within minutes of each other and their hunks
+  interleaved: a test's `/** ... */` block ended up a thousand lines from its
+  test and above an unrelated helper, and the `colr` sweep's cell table tripped
+  `clippy::type_complexity`. The doc block is back on the test it describes and
+  the table has a named `ColrCell` type. No behaviour changed and no test moved.
+
 - GIF disposal code **4** rewinds the canvas the way libnsgif does, instead of
   keeping it (issue #827). GIF89a reserves codes 4 to 7; libnsgif remaps 4 onto
   restore-to-previous and leaves 5, 6 and 7 as "keep". Measured on vips 8.18.6

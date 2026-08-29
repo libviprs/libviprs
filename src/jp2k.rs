@@ -2388,19 +2388,6 @@ mod tests {
         assert_eq!(decoded("rgb_lossless.jp2").width(), 4);
     }
 
-    /**
-     * The image origin is the one geometry this loader and vips disagree
-     * about, and it is pinned so the disagreement is a decision on the
-     * record rather than a surprise (issue #766).
-     * `origin57.j2k` declares `Xsiz = 37, XOsiz = 5, Ysiz = 31, YOsiz = 7`.
-     * The standard's image is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is
-     * 32x24 and is what this loader and `hayro-jpeg2000` both report. vips
-     * reports 27x17 with `xoffset = -5`, which is that size less the origin a
-     * second time.
-     * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
-     * 27x17.
-     */
-
     /// Rewrite a JP2's `METH = 1` `colr` box to name `enumcs`, leaving every
     /// other byte alone.
     ///
@@ -2469,6 +2456,21 @@ mod tests {
      * JP2, and a 16-bit RGB file this crate encodes, each at every enum ->
      * Output: the interpretation `vipsheader` reported for that cell.
      */
+    /// One row of the `colr` sweep: the `EnumCS` value, then the
+    /// interpretation `vipsheader` printed for it at 3 components 8-bit, at 1
+    /// component 8-bit, and at 3 components 16-bit.
+    ///
+    /// Named rather than spelled inline because the inline form is what
+    /// `clippy::type_complexity` refuses, and because three `Option`s of the
+    /// same type in a row are worth a sentence saying which is which.
+    #[cfg(feature = "jp2k")]
+    type ColrCell = (
+        u32,
+        Option<Interpretation>,
+        Option<Interpretation>,
+        Option<Interpretation>,
+    );
+
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_colr_box_enum_decides_the_interpretation_not_the_component_count() {
@@ -2476,12 +2478,7 @@ mod tests {
         // component 8-bit, and for 3 components 16-bit). `None` is a cell
         // `hayro-jpeg2000` refuses before the tag is reached; each one is an
         // issue of its own and they are asserted separately below.
-        let cells: &[(
-            u32,
-            Option<Interpretation>,
-            Option<Interpretation>,
-            Option<Interpretation>,
-        )] = &[
+        let cells: &[ColrCell] = &[
             (
                 12,
                 Some(Interpretation::Cmyk),
@@ -2717,6 +2714,18 @@ mod tests {
         );
     }
 
+    /**
+     * The image origin is the one geometry this loader and vips disagree
+     * about, and it is pinned so the disagreement is a decision on the
+     * record rather than a surprise (issue #766).
+     * `origin57.j2k` declares `Xsiz = 37, XOsiz = 5, Ysiz = 31, YOsiz = 7`.
+     * The standard's image is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is
+     * 32x24 and is what this loader and `hayro-jpeg2000` both report. vips
+     * reports 27x17 with `xoffset = -5`, which is that size less the origin a
+     * second time.
+     * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
+     * 27x17.
+     */
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_image_origin_is_the_one_divergence_on_geometry() {
