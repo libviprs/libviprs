@@ -42,7 +42,7 @@
 //! `P6` for a three-band one.
 
 use crate::codec::{DecodeError, EncodeError};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::{DEFAULT_MAX_ALLOC_BYTES, Raster, RasterError};
 use std::io::{Error as IoError, ErrorKind};
 
@@ -58,7 +58,7 @@ fn malformed(msg: impl Into<String>) -> DecodeError {
 
 /// The single-band float format used by the text codecs (`FloatF32(1)`).
 fn float1() -> Result<PixelFormat, DecodeError> {
-    PixelFormat::with_channels(1, 4)
+    PixelFormat::with_kind(1, SampleKind::F32)
         .ok_or_else(|| malformed("cannot build a single-band float format"))
 }
 
@@ -68,12 +68,17 @@ fn float1() -> Result<PixelFormat, DecodeError> {
 /// representation that parses back to the same `f32`, so the text round-trips
 /// losslessly.
 fn fmt_sample(data: &[u8], off: usize, fmt: PixelFormat) -> String {
-    match fmt.bytes_per_channel() {
-        1 => data[off].to_string(),
-        2 => u16::from_ne_bytes([data[off], data[off + 1]]).to_string(),
-        _ => {
-            f32::from_ne_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]).to_string()
-        }
+    let kind = fmt.kind();
+    let v = read_sample_f64(data, kind, off);
+    if kind.is_float() {
+        // Back through `f32` so the shortest representation that parses to
+        // the same `f32` is what gets written; going via `f64` would print
+        // the widened decimal instead.
+        (v as f32).to_string()
+    } else {
+        // Every integer kind's value is exact in `f64`, including `I32`'s
+        // and `U32`'s, so this is the integer and not a rounding of it.
+        (v as i64).to_string()
     }
 }
 
@@ -162,10 +167,18 @@ impl Raster {
                 )));
             }
         };
-        let maxval: u32 = if fmt.bytes_per_channel() == 1 {
-            255
-        } else {
-            65535
+        // The two kinds Netpbm has a binary form for. The float guard
+        // above has already refused `F32`, and a kind with no Netpbm
+        // maxval is refused here rather than written with somebody else's
+        // ceiling (issue #607).
+        let maxval: u32 = match fmt.kind() {
+            SampleKind::U8 => 255,
+            SampleKind::U16 => 65535,
+            other => {
+                return Err(EncodeError::unsupported(format!(
+                    "ppm ({other:?} samples have no Netpbm binary form)"
+                )));
+            }
         };
         let w = self.width();
         let h = self.height();
@@ -173,7 +186,7 @@ impl Raster {
 
         let mut out = Vec::with_capacity(32 + data.len());
         out.extend_from_slice(format!("{magic}\n{w} {h}\n{maxval}\n").as_bytes());
-        if fmt.bytes_per_channel() == 1 {
+        if fmt.kind() == SampleKind::U8 {
             // 8-bit samples are already the interleaved raster body.
             out.extend_from_slice(data);
         } else {
@@ -347,9 +360,17 @@ impl Raster {
                 "ppm: maxval {maxval} out of range 1..=65535"
             )));
         }
-        let bpc = if maxval <= 255 { 1usize } else { 2 };
-        let fmt = PixelFormat::with_channels(channels, bpc)
-            .ok_or_else(|| malformed("ppm: unsupported channel/depth combination"))?;
+        // The maxval names the kind, not just a width: Netpbm's binary
+        // form is unsigned, so a one-byte maxval is `u8` and a two-byte one
+        // is `u16` (issue #607).
+        let kind = if maxval <= 255 {
+            SampleKind::U8
+        } else {
+            SampleKind::U16
+        };
+        let bpc = kind.bytes();
+        let fmt = PixelFormat::with_kind(channels, kind)
+            .ok_or_else(|| malformed("ppm: unsupported channel/kind combination"))?;
 
         let count = (width as usize)
             .checked_mul(height as usize)
@@ -459,7 +480,7 @@ mod tests {
     use super::*;
 
     fn float1_test() -> PixelFormat {
-        PixelFormat::with_channels(1, 4).expect("FloatF32(1) is a valid format")
+        PixelFormat::with_kind(1, SampleKind::F32).expect("FloatF32(1) is a valid format")
     }
 
     /// A small single-band float raster whose values are all exactly
