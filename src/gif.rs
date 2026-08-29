@@ -4043,6 +4043,163 @@ mod tests {
     }
 
     /**
+     * Tests that a GIF declaring no global colour table decodes through
+     * libnsgif's own substitute rather than being refused. Works by decoding
+     * a two-pixel file whose logical screen descriptor clears the
+     * global-table flag and whose only frame paints indices 0 and 1.
+     * libnsgif builds a two-entry black-and-white table for such a file and
+     * sets its colour table size to 2, so the file has a picture. `gif`
+     * 0.14.2 refuses the frame outright instead: `next_frame_info` errors
+     * with "no color table available for current frame" when a frame has
+     * neither a local palette nor a global one, and `Decoder` has no way to
+     * supply one from outside. So the loader hands the decoder the same file
+     * with the table spliced in, which is the only shape the crate will read
+     * and is byte for byte what libnsgif invents.
+     * Measured on vips 8.18.6 against exactly this file: `getpoint 0 0` is
+     * `0 0 0`, `getpoint 1 0` is `255 255 255`, `gif-palette` is
+     * `-16777216 -1`, `bits-per-sample` is 1 and `background` is `0 0 0`.
+     * The stored background index is the control that says the substitute is
+     * never indexed: index 1 still reports black, which is its entry 0, and
+     * not the white its entry 1 holds.
+     * Input: a 2x1 GIF with no colour table anywhere -> Output: black then
+     * white, a two-entry palette and one bit per sample.
+     */
+    #[test]
+    fn a_gif_with_no_colour_table_decodes_through_libnsgifs_black_and_white() {
+        let bytes = fixture_tables((2, 1), None, 0, None, &[Frame::full(2, 1, vec![0, 1])]);
+        let raster = decode_bytes(&bytes).expect("decodes");
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            raster.data(),
+            [0, 0, 0, 255, 255, 255],
+            "index 0 is the substitute's black and index 1 its white"
+        );
+        assert_eq!(
+            raster.get_int_array("gif-palette"),
+            Some(&[-16_777_216i64, -1][..]),
+            "and the substitute is the table that gets attached"
+        );
+        assert_eq!(raster.get_int("bits-per-sample"), Some(1));
+        assert_eq!(raster.get_int("palette-bit-depth"), Some(1));
+
+        // The stored index is ignored, whatever it says, because libnsgif
+        // only honours it when the file really declares a table.
+        for stored in [0u8, 1, 3, 255] {
+            let bytes = fixture_tables(
+                (2, 1),
+                None,
+                stored,
+                None,
+                &[Frame {
+                    disposal: 2,
+                    ..Frame::full(2, 1, vec![0, 1])
+                }],
+            );
+            assert_eq!(
+                decode_bytes(&bytes).expect("decodes").data(),
+                [0, 0, 0, 255, 255, 255],
+                "background index {stored} with no table is still entry 0"
+            );
+        }
+
+        // The positive control: the same file *with* a table is a different
+        // picture, so "black then white" is not what any decode would give.
+        let declared = fixture(
+            (2, 1),
+            &[[9, 8, 7], [1, 2, 3]],
+            0,
+            None,
+            &[Frame::full(2, 1, vec![0, 1])],
+        );
+        assert_eq!(
+            decode_bytes(&declared).expect("decodes").data(),
+            [9, 8, 7, 1, 2, 3]
+        );
+    }
+
+    /**
+     * Tests that a graphic control extension whose **last** sub-block is not
+     * four bytes no longer truncates the file. Works by decoding two-frame
+     * fixtures whose frame 0 carries such a chain and requiring both frames
+     * back, with the disposal libnsgif reads out of it.
+     * `gif` 0.14.2's `read_control_extension` errors with "control extension
+     * has wrong length" unless the last sub-block is exactly four
+     * (`reader/decoder.rs:853-856`), and the error ends the header scan, so
+     * every frame from that extension onwards disappears. libnsgif does not
+     * measure the chain at all, so the file loads. The loader now rewrites
+     * each such chain into the single four-byte sub-block libnsgif's own read
+     * would produce, which is the only shape the crate accepts and carries
+     * exactly the bytes libnsgif uses.
+     * Measured on vips 8.18.6 against exactly these files: both report
+     * `n-pages: 2` and page 1 is `green black`, the rewind disposal 4 asks
+     * for. libviprs reported `NoFrames`.
+     * Input: chains of `04 quad(4) 01 AA 00` and `06 quad(4) AA BB 00` ->
+     * Output: two pages each, and the canvas rewound.
+     */
+    #[test]
+    fn a_control_extension_the_crate_refuses_no_longer_truncates_the_file() {
+        let quad = |disposal: u8| [(disposal & 7) << 2, 0u8, 0, 0];
+        let load = |raw: Vec<u8>| {
+            let bytes = fixture(
+                (2, 1),
+                &ANIM_PALETTE,
+                3,
+                Some(0),
+                &[
+                    Frame {
+                        raw_control: Some(raw),
+                        ..Frame::full(2, 1, vec![1, 1])
+                    },
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        ..Frame::full(1, 1, vec![2])
+                    },
+                ],
+            );
+            decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+        };
+
+        // A trailing one-byte sub-block, so the last one is not four.
+        let mut trailing = vec![4u8];
+        trailing.extend_from_slice(&quad(4));
+        trailing.extend_from_slice(&[1, 0xAA, 0]);
+        let raster = load(trailing).expect("the file has two frames");
+        assert_eq!(raster.get_n_pages(), 2);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 0, 0, 0],
+            "and frame 0's code 4 rewound the canvas"
+        );
+
+        // One six-byte sub-block, so no sub-block is four.
+        let mut six = vec![6u8];
+        six.extend_from_slice(&quad(4));
+        six.extend_from_slice(&[0xAA, 0xBB, 0]);
+        let raster = load(six).expect("the file has two frames");
+        assert_eq!(raster.get_n_pages(), 2);
+        assert_eq!(page_bytes(&raster, 1), [0, 255, 0, 0, 0, 0]);
+
+        // The control: the ordinary shape was never truncated, so "two
+        // pages" is not what every file gives.
+        let mut plain = vec![4u8];
+        plain.extend_from_slice(&quad(1));
+        plain.push(0);
+        let raster = load(plain).expect("a valid GIF");
+        assert_eq!(raster.get_n_pages(), 2);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 255, 0, 0],
+            "disposal 1 keeps, so this fixture can tell the two apart"
+        );
+    }
+
+    /**
      * Tests that a graphic control extension spread over more than one
      * sub-block, or with a size byte that does not say 4, is read the way
      * libnsgif reads it. Works by writing five `0xF9` chains verbatim in front
