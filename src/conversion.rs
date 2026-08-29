@@ -133,7 +133,7 @@
 use crate::arithmetic::interpretation_max_alpha;
 use crate::bands::BandError;
 use crate::extract::ExtractError;
-use crate::pixel::{PixelFormat, read_sample_f64, write_sample_f64};
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_sample_f64};
 use crate::raster::{Raster, RasterError};
 use core::num::NonZeroU16;
 use thiserror::Error;
@@ -277,6 +277,23 @@ pub enum ConversionError {
         /// The operation that was asked for.
         op: &'static str,
     },
+    /// The raster carries a sample kind this operation has no
+    /// implementation for.
+    ///
+    /// The sibling of [`ConversionError::FloatUnsupported`] for the
+    /// carriers that are not float: the unsigned 32-bit one of issue #517,
+    /// and the signed ones of issue #516 when they land. A width-keyed
+    /// `match` would have read four `u32` bytes as an `f32` here instead
+    /// (issue #607), so this variant is what turns that misread into a
+    /// refusal the caller can see. Mirrors
+    /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
+    #[error("{op} does not support {kind:?} samples yet")]
+    UnsupportedSampleKind {
+        /// The operation that was asked for.
+        op: &'static str,
+        /// The sample kind it cannot read.
+        kind: SampleKind,
+    },
     /// A delegated band operation failed.
     #[error(transparent)]
     Band(#[from] BandError),
@@ -302,45 +319,71 @@ fn expect_conv<T>(op: &str, r: Result<T, ConversionError>) -> T {
 }
 
 /// Read the flat `i`-th unsigned sample of a buffer with the given
-/// bytes-per-channel (native byte order for 16-bit, matching
-/// [`crate::raster_ops`]). Unsigned depths only: float callers use
-/// [`read_f32_flat`], and the panic arm keeps unsigned-only operations
-/// from misreading float bytes as `u16` pairs.
+/// sample kind (native byte order, matching [`crate::raster_ops`]).
+///
+/// Unsigned kinds only, and keyed on the kind rather than on a byte width
+/// so that the 32-bit unsigned carrier is read as the `u32` it is instead
+/// of falling into whichever arm four bytes happened to select (issues
+/// #517, #607). Float samples go through
+/// [`read_sample_f64`](crate::pixel) instead, which is what
+/// [`Raster::try_cast`] now uses for every carrier; the panic arm here is
+/// a backstop behind [`reject_unreadable_kind`] and names the kind it was
+/// handed rather than claiming the raster is float.
 #[inline]
-fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
-    match bpc {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        _ => panic!(
-            "this operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
+fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => data[i] as u32,
+        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
+            "this operation does not support {kind:?} samples yet; \
+             cast to an unsigned format first"
         ),
     }
 }
 
-/// Write the flat `i`-th unsigned sample. `v` must already fit the depth.
-/// Unsigned depths only; see [`read_flat`].
+/// Write the flat `i`-th unsigned sample. `v` must already fit the kind.
+/// Unsigned kinds only; see [`read_flat`].
 #[inline]
-fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    match bpc {
-        1 => data[i] = v as u8,
-        2 => {
+fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
+    match kind {
+        SampleKind::U8 => data[i] = v as u8,
+        SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
-            data[2 * i] = b[0];
-            data[2 * i + 1] = b[1];
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        _ => panic!(
-            "this operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
+        SampleKind::U32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&v.to_ne_bytes());
+        }
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
+            "this operation does not support {kind:?} samples yet; \
+             cast to an unsigned format first"
         ),
     }
 }
 
-/// Read the flat `i`-th sample of a float buffer (native byte order).
-#[inline]
-fn read_f32_flat(data: &[u8], i: usize) -> f32 {
-    let b = 4 * i;
-    f32::from_ne_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]])
+/// Refuse a sample kind the unsigned-only sample paths in this module
+/// cannot read, as a typed error rather than as a panic out of a
+/// `Result`-returning method (the shape issue #694 landed).
+///
+/// Float keeps its own variant, because that is the refusal the crate has
+/// documented and tested all along. Every other non-`U8`/`U16` kind is the
+/// carrier work of issues #516 and #517, and gets
+/// [`ConversionError::UnsupportedSampleKind`].
+fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ConversionError> {
+    let kind = r.format().kind();
+    match kind {
+        SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => Ok(()),
+        SampleKind::F32 => Err(ConversionError::FloatUnsupported { op }),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => {
+            Err(ConversionError::UnsupportedSampleKind { op, kind })
+        }
+    }
 }
 
 /// One `vips_cast` sample from a float carrier down to an unsigned one.
@@ -375,13 +418,6 @@ pub(crate) fn cast_float_sample(v: f64, out_bpc: usize) -> u32 {
     } else {
         v.clamp(0.0, max).trunc() as u32
     }
-}
-
-/// Write the flat `i`-th sample of a float buffer (native byte order).
-#[inline]
-fn write_f32_flat(data: &mut [u8], i: usize, v: f32) {
-    let b = 4 * i;
-    data[b..b + 4].copy_from_slice(&v.to_ne_bytes());
 }
 
 /// The libvips colour interpretation tags (`VipsInterpretation`).
@@ -704,19 +740,24 @@ impl RasterCopyBuilder<'_> {
 /// same format. `map` receives output coordinates and returns the source
 /// coordinates whose whole pixel (all bands) is copied. Metadata is
 /// carried over from `src`.
-/// Read a flat `bpc`-byte sample as `u32` (native byte order), for the
-/// 1-, 2-, and 4-byte sample depths.
+/// Read one sample as the `u32` its storage bits are (native byte order).
 ///
 /// The **storage** read, as distinct from the numeric one
-/// [`read_sample_f64`](crate::pixel) gives: it hands back a float sample's
-/// bit pattern rather than its value, which is what `msb` and
-/// `ifthenelse`'s non-zero test want and what `flatten` did not
-/// (issue #859).
-fn read_sample_u32(bytes: &[u8], bpc: usize) -> u32 {
-    match bpc {
-        1 => bytes[0] as u32,
-        2 => u16::from_ne_bytes([bytes[0], bytes[1]]) as u32,
-        _ => u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+/// [`read_sample_f64`](crate::pixel) gives: it is what both callers want,
+/// which are `msb` (a bit-level op, and one that refuses a float raster
+/// the way vips does, issue #860) and `ifthenelse` (a non-zero test).
+/// Keyed on the kind rather than on a byte width so the unsigned 32-bit
+/// carrier is read as itself (issue #517), and the float arm is spelled
+/// out rather than reached through a wildcard, because reading `f32` bits
+/// as a `u32` is a deliberate bit-pattern read here and was a defect at
+/// the third caller, `flatten`, until issue #859 moved it off.
+fn read_sample_u32(bytes: &[u8], kind: SampleKind) -> u32 {
+    match kind {
+        SampleKind::U8 | SampleKind::I8 => u32::from(bytes[0]),
+        SampleKind::U16 | SampleKind::I16 => u32::from(u16::from_ne_bytes([bytes[0], bytes[1]])),
+        SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
     }
 }
 
@@ -993,6 +1034,15 @@ impl Raster {
     /// rescales instead of clipping when the depth changes, is not
     /// implemented, so this is always the non-shifting behaviour.
     ///
+    /// [`PixelFormat::Uint32`] is a cast target and a cast source (issue
+    /// #517), and it is the one place this deliberately diverges from
+    /// `vips_cast`. libvips narrows a `uint` sample through a signed
+    /// `int`, so on 8.18.6 a `uint` raster holding 2147483647 casts to
+    /// `uchar` 255 while one holding 2147483648 casts to **0**, with the
+    /// boundary exactly at `INT_MAX`. This clips at the target's ceiling
+    /// throughout, so both answer 255. See
+    /// [`write_sample_f64`](crate::pixel) for the measured table.
+    ///
     /// # Errors
     ///
     /// [`ConversionError::CastBandCountChange`] if `format` has a
@@ -1008,35 +1058,25 @@ impl Raster {
                 to_bands: format.channels(),
             });
         }
-        let in_bpc = from.bytes_per_channel();
-        let out_bpc = format.bytes_per_channel();
+        let (in_kind, out_kind) = (from.kind(), format.kind());
+        let (in_bpc, out_bpc) = (in_kind.bytes(), out_kind.bytes());
         let mut out = Raster::zeroed(self.width(), self.height(), format)?;
         let samples = self.width() as usize * self.height() as usize * from.channels();
         let sdata = self.data();
         let odata = out.data_mut();
-        if !from.is_float() && !format.is_float() {
-            // Unsigned to unsigned: the integer path, byte-identical to the
-            // pre-float behaviour.
-            for i in 0..samples {
-                let v = read_flat(sdata, in_bpc, i);
-                let v = if out_bpc == 1 { v.min(255) } else { v };
-                write_flat(odata, out_bpc, i, v);
-            }
-        } else {
-            // A float endpoint: go through f64, which holds every u8/u16
-            // and f32 sample exactly.
-            for i in 0..samples {
-                let v: f64 = if from.is_float() {
-                    read_f32_flat(sdata, i) as f64
-                } else {
-                    read_flat(sdata, in_bpc, i) as f64
-                };
-                if format.is_float() {
-                    write_f32_flat(odata, i, v as f32);
-                } else {
-                    write_flat(odata, out_bpc, i, cast_float_sample(v, out_bpc));
-                }
-            }
+        // One loop through `f64`, which holds every `u8`, `u16`, `u32`,
+        // `i32` and `f32` sample exactly, so it is lossless for every pair
+        // of carriers rather than only for the ones with a float endpoint.
+        // This used to fork on `is_float()` and read the integer side at a
+        // byte width, which answers "float" for any four-byte carrier and
+        // would have read a `uint` sample of 1 as 1.4e-45 (issues #517,
+        // #607). The clipping and truncation live in `write_sample_f64`,
+        // where they are stated once per kind against the kind's own range
+        // instead of as a `clamp(0, max)` that is only right for three of
+        // the seven.
+        for i in 0..samples {
+            let v = read_sample_f64(sdata, in_kind, i * in_bpc);
+            write_sample_f64(odata, out_kind, i * out_bpc, v);
         }
         out.carry_meta_from(self);
         Ok(out)
@@ -1257,7 +1297,8 @@ impl Raster {
             return Err(ConversionError::FloatUnsupported { op: "msb" });
         }
         let fmt = self.format();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
         let bands = fmt.channels();
         let shift = ((bpc - 1) * 8) as u32;
         let (src_bands, out_bands): (Vec<usize>, usize) = match band {
@@ -1286,7 +1327,7 @@ impl Raster {
             for x in 0..w as usize {
                 for (oi, &sb) in src_bands.iter().enumerate() {
                     let so = y * sstride + (x * bands + sb) * bpc;
-                    let sample = read_sample_u32(&src[so..so + bpc], bpc);
+                    let sample = read_sample_u32(&src[so..so + bpc], kind);
                     let oo = y * ostride + x * out_bands + oi;
                     odata[oo] = (sample >> shift) as u8;
                 }
@@ -1392,6 +1433,10 @@ impl Raster {
                 });
             }
         };
+        // Through the kind, not the width: `with_channels(out_bands, 4)`
+        // answers the float carrier, so flattening a `Uint32` raster would
+        // hand back a `FloatF32` tagged raster full of `u32` bytes (issues
+        // #517, #607).
         let out_fmt = PixelFormat::with_kind(out_bands, kind)
             .expect("a format exists for a band count and kind already carried by this raster");
         // The alpha denominator is a property of the **interpretation**,
@@ -1399,9 +1444,10 @@ impl Raster {
         // a 16-bit raster tagged `grey16` / `rgb16`. Measured on
         // `/opt/homebrew/bin/vips` 8.18.6 with alpha 128: a `ushort`
         // raster tagged `b-w` holding 65535 flattens to **32896**, which
-        // is `65535 * 128 / 255`, and the width rule answered 128. Same
-        // source `white_ink` reads for the same reason (issues #667,
-        // #859).
+        // is `65535 * 128 / 255`, and the width rule answered 128; a
+        // `uint` raster at 90000 flattens to 45176 and the width rule
+        // answered 0. Same source `white_ink` reads for the same reason
+        // (issues #667, #859).
         let max_alpha = interpretation_max_alpha(self.interpretation());
         let w = self.width();
         let h = self.height();
@@ -1496,12 +1542,12 @@ impl Raster {
         let out_fmt = if then.format() == otherwise.format() {
             then.format()
         } else {
-            let bpc = then
-                .format()
-                .bytes_per_channel()
-                .max(otherwise.format().bytes_per_channel());
-            PixelFormat::with_channels(bands, bpc)
-                .expect("band count comes from a valid input format")
+            // `SampleKind::promote` rather than the wider byte width: a
+            // width cannot order the carriers, and four bytes answers
+            // float for a `uint` branch (issues #517, #607).
+            let kind = then.format().kind().promote(otherwise.format().kind());
+            PixelFormat::with_kind(bands, kind)
+                .expect("band count and kind come from valid input formats")
         };
         let then_cast;
         let then = if then.format() == out_fmt {
@@ -1517,7 +1563,8 @@ impl Raster {
             otherwise_cast = otherwise.try_cast(out_fmt)?;
             &otherwise_cast
         };
-        let cbpc = self.format().bytes_per_channel();
+        let ckind = self.format().kind();
+        let cbpc = ckind.bytes();
         let cdata = self.data();
         let cstride = self.stride();
         let mut out = Raster::zeroed(w, h, out_fmt)?;
@@ -1533,7 +1580,7 @@ impl Raster {
                 for b in 0..bands {
                     let cb = if cond_bands == 1 { 0 } else { b };
                     let co = y * cstride + (x * cond_bands + cb) * cbpc;
-                    let take_then = read_sample_u32(&cdata[co..co + cbpc], cbpc) != 0;
+                    let take_then = read_sample_u32(&cdata[co..co + cbpc], ckind) != 0;
                     let sample_stride = if take_then { tstride } else { ostride_o };
                     let sample_data = if take_then { tdata } else { odata_o };
                     let so = y * sample_stride + (x * bands + b) * bpc;
@@ -1676,8 +1723,11 @@ impl Raster {
             return Err(ConversionError::InvalidGammaExponent { exponent });
         }
         let power = 1.0 / exponent;
-        let bpc = self.format().bytes_per_channel();
-        let mx = if bpc == 1 { 255u32 } else { 65535u32 };
+        let kind = self.format().kind();
+        reject_unreadable_kind("gamma", self)?;
+        let mx = kind
+            .max_value()
+            .expect("an unsigned kind has a ceiling; float is refused above");
         let mxf = mx as f64;
         // Match vips_gamma bit-for-bit (gamma.c): the curve is built as an
         // identity LUT put through `vips_pow_const1(power)` then
@@ -1700,18 +1750,32 @@ impl Raster {
         // (0 divergences).
         let scale = (mxf / mxf.powf(power)) as f32;
         let mxf32 = mxf as f32;
-        let lut: Vec<u32> = (0..=mx)
-            .map(|i| {
-                let powered = (i as f64).powf(power) as f32;
-                (scale * powered).clamp(0.0, mxf32) as u32
-            })
-            .collect();
+        let curve = |v: u32| -> u32 {
+            let powered = (v as f64).powf(power) as f32;
+            (scale * powered).clamp(0.0, mxf32) as u32
+        };
+        // The LUT is indexed by the sample value, so it is the right shape
+        // exactly where a value-indexed table is, which is the question
+        // `hist_bins` already answers. On the 32-bit carrier it is not: a
+        // 2^32-entry table is 16 GiB, so those samples go through the same
+        // curve one at a time. The arithmetic is identical either way, and
+        // the answer matches vips including where vips is degenerate.
+        // Measured on 8.18.6: `vips gamma` on a `uint` raster answers 0 for
+        // every input, because `mx / pow(mx, 2.4)` at mx = 4294967295
+        // underflows the f32 coefficient, and 100 and 90000 both come back
+        // 0. This reproduces that rather than inventing a nicer curve.
+        let lut: Option<Vec<u32>> = kind.hist_bins().map(|_| (0..=mx).map(curve).collect());
         let mut out = Raster::zeroed(self.width(), self.height(), self.format())?;
         let samples = self.width() as usize * self.height() as usize * self.format().channels();
         let sdata = self.data();
         let odata = out.data_mut();
         for i in 0..samples {
-            write_flat(odata, bpc, i, lut[read_flat(sdata, bpc, i) as usize]);
+            let v = read_flat(sdata, kind, i);
+            let mapped = match &lut {
+                Some(table) => table[v as usize],
+                None => curve(v),
+            };
+            write_flat(odata, kind, i, mapped);
         }
         out.carry_meta_from(self);
         Ok(out)
@@ -1743,13 +1807,14 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_falsecolour(&self) -> Result<Raster, ConversionError> {
         let channels = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
+        reject_unreadable_kind("falsecolour", self)?;
+        let kind = self.format().kind();
         let mut out = Raster::zeroed(self.width(), self.height(), PixelFormat::Rgb8)?;
         let pixels = self.width() as usize * self.height() as usize;
         let sdata = self.data();
         let odata = out.data_mut();
         for p in 0..pixels {
-            let v = read_flat(sdata, bpc, p * channels).min(255) as usize;
+            let v = read_flat(sdata, kind, p * channels).min(255) as usize;
             odata[p * 3..p * 3 + 3].copy_from_slice(&FALSECOLOUR_PET[v]);
         }
         out.carry_meta_from(self);
@@ -1790,8 +1855,9 @@ impl Raster {
         // width, and the two only agree because a `Gray16` raster is
         // normally tagged `Grey16`. Measured on vips 8.18.6: a `ushort`
         // raster tagged `b-w` gets alpha **255**, one tagged `grey16` or
-        // `rgb16` gets 65535. Same reading `white_ink` takes for the same
-        // reason (issues #667, #861).
+        // `rgb16` gets 65535, and a `uint` raster tagged `b-w` gets 255
+        // where the width rule would have said 65535. Same reading
+        // `white_ink` takes for the same reason (issues #667, #861).
         let max = interpretation_max_alpha(self.interpretation());
         let mut out = self.try_bandjoin_const(max)?;
         out.carry_meta_from(self);
@@ -1865,8 +1931,8 @@ impl Raster {
         // Float input is not exotic: `space_depth` maps Lab, Lch, OkLab,
         // OkLCh, XYZ, scRGB and Yxy all to F32, so a `colourspace` result is
         // already float.
-        if images.iter().any(|i| i.format().is_float()) {
-            return Err(ConversionError::FloatUnsupported { op: "arrayjoin" });
+        for img in images {
+            reject_unreadable_kind("arrayjoin", img)?;
         }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
         // vips does not clamp `across` to the image count: it lays out a grid
@@ -1899,10 +1965,14 @@ impl Raster {
             .map(|i| i.format().channels())
             .max()
             .expect("images is non-empty");
-        let bpc = images
+        // The common carrier, through `SampleKind::promote` rather than
+        // through the widest byte width: a width cannot order the kinds,
+        // and `with_channels(bands, 4)` answers float for a `uint` input
+        // (issues #517, #607).
+        let kind = images
             .iter()
-            .map(|i| i.format().bytes_per_channel())
-            .max()
+            .map(|i| i.format().kind())
+            .reduce(SampleKind::promote)
             .expect("images is non-empty");
         for img in images {
             let c = img.format().channels();
@@ -1933,8 +2003,8 @@ impl Raster {
             });
         };
 
-        let fmt = PixelFormat::with_channels(bands, bpc)
-            .expect("band count comes from valid input formats");
+        let fmt = PixelFormat::with_kind(bands, kind)
+            .expect("band count and kind both come from valid input formats");
         let mut out = Raster::zeroed(out_w, out_h, fmt)?;
         let odata = out.data_mut();
         for (k, img) in images.iter().enumerate() {
@@ -1943,7 +2013,7 @@ impl Raster {
             let ox = col as usize * (cell_w as usize + shim as usize);
             let oy = row as usize * (cell_h as usize + shim as usize);
             let ichannels = img.format().channels();
-            let ibpc = img.format().bytes_per_channel();
+            let ikind = img.format().kind();
             let idata = img.data();
             let iw = img.width() as usize;
             for y in 0..img.height() as usize {
@@ -1952,7 +2022,7 @@ impl Raster {
                     let oi = ((oy + y) * out_w as usize + ox + x) * bands;
                     for b in 0..bands {
                         let sb = if ichannels == 1 { 0 } else { b };
-                        write_flat(odata, bpc, oi + b, read_flat(idata, ibpc, si + sb));
+                        write_flat(odata, kind, oi + b, read_flat(idata, ikind, si + sb));
                     }
                 }
             }
@@ -2087,9 +2157,8 @@ impl Raster {
         // Float input is not exotic: `space_depth` maps every one of Lab,
         // Lch, OkLab, OkLCh, XYZ, scRGB and Yxy to F32, so
         // `im.colourspace(Lab).join(..)` arrives here as float.
-        if self.format().is_float() || other.format().is_float() {
-            return Err(ConversionError::FloatUnsupported { op: "join" });
-        }
+        reject_unreadable_kind("join", self)?;
+        reject_unreadable_kind("join", other)?;
         let align = align.unwrap_or(Align::Low);
         let shim = shim.unwrap_or(0);
         // libvips carries this bound in the property declaration, so
@@ -2311,7 +2380,7 @@ impl Raster {
         for (p, px) in odata.iter_mut().enumerate() {
             let mut v = no_match;
             for (i, c) in conditions.iter().enumerate() {
-                if read_flat(c.data(), c.format().bytes_per_channel(), p) != 0 {
+                if read_flat(c.data(), c.format().kind(), p) != 0 {
                     v = i as u8;
                     break;
                 }

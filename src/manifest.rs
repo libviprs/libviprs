@@ -302,6 +302,19 @@ mod pixel_format_serde {
             "rgb16" => Ok(PixelFormat::Rgb16),
             "rgba16" => Ok(PixelFormat::Rgba16),
             "rgbaf32" => Ok(PixelFormat::RgbaF32),
+            // The uint carrier has no named spelling and no width-keyed
+            // one either: `with_channels(n, 4)` answers the float carrier,
+            // so this tag has to build the format through the kind (issues
+            // #517, #607). Read before the width-keyed tail below so a
+            // "uint32:N" tag can never fall into the four-byte float arm.
+            other if other.starts_with("uint32:") => {
+                let n: usize = other
+                    .strip_prefix("uint32:")
+                    .expect("the guard above matched this prefix")
+                    .parse()
+                    .map_err(|_| unknown())?;
+                PixelFormat::with_kind(n, crate::pixel::SampleKind::U32).ok_or_else(unknown)
+            }
             other => {
                 let (depth, bands) = other
                     .strip_prefix("multi8:")
