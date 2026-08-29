@@ -286,6 +286,7 @@ mod pixel_format_serde {
             PixelFormat::Multi8(n) => format!("multi8:{n}"),
             PixelFormat::Multi16(n) => format!("multi16:{n}"),
             PixelFormat::FloatF32(n) => format!("floatf32:{n}"),
+            PixelFormat::Uint32(n) => format!("uint32:{n}"),
         };
         s.serialize_str(&name)
     }
@@ -301,6 +302,19 @@ mod pixel_format_serde {
             "rgb16" => Ok(PixelFormat::Rgb16),
             "rgba16" => Ok(PixelFormat::Rgba16),
             "rgbaf32" => Ok(PixelFormat::RgbaF32),
+            // The uint carrier has no named spelling and no width-keyed
+            // one either: `with_channels(n, 4)` answers the float carrier,
+            // so this tag has to build the format through the kind (issues
+            // #517, #607). Read before the width-keyed tail below so a
+            // "uint32:N" tag can never fall into the four-byte float arm.
+            other if other.starts_with("uint32:") => {
+                let n: usize = other
+                    .strip_prefix("uint32:")
+                    .expect("the guard above matched this prefix")
+                    .parse()
+                    .map_err(|_| unknown())?;
+                PixelFormat::with_kind(n, crate::pixel::SampleKind::U32).ok_or_else(unknown)
+            }
             other => {
                 let (depth, bands) = other
                     .strip_prefix("multi8:")
@@ -1051,5 +1065,51 @@ mod tests {
                 "the legacy tag {tag} must still load"
             );
         }
+    }
+
+    /**
+     * Tests that the unsigned 32-bit carrier round-trips through the
+     * manifest wire tag, and that its tag is read before the width-keyed
+     * tail so it cannot fall into the four-byte float arm (issue #517).
+     * Works by serialising a `Uint32` format, asserting the exact tag
+     * string, and reading it back, with the float carrier at the same band
+     * count as the control that the two tags are distinct and neither
+     * reads as the other.
+     * Input: Uint32(3) -> "uint32:3" -> Uint32(3); FloatF32(3) ->
+     * "floatf32:3" -> FloatF32(3).
+     */
+    #[test]
+    fn uint32_round_trips_through_the_manifest_tag() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        for bands in [1u16, 3, 4, 7] {
+            let fmt = PixelFormat::Uint32(n(bands));
+            let json = serde_json::to_string(&SourceMetadata {
+                width: 4,
+                height: 4,
+                pixel_format: fmt,
+                bytes_hash: None,
+            })
+            .unwrap();
+            assert!(
+                json.contains(&format!("\"uint32:{bands}\"")),
+                "the tag for {fmt:?} is not uint32:{bands} in {json}"
+            );
+            let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.pixel_format, fmt);
+        }
+        // Control: the float carrier of the same width keeps its own tag
+        // and reads back as itself, so the two four-byte carriers are not
+        // one tag with two names.
+        let f = PixelFormat::FloatF32(n(3));
+        let json = serde_json::to_string(&SourceMetadata {
+            width: 4,
+            height: 4,
+            pixel_format: f,
+            bytes_hash: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"floatf32:3\""));
+        let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pixel_format, f);
     }
 }

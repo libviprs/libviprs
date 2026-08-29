@@ -85,7 +85,7 @@
 
 use crate::arithmetic::interpretation_max_alpha;
 use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::{Raster, RasterError};
 use crate::resample::{ReduceKernel, ResizeOptions};
 use thiserror::Error;
@@ -129,6 +129,23 @@ pub enum ExtractError {
     FloatUnsupported {
         /// The operation that refused, e.g. `"embed"`.
         op: &'static str,
+    },
+    /// The raster carries a sample kind this operation has no
+    /// implementation for.
+    ///
+    /// The sibling of [`ExtractError::FloatUnsupported`] for the carriers
+    /// that are not float. `embed`, `gravity` and `insert` carry the
+    /// unsigned 32-bit one of issue #517, so this reaches them only for
+    /// the signed carriers of issue #516; `smartcrop`'s entropy and
+    /// attention strategies also refuse `Uint32`, because both build a
+    /// value-indexed table and 2^32 bins is not a table. Mirrors
+    /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
+    #[error("{op} does not support {kind:?} samples yet")]
+    UnsupportedSampleKind {
+        /// The operation that refused.
+        op: &'static str,
+        /// The sample kind it cannot read.
+        kind: SampleKind,
     },
     /// A zoom, subsample, or replicate factor is zero.
     #[error("factor must be greater than zero")]
@@ -332,36 +349,47 @@ pub enum SmartcropInteresting {
 // ---------------------------------------------------------------------------
 
 /// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
-/// keeps the sample-level extract ops, which predate the float formats,
-/// from misreading float bytes as `u16` pairs. (The pure byte-copy paths
-/// like `extract_area` are depth-agnostic and handle float fine.)
+/// matching [`crate::raster_ops`]).
+///
+/// Unsigned kinds only, and keyed on the kind rather than on a byte width
+/// so the 32-bit unsigned carrier is read as the `u32` it is instead of
+/// falling into whichever arm four bytes happened to select (issues #517,
+/// #607). The panic arm is a backstop behind [`reject_unreadable_kind`]
+/// and names the kind it was handed rather than claiming the raster is
+/// float. (The pure byte-copy paths like `extract_area` are
+/// depth-agnostic and handle every carrier fine.)
 #[inline]
-fn read_s(data: &[u8], bpc: usize, i: usize) -> u32 {
-    match bpc {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        _ => panic!(
-            "this extract operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
+fn read_s(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => data[i] as u32,
+        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
+            "this extract operation does not support {kind:?} samples yet; \
+             cast to an unsigned format first"
         ),
     }
 }
 
-/// Write the flat `i`-th sample. `v` must already fit the depth.
-/// Unsigned depths only; see [`read_s`].
+/// Write the flat `i`-th sample. `v` must already fit the kind.
+/// Unsigned kinds only; see [`read_s`].
 #[inline]
-fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    match bpc {
-        1 => data[i] = v as u8,
-        2 => {
+fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
+    match kind {
+        SampleKind::U8 => data[i] = v as u8,
+        SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
-            data[2 * i] = b[0];
-            data[2 * i + 1] = b[1];
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        _ => panic!(
-            "this extract operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
+        SampleKind::U32 => data[4 * i..4 * i + 4].copy_from_slice(&v.to_ne_bytes()),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
+            "this extract operation does not support {kind:?} samples yet; \
+             cast to an unsigned format first"
         ),
     }
 }
@@ -448,6 +476,13 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
         | PixelFormat::Rgb16
         | PixelFormat::Rgba16
         | PixelFormat::Multi16(_) => f64::from((byte << 8) | byte),
+        // `memset` fills every byte of the sample, so a four-byte integer
+        // carrier gets the ink byte replicated four times. Measured:
+        // `vips embed --extend white` on a one-band `uint` raster fills
+        // 4294967295 (`0xFFFFFFFF`) and on an `int` one fills -1, the same
+        // bytes read signed. The comment above about `int` + scRGB
+        // measuring `0x01010101` is the low-ink end of the same rule.
+        PixelFormat::Uint32(_) => f64::from((byte << 24) | (byte << 16) | (byte << 8) | byte),
     }
 }
 
@@ -496,11 +531,11 @@ fn reflect(i: i64, n: i64) -> i64 {
 /// promotion is numeric.
 fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
     let dbands = dst.format().channels();
-    let dbpc = dst.format().bytes_per_channel();
+    let dkind = dst.format().kind();
     let (dw, dh) = (dst.width() as i64, dst.height() as i64);
     let dstride = dst.width() as usize;
     let sbands = src.format().channels();
-    let sbpc = src.format().bytes_per_channel();
+    let skind = src.format().kind();
     let sstride = src.width() as usize;
     let sdata = src.data();
     let ddata = dst.data_mut();
@@ -518,7 +553,7 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
             let di = (oy as usize * dstride + ox as usize) * dbands;
             for c in 0..dbands {
                 let sc = if sbands == 1 { 0 } else { c };
-                write_s(ddata, dbpc, di + c, read_s(sdata, sbpc, si + sc));
+                write_s(ddata, dkind, di + c, read_s(sdata, skind, si + sc));
             }
         }
     }
@@ -528,13 +563,13 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
 /// down the `insert` background before the inputs are blitted on top.
 fn fill_ink(dst: &mut Raster, ink: &[u32]) {
     let bands = dst.format().channels();
-    let bpc = dst.format().bytes_per_channel();
+    let kind = dst.format().kind();
     let count = dst.width() as usize * dst.height() as usize;
     let data = dst.data_mut();
     for p in 0..count {
         let di = p * bands;
         for (c, &v) in ink.iter().enumerate() {
-            write_s(data, bpc, di + c, v);
+            write_s(data, kind, di + c, v);
         }
     }
 }
@@ -598,9 +633,32 @@ fn negated_origin(v: u32) -> i32 {
 /// This mirrors [`reject_float_input`](crate::arithmetic) in `arithmetic.rs`,
 /// which #631 added for `recomb` and `stdif`. Same problem, same shape.
 #[inline]
-fn reject_float(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
-    if r.format().is_float() {
-        return Err(ExtractError::FloatUnsupported { op });
+fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
+    let kind = r.format().kind();
+    match kind {
+        SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => Ok(()),
+        SampleKind::F32 => Err(ExtractError::FloatUnsupported { op }),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => {
+            Err(ExtractError::UnsupportedSampleKind { op, kind })
+        }
+    }
+}
+
+/// The stricter guard, for the two smartcrop strategies that build a
+/// value-indexed table.
+///
+/// `region_entropy` allocates one bin per sample value and `rgb_planes`
+/// divides by a fixed 8- or 16-bit scale, so those two need a kind whose
+/// values a table can be indexed by. That question is
+/// [`SampleKind::hist_bins`], and it answers `None` for the 32-bit kinds
+/// for the same reason it answers `None` for float: 2^32 bins is not a
+/// table. Without this the `uint` carrier would index a 65536-entry
+/// histogram with a sample of 90000 and panic out of a `Result`.
+fn reject_untabulated_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
+    reject_unreadable_kind(op, r)?;
+    let kind = r.format().kind();
+    if kind.hist_bins().is_none() {
+        return Err(ExtractError::UnsupportedSampleKind { op, kind });
     }
     Ok(())
 }
@@ -740,7 +798,7 @@ impl Raster {
         extend: Extend,
         background: Option<&[f64]>,
     ) -> Result<Raster, ExtractError> {
-        reject_float("embed", self)?;
+        reject_unreadable_kind("embed", self)?;
         self.embed_impl(x as i64, y as i64, width, height, extend, background)
     }
 
@@ -788,16 +846,20 @@ impl Raster {
         }
         debug_assert!(
             !self.format().is_float(),
-            "embed_impl's callers must reject a float raster first; see reject_float (issue #694)"
+            "embed_impl's callers must reject a float raster first; \
+             see reject_unreadable_kind (issue #694)"
         );
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let max = if bpc == 1 { 255u32 } else { 65535u32 };
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
+        let max = kind
+            .max_value()
+            .expect("an unsigned kind has a ceiling; float is refused before here");
         let ink: Vec<u32> = match extend {
             // The white ink comes from the interpretation, never from `max`;
-            // see [`white_ink`]. The `as u32` is exact for the 8- and 16-bit
-            // carriers, the only ones `write_s` below will accept anyway.
+            // see [`white_ink`]. The `as u32` is exact for every unsigned
+            // carrier, the only ones `write_s` below will accept anyway.
             Extend::White => vec![white_ink(fmt, self.interpretation()) as u32; bands],
             Extend::Background => resolve_ink(bands, max, background)?,
             _ => vec![0; bands],
@@ -824,12 +886,12 @@ impl Raster {
                     Some((sx, sy)) => {
                         let si = (sy as usize * sstride + sx as usize) * bands;
                         for c in 0..bands {
-                            write_s(&mut out, bpc, di + c, read_s(data, bpc, si + c));
+                            write_s(&mut out, kind, di + c, read_s(data, kind, si + c));
                         }
                     }
                     None => {
                         for (c, &v) in ink.iter().enumerate() {
-                            write_s(&mut out, bpc, di + c, v);
+                            write_s(&mut out, kind, di + c, v);
                         }
                     }
                 }
@@ -878,7 +940,7 @@ impl Raster {
             D::SouthWest => (0, by),
             D::NorthWest => (0, 0),
         };
-        reject_float("gravity", self)?;
+        reject_unreadable_kind("gravity", self)?;
         self.embed_impl(x, y, width, height, extend, background)
     }
 
@@ -1094,19 +1156,21 @@ impl Raster {
         }
         // Both inputs, because the result's depth is the wider of the two, so
         // a float `sub` reaches the sample copy just as a float `self` does.
-        reject_float("insert", self)?;
-        reject_float("insert", sub)?;
+        reject_unreadable_kind("insert", self)?;
+        reject_unreadable_kind("insert", sub)?;
         let bands = mb.max(sb);
-        let bpc = self
-            .format()
-            .bytes_per_channel()
-            .max(sub.format().bytes_per_channel());
-        let max = if bpc == 1 { 255u32 } else { 65535u32 };
+        // Through `SampleKind::promote`, not the wider byte width: a width
+        // cannot order the carriers, and four bytes answers float for a
+        // `uint` input (issues #517, #607).
+        let kind = self.format().kind().promote(sub.format().kind());
+        let max = kind
+            .max_value()
+            .expect("an unsigned kind has a ceiling; float is refused above");
         // Resolve the fill up front so a bad background vector errors even
         // when `expand` leaves no visible gap.
         let ink = resolve_ink(bands, max, background)?;
-        let fmt = PixelFormat::with_channels(bands, bpc)
-            .expect("band count is bounded by the two input formats");
+        let fmt = PixelFormat::with_kind(bands, kind)
+            .expect("band count is bounded by the two input formats, and the kind is carried");
         let (ox, oy, ow, oh) = if expand {
             let left = 0i64.min(x as i64);
             let top = 0i64.min(y as i64);
@@ -1212,7 +1276,7 @@ impl Raster {
             interesting,
             SmartcropInteresting::Entropy | SmartcropInteresting::Attention
         ) {
-            reject_float("smartcrop", self)?;
+            reject_untabulated_kind("smartcrop", self)?;
         }
         // libvips premultiplies before the strategy switch whenever an
         // alpha band is present; `has_alpha` guarantees the two bands
@@ -1297,8 +1361,10 @@ impl Raster {
 /// `vips_smartcrop_score` computes via `hist_find` + `hist_entropy`.
 fn region_entropy(im: &Raster, x: i64, y: i64, w: i64, h: i64) -> f64 {
     let bands = im.format().channels();
-    let bpc = im.format().bytes_per_channel();
-    let bins = if bpc == 1 { 256 } else { 65536 };
+    let kind = im.format().kind();
+    let bins = kind
+        .hist_bins()
+        .expect("reject_untabulated_kind refuses a kind with no bin count");
     let mut hist = vec![0u64; bins];
     let stride = im.width() as usize;
     let data = im.data();
@@ -1306,7 +1372,7 @@ fn region_entropy(im: &Raster, x: i64, y: i64, w: i64, h: i64) -> f64 {
         for xx in x..x + w {
             let base = (yy as usize * stride + xx as usize) * bands;
             for c in 0..bands {
-                hist[read_s(data, bpc, base + c) as usize] += 1;
+                hist[read_s(data, kind, base + c) as usize] += 1;
             }
         }
     }
@@ -1386,15 +1452,15 @@ fn transpose(src: &[f64], w: usize, h: usize) -> Vec<f64> {
 /// analysis input being already premultiplied.
 fn rgb_planes(im: &Raster) -> [Vec<f64>; 3] {
     let bands = im.format().channels();
-    let bpc = im.format().bytes_per_channel();
-    let scale = if bpc == 1 { 1.0 } else { 257.0 };
+    let kind = im.format().kind();
+    let scale = if kind.bytes() == 1 { 1.0 } else { 257.0 };
     let (w, h) = (im.width() as usize, im.height() as usize);
     let data = im.data();
     let mut planes: [Vec<f64>; 3] = [vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h]];
     for i in 0..w * h {
         for (c, plane) in planes.iter_mut().enumerate() {
             let sc = if bands >= 3 { c } else { 0 };
-            plane[i] = read_s(data, bpc, i * bands + sc) as f64 / scale;
+            plane[i] = read_s(data, kind, i * bands + sc) as f64 / scale;
         }
     }
     planes
@@ -3132,6 +3198,125 @@ mod tests {
             white2.getpoint(0, 0),
             vec![255.0, 255.0, 255.0],
             "srgb twice"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // the unsigned 32-bit carrier (issue #517)
+    // ------------------------------------------------------------------
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /**
+     * Tests that `embed` carries the unsigned 32-bit carrier: it copies
+     * the source samples at the right stride and inks the border with the
+     * carrier's own white.
+     * Works by embedding a 1x1 `uint` raster in the middle of a 3x3 canvas
+     * with `Extend::White` and reading both a source sample and a border
+     * one, so a read at half stride moves the first and a wrong ink moves
+     * the second. Both pinned to `/opt/homebrew/bin/vips` 8.18.6, where
+     * `vips embed --extend white` on a `uint` raster fills **4294967295**
+     * and an `int` one fills -1, the same bytes read signed.
+     * Input: uint 90000 embedded at (1, 1) in 3x3 -> centre 90000, border
+     * 4294967295.
+     */
+    #[test]
+    fn embed_carries_the_uint_carrier_and_its_white_ink() {
+        let src = uint32(1, 1, &[90_000]);
+        let out = src
+            .try_embed(1, 1, 3, 3, Extend::White, None)
+            .expect("embed carries the uint carrier");
+        assert_eq!(out.format(), src.format());
+        assert_eq!(
+            u32_at(&out, 4),
+            90_000,
+            "the source sample moved or was misread"
+        );
+        assert_eq!(
+            u32_at(&out, 0),
+            4_294_967_295,
+            "the white ink is not the carrier's"
+        );
+        // Controls: the same call on the carriers that already worked.
+        let g8 = gray(1, 1, vec![200]);
+        let o8 = g8.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(o8.data()[4], 200);
+        assert_eq!(o8.data()[0], 255);
+        let g16 = gray16(1, 1, &[40000]);
+        let o16 = g16.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(u16::from_ne_bytes([o16.data()[8], o16.data()[9]]), 40000);
+    }
+
+    /**
+     * Tests that `insert` picks the output carrier through
+     * `SampleKind::promote` rather than through the wider byte width,
+     * which answers the float carrier at four bytes (issues #517, #607).
+     * Works by inserting an 8-bit raster into a `uint` one and asserting
+     * both the format and a sample, with the 8-into-16 pair as the control
+     * that the existing promotion did not move.
+     * Input: insert(uint, u8) -> Uint32 carrying 90000; insert(u16, u8) ->
+     * Gray16.
+     */
+    #[test]
+    fn insert_promotes_through_the_kind() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let main = uint32(2, 1, &[90_000, 90_000]);
+        let sub = gray(1, 1, vec![7]);
+        let out = main.try_insert(&sub, 0, 0, false, None).unwrap();
+        assert_eq!(out.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&out, 1), 90_000);
+        assert_eq!(u32_at(&out, 0), 7);
+        // Control: the promotion that existed before is untouched.
+        let out16 = gray16(2, 1, &[40000, 40000])
+            .try_insert(&sub, 0, 0, false, None)
+            .unwrap();
+        assert_eq!(out16.format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that the two smartcrop strategies which build a value-indexed
+     * table refuse the 32-bit carrier as a typed error rather than
+     * panicking on an out-of-range histogram index.
+     * Works by asking for both strategies on a `uint` raster whose samples
+     * are far above 65536, with the pure-geometry strategies as the
+     * control that smartcrop itself still works on that carrier.
+     * Input: Entropy / Attention on uint -> Err(UnsupportedSampleKind);
+     * Centre on uint -> Ok.
+     */
+    #[test]
+    fn smartcrop_refuses_the_uint_carrier_where_it_needs_a_table() {
+        let r = uint32(4, 4, &[90_000; 16]);
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            let got = r.try_smartcrop(2, 2, interesting, false);
+            assert!(
+                matches!(
+                    got,
+                    Err(ExtractError::UnsupportedSampleKind {
+                        op: "smartcrop",
+                        kind: SampleKind::U32
+                    })
+                ),
+                "{interesting:?} on a uint raster gave {got:?}"
+            );
+        }
+        // Control: the geometry strategies are depth-agnostic and still
+        // carry the same raster, so the refusal is about the table.
+        assert!(
+            r.try_smartcrop(2, 2, SmartcropInteresting::Centre, false)
+                .is_ok()
         );
     }
 }

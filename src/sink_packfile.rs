@@ -599,6 +599,20 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
                 raster.format()
             )));
         }
+        // The `image` crate's widest integer colour type is 16-bit (L8,
+        // L16, Rgb8, Rgba8, Rgb16, Rgba16, and two 32-bit *float* ones),
+        // so the 32-bit unsigned carrier has no representation there at
+        // all. A typed refusal is the implementation here rather than a
+        // gap: unlike `resize` or the band ops, where vips supports `uint`
+        // and refusing would have been a parity regression, there is
+        // nothing to be faithful to (issue #517).
+        PixelFormat::Uint32(_) => {
+            return Err(SinkError::EncodeMsg(format!(
+                "32-bit unsigned raster ({:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first",
+                raster.format()
+            )));
+        }
     };
 
     let mut buf = Vec::new();
