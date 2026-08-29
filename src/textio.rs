@@ -43,7 +43,7 @@
 
 use crate::codec::{DecodeError, EncodeError};
 use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
-use crate::raster::{DEFAULT_MAX_ALLOC_BYTES, Raster, RasterError};
+use crate::raster::Raster;
 use std::io::{Error as IoError, ErrorKind};
 
 /// Build a typed [`DecodeError`] for a malformed text or Netpbm input.
@@ -367,11 +367,23 @@ impl Raster {
     /// most-significant-byte-first. `#` comments are honoured in the header.
     ///
     /// The pixel buffer is bounded before it is reserved: the declared
-    /// dimensions are capped against [`DEFAULT_MAX_ALLOC_BYTES`] (the same
-    /// budget the [`Raster`] constructors enforce), the binary body must be
-    /// wholly present before any reservation, and the reservation itself is
-    /// fallible, so a hostile header cannot force a multi-gigabyte allocation
-    /// or a process abort. The inverse is [`Raster::ppm_save`].
+    /// geometry is priced against the allocation budget through
+    /// `DecodeLimits::check_image_alloc` (named rather than linked: it is
+    /// `pub(crate)` and these docs are public),
+    /// the binary body must be wholly present before any reservation, and the
+    /// reservation itself is fallible, so a hostile header cannot force a
+    /// multi-gigabyte allocation or a process abort. The inverse is
+    /// [`Raster::ppm_save`].
+    ///
+    /// This runs at [`DecodeLimits::default`](crate::source::DecodeLimits),
+    /// which is what the sniffed route uses, so decoding the same bytes by
+    /// name and by route gives the same answer (issue #563). It used to cap at
+    /// `DEFAULT_MAX_ALLOC_BYTES` instead, **8 GiB** against the route
+    /// default's **512 MiB**, so this entry point accepted declared sizes every
+    /// other container refused. `decode_netpbm` takes the
+    /// limits explicitly (issue #910). Named rather than linked because it is
+    /// `pub(crate)` and this method's docs are public, which
+    /// `-D rustdoc::private_intra_doc_links` refuses.
     ///
     /// # Errors
     ///
@@ -381,6 +393,43 @@ impl Raster {
     /// dimensions past the allocation budget, or a raster the dimensions
     /// cannot construct.
     pub fn ppm_load(data: &[u8]) -> Result<Raster, DecodeError> {
+        decode_netpbm(data, crate::source::DecodeLimits::default())
+    }
+}
+
+/// The route table's Netpbm entry point, under the caller's
+/// [`DecodeLimits`](crate::source::DecodeLimits).
+///
+/// [`Raster::ppm_load`] is this with the default limits, so the named entry
+/// point and the sniffed one give the same answer for the same bytes, which
+/// is the property issue #563 is about.
+///
+/// # It had a budget, and not the route's budget
+///
+/// Before issue #910 this capped the declared size against
+/// [`DEFAULT_MAX_ALLOC_BYTES`], **8 GiB**, where every route's default is
+/// `DecodeLimits::default().max_alloc_bytes`, **512 MiB**. Sixteen times
+/// apart, so a declared 4 GiB Netpbm was refused by every other container in
+/// the table and accepted here. A component enforcing *a* limit is not the
+/// same as one enforcing *the* limit, and a refusal table cannot tell the two
+/// apart from outside: the rows pass either way, which is worse than an
+/// absent row because it reads as coverage.
+///
+/// So the ceiling is now [`DecodeLimits::check_image_alloc`], the same call
+/// every other native container makes, and it reports
+/// [`SourceError::AllocLimitExceeded`] naming the caller's number rather than
+/// a constant.
+///
+/// # Errors
+///
+/// [`SourceError::AllocLimitExceeded`] if the declared geometry prices past
+/// the caller's allocation budget, and the malformed-input errors
+/// [`Raster::ppm_load`] documents.
+pub(crate) fn decode_netpbm(
+    data: &[u8],
+    limits: crate::source::DecodeLimits,
+) -> Result<Raster, DecodeError> {
+    {
         let mut pos = 0usize;
         let magic = next_token(data, &mut pos).ok_or_else(|| malformed("ppm: empty input"))?;
         let (channels, ascii) = match magic.as_slice() {
@@ -423,18 +472,11 @@ impl Raster {
         let need = count
             .checked_mul(bpc)
             .ok_or_else(|| malformed("ppm: declared dimensions overflow"))?;
-        // Cap the declared size against the shared allocation budget before
-        // reserving, so a ~20-byte hostile header cannot request gigabytes.
-        if need as u64 > DEFAULT_MAX_ALLOC_BYTES {
-            return Err(RasterError::ByteBudgetExceeded {
-                width,
-                height,
-                format: fmt,
-                bytes: need as u64,
-                budget: DEFAULT_MAX_ALLOC_BYTES,
-            }
-            .into());
-        }
+        // Cap the declared geometry against the **caller's** budget before
+        // reserving, so a ~20-byte hostile header cannot request gigabytes,
+        // and so this route refuses at the same number every other container
+        // refuses at (issue #910). `check_image_alloc` is that shared call.
+        limits.check_image_alloc("ppm pixel data", width, height, channels as u64, bpc as u64)?;
 
         let mut buf: Vec<u8> = Vec::new();
         if ascii {
@@ -521,6 +563,118 @@ fn next_u32(data: &[u8], pos: &mut usize, what: &str) -> Result<u32, DecodeError
 
 #[cfg(test)]
 mod tests {
+    /**
+     * Tests that the sniffer claims exactly the four Netpbm magics this
+     * crate decodes, and no more (issue #910).
+     *
+     * The route table's rule is that every row in `SniffedFormat::ALL` can
+     * reach a decoder, which `every_container_is_reachable_from_its_own_magic`
+     * enforces. So the sniffed set has to be the decodable set: `P2` and `P3`
+     * for the ASCII forms, `P5` and `P6` for the binary ones.
+     *
+     * **The absences are the assertion, not an oversight.** Measured on the
+     * pinned vips 8.18.6, `ppmload` reads `P1` and `P4` too, and this crate
+     * reads neither by any route, so claiming their magic would put a row in
+     * the table that cannot decode. Issue #919 is that gap and carries the
+     * polarity trap that makes it worth doing carefully. `PF` is the float
+     * PFM and `P7` is PAM, neither of which this crate reads or writes.
+     *
+     * An unasserted absence is a coincidence; this one is a rule.
+     */
+    #[test]
+    fn the_sniffer_claims_exactly_the_netpbm_magics_this_crate_decodes() {
+        use crate::source::{SniffedFormat, sniff};
+
+        for (magic, body) in [
+            (&b"P2"[..], &b"\n2 2\n255\n0 1 2 3\n"[..]),
+            (&b"P3"[..], &b"\n1 1\n255\n0 1 2\n"[..]),
+            (&b"P5"[..], &b"\n2 2\n255\n\x00\x40\x80\xff"[..]),
+            (&b"P6"[..], &b"\n1 1\n255\n\x00\x40\x80"[..]),
+        ] {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(body);
+            let name = String::from_utf8_lossy(magic).into_owned();
+            assert_eq!(
+                sniff(&bytes),
+                Some(SniffedFormat::Netpbm),
+                "{name} must be claimed"
+            );
+            // And claimed *because* it decodes, which is the table's rule.
+            assert!(
+                decode_netpbm(&bytes, crate::source::DecodeLimits::default()).is_ok(),
+                "{name} must decode, or it must not be a row"
+            );
+        }
+
+        for (magic, body) in [
+            (&b"P1"[..], &b"\n2 2\n0 1 1 0\n"[..]),
+            (&b"P4"[..], &b"\n2 2\n\xc0\x00"[..]),
+            (&b"PF"[..], &b"\n2 2\n-1.0\n"[..]),
+            (&b"P7"[..], &b"\nWIDTH 2\n"[..]),
+        ] {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(body);
+            let name = String::from_utf8_lossy(magic).into_owned();
+            assert_eq!(
+                sniff(&bytes),
+                None,
+                "{name} has no decoder here, so it must not be a row (issue #919)"
+            );
+        }
+    }
+
+    /**
+     * Tests that the Netpbm route refuses at the **caller's** budget and not
+     * at a constant of its own (issue #910).
+     *
+     * This is the whole substance of the change and it is invisible from a
+     * refusal table. Before #910 this path capped against
+     * `DEFAULT_MAX_ALLOC_BYTES`, **8 GiB**, where every route's default is
+     * `DecodeLimits::default().max_alloc_bytes`, **512 MiB**. Sixteen times
+     * apart, so a declared 4 GiB Netpbm was refused by every other container
+     * and accepted here. It had *a* budget and not *the* budget, and a row in
+     * `tests/decode_alloc_refusal_shape.rs` would have passed either way,
+     * which is worse than an absent row because it reads as coverage.
+     *
+     * Only varying the caller's limit can see the difference, so that is what
+     * this does: the same 3 MiB header is accepted under a 512 MiB budget and
+     * refused under a 1 MiB one, and the refusal names **1 MiB**. A route
+     * still using the constant would accept both and a route hard-coding any
+     * other number would report that number.
+     */
+    #[test]
+    fn the_netpbm_route_refuses_at_the_callers_budget_not_at_one_of_its_own() {
+        // 1024 x 1024 RGB8 is 3 MiB: comfortably inside the 512 MiB default
+        // and comfortably outside a 1 MiB ceiling.
+        let header = b"P6\n1024 1024\n255\n";
+        let mut bytes = header.to_vec();
+        bytes.resize(header.len() + 1024 * 1024 * 3, 0);
+
+        // Positive control: it decodes at all, so the refusal below is the
+        // ceiling and not the parser.
+        let ok = decode_netpbm(&bytes, crate::source::DecodeLimits::default())
+            .expect("3 MiB is inside the 512 MiB default");
+        assert_eq!((ok.width(), ok.height()), (1024, 1024));
+
+        let tight = crate::source::DecodeLimits::default().with_max_alloc_bytes(1024 * 1024);
+        let err = decode_netpbm(&bytes, tight).expect_err("3 MiB is outside a 1 MiB ceiling");
+        match &err {
+            crate::source::SourceError::AllocLimitExceeded {
+                needed_bytes,
+                max_alloc_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    *max_alloc_bytes,
+                    1024 * 1024,
+                    "the refusal must name the caller's ceiling, not a constant"
+                );
+                assert_eq!(*needed_bytes, 1024 * 1024 * 3);
+            }
+            other => panic!("expected the route's alloc refusal, got {other:?}"),
+        }
+    }
+
     /**
      * Tests [`Raster::encode_netpbm`]'s refusal arm directly, because neither
      * route can reach it (issue #882).
@@ -740,14 +894,18 @@ mod tests {
         assert!(!err.to_string().is_empty());
 
         // Dimensions whose byte size exceeds the allocation budget are rejected
-        // up front on the ASCII path too, before any per-sample parsing.
+        // up front on the ASCII path too, before any per-sample parsing. The
+        // variant is the route's, `AllocLimitExceeded`, and not the raster
+        // constructor's `ByteBudgetExceeded`, because this path now prices
+        // against the caller's `DecodeLimits` like every other container
+        // rather than against `DEFAULT_MAX_ALLOC_BYTES` (issue #910).
         let over_budget = b"P3\n65535 65535\n255\n";
         let err =
             Raster::ppm_load(over_budget).expect_err("over-budget header must be a typed error");
-        assert!(matches!(
-            err,
-            DecodeError::Raster(RasterError::ByteBudgetExceeded { .. })
-        ));
+        assert!(
+            matches!(err, DecodeError::AllocLimitExceeded { .. }),
+            "expected the route's alloc refusal, got {err:?}"
+        );
     }
 
     #[test]

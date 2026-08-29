@@ -853,12 +853,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filed for and is attached with it, which makes **every header field
   `gifload` attaches now attached** by this loader.
 
-  It is a separate variant rather than a widening of `IntArray`. `background`
-  holds three colour-table bytes widened to doubles, so its values are always
-  integral and it would have fitted an int array numerically, but vips writes
-  the two as different GTypes and a reader asking for one does not accept the
-  other, so it would have been a field nobody reads.
+- **Netpbm is a sniffed container**, so `decode_file` and `decode_bytes` read a
+  `.ppm` or `.pgm` this crate wrote (issue #910). It was the only save row whose
+  own output could not be read back: `source::sniff` had no variant for it, so
+  the file fell through to `image`'s content guess, which recognised the
+  container and refused it for want of the `pnm` feature.
 
+  The route goes to `crate::textio`, not to `image`. Enabling `image`'s `pnm`
+  would have cost nothing in the lock file, it is `pnm = []` with no dependency
+  behind it, and it was still the wrong change: `Raster::ppm_load` has decoded
+  `P2`, `P3`, `P5` and `P6` since #77, and the only thing the facade would add
+  is `P1`, `P4` and the float `PF`, **none of which `encode_ppm` writes
+  either**. A free-looking feature that buys decode paths with no matching
+  encode paths still widens what the crate claims.
   The trailer text is measured. I hand-wrote a `VipsArrayDouble` into a `.v`
   and had vips rewrite it: `0.5`, `-1.25` and `3.0000000000000004` come back
   unchanged, `71.0` goes out as `71` and `1e300` as `1.0000000000000001e+300`,
@@ -902,92 +909,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the box filters. Widening those to `i64` is the remainder of #516's parity
   work.
 
-- **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
-  libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:
-  `hist_find`, `hist_cum`, `project` and the `hough_*` family all count pixels
-  and libvips emits every one of them as `uint`, so a 300x300 image already
-  overflows a 16-bit counter. Widening those counters onto it is issue #532 and
-  lands separately.
+  So the sniffer claims exactly the four magics that decode, and the absences
+  are asserted rather than implied: `P1`, `P4`, `PF` and `P7` stay unclaimed,
+  because a row in `SniffedFormat::ALL` that cannot decode breaks the table's
+  own rule. vips does read `P1` and `P4`, and issue #919 is that gap.
 
-  There is no named four-band spelling of it, so `Uint32(n)` is canonical at
-  every band count and carries no alias, unlike `FloatF32(4)` and `RgbaF32`.
-  Like the multiband and float variants it is a compute intermediate: the tile
-  sinks and the 8/16-bit container encoders refuse it with a typed error naming
-  it, rather than narrowing it behind the caller's back.
-
-  **`PixelFormat::with_kind` is the only constructor that reaches it.**
-  `with_channels(n, 4)` still answers the float carrier, because that is the
-  answer every existing caller asked for, and a byte width does not name a
-  carrier. That pair is the sharpest statement of issue #607 in the crate: two
-  constructors, one width, two different answers, and a test pinning both.
-
-  The ops that read samples one at a time carry it: `cast` both ways, `embed`,
-  `gravity`, `insert`, `bandjoin`, `bandjoin_const`, `bandmean`, the `bandbool`
-  family, `bandrank`, `extract_band`, `arrayjoin`, `ifthenelse`, `switch`,
-  `msb`, `flatten`, `falsecolour`, `gamma`, `downscale_half`, `downscale_to`
-  and `resize`. Every one of those answers were measured against
-  `/opt/homebrew/bin/vips` 8.18.6 rather than reasoned about, because vips
-  supports `uint` at all of them and preserves the value exactly: a 4x4 `uint`
-  image at 90000 comes back at 90000 from `resize 0.5`, `shrink 2 2` and
-  `bandmean`, `addalpha` appends 255, `embed --extend white` fills 4294967295,
-  `msb` gives 0 and `falsecolour` gives (174, 0, 0).
-
-  Two places where the answer is deliberately *not* vips's, both measured:
-
-  - **Narrowing.** libvips takes a `uint` sample through a signed `int` on the
-    way down, so on 8.18.6 a `uint` raster holding 2147483647 casts to `uchar`
-    255 and one holding 2147483648 casts to **0**, with the boundary exactly at
-    `INT_MAX`. `cast` clips at the target's ceiling instead, so both answer 255.
-  - **`resize`.** libviprs reads the reduce mask as `double` where vips reads
-    its 12-bit fixed-point copy, which is the divergence
-    `reduce_preserves_a_constant_where_the_vips_short_mask_does_not` already
-    pins on the narrower carriers. On a 4x4 `uint` ramp `vips resize 0.5`
-    answers 102360 and libviprs answers 102359; the same image cast to FLOAT
-    and resized by vips answers 102358.62, so the exact result rounds to
-    libviprs's number.
-
-  Two typed refusals replace panics out of `Result`-returning methods, the shape
-  issue #694 landed: `BandError::UnsupportedSampleKind` and
-  `ExtractError::UnsupportedSampleKind`, alongside
-  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
-  the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
-  over a raster that is not float. `smartcrop`'s entropy and attention
-  strategies keep a stricter guard and refuse the 32-bit carrier, because both
-  build a value-indexed table and `SampleKind::hist_bins` is `None` at 32 bits,
-  the same answer it gives for float.
-
-  `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
-  #858, which this stacks on): the `BandFmt` wire tag used to be written from a
-  byte width, and a byte width does not name a carrier.
-- **A gate against a byte width standing in for a sample kind**, which is what
-  issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
-  `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
-  than a lint because `#[non_exhaustive]` on `SampleKind` turns a *`match`*
-  into a compile error and does nothing at all to a *comparison*, which is
-  precisely the shape that keeps coming back: `jp2k.rs:3122` arrived after
-  #748's census was taken.
-
-  It parses rather than greps. A shell `grep` cannot tell code from prose, and
-  the first thing it would have failed on is `pixel.rs`'s comment explaining
-  why `canonical()` does **not** take the width shortcut, which is prose
-  arguing *for* the rule. The scanner strips comments (tracking string
-  literals, so a `//` inside one does not blind it) and it is proved on both
-  directions before it is trusted: a comparison in code is found, the same
-  text in each of the four comment forms is not.
-
-  Two code sites are left and neither is in a file this lane owns, so they are
-  named in a countdown with the lane that clears each. The assertion is set
-  equality both ways, like `tests/ci_feature_coverage.rs`: a new site anywhere
-  fails, and a listed site that has already been cleared **also** fails, so the
-  list can only shrink and cannot rot into an allowlist. When it is empty,
-  #607 closes.
-
-- `JxlError::UnsupportedSampleKind`, for a header describing a sample kind the
-  JPEG XL loader has no stream type for (issue #607). Unreachable while
-  `PixelFormat` carries only `U8`, `U16` and `F32`, which are exactly the
-  three arms the frame loop implements; it is there so the carriers of #516
-  and #517 arrive as a typed refusal instead of through the arm that used to
-  ask for `f32` samples and write float bit patterns into an integer raster.
+  The magic is two bytes and no more, which is as loose as `ppmload`'s own
+  `is_a`: measured on 8.18.6, a file opening `P5xyzzy` is accepted as `ppmload`
+  and then fails with `bad image dimensions`. A sniffer stricter than the
+  reference makes files vips reads unreachable, so the refusal stays in the
+  loader, where re-tokenising the header gives it a type.
 
 - **`.ppm` and `.pgm` are rows in `Raster::save`, and `"ppm"` and `"pgm"` are
   rows in `Raster::encode_to_buffer`** (issue #882). `Raster::encode_ppm` has
@@ -2459,6 +2390,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Raster::ppm_load` prices against the decode budget instead of the raster
+  construction one** (issue #910). It capped the declared geometry at
+  `DEFAULT_MAX_ALLOC_BYTES`, **8 GiB**, where every route's default is
+  `DecodeLimits::default().max_alloc_bytes`, **512 MiB**. Sixteen times apart,
+  so a declared 4 GiB Netpbm was refused by every other container in the table
+  and accepted here.
+
+  It had *a* budget and not *the* budget, and that distinction is invisible from
+  a refusal table: a row in `tests/decode_alloc_refusal_shape.rs` would have
+  passed either way, which is worse than an absent row because it reads as
+  coverage. Only a check that varies the **caller's** limit can see it, and
+  that is the check that landed with it.
+
+  The refusal is now `SourceError::AllocLimitExceeded` naming the caller's
+  ceiling rather than `RasterError::ByteBudgetExceeded` naming a constant, so
+  `is_alloc_limit` answers true for it and raising `DecodeLimits::max_alloc_bytes`
+  is the remedy. A caller decoding a Netpbm between 512 MiB and 8 GiB now has to
+  raise the limit explicitly, the same as for every other container.
+
+- **`MetadataValue::DoubleArray(Vec<f64>)`**, the `VipsArrayDouble` half of
+  the pair `IntArray` opened in #787, with `as_double_array`,
+  `Raster::get_double_array`, the `From` impls, type code 6 and the `.v`
+  trailer both ways (issue #852). GIF's `background` is the field it was
+  filed for and is attached with it, which makes **every header field
+  `gifload` attaches now attached** by this loader.
+
+  It is a separate variant rather than a widening of `IntArray`. `background`
+  holds three colour-table bytes widened to doubles, so its values are always
+  integral and it would have fitted an int array numerically, but vips writes
+  the two as different GTypes and a reader asking for one does not accept the
+  other, so it would have been a field nobody reads.
+
+  The trailer text is measured. I hand-wrote a `VipsArrayDouble` into a `.v`
+  and had vips rewrite it: `0.5`, `-1.25` and `3.0000000000000004` come back
+  unchanged, `71.0` goes out as `71` and `1e300` as `1.0000000000000001e+300`,
+  which is `%.17g`. This writes Rust's shortest round-tripping form instead,
+  because that is what `xml_field_of` already does for a scalar `Double` and
+  one trailer should not carry two conventions. Every one of those spellings
+  parses back to the same `f64` on both sides, so the difference is spelling
+  and not value.
+
+- **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
+  libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:
+  `hist_find`, `hist_cum`, `project` and the `hough_*` family all count pixels
+  and libvips emits every one of them as `uint`, so a 300x300 image already
+  overflows a 16-bit counter. Widening those counters onto it is issue #532 and
+  lands separately.
+
+  There is no named four-band spelling of it, so `Uint32(n)` is canonical at
+  every band count and carries no alias, unlike `FloatF32(4)` and `RgbaF32`.
+  Like the multiband and float variants it is a compute intermediate: the tile
+  sinks and the 8/16-bit container encoders refuse it with a typed error naming
+  it, rather than narrowing it behind the caller's back.
+
+  **`PixelFormat::with_kind` is the only constructor that reaches it.**
+  `with_channels(n, 4)` still answers the float carrier, because that is the
+  answer every existing caller asked for, and a byte width does not name a
+  carrier. That pair is the sharpest statement of issue #607 in the crate: two
+  constructors, one width, two different answers, and a test pinning both.
+
+  The ops that read samples one at a time carry it: `cast` both ways, `embed`,
+  `gravity`, `insert`, `bandjoin`, `bandjoin_const`, `bandmean`, the `bandbool`
+  family, `bandrank`, `extract_band`, `arrayjoin`, `ifthenelse`, `switch`,
+  `msb`, `flatten`, `falsecolour`, `gamma`, `downscale_half`, `downscale_to`
+  and `resize`. Every one of those answers were measured against
+  `/opt/homebrew/bin/vips` 8.18.6 rather than reasoned about, because vips
+  supports `uint` at all of them and preserves the value exactly: a 4x4 `uint`
+  image at 90000 comes back at 90000 from `resize 0.5`, `shrink 2 2` and
+  `bandmean`, `addalpha` appends 255, `embed --extend white` fills 4294967295,
+  `msb` gives 0 and `falsecolour` gives (174, 0, 0).
+
+  Two places where the answer is deliberately *not* vips's, both measured:
+
+  - **Narrowing.** libvips takes a `uint` sample through a signed `int` on the
+    way down, so on 8.18.6 a `uint` raster holding 2147483647 casts to `uchar`
+    255 and one holding 2147483648 casts to **0**, with the boundary exactly at
+    `INT_MAX`. `cast` clips at the target's ceiling instead, so both answer 255.
+  - **`resize`.** libviprs reads the reduce mask as `double` where vips reads
+    its 12-bit fixed-point copy, which is the divergence
+    `reduce_preserves_a_constant_where_the_vips_short_mask_does_not` already
+    pins on the narrower carriers. On a 4x4 `uint` ramp `vips resize 0.5`
+    answers 102360 and libviprs answers 102359; the same image cast to FLOAT
+    and resized by vips answers 102358.62, so the exact result rounds to
+    libviprs's number.
+
+  Two typed refusals replace panics out of `Result`-returning methods, the shape
+  issue #694 landed: `BandError::UnsupportedSampleKind` and
+  `ExtractError::UnsupportedSampleKind`, alongside
+  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
+  the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
+  over a raster that is not float. `smartcrop`'s entropy and attention
+  strategies keep a stricter guard and refuse the 32-bit carrier, because both
+  build a value-indexed table and `SampleKind::hist_bins` is `None` at 32 bits,
+  the same answer it gives for float.
+
+  `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
+  #858, which this stacks on): the `BandFmt` wire tag used to be written from a
+  byte width, and a byte width does not name a carrier.
+- **A gate against a byte width standing in for a sample kind**, which is what
+  issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
+  `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
+  than a lint because `#[non_exhaustive]` on `SampleKind` turns a *`match`*
+  into a compile error and does nothing at all to a *comparison*, which is
+  precisely the shape that keeps coming back: `jp2k.rs:3122` arrived after
+  #748's census was taken.
+
+  It parses rather than greps. A shell `grep` cannot tell code from prose, and
+  the first thing it would have failed on is `pixel.rs`'s comment explaining
+  why `canonical()` does **not** take the width shortcut, which is prose
+  arguing *for* the rule. The scanner strips comments (tracking string
+  literals, so a `//` inside one does not blind it) and it is proved on both
+  directions before it is trusted: a comparison in code is found, the same
+  text in each of the four comment forms is not.
+
+  Two code sites are left and neither is in a file this lane owns, so they are
+  named in a countdown with the lane that clears each. The assertion is set
+  equality both ways, like `tests/ci_feature_coverage.rs`: a new site anywhere
+  fails, and a listed site that has already been cleared **also** fails, so the
+  list can only shrink and cannot rot into an allowlist. When it is empty,
+  #607 closes.
+
+- `JxlError::UnsupportedSampleKind`, for a header describing a sample kind the
+  JPEG XL loader has no stream type for (issue #607). Unreachable while
+  `PixelFormat` carries only `U8`, `U16` and `F32`, which are exactly the
+  three arms the frame loop implements; it is there so the carriers of #516
+  and #517 arrive as a typed refusal instead of through the arm that used to
+  ask for `f32` samples and write float bit patterns into an integer raster.
 - **The Miri job runs a named slice of the `--lib` target instead of the whole
   suite, and says so** (issue #675). It has never reported: three dispatched
   runs were killed at the 90 minute ceiling and one went 4h13m. Removing

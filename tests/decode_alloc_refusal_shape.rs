@@ -203,6 +203,21 @@ fn priced_by_libviprs() -> Vec<Row> {
             what: ".v pixel buffer",
             price: 48,
         },
+        // Netpbm, which joined the budget in #910. Before that it priced
+        // against `DEFAULT_MAX_ALLOC_BYTES` directly, 8 GiB, where every
+        // route's default is 512 MiB: it had *a* budget and not *the*
+        // budget, and a row in this table would have passed either way,
+        // which is why the row and the routing landed together.
+        Row {
+            format: "ppm",
+            bytes: rgb8(4).encode_ppm().expect("ppm fixture"),
+            decoded: (4, 4),
+            priced_geometry: (4, 4, 3),
+            sample_bytes: 1,
+            decoder_planes: 0,
+            what: "ppm pixel data",
+            price: 48,
+        },
         Row {
             format: "gif",
             bytes: rgb8(4).encode_gif(Default::default()).expect("gif fixture"),
@@ -448,9 +463,9 @@ fn the_two_tables_account_for_every_container() {
     // JPEG XL, AVIF and JPEG 2000 are each only compiled in behind their own
     // feature, so the self-priced table is one shorter for each that is off.
     // Spelled out rather than hidden in a `cfg!` inside the sum, because a
-    // reader has to be able to check the arithmetic. The 9 unconditional rows
-    // are gif, radiance, fits, openexr, webp, uhdr, .v, nifti and mat.
-    let expected_self_priced = 9
+    // reader has to be able to check the arithmetic. The 10 unconditional rows
+    // are gif, radiance, fits, openexr, webp, uhdr, .v, nifti, mat and ppm.
+    let expected_self_priced = 10
         + usize::from(cfg!(feature = "jxl"))
         + usize::from(cfg!(feature = "avif"))
         + usize::from(cfg!(feature = "jp2k"));
@@ -473,9 +488,9 @@ fn the_two_tables_account_for_every_container() {
         + usize::from(!cfg!(feature = "jp2k"));
     assert_eq!(
         self_priced + image_backed + absent_features + excluded_takes_two_buffers,
-        16,
+        17,
         "the two tables plus the one documented exclusion must account for all \
-         sixteen containers libviprs sniffs; see SniffedFormat::ALL"
+         seventeen containers libviprs sniffs; see SniffedFormat::ALL"
     );
 }
 
@@ -695,16 +710,15 @@ fn is_alloc_limit_catches_every_shape_the_budget_refuses_in() {
     );
 
     // The third control, and the one that looks most like a false negative
-    // until you read what it says. `Raster::ppm_load`, `csv_load` and
-    // `matrix_load` are public decode entry points returning this same enum,
-    // and an over-large declared geometry comes back as
-    // `Raster(ByteBudgetExceeded)` whose message reads "needs N bytes,
-    // exceeding the M-byte allocation budget". That budget is
-    // `DEFAULT_MAX_ALLOC_BYTES`, the raster construction ceiling, not
-    // `DecodeLimits::max_alloc_bytes`, so raising the decode limit does
-    // nothing about it and `is_alloc_limit` must say no.
-    let by_construction =
-        Raster::ppm_load(b"P6\n60000 60000\n255\n").expect_err("60000 squared RGB8 is 10.8 GB");
+    // until you read what it says. The **raster construction** budget is a
+    // different ceiling from the decode one: it is `DEFAULT_MAX_ALLOC_BYTES`,
+    // it is not reached through `DecodeLimits`, and raising the decode limit
+    // does nothing about it, so `is_alloc_limit` must say no. It reaches this
+    // enum through `SourceError::Raster`, which is why the distinction is not
+    // academic.
+    let by_construction: SourceError = Raster::zeroed(60_000, 60_000, PixelFormat::Rgb8)
+        .expect_err("60000 squared RGB8 is 10.8 GB")
+        .into();
     assert!(
         by_construction.to_string().contains("allocation budget"),
         "this control is only meaningful if it reads like an allocation refusal: {by_construction}"
@@ -713,6 +727,25 @@ fn is_alloc_limit_catches_every_shape_the_budget_refuses_in() {
         !by_construction.is_alloc_limit(),
         "the raster construction budget is a different ceiling with a different \
          remedy: {by_construction:?}"
+    );
+
+    // This control used to be `Raster::ppm_load` on the same geometry, because
+    // that entry point priced against the construction budget rather than the
+    // decode one and so answered `false` here. Issue #910 moved it onto
+    // `DecodeLimits::check_image_alloc` like every other container, so it now
+    // answers **true**, and the pair below is what says the move actually
+    // happened rather than being described: the same bytes, the two ceilings,
+    // opposite answers.
+    let by_decode_limit =
+        Raster::ppm_load(b"P6\n60000 60000\n255\n").expect_err("60000 squared RGB8 is 10.8 GB");
+    assert!(
+        by_decode_limit.is_alloc_limit(),
+        "Netpbm prices against the decode budget now, so raising \
+         DecodeLimits::max_alloc_bytes is the remedy: {by_decode_limit:?}"
+    );
+    assert!(
+        by_decode_limit.to_string().contains("allocation ceiling"),
+        "and it reports the decode ceiling's wording, not the constructor's: {by_decode_limit}"
     );
 }
 
