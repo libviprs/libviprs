@@ -711,6 +711,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GIF load attaches **`gif-palette`**, the global colour table as one signed
+  32-bit word per entry (issue #828). vips packs libnsgif's `R, G, B, A` byte
+  quad as a machine integer, so on a little-endian host each entry reads
+  `0xFF << 24 | B << 16 | G << 8 | R` and every one of them is negative:
+  measured on vips 8.18.6, a table of `(71, 112, 76)` and `(60, 60, 60)` comes
+  back `-11767737 -12829636`. The array is the table as it sits on the wire,
+  padding included, so a three-colour table has four entries with an
+  opaque-black fourth.
+
+  It carries vips's presence rule, which is about the **file** and not the
+  window that was loaded: the field is attached only when no frame anywhere in
+  the file declares a colour table of its own, so a two-frame file whose frame
+  0 has a local table reports no `gif-palette` at `[page=1]` either. Measured
+  across seven files and three windows, including a local table byte-identical
+  to the global one, which still suppresses it.
+
+  `background` is the one `gifload` header field still not attached, and now
+  for a measured reason rather than an expired one: vips stores it as a
+  `VipsArrayDouble` and `MetadataValue` has an integer array and no
+  floating-point one. Issue #852 is that variant.
+
+- `src/gif.rs`'s module docs carry a table of every `gifload` header field and
+  whether this loader attaches it, and the table is **checked**: a test parses
+  it out of the source and requires every "attached" row to be present on a
+  decoded raster and every "not attached" row to be absent (issue #801). The
+  paragraph it replaces named a blocker that had already been removed and a
+  field set that had already moved, because nothing held it.
+
 - **`.jp2` is a row in `Raster::save` and `"jp2k"` is one in
   `Raster::encode_to_buffer`** (issue #770). JPEG 2000 was wired into the
   content sniffer on the way in but into nothing shared on the way out, so
@@ -2783,6 +2811,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `4 1 241` and the transform, because a profile leaves the colour space where
   `SIZ` put it. The old condition got that third case wrong and nothing had
   filed it.
+
+- GIF disposal code **4** rewinds the canvas the way libnsgif does, instead of
+  keeping it (issue #827). GIF89a reserves codes 4 to 7; libnsgif remaps 4 onto
+  restore-to-previous and leaves 5, 6 and 7 as "keep". Measured on vips 8.18.6
+  over all eight codes on one two-frame file, page 1 comes back three different
+  ways: `green red` for 0, 1, 5, 6 and 7, `green blue` for 2, and `green black`
+  for 3 and 4. libviprs gave `green red` for 4.
+
+  The code never reached this module: `gif` 0.14.2's `DisposalMethod::from_u8`
+  knows only 0 to 3 and folds everything else onto `Any`, so 4 arrived
+  indistinguishable from 0. `ControlWalk` now walks the block chain a second
+  time and reads each frame's graphic control extension off the wire. It
+  decodes no pixels and allocates nothing, so there is no new buffer to price
+  against `DecodeLimits`, and it is not trusted blind: the extension carries
+  the delay, the transparent index and the disposal side by side, the decoder
+  kept the first two intact and the third in collapsed form, so all three are
+  compared before the fourth is believed. A frame where the two walks disagree
+  keeps the decoder's answer, which is what every frame got before.
+
+- `background_rgb` falls back to colour table **entry 0** for an index the
+  table cannot serve, where it used to answer black, and its doc no longer
+  claims vips answers black either (issue #850). Measured on vips 8.18.6 with
+  a palette whose entry 0 is `(9, 8, 7)`: a stored index of 200 reports
+  `background: 9 8 7` and disposes the canvas to it, where index 3 on the same
+  table reports `0 0 255`. The fixture that pinned this before used a palette
+  whose entry 0 was black, so "black" and "entry 0" could not be told apart,
+  and the doc and the test agreed with each other while neither agreed with
+  vips.
+
+  **No pixel moves today.** `gif` 0.14.2 clears `Decoder::bg_color()` to
+  `None` when the stored index is past the global palette, so the loader
+  already reached entry 0 through `index.unwrap_or(0)`, for the wrong reason.
+  That normalisation lives in a dependency and nothing in this module recorded
+  that the answer leaned on it; now the fallback is explicit and the reliance
+  is written down beside it.
 
 - **A JPEG 2000's `colr` box decides its interpretation, not its band count**
   (issue #767). `jp2kload` reads the box's enumerated colour space and maps
