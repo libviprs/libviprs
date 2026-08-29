@@ -277,23 +277,6 @@ pub enum ConversionError {
         /// The operation that was asked for.
         op: &'static str,
     },
-    /// The raster carries a sample kind this operation has no
-    /// implementation for.
-    ///
-    /// The sibling of [`ConversionError::FloatUnsupported`] for the
-    /// carriers that are not float: the unsigned 32-bit one of issue #517,
-    /// and the signed ones of issue #516 when they land. A width-keyed
-    /// `match` would have read four `u32` bytes as an `f32` here instead
-    /// (issue #607), so this variant is what turns that misread into a
-    /// refusal the caller can see. Mirrors
-    /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
-    #[error("{op} does not support {kind:?} samples yet")]
-    UnsupportedSampleKind {
-        /// The operation that was asked for.
-        op: &'static str,
-        /// The sample kind it cannot read.
-        kind: SampleKind,
-    },
     /// A delegated band operation failed.
     #[error(transparent)]
     Band(#[from] BandError),
@@ -318,71 +301,142 @@ fn expect_conv<T>(op: &str, r: Result<T, ConversionError>) -> T {
     }
 }
 
-/// Read the flat `i`-th unsigned sample of a buffer with the given
-/// sample kind (native byte order, matching [`crate::raster_ops`]).
+/// Read the flat `i`-th sample of a buffer as a signed integer, with the
+/// given sample kind (native byte order, matching [`crate::raster_ops`]).
 ///
-/// Unsigned kinds only, and keyed on the kind rather than on a byte width
-/// so that the 32-bit unsigned carrier is read as the `u32` it is instead
-/// of falling into whichever arm four bytes happened to select (issues
-/// #517, #607). Float samples go through
-/// [`read_sample_f64`](crate::pixel) instead, which is what
-/// [`Raster::try_cast`] now uses for every carrier; the panic arm here is
-/// a backstop behind [`reject_unreadable_kind`] and names the kind it was
-/// handed rather than claiming the raster is float.
+/// `i64` and total over [`SampleKind`], which is issue #909 on this side:
+/// the `u32` this used to return could not hold a negative, so `gamma`,
+/// `falsecolour`, `msb`, `arrayjoin` and `join` refused the three signed
+/// carriers of issue #516 even though vips runs all five on them.
+/// Measured on `/opt/homebrew/bin/vips` 8.18.6 against a `char` raster:
+/// `gamma` and `join` answer CHAR, `falsecolour` and `msb` answer UCHAR.
+/// The shape is [`crate::convolution`]'s `put_sample`, total since #748.
+///
+/// Keyed on the kind rather than on a byte width, so the four-byte kinds
+/// stay three different reads (issues #517, #607). The signed kinds
+/// sign-extend, so this is the numeric read; `F32` truncates toward zero
+/// the way `vips_cast` does, and is reachable only from a direct call,
+/// because every op here still refuses a float raster for the reason it
+/// always has.
 #[inline]
-fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> i64 {
     match kind {
-        SampleKind::U8 => data[i] as u32,
-        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        SampleKind::U32 => u32::from_ne_bytes([
+        SampleKind::U8 => i64::from(data[i]),
+        SampleKind::I8 => i64::from(data[i] as i8),
+        SampleKind::U16 => i64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::I16 => i64::from(i16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::U32 => i64::from(u32::from_ne_bytes([
             data[4 * i],
             data[4 * i + 1],
             data[4 * i + 2],
             data[4 * i + 3],
-        ]),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
-            "this operation does not support {kind:?} samples yet; \
-             cast to an unsigned format first"
-        ),
+        ])),
+        SampleKind::I32 => i64::from(i32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::F32 => f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]) as i64,
     }
 }
 
-/// Write the flat `i`-th unsigned sample. `v` must already fit the kind.
-/// Unsigned kinds only; see [`read_flat`].
+/// Store the flat `i`-th sample. `v` must already fit the kind.
+///
+/// A store and not a cast, the contract [`crate::convolution`]'s
+/// `put_sample` carries: `gamma` has already clamped through the curve and
+/// the copying ops write back a sample read at the same kind, so nothing
+/// arriving here is out of range and the narrow cannot clip.
+/// Total over [`SampleKind`]; see [`read_flat`].
 #[inline]
-fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
+fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     match kind {
         SampleKind::U8 => data[i] = v as u8,
+        SampleKind::I8 => data[i] = v as i8 as u8,
         SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
             data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        SampleKind::U32 => {
-            data[4 * i..4 * i + 4].copy_from_slice(&v.to_ne_bytes());
+        SampleKind::I16 => {
+            let b = (v as i16).to_ne_bytes();
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
-            "this operation does not support {kind:?} samples yet; \
-             cast to an unsigned format first"
-        ),
+        SampleKind::U32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&(v as u32).to_ne_bytes());
+        }
+        SampleKind::I32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_ne_bytes());
+        }
+        SampleKind::F32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+        }
     }
 }
 
-/// Refuse a sample kind the unsigned-only sample paths in this module
+/// Whether the flat `i`-th sample of a condition raster selects its
+/// branch, for [`Raster::try_ifthenelse`] and [`Raster::try_switch`].
+///
+/// `vips_ifthenelse` and `vips_switch` cast the condition to `uchar`
+/// before testing it, and `vips_cast` clips at both ends and truncates
+/// toward zero, so a negative sample is **false** and a fraction below one
+/// is false as well. Measured on `/opt/homebrew/bin/vips` 8.18.6:
+///
+/// | condition | `vips switch` | `vips ifthenelse 10 20` |
+/// |---|---|---|
+/// | `char` `[-50, 0, 1, -1, 127]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+/// | `float` `[0, 0.5, 1, -0.5]` | `[1, 1, 0, 1]` | - |
+///
+/// (`switch` with one condition answers 0 where it matched and 1 where
+/// nothing did, so a 1 is a false condition.)
+///
+/// Both callers used to read the **storage** word instead, which is a
+/// different question. `read_sample_u32` on a `char` -50 answers 206, the
+/// byte pattern, so `ifthenelse` took the then-branch where vips takes the
+/// else-branch; and on an `f32` 0.5 it answers 0x3F000000, so every
+/// non-zero float was true including the ones vips truncates away. Two
+/// carriers, two wrong answers, and the reason is one substitution: a
+/// truthiness test is numeric.
+#[inline]
+fn condition_is_true(data: &[u8], kind: SampleKind, i: usize) -> bool {
+    // Clipped into `uchar`, not merely compared against zero: the clip is
+    // what makes a negative sample false, and `read_flat` has already
+    // truncated a float toward zero.
+    read_flat(data, kind, i).clamp(0, 255) != 0
+}
+
+/// Refuse a sample kind the integer-only sample paths in this module
 /// cannot read, as a typed error rather than as a panic out of a
 /// `Result`-returning method (the shape issue #694 landed).
 ///
-/// Float keeps its own variant, because that is the refusal the crate has
-/// documented and tested all along. Every other non-`U8`/`U16` kind is the
-/// carrier work of issues #516 and #517, and gets
-/// [`ConversionError::UnsupportedSampleKind`].
+/// Float is the only refusal left, and it is the one the crate has
+/// documented and tested all along. The three signed carriers of issue
+/// #516 came through here between #516 and #909, which was a parity
+/// regression rather than an implementation: vips runs `gamma`,
+/// `falsecolour`, `msb`, `arrayjoin` and `join` on a `char` raster.
+///
+/// That left `ConversionError`'s own `UnsupportedSampleKind` variant with
+/// no construction site anywhere in the crate, so issue #931 removed it. A
+/// caller of a `conversion` op still meets that refusal where it is still
+/// real, through [`ConversionError::Band`] and
+/// [`ConversionError::Extract`], because `bands` and `extract` both keep
+/// their own. `SampleKind` is `#[non_exhaustive]` and this `match` is
+/// exhaustive over it, so an eighth kind is a compile error here and
+/// whoever adds one decides what it answers.
 fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ConversionError> {
     let kind = r.format().kind();
     match kind {
-        SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => Ok(()),
+        SampleKind::U8
+        | SampleKind::U16
+        | SampleKind::U32
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::I32 => Ok(()),
         SampleKind::F32 => Err(ConversionError::FloatUnsupported { op }),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => {
-            Err(ConversionError::UnsupportedSampleKind { op, kind })
-        }
     }
 }
 
@@ -1296,15 +1350,28 @@ impl Raster {
         // integer", measured on `/opt/homebrew/bin/vips` 8.18.6. Without
         // this the `f32`'s exponent and sign get shifted into the output
         // byte and the call looks like it worked (issue #860). Through
-        // `reject_unreadable_kind` rather than `is_float`, so the signed
-        // carriers of issue #516 are refused by the same guard when they
-        // land, and float keeps the variant it has always had.
+        // `reject_unreadable_kind` rather than `is_float`, so the refusal
+        // is stated per kind and float keeps the variant it has always had.
         reject_unreadable_kind("msb", self)?;
         let fmt = self.format();
         let kind = fmt.kind();
         let bpc = kind.bytes();
         let bands = fmt.channels();
         let shift = ((bpc - 1) * 8) as u32;
+        // `VIPS_MSB_SIGNED` offsets a signed sample by half the carrier's
+        // range before the shift, `(v + 2^(bits-1)) >> (bits - 8)`, so the
+        // output stays the unsigned 0..255 byte an `msb` result is. On the
+        // stored word that offset is exactly a flip of the sign bit, which
+        // is why the unsigned storage read is still the right one to take
+        // here: `-1` as `char` is `0xFF`, `0xFF ^ 0x80` is `0x7F`, and vips
+        // answers **127**. Measured on 8.18.6, `char` `[-1, 0, 1, 127]`
+        // gives `[127, 128, 129, 255]` and `short` gives
+        // `[127, 128, 128, 128]`, both UCHAR (issue #909).
+        let sign_bit = if kind.is_signed() {
+            1u32 << (bpc * 8 - 1)
+        } else {
+            0
+        };
         let (src_bands, out_bands): (Vec<usize>, usize) = match band {
             None => ((0..bands).collect(), bands),
             Some(b) => {
@@ -1331,7 +1398,7 @@ impl Raster {
             for x in 0..w as usize {
                 for (oi, &sb) in src_bands.iter().enumerate() {
                     let so = y * sstride + (x * bands + sb) * bpc;
-                    let sample = read_sample_u32(&src[so..so + bpc], kind);
+                    let sample = read_sample_u32(&src[so..so + bpc], kind) ^ sign_bit;
                     let oo = y * ostride + x * out_bands + oi;
                     odata[oo] = (sample >> shift) as u8;
                 }
@@ -1584,7 +1651,7 @@ impl Raster {
                 for b in 0..bands {
                     let cb = if cond_bands == 1 { 0 } else { b };
                     let co = y * cstride + (x * cond_bands + cb) * cbpc;
-                    let take_then = read_sample_u32(&cdata[co..co + cbpc], ckind) != 0;
+                    let take_then = condition_is_true(cdata, ckind, co / cbpc);
                     let sample_stride = if take_then { tstride } else { ostride_o };
                     let sample_data = if take_then { tdata } else { odata_o };
                     let so = y * sample_stride + (x * bands + b) * bpc;
@@ -1729,10 +1796,10 @@ impl Raster {
         let power = 1.0 / exponent;
         let kind = self.format().kind();
         reject_unreadable_kind("gamma", self)?;
-        let mx = kind
-            .max_value()
-            .expect("an unsigned kind has a ceiling; float is refused above");
-        let mxf = mx as f64;
+        let (lo, hi) = kind
+            .range()
+            .expect("an integer kind has a range; float is refused above");
+        let mxf = hi as f64;
         // Match vips_gamma bit-for-bit (gamma.c): the curve is built as an
         // identity LUT put through `vips_pow_const1(power)` then
         // `vips_linear1(mx / pow(mx, power), 0)`, then cast back to the
@@ -1754,9 +1821,16 @@ impl Raster {
         // (0 divergences).
         let scale = (mxf / mxf.powf(power)) as f32;
         let mxf32 = mxf as f32;
-        let curve = |v: u32| -> u32 {
+        // `mx` is the carrier's **positive** ceiling on a signed kind too,
+        // which is what makes `char` 100 answer 71: `(100/127)^2.4 * 127`
+        // truncated, measured on 8.18.6. A negative sample falls out of the
+        // same arithmetic rather than out of a branch: `powf` of a negative
+        // base at a fractional exponent is `NaN`, `clamp` passes `NaN`
+        // through, and Rust's float-to-integer cast maps it to zero, which
+        // is the 0 vips answers for `char` -1 and -100 (issue #909).
+        let curve = |v: i64| -> i64 {
             let powered = (v as f64).powf(power) as f32;
-            (scale * powered).clamp(0.0, mxf32) as u32
+            (scale * powered).clamp(0.0, mxf32) as i64
         };
         // The LUT is indexed by the sample value, so it is the right shape
         // exactly where a value-indexed table is, which is the question
@@ -1768,7 +1842,10 @@ impl Raster {
         // every input, because `mx / pow(mx, 2.4)` at mx = 4294967295
         // underflows the f32 coefficient, and 100 and 90000 both come back
         // 0. This reproduces that rather than inventing a nicer curve.
-        let lut: Option<Vec<u32>> = kind.hist_bins().map(|_| (0..=mx).map(curve).collect());
+        // Indexed from the range floor, not from zero: on a signed carrier
+        // the table has to cover `-128..=127`, and a `0..=hi` table indexed
+        // by the raw sample would read off the end of it.
+        let lut: Option<Vec<i64>> = kind.hist_bins().map(|_| (lo..=hi).map(curve).collect());
         let mut out = Raster::zeroed(self.width(), self.height(), self.format())?;
         let samples = self.width() as usize * self.height() as usize * self.format().channels();
         let sdata = self.data();
@@ -1776,7 +1853,7 @@ impl Raster {
         for i in 0..samples {
             let v = read_flat(sdata, kind, i);
             let mapped = match &lut {
-                Some(table) => table[v as usize],
+                Some(table) => table[(v - lo) as usize],
                 None => curve(v),
             };
             write_flat(odata, kind, i, mapped);
@@ -1818,7 +1895,11 @@ impl Raster {
         let sdata = self.data();
         let odata = out.data_mut();
         for p in 0..pixels {
-            let v = read_flat(sdata, kind, p * channels).min(255) as usize;
+            // `vips_falsecolour` casts to uchar before the lookup and
+            // `vips_cast` clips at both ends, so a negative sample reads
+            // the bottom entry. Measured on 8.18.6: `char` -100 gives the
+            // same (12, 0, 25) as 0, and 100 gives (0, 154, 184).
+            let v = read_flat(sdata, kind, p * channels).clamp(0, 255) as usize;
             odata[p * 3..p * 3 + 3].copy_from_slice(&FALSECOLOUR_PET[v]);
         }
         out.carry_meta_from(self);
@@ -2384,7 +2465,7 @@ impl Raster {
         for (p, px) in odata.iter_mut().enumerate() {
             let mut v = no_match;
             for (i, c) in conditions.iter().enumerate() {
-                if read_flat(c.data(), c.format().kind(), p) != 0 {
+                if condition_is_true(c.data(), c.format().kind(), p) {
                     v = i as u8;
                     break;
                 }
@@ -2675,7 +2756,34 @@ const FALSECOLOUR_PET: [[u8; 3]; 256] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::ALL_KINDS;
     use core::num::NonZeroU16;
+
+    /// A one-band `Int8` raster from signed sample values.
+    fn int8(w: u32, h: u32, vals: &[i8]) -> Raster {
+        let data: Vec<u8> = vals.iter().map(|v| *v as u8).collect();
+        let fmt = PixelFormat::Int8(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// A one-band `Int16` raster from signed sample values.
+    fn int16(w: u32, h: u32, vals: &[i16]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Int16(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// A one-band `Int32` raster from signed sample values.
+    fn int32(w: u32, h: u32, vals: &[i32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Int32(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of an `Int8` raster, read back signed.
+    fn i8s(r: &Raster) -> Vec<i8> {
+        r.data().iter().map(|b| *b as i8).collect()
+    }
 
     fn gray8(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
@@ -5278,5 +5386,249 @@ mod tests {
         assert!(u.try_gamma(None).is_ok());
         assert!(u.try_falsecolour().is_ok());
         assert!(Raster::try_arrayjoin(&[&u, &u], None, None).is_ok());
+    }
+
+    /**
+     * Tests that this module's sample reader and writer round-trip every
+     * sample kind at its own stride and its own signedness, including the
+     * `F32` arm no op here can reach because they all still refuse a float
+     * raster.
+     * Works by sweeping [`ALL_KINDS`] rather than a hand-written list, and
+     * by writing at sample index 1 of a two-sample buffer so a wrong
+     * stride overwrites index 0 and is caught by the untouched-neighbour
+     * assertion as well as by the value.
+     * Input: each kind's `range()` endpoints and 0 -> Output: the same
+     * numbers back, index 0 still zero.
+     */
+    #[test]
+    fn read_flat_and_write_flat_round_trip_every_kind_at_its_own_stride() {
+        for kind in ALL_KINDS {
+            let bytes = kind.bytes();
+            let cases: [i64; 3] = match kind.range() {
+                Some((lo, hi)) => [lo, 0, hi],
+                None => [-128, 0, 127],
+            };
+            for v in cases {
+                let mut buf = vec![0u8; bytes * 2];
+                write_flat(&mut buf, kind, 1, v);
+                assert_eq!(
+                    read_flat(&buf, kind, 1),
+                    v,
+                    "{kind:?} did not round-trip {v}"
+                );
+                assert!(
+                    buf[..bytes].iter().all(|&b| b == 0),
+                    "{kind:?} wrote outside sample 1, so its stride is wrong"
+                );
+            }
+        }
+        // The width collisions, stated directly: `-1` is the same byte in
+        // both one-byte kinds and a different number, and four bytes is a
+        // three-way tie.
+        let mut b8 = vec![0u8; 1];
+        write_flat(&mut b8, SampleKind::I8, 0, -1);
+        assert_eq!(read_flat(&b8, SampleKind::U8, 0), 255);
+        assert_eq!(read_flat(&b8, SampleKind::I8, 0), -1);
+        let mut b32 = vec![0u8; 4];
+        write_flat(&mut b32, SampleKind::I32, 0, -1);
+        assert_eq!(read_flat(&b32, SampleKind::U32, 0), 4_294_967_295);
+        assert_eq!(read_flat(&b32, SampleKind::I32, 0), -1);
+    }
+
+    /**
+     * Tests that `msb` offsets a signed sample by half the carrier's range
+     * before the shift, which is what keeps its output the unsigned
+     * `0..=255` byte an `msb` result is.
+     * `VIPS_MSB_SIGNED` computes `(v + 2^(bits-1)) >> (bits - 8)`, and on
+     * the stored word that offset is a flip of the sign bit. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 with `[-1, 0, 1, 127]`: `char`
+     * answers `[127, 128, 129, 255]`, `short` and `int` both answer
+     * `[127, 128, 128, 128]`, and every one of them comes back UCHAR.
+     * Works by asserting all three carriers, with a `uchar` input as the
+     * control that the unsigned path is the identity and so the offset is
+     * not being applied to everything.
+     * Input: `[-1, 0, 1, 127]` at each signed carrier -> Output: the
+     * measured bytes.
+     */
+    #[test]
+    fn msb_offsets_a_signed_sample_by_half_the_carrier_range() {
+        let c = int8(4, 1, &[-1, 0, 1, 127]).try_msb(None).unwrap();
+        assert_eq!(c.format(), PixelFormat::Gray8);
+        assert_eq!(c.data(), &[127, 128, 129, 255]);
+
+        let s = int16(4, 1, &[-1, 0, 1, 127]).try_msb(None).unwrap();
+        assert_eq!(s.format(), PixelFormat::Gray8);
+        assert_eq!(s.data(), &[127, 128, 128, 128]);
+
+        let i = int32(4, 1, &[-1, 0, 1, 127]).try_msb(None).unwrap();
+        assert_eq!(i.format(), PixelFormat::Gray8);
+        assert_eq!(i.data(), &[127, 128, 128, 128]);
+
+        // Control: on an unsigned one-byte carrier `msb` is the identity,
+        // so the sign-bit flip is not being applied unconditionally.
+        let u = gray8(4, 1, vec![0, 1, 128, 255]).try_msb(None).unwrap();
+        assert_eq!(u.data(), &[0, 1, 128, 255]);
+    }
+
+    /**
+     * Tests that `gamma` uses the carrier's **positive** ceiling as `mx`
+     * and answers 0 for every negative sample, and that the value-indexed
+     * LUT is keyed from the range floor rather than from zero.
+     * The LUT is the part that would fail loudly: a `0..=hi` table indexed
+     * by a raw `char` sample reads far past its end. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6, `vips gamma` on a `char` raster
+     * holding `[-128, -100, -1, 0, 1, 50, 100, 127]` answers
+     * `[0, 0, 0, 0, 0, 13, 71, 127]`, and on `short` and `int` the whole
+     * row is 0 because `mx / pow(mx, 2.4)` underflows the `f32`
+     * coefficient at those ceilings, the same degeneracy the `uint`
+     * carrier already reproduces.
+     * Works by asserting the measured `char` row, which contains both a
+     * saturating end (127 -> 127) and two interior values, plus the two
+     * wider carriers, plus a `Gray8` control that the unsigned curve is
+     * untouched.
+     * Input: the eight `char` samples above -> Output: the measured row.
+     */
+    #[test]
+    fn gamma_uses_the_positive_ceiling_and_zeroes_a_negative_sample() {
+        let g = int8(8, 1, &[-128, -100, -1, 0, 1, 50, 100, 127])
+            .try_gamma(None)
+            .unwrap();
+        assert_eq!(g.format(), int8(1, 1, &[0]).format());
+        assert_eq!(i8s(&g), vec![0, 0, 0, 0, 0, 13, 71, 127]);
+
+        let s = int16(4, 1, &[-1, 0, 1, 127]).try_gamma(None).unwrap();
+        assert_eq!(s.data(), vec![0u8; 8]);
+        let i = int32(4, 1, &[-1, 0, 1, 127]).try_gamma(None).unwrap();
+        assert_eq!(i.data(), vec![0u8; 16]);
+
+        // Control: the unsigned byte curve is what it always was, so the
+        // range-keyed LUT did not move the answers it already had.
+        let u = gray8(3, 1, vec![0, 100, 255]).try_gamma(None).unwrap();
+        assert_eq!(u.data()[0], 0);
+        assert_eq!(u.data()[2], 255);
+        assert!(u.data()[1] > 0 && u.data()[1] < 100);
+    }
+
+    /**
+     * Tests that `falsecolour` clips a negative sample into the bottom LUT
+     * entry rather than indexing with it, and stamps sRGB.
+     * `vips_falsecolour` casts its input to uchar before the lookup and
+     * `vips_cast` clips at both ends. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6, a `char` raster of
+     * `[-100, -1, 0, 100]` comes back 3-band UCHAR srgb with -100, -1 and
+     * 0 all mapping to **(12, 0, 25)** and 100 to **(0, 154, 184)**.
+     * Works by asserting those two entries, where the second is the
+     * control that the clip is a clip and not a blanket zero: an
+     * implementation that clamped everything to the bottom would pass the
+     * first three cells.
+     * Input: `char` `[-100, -1, 0, 100]` -> Output: the measured pixels.
+     */
+    #[test]
+    fn falsecolour_clips_a_negative_sample_to_the_bottom_entry() {
+        let f = int8(4, 1, &[-100, -1, 0, 100]).try_falsecolour().unwrap();
+        assert_eq!(f.format(), PixelFormat::Rgb8);
+        assert_eq!(f.interpretation(), Interpretation::Srgb);
+        assert_eq!(&f.data()[0..3], &[12, 0, 25]);
+        assert_eq!(&f.data()[3..6], &[12, 0, 25]);
+        assert_eq!(&f.data()[6..9], &[12, 0, 25]);
+        assert_eq!(&f.data()[9..12], &[0, 154, 184]);
+    }
+
+    /**
+     * Tests that the copying ops in this module carry the signed carriers'
+     * samples unchanged, and that the one refusal left is float.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips join` and
+     * `vips arrayjoin` on two `char` rasters both answer CHAR with every
+     * sample copied.
+     * Works by joining a `char` column with a second one and reading the
+     * samples back, with a float raster as the control that the guard is
+     * intact and still names its own variant.
+     * Input: two `char` columns -> Output: the samples side by side.
+     */
+    #[test]
+    fn join_and_arrayjoin_carry_the_signed_carriers() {
+        let a = int8(1, 4, &[-100, -1, 0, 100]);
+        let b = int8(1, 4, &[-101, 2, -1, 101]);
+        let j = a
+            .try_join(&b, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!(i8s(&j), vec![-100, -101, -1, 2, 0, -1, 100, 101]);
+        let g = Raster::try_arrayjoin(&[&a, &b], None, None).unwrap();
+        assert_eq!(i8s(&g), vec![-100, -101, -1, 2, 0, -1, 100, 101]);
+
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&f, &f], None, None),
+            Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
+        ));
+    }
+
+    /**
+     * Tests that `ifthenelse` and `switch` read their condition
+     * **numerically** and cast it into `uchar` before testing it, so a
+     * negative sample is false and a fraction below one is false.
+     * Both read the storage word instead, which is a different question
+     * and gave two different wrong answers. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 with the branches 10 and 20:
+     *
+     * | condition | `vips switch` | `vips ifthenelse` |
+     * |---|---|---|
+     * | `char` `[-50, 0, 1, -1, 127]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+     * | `float` `[0, 0.5, 1, -0.5, 300.7]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+     *
+     * A one-condition `switch` answers 0 where it matched and 1 where
+     * nothing did, so a 1 is a false condition and the two rows agree.
+     * Works by driving both ops on both carriers, which is what separates
+     * the two bugs: the storage read made `char` -50 true because its byte
+     * is 206, and `f32` 0.5 true because its bit pattern is 0x3F000000, so
+     * a fixture with only one of the two carriers would have looked like a
+     * signedness bug or like a float bug rather than both.
+     * The `127` and `300.7` cells are the positive control that the clip
+     * is a clip: an implementation answering false for everything passes
+     * the first four cells of every row.
+     * Input: the conditions above -> Output: the measured rows.
+     */
+    #[test]
+    fn a_condition_is_read_numerically_and_cast_into_uchar() {
+        let then = gray8(5, 1, vec![10; 5]);
+        let els = gray8(5, 1, vec![20; 5]);
+
+        let c8 = int8(5, 1, &[-50, 0, 1, -1, 127]);
+        assert_eq!(
+            c8.try_ifthenelse(&then, &els).unwrap().data(),
+            &[20, 20, 10, 20, 10]
+        );
+        assert_eq!(Raster::try_switch(&[&c8]).unwrap().data(), &[1, 1, 0, 1, 0]);
+
+        let bytes: Vec<u8> = [0.0f32, 0.5, 1.0, -0.5, 300.7]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        let cf = Raster::new(
+            5,
+            1,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+            bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            cf.try_ifthenelse(&then, &els).unwrap().data(),
+            &[20, 20, 10, 20, 10]
+        );
+        assert_eq!(Raster::try_switch(&[&cf]).unwrap().data(), &[1, 1, 0, 1, 0]);
+
+        // Control: the unsigned carriers are untouched, including the
+        // 32-bit one whose samples are far above the `uchar` ceiling and
+        // must still be true rather than clipped to zero.
+        let u8c = gray8(3, 1, vec![0, 1, 255]);
+        assert_eq!(Raster::try_switch(&[&u8c]).unwrap().data(), &[1, 0, 0]);
+        let u32c = uint32(2, 1, &[0, 90_000]);
+        assert_eq!(Raster::try_switch(&[&u32c]).unwrap().data(), &[1, 0]);
     }
 }
