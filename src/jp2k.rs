@@ -485,10 +485,24 @@ pub enum Compression {
 /// neither behind it: it inherits both from `VipsForeignSave` and implements
 /// neither, and saving with a profile produces a byte-identical file
 /// (measured). There is no tile geometry and no `subsample_mode` either;
-/// `openjpeg2-pure-rs` exposes `format`, `threads`, `irreversible`,
-/// `use_mct`, `rates` and `num_resolutions` and keeps the rest of
-/// `opj_cparameters_t` `pub(crate)`, so neither has an encoder behind it.
-/// Tiled save is issue #768.
+/// `openjpeg2-pure-rs`'s `EncodeOptions` exposes `format`, `threads`,
+/// `irreversible`, `use_mct`, `rates` and `num_resolutions`, and nothing here
+/// reaches the tile grid through it.
+///
+/// **Not because the tile knobs are private**, which is what #768 says and
+/// what I found to be wrong. Measured against the vendored source of 0.1.1:
+/// `opj_cparameters` is `pub`, `tile_size_on` / `cp_tdx` / `cp_tdy` are `pub`,
+/// they live in `pub mod openjpeg`, and that module and `api.rs` hold **zero**
+/// `unsafe` between them. Every function `Encoder::encode` calls is public.
+/// The one private piece is `Image::to_opj`, thirty lines of struct filling
+/// over `pub` types.
+///
+/// So the choice is not "the clean safe API against a `pub(crate)` surface",
+/// it is "upstream one field against hand-rolling `to_opj` over a c2rust
+/// translation of `opj_image` whose only stability contract is happening to be
+/// `pub`". Upstreaming still wins, for that second reason rather than the
+/// first, and `the_encoder_knobs_upstream_exposes_are_still_these_six` fails
+/// to compile the day it lands. Tiled save is issue #768.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SaveOptions {
@@ -1676,6 +1690,16 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
     // own loader rejects is a worse trade than a typed refusal, which is the
     // call `crate::jxl` makes for the band counts `zune-jpegxl` has no
     // spelling for. Lifting both halves is issue #769.
+    //
+    // The wall is narrower than "more than four channels", measured in
+    // `the_band_ceiling_is_the_loaders_and_it_is_narrower_than_a_channel_count`:
+    // five components read back under a CMYK `colr` box and under no other,
+    // because CMYK plus alpha is five channels the decoder can name, and six
+    // read back under none at all. So the ceiling could move to five only by
+    // tagging a `Multi8(5)` as CMYK, which invents a colour meaning it does
+    // not have. What #769 actually waits on is
+    // `ColorSpace::Unknown { num_channels }`, a variant `hayro-jpeg2000`
+    // already has and never reports for a count it cannot name.
     if bands > MAX_BANDS {
         return Err(EncodeError::encode(format!(
             "jp2k: this build writes at most {MAX_BANDS} bands and the raster has \
@@ -3022,6 +3046,144 @@ mod tests {
      * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
      * 27x17.
      */
+    /**
+     * Pins the wall the band ceiling actually stands on, because #769's
+     * stated cause is a channel count and the measurement is narrower than
+     * that (issue #769).
+     * `Raster::encode_jp2k` refuses more than `MAX_BANDS`, and the reason is
+     * the loader rather than the format or the encoder: `openjpeg2-pure-rs`
+     * writes any band count and `vips jp2kload` reads a five-band file back
+     * as `5 bands, srgb`. Measured here by encoding two, five and six
+     * component codestreams through the same encoder and handing each to the
+     * decoder under every `colr` box that could change its mind:
+     *
+     * | components | sRGB | greyscale | CMYK | none (bare) |
+     * |---|---|---|---|---|
+     * | 2 | refused | Gray + alpha | refused | Gray + alpha |
+     * | 5 | refused | refused | **CMYK + alpha** | refused |
+     * | 6 | refused | refused | refused | refused |
+     *
+     * So five components are readable in exactly one way, as CMYK plus alpha,
+     * which is #769's own footnote and not a general lift: a `Multi8(5)` has
+     * no CMYK meaning and tagging it that way invents one. Six are unreadable
+     * under every box there is. The wall is `hayro-jpeg2000` never reporting
+     * `ColorSpace::Unknown { num_channels }`, a variant it already has, for a
+     * count it cannot name.
+     * This goes red the day that changes, which is what #769 is waiting for.
+     * Input: 2, 5 and 6 component codestreams -> Output: the table above.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_band_ceiling_is_the_loaders_and_it_is_narrower_than_a_channel_count() {
+        use hayro_jpeg2000::{DecodeSettings, Image as Jp2kImage};
+        use openjpeg2_pure::{EncodeOptions, Encoder, Format, Image, ImageComponent};
+
+        /// A `components`-component 8x6 codestream, written through the same
+        /// encoder `Raster::encode_jp2k` uses and past the ceiling it enforces.
+        fn encoded(components: usize) -> Vec<u8> {
+            let comps: Vec<ImageComponent> = (0..components)
+                .map(|band| {
+                    ImageComponent::new(
+                        8,
+                        6,
+                        8,
+                        false,
+                        (0..8u32 * 6)
+                            .map(|i| (i as i32 + band as i32) % 251)
+                            .collect(),
+                    )
+                    .expect("a component")
+                })
+                .collect();
+            let image = Image::new(8, 6, openjpeg2_pure::ColorSpace::Srgb, comps)
+                .expect("an image the encoder accepts at any band count");
+            Encoder::encode(
+                &image,
+                &EncodeOptions {
+                    format: Format::Jp2,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("the encoder writes any band count, which is half of #769")
+        }
+
+        /// Whether the decoder will read `bytes` at all.
+        fn reads(bytes: &[u8]) -> bool {
+            Jp2kImage::new(bytes, &DecodeSettings::default()).is_ok()
+        }
+
+        // Two components: the ordinary greyscale-plus-alpha shape, and the
+        // control that says the sweep is measuring the decoder rather than the
+        // encoder. Its own file is written sRGB and read as Gray + alpha,
+        // which is the decoder reconciling the box against the count.
+        let two = encoded(2);
+        assert!(reads(&retagged(&two, ENUMCS_GREY)));
+
+        // Five: readable under CMYK and nothing else.
+        let five = encoded(5);
+        assert!(
+            reads(&retagged(&five, ENUMCS_CMYK)),
+            "CMYK plus alpha is five channels the decoder can name, which is why \
+             #769 says the ceiling is not a flat Csiz <= 4"
+        );
+        for enumcs in [ENUMCS_SRGB, ENUMCS_GREY, ENUMCS_SYCC] {
+            assert!(
+                !reads(&retagged(&five, enumcs)),
+                "EnumCS {enumcs} on five components: if this reads now, the decoder \
+                 has grown the arm #769 is waiting for and the ceiling can move"
+            );
+        }
+
+        // Six: nothing reads it, so no box rewrite can rescue this one and the
+        // ceiling cannot be lifted by anything in this crate.
+        let six = encoded(6);
+        for enumcs in [ENUMCS_SRGB, ENUMCS_GREY, ENUMCS_CMYK, ENUMCS_SYCC] {
+            assert!(
+                !reads(&retagged(&six, enumcs)),
+                "EnumCS {enumcs} on six components: if this reads now, #769 is unblocked"
+            );
+        }
+    }
+
+    /**
+     * The encoder knobs `openjpeg2-pure-rs` exposes, named exhaustively, so
+     * the tiled-save gap announces itself the day upstream closes it (#768).
+     * #768 says tiled save has no encoder parameter behind it because
+     * `cp_tdx` / `cp_tdy` and `tile_size_on` are `pub(crate)`. **They are
+     * not.** Measured against the vendored source of 0.1.1:
+     * `opj_cparameters` is `pub`, its three tile fields are `pub`, it lives in
+     * `pub mod openjpeg`, and that module and `api.rs` contain **zero**
+     * `unsafe` between them. Every function `Encoder::encode` calls is public
+     * too. The only private piece is `Image::to_opj`, thirty lines of struct
+     * filling over `pub` types.
+     *
+     * So the choice #768 asks for is not "clean API against `pub(crate)`", it
+     * is "upstream one field against hand-rolling `to_opj` over a c2rust
+     * translation of `opj_image` that has no stability contract beyond
+     * happening to be `pub`". Upstreaming still wins, for that reason rather
+     * than the one in the issue, and this is the guard that says when it
+     * lands: `EncodeOptions` is not `#[non_exhaustive]`, so a seventh field
+     * stops this literal compiling.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_encoder_knobs_upstream_exposes_are_still_these_six() {
+        use openjpeg2_pure::{EncodeOptions, Format};
+
+        let all_of_them = EncodeOptions {
+            format: Format::Jp2,
+            threads: 0,
+            irreversible: false,
+            use_mct: false,
+            rates: vec![0.0],
+            num_resolutions: None,
+        };
+        // Naming every field is the assertion; the runtime half just keeps the
+        // value alive and pins the two this crate actually sets.
+        assert!(!all_of_them.irreversible);
+        assert_eq!(all_of_them.rates.len(), 1);
+    }
+
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_image_origin_is_the_one_divergence_on_geometry() {
