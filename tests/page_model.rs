@@ -202,6 +202,54 @@ fn exactly_one_source_file_names_the_page_height_key() {
     );
 }
 
+/// Whether `body` calls `name`, tolerating rustfmt breaking the call across
+/// lines by squeezing whitespace out first.
+///
+/// The same helper `tests/n_pages_meaning.rs` uses, kept identical for the
+/// reason the module doc gives about the scanner: two guards on the same shape
+/// that drift apart are worse than one.
+fn calls(body: &str, name: &str) -> bool {
+    fn squash(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    squash(body).contains(&squash(&format!("{name}(")))
+}
+
+/// Exactly three loaders declare a page split, and `tests/animation_dialect.rs`
+/// holds all three to one dialect.
+///
+/// The companion to the test above, and the reason it is here rather than in
+/// the dialect file: that one loads three fixtures and compares the answers,
+/// which proves the three loaders that exist agree, and proves nothing at all
+/// about a fourth. This scans the source, so a loader that starts declaring a
+/// page split without a row in `COMPAT_PAIR` lands here instead of shipping a
+/// fourth dialect nobody compared.
+///
+/// `raster.rs` is on the list because `Raster::set_page_height`, the panicking
+/// form, calls the fallible one. It is the definition site rather than a
+/// loader, which is why the message names the three separately.
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn only_the_three_animated_loaders_declare_a_page_split() {
+    let callers: Vec<String> = non_test_bodies()
+        .into_iter()
+        .filter(|(_, body)| calls(body, ".try_set_page_height"))
+        .map(|(name, _)| name)
+        .collect();
+
+    assert_eq!(
+        callers,
+        ["gif.rs", "jxl.rs", "raster.rs", "webp.rs"],
+        "the three animated loaders declare a page split, plus `raster.rs` \
+         where the panicking form calls the fallible one. A fourth loader is \
+         welcome, and it needs a row in `COMPAT_PAIR` in \
+         `tests/animation_dialect.rs` saying what its own vips loader attaches \
+         under `delay`, `loop`, `gif-delay` and `gif-loop`, measured with \
+         `vipsheader -f`. Three loaders measured separately against three \
+         oracles is how they drifted apart the first time (issues #564, #865)"
+    );
+}
+
 /// The scanner would have caught a second writer, so the empty result above
 /// is a measurement rather than a coincidence.
 ///
