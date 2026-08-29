@@ -1074,6 +1074,7 @@ fn pad_to_block(bytes: &mut Vec<u8>, fill: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::SampleKind;
     use crate::source::DeclaredGeometry;
 
     /// Build a header unit from a list of card texts, padded out to whole
@@ -1773,6 +1774,113 @@ mod tests {
             .map(|c| i16::from_be_bytes(*c))
             .collect();
         assert_eq!(stored, vec![-32768, -28671, -24574, -20477]);
+    }
+
+    /**
+     * Tests that the four carriers #516 and #517 added go out through
+     * vips's own promotion table rather than as a bare bit-pattern copy or
+     * the float wildcard: a saturating cast to the same-width unsigned
+     * carrier for the signed kinds (`bandfmt_fits`'s `CHAR` to `UCHAR`,
+     * `SHORT` to `USHORT`, `INT` to `UINT`), and BITPIX 32 with
+     * `BZERO = 2147483648` for the already-unsigned 32-bit kind, the exact
+     * 32-bit twin of `Gray16`'s `BZERO = 32768`.
+     * Works by encoding a 2x2 raster of each carrier and comparing the
+     * written BITPIX card, the BZERO card (or its absence), and the data
+     * bytes against `vips fitssave` 8.18.6, measured with `vipsheader` and
+     * a raw byte dump on a file built from the same four pixel values with
+     * `vips rawload --format {char,short,int,uint}` (issue #957).
+     * Input: `Int8`, `Int16`, `Int32` rasters carrying
+     * `[-5, 0, 5, big]`, and a `Uint32` raster carrying `[1, 0, 5, 70000]`
+     * -> Output: the oracle's BITPIX/BZERO cards and data bytes, exactly.
+     */
+    #[test]
+    fn encode_promotes_signed_and_32_bit_carriers_like_vips() {
+        struct Case {
+            kind: SampleKind,
+            // Top-down, row-major: [row0_x0, row0_x1, row1_x0, row1_x1].
+            pixels: [i64; 4],
+            bitpix_card: &'static str,
+            bzero_card: Option<&'static str>,
+            data: &'static [u8],
+        }
+        let cases = [
+            Case {
+                kind: SampleKind::I8,
+                pixels: [-5, 0, 5, 127],
+                bitpix_card: "BITPIX  =                    8 / number of bits per data pixel",
+                bzero_card: None,
+                data: &[5, 127, 0, 0],
+            },
+            Case {
+                kind: SampleKind::I16,
+                pixels: [-5, 0, 5, 300],
+                bitpix_card: "BITPIX  =                   16 / number of bits per data pixel",
+                bzero_card: Some(
+                    "BZERO   =                32768 / offset data range to that of unsigned short",
+                ),
+                data: &[128, 5, 129, 44, 128, 0, 128, 0],
+            },
+            Case {
+                kind: SampleKind::I32,
+                pixels: [-5, 0, 5, 70000],
+                bitpix_card: "BITPIX  =                   32 / number of bits per data pixel",
+                bzero_card: Some(
+                    "BZERO   =           2147483648 / offset data range to that of unsigned long",
+                ),
+                data: &[128, 0, 0, 5, 128, 1, 17, 112, 128, 0, 0, 0, 128, 0, 0, 0],
+            },
+            Case {
+                kind: SampleKind::U32,
+                pixels: [1, 0, 5, 70000],
+                bitpix_card: "BITPIX  =                   32 / number of bits per data pixel",
+                bzero_card: Some(
+                    "BZERO   =           2147483648 / offset data range to that of unsigned long",
+                ),
+                data: &[128, 0, 0, 5, 128, 1, 17, 112, 128, 0, 0, 1, 128, 0, 0, 0],
+            },
+        ];
+
+        for case in cases {
+            let format = PixelFormat::with_kind(1, case.kind).unwrap();
+            let mut data = Vec::new();
+            for &p in &case.pixels {
+                match case.kind {
+                    SampleKind::I8 => data.push(p as i8 as u8),
+                    SampleKind::I16 => data.extend_from_slice(&(p as i16).to_ne_bytes()),
+                    SampleKind::I32 => data.extend_from_slice(&(p as i32).to_ne_bytes()),
+                    SampleKind::U32 => data.extend_from_slice(&(p as u32).to_ne_bytes()),
+                    other => unreachable!("cases cover only the four measured carriers: {other:?}"),
+                }
+            }
+            let raster = Raster::new(2, 2, format, data).unwrap();
+            let encoded = raster.encode_fits().unwrap();
+            let header = String::from_utf8(encoded[..BLOCK].to_vec()).unwrap();
+            assert!(
+                header.contains(case.bitpix_card),
+                "{:?}: expected {:?} in header:\n{header}",
+                case.kind,
+                case.bitpix_card
+            );
+            match case.bzero_card {
+                Some(card) => assert!(
+                    header.contains(card),
+                    "{:?}: expected {:?} in header:\n{header}",
+                    case.kind,
+                    card
+                ),
+                None => assert!(
+                    !header.contains("BZERO"),
+                    "{:?}: expected no BZERO card in header:\n{header}",
+                    case.kind
+                ),
+            }
+            assert_eq!(
+                &encoded[BLOCK..BLOCK + case.data.len()],
+                case.data,
+                "{:?}: data bytes should match vips fitssave",
+                case.kind
+            );
+        }
     }
 
     /**
