@@ -3076,6 +3076,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two `src/draw.rs` sites #867 converted had no test holding them** (issue
+  #915). Both are the shape #607 exists to prevent and both were silent: the
+  `draw_smudge` saturation ceiling, which reads `SampleKind::max_value` and
+  could be replaced by a flat `255.0` with the whole suite staying green, and
+  the `Mask::apply` sample-kind guard, which could be deleted entirely with
+  the same result.
+
+  The mask one is the sharper miss, because a test for it already existed and
+  was **vacuous**: `draw_mask_requires_single_band_8bit_mask` built its masks
+  with `Raster::zeroed`, and an all-zero mask blends zero weight, so "refused"
+  and "accepted with weight 0" both leave a black target. Both masks are
+  saturated now, and the `Gray16` case is the one the kind test is really for:
+  without the guard its samples are walked as bytes, at half the stride, with
+  the low byte of each 16-bit value used as the weight.
+
+  The smudge test needed a fixture that separates the two constants, so it
+  smudges a uniform `Gray16` field of 40000: a 255 ceiling flattens it and the
+  kind's own ceiling does not.
+
+  Neither was a defect. The code on `main` is right in both places; what was
+  missing was anything that would notice if a later edit undid it.
+
 - Two GIFs that decode in vips and did not decode here now decode, because the
   loader hands the decoder the same file in the shape it will read (issues
   #851, #879). Both were filed as "upstream refuses it first, nothing here
