@@ -2027,6 +2027,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sum of the parts, so a site added to one of them is red rather than
   absorbed.
 
+  The labels are also checked against each other: no leaf site label may be a
+  proper prefix of another, because the probe matches a cap site with
+  `starts_with` so a counting window can name a whole module. Two leaf labels in
+  a prefix relation inherit that and a ceiling naming one silently refuses both,
+  which is the ordinal reasoning the labels exist to remove arriving through a
+  different door. The first pair written here,
+  `arithmetic.stdif.integral` and `arithmetic.stdif.integral_squares`, was
+  exactly that, and the check naming the first of the two integral images stayed
+  green under a mutation that routed it around the funnel altogether.
+
   No public API moves and no behaviour changes here either.
 
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
