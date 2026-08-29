@@ -2497,6 +2497,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Six modules read and write samples through the sample kind instead of the
+  byte width (issue #840, part of #748 and #607 step (b)). `composite`,
+  `create`, `freqfilt`, `mosaicing`, `raster_ops` and `textio` each carried
+  their own copy of the same three-arm `match`, whose trailing arm reads four
+  bytes as an `f32` whatever those bytes are, so a `u32` sample of `1` came
+  back as `1.4e-45`. Six copies of one function is the reason a new carrier
+  would be a six-place edit; they go through one `read_sample_f64` now, whose
+  match has no wildcard arm.
+
+  Three of the sites do more than read. `composite` takes its output depth from
+  `SampleKind::promote` rather than the wider of the two byte widths, and its
+  write-back clamp from `SampleKind::range` rather than a literal ceiling per
+  width, so a signed carrier would saturate at its own floor instead of at
+  zero. `mosaicing`'s merge dispatches the feathered blend on the kind, and the
+  four kinds with no `BlendSample` implementation get the new typed
+  `MosaicError::UnsupportedSampleKind` instead of being blended as float.
+  `mosaicing` also wrote `bytes_per_channel()` into the `VMJ1`
+  `mosaic-join-tree` header and read it back through the width-keyed
+  constructor, which is the `.v` `BandFmt` shape one layer in; that byte is a
+  sample-kind code now, keeping `1`, `2` and `4` for the three kinds that exist
+  so every blob already written still parses.
+
+  Nothing moves for the three kinds a `PixelFormat` carries today, and the
+  mutation sweep that says so found three gaps on the way: breaking the 16-bit
+  write in `new_from_image`, dropping the stride in `elem_f64`, and blending a
+  `Gray16` merge as `u8` all left the whole suite green, because every merge
+  fixture in the module was 8-bit or float. All three have a test now.
+
 - `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
   and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
   `vips hist_find` of a `ushort` `[4096, 4096, 9]` gives width **4097** where
