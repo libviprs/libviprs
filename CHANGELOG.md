@@ -2928,8 +2928,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-<<<<<<< HEAD
-=======
 - **`draw` and `raster` stop asking for a byte width too** (issues #748,
   #607). `draw`'s `channel_at` / `set_channel_at` took a `bpc: usize` and
   panicked on the `_` arm, so the refusal covered float and would have covered
@@ -2987,9 +2985,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling went **29 -> 22 -> 18**. Both remaining heads are outside this
   work: `fits.rs:409` is already width-total, and `jp2k.rs:1721` arrived
   after the census.
-
-
->>>>>>> 5247737bff4f762865008f576c7436983cffcb76
 - **A 20-byte WebP file could panic the chunk walk on a 32-bit target**
   (issue #862). `opaque_blended_frame_offsets` steps over a RIFF chunk by
   `size + (size & 1)`, and only the outer addition was checked. `size` comes
@@ -3011,10 +3006,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds check, so the guard is a unit test on the step itself rather than a
   fixture, with one assertion written as an equality against `usize::BITS`
   so it says something true on both targets.
-<<<<<<< HEAD
-
-=======
->>>>>>> 5247737bff4f762865008f576c7436983cffcb76
 - **The `.v` `BandFmt` wire tag comes from the sample kind, not from a byte
   width** (issue #841). `encode_vips` derived that header word through
   `match bpc { 1 => 0, 2 => 2, _ => 6 }`, so every four-byte sample kind that
