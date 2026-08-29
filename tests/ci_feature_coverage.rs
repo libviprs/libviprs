@@ -48,9 +48,14 @@
 //! `tests/miri_fs_test_inventory.txt` (#712).
 
 /// The manifest, at compile time.
+use std::collections::BTreeSet;
+
 const CARGO_TOML: &str = include_str!("../Cargo.toml");
 /// The only CI workflow that gates a merge (issue #585), at compile time.
 const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
+
+/// The local gate, which has to lint the same set as the hosted one.
+const MAKEFILE: &str = include_str!("../Makefile");
 
 /// Which jobs a feature belongs in, and why.
 struct Coverage {
@@ -450,5 +455,54 @@ fn test_util_is_only_ever_gated_alongside_cfg_test() {
          so it needs its own lint cell in ci.yml and a row change in \
          EXPECTED:\n  {}",
         bare.join("\n  ")
+    );
+}
+
+/// The `Makefile`'s `LINTED_FEATURES` is exactly the `lint: true` rows above.
+///
+/// #816 closed the hosted half of this hole and left the local half open, and
+/// the local half is the one that matters more here: the handover says plainly
+/// that the local gate is authoritative and GitHub Actions is not. So `main`
+/// could be red under a feature, `make clippy` could be green, and both would
+/// be behaving as documented.
+///
+/// It was not hypothetical. `main` was red under `packfile`
+/// (`sink_packfile.rs:147`, `collapsible_if`) for an unknown stretch, and the
+/// only reason anyone found it was someone verifying #816's measurement by
+/// hand. A sweep of all seven non-default features at that commit found
+/// `packfile` was the only red one, which is exactly the shape that gets
+/// dismissed as a one-off (issue #844).
+///
+/// Asserted as set equality rather than containment, in both directions: a
+/// feature CI lints that the `Makefile` skips is the original hole, and a
+/// feature the `Makefile` lints that CI skips is a local green that means more
+/// than a hosted one, which is its own kind of wrong.
+#[test]
+fn the_makefile_lints_exactly_the_features_ci_lints() {
+    let declared: BTreeSet<&str> = EXPECTED
+        .iter()
+        .filter(|(_, c)| c.lint)
+        .map(|(name, _)| *name)
+        .collect();
+
+    let line = MAKEFILE
+        .lines()
+        .find(|l| l.starts_with("LINTED_FEATURES"))
+        .expect("the Makefile must declare LINTED_FEATURES; see issue #844");
+    let listed: BTreeSet<&str> = line
+        .split_once(":=")
+        .expect("LINTED_FEATURES must be a := assignment")
+        .1
+        .split_whitespace()
+        .collect();
+
+    assert_eq!(
+        listed,
+        declared,
+        "`make clippy` and CI's Check & Lint job must lint the same features. \
+         Missing from the Makefile: {:?}. Extra in the Makefile: {:?}. Move both \
+         lists in the same change (issue #844).",
+        declared.difference(&listed).collect::<Vec<_>>(),
+        listed.difference(&declared).collect::<Vec<_>>(),
     );
 }
