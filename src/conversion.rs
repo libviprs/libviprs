@@ -395,6 +395,37 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
+/// Whether the flat `i`-th sample of a condition raster selects its
+/// branch, for [`Raster::try_ifthenelse`] and [`Raster::try_switch`].
+///
+/// `vips_ifthenelse` and `vips_switch` cast the condition to `uchar`
+/// before testing it, and `vips_cast` clips at both ends and truncates
+/// toward zero, so a negative sample is **false** and a fraction below one
+/// is false as well. Measured on `/opt/homebrew/bin/vips` 8.18.6:
+///
+/// | condition | `vips switch` | `vips ifthenelse 10 20` |
+/// |---|---|---|
+/// | `char` `[-50, 0, 1, -1, 127]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+/// | `float` `[0, 0.5, 1, -0.5]` | `[1, 1, 0, 1]` | - |
+///
+/// (`switch` with one condition answers 0 where it matched and 1 where
+/// nothing did, so a 1 is a false condition.)
+///
+/// Both callers used to read the **storage** word instead, which is a
+/// different question. `read_sample_u32` on a `char` -50 answers 206, the
+/// byte pattern, so `ifthenelse` took the then-branch where vips takes the
+/// else-branch; and on an `f32` 0.5 it answers 0x3F000000, so every
+/// non-zero float was true including the ones vips truncates away. Two
+/// carriers, two wrong answers, and the reason is one substitution: a
+/// truthiness test is numeric.
+#[inline]
+fn condition_is_true(data: &[u8], kind: SampleKind, i: usize) -> bool {
+    // Clipped into `uchar`, not merely compared against zero: the clip is
+    // what makes a negative sample false, and `read_flat` has already
+    // truncated a float toward zero.
+    read_flat(data, kind, i).clamp(0, 255) != 0
+}
+
 /// Refuse a sample kind the integer-only sample paths in this module
 /// cannot read, as a typed error rather than as a panic out of a
 /// `Result`-returning method (the shape issue #694 landed).
@@ -1630,7 +1661,7 @@ impl Raster {
                 for b in 0..bands {
                     let cb = if cond_bands == 1 { 0 } else { b };
                     let co = y * cstride + (x * cond_bands + cb) * cbpc;
-                    let take_then = read_sample_u32(&cdata[co..co + cbpc], ckind) != 0;
+                    let take_then = condition_is_true(cdata, ckind, co / cbpc);
                     let sample_stride = if take_then { tstride } else { ostride_o };
                     let sample_data = if take_then { tdata } else { odata_o };
                     let so = y * sample_stride + (x * bands + b) * bpc;
@@ -2444,7 +2475,7 @@ impl Raster {
         for (p, px) in odata.iter_mut().enumerate() {
             let mut v = no_match;
             for (i, c) in conditions.iter().enumerate() {
-                if read_flat(c.data(), c.format().kind(), p) != 0 {
+                if condition_is_true(c.data(), c.format().kind(), p) {
                     v = i as u8;
                     break;
                 }
@@ -5546,5 +5577,68 @@ mod tests {
             Raster::try_arrayjoin(&[&f, &f], None, None),
             Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
         ));
+    }
+
+    /**
+     * Tests that `ifthenelse` and `switch` read their condition
+     * **numerically** and cast it into `uchar` before testing it, so a
+     * negative sample is false and a fraction below one is false.
+     * Both read the storage word instead, which is a different question
+     * and gave two different wrong answers. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 with the branches 10 and 20:
+     *
+     * | condition | `vips switch` | `vips ifthenelse` |
+     * |---|---|---|
+     * | `char` `[-50, 0, 1, -1, 127]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+     * | `float` `[0, 0.5, 1, -0.5, 300.7]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+     *
+     * A one-condition `switch` answers 0 where it matched and 1 where
+     * nothing did, so a 1 is a false condition and the two rows agree.
+     * Works by driving both ops on both carriers, which is what separates
+     * the two bugs: the storage read made `char` -50 true because its byte
+     * is 206, and `f32` 0.5 true because its bit pattern is 0x3F000000, so
+     * a fixture with only one of the two carriers would have looked like a
+     * signedness bug or like a float bug rather than both.
+     * The `127` and `300.7` cells are the positive control that the clip
+     * is a clip: an implementation answering false for everything passes
+     * the first four cells of every row.
+     * Input: the conditions above -> Output: the measured rows.
+     */
+    #[test]
+    fn a_condition_is_read_numerically_and_cast_into_uchar() {
+        let then = gray8(5, 1, vec![10; 5]);
+        let els = gray8(5, 1, vec![20; 5]);
+
+        let c8 = int8(5, 1, &[-50, 0, 1, -1, 127]);
+        assert_eq!(
+            c8.try_ifthenelse(&then, &els).unwrap().data(),
+            &[20, 20, 10, 20, 10]
+        );
+        assert_eq!(Raster::try_switch(&[&c8]).unwrap().data(), &[1, 1, 0, 1, 0]);
+
+        let bytes: Vec<u8> = [0.0f32, 0.5, 1.0, -0.5, 300.7]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        let cf = Raster::new(
+            5,
+            1,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+            bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            cf.try_ifthenelse(&then, &els).unwrap().data(),
+            &[20, 20, 10, 20, 10]
+        );
+        assert_eq!(Raster::try_switch(&[&cf]).unwrap().data(), &[1, 1, 0, 1, 0]);
+
+        // Control: the unsigned carriers are untouched, including the
+        // 32-bit one whose samples are far above the `uchar` ceiling and
+        // must still be true rather than clipped to zero.
+        let u8c = gray8(3, 1, vec![0, 1, 255]);
+        assert_eq!(Raster::try_switch(&[&u8c]).unwrap().data(), &[1, 0, 0]);
+        let u32c = uint32(2, 1, &[0, 90_000]);
+        assert_eq!(Raster::try_switch(&[&u32c]).unwrap().data(), &[1, 0]);
     }
 }
