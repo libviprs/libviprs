@@ -711,6 +711,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Animated GIF save** (issue #573). `Raster::encode_gif` splits the raster by
+  its page height and writes one GIF frame per page, taking the per-frame
+  delays out of the `delay` field and the NETSCAPE loop block out of `loop`,
+  which is where vips reads them too: `gifsave` has no argument for either and
+  `cgifsave.c:753` reads them back off the image.
+
+  A still built from scratch saves to the same bytes it always did, because a
+  raster with no page split is one page and a raster with no `loop` field
+  loops forever, which is the block cgif already wrote. A still that was
+  *loaded* from a GIF is a different matter, and worth saying out loud: the
+  loader attaches `loop`, so re-encoding one now honours it, and a source file
+  carrying no NETSCAPE block round-trips to a file carrying none, where before
+  it gained a block holding zero. That is the better match for vips, which
+  writes no block for `loop = 1`, and
+  `a_reloaded_still_carries_its_loop_count_back_out` pins all three cases.
+
+  The frame geometry is the page, not the roll, so the GIF axis limit applies
+  per frame: a 1x80000 roll of two 40000-row pages saves, and a 1x70000 still
+  does not.
+
+  **Four measured divergences from vips, each with a test carrying the
+  measurement.** A `delay` array whose length is not the page count is refused
+  where vips pads with zeros or truncates (a two-entry array on a four-page
+  roll wrote `2 3 0 0`, a six-entry one wrote `2 3 4 5`). A negative delay or
+  `loop` is refused where vips casts it unsigned, turning -10 ms into 655
+  seconds and `loop = -1` into 65536 plays. A delay past what the wire holds
+  saturates where vips wraps, turning 655360 ms into no delay at all and
+  700000 ms into 44.64 seconds. And a stored `page-height` that does not
+  divide the raster is refused at `try_set_page_height` rather than silently
+  collapsing at the save, which is what `vips gifsave --page-height 5` on a
+  12-row image does.
+
+  A field of the *wrong type* is ignored rather than refused, matching the
+  `page-height` and `n-pages` readers: an untrusted `.v` can leave anything
+  under any name, so a wrong type means "this is not the field I read", where
+  a negative integer means "this is the field and its value is impossible".
+
+  Disposal follows cgif, measured over five files: restore-to-background on
+  every frame but the last when the animation carries transparency, keep
+  otherwise. Under "keep" a transparent pixel on page 2 would show page 1
+  through it, because every frame written here covers the whole screen.
+
+  **`Raster` drops `delay` wherever it drops `page-height`.** The array holds
+  one entry per page, so it describes the page split rather than the image,
+  and an op that changes the shape hands on an array that no longer indexes
+  anything. `roll.extract_page(0).encode_gif(..)` found it: the extracted page
+  arrived carrying the roll's four delays and the save refused it. Dropping is
+  the same call the page split already gets, and for the same reason; keeping
+  it would have been worse than refusing, since the first delay would then be
+  written onto a page that is not the first. `merge_fields_from` refuses to
+  import one for the matching reason, so joining a still to an animation
+  cannot give the still that animation's timings.
+
 - **Animated GIF load** (issue #572). `decode_gif_with` takes `gif::LoadOptions`
   carrying vips's `page` and `n`, composites the frames it selects and stacks
   them into one raster whose `page-height` is the logical screen height, which

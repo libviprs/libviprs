@@ -12,6 +12,11 @@ use thiserror::Error;
 /// [`Raster::try_set_page_height`].
 const PAGE_HEIGHT: &str = "page-height";
 
+/// The per-frame delay array, in milliseconds, which [`crate::gif`] attaches
+/// and reads. Named here for the one reason [`Raster::carry_meta_from`] gives:
+/// it describes the page split, so it cannot survive a change of shape.
+const DELAY: &str = "delay";
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -934,6 +939,16 @@ impl Raster {
         // it costs nothing on a still: nothing here attaches the field to one.
         if self.height != src.height {
             self.fields.remove(PAGE_HEIGHT);
+            // `delay` is the second field that is a statement about the page
+            // split rather than about the image, and it goes for the same
+            // reason (issue #572). It holds one entry per page, so a raster
+            // whose page count moved carries an array that no longer indexes
+            // anything: `roll.extract_page(0)` on a four-page animation
+            // produced a one-page raster still claiming four delays, and
+            // `encode_gif` then refused to save it because the two disagree.
+            // Keeping it would have been worse than refusing, since the first
+            // delay would have been written onto a page that is not the first.
+            self.fields.remove(DELAY);
         }
     }
 
@@ -956,9 +971,16 @@ impl Raster {
         // so an unpaged image silently becomes a four-frame animation
         // (measured on 8.18.6).
         let had_page_height = self.fields.get(PAGE_HEIGHT).is_some();
+        let had_delay = self.fields.get(DELAY).is_some();
         self.fields.merge_under(&other.fields);
         if !had_page_height {
             self.fields.remove(PAGE_HEIGHT);
+        }
+        // The delay array goes with the split for the reason above: a
+        // still that joins an animation would otherwise come out carrying
+        // that animation's per-frame timings (issue #572).
+        if !had_delay {
+            self.fields.remove(DELAY);
         }
     }
 
