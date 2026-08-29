@@ -294,3 +294,128 @@ fn a_byte_width_is_never_compared_outside_the_named_countdown() {
          allowlist. When it is empty, issue #607 closes."
     );
 }
+
+/// The shapes a real width comparison arrives in, each one measured on a plant
+/// in `src/draw.rs` that `cargo fmt --check` and `cargo check --lib` both
+/// accepted (issue #942).
+///
+/// Every row is a source that *must* be found. Three of the four were green
+/// under the scanner #607 was closed on, and the third of them is the one that
+/// matters: the epic's own headline number for this work was "width-keyed match
+/// heads 12 -> 7 -> 2", and the gate that closed it could not see a match head.
+const MUST_BE_FOUND: &[(&str, &str)] = &[
+    (
+        "one line, the only shape the #607 scanner could see",
+        "fn f(fmt: PixelFormat) -> bool {\n    fmt.bytes_per_channel() == 4\n}\n",
+    ),
+    (
+        "rustfmt-wrapped, the operator opening the continuation line",
+        "fn f(fmt: PixelFormat) -> bool {\n    \
+         a_receiver_long_enough_to_make_rustfmt_wrap.bytes_per_channel()\n        == 4\n}\n",
+    ),
+    (
+        "rustfmt-wrapped the other way round, the constant first",
+        "fn f(fmt: PixelFormat) -> bool {\n    A_CONSTANT_WITH_A_LONG_NAME\n        \
+         == fmt.bytes_per_channel()\n}\n",
+    ),
+    (
+        "a match head, the shape the epic's own metric counted",
+        "fn f(fmt: PixelFormat) -> Carrier {\n    match fmt.bytes_per_channel() {\n        \
+         1 => Carrier::U8,\n        2 => Carrier::U16,\n        _ => Carrier::F32,\n    }\n}\n",
+    ),
+    (
+        "a match head on the SampleKind spelling",
+        "fn f(kind: SampleKind) -> u8 {\n    match kind.bytes() {\n        \
+         1 => 1,\n        _ => 2,\n    }\n}\n",
+    ),
+    (
+        "an ordering operator, which is the same question with a coarser arm",
+        "fn f(fmt: PixelFormat) -> bool {\n    fmt.bytes_per_channel() > 2\n}\n",
+    ),
+    (
+        "an ordering operator on the receiver's right",
+        "fn f(a: SampleKind, b: SampleKind) -> SampleKind {\n    \
+         if a.bytes() >= b.bytes() { a } else { b }\n}\n",
+    ),
+    (
+        "the SampleKind::bytes() synonym, which the #607 scanner never read",
+        "fn f(kind: SampleKind) -> f64 {\n    if kind.bytes() == 1 { 1.0 } else { 257.0 }\n}\n",
+    ),
+    (
+        "matches!, which is a match head wearing a macro",
+        "fn f(fmt: PixelFormat) -> bool {\n    matches!(fmt.bytes_per_channel(), 1 | 2)\n}\n",
+    ),
+];
+
+/// Uses of the same accessors that are not a width standing in for a kind, so
+/// the scanner must leave them alone.
+///
+/// The `assert_eq!` rows are a decision rather than an oversight: `src/pixel.rs`
+/// pins `SampleKind::bytes()` against literal widths twenty times over, and
+/// `kind().bytes() == bytes_per_channel()` is the assertion that the two
+/// accessors agree. Those are the accessor under test, not a dispatch on it.
+const MUST_NOT_BE_FOUND: &[(&str, &str)] = &[
+    (
+        "a stride",
+        "fn f(kind: SampleKind) -> usize {\n    i * bands * kind.bytes()\n}\n",
+    ),
+    (
+        "a buffer size",
+        "fn f(kind: SampleKind) -> Vec<u8> {\n    vec![0u8; 2 * kind.bytes()]\n}\n",
+    ),
+    (
+        "a slice bound",
+        "fn f(kind: SampleKind) -> bool {\n    buf[..kind.bytes()].iter().all(|&b| b == 0)\n}\n",
+    ),
+    (
+        "a plain binding",
+        "fn f(kind: SampleKind) -> usize {\n    let bpc = kind.bytes();\n    bpc\n}\n",
+    ),
+    (
+        "an assert pinning the accessor itself",
+        "fn f(kind: SampleKind) {\n    assert_eq!(kind.bytes(), 4, \"four-byte kind\");\n}\n",
+    ),
+    (
+        "an argument that happens to sit beside a comparison",
+        "fn f(a: usize, kind: SampleKind) -> bool {\n    a == 1 && read(data, kind.bytes())\n}\n",
+    ),
+];
+
+/**
+ * Tests that the width scanner sees every shape a width comparison actually
+ * arrives in, and not the uses that are a stride or a buffer size.
+ * Works by running `width_comparisons` over one literal source per shape,
+ * rather than over the crate, so the scanner is proved before the countdown
+ * below is believed. Three of the shapes were measured green under the
+ * scanner issue #607 was closed on, each one `cargo fmt --check` and
+ * `cargo check --lib` clean as a plant in `src/draw.rs`: a wrapped line, a
+ * match head and an ordering operator, plus the `SampleKind::bytes()`
+ * spelling it never read at all (issue #942).
+ * Input: one source per shape -> Output: found for every row of
+ * `MUST_BE_FOUND`, not found for every row of `MUST_NOT_BE_FOUND`.
+ */
+#[test]
+fn the_width_scanner_sees_every_shape_a_real_site_takes() {
+    // Collected rather than asserted row by row, so one run names every shape
+    // the scanner cannot see instead of stopping at the first.
+    let mut wrong: Vec<String> = Vec::new();
+    for (label, src) in MUST_BE_FOUND {
+        let hits = width_comparisons(src).len();
+        if hits != 1 {
+            wrong.push(format!("MISSED ({label}), {hits} hits:\n{src}"));
+        }
+    }
+    for (label, src) in MUST_NOT_BE_FOUND {
+        let hits = width_comparisons(src);
+        if !hits.is_empty() {
+            wrong.push(format!("FALSE POSITIVE ({label}), {hits:?}:\n{src}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the width scanner is {} rows wrong out of {}:\n{}",
+        wrong.len(),
+        MUST_BE_FOUND.len() + MUST_NOT_BE_FOUND.len(),
+        wrong.join("\n")
+    );
+}
