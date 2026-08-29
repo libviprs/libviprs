@@ -404,6 +404,34 @@ pub enum JxlError {
         /// The budget in force, [`DecodeLimits::max_alloc_bytes`].
         max_alloc_bytes: u64,
     },
+    /// The animation header declares a ticks-per-second rate that is not a
+    /// rate, so no frame duration in the file can be converted.
+    ///
+    /// Defensive, and it should be unreachable: the JPEG XL bitstream
+    /// encodes `tps_numerator` as `U32(100, 1000, 1 + u(10), 1 + u(30))`,
+    /// whose smallest value in any arm is 1, so a numerator of zero cannot
+    /// be decoded from a well-formed header and `jxl-oxide`'s parser will
+    /// not produce one. It is a refusal rather than a fallback because the
+    /// alternative was to report the file as a multipage document, which
+    /// turns a malformed animation into a silently timing-less one (issue #889).
+    #[error("jxl: animation rate {tps_numerator}/{tps_denominator} is not a rate")]
+    BadAnimationRate {
+        /// The declared ticks-per-second numerator, which was zero.
+        tps_numerator: u32,
+        /// The declared denominator, reported alongside it.
+        tps_denominator: u32,
+    },
+    /// A keyframe the decoder counted but cannot describe.
+    ///
+    /// Defensive: `num_loaded_keyframes` bounds the index this is asked
+    /// for, so a `None` from `frame_header` is the decoder disagreeing with
+    /// itself. Refused rather than filled in with a zero delay, which is
+    /// what it used to be (issue #889).
+    #[error("jxl: the decoder counted keyframe {index} and cannot describe it")]
+    FrameHeaderMissing {
+        /// The keyframe index that has no header.
+        index: u32,
+    },
     /// Constructing the decoded [`Raster`] failed.
     #[error(transparent)]
     Raster(#[from] RasterError),
@@ -609,12 +637,30 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
 ///
 /// # Where this diverges from vips, deliberately
 ///
-/// **The delay array is subset to the pages actually loaded**, exactly as
-/// [`crate::webp::decode_webp_with`] does and for the same reason:
-/// measured, `vipsheader -f delay 'anim4.jxl[page=1,n=2]'` prints the
-/// file's whole `45 67 200 12` onto a raster holding pages 1 and 2, and
-/// nothing on that raster records the offset. Here `delay.len() ==
-/// pages_loaded()` always holds.
+/// **Every per-frame field follows the loaded window, where vips's follow
+/// the whole file**, exactly as [`crate::webp::decode_webp_with`] does and for
+/// the same reason. Measured on 8.18.6 against a four-page animation
+/// carrying `delay 45 67 200 12`, using `vipsheader -f` rather than `-a`,
+/// because `-a` does not list the compat fields at all:
+///
+/// | load | vips `delay` | here | vips `gif-delay` | here |
+/// |---|---|---|---|---|
+/// | default (`page=0,n=1`) | `45 67 200 12` | `[45]` | 4 | 4 |
+/// | `page=1` | `45 67 200 12` | `[67]` | 4 | **7** |
+/// | `page=1,n=2` | `45 67 200 12` | `[67, 200]` | 4 | **7** |
+/// | `page=2,n=2` | `45 67 200 12` | `[200, 12]` | 4 | **20** |
+/// | `page=3` | `45 67 200 12` | `[12]` | 4 | **1** |
+///
+/// `gif-delay` is the first delay in centiseconds, so once `delay` is the
+/// loaded window's, `gif-delay` is the first entry of *that*. The
+/// `page=2,n=2` row is the one that makes it unambiguous: 20 is 200 ms,
+/// which is neither the file's first delay nor the window's second. The
+/// numbers are identical to the WebP loader's on the same roll, which is
+/// the point: one dialect, two containers.
+///
+/// Nothing on a partially loaded raster records which file page its page 0
+/// was, so vips's file-scoped array cannot be lined up with the pages that
+/// are there. Here `delay.len() == pages_loaded()` always holds.
 ///
 /// `gif-loop` is **not** attached, and that is not an omission: measured,
 /// `jxlload` attaches `gif-delay` and no `gif-loop`, where `webpload`
@@ -778,6 +824,11 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
     // is answered by the whole file rather than by whichever pages were
     // asked for. `None` everywhere means every frame carries the multipage
     // sentinel, which is a document; the loaded slice is taken after.
+    //
+    // Both failure shapes are refusals rather than a `None` that would look
+    // like the sentinel: a rate that is not a rate, and a keyframe the
+    // decoder counted and cannot describe. Folding either into "this is a
+    // document" is what issue #889 was.
     let per_frame: Option<Vec<Option<FrameDelay>>> = image
         .image_header()
         .metadata
@@ -786,16 +837,18 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
         .map(|animation| {
             (0..file_pages)
                 .map(|index| {
-                    image.frame_header(index as usize).and_then(|header| {
-                        frame_millis(
-                            header.duration,
-                            animation.tps_numerator,
-                            animation.tps_denominator,
-                        )
-                    })
+                    let header = image
+                        .frame_header(index as usize)
+                        .ok_or(JxlError::FrameHeaderMissing { index })?;
+                    frame_millis(
+                        header.duration,
+                        animation.tps_numerator,
+                        animation.tps_denominator,
+                    )
                 })
-                .collect()
-        });
+                .collect::<Result<Vec<_>, JxlError>>()
+        })
+        .transpose()?;
     let plays = image
         .image_header()
         .metadata
@@ -909,6 +962,13 @@ fn decode(bytes: &[u8], limits: DecodeLimits, options: LoadOptions) -> Result<Ra
             .expect("`animated` is only true when the durations were read")
             [pages.start as usize..pages.end as usize]
             .iter()
+            // The one place a delay is still filled in rather than read:
+            // a frame carrying the multipage sentinel inside a file that is
+            // otherwise an animation. libjxl writes the sentinel on every
+            // frame or on none, so no encoder reachable from here produces
+            // the mixture, and vips maps it to -1, which an unsigned delay
+            // has no spelling for. Zero is the closest honest answer and it
+            // is the only fabrication left.
             .map(|delay| i64::from(delay.unwrap_or_default().millis()))
             .collect();
         if let Some(&first) = delays.first() {
@@ -1215,13 +1275,26 @@ fn interpretation(is_grayscale: bool, format: PixelFormat) -> Interpretation {
 const MULTIPAGE_DURATION: u32 = 0xffff_ffff;
 
 /// The milliseconds a frame lasts, given its `duration` in ticks and the
-/// animation header's ticks-per-second rate, or `None` when the duration is
-/// not one.
+/// animation header's ticks-per-second rate.
 ///
-/// `None` for [`MULTIPAGE_DURATION`], which marks a page of a document
-/// rather than a frame of an animation, and for a zero `tps_numerator`,
-/// which is not a rate and would otherwise divide by zero on a malformed
-/// header.
+/// Three answers, deliberately three and not one (issue #889):
+///
+/// * `Ok(Some(delay))` for a frame of an animation.
+/// * `Ok(None)` for [`MULTIPAGE_DURATION`], which marks a page of a
+///   document rather than a frame of an animation. That is not a missing
+///   duration, it is a statement that the file is not an animation, and it
+///   is the whole of what issue #621 asked about.
+/// * `Err(JxlError::BadAnimationRate)` for a zero `tps_numerator`, which is
+///   not a rate and would otherwise divide by zero.
+///
+/// The third used to be folded into the second, which meant a malformed
+/// rate turned a real animation into a document with no `delay`, no `loop`
+/// and no `gif-delay` at all, rather than into a refusal. It should be
+/// unreachable either way: the bitstream encodes `tps_numerator` as
+/// `U32(100, 1000, 1 + u(10), 1 + u(30))`, whose smallest value in any arm
+/// is 1. That is a read of the format's own declarative spec rather than a
+/// measurement, and it is why this is a guard rather than a code path with
+/// a fixture behind it.
 ///
 /// The arithmetic is `ticks * 1000 * tps_denominator / tps_numerator`,
 /// widened to `u64` and saturated back, with the multiplication before the
@@ -1231,14 +1304,24 @@ const MULTIPAGE_DURATION: u32 = 0xffff_ffff;
 /// therefore visible only on a file no encoder reachable from here
 /// produces, and it is written down rather than measured.
 #[cfg(feature = "jxl")]
-fn frame_millis(ticks: u32, tps_numerator: u32, tps_denominator: u32) -> Option<FrameDelay> {
-    if ticks == MULTIPAGE_DURATION || tps_numerator == 0 {
-        return None;
+fn frame_millis(
+    ticks: u32,
+    tps_numerator: u32,
+    tps_denominator: u32,
+) -> Result<Option<FrameDelay>, JxlError> {
+    if tps_numerator == 0 {
+        return Err(JxlError::BadAnimationRate {
+            tps_numerator,
+            tps_denominator,
+        });
+    }
+    if ticks == MULTIPAGE_DURATION {
+        return Ok(None);
     }
     let millis = u64::from(ticks) * 1000 * u64::from(tps_denominator) / u64::from(tps_numerator);
-    Some(FrameDelay::from_millis(
+    Ok(Some(FrameDelay::from_millis(
         u32::try_from(millis).unwrap_or(u32::MAX),
-    ))
+    )))
 }
 
 /// The `exif-data` blob for an image, or `None` when there is no readable
@@ -2752,7 +2835,7 @@ mod tests {
         // durations of `ANIM4_DELAY` pass through unchanged.
         for (ticks, millis) in [(45u32, 45u32), (67, 67), (200, 200), (12, 12), (0, 0)] {
             assert_eq!(
-                frame_millis(ticks, 1000, 1),
+                frame_millis(ticks, 1000, 1).expect("1000/1 is a rate"),
                 Some(FrameDelay::from_millis(millis)),
                 "{ticks} ticks at 1000/1"
             );
@@ -2760,12 +2843,15 @@ mod tests {
         // A slower clock: 3 ticks at 10 ticks per second is 300 ms. The
         // multiplication has to come before the division or this answers
         // 0.
-        assert_eq!(frame_millis(3, 10, 1), Some(FrameDelay::from_millis(300)));
+        assert_eq!(
+            frame_millis(3, 10, 1).expect("10/1 is a rate"),
+            Some(FrameDelay::from_millis(300))
+        );
         // And a rate with a denominator. 30000/1001 ticks per second is
         // NTSC's 29.97 fps, where one tick is 1001000/30000 ms and the
         // last step truncates 33.36 to 33.
         assert_eq!(
-            frame_millis(1, 30000, 1001),
+            frame_millis(1, 30000, 1001).expect("30000/1001 is a rate"),
             Some(FrameDelay::from_millis(33))
         );
         // Thirty of those ticks is 1001 ms, which is the check that the
@@ -2773,18 +2859,38 @@ mod tests {
         // first gives 30000/1001 = 29 in integers and then 30 * 1000 / 29
         // = 1034, and dividing the ticks first gives 0.
         assert_eq!(
-            frame_millis(30, 30000, 1001),
+            frame_millis(30, 30000, 1001).expect("30000/1001 is a rate"),
             Some(FrameDelay::from_millis(1001))
         );
         // The sentinel that marks a multipage document rather than an
         // animation. It is not a duration and does not become one.
-        assert_eq!(frame_millis(0xffff_ffff, 1000, 1), None);
-        // A zero numerator is not a rate. Refusing rather than dividing
-        // keeps a malformed header from being a panic.
-        assert_eq!(frame_millis(45, 0, 1), None);
+        assert_eq!(
+            frame_millis(0xffff_ffff, 1000, 1).expect("1000/1 is a rate"),
+            None
+        );
+        // A zero numerator is not a rate, and it is a **refusal** rather
+        // than the sentinel's answer. Folding the two together is what
+        // issue #889 was: a malformed rate reported the file as a document
+        // with no `delay`, no `loop` and no `gif-delay` at all, which reads
+        // as a deliberate multipage still rather than as a broken file.
+        assert!(matches!(
+            frame_millis(45, 0, 1),
+            Err(JxlError::BadAnimationRate {
+                tps_numerator: 0,
+                tps_denominator: 1
+            })
+        ));
+        assert_ne!(frame_millis(45, 0, 1).ok(), Some(None), "not the sentinel");
+        // And the sentinel is still the sentinel under a rate that works,
+        // which is the positive control for the row above: the two answers
+        // are different values of different shapes now, not one value.
+        assert_eq!(
+            frame_millis(0xffff_ffff, 30000, 1001).expect("30000/1001 is a rate"),
+            None
+        );
         // And an absurd duration saturates rather than wrapping.
         assert_eq!(
-            frame_millis(0xffff_fffe, 1, 1),
+            frame_millis(0xffff_fffe, 1, 1).expect("1/1 is a rate"),
             Some(FrameDelay::from_millis(u32::MAX))
         );
     }

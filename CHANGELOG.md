@@ -3027,6 +3027,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
 
+- **Three reasons a JPEG XL frame has no duration stopped being one**
+  (issue #889). `frame_millis` returned an `Option` and the loader read
+  `None` as "this is a page of a multipage document", which also swallowed
+  a keyframe the decoder could not describe and a `tps_numerator` of zero.
+  The second fabricated a `0 ms` delay; the third turned **every** frame
+  into `None`, so a malformed animation read back with no `delay`, no
+  `loop` and no `gif-delay` at all and nothing said the file was broken.
+
+  It now returns a `Result<Option<..>>` with three answers, and there are
+  two new `JxlError` variants, `BadAnimationRate` and `FrameHeaderMissing`,
+  on an enum that is already `#[non_exhaustive]`. Both are defensive: the
+  bitstream encodes `tps_numerator` as `U32(100, 1000, 1 + u(10), 1 + u(30))`
+  whose smallest value in any arm is 1, and `num_loaded_keyframes` bounds
+  the index `frame_header` is asked for, so neither is reachable from a file
+  I could build. That is a read of the format's spec rather than a
+  measurement, and the reason to fix it anyway is that the collapse was
+  silent in the direction that matters.
+
+  One fabrication is left and is documented at the line: a sentinel frame
+  inside a file that is otherwise an animation still reads as `0 ms`.
+  libjxl writes the sentinel on every frame or on none, and vips maps it to
+  `-1`, which an unsigned delay has no spelling for.
+
+- **Every per-frame field follows the loaded window, and the docs now say
+  so** (issue #890). The deliberate `delay` subsetting takes `gif-delay`
+  with it, because `gif-delay` is the first delay in centiseconds, and only
+  the `delay` array was written down. Measured across five windows on both
+  loaders, using `vipsheader -f` rather than `-a`, which does not list the
+  compat fields at all:
+
+  | load | vips `gif-delay` | here |
+  |---|---|---|
+  | default | 4 | 4 |
+  | `page=1` | 4 | 7 |
+  | `page=1,n=2` | 4 | 7 |
+  | `page=2,n=2` | 4 | 20 |
+  | `page=3` | 4 | 1 |
+
+  The `page=2,n=2` row is the one that makes the rule legible rather than
+  anecdotal: 20 is 200 ms, which is neither the file's first delay nor the
+  window's second. Both `src/webp.rs` and `src/jxl.rs` carry the table now.
+
+  The same section also fixes an argument rather than code. `ANIM4_DELAY`'s
+  doc claimed 45 ms proves `gif-delay` rounds half to even, and it does
+  not: `rint(4.5)` is 4 under half-to-even **and** under truncation, so that
+  window only rules out half-up. It takes two windows, and the second is
+  `page=1`, where 67 ms gives 7 and truncation would give 6. The rule is
+  round-half-to-even and the code was right; the sentence under it was not.
+
 - **A WebP frame marked dispose-to-background is disposed** (issue #884).
   `image-webp` 0.2.4 clears a disposed frame's rectangle only when a
   background colour has been set, and it has none unless a caller sets one,
