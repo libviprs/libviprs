@@ -87,7 +87,9 @@
 //! * It cannot tell an image-sized allocation that went through a fallible
 //!   reservation from one that did not. It is a budget, not a proof of
 //!   fallibility. What it proves is that no *further* image-sized buffer fits,
-//!   which is the property both mutations break.
+//!   which is the property both mutations break. The funnel count in
+//!   `src/raster.rs` is the half that answers the other question, and the
+//!   section below says why the two are in different binaries.
 //! * It counts a request, not a residency. An allocator that over-allocates, or
 //!   a page never touched, is charged at the size asked for.
 //! * The budgets only cover the carriers the rows name. The sharpen, canny and
@@ -101,15 +103,32 @@
 //!   with the same evidence that set it in the first place. That is the
 //!   intended cost.
 //!
-//! # One instrument, not two
+//! # One instrument, two halves, and why they are in different binaries
 //!
 //! `#[global_allocator]` here is scoped to this one integration-test binary, so
-//! it reaches no other test and it is not a process-wide install. #696 wants a
+//! it reaches no other test and it is not a process-wide install. #696 wanted a
 //! counting allocator too, to prove that every image-sized allocation on a path
 //! went through the fallible reservation helper, and the crate having two of
-//! these with different accounting is how a third gets invented. So it extends
-//! this one rather than building a second: same allocator, same window, same
-//! counters, with the hook-consumption comparison layered on top. That decision
+//! these with different accounting is how a third gets invented. So it did not
+//! build one. It counts consumptions of the `cfg(test)` probe on
+//! `raster::try_plane` instead, per entry point and per module, at exact
+//! equality, in
+//! `raster::tests::every_plane_these_paths_reserve_goes_through_the_one_funnel`.
+//!
+//! That check cannot live here and this one cannot live there. The probe is
+//! `cfg(test)`, so it exists only in the library's own unit-test binary, and an
+//! integration test links the library built *without* `cfg(test)`;
+//! `#[global_allocator]` is scoped to the binary that installs it, and the unit
+//! test binary is not this one. So the two halves sit in the two places each is
+//! measurable, and they are read together: where a row there and a row here
+//! agree for the same operation, every image-sized allocation on that path went
+//! through the fallible helper. `try_sharpen` is six in both. `try_conv` is one
+//! here and two there, because the row window is a real reservation that is not
+//! image-sized, which is the property #575 put there on purpose.
+//!
+//! Neither half is worth much alone, and each covers the other's blind spot:
+//! this one cannot tell a fallible reservation from an infallible one, and that
+//! one cannot see a buffer that never reaches the helper at all. That decision
 //! and the rule behind it are written up in `CONTRIBUTING.md`, under
 //! "Allocation instruments: one shape, two questions", because the next person
 //! to want one will read that and may never open this file.
@@ -966,4 +985,94 @@ fn the_counters_saturate_instead_of_unwinding_out_of_the_allocator() {
     assert_eq!(cost.allocs, 0, "the count wraps rather than panicking");
     assert_eq!(cost.peak_bytes, i64::MAX, "live bytes saturate at the top");
     assert_eq!(cost.min_live, i64::MIN, "and at the bottom");
+}
+
+/// English numerals, so the count `CONTRIBUTING.md` spells out can be compared
+/// against the one this file measures. Wide enough that the table would have to
+/// grow a long way before this stopped answering, and the check says so out
+/// loud rather than passing when it falls off the end.
+const NUMERALS: [&str; 41] = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "twenty-one",
+    "twenty-two",
+    "twenty-three",
+    "twenty-four",
+    "twenty-five",
+    "twenty-six",
+    "twenty-seven",
+    "twenty-eight",
+    "twenty-nine",
+    "thirty",
+    "thirty-one",
+    "thirty-two",
+    "thirty-three",
+    "thirty-four",
+    "thirty-five",
+    "thirty-six",
+    "thirty-seven",
+    "thirty-eight",
+    "thirty-nine",
+    "forty",
+];
+
+/// `CONTRIBUTING.md` tells the next lane what touching `src/convolution.rs`
+/// costs, and the number it quotes has to be the number of rows in [`BUDGETS`].
+///
+/// It was not. #575 put four operations' worth of rows in this file and took
+/// the table from sixteen to eighteen, and the paragraph that warns about the
+/// cost went on saying sixteen, so the one document a lane reads *before*
+/// starting understated the blast radius by two rows. That is the shape this
+/// repo keeps finding: a doc claim with nothing holding it. Now something
+/// holds it.
+///
+/// `include_str!` rather than a read, deliberately: the file is baked in at
+/// compile time, so this touches no filesystem at run time and stays off the
+/// Miri inventory.
+#[test]
+fn contributing_quotes_the_number_of_rows_this_file_has() {
+    const CONTRIBUTING: &str = include_str!("../CONTRIBUTING.md");
+    const PHRASE: &str = " rows of two numbers";
+
+    let occurrences = CONTRIBUTING.matches(PHRASE).count();
+    assert_eq!(
+        occurrences, 1,
+        "CONTRIBUTING.md says \"{PHRASE}\" {occurrences} times; this check reads the one \
+         occurrence it expects, so a second one has to be reconciled by hand"
+    );
+
+    let quoted = CONTRIBUTING
+        .split_once(PHRASE)
+        .map(|(before, _)| before)
+        .and_then(|before| before.rsplit(['*', ' ']).find(|w| !w.is_empty()))
+        .expect("the phrase is there, so a word comes before it");
+    let want = NUMERALS
+        .get(BUDGETS.len())
+        .unwrap_or_else(|| panic!("{} rows is past the numeral table", BUDGETS.len()));
+    assert_eq!(
+        quoted,
+        *want,
+        "CONTRIBUTING.md tells a lane the convolution budgets are \"{quoted}{PHRASE}\" and this \
+         file holds {} of them; a row added or removed here has to move that sentence too",
+        BUDGETS.len()
+    );
 }
