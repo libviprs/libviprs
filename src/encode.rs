@@ -345,6 +345,16 @@ fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
                 "32-bit unsigned raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
             )));
         }
+        // The `image` crate has no signed colour type at any width, so the
+        // signed carriers of issue #516 are refused whatever their size.
+        // Not a width question: `Int8` is one byte and still has no L8 to
+        // map to, because L8 is unsigned.
+        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
+            return Err(EncodeError::encode(format!(
+                "signed raster ({fmt:?}) has no image colour type, which are all unsigned; \
+                 cast to an unsigned 8/16-bit format first"
+            )));
+        }
     })
 }
 
@@ -844,7 +854,8 @@ mod tests {
      * control that the two carriers get distinct messages even though they
      * share a byte width.
      * Input: Uint32(1) -> Err naming "32-bit unsigned"; FloatF32(1) -> Err
-     * naming "float".
+     * naming "float"; Int8 / Int16 / Int32 -> Err saying the colour types
+     * are all unsigned, at every width.
      */
     #[test]
     fn the_encoders_refuse_the_uint_carrier_by_name() {
@@ -867,5 +878,27 @@ mod tests {
             .to_string();
         assert!(fmsg.contains("float"), "{fmsg}");
         assert_ne!(msg, fmsg);
+
+        // The three signed carriers, refused at **every** width, which is
+        // the part a width-keyed reading gets wrong: `Int8` is one byte and
+        // there is still no signed `L8`, because every `image` colour type
+        // is unsigned. Unlike the refusals issue #909 tracks, this one is
+        // the correct implementation rather than an interim: there is
+        // nothing in the `image` crate to be faithful to.
+        for fmt in [
+            PixelFormat::Int8(n(1)),
+            PixelFormat::Int16(n(1)),
+            PixelFormat::Int32(n(1)),
+        ] {
+            let m = Raster::zeroed(2, 2, fmt)
+                .unwrap()
+                .encode_png(6)
+                .expect_err("a signed raster has no image colour type")
+                .to_string();
+            assert!(
+                m.contains("signed") && m.contains("unsigned"),
+                "the refusal for {fmt:?} must say the colour types are all unsigned: {m}"
+            );
+        }
     }
 }

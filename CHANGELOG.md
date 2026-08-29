@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`profile` emits `Int32` and stops saturating at 65535** (issues #516, #759).
+  Breaking because the output format changes, and a live defect until now:
+  positions on any axis longer than 65535 were wrong. On a 1x65537 all-zero
+  image `vips profile` reports **65537** and this reported 65535.
+
+  Note the signedness. vips emits `VIPS_FORMAT_INT` there for every one of the
+  eight input formats, measured on `/opt/homebrew/bin/vips` 8.18.6, so closing
+  this needed the **signed** carrier and not the unsigned one issue #532 widened
+  the counters onto. That is the opposite of what #532 assumes about the counter
+  family, and it is why `profile` was left out of that change with a mutation row
+  asserting it had been.
+
+- **`project` sums a signed input into `Int32`** rather than the float carrier
+  (issue #516), which is the second row of the table #532 opened. The measured
+  table is `UINT` for `uchar` / `ushort` / `uint`, `INT` for `char` / `short` /
+  `int`, and `DOUBLE` for `float` and `double`. A negative sum survives now
+  instead of clipping at zero. The float row is still a deviation: this crate
+  has no `f64` carrier, so it sums into `FloatF32`.
 - **`GifError::BadPageNumber` is gone**, folded into the
   `SourceError::PageOutOfRange` the WebP and JPEG XL loaders already report
   (issue #845). One refusal had two typed spellings, carrying the same three
@@ -848,6 +866,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is `P1`, `P4` and the float `PF`, **none of which `encode_ppm` writes
   either**. A free-looking feature that buys decode paths with no matching
   encode paths still widens what the crate claims.
+  The trailer text is measured. I hand-wrote a `VipsArrayDouble` into a `.v`
+  and had vips rewrite it: `0.5`, `-1.25` and `3.0000000000000004` come back
+  unchanged, `71.0` goes out as `71` and `1e300` as `1.0000000000000001e+300`,
+  which is `%.17g`. This writes Rust's shortest round-tripping form instead,
+  because that is what `xml_field_of` already does for a scalar `Double` and
+  one trailer should not carry two conventions. Every one of those spellings
+  parses back to the same `f64` on both sides, so the difference is spelling
+  and not value.
+- **The signed pixel carriers**, `PixelFormat::Int8`, `Int16` and `Int32`: the
+  libvips `VIPS_FORMAT_CHAR`, `SHORT` and `INT` ones (issue #516). With issue
+  #517's `Uint32` before them, **every `SampleKind` now has a `PixelFormat`
+  behind it**, so `PixelFormat::with_kind` is total and never answers `None` for
+  a kind.
+
+  `with_channels` still cannot reach four of the seven, and that is deliberate:
+  a byte width does not name a carrier. Two bytes answers `Rgb16` where the
+  caller may have meant `Int16`, and four bytes answers the float carrier where
+  they may have meant `Uint32` or `Int32`. `with_kind` is the constructor that
+  cannot be asked ambiguously.
+
+  Like the other tuple carriers these are compute intermediates with no named
+  spelling, so `Int8(n)` is canonical at every band count, and they follow the
+  same four-band alpha rule.
+
+  Three refusals, each measured rather than assumed:
+
+  - The `image` crate has **no signed colour type at any width**, so the PNG and
+    JPEG encoders and both tile sinks refuse all three. `Int8` is one byte and
+    there is still no signed L8, so this is not a width question.
+  - JPEG 2000 refuses `Int32` and `Uint32` because vips does not read either
+    back: with `--lossless`, `int` 7 returns as 14 and `uint` 7 as 2147483662.
+  - JPEG 2000 refuses `Int8` and `Int16` for a different reason. With
+    `--lossless`, `char` and `short` rasters holding `[-5, 100, -100, 7]`
+    round-trip **exactly**, so the format carries signed samples and this
+    encoder cannot write them. That is a gap rather than a limit and is issue
+    #905; writing them unsigned would turn -5 into 251.
+
+  The ops whose sample helpers return `u32` refuse the signed carriers with the
+  typed error issue #517 added, rather than misreading them: `gamma`,
+  `falsecolour`, `msb`, `addalpha`, `bandmean`, `bandbool`, `embed`, `insert`
+  and the box filters. Widening those to `i64` is the remainder of #516's parity
+  work.
 
   So the sniffer claims exactly the four magics that decode, and the absences
   are asserted rather than implied: `P1`, `P4`, `PF` and `P7` stay unclaimed,
@@ -3307,6 +3367,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Animated WebP frames are composited by this loader rather than by
+  `image-webp`, and come back byte-exact with vips (issues #837, #917). Every
+  blended page used to be a grey level low, which is #837, and translucent
+  pixels were out by up to 26 levels, which is #917.
+
+  **Both issues named the wrong reference implementation, mine included.**
+  They were written against libwebp's `anim_decode.c`, and vips does not call
+  it: `webp2vips.c` pulls each frame with `WebPDemuxGetFrame` and `WebPDecode`
+  and composites them itself. Three implementations, three answers:
+
+  | | `dst_factor_a` | rounding |
+  |---|---|---|
+  | vips | `(dst_a * (255 - src_a) + 127) >> 8` | `+ (1 << 12)` before the shift |
+  | libwebp | `(dst_a * (256 - src_a)) >> 8` | none |
+  | `image-webp` | `div_by_255(dst_a * (255 - src_a))` | none |
+
+  The rounding term is the whole of #837: with an opaque source the factor is
+  0 and the product is one short of `s << 24`, so vips carries it back and the
+  other two truncate. libwebp reaches the same answer by skipping the blend
+  for opaque pixels, which is what #837 saw, but that is a second route rather
+  than the reason.
+
+  vips's model is also simpler than libwebp's, and porting libwebp's first
+  made the adversarial header-lie fixture *worse*: clear the previous frame's
+  rectangle if it disposed to background, then paste this frame, blending only
+  when it is not the first and its own header asks for it. No key frames, no
+  per-pixel opacity test, no partial blend ranges.
+
+  `image-webp` exposes no per-frame decode, so the frames are recovered by
+  clearing every `ANMF` blend bit, which turns its `composite_frame` into a
+  verbatim copy of each frame's rectangle. That is done through a reader that
+  patches the bytes on the way past, so nothing is copied. The patch claims
+  nothing about the pixels, which is what separates it from the rewrite #863
+  withdrew: that one read `alpha_is_used` as proof of opacity, where this
+  decides what to do with a frame from the frame's own decoded alpha.
+
+  `webp::DECODER_PLANES_ANIMATED` goes 3 to 5 for the two planes this needs,
+  measured from both sides: `tests/webp_decode_working_set.rs` fails at four,
+  with the peak 8,644 bytes over the price on a 512x512 fixture.
+
+- An animated WebP's band count follows the rule vips applies rather than the
+  `VP8X` alpha flag alone (issue #885). `webp2vips.c:413` starts from the flag
+  and `:464-471` turns alpha on when **any** frame carries alpha of its own or
+  is smaller than the canvas, the second because a frame that does not cover
+  the canvas leaves the area around it transparent. libwebp's demuxer computes
+  the per-frame half from an `ALPH` chunk or the `VP8L` header's
+  `alpha_is_used` bit (`demux.c:204,245`).
+
+  `image-webp` reads the flag and nothing else, so a file with a sub-canvas
+  frame came back three-band and the transparent area came back as opaque
+  black. That is lost data rather than a wrong label: measured on vips 8.18.6,
+  the same file reports four bands and an alpha of 0 outside the frame.
+
+  The fix hands the decoder the file with the flag set, so the RGBA canvas it
+  already keeps internally comes back whole. That is sound where the blend-flag
+  rewrite #863 withdrew was not, and the difference matters: the alpha flag is
+  an output-format switch inside `image-webp`, deciding only whether the fourth
+  channel is dropped on the way out, so moving it cannot change a decoded
+  value. The blend flag decided arithmetic, from a header field libwebp never
+  consults. The copy is priced through `DecodeLimits` and is made only for a
+  file the rule moves, which is no file `vips webpsave` writes.
+
 - **`decode_avif` no longer writes the payload through a read-only pointer**
   (issue #912). `decode_av1` filled the buffer `dav1d_data_create` hands back,
   which is the documented dav1d sequence and correct against dav1d's C. Against
@@ -3342,10 +3464,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without the qualifier, which reads as a bound on the whole function rather
   than on half of it.
 
-  No fixture reaches the translucent half, because `vips webpsave` writes
+  No fixture reached the translucent half, because `vips webpsave` writes
   blending **off** on every frame of a transparent animation, so the files
-  that would show it are the ones vips does not produce. That is worth
+  that would show it are the ones vips does not produce. That was worth
   saying in the docs rather than leaving as a silence.
+
+  **Both halves are since fixed**, in the entry above: the loader composites
+  animations itself now and is byte-exact with vips, and the fixture the
+  translucent half needed is built with `cwebp` and `webpmux` rather than
+  with `vips webpsave`. The qualifier this entry added is what made the
+  second half visible enough to go looking for, so it is left standing
+  rather than folded away.
 
 
 - **Two `src/draw.rs` sites #867 converted had no test holding them** (issue

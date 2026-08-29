@@ -260,6 +260,14 @@ fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError
             "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
              cast to an unsigned 8/16-bit format first"
         ))),
+        // Every `image` colour type is unsigned, so this is not a width
+        // question and `Int8` is refused alongside `Int32` (issue #516).
+        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
+            Err(SinkError::EncodeMsg(format!(
+                "signed raster ({fmt:?}) cannot be encoded as an image tile; \
+                 the image colour types are all unsigned, so cast first"
+            )))
+        }
     }
 }
 
