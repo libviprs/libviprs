@@ -144,24 +144,6 @@ const PLAYS: i32 = 4;
 /// and the wrong contents.
 const PAGE_COLOURS: [[u8; 3]; 4] = [[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
 
-/// A colour as `image-webp` 0.2.4 hands it back for a WebP page the file asks
-/// to have blended: every non-zero channel one grey level low, zero unchanged.
-///
-/// The arithmetic is upstream's, not a tolerance: with a source alpha of 255
-/// the blend is `(s * 255 * ((1 << 24) / 255)) >> 24`, which is `s - 1` for
-/// every `s` from 1 to 255. libwebp skips the blend for opaque pixels and
-/// `image-webp` does not, which is issue #837, and issue #863 is why libviprs
-/// no longer tries to work around it. `src/webp.rs`'s `as_image_webp_blends`
-/// is the same rule stated for the same reason; the day it is fixed upstream
-/// both go red together.
-fn as_blended(colour: &[u8; 3]) -> [u8; 3] {
-    [
-        colour[0].saturating_sub(1),
-        colour[1].saturating_sub(1),
-        colour[2].saturating_sub(1),
-    ]
-}
-
 /// Decode one window of the fixture out of one container.
 ///
 /// A function per container rather than a trait, because the three loaders take
@@ -326,15 +308,13 @@ fn n_pages_counts_the_file_in_every_container() {
 /// WebP three, which is each container's own business and not the page model's,
 /// so only the RGB triple is asserted.
 ///
-/// WebP's pages after the first are compared **one grey level low**, and that
-/// is not a tolerance, it is the exact upstream defect issue #837 describes:
-/// `image-webp` 0.2.4 runs its approximate alpha blend on opaque pixels where
-/// libwebp copies them, and `vips webpsave` writes blending on for every frame
-/// after the first of an opaque animation. libviprs used to hide it by reading
-/// a header hint, and issue #863 withdrew that because a file whose header lied
-/// then decoded to a different picture. `as_blended` below is the rule, and a
-/// zero channel stays zero, so page 0 and the black page are unaffected either
-/// way.
+/// All three containers are compared **exactly**. WebP's pages after the first
+/// used to be a grey level low, which was issue #837: `image-webp` runs its
+/// approximate alpha blend on opaque pixels where libwebp copies them, and
+/// `vips webpsave` writes blending on for every frame after the first of an
+/// opaque animation. The loader composites the frames itself now, so the
+/// special case is gone and the three containers agree on the pixels as well
+/// as on the geometry, which is what this file was for.
 ///
 /// Input: every frame of each container, and the `[page=1,n=2]` window.
 /// Output: pages 0 to 3 uniformly black, red, green and blue, and the window's
@@ -355,14 +335,9 @@ fn the_pages_come_back_in_file_order_with_the_same_pixels() {
                 3,
                 "{container}: an extracted page is one frame tall"
             );
-            let expected = if *container == "webp" && index > 0 {
-                as_blended(colour)
-            } else {
-                *colour
-            };
             assert!(
-                page.data().chunks(channels).all(|px| px[..3] == expected),
-                "{container}: page {index} is uniformly {expected:?}, and it is \
+                page.data().chunks(channels).all(|px| px[..3] == *colour),
+                "{container}: page {index} is uniformly {colour:?}, and it is \
                  not: the first pixel is {:?}",
                 &page.data()[..3]
             );
@@ -376,14 +351,7 @@ fn the_pages_come_back_in_file_order_with_the_same_pixels() {
             let page = window
                 .try_extract_page(slot as u32)
                 .expect("both pages of a two-page window extract");
-            // Both of these are file pages after the first, so WebP loses a
-            // level on both, window or no window: the blend flag is the
-            // file's and does not move with the request.
-            let expected = if *container == "webp" {
-                as_blended(&PAGE_COLOURS[index])
-            } else {
-                PAGE_COLOURS[index]
-            };
+            let expected = PAGE_COLOURS[index];
             assert!(
                 page.data().chunks(channels).all(|px| px[..3] == expected),
                 "{container}: page {slot} of a `page=1, n=2` load is file page \
