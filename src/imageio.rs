@@ -41,6 +41,15 @@
 //! all five are rows, and the suffix only decides whether the file is written
 //! at all.
 //!
+//! **Ultra HDR is not in that table and is not missing from it.** `uhdrsave`
+//! registers no file suffix at all (measured on 8.18.6: an empty suffix list
+//! in `vips -l`, and `vips copy base.v out.uhdr` refused as an unknown
+//! format), and the four suffixes `uhdrload` claims on the way in at priority
+//! 100 all route to `jpegsave` on the way out. So there is no extension for
+//! this route to key on. Ultra HDR is written by name, through
+//! [`Raster::encode_to_buffer`] with `"uhdr"` or through
+//! [`Raster::encode_uhdr`] (issue #809).
+//!
 //! Structured EXIF tag writing (`exif-ifd0-*` fields into the TIFF
 //! directory of a JPEG APP1 segment) is also deferred to the foreign
 //! batch: those fields round-trip through `.v` and travel on the raster,
@@ -3729,6 +3738,98 @@ mod tests {
         }
         // Positive control: a row that *is* live in every build.
         assert!(im.encode_for_extension("png", true).is_ok());
+    }
+
+    /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling: the
+    /// input contract [`crate::uhdr::encode_uhdr`] computes a gain map from,
+    /// and the one raster on which "the extension route did not write Ultra
+    /// HDR" is a claim with anything behind it.
+    fn scrgb_ramp(w: u32, h: u32) -> Raster {
+        let mut px: Vec<f32> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = f64::from(x) / f64::from(w - 1);
+                let s = f64::from(y) / f64::from(h - 1);
+                px.push((0.02 + 6.0 * t * s) as f32);
+                px.push((0.5 * (1.0 - t) + 3.0 * s) as f32);
+                px.push((1.5 * t + 0.25) as f32);
+            }
+        }
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            px.into_iter().flat_map(f32::to_ne_bytes).collect(),
+        )
+        .unwrap()
+    }
+
+    /**
+     * Tests that **no** extension selects the Ultra HDR writer, which is the
+     * measured answer rather than a gap (issue #809).
+     *
+     * Every other row in this table exists because vips registers the suffix.
+     * `uhdrsave` registers none: on the pinned 8.18.6, `vips -l` reports
+     * `VipsForeignSaveUhdrFile (uhdrsave), save image in UltraHDR format,
+     * nocache (), priority=0` with an empty suffix list, and
+     * `vips copy base.v out.uhdr` is refused with `"out.uhdr" is not a known
+     * file format`. So this table has nothing to add, and the format is
+     * reached by name through `Raster::encode_to_buffer("uhdr")` and
+     * [`Raster::encode_uhdr`] instead.
+     *
+     * The half that is worth a check is the collision. `uhdrload` **does**
+     * claim `.jpg`, `.jpeg`, `.jpe` and `.jfif` on the way in, at priority
+     * 100 against `jpegload`'s 50, so the obvious way to "fix" this issue
+     * later is to make `.jpg` route to Ultra HDR when the raster happens to
+     * suit it. vips does not: `vips copy base.v out.jpg` writes 803 bytes
+     * that `vips uhdrload` then refuses with `not an UltraHDR image`. This
+     * pins the same answer here, on the one raster where the two routes could
+     * possibly disagree.
+     *
+     * `is_uhdr` on the container `encode_uhdr` writes is the positive control.
+     * Without it, every assertion below is "this predicate said no", which a
+     * predicate that always says no also satisfies.
+     */
+    #[test]
+    fn no_extension_selects_the_ultra_hdr_writer_because_vips_registers_none() {
+        let hdr = scrgb_ramp(16, 16);
+
+        // The control: this raster genuinely does have an Ultra HDR encoding,
+        // and the gate genuinely does recognise it.
+        let container = hdr
+            .encode_uhdr(crate::uhdr::SaveOptions::default().quality)
+            .expect("a 3-band f32 raster encodes");
+        assert!(
+            crate::uhdr::is_uhdr(&container),
+            "positive control: the gate has to say yes to something"
+        );
+
+        // `.uhdr` is not a row, and the refusal does not advertise one.
+        let err = hdr.encode_for_extension("uhdr", true).unwrap_err();
+        assert!(
+            matches!(&err, SaveError::UnsupportedExtension { extension } if extension == "uhdr"),
+            "vips refuses the same suffix, so this must too, got {err}"
+        );
+        assert!(
+            !saveable_extensions().contains("uhdr"),
+            "the refusal must not advertise .uhdr: {}",
+            saveable_extensions()
+        );
+
+        // And the four suffixes `uhdrload` claims on the way in stay plain
+        // JPEG on the way out: either this build has no row for them, or the
+        // row writes something the Ultra HDR gate does not recognise.
+        for extension in ["jpg", "jpeg", "jpe", "jfif"] {
+            match hdr.encode_for_extension(extension, true) {
+                Ok(bytes) => assert!(
+                    !crate::uhdr::is_uhdr(&bytes),
+                    ".{extension} must not select the Ultra HDR writer: vips routes it to \
+                     jpegsave and `vips uhdrload` refuses the result"
+                ),
+                Err(SaveError::UnsupportedExtension { .. } | SaveError::Encode(_)) => {}
+                Err(other) => panic!(".{extension} answered with {other}"),
+            }
+        }
     }
 
     /**
