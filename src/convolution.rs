@@ -3363,6 +3363,51 @@ mod tests {
      * Input: the carried formats and all seven kinds -> Output: each kind's
      * own ceiling, and `uchar` true for `U8` alone.
      */
+    /**
+     * Tests that `put_sample` stores every [`SampleKind`] at that kind's own
+     * stride and reads back as itself.
+     * The mutation sweep for this lane found **no test reddened** when
+     * `put_sample`'s `U32` arm was changed to store two bytes instead of
+     * four, which is exactly the half-stride write issue #607 is about and
+     * exactly what the `else` arm this function replaced did to every kind
+     * wider than one byte. No test reddened because no `PixelFormat` carries
+     * a four-byte integer kind, so the traversal never reaches that arm, and
+     * every fixture in this module is 8-bit or 16-bit or float. The gap is
+     * in the coverage rather than in the code, so this is the test rather
+     * than a fix.
+     * Works by storing one value per kind into slot 1 of a two-slot buffer
+     * and reading it back through the shared reader, then checking slot 0
+     * was never touched. Slot 1 is what makes the stride visible: at
+     * `bytes() == 1` a dropped stride is the identity.
+     * Input: one value per kind at slot 1 -> Output: it reads back, and slot
+     * 0 is still zero.
+     */
+    #[test]
+    fn put_sample_stores_every_kind_at_its_own_stride() {
+        let cases: [(SampleKind, i64); 7] = [
+            (SampleKind::U8, 200),
+            (SampleKind::I8, -100),
+            (SampleKind::U16, 40000),
+            (SampleKind::I16, -30000),
+            (SampleKind::U32, 3_000_000_000),
+            (SampleKind::I32, -2_000_000_000),
+            (SampleKind::F32, -2),
+        ];
+        for (kind, v) in cases {
+            let mut buf = vec![0u8; 2 * kind.bytes()];
+            put_sample(&mut buf, kind, kind.bytes(), v);
+            assert_eq!(
+                read_sample_f64(&buf, kind, kind.bytes()),
+                v as f64,
+                "{kind:?} must read back the value it was stored as"
+            );
+            assert!(
+                buf[..kind.bytes()].iter().all(|&b| b == 0),
+                "{kind:?} stored outside its own slot: {buf:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_clip_ceiling_and_the_uchar_test_read_the_kind() {
         assert_eq!(depth_max(PixelFormat::Gray8), 255);
