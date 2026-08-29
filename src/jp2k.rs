@@ -39,15 +39,17 @@
 //! `oracle-captures/foreign-jp2k/oracle.json`.
 //!
 //! * **Both carriers are read and the reversible path is exact.** Of the 22
-//!   fixtures the decoder accepts, **fourteen are byte-identical** to what
+//!   fixtures in the decodable set, **fifteen are byte-identical** to what
 //!   `vips rawsave` wrote: every reversible 5/3 file, at every component
-//!   precision from 2 to 16 bits, greyscale, RGB, RGBA and CMYK, tiled and
-//!   untiled, subsampled and multi-resolution. The reversible wavelet is
-//!   integer-specified, so that is a parity port rather than an approximation
-//!   and its pins carry no tolerance at all. Of the other eight, four are the
-//!   irreversible fixtures below, three are refused on carrier grounds (one
-//!   signed component and two 31-bit ones), and one is `origin57.j2k`, whose
-//!   geometry diverges and is issue #766.
+//!   precision from 2 to 16 bits, signed and unsigned, greyscale, RGB, RGBA
+//!   and CMYK, tiled and untiled, subsampled and multi-resolution. The
+//!   reversible wavelet is integer-specified, so that is a parity port
+//!   rather than an approximation and its pins carry no tolerance at all.
+//!   Of the other seven, four are the irreversible fixtures below, two are
+//!   refused on carrier grounds (both of them 31-bit), and one is
+//!   `origin57.j2k`, whose geometry diverges and is issue #766.
+//!   `depth12s.j2k` moved into the first group when issue #905 landed the
+//!   signed carriers.
 //! * **The irreversible path needs a tolerance, and it is 4.** The 9/7
 //!   wavelet is float-specified, so `hayro-jpeg2000` and OpenJPEG are entitled
 //!   to disagree in the last place. Measured, they disagree by at most **4
@@ -66,23 +68,47 @@
 //!   8-bit-only test cannot catch a port that forgets the shift; the depth
 //!   sweep here runs 2, 4, 8, 10, 12, 14 and 16 and every one of them is
 //!   pinned to the vips answer.
-//! * **A signed component is refused rather than silently offset.** libvips
-//!   has `char` and `short` band formats and hands a signed component to one
-//!   of them; [`PixelFormat`] has no signed carrier at all, and
-//!   `hayro-jpeg2000` does not report signedness, returning every component
-//!   DC-level-shifted into the unsigned range. So a signed file decoded
-//!   naively comes back offset by exactly half the range: measured on
-//!   `depth12s.j2k`, libviprs would say 0 where vips says -32768. Rather than
-//!   ship that, [`decode_jp2k`] reads the sign bit out of the codestream's own
-//!   SIZ marker and refuses with [`Jp2kError::SignedComponent`].
-//! * **More than 16 bits of precision is refused too, for two reasons at
-//!   once.** [`PixelFormat`] has no 32-bit integer carrier, and
-//!   `hayro-jpeg2000` hands samples back as `f32`, whose 24-bit mantissa
-//!   cannot hold a 31-bit sample: measured on `int31.jp2`, three distinct
-//!   input values all come back as the same float. vips's own answer there is
-//!   not a round trip either (`jp2ksave` writes 31 bits for a 4-byte format
-//!   and `jp2kload` doubles them coming back), so there is nothing to be
-//!   faithful to. [`Jp2kError::PrecisionNotSupported`] names the ceiling.
+//! * **Signed components go both ways, and the sign bit is the file's own.**
+//!   JPEG 2000 carries a per-component `sgnd` flag and vips round-trips it
+//!   exactly, so [`PixelFormat::Int8`] and [`PixelFormat::Int16`] save and
+//!   load rather than being refused (issue #905). Measured with
+//!   `--lossless` on a raster holding `[-5, 100, -100, 7]`: `char` and
+//!   `short` come back unchanged, where `int` comes back `[-10, 200, -200,
+//!   14]` and `uint` comes back offset by 2^31. The encoder sets `Ssiz`'s
+//!   top bit exactly as `jp2ksave` does (`0x87` for an 8-bit signed
+//!   component, `0x8f` for a 16-bit one) and `vips jp2kload` reads the
+//!   files it writes back sample for sample. The loader takes the sign bit
+//!   off the codestream's own `SIZ` marker, because `hayro-jpeg2000` does
+//!   not report signedness and hands every component back DC-level-shifted
+//!   into the unsigned range, so the file's own sample is what the decoder
+//!   returns minus `2^(precision - 1)`. Measured on `depth12s.j2k`:
+//!   `hayro-jpeg2000` says `[0, 2047, 2048, 2049, 4095]`, the file holds
+//!   `[-2048, -1, 0, 1, 2047]`, and vips says `[-32768, -16, 0, 16, 32752]`
+//!   after the left-justification below.
+//! * **Two signed shapes are refused, and neither of them is a carrier
+//!   gap.** Components that *disagree* on the sign bit have no single
+//!   raster carrier, and `vips jp2kload` refuses the same file
+//!   (`components differ in precision`, measured on `rgb_lossless.jp2` with
+//!   component 1's `Ssiz` bit flipped), so
+//!   [`Jp2kError::MixedComponentSignedness`] is parity rather than a gap. A
+//!   signed file in the inverse-YCC shape below is refused too, and there
+//!   vips does answer: it runs the transform with the offset subtraction
+//!   wrapping in the component's own signed carrier and then clamps the
+//!   result to the *unsigned* range before storing it back into a `char`.
+//!   Measured on the committed `sub420.j2k` shape written signed, the red
+//!   band comes out 0 at every pixel and the blue band wraps past 127 into
+//!   negatives (`[0, 5, 28]` at pixel 0, `[0, 28, -122]` at pixel 4). That
+//!   is an answer no carrier can hold, so [`Jp2kError::SignedInverseYcc`]
+//!   refuses instead of reproducing it.
+//! * **More than 16 bits of precision is refused, and the reason is the
+//!   decoder rather than the carrier.** [`PixelFormat`] grew 32-bit integer
+//!   carriers in issue #516, but `hayro-jpeg2000` hands samples back as
+//!   `f32`, whose 24-bit mantissa cannot hold a 31-bit sample: measured on
+//!   `int31.jp2`, three distinct input values all come back as the same
+//!   float. vips's own answer there is not a round trip either (`jp2ksave`
+//!   writes 31 bits for a 4-byte format and `jp2kload` doubles them coming
+//!   back), so there is nothing to be faithful to.
+//!   [`Jp2kError::PrecisionNotSupported`] names the ceiling.
 //! * **A bare codestream with subsampled chroma gets the inverse YCC, and it
 //!   is OpenJPEG's arithmetic and not a textbook matrix.** `jp2kload` treats
 //!   an unspecified colour space with three components and subsampling on
@@ -225,7 +251,7 @@ use crate::conversion::Interpretation;
 use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jp2k")]
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 #[cfg(feature = "jp2k")]
 use crate::raster::buffer_len;
 use crate::raster::{Raster, RasterError};
@@ -257,11 +283,15 @@ pub const MAX_BANDS: usize = 4;
 
 /// The highest component precision [`decode_jp2k`] will carry.
 ///
-/// Two independent ceilings land on the same number. [`PixelFormat`] has no
-/// 32-bit integer carrier, so there is nowhere to put a wider sample; and
-/// `hayro-jpeg2000` returns samples as `f32`, whose 24-bit mantissa cannot
-/// hold one. Measured on `int31.jp2`, whose five distinct 31-bit samples come
-/// back as three distinct floats.
+/// The ceiling is the decoder's, not the carrier's. [`PixelFormat`] grew
+/// [`PixelFormat::Uint32`] and [`PixelFormat::Int32`] in issue #516, so
+/// there is somewhere to put a wider sample now; what there is not is a way
+/// to get one out of `hayro-jpeg2000`, which returns samples as `f32` and
+/// whose 24-bit mantissa cannot hold a 31-bit one. Measured on `int31.jp2`,
+/// whose five distinct 31-bit samples come back as three distinct floats.
+/// vips does not round-trip 31-bit samples either, so there is nothing on
+/// the other side of the ceiling to be faithful to (issue #905 records the
+/// numbers).
 pub const MAX_PRECISION: u8 = 16;
 
 /// Errors from the JPEG 2000 loader.
@@ -320,32 +350,65 @@ pub enum Jp2kError {
         /// What was wrong, named by the structure that was being read.
         reason: String,
     },
-    /// A component is signed, and there is no signed carrier to decode it
-    /// into.
+    /// The components disagree about the sign bit, so there is no single
+    /// carrier for the raster.
     ///
-    /// libvips has `char` and `short` band formats; [`PixelFormat`] has
-    /// neither. `hayro-jpeg2000` does not report signedness either and returns
-    /// every component DC-level-shifted into the unsigned range, so decoding
-    /// one anyway would come back offset by half the range with nothing
-    /// saying so: measured on `depth12s.j2k`, libviprs would report 0 where
-    /// vips reports -32768.
+    /// A [`PixelFormat`] has one sample kind for the whole image, and JPEG
+    /// 2000 sets `sgnd` per component, so a file that mixes them has no
+    /// carrier at all rather than an awkward one. `vips jp2kload` refuses
+    /// the same file: measured on `rgb_lossless.jp2` with component 1's
+    /// `Ssiz` sign bit flipped and nothing else touched, vips fails with
+    /// `components differ in precision`, while the untouched file decodes.
+    /// So this is parity and not a gap.
     #[error(
-        "jp2k: component {component} is a signed {precision}-bit component, and a raster \
-         has no signed sample carrier; vips reads it as `char` or `short`"
+        "jp2k: component {signed} is signed and component {unsigned} is not; a raster \
+         carries one sample kind for every band, and vips jp2kload refuses a file whose \
+         components disagree here too"
     )]
-    SignedComponent {
-        /// Which component, counting from zero, declared the sign bit.
-        component: usize,
-        /// The precision that component declared.
-        precision: u8,
+    MixedComponentSignedness {
+        /// The first signed component, counting from zero.
+        signed: usize,
+        /// The first unsigned component, counting from zero.
+        unsigned: usize,
+    },
+    /// A signed file is in the shape `jp2kload` runs its inverse YCC over,
+    /// and vips's answer there is not one a carrier can hold.
+    ///
+    /// The shape is the one the module docs describe: a bare or unspecified
+    /// colour space, three components, and subsampling on components 1 and
+    /// 2. vips does answer for it, and the answer is unusable. Measured on
+    /// the committed `sub420.j2k` written signed
+    /// instead of unsigned, vips subtracts the YCC offset **inside the
+    /// component's own signed carrier**, so `-112 - 128` wraps to `16`, and
+    /// then clamps the transform's result to the *unsigned* range before
+    /// storing it into a `char`: the red band is 0 at every pixel and the
+    /// blue band wraps past 127 into negatives (`[0, 5, 28]` at pixel 0 and
+    /// `[0, 28, -122]` at pixel 4, against `[255, 87, 0]` and `[200, 109,
+    /// 36]` for the same file written unsigned).
+    ///
+    /// Reproducing that would be matching an oracle that has lost the
+    /// picture, so this refuses instead. The encoder here cannot produce
+    /// the shape: it always writes a JP2 container with an explicit `colr`
+    /// box and never subsamples, so only a hand-built codestream reaches
+    /// this.
+    #[error(
+        "jp2k: this is a signed {components}-component codestream with subsampled chroma \
+         and no declared colour space, which is the shape jp2kload runs its inverse YCC \
+         over; vips clamps that transform into the unsigned range and stores it in a \
+         signed carrier, losing the picture, so it is refused rather than reproduced"
+    )]
+    SignedInverseYcc {
+        /// How many components the codestream declared, which the shape
+        /// fixes at three.
+        components: usize,
     },
     /// A component declares more bits per sample than this loader carries.
     ///
-    /// The ceiling is [`MAX_PRECISION`] and the reasons are on it.
+    /// The ceiling is [`MAX_PRECISION`] and the reason is on it.
     #[error(
         "jp2k: component {component} declares {precision} bits per sample; this loader \
-         carries at most {max}, because a raster has no 32-bit integer carrier and the \
-         decoder returns samples as f32"
+         carries at most {max}, because the decoder returns samples as f32 and a 24-bit \
+         mantissa cannot hold a wider one"
     )]
     PrecisionNotSupported {
         /// Which component, counting from zero, declared the precision.
@@ -553,11 +616,14 @@ impl SaveOptions {
 /// * [`Jp2kError::Container`] for a box structure or marker segment this
 ///   module cannot walk, and [`Jp2kError::Decode`] for a bitstream
 ///   `hayro-jpeg2000` refuses.
-/// * [`Jp2kError::SignedComponent`] for a signed component and
-///   [`Jp2kError::PrecisionNotSupported`] for one above [`MAX_PRECISION`],
-///   both of which are carrier gaps rather than format ones, and
-///   [`Jp2kError::PrecisionWiderThanDeclared`] for a palette whose entries are
-///   wider than the index `SIZ` declared.
+/// * [`Jp2kError::PrecisionNotSupported`] for a component above
+///   [`MAX_PRECISION`], which is the decoder's `f32` container rather than a
+///   format limit, and [`Jp2kError::PrecisionWiderThanDeclared`] for a
+///   palette whose entries are wider than the index `SIZ` declared.
+/// * [`Jp2kError::MixedComponentSignedness`] when the components disagree
+///   about the sign bit, and [`Jp2kError::SignedInverseYcc`] for a signed
+///   file in the shape `jp2kload` runs its inverse YCC over. A signed
+///   component on its own is a carrier and not a refusal (issue #905).
 /// * [`Jp2kError::UnsupportedBandCount`],
 ///   [`Jp2kError::BandCountMismatch`] and
 ///   [`Jp2kError::ComponentGeometryMismatch`], all defensive.
@@ -1224,18 +1290,29 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     let layout = ContainerLayout::parse(bytes)?;
     let header = CodestreamHeader::parse(&bytes[layout.codestream..])?;
 
-    // The carrier gaps, answered off the codestream's own SIZ rather than off
-    // the decoder, because `hayro-jpeg2000` reports neither the sign bit nor a
-    // per-component precision before the decode, and both decide whether the
-    // file can be carried at all.
-    for (component, spec) in header.components.iter().enumerate() {
-        if spec.signed {
-            return Err(Jp2kError::SignedComponent {
-                component,
-                precision: spec.precision,
-            }
-            .into());
+    // The carrier decisions, answered off the codestream's own SIZ rather
+    // than off the decoder, because `hayro-jpeg2000` reports neither the sign
+    // bit nor a per-component precision before the decode, and both decide
+    // what the file can be carried as.
+    //
+    // The sign bit is a whole-image property here and a per-component one in
+    // the format, so a file whose components disagree has no carrier at all.
+    // vips refuses that file too, which is why it is a typed refusal rather
+    // than a widening.
+    let signed = header.components[0].signed;
+    if let Some((signed_at, unsigned_at)) = header
+        .components
+        .iter()
+        .position(|c| c.signed)
+        .zip(header.components.iter().position(|c| !c.signed))
+    {
+        return Err(Jp2kError::MixedComponentSignedness {
+            signed: signed_at,
+            unsigned: unsigned_at,
         }
+        .into());
+    }
+    for (component, spec) in header.components.iter().enumerate() {
         if spec.precision > MAX_PRECISION {
             return Err(Jp2kError::PrecisionNotSupported {
                 component,
@@ -1244,6 +1321,18 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
             }
             .into());
         }
+    }
+    // The one combination where a signed file has an oracle answer and the
+    // answer is unusable. `sycc_to_rgb` below is written against the
+    // unsigned domain, and vips runs it against the signed one anyway, in
+    // the component's own carrier: the offset subtraction wraps and the
+    // clamp is to the unsigned range. Refused rather than reproduced, with
+    // the numbers on the variant.
+    if signed && layout.runs_inverse_ycc(&header) {
+        return Err(Jp2kError::SignedInverseYcc {
+            components: header.components.len(),
+        }
+        .into());
     }
 
     // What the decoder is allowed to see. `hayro-jpeg2000` resolves the `colr`
@@ -1295,7 +1384,17 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // a palettised codestream declares one component and decodes to three.
     let bands = u32::from(image.color_space().num_channels()) + u32::from(image.has_alpha());
     let element_bytes: u64 = if header.max_precision() > 8 { 2 } else { 1 };
-    let format = carrier(bands, element_bytes)?;
+    // Keyed on the sample kind rather than on the byte width, because a
+    // width cannot tell `Int8` from `Gray8` or `Int16` from `Gray16`, and
+    // the sign bit is exactly the thing that decides which one this is
+    // (issues #607, #905).
+    let kind = match (element_bytes, signed) {
+        (1, false) => SampleKind::U8,
+        (1, true) => SampleKind::I8,
+        (_, false) => SampleKind::U16,
+        (_, true) => SampleKind::I16,
+    };
+    let format = carrier(bands, kind)?;
 
     // The allocation budget, which `check_pixels` does not imply: a
     // 1-gigapixel `max_pixels` permits an 8 GiB `Rgba16` frame against a
@@ -1393,8 +1492,20 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         for (band, data) in components.iter().enumerate() {
             let precision = u32::from(data.bit_depth());
             let shift = element_bits - precision;
+            // `hayro-jpeg2000` applies the DC level shift to every component
+            // whether or not `SIZ` set the sign bit, so a signed component
+            // arrives in the unsigned range and the file's own sample is
+            // that value minus half the range. Undoing it here rather than
+            // in `quantise` keeps one clamp doing both jobs: clamping to
+            // `[0, 2^p - 1]` and then subtracting `2^(p-1)` is exactly a
+            // clamp to the signed range `[-2^(p-1), 2^(p-1) - 1]`.
+            let dc_shift = if signed { 1i32 << (precision - 1) } else { 0 };
             for (i, sample) in data.samples().iter().enumerate() {
-                let value = quantise(*sample, precision) << shift;
+                // The left-justification is the same shift for both signs:
+                // it multiplies by a power of two, and two's complement
+                // multiplication is sign-agnostic. `-2048 << 4` is -32768,
+                // which is what vips reports for `depth12s.j2k`.
+                let value = ((quantise(*sample, precision) as i32 - dc_shift) << shift) as u32;
                 store(
                     &mut buffer,
                     (i * bands as usize) + band,
@@ -1525,21 +1636,27 @@ fn sycc_to_rgb(y: u32, cb: u32, cr: u32, precision: u32) -> [u32; 3] {
     ]
 }
 
-/// The sample carrier for a band count and an element width.
+/// The sample carrier for a band count and a sample kind.
 ///
-/// The mapping is [`PixelFormat::with_channels`]'s, so 1, 3 and 4 bands reach
-/// the named `Gray` / `Rgb` / `Rgba` variants and everything else reaches the
-/// multiband ones. A zero band count is the one thing that has no carrier, and
-/// it is unreachable from a valid codestream because `SIZ` refuses `Csiz = 0`
+/// Keyed on the kind rather than on a byte width, because the width is not
+/// enough: one byte is `Gray8` or `Int8` and two is `Gray16` or `Int16`, and
+/// only the codestream's sign bit says which. [`PixelFormat::with_kind`] is
+/// the constructor that cannot be asked that question ambiguously, and it
+/// keeps the unsigned mapping unchanged, so 1, 3 and 4 bands still reach the
+/// named `Gray` / `Rgb` / `Rgba` variants and everything else reaches the
+/// multiband ones.
+///
+/// A zero band count is the one thing that has no carrier, and it is
+/// unreachable from a valid codestream because `SIZ` refuses `Csiz = 0`
 /// before this is called; the check is here anyway because the count comes
 /// from the decoder rather than from `SIZ`, and a palette resolves to
 /// whatever the palette says.
 #[cfg(feature = "jp2k")]
-fn carrier(bands: u32, element_bytes: u64) -> Result<PixelFormat, Jp2kError> {
+fn carrier(bands: u32, kind: SampleKind) -> Result<PixelFormat, Jp2kError> {
     let max = u32::from(u16::MAX);
     usize::try_from(bands)
         .ok()
-        .and_then(|n| PixelFormat::with_channels(n, element_bytes as usize))
+        .and_then(|n| PixelFormat::with_kind(n, kind))
         .ok_or(Jp2kError::UnsupportedBandCount { bands, max })
 }
 
@@ -1678,7 +1795,11 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
     use openjpeg2_pure::{EncodeOptions, Encoder, Format, Image, ImageComponent};
 
     let SaveOptions { compression } = options;
-    let (precision, element_bytes) = sample_depth(raster.format())?;
+    let ComponentLayout {
+        precision,
+        element_bytes,
+        signed,
+    } = sample_depth(raster.format())?;
     let (width, height) = (raster.width(), raster.height());
     let bands = raster.format().channels();
     // `jp2ksave` writes any band count and `openjpeg2-pure-rs` encodes any
@@ -1717,13 +1838,19 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
         let mut samples = Vec::with_capacity(plane);
         for i in 0..plane {
             let at = (i * bands + band) * element_bytes;
-            samples.push(match element_bytes {
-                1 => i32::from(data[at]),
-                _ => i32::from(u16::from_ne_bytes([data[at], data[at + 1]])),
+            // Read at the raster's own signedness, not at its width. Widening
+            // an `Int8` sample of -5 through `u8` would hand the encoder 251
+            // and write a file that says -5 nowhere, which is the silent
+            // wrong answer issue #905 exists to avoid.
+            samples.push(match (element_bytes, signed) {
+                (1, false) => i32::from(data[at]),
+                (1, true) => i32::from(data[at] as i8),
+                (_, false) => i32::from(u16::from_ne_bytes([data[at], data[at + 1]])),
+                (_, true) => i32::from(i16::from_ne_bytes([data[at], data[at + 1]])),
             });
         }
         components.push(
-            ImageComponent::new(width, height, precision, false, samples)
+            ImageComponent::new(width, height, precision, signed, samples)
                 .map_err(|e| EncodeError::encode(format!("jp2k: component {band}: {e:?}")))?,
         );
     }
@@ -1779,26 +1906,64 @@ fn num_resolutions(width: u32, height: u32) -> i32 {
     (smallest.ilog2() as i32 - 5).max(1)
 }
 
-/// The component precision and element width for a raster carrier.
+/// What one component header says about a raster carrier: how many bits, how
+/// many bytes it takes in the raster, and whether `Ssiz`'s top bit is set.
+///
+/// A triple of loose values would let a caller pair the width of one carrier
+/// with the sign of another; naming the three fields is what stops the
+/// `false` that used to sit in the `ImageComponent::new` call from being
+/// re-introduced by a positional argument (issue #905).
+#[cfg(feature = "jp2k")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComponentLayout {
+    /// Bits per sample, which becomes `(Ssiz & 0x7f) + 1` in the file.
+    precision: u8,
+    /// Bytes this carrier takes per sample in the raster.
+    element_bytes: usize,
+    /// Whether the samples are two's complement, which becomes `Ssiz`'s top
+    /// bit.
+    signed: bool,
+}
+
+/// The component layout for a raster carrier.
 ///
 /// # Errors
 ///
 /// [`EncodeError::Encode`] for the float carriers, which is what
 /// `vips jp2ksave` does with a `float` or `double` image: it fails with `not
-/// an integer format` rather than quantising behind the caller's back; for
-/// the 32-bit integer carriers, which vips accepts and then fails to read
-/// back; and for the signed 8- and 16-bit ones, which JPEG 2000 does carry
-/// and this encoder does not yet write (issues #516, #905).
+/// an integer format` rather than quantising behind the caller's back; and
+/// for the 32-bit integer carriers, which vips accepts and then fails to
+/// read back.
+///
+/// The signed 8- and 16-bit carriers are **not** refusals. They were, until
+/// issue #905, and the split between them and the 32-bit pair is measured
+/// rather than assumed: under `--lossless`, `char` and `short` round-trip
+/// through vips exactly while `int` and `uint` do not.
 #[cfg(feature = "jp2k")]
-fn sample_depth(format: PixelFormat) -> Result<(u8, usize), EncodeError> {
+fn sample_depth(format: PixelFormat) -> Result<ComponentLayout, EncodeError> {
+    let layout = |precision, element_bytes, signed| ComponentLayout {
+        precision,
+        element_bytes,
+        signed,
+    };
     match format {
         PixelFormat::Gray8 | PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Multi8(_) => {
-            Ok((8, 1))
+            Ok(layout(8, 1, false))
         }
         PixelFormat::Gray16
         | PixelFormat::Rgb16
         | PixelFormat::Rgba16
-        | PixelFormat::Multi16(_) => Ok((16, 2)),
+        | PixelFormat::Multi16(_) => Ok(layout(16, 2, false)),
+        // JPEG 2000 carries signed samples natively, so these are written
+        // rather than refused: `Ssiz` gets its top bit and the samples go in
+        // as two's complement. Measured on `/opt/homebrew/bin/vips` 8.18.6,
+        // `jp2ksave --lossless` then `jp2kload` on a raster holding
+        // `[-5, 100, -100, 7]`: `char` and `short` both come back unchanged,
+        // and the files this encoder writes carry the same `Ssiz` bytes vips
+        // writes, `0x87` and `0x8f`, and read back through `vips jp2kload`
+        // sample for sample (issue #905).
+        PixelFormat::Int8(_) => Ok(layout(8, 1, true)),
+        PixelFormat::Int16(_) => Ok(layout(16, 2, true)),
         PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(EncodeError::encode(format!(
             "jp2k: JPEG 2000 stores integer samples and {format:?} is float; cast to an \
              integer format first, so the quantisation is yours rather than the encoder's \
@@ -1816,21 +1981,6 @@ fn sample_depth(format: PixelFormat) -> Result<(u8, usize), EncodeError> {
              cast to an 8/16-bit format first (vips jp2ksave accepts a 32-bit image \
              but does not read it back: with --lossless, uint 7 returns as 2147483662 \
              and int 7 returns as 14)"
-        ))),
-        // The signed 8- and 16-bit carriers are a different refusal, and
-        // the distinction is measured rather than assumed. JPEG 2000 has a
-        // per-component `sgnd` flag and vips round-trips both of them
-        // **exactly**: with `--lossless`, `char` and `short` rasters
-        // holding `[-5, 100, -100, 7]` come back unchanged, where `int` and
-        // `uint` do not. So this is a gap in *this* encoder, which has no
-        // signed component support, and not a limit of the format. Writing
-        // the samples as unsigned would be the silent wrong answer: -5
-        // would come back as 251. Tracked as issue #905.
-        PixelFormat::Int8(_) | PixelFormat::Int16(_) => Err(EncodeError::encode(format!(
-            "jp2k: this encoder writes unsigned components and {format:?} is signed; \
-             cast to an unsigned format first (JPEG 2000 does carry signed samples \
-             and vips round-trips them losslessly, so this is issue #905 rather than \
-             a format limit)"
         ))),
     }
 }
@@ -2369,72 +2519,455 @@ mod tests {
         }
     }
 
+    /// The samples of a raster read at its own sample kind, so a signed
+    /// carrier comes back as the numbers the file holds rather than as their
+    /// bit patterns.
+    ///
+    /// Keyed on [`PixelFormat::kind`] rather than on a byte width, for the
+    /// reason issue #607 gives: `Int8` and `Gray8` are both one byte and
+    /// mean different things, and `samples` above would read -5 as 251.
+    #[cfg(feature = "jp2k")]
+    fn signed_samples(raster: &Raster) -> Vec<i32> {
+        use crate::pixel::SampleKind;
+        let data = raster.data();
+        match raster.format().kind() {
+            SampleKind::I8 => data.iter().map(|b| i32::from(*b as i8)).collect(),
+            SampleKind::I16 => data
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i32::from(i16::from_ne_bytes(*c)))
+                .collect(),
+            other => panic!("signed_samples wants a signed carrier, not {other:?}"),
+        }
+    }
+
+    /// Every `#[test]` in this file, as (line, name, doc block, body).
+    ///
+    /// The body is widened by one level of indirection: any `const` this file
+    /// declares whose name the body mentions is appended to it, so a test
+    /// that drives a table reaches the fixtures the table names. That is the
+    /// same one-hop rule `tests/miri_ignore_convention.rs` follows into a
+    /// test helper, and it is what keeps
+    /// `the_reversible_fixtures_decode_to_the_bytes_vips_produces` honest:
+    /// its doc names three fixtures its body reaches only through `EXACT`.
+    fn tests_with_docs_and_bodies(source: &str) -> Vec<(usize, String, String, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // `const NAME: ... ;`, from its first line to the first line that ends
+        // the item. Every const in this file is a single item terminated that
+        // way, and one that is not simply contributes a shorter block.
+        let mut consts: Vec<(String, String)> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix("const ") else {
+                continue;
+            };
+            let Some(name) = rest.split(':').next().map(str::trim) else {
+                continue;
+            };
+            let mut end = i;
+            while end < lines.len() && !lines[end].trim_end().ends_with(';') {
+                end += 1;
+            }
+            consts.push((
+                name.to_string(),
+                lines[i..=end.min(lines.len() - 1)].join("\n"),
+            ));
+        }
+
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let Some(name) = lines[i]
+                .trim_start()
+                .strip_prefix("fn ")
+                .and_then(|rest| rest.split('(').next())
+            else {
+                i += 1;
+                continue;
+            };
+            let mut attrs = i;
+            while attrs > 0 && lines[attrs - 1].trim_start().starts_with("#[") {
+                attrs -= 1;
+            }
+            if !lines[attrs..i].iter().any(|l| l.trim() == "#[test]") {
+                i += 1;
+                continue;
+            }
+            // The block doc above the attribute stack, if there is one.
+            let mut doc = String::new();
+            if attrs > 0 && lines[attrs - 1].trim().ends_with("*/") {
+                let mut start = attrs - 1;
+                while start > 0 && !lines[start].trim_start().starts_with("/**") {
+                    start -= 1;
+                }
+                doc = lines[start..attrs].join("\n");
+            }
+            // The body, to the closing brace at the function's own indent.
+            let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+            let closing = format!("{indent}}}");
+            let mut end = i + 1;
+            while end < lines.len() && lines[end] != closing {
+                end += 1;
+            }
+            let mut body = lines[i..=end.min(lines.len() - 1)].join("\n");
+            for (const_name, text) in &consts {
+                if body.contains(const_name.as_str()) {
+                    body.push('\n');
+                    body.push_str(text);
+                }
+            }
+            out.push((attrs, name.to_string(), doc, body));
+            i = end + 1;
+        }
+        out
+    }
+
     /**
-     * Pins the two carrier refusals, both of which are gaps in this crate
-     * rather than in the format, and both of which would otherwise be
-     * silently wrong answers.
-     * A signed component has no `PixelFormat` to go into and
-     * `hayro-jpeg2000` reports every component DC-level-shifted into the
-     * unsigned range, so decoding one anyway comes back offset by half the
-     * range: measured on `depth12s.j2k`, 0 where vips says -32768. A 31-bit
-     * component has no 32-bit integer carrier and does not survive the
-     * decoder's `f32` container either.
-     * Each refusal has a positive control beside it, and they are the point:
-     * `depth12u.j2k` is the same file with the sign bit clear and
-     * `depth16u.j2k` is the same shape one bit under the ceiling, so a
-     * refusal that fired for the wrong reason would take its control down
-     * with it.
-     * Input: `depth12s.j2k`, `int31.jp2`, `uint31.jp2` -> Output: the typed
-     * variant naming the component and the number, and a clean decode for
-     * each control.
+     * Every `#[test]` in this file carries its own doc block, checked by
+     * reading the file rather than by convention, because this file has
+     * already lost one twice.
+     * The block for `the_image_origin_is_the_one_divergence_on_geometry`
+     * came off its function when two PRs merged minutes apart (#846 and
+     * #855) and their hunks interleaved. Issue #869 filed that, #891 moved
+     * the block, and it still did not land on its test: measured on
+     * `origin/main` while issue #926 was in flight, the block sat above the
+     * *band ceiling* test's own doc block, so that test's rendered doc
+     * opened with a paragraph about image origins and the origin test had
+     * none. Nothing went red. `cargo fmt --check` is clean, `make clippy`
+     * is silent across all nine features, and `cargo doc` with all three
+     * lints denied has nothing to say, because for a private test item
+     * rustdoc has no opinion about a lost doc and every link still
+     * resolves.
+     * A doc that drifted onto the wrong function is the failure mode, and
+     * the observable half of it is that some other function ends up with
+     * none, because a block doc comment always attaches to the item below
+     * it. So that is what this asserts, over the file's own text.
+     * Input: `src/jp2k.rs` -> Output: no `#[test]` without a doc block of
+     * its own, and a count of the tests scanned so a parse that stopped
+     * early cannot pass quietly.
+     */
+    #[test]
+    fn every_test_in_this_file_keeps_its_own_doc_block() {
+        // `include_str!` rather than `std::fs::read_to_string`, for the same
+        // reason the fixtures above are `include_bytes!`: it keeps this off
+        // `tests/miri_fs_test_inventory.txt`.
+        let source = include_str!("jp2k.rs");
+        let tests = tests_with_docs_and_bodies(source);
+        let undocumented: Vec<(usize, &str)> = tests
+            .iter()
+            .filter(|(_, _, doc, _)| doc.is_empty())
+            .map(|(line, name, _, _)| (*line, name.as_str()))
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "these tests have no doc block of their own, which means their block is \
+             sitting on somebody else's function: {undocumented:?}"
+        );
+        // The negative control on the scanner itself: a parse that matched
+        // nothing would report an empty offender list too, which is the
+        // empty-result trap. This file has dozens of tests, so a number in
+        // single figures means the walk stopped early.
+        assert!(
+            tests.len() > 30,
+            "the scanner found only {} tests in this file, so it is not reading what it \
+             thinks it is reading",
+            tests.len()
+        );
+    }
+
+    /**
+     * And the half the count cannot see: a doc block is on the test it
+     * describes, not merely on some test.
+     * "Every test has a doc" is satisfied perfectly by a block sitting above
+     * the wrong one, which is exactly the state issue #926 found: two blocks
+     * stacked on the band-ceiling test and none on the origin test. Position
+     * had drifted and content had not, so the content is what identifies the
+     * owner. Every doc block in this file names the fixtures its test drives,
+     * in an `Input:` line, so the check is that a fixture named in a doc is
+     * a fixture that test can reach.
+     * The reach is one hop, through a `const` the body names, because
+     * `the_reversible_fixtures_decode_to_the_bytes_vips_produces` documents
+     * three fixtures it touches only through `EXACT`. Without that hop the
+     * check would have a false positive on the day it landed, which is the
+     * fastest way to get a guard deleted.
+     * Input: `src/jp2k.rs` -> Output: no doc block naming a fixture its own
+     * test cannot reach, plus the count of fixture mentions actually
+     * checked, so a scan that found no fixture names at all cannot pass as
+     * a clean file.
+     */
+    #[test]
+    fn a_doc_block_names_fixtures_the_test_under_it_actually_reaches() {
+        let source = include_str!("jp2k.rs");
+        // Every committed fixture name, taken from the file's own string
+        // literals rather than from a second hand-written list.
+        let mut names: Vec<&str> = Vec::new();
+        for piece in source.split('"').skip(1).step_by(2) {
+            if [".j2k", ".jp2", ".bin"]
+                .iter()
+                .any(|suffix| piece.ends_with(suffix))
+                && !names.contains(&piece)
+            {
+                names.push(piece);
+            }
+        }
+        assert!(
+            names.len() > 20,
+            "the fixture scan found only {} names, so it is not reading the file it \
+             thinks it is reading",
+            names.len()
+        );
+
+        let mut checked = 0;
+        let mut stranded: Vec<(String, &str)> = Vec::new();
+        for (_, test, doc, body) in tests_with_docs_and_bodies(source) {
+            for name in &names {
+                if doc.contains(name) {
+                    checked += 1;
+                    if !body.contains(name) {
+                        stranded.push((test.clone(), name));
+                    }
+                }
+            }
+        }
+        assert!(
+            stranded.is_empty(),
+            "these doc blocks name a fixture their own test never touches, which is what \
+             a block sitting on the wrong function looks like: {stranded:?}"
+        );
+        // The positive control. An empty `stranded` proves nothing unless
+        // the scan actually found doc blocks naming fixtures, and this file
+        // has dozens.
+        assert!(
+            checked > 20,
+            "only {checked} fixture mentions were checked, so this passed by finding \
+             nothing rather than by finding nothing wrong"
+        );
+    }
+
+    /**
+     * Pins the signed decode as the numbers vips reports, not as an offset.
+     * `hayro-jpeg2000` DC-level-shifts every component into the unsigned
+     * range whatever `SIZ` says, so the loader takes the sign bit off the
+     * codestream itself and subtracts the shift back off. Both halves are
+     * asserted: the carrier is the signed one, and the five samples are the
+     * ones the committed capture records for `vips jp2kload`.
+     * The values are the point. `depth12s.j2k` holds `[-2048, -1, 0, 1,
+     * 2047]` and vips reports `[-32768, -16, 0, 16, 32752]`, so the row
+     * carries the left-justification and the sign together: an
+     * implementation that forgot the shift would say `[-2048, -1, 0, 1,
+     * 2047]` and one that forgot the sign would say `[0, 32752, -32768,
+     * -32752, 65520 as i16]`. Neither can pass this.
+     * `depth12u.j2k` is the same file with the sign bit clear and is the
+     * positive control that the carrier moved because of that bit and not
+     * because of the depth or the geometry.
+     * Input: `depth12s.j2k` -> Output: `Int16(1)` holding the five vips
+     * numbers, with `bits-per-sample` still 12.
      */
     #[test]
     #[cfg(feature = "jp2k")]
-    fn a_carrier_this_crate_does_not_have_is_a_typed_refusal_and_not_an_offset() {
-        let err = decode_jp2k(fixture("depth12s.j2k"), DecodeLimits::default())
-            .expect_err("a signed component has no carrier");
-        assert!(
-            matches!(
-                err,
-                SourceError::Jp2k(Jp2kError::SignedComponent {
-                    component: 0,
-                    precision: 12
-                })
-            ),
-            "a signed component must be refused by name: {err:?}"
+    fn a_signed_component_decodes_to_the_signed_carrier_vips_uses() {
+        let one = std::num::NonZeroU16::new(1).expect("1 is non-zero");
+        let raster = decoded("depth12s.j2k");
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Int16(one),
+            "a 12-bit signed component is `short` in vips and `Int16` here"
         );
+        assert_eq!(
+            signed_samples(&raster),
+            vec![-32768, -16, 0, 16, 32752],
+            "the committed capture records exactly these five for vips jp2kload, and \
+             they carry the left-justification and the sign at once"
+        );
+        assert_eq!(
+            int_field(&raster, "bits-per-sample"),
+            Some(12),
+            "the true depth still travels here and not in the value"
+        );
+        assert_eq!(
+            raster.interpretation(),
+            Interpretation::Grey16,
+            "vips tags the same file grey16"
+        );
+
         // The control: the same 5x1 shape at the same precision with the sign
-        // bit clear decodes, so the refusal above is the sign bit and not the
-        // depth or the geometry.
-        assert_eq!(decoded("depth12u.j2k").width(), 5);
+        // bit clear is unsigned, so the carrier above followed that bit.
+        let control = decoded("depth12u.j2k");
+        assert_eq!(control.format(), PixelFormat::Gray16);
+        assert_eq!(samples(&control), vec![0, 16, 16384, 65504, 65520]);
+    }
 
-        // `uint31.jp2` is the precision refusal on its own. Its sibling
-        // `int31.jp2` is signed AND 31-bit and is refused by the sign bit
-        // first, which is the order the checks run in and is asserted here so
-        // the two cannot be confused for one another.
-        let err = decode_jp2k(fixture("uint31.jp2"), DecodeLimits::default())
-            .expect_err("31 bits per sample has no carrier");
-        let SourceError::Jp2k(Jp2kError::PrecisionNotSupported {
-            component,
-            precision,
-            max,
-        }) = err
-        else {
-            panic!("uint31.jp2 must be refused by precision: {err:?}");
-        };
-        assert_eq!((component, precision, max), (0, 31, MAX_PRECISION));
-
-        let err = decode_jp2k(fixture("int31.jp2"), DecodeLimits::default())
-            .expect_err("a signed 31-bit component has neither carrier");
-        assert!(
-            matches!(
-                err,
-                SourceError::Jp2k(Jp2kError::SignedComponent { precision: 31, .. })
-            ),
-            "int31.jp2 is signed and 31-bit; the sign bit is checked first: {err:?}"
-        );
+    /**
+     * Pins the one carrier refusal left on the decode side, and that both
+     * 31-bit fixtures now reach it.
+     * Before issue #905 `int31.jp2` was refused by the sign bit, which ran
+     * first; the sign bit is a carrier now, so the precision ceiling is what
+     * catches it, and `uint31.jp2` reaches the same refusal by the same
+     * route. That is the assertion: the two files are refused for the same
+     * reason, and the reason is the decoder's `f32` container rather than a
+     * missing carrier.
+     * The control is `depth16u.j2k`, one bit under the ceiling, so a refusal
+     * that fired on the shape rather than the number would take it down too.
+     * Input: `uint31.jp2`, `int31.jp2` -> Output:
+     * `PrecisionNotSupported { precision: 31, max: 16 }` for both.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn thirty_one_bits_is_the_decode_ceiling_whichever_sign_it_carries() {
+        for name in ["uint31.jp2", "int31.jp2"] {
+            let err = decode_jp2k(fixture(name), DecodeLimits::default())
+                .expect_err("31 bits per sample has no carrier");
+            let SourceError::Jp2k(Jp2kError::PrecisionNotSupported {
+                component,
+                precision,
+                max,
+            }) = err
+            else {
+                panic!("{name} must be refused by precision: {err:?}");
+            };
+            assert_eq!(
+                (component, precision, max),
+                (0, 31, MAX_PRECISION),
+                "{name}"
+            );
+        }
         // The control: one bit under the ceiling still decodes.
         assert_eq!(decoded("depth16u.j2k").format(), PixelFormat::Gray16);
+    }
+
+    /// A copy of `bytes` with `Ssiz`'s sign bit set on the named components
+    /// and nothing else touched.
+    ///
+    /// The whole point of building the input this way is that the sample
+    /// data, the tile layout, the `colr` box and the geometry are the
+    /// committed fixture's, so the only thing under test is the
+    /// declaration. It asserts that every named component actually moved,
+    /// because a flip that silently failed to apply would leave a test
+    /// asserting a refusal that never had anything to refuse.
+    #[cfg(feature = "jp2k")]
+    fn with_sign_bits(bytes: &[u8], components: &[usize]) -> Vec<u8> {
+        let layout = ContainerLayout::parse(bytes).expect("container");
+        let mut out = bytes.to_vec();
+        let base = layout.codestream;
+        let count = usize::from(u16::from_be_bytes([out[base + 40], out[base + 41]]));
+        for component in components {
+            assert!(*component < count, "component {component} of {count}");
+            let at = base + 42 + component * 3;
+            assert_eq!(
+                out[at] & 0x80,
+                0,
+                "component {component} is already signed, so setting the bit proves nothing"
+            );
+            out[at] |= 0x80;
+        }
+        out
+    }
+
+    /**
+     * Pins the refusal for a file whose components disagree about the sign
+     * bit, and pins it as parity rather than as a gap.
+     * A raster carries one sample kind for every band, so there is no
+     * carrier for a file that mixes them. vips has the same problem and the
+     * same answer: measured on 8.18.6, `rgb_lossless.jp2` with component
+     * 1's `Ssiz` sign bit flipped and nothing else touched fails with
+     * `jp2kload: components differ in precision`, while the untouched file
+     * decodes. So matching the refusal is the faithful thing here.
+     * Two controls, and they are what make the row mean something. The
+     * untouched fixture still decodes, so the refusal is the flipped bit and
+     * not the rewrite; and the *same* fixture with all three bits flipped
+     * decodes as `Int8(3)`, so the refusal is the disagreement and not the
+     * sign.
+     * Input: `rgb_lossless.jp2` with one, none and all three sign bits set
+     * -> Output: `MixedComponentSignedness { signed: 1, unsigned: 0 }`, a
+     * clean `Rgb8`, and a clean `Int8(3)`.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn components_that_disagree_about_the_sign_bit_are_refused_the_way_vips_refuses_them() {
+        let three = std::num::NonZeroU16::new(3).expect("3 is non-zero");
+        let base = fixture("rgb_lossless.jp2");
+
+        let mixed = with_sign_bits(base, &[1]);
+        let err = decode_jp2k(&mixed, DecodeLimits::default())
+            .expect_err("a file whose components disagree has no carrier");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jp2k(Jp2kError::MixedComponentSignedness {
+                    signed: 1,
+                    unsigned: 0
+                })
+            ),
+            "the refusal must name both sides: {err:?}"
+        );
+
+        // Control one: the untouched fixture, so the refusal is the bit.
+        assert_eq!(decoded("rgb_lossless.jp2").format(), PixelFormat::Rgb8);
+
+        // Control two: the same file with every component signed, so the
+        // refusal is the disagreement rather than the sign. vips reads this
+        // one as `char` / `srgb` too (measured: `[-128, -128, -128, -67,
+        // -31, -99]` for the first two pixels, against `[0, 0, 0, 61, 97,
+        // 29]` unsigned, which is the same numbers less 128).
+        let all_signed = with_sign_bits(base, &[0, 1, 2]);
+        let raster = decode_jp2k(&all_signed, DecodeLimits::default())
+            .expect("an all-signed file has a carrier");
+        assert_eq!(raster.format(), PixelFormat::Int8(three));
+        assert_eq!(
+            raster.interpretation(),
+            Interpretation::Srgb,
+            "vips tags the same file srgb"
+        );
+        assert_eq!(
+            signed_samples(&raster)[..6],
+            [-128, -128, -128, -67, -31, -99],
+            "the same samples as the unsigned control, less 128, which is what the \
+             DC level shift comes to at 8 bits"
+        );
+    }
+
+    /**
+     * Pins the second signed refusal: a signed file in the shape `jp2kload`
+     * runs its inverse YCC over is refused rather than reproduced, because
+     * vips's answer there is not one a carrier can hold.
+     * Measured on 8.18.6 by writing the committed `sub420.j2k` shape signed
+     * with `opj_compress` (`-F 8,4,3,8,s@1x1:2x2:2x2 -mct 0`): vips
+     * subtracts the YCC offset *inside* the component's own signed carrier,
+     * so `-112 - 128` wraps to 16, and then clamps the transform's output to
+     * the unsigned range before storing it in a `char`. The red band comes
+     * out 0 at every pixel and the blue band wraps past 127 into negatives:
+     * `[0, 5, 28]` at pixel 0 and `[0, 28, -122]` at pixel 4, against
+     * `[255, 87, 0]` and `[200, 109, 36]` for the same file written
+     * unsigned. Matching that would be matching an oracle that has lost the
+     * picture.
+     * The control is the untouched fixture, which still decodes through the
+     * YCC path to the pixels vips produces, so the refusal is the sign bit
+     * and not the shape.
+     * Input: `sub420.j2k` with all three sign bits set -> Output:
+     * `SignedInverseYcc { components: 3 }`, and a clean decode without them.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_signed_file_in_the_inverse_ycc_shape_is_refused_rather_than_reproduced() {
+        let signed = with_sign_bits(fixture("sub420.j2k"), &[0, 1, 2]);
+        let err = decode_jp2k(&signed, DecodeLimits::default())
+            .expect_err("vips's answer for this shape is not one a carrier can hold");
+        assert!(
+            matches!(
+                err,
+                SourceError::Jp2k(Jp2kError::SignedInverseYcc { components: 3 })
+            ),
+            "the refusal must name the shape: {err:?}"
+        );
+
+        // The control: without the sign bits the same file runs the inverse
+        // YCC and lands on vips's pixels, so this refusal is the sign and
+        // not the subsampling.
+        let raster = decoded("sub420.j2k");
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        assert_eq!(raster.data()[..3], [255, 87, 0]);
     }
 
     /**
@@ -3066,18 +3599,6 @@ mod tests {
     }
 
     /**
-     * The image origin is the one geometry this loader and vips disagree
-     * about, and it is pinned so the disagreement is a decision on the
-     * record rather than a surprise (issue #766).
-     * `origin57.j2k` declares `Xsiz = 37, XOsiz = 5, Ysiz = 31, YOsiz = 7`.
-     * The standard's image is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is
-     * 32x24 and is what this loader and `hayro-jpeg2000` both report. vips
-     * reports 27x17 with `xoffset = -5`, which is that size less the origin a
-     * second time.
-     * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
-     * 27x17.
-     */
-    /**
      * Pins the wall the band ceiling actually stands on, because #769's
      * stated cause is a channel count and the measurement is narrower than
      * that (issue #769).
@@ -3215,6 +3736,18 @@ mod tests {
         assert_eq!(all_of_them.rates.len(), 1);
     }
 
+    /**
+     * The image origin is the one geometry this loader and vips disagree
+     * about, and it is pinned so the disagreement is a decision on the
+     * record rather than a surprise (issue #766).
+     * `origin57.j2k` declares `Xsiz = 37, XOsiz = 5, Ysiz = 31, YOsiz = 7`.
+     * The standard's image is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is
+     * 32x24 and is what this loader and `hayro-jpeg2000` both report. vips
+     * reports 27x17 with `xoffset = -5`, which is that size less the origin a
+     * second time.
+     * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
+     * 27x17.
+     */
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_image_origin_is_the_one_divergence_on_geometry() {
@@ -3660,8 +4193,16 @@ mod tests {
                     SampleKind::U16 => {
                         data.extend_from_slice(&((value * 271 % 65536) as u16).to_ne_bytes());
                     }
+                    // The full 16-bit range and not the non-negative half of
+                    // it. `% 32768` would have made every `Int16` sample
+                    // positive, and a signed round trip whose fixture never
+                    // goes below zero passes just as well against an encoder
+                    // that writes the component unsigned, which is the
+                    // defect issue #905 closed.
                     SampleKind::I16 => {
-                        data.extend_from_slice(&((value * 271 % 32768) as i16).to_ne_bytes());
+                        data.extend_from_slice(
+                            &((value * 271 % 65536) as u16 as i16).to_ne_bytes(),
+                        );
                     }
                     SampleKind::U32 => data.extend_from_slice(&(value * 271).to_ne_bytes()),
                     SampleKind::I32 => {
@@ -3679,30 +4220,68 @@ mod tests {
     /**
      * Pins the lossless encoder as a true round trip at every carrier this
      * codec reads: what goes in comes back out, sample for sample, at 1, 2, 3
-     * and 4 bands and at both element widths.
+     * and 4 bands, at both element widths, and at both signs.
      * The multiband rows are not padding. A 2-band raster is where vips's own
      * band-count guess splits (measured: 2 bands read back `b-w`, 3 read back
      * `srgb`), and a de-interleaver that transposed bands would still
      * round-trip a 1-band image, so the wide rows are what makes the plane
      * ordering an assertion.
-     * Input: eight rasters -> Output: the same pixels back, at the same
-     * carrier, with the container always a JP2 whatever the raster.
+     * The signed rows carry a guard of their own, because they are the ones
+     * that can pass vacuously: an all-positive fixture round-trips just as
+     * happily through an encoder that never sets `Ssiz`'s sign bit, so each
+     * signed row first asserts its fixture holds samples of both signs
+     * (issue #905).
+     * Input: sixteen rasters, generated from the four sample kinds rather
+     * than listed -> Output: the same pixels back, at the same carrier, with
+     * the container always a JP2 whatever the raster.
      */
     #[test]
     #[cfg(feature = "jp2k")]
     fn every_carrier_survives_a_lossless_round_trip_through_this_crate() {
-        let two = std::num::NonZeroU16::new(2).expect("2 is non-zero");
-        for format in [
-            PixelFormat::Gray8,
-            PixelFormat::Gray16,
-            PixelFormat::Rgb8,
-            PixelFormat::Rgb16,
-            PixelFormat::Rgba8,
-            PixelFormat::Rgba16,
-            PixelFormat::Multi8(two),
-            PixelFormat::Multi16(two),
-        ] {
+        use crate::pixel::SampleKind;
+
+        // Generated from the kinds this codec carries rather than listed, so
+        // a carrier added to `PixelFormat` cannot slip past the sweep the way
+        // three did when issue #516 landed and every hand-written array
+        // stopped at the previous last variant. Four band counts because 1, 3
+        // and 4 reach the named variants and 2 reaches the multiband one, and
+        // 2 is also where vips's own band-count guess splits (measured: 2
+        // bands read back `b-w`, 3 read back `srgb`).
+        let carriers: Vec<PixelFormat> = [
+            SampleKind::U8,
+            SampleKind::U16,
+            SampleKind::I8,
+            SampleKind::I16,
+        ]
+        .into_iter()
+        .flat_map(|kind| {
+            (1..=MAX_BANDS).map(move |bands| {
+                PixelFormat::with_kind(bands, kind).expect("1 to 4 bands has a carrier")
+            })
+        })
+        .collect();
+        assert_eq!(
+            carriers.len(),
+            16,
+            "four kinds at four band counts, and the count is spelled out so a kind \
+             dropped from the list is a failure rather than a shorter sweep"
+        );
+
+        for format in carriers {
             let source = ramp(8, 6, format);
+            // The fixture has to be able to catch the bug. A signed round
+            // trip whose samples are all non-negative passes against an
+            // encoder that writes the component unsigned, so every signed
+            // row asserts its own fixture straddles zero before it asserts
+            // anything about the codec.
+            if matches!(format.kind(), SampleKind::I8 | SampleKind::I16) {
+                let values = signed_samples(&source);
+                assert!(
+                    values.iter().any(|v| *v < 0) && values.iter().any(|v| *v > 0),
+                    "{format:?}: the fixture must hold samples of both signs, or this \
+                     row cannot tell a signed encode from an unsigned one"
+                );
+            }
             let bytes = source
                 .encode_jp2k(SaveOptions::default())
                 .unwrap_or_else(|e| panic!("{format:?} must encode: {e}"));
@@ -3726,6 +4305,250 @@ mod tests {
                  multiple-component transform are both exact, so this is an identity"
             );
         }
+    }
+
+    /// The `Ssiz` byte the encoder wrote for every component of `bytes`.
+    ///
+    /// Read back out of the file rather than off the raster, so the
+    /// assertion is about what a third-party reader will see and not about
+    /// what this crate meant.
+    #[cfg(feature = "jp2k")]
+    fn written_ssiz(bytes: &[u8]) -> Vec<u8> {
+        let layout = ContainerLayout::parse(bytes).expect("container");
+        let codestream = &bytes[layout.codestream..];
+        // `SIZ` starts at offset 2 and its component triples at offset 42,
+        // which is the same arithmetic `CodestreamHeader::parse` walks; the
+        // count comes from `Csiz` at 40.
+        let count = usize::from(u16::from_be_bytes([codestream[40], codestream[41]]));
+        (0..count).map(|i| codestream[42 + i * 3]).collect()
+    }
+
+    /**
+     * Pins the encoder's own bytes, not just its round trip: the `Ssiz`
+     * byte this crate writes for each carrier is the byte `vips jp2ksave`
+     * writes for the libvips band format that carries the same samples.
+     * This is the assertion the round trip cannot make. Encoding and
+     * decoding through one crate agrees with itself whatever convention it
+     * picked, so a codec that wrote every component unsigned and read every
+     * component unsigned would still round-trip perfectly and would still be
+     * a file nothing else can read. The sign bit in `Ssiz` is what a third
+     * party sees, and these four values are what vips puts there.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: saving a 4x1 raster of
+     * `[-5, 100, -100, 7]` as `uchar`, `char`, `ushort` and `short` with
+     * `jp2ksave --lossless` gives `Ssiz` of `0x07`, `0x87`, `0x0f` and
+     * `0x8f`, and reading the files *this* encoder writes back through
+     * `vips jp2kload` returns the same four sample sets exactly.
+     * Input: four 4x1 rasters -> Output: `Ssiz` per component, and the
+     * precision half of the byte as the control that the sign bit is the
+     * only thing that moved.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_sign_bit_this_encoder_writes_is_the_one_vips_writes() {
+        let one = std::num::NonZeroU16::new(1).expect("1 is non-zero");
+        let three = std::num::NonZeroU16::new(3).expect("3 is non-zero");
+        let cases: [(PixelFormat, u8); 4] = [
+            (PixelFormat::Gray8, 0x07),
+            (PixelFormat::Int8(one), 0x87),
+            (PixelFormat::Gray16, 0x0f),
+            (PixelFormat::Int16(one), 0x8f),
+        ];
+        for (format, want) in cases {
+            let bytes = ramp(4, 1, format)
+                .encode_jp2k(SaveOptions::default())
+                .unwrap_or_else(|e| panic!("{format:?} must encode: {e}"));
+            assert_eq!(
+                written_ssiz(&bytes),
+                vec![want],
+                "{format:?}: vips writes {want:#04x} for the band format that carries \
+                 these samples, so anything else is a file vips reads as the wrong sign"
+            );
+        }
+
+        // Every component gets the bit, not just the first: a loop that set
+        // the sign on component 0 and left the rest unsigned would pass the
+        // one-band rows above and write a file whose green and blue planes
+        // are offset by half the range.
+        let bytes = ramp(4, 1, PixelFormat::Int8(three))
+            .encode_jp2k(SaveOptions::default())
+            .expect("a three-band signed raster must encode");
+        assert_eq!(written_ssiz(&bytes), vec![0x87, 0x87, 0x87]);
+    }
+
+    /**
+     * Pins the exact table issue #905 was filed with, through this crate
+     * rather than through vips: `[-5, 100, -100, 7]` survives a lossless
+     * round trip on the signed 8- and 16-bit carriers and is refused on the
+     * 32-bit ones.
+     * The four values are chosen and not a ramp. Two are negative, one of
+     * them (-100) is outside the range a naive `as u8` would leave
+     * recognisable, and 251 is what -5 would come back as if the samples
+     * were widened through the unsigned type. A test whose fixture was
+     * `[0, 100, 7]` would pass against exactly that bug.
+     * The 32-bit rows are the other half of the split and the reason this
+     * issue is not "signed is unsupported": vips writes them and cannot read
+     * them back, so refusing is the implementation. Their message has to say
+     * 32-bit and must not say signed, or the two refusals are
+     * indistinguishable to a caller.
+     * Input: `[-5, 100, -100, 7]` at `Int8(1)`, `Int16(1)`, `Int32(1)` and
+     * `Uint32(1)` -> Output: an identity for the first two and a typed
+     * refusal naming 32-bit for the last two.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_values_from_the_issue_round_trip_on_the_signed_carriers() {
+        let one = std::num::NonZeroU16::new(1).expect("1 is non-zero");
+        let values: [i32; 4] = [-5, 100, -100, 7];
+
+        let bytes: Vec<u8> = values.iter().map(|v| (*v as i8).to_ne_bytes()[0]).collect();
+        let source = Raster::new(4, 1, PixelFormat::Int8(one), bytes).expect("Int8 fixture");
+        let encoded = source
+            .encode_jp2k(SaveOptions::default())
+            .expect("Int8 must encode");
+        let back = decode_jp2k(&encoded, DecodeLimits::default()).expect("Int8 must decode");
+        assert_eq!(back.format(), PixelFormat::Int8(one));
+        assert_eq!(
+            signed_samples(&back),
+            values.to_vec(),
+            "vips round-trips these four through `char` exactly, and so does this"
+        );
+        assert_eq!(
+            back.data(),
+            source.data(),
+            "the reversible 5/3 wavelet is exact, so a signed round trip is an identity \
+             on the bytes and not only on the numbers"
+        );
+        // The same four bytes read as unsigned are `[251, 100, 156, 7]`, and
+        // 251 is exactly what -5 comes back as when the sample is widened
+        // through `u8` on the way into the encoder. The bytes cannot tell the
+        // two apart; the carrier can, which is why `format()` is asserted
+        // above and why this row is here rather than a bit-pattern check.
+        assert_eq!(samples(&back), vec![251, 100, 156, 7]);
+
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|v| (*v as i16).to_ne_bytes())
+            .collect();
+        let source = Raster::new(4, 1, PixelFormat::Int16(one), bytes).expect("Int16 fixture");
+        let encoded = source
+            .encode_jp2k(SaveOptions::default())
+            .expect("Int16 must encode");
+        let back = decode_jp2k(&encoded, DecodeLimits::default()).expect("Int16 must decode");
+        assert_eq!(back.format(), PixelFormat::Int16(one));
+        assert_eq!(signed_samples(&back), values.to_vec());
+
+        // The other arm of the split, and it is a different refusal for a
+        // different reason: vips accepts a 32-bit image and does not read it
+        // back, so there is nothing to be faithful to.
+        for format in [PixelFormat::Int32(one), PixelFormat::Uint32(one)] {
+            let message = ramp(4, 1, format)
+                .encode_jp2k(SaveOptions::default())
+                .expect_err("a 32-bit raster has no component this encoder writes")
+                .to_string();
+            assert!(
+                message.contains("32-bit") && !message.contains("signed"),
+                "{format:?}: the 32-bit refusal must name the width and must not read as \
+                 the signed one, which is no longer a refusal at all: {message}"
+            );
+        }
+    }
+
+    /**
+     * A direct sweep of `sample_depth` over every carrier, because the
+     * callers cannot reach all of its arms in a way that distinguishes them:
+     * `encode` only ever asks for the layout it then uses, so a carrier
+     * given the wrong precision or the wrong sign would show up as a wrong
+     * file rather than as a wrong answer here, and the two 32-bit arms are
+     * refusals no round-trip row can cover.
+     * Generated from the sample kinds rather than listed, for the reason
+     * issue #516 gives: three carriers arrived at once and four hand-written
+     * arrays stopped at the previous last variant. The controls are the
+     * collisions the bug would exploit, `Int8` against `Gray8` and `Int16`
+     * against `Gray16`, which share a byte width and differ only here.
+     * Input: every `PixelFormat` this codec can be handed -> Output: the
+     * precision, the element width and the sign bit for the four it writes,
+     * and a refusal for the rest.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn sample_depth_answers_precision_width_and_sign_for_every_carrier() {
+        use crate::pixel::SampleKind;
+
+        let expected = |kind: SampleKind| -> Option<ComponentLayout> {
+            Some(match kind {
+                SampleKind::U8 => ComponentLayout {
+                    precision: 8,
+                    element_bytes: 1,
+                    signed: false,
+                },
+                SampleKind::U16 => ComponentLayout {
+                    precision: 16,
+                    element_bytes: 2,
+                    signed: false,
+                },
+                SampleKind::I8 => ComponentLayout {
+                    precision: 8,
+                    element_bytes: 1,
+                    signed: true,
+                },
+                SampleKind::I16 => ComponentLayout {
+                    precision: 16,
+                    element_bytes: 2,
+                    signed: true,
+                },
+                SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => return None,
+            })
+        };
+
+        let kinds = [
+            SampleKind::U8,
+            SampleKind::U16,
+            SampleKind::I8,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+            SampleKind::F32,
+        ];
+        let mut written = 0;
+        let mut refused = 0;
+        for kind in kinds {
+            for bands in 1..=MAX_BANDS {
+                let format = PixelFormat::with_kind(bands, kind).expect("1 to 4 bands");
+                match (sample_depth(format), expected(kind)) {
+                    (Ok(got), Some(want)) => {
+                        assert_eq!(got, want, "{format:?}");
+                        written += 1;
+                    }
+                    (Err(e), None) => {
+                        refused += 1;
+                        let _ = e;
+                    }
+                    (got, want) => panic!("{format:?}: got {got:?}, wanted {want:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            (written, refused),
+            (16, 12),
+            "four carriers written and three refused, at four band counts each; the \
+             counts are spelled out so a kind that silently changed sides is a failure"
+        );
+
+        // The collision the width-keyed reading gets wrong, stated on its
+        // own: `Int8` and `Gray8` are both one byte and only one of them is
+        // signed.
+        let one = std::num::NonZeroU16::new(1).expect("1 is non-zero");
+        let signed8 = sample_depth(PixelFormat::Int8(one)).expect("Int8 is written");
+        let unsigned8 = sample_depth(PixelFormat::Gray8).expect("Gray8 is written");
+        assert_eq!(
+            (signed8.precision, signed8.element_bytes),
+            (unsigned8.precision, unsigned8.element_bytes),
+            "the two carriers agree on everything a width can see"
+        );
+        assert_ne!(
+            signed8.signed, unsigned8.signed,
+            "and disagree on the one thing a width cannot"
+        );
     }
 
     /**

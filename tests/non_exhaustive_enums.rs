@@ -98,7 +98,8 @@ fn assert_jp2k_error_non_exhaustive(v: &Jp2kError) {
         Jp2kError::FeatureNotEnabled => {}
         Jp2kError::Decode { .. } => {}
         Jp2kError::Container { .. } => {}
-        Jp2kError::SignedComponent { .. } => {}
+        Jp2kError::MixedComponentSignedness { .. } => {}
+        Jp2kError::SignedInverseYcc { .. } => {}
         Jp2kError::PrecisionNotSupported { .. } => {}
         Jp2kError::PrecisionWiderThanDeclared { .. } => {}
         Jp2kError::UnsupportedBandCount { .. } => {}
