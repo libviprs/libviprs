@@ -1156,6 +1156,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeats-after-the-first and a single play carries no block at all, where
   WebP's `ANIM` chunk holds the play count unshifted.
 
+  All four consumers are landed, and `tests/animation_dialect.rs` now holds
+  them to **one** dialect: it loads the same four-frame animation as a GIF, a
+  WebP and a JPEG XL and compares the answers at four windows, rather than
+  taking three separate agreements measured module by module. That is what
+  found the drift the model was meant to prevent, because the compatibility
+  pair diverges three ways: `gifload` attaches `gif-delay` and `gif-loop` and
+  this crate's GIF loader attaches neither (issue #865), where the WebP loader
+  attaches both and the JPEG XL loader attaches one, those two matching their
+  oracles exactly.
+
+  Two things are worth carrying out of that measurement. **`vipsheader -a` is a
+  broken probe for `gif-delay` and `gif-loop`**: it lists neither on any file,
+  on any loader, while `vipsheader -f gif-loop` returns the value, so reading
+  the absence in `-a` gives the exact inverse of the truth. And geometry alone
+  does not prove a roll: stacking a four-page WebP backwards leaves the height,
+  the page count, `page-height`, `n-pages`, `delay`, `loop` and both
+  compatibility fields untouched, so the guard walks the pages through
+  `Raster::try_extract_page` and checks their pixels.
+
 - JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
   #501). Build with `--features jp2k` and `decode_jp2k` reads both container
   forms, the RFC 3745 JP2 box structure and the bare `SOC` + `SIZ` codestream,
