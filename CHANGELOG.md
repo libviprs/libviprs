@@ -2825,6 +2825,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `.v` `BandFmt` wire tag comes from the sample kind, not from a byte
+  width** (issue #841). `encode_vips` derived that header word through
+  `match bpc { 1 => 0, 2 => 2, _ => 6 }`, so every four-byte sample kind that
+  is not `f32` was written into the file tagged **float**. It is the one site
+  of #748's list where a wrong answer is not confined to a single op: it lands
+  on disk and is read back wrong on every later run, and `fuzz_decode` routes
+  `.v` magic at `decode_vips_bytes`, so the read half of the same word is
+  reached from untrusted bytes. `get_field("format")` carried the same
+  three-arm match and answered `"float"` for the same inputs, so the reported
+  field and the wire tag were wrong together and agreed with each other.
+
+  All seven `SampleKind` values map to their real `VipsBandFormat` codes now,
+  rather than the fallthrough being patched, so the carriers of issues #516
+  and #517 get correct `.v` behaviour without touching this file again. The
+  table is measured on `/opt/homebrew/bin/vips` 8.18.6 (`vips black base.v 4 3
+  --bands 1`, then `vips cast base.v out.v <format>` for each of the ten
+  formats, reading the `i32` at header offset 20 back out of each file):
+  `uchar` 0, `char` 1, `ushort` 2, `short` 3, `uint` 4, `int` 5, `float` 6,
+  `complex` 7, `double` 8, `dpcomplex` 9. `uint`, `int` and `float` all carry
+  `Bbits` 32, which is why a width cannot decide this word.
+
+  **`.v` stays wire-compatible.** The three codes libviprs has always written
+  keep their values, so every `.v` this crate has written still decodes to the
+  format it was written with, and re-encoding writes the same two header words
+  back. That is pinned against the byte-for-byte 64-byte headers vips 8.18.6
+  wrote for `uchar`, `ushort` and `float`.
+
+  The reader also stops merging two refusals. A code that is not a sample kind
+  libviprs knows at all, and a real vips format this build has no carrier for,
+  answer differently now: the second names the format, so a `uint` file reads
+  as "no carrier yet" rather than as corruption.
+
 - A GIF graphic control extension spread over more than one sub-block, or
   carrying a size byte that does not say 4, is read the way libnsgif reads it
   (issue #878). libnsgif never looks at the chain: it takes the four bytes
