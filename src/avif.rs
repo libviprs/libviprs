@@ -1472,6 +1472,85 @@ unsafe fn read_picture(picture: &Dav1dPicture, nclx: Option<Nclx>) -> Result<Fra
 mod tests {
     use super::*;
 
+    /// The region of this file that talks to dav1d, with every comment
+    /// stripped, so the checks below read code and not prose.
+    ///
+    /// It runs from the `extern "C"` block to the top of [`read_picture`],
+    /// which is exactly the span [`decode_av1`] owns. Counting over the whole
+    /// file would be wrong in the way this epic keeps rediscovering: the
+    /// sentence explaining *why* `dav1d_data_create` is not used names it, so a
+    /// whole-file count of the name would be satisfied by the prose arguing
+    /// against it.
+    fn ffi_region_without_comments() -> String {
+        let source = include_str!("avif.rs");
+        let start = source
+            .find("    unsafe extern \"C\" {")
+            .expect("the dav1d `extern \"C\"` block moved or was renamed");
+        let end = source[start..]
+            .find("unsafe fn read_picture(")
+            .map(|offset| start + offset)
+            .expect("`read_picture` moved or was renamed");
+        source[start..end]
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The AV1 input buffer is one this crate allocated, and dav1d is lent it
+    /// rather than asked for one.
+    ///
+    /// `dav1d_data_create` hands back a pointer for the caller to fill, and in
+    /// `rav1d` that pointer is built out of a shared reference, so it carries a
+    /// read-only tag and writing the payload through it is undefined behaviour
+    /// under both Stacked Borrows and Tree Borrows (issue #912). Miri says so
+    /// on the first AVIF fixture that decodes, and nothing else can: the write
+    /// is well-behaved at runtime today, so no assertion about pixels or
+    /// timings will ever go red on it.
+    ///
+    /// That leaves the shape of the call as the only thing an ordinary test
+    /// run can hold, so this holds it. It is weaker than running Miri, and it
+    /// is what stops the two lines going back in unnoticed.
+    ///
+    /// The `dav1d_data_wrap` count is the positive control. A zero has two
+    /// explanations, one of which is a scanner that found nothing at all, and
+    /// two matches for the replacement rule out the anchors having drifted off
+    /// the region.
+    #[test]
+    fn the_av1_input_buffer_is_lent_to_dav1d_rather_than_taken_from_it() {
+        let region = ffi_region_without_comments();
+
+        let wraps = region.matches("dav1d_data_wrap(").count();
+        assert_eq!(
+            wraps, 2,
+            "expected the `dav1d_data_wrap` declaration and its one call in the FFI \
+             region, found {wraps}. If this is 0 the scanner is looking at the wrong \
+             span and every other assertion here is worthless."
+        );
+
+        let creates = region.matches("dav1d_data_create").count();
+        assert_eq!(
+            creates, 0,
+            "`dav1d_data_create` is back in the dav1d call sequence ({creates} \
+             mentions in code). The buffer it returns carries a read-only tag in \
+             `rav1d`, so filling it is undefined behaviour under both aliasing \
+             models (issue #912). Allocate the payload here and lend it through \
+             `dav1d_data_wrap` instead."
+        );
+
+        let copies = region.matches("copy_nonoverlapping").count();
+        assert_eq!(
+            copies, 0,
+            "the FFI region copies through a raw pointer again ({copies} sites). \
+             The payload is copied by `to_vec` into an allocation this function \
+             owns; a `copy_nonoverlapping` here is how issue #912 was written the \
+             first time."
+        );
+    }
+
     /// The lossless 8-bit fixture, which is the bit-exactness anchor for the
     /// whole module: `heifsave --lossless --bitdepth 8` writes AV1 with
     /// `matrix_coefficients = 0` and 4:4:4 chroma, so the planes *are* the
