@@ -246,9 +246,16 @@ fn raw_string_start(b: &[u8], i: usize) -> Option<(usize, usize)> {
     if prev_ident {
         return None;
     }
+    // `c"..."` (a non-raw C-string) needs nothing here: it falls through to
+    // the plain `"` branch a byte later and is masked correctly by luck,
+    // since there is no prefix-specific escaping difference from an
+    // ordinary string. `cr"..."` does need to be here, the same as `br"..."`
+    // beside it, or a literal backslash inside one is escape-processed and
+    // desynchronises the mask exactly the way #943 already happened once
+    // (issue #940's panel).
     let mut k = if b[i] == b'r' {
         i + 1
-    } else if b[i] == b'b' && i + 1 < b.len() && b[i + 1] == b'r' {
+    } else if (b[i] == b'b' || b[i] == b'c') && i + 1 < b.len() && b[i + 1] == b'r' {
         i + 2
     } else {
         return None;
@@ -445,14 +452,29 @@ fn head_ranges(toks: &[(usize, &str)]) -> Vec<(usize, usize)> {
 /// operators, all four ordering operators, and both spellings of the
 /// accessor: `PixelFormat::bytes_per_channel()` and `SampleKind::bytes()`.
 ///
+/// A comparison survives one level of defensive parenthesization around the
+/// whole call (`(kind.bytes()) == 1`) and one `as` cast on the accessor's
+/// side (`kind.bytes() as u8 == 1`), because a batch review of this exact
+/// scanner found both silently defeat it: neither is a hypothetical corner
+/// case, both are ordinary Rust a rustfmt pass or a reviewer might introduce
+/// (issue #940's panel). Deeper nesting of either is not handled and is not
+/// pinned; it has not been observed and adding it widens the risk of a false
+/// positive on an unrelated wrapped call for a shape nobody has needed yet.
+///
 /// # Where it under-approximates
 ///
 /// A width read into a local and compared on the next line
 /// (`let bpc = kind.bytes(); if bpc == 1`) is invisible, and so is a width
-/// compared through a helper in another file. Both need a scan that follows
-/// values rather than one that reads tokens, which is a different kind of
-/// program from this one. `the_documented_blind_spots_are_still_blind` pins
-/// them so the list cannot grow in silence.
+/// compared through a helper in another file. A width used to index a table
+/// (`SCALE[kind.bytes()]`) or tested for set membership
+/// (`allowed.contains(&kind.bytes())`) is invisible too: recognising either
+/// needs the scanner to understand what encloses the call rather than only
+/// what touches it, which is a real widening rather than the paren/cast fix
+/// above, and was left for a future pass rather than done under review
+/// pressure. All four need a scan that follows values or structure rather
+/// than one that reads adjacent tokens, which is a different kind of program
+/// from this one. `the_documented_blind_spots_are_still_blind` pins them so
+/// the list cannot grow in silence.
 fn width_comparisons(src: &str) -> Vec<(usize, String)> {
     const NEEDLES: [&str; 2] = ["bytes_per_channel", "bytes"];
     let masked = mask_literals_and_comments(src);
@@ -471,9 +493,31 @@ fn width_comparisons(src: &str) -> Vec<(usize, String)> {
         if toks.get(i + 1).map(|t| t.1) != Some("(") || toks.get(i + 2).map(|t| t.1) != Some(")") {
             continue;
         }
-        let after = toks.get(i + 3).is_some_and(|t| COMPARISONS.contains(&t.1));
         let start = receiver_start(&toks, i - 1);
-        let before = start > 0 && COMPARISONS.contains(&toks[start - 1].1);
+        // A single defensive `(...)` wrapped tightly around the whole call
+        // (nothing else inside it) is not part of the receiver chain
+        // `receiver_start` already walks, so it needs its own one-level
+        // unwrap on both sides, done jointly: an open immediately before the
+        // receiver only counts as this call's wrapper if a close immediately
+        // follows the call's own closing paren too, or a macro's argument
+        // list (`assert_eq!(kind.bytes(), 4)`) would be misread as a wrap
+        // (issue #940's panel).
+        let wrapped =
+            start > 0 && toks[start - 1].1 == "(" && toks.get(i + 3).map(|t| t.1) == Some(")");
+        let before_start = if wrapped { start - 1 } else { start };
+        let mut after_idx = if wrapped { i + 4 } else { i + 3 };
+        // `as <type>` narrows or widens the accessor's own result and does
+        // not change which comparison it feeds, so it is transparent to the
+        // scanner the same way the wrap above is.
+        if toks.get(after_idx).map(|t| t.1) == Some("as")
+            && toks.get(after_idx + 1).is_some_and(|t| is_word(t.1))
+        {
+            after_idx += 2;
+        }
+        let after = toks
+            .get(after_idx)
+            .is_some_and(|t| COMPARISONS.contains(&t.1));
+        let before = before_start > 0 && COMPARISONS.contains(&toks[before_start - 1].1);
         let in_head = heads.iter().any(|&(a, b)| *off >= a && *off < b);
         if after || before || in_head {
             lines.push(masked[..*off].bytes().filter(|c| *c == b'\n').count() + 1);
@@ -665,6 +709,11 @@ fn the_width_scanner_sees_code_and_not_comments() {
             "fn f(x: PixelFormat) -> bool { let s: &'static str = \"n\"; \
              x.bytes_per_channel() == 1 }\n",
         ),
+        (
+            "a raw C-string holding an unmatched quote, issue #940's panel",
+            "fn f(x: PixelFormat) -> bool {\n    let _ = cr#\"an unmatched \" quote\"#;\n    \
+             x.bytes_per_channel() == 1\n}\n",
+        ),
     ] {
         assert_eq!(
             width_comparisons(src).len(),
@@ -707,6 +756,15 @@ fn the_documented_blind_spots_are_still_blind() {
         (
             "a width handed to a helper that does the comparing",
             "fn f(kind: SampleKind) -> bool {\n    is_one_byte(kind.bytes())\n}\n",
+        ),
+        (
+            "a width used to index a table, issue #940's panel",
+            "fn f(kind: SampleKind) -> f64 {\n    SCALE[kind.bytes()]\n}\n",
+        ),
+        (
+            "a width tested for set membership, issue #940's panel",
+            "fn f(kind: SampleKind, allowed: &std::collections::HashSet<usize>) -> bool {\n    \
+             allowed.contains(&kind.bytes())\n}\n",
         ),
     ] {
         assert_eq!(
@@ -854,6 +912,22 @@ const MUST_BE_FOUND: &[(&str, &str)] = &[
     (
         "matches!, which is a match head wearing a macro",
         "fn f(fmt: PixelFormat) -> bool {\n    matches!(fmt.bytes_per_channel(), 1 | 2)\n}\n",
+    ),
+    (
+        "a single defensive paren wrapped around the whole call, issue #940's panel",
+        "fn f(kind: SampleKind) -> bool {\n    (kind.bytes()) == 1\n}\n",
+    ),
+    (
+        "an `as` cast between the call and the comparison, issue #940's panel",
+        "fn f(kind: SampleKind) -> bool {\n    kind.bytes() as u8 == 1\n}\n",
+    ),
+    (
+        "a wrap and a cast together, issue #940's panel",
+        "fn f(fmt: PixelFormat) -> bool {\n    fmt.bytes_per_channel() as i64 == 4i64\n}\n",
+    ),
+    (
+        "both sides wrapped, one found from each direction",
+        "fn f(a: SampleKind, b: SampleKind) -> bool {\n    (a.bytes()) >= (b.bytes())\n}\n",
     ),
 ];
 
