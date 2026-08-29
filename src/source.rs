@@ -504,7 +504,8 @@ pub enum SourceError {
     PageOutOfRange {
         /// The container, for the message: `"gif"`, `"webp"` or `"jxl"`,
         /// which are exactly the three loaders that call
-        /// [`resolve_page_range`]. This said `("webp", "jxl")` for as long as
+        /// `resolve_page_range` (crate-private, so it is named rather than
+        /// linked). This said `("webp", "jxl")` for as long as
         /// GIF had a `BadPageNumber` of its own, and stayed saying it after
         /// #845 folded that variant in here, so the doc named two of the three
         /// containers a caller can actually see (issue #950). The
