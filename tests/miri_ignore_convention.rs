@@ -356,13 +356,17 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// stayed green, and reading a `;` inside `[u8; 32]` as a bodyless declaration
 /// dropped 116 functions out of the call graph the same way.
 ///
-/// Eighteen today: five in `tests/dependency_policy.rs`, three in
-/// `tests/pdfium_source_audit.rs` and two in `tests/workspace_layout.rs`, which
-/// are the ten #714 is about; six in `tests/icc_lut_alloc.rs`, which spawn a
-/// child on purpose to watch it abort (#693); one in `src/source.rs` that
-/// shells out to `mkfifo` and was already annotated, for the filesystem reason,
-/// before any of this; and one in `tests/oracle_capture_pins.rs` that runs
-/// `git ls-files`, which is the one #701 brought in.
+/// Nineteen today: six in `tests/dependency_policy.rs`, three in
+/// `tests/pdfium_source_audit.rs` and two in `tests/workspace_layout.rs`. Ten
+/// of those eleven are what #714 is about; the eleventh is the sha2 version
+/// ceiling #731 added, which spawns nothing at run time and is counted anyway,
+/// because this detector reads the call graph rather than the process table and
+/// cannot see that `graphs()` memoizes its `cargo tree` calls across the whole
+/// binary. Then six in `tests/icc_lut_alloc.rs`, which spawn a child on purpose
+/// to watch it abort (#693); one in `src/source.rs` that shells out to `mkfifo`
+/// and was already annotated, for the filesystem reason, before any of this;
+/// and one in `tests/oracle_capture_pins.rs` that runs `git ls-files`, which is
+/// the one #701 brought in.
 ///
 /// The population is wider than the ten that needed fixing, and deliberately
 /// so. Pinning only the ten would go green again the moment the detector lost
@@ -373,11 +377,11 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// It then caught a second one, which is the better advertisement: #701 added
 /// `no_compiled_python_is_tracked_under_oracle_captures`, which shells out to
 /// `git ls-files`, and both PRs were green on their own branches. The count
-/// only moved when they landed together, and it is the eighteenth here for
-/// exactly that reason. This is a count that two file-disjoint changes can
-/// both be right about and still break, so move it in the same change that
-/// moves the population.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 18;
+/// only moved when they landed together, and it is what took this count to
+/// eighteen, for exactly that reason. This is a count that two file-disjoint
+/// changes can both be right about and still break, so move it in the same
+/// change that moves the population.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 19;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.

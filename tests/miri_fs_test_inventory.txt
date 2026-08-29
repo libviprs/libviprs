@@ -358,6 +358,7 @@ annotated   not-detected tests/dependency_policy.rs::every_links_key_is_on_the_a
 annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confined_to_packfile
 annotated   not-detected tests/dependency_policy.rs::runtime_library_loaders_are_confined_to_the_pdfium_features
 annotated   not-detected tests/dependency_policy.rs::the_external_library_features_stay_opt_in
+annotated   not-detected tests/dependency_policy.rs::the_sha2_miri_backend_pin_has_not_outlived_its_cause
 annotated   not-detected tests/icc_lut_alloc.rs::a_lut_export_survives_a_ceiling_at_the_promised_cms_bound
 annotated   not-detected tests/icc_lut_alloc.rs::a_lut_import_survives_a_ceiling_at_the_promised_cms_bound
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting
