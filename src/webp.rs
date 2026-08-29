@@ -719,11 +719,9 @@ fn scan_animation(bytes: &[u8]) -> Option<AnimationScan> {
         let size = u32::from_le_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?);
         // `at + 8` is inside the buffer by the loop condition; everything
         // past it is the file's own arithmetic on a size it chose, so it
-        // goes through the checked step. Both casts back to `usize` are
-        // lossless because `chunk_bounds` was asked for this target's
-        // ceiling and refuses anything above it (issue #941).
-        let bounds = chunk_bounds((at + 8) as u64, size, usize::MAX as u64)?;
-        let payload = bytes.get(at + 8..bounds.end as usize)?;
+        // goes through the checked step (issue #941).
+        let (end, next) = chunk_bounds_here(at + 8, size)?;
+        let payload = bytes.get(at + 8..end)?;
         match fourcc {
             b"VP8X" => {
                 // Ten bytes: flags, three reserved, then the canvas width
@@ -764,8 +762,8 @@ fn scan_animation(bytes: &[u8]) -> Option<AnimationScan> {
             _ => {}
         }
         // Chunks are padded to an even length and the size field does not
-        // count the pad, which `chunk_bounds` already applied.
-        at = bounds.next as usize;
+        // count the pad, which the step above already applied.
+        at = next;
     }
     seen_vp8x.then_some(scan)
 }
@@ -1342,6 +1340,27 @@ fn chunk_bounds(payload: u64, size: u32, addr_max: u64) -> Option<ChunkBounds> {
     let end = payload.checked_add(size)?;
     let next = end.checked_add(size & 1)?;
     (next <= addr_max).then_some(ChunkBounds { end, next })
+}
+
+/// [`chunk_bounds`] at this target's own address ceiling, as the two `usize`
+/// offsets a walk actually indexes with.
+///
+/// Every walk calls this rather than [`chunk_bounds`] directly, so the
+/// ceiling is not a thing a caller can get wrong: on a 64-bit host
+/// `usize::MAX as u64` *is* `u64::MAX`, so passing the wrong one there is
+/// invisible to every test that can run, and it would put #941 straight
+/// back. The ceiling stays a parameter one level down only so a test can
+/// ask what a 32-bit target asks.
+///
+/// The narrowing is `try_from` rather than `as`, so even a wrong ceiling
+/// refuses instead of truncating to an offset behind the one the walk
+/// started at, which is what the same file does with overflow checks off.
+fn chunk_bounds_here(payload: usize, size: u32) -> Option<(usize, usize)> {
+    let bounds = chunk_bounds(payload as u64, size, usize::MAX as u64)?;
+    Some((
+        usize::try_from(bounds.end).ok()?,
+        usize::try_from(bounds.next).ok()?,
+    ))
 }
 
 /// The encoder colour type for a raster, or the reason there is none.
@@ -2009,8 +2028,8 @@ mod tests {
         while p + 8 <= bytes.len() {
             out.push(String::from_utf8_lossy(&bytes[p..p + 4]).into_owned());
             let size = u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap());
-            p = match chunk_bounds((p + 8) as u64, size, usize::MAX as u64) {
-                Some(bounds) => bounds.next as usize,
+            p = match chunk_bounds_here(p + 8, size) {
+                Some((_, next)) => next,
                 None => break,
             };
         }
@@ -3153,8 +3172,8 @@ mod tests {
                 assert!(blends && claims_opaque, "frame at {cursor} is not the lie");
                 crafted += 1;
             }
-            cursor = match chunk_bounds((cursor + 8) as u64, size, usize::MAX as u64) {
-                Some(bounds) => bounds.next as usize,
+            cursor = match chunk_bounds_here(cursor + 8, size) {
+                Some((_, next)) => next,
                 None => break,
             };
         }
@@ -3283,6 +3302,21 @@ mod tests {
         // range; one more byte of payload offset is what tips it over.
         assert_eq!(bounds(1, u32::MAX - 1, ADDR_32), Some((ADDR_32, ADDR_32)));
         assert_eq!(bounds(2, u32::MAX - 1, ADDR_32), None);
+
+        // And the wrapper every walk actually calls, which is the step at
+        // this target's own ceiling and nothing else. The equality is
+        // written against `chunk_bounds` rather than against a literal so
+        // it says the same true thing on both targets: a wrapper that
+        // picked a different ceiling fails here on a 32-bit host and is
+        // invisible on a 64-bit one, which is why the ceiling is pinned in
+        // one place rather than passed by three callers.
+        assert_eq!(chunk_bounds_here(20, 116), Some((136, 136)));
+        assert_eq!(chunk_bounds_here(20, 117), Some((137, 138)));
+        assert_eq!(
+            chunk_bounds_here(20, u32::MAX),
+            chunk_bounds(20, u32::MAX, usize::MAX as u64)
+                .map(|b| (b.end as usize, b.next as usize))
+        );
     }
 
     /**
