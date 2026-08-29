@@ -2758,7 +2758,12 @@ mod tests {
         // Measured with `/opt/homebrew/bin/vips` 8.18.6, not read off the
         // libvips headers: `vips cast base.v out.v <format>` for each format,
         // then the `i32` at header offset 20 of each file.
-        let cases = [(1i32, "char"), (3, "short"), (4, "uint"), (5, "int")];
+        // `uint` (BandFmt 4) is deliberately not in this list any more:
+        // issue #517 gave it a carrier, so it decodes rather than refusing,
+        // and `a_uint_v_file_round_trips_through_the_carrier` below is what
+        // pins it instead. The three that remain are the signed kinds of
+        // issue #516, which still have no carrier.
+        let cases = [(1i32, "char"), (3, "short"), (5, "int")];
         for (code, nickname) in cases {
             let mut bytes = rgb_2x2().encode_vips_impl(false);
             bytes[20..24].copy_from_slice(&code.to_ne_bytes());
@@ -2773,8 +2778,8 @@ mod tests {
             );
         }
 
-        // Positive control: the same probe on the three codes this build does
-        // carry decodes rather than refusing, so the four failures above are
+        // Positive control: the same probe on a code this build does carry
+        // decodes rather than refusing, so the three failures above are
         // about the sample kind and not about the patched fixture.
         let ok = rgb_2x2().encode_vips_impl(false);
         assert_eq!(
@@ -2996,14 +3001,100 @@ mod tests {
             vips_header_at(32, 6, 4)[BBITS_OFFSET..BBITS_OFFSET + 4],
             "uint and float share Bbits 32"
         );
-        let err = decode_vips_bytes(&uint, DecodeLimits::default())
-            .expect_err("no libviprs PixelFormat carries uint yet");
-        let SourceError::VipsFormat(msg) = &err else {
-            panic!("a band format with no carrier is a format error: {err:?}");
-        };
-        assert!(
-            msg.contains("uint"),
-            "the refusal must name uint, got {msg:?}"
+        // And it decodes, since issue #517 gave `uint` a carrier. This
+        // assertion used to be a refusal: #841 built this arm with nothing
+        // that could reach it, because no `PixelFormat` produced the kind,
+        // and #517 is what made it reachable. So the pair of them turn a
+        // "we would refuse this" into the round trip the wire tag is for.
+        let back = decode_vips_bytes(&uint, DecodeLimits::default())
+            .expect("BandFmt 4 carries uint since issue #517");
+        assert_eq!(
+            back.format(),
+            PixelFormat::with_kind(3, SampleKind::U32).unwrap(),
+            "BandFmt 4 must decode to the uint carrier, not to the float one \
+             it shares Bbits 32 with"
+        );
+        let re = back.encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(re[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4].try_into().unwrap()),
+            4,
+            "re-encoding a uint raster must write BandFmt 4 back, not float's 6"
+        );
+        assert_eq!(
+            i32::from_ne_bytes(re[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+            32
+        );
+    }
+
+    /**
+     * Tests that a `uint` raster survives a `.v` round trip, which is the
+     * proof issue #841 could not write and issue #517 makes possible.
+     * Works by encoding a `Uint32` raster with distinct samples, asserting
+     * the two header words a byte width cannot separate (`BandFmt` 4 and
+     * Bbits 32, where float carries 6 and the same 32), then decoding and
+     * comparing the format and every byte. A file is the one place a wrong
+     * carrier tag outlives the process, so this is the assertion that
+     * matters most of the ones in this stack.
+     * Input: a 2x2 `Uint32(3)` raster holding values above 65535 ->
+     * Output: BandFmt 4, Bbits 32, and the same raster back.
+     */
+    #[test]
+    fn a_uint_v_file_round_trips_through_the_carrier() {
+        let fmt = PixelFormat::with_kind(3, SampleKind::U32).unwrap();
+        // Values above 65535, so a carrier that narrowed on the way through
+        // would lose them rather than merely retag them.
+        let samples: Vec<u32> = (0..12).map(|i| 90_000 + i * 7).collect();
+        let data: Vec<u8> = samples.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let im = Raster::new(2, 2, fmt, data.clone()).unwrap();
+
+        let bytes = im.encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(
+                bytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            4,
+            "a uint raster must write BandFmt 4; 6 is float and shares Bbits 32"
+        );
+        assert_eq!(
+            i32::from_ne_bytes(bytes[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+            32
+        );
+
+        let back = decode_vips_bytes(&bytes, DecodeLimits::default())
+            .expect("a uint .v file must read back");
+        assert_eq!(back.format(), fmt);
+        assert_eq!((back.width(), back.height()), (2, 2));
+        assert_eq!(
+            back.data(),
+            &data[..],
+            "the samples changed on the way back"
+        );
+
+        // Control: the float carrier of the same width writes a different
+        // word and reads back as itself, so the two are told apart by the
+        // tag and not by the width they share.
+        let ffmt = PixelFormat::with_kind(3, SampleKind::F32).unwrap();
+        let fbytes = Raster::zeroed(2, 2, ffmt).unwrap().encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(
+                fbytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            6
+        );
+        assert_eq!(
+            i32::from_ne_bytes(fbytes[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+            32,
+            "uint and float share Bbits, which is why BandFmt is load-bearing"
+        );
+        assert_eq!(
+            decode_vips_bytes(&fbytes, DecodeLimits::default())
+                .unwrap()
+                .format(),
+            ffmt
         );
     }
 

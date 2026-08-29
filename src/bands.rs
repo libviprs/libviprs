@@ -60,7 +60,7 @@
 //! tile-encoding sinks reject them, so reduce or extract back to 1/3/4 bands
 //! before handing a raster to the pyramid pipeline.
 
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::{Raster, RasterError};
 use thiserror::Error;
 
@@ -68,6 +68,22 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BandError {
+    /// The raster carries a sample kind the band operations have no
+    /// implementation for.
+    ///
+    /// The band ops read samples as unsigned integers, so they carry `U8`,
+    /// `U16` and the 32-bit unsigned carrier of issue #517, and refuse
+    /// float and the signed carriers of issue #516. It replaces a panic
+    /// whose message said "float rasters" over a raster that was not
+    /// float. Mirrors
+    /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
+    #[error("{op} does not support {kind:?} samples yet")]
+    UnsupportedSampleKind {
+        /// The operation that refused.
+        op: &'static str,
+        /// The sample kind it cannot read.
+        kind: SampleKind,
+    },
     /// Two rasters that must share dimensions do not.
     #[error("dimension mismatch: {expected_w}x{expected_h} vs {got_w}x{got_h}")]
     DimensionMismatch {
@@ -120,58 +136,85 @@ pub enum BandError {
     Raster(#[from] RasterError),
 }
 
-/// Read the flat `i`-th sample of a buffer with the given bytes-per-channel
-/// (native byte order for 16-bit, matching [`crate::raster_ops`]).
-/// Unsigned depths only: the panic arm keeps the band ops, which predate
-/// the float formats, from misreading float bytes as `u16` pairs.
+/// Read the flat `i`-th sample of a buffer, honouring the sample kind
+/// (native byte order, matching [`crate::raster_ops`]).
+///
+/// Unsigned kinds only, and keyed on the kind rather than on a byte width:
+/// the width's `_` arm used to panic claiming the raster was float, which
+/// on the 32-bit unsigned carrier of issue #517 names the wrong carrier
+/// and refuses one the band ops can read perfectly well. The panic that
+/// remains is a backstop behind [`reject_unreadable_kind`] and says which
+/// kind it was handed.
 #[inline]
-fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
-    match bpc {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        _ => panic!(
-            "the band operations do not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
+fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => data[i] as u32,
+        SampleKind::U16 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
+            "the band operations do not support {kind:?} samples yet; \
+             cast to an unsigned format first"
         ),
     }
 }
 
-/// Write the flat `i`-th sample. `v` must already fit the depth.
-/// Unsigned depths only; see [`read_flat`].
+/// Write the flat `i`-th sample. `v` must already fit the kind.
+/// Unsigned kinds only; see [`read_flat`].
 #[inline]
-fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    match bpc {
-        1 => data[i] = v as u8,
-        2 => {
+fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
+    match kind {
+        SampleKind::U8 => data[i] = v as u8,
+        SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
-            data[2 * i] = b[0];
-            data[2 * i + 1] = b[1];
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        _ => panic!(
-            "the band operations do not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
+        SampleKind::U32 => data[4 * i..4 * i + 4].copy_from_slice(&v.to_ne_bytes()),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
+            "the band operations do not support {kind:?} samples yet; \
+             cast to an unsigned format first"
         ),
     }
 }
 
 /// Clamp-and-round an `f64` constant into the sample range of an unsigned
-/// depth. Unsigned depths only; see [`read_flat`].
+/// kind. Unsigned kinds only; see [`read_flat`].
 #[inline]
-fn const_to_sample(c: f64, bpc: usize) -> u32 {
-    let max = match bpc {
-        1 => 255.0,
-        2 => 65535.0,
-        _ => panic!(
-            "the band operations do not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
-    };
+fn const_to_sample(c: f64, kind: SampleKind) -> u32 {
+    let max = f64::from(kind.max_value().unwrap_or_else(|| {
+        panic!(
+            "the band operations do not support {kind:?} samples yet; \
+             cast to an unsigned format first"
+        )
+    }));
     c.clamp(0.0, max).round() as u32
 }
 
-/// Canonical output format for a band count and depth.
-fn format_for(bands: usize, bpc: usize) -> Result<PixelFormat, BandError> {
-    PixelFormat::with_channels(bands, bpc).ok_or(BandError::TooManyBands { bands })
+/// Canonical output format for a band count and sample kind.
+///
+/// Through [`PixelFormat::with_kind`], because a byte width does not name
+/// a carrier: `with_channels(bands, 4)` answers the float carrier, so
+/// bandjoining two `uint` rasters used to tag the result float (issue
+/// #517).
+fn format_for(bands: usize, kind: SampleKind) -> Result<PixelFormat, BandError> {
+    PixelFormat::with_kind(bands, kind).ok_or(BandError::TooManyBands { bands })
+}
+
+/// Refuse a sample kind the unsigned-only band ops cannot read, as a typed
+/// error rather than a panic out of a `Result`-returning method (the shape
+/// issue #694 landed).
+fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), BandError> {
+    let kind = r.format().kind();
+    match kind {
+        SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => Ok(()),
+        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => {
+            Err(BandError::UnsupportedSampleKind { op, kind })
+        }
+    }
 }
 
 /// Error unless `a` and `b` share pixel dimensions.
@@ -212,12 +255,18 @@ impl Raster {
     /// count exceeds `u16::MAX`.
     pub fn try_bandjoin(&self, other: &Raster) -> Result<Raster, BandError> {
         ensure_same_dims(self, other)?;
+        reject_unreadable_kind("bandjoin", self)?;
+        reject_unreadable_kind("bandjoin", other)?;
         let (a_fmt, b_fmt) = (self.format(), other.format());
         let (a_bands, b_bands) = (a_fmt.channels(), b_fmt.channels());
-        let (a_bpc, b_bpc) = (a_fmt.bytes_per_channel(), b_fmt.bytes_per_channel());
+        let (a_kind, b_kind) = (a_fmt.kind(), b_fmt.kind());
         let out_bands = a_bands + b_bands;
-        let out_bpc = a_bpc.max(b_bpc);
-        let out_fmt = format_for(out_bands, out_bpc)?;
+        // `SampleKind::promote`, the libvips `vips__formatalike` order,
+        // rather than the wider byte width, which cannot order the carriers
+        // (issues #517, #607).
+        let out_kind = a_kind.promote(b_kind);
+        let out_bpc = out_kind.bytes();
+        let out_fmt = format_for(out_bands, out_kind)?;
 
         let pixels = self.width() as usize * self.height() as usize;
         let mut out = vec![0u8; pixels * out_bands * out_bpc];
@@ -225,12 +274,12 @@ impl Raster {
         for p in 0..pixels {
             let base = p * out_bands;
             for c in 0..a_bands {
-                let v = read_flat(a_data, a_bpc, p * a_bands + c);
-                write_flat(&mut out, out_bpc, base + c, v);
+                let v = read_flat(a_data, a_kind, p * a_bands + c);
+                write_flat(&mut out, out_kind, base + c, v);
             }
             for c in 0..b_bands {
-                let v = read_flat(b_data, b_bpc, p * b_bands + c);
-                write_flat(&mut out, out_bpc, base + a_bands + c, v);
+                let v = read_flat(b_data, b_kind, p * b_bands + c);
+                write_flat(&mut out, out_kind, base + a_bands + c, v);
             }
         }
         let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
@@ -296,12 +345,14 @@ impl Raster {
         if v.is_empty() {
             return Err(BandError::EmptyConstants);
         }
+        reject_unreadable_kind("bandjoin_const", self)?;
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
         let out_bands = bands + v.len();
-        let out_fmt = format_for(out_bands, bpc)?;
-        let consts: Vec<u32> = v.iter().map(|&c| const_to_sample(c, bpc)).collect();
+        let out_fmt = format_for(out_bands, kind)?;
+        let consts: Vec<u32> = v.iter().map(|&c| const_to_sample(c, kind)).collect();
 
         let pixels = self.width() as usize * self.height() as usize;
         let mut out = vec![0u8; pixels * out_bands * bpc];
@@ -309,10 +360,15 @@ impl Raster {
         for p in 0..pixels {
             let base = p * out_bands;
             for c in 0..bands {
-                write_flat(&mut out, bpc, base + c, read_flat(data, bpc, p * bands + c));
+                write_flat(
+                    &mut out,
+                    kind,
+                    base + c,
+                    read_flat(data, kind, p * bands + c),
+                );
             }
             for (k, &cv) in consts.iter().enumerate() {
-                write_flat(&mut out, bpc, base + bands + k, cv);
+                write_flat(&mut out, kind, base + bands + k, cv);
             }
         }
         let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
@@ -357,7 +413,7 @@ impl Raster {
         }
         let fmt = self.format();
         let out_bands = fmt.channels() * factor as usize;
-        let out_fmt = format_for(out_bands, fmt.bytes_per_channel())?;
+        let out_fmt = format_for(out_bands, fmt.kind())?;
         let mut result = Raster::new(width / factor, self.height(), out_fmt, self.data().to_vec())?;
         // Reshapes the pixel grid and does *not* rescale the resolution:
         // measured on vips 8.18.6, an 8x8 3-band raster folds to 1x8 24-band
@@ -405,7 +461,7 @@ impl Raster {
         let out_width = self.width() as u64 * factor as u64;
         let out_width =
             u32::try_from(out_width).map_err(|_| BandError::WidthOverflow { width: out_width })?;
-        let out_fmt = format_for(bands / factor as usize, fmt.bytes_per_channel())?;
+        let out_fmt = format_for(bands / factor as usize, fmt.kind())?;
         let mut result = Raster::new(out_width, self.height(), out_fmt, self.data().to_vec())?;
         // Same as `bandfold`: 8x8 3-band unfolds to 24x8 1-band and reports
         // the same `xres 5 yres 7`.
@@ -436,19 +492,21 @@ impl Raster {
     ///
     /// Returns a wrapped [`RasterError`] if the result cannot be allocated.
     pub fn try_bandmean(&self) -> Result<Raster, BandError> {
+        reject_unreadable_kind("bandmean", self)?;
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let out_fmt = format_for(1, bpc)?;
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
+        let out_fmt = format_for(1, kind)?;
         let pixels = self.width() as usize * self.height() as usize;
         let mut out = vec![0u8; pixels * bpc];
         let data = self.data();
         for p in 0..pixels {
             let sum: u64 = (0..bands)
-                .map(|c| read_flat(data, bpc, p * bands + c) as u64)
+                .map(|c| read_flat(data, kind, p * bands + c) as u64)
                 .sum();
             let bands64 = bands as u64;
-            write_flat(&mut out, bpc, p, ((sum + bands64 / 2) / bands64) as u32);
+            write_flat(&mut out, kind, p, ((sum + bands64 / 2) / bands64) as u32);
         }
         let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
         result.carry_meta_from(self);
@@ -496,29 +554,34 @@ impl Raster {
             None => count / 2,
         };
         let bands = self.format().channels();
-        let mut out_bpc = self.format().bytes_per_channel();
+        reject_unreadable_kind("bandrank", self)?;
+        // Promoted over the whole input set, so the answer does not depend
+        // on the order they were listed in (issues #517, #607).
+        let mut out_kind = self.format().kind();
         for r in others {
             ensure_same_dims(self, r)?;
+            reject_unreadable_kind("bandrank", r)?;
             if r.format().channels() != bands {
                 return Err(BandError::BandCountMismatch {
                     expected: bands,
                     got: r.format().channels(),
                 });
             }
-            out_bpc = out_bpc.max(r.format().bytes_per_channel());
+            out_kind = out_kind.promote(r.format().kind());
         }
-        let out_fmt = format_for(bands, out_bpc)?;
+        let out_bpc = out_kind.bytes();
+        let out_fmt = format_for(bands, out_kind)?;
 
         let samples = self.width() as usize * self.height() as usize * bands;
         let mut out = vec![0u8; samples * out_bpc];
         let mut vals = vec![0u32; count];
         for i in 0..samples {
-            vals[0] = read_flat(self.data(), self.format().bytes_per_channel(), i);
+            vals[0] = read_flat(self.data(), self.format().kind(), i);
             for (k, r) in others.iter().enumerate() {
-                vals[k + 1] = read_flat(r.data(), r.format().bytes_per_channel(), i);
+                vals[k + 1] = read_flat(r.data(), r.format().kind(), i);
             }
             vals.sort_unstable();
-            write_flat(&mut out, out_bpc, i, vals[idx]);
+            write_flat(&mut out, out_kind, i, vals[idx]);
         }
         let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
         result.carry_meta_from(self);
@@ -609,19 +672,21 @@ impl Raster {
     /// with `op`, keeping the input depth. A single-band input reduces to a
     /// copy of itself, matching libvips.
     fn bandbool(&self, op: impl Fn(u32, u32) -> u32) -> Result<Raster, BandError> {
+        reject_unreadable_kind("bandbool", self)?;
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let out_fmt = format_for(1, bpc)?;
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
+        let out_fmt = format_for(1, kind)?;
         let pixels = self.width() as usize * self.height() as usize;
         let mut out = vec![0u8; pixels * bpc];
         let data = self.data();
         for p in 0..pixels {
-            let mut acc = read_flat(data, bpc, p * bands);
+            let mut acc = read_flat(data, kind, p * bands);
             for c in 1..bands {
-                acc = op(acc, read_flat(data, bpc, p * bands + c));
+                acc = op(acc, read_flat(data, kind, p * bands + c));
             }
-            write_flat(&mut out, bpc, p, acc);
+            write_flat(&mut out, kind, p, acc);
         }
         let mut result = Raster::new(self.width(), self.height(), out_fmt, out)?;
         result.carry_meta_from(self);
@@ -673,7 +738,8 @@ impl Raster {
     pub fn try_extract_bands(&self, start: i64, n: u32) -> Result<Raster, BandError> {
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
         if n == 0 {
             return Err(BandError::EmptyBandRange);
         }
@@ -687,7 +753,10 @@ impl Raster {
         }
         let first = resolved as usize;
         let n = n as usize;
-        let out_fmt = format_for(n, bpc)?;
+        // A pure byte copy, so every carrier passes through: the format
+        // has to come off the kind or a `Uint32` band extract would be
+        // tagged float (issue #517).
+        let out_fmt = format_for(n, kind)?;
 
         let pixels = self.width() as usize * self.height() as usize;
         let mut out = vec![0u8; pixels * n * bpc];
@@ -1279,14 +1348,121 @@ mod tests {
         assert_eq!(folded2.width(), mono.width() / 2);
     }
 
-    /// The band ops reject float rasters loudly instead of misreading
-    /// their bytes as u16 pairs (float band maths lands with a later
-    /// batch; cast to an unsigned format first).
+    /// The band ops reject a sample kind they cannot read instead of
+    /// misreading its bytes as `u16` pairs (float band maths lands with a
+    /// later batch; cast to an unsigned format first). The panicking
+    /// surface still panics, and the message now names the kind it was
+    /// handed: it used to say "float rasters" for anything four bytes
+    /// wide, which is the wrong carrier as soon as the unsigned 32-bit one
+    /// exists (issue #517).
     #[test]
-    #[should_panic(expected = "do not support float rasters")]
+    #[should_panic(expected = "does not support F32 samples")]
     fn bands_float_panics() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
         let _ = im.bandjoin_const(255.0);
+    }
+
+    // ------------------------------------------------------------------
+    // the unsigned 32-bit carrier (issue #517)
+    // ------------------------------------------------------------------
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /**
+     * Tests that the band ops carry the unsigned 32-bit carrier and keep a
+     * value no 16-bit carrier holds, and that the output format comes off
+     * the kind rather than the byte width.
+     * Works by joining two `uint` rasters and taking their band mean,
+     * against `/opt/homebrew/bin/vips` 8.18.6: `vips bandmean` on a
+     * two-band `uint` image holding (90000, 128) answers **45064**, which
+     * is `(90000 + 128) / 2`, and the output stays UINT. The mixed
+     * 8-with-uint join is the case the byte width gets wrong: four bytes
+     * names the float carrier.
+     * Input: bandjoin(uint 90000, uint 128) -> Uint32(2); bandmean of it
+     * -> 45064; bandjoin(u8, uint) -> Uint32(2).
+     */
+    #[test]
+    fn band_ops_carry_the_uint_carrier() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let a = uint32(1, 1, &[90_000]);
+        let b = uint32(1, 1, &[128]);
+        let joined = a.try_bandjoin(&b).unwrap();
+        assert_eq!(joined.format(), PixelFormat::Uint32(n(2)));
+        assert_eq!(u32_at(&joined, 0), 90_000);
+        assert_eq!(u32_at(&joined, 1), 128);
+
+        let mean = joined.try_bandmean().unwrap();
+        assert_eq!(mean.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&mean, 0), 45_064);
+
+        // The promotion the byte width cannot express.
+        let mixed = gray2x1()
+            .try_bandjoin(&uint32(2, 1, &[90_000, 90_000]))
+            .unwrap();
+        assert_eq!(mixed.format(), PixelFormat::Uint32(n(2)));
+        assert_eq!(u32_at(&mixed, 0), 7);
+        assert_eq!(u32_at(&mixed, 1), 90_000);
+
+        // A band extract is a byte copy, so it has to keep the carrier too.
+        let one = joined.try_extract_band(1).unwrap();
+        assert_eq!(one.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&one, 0), 128);
+
+        // Control: the 8-with-16 promotion that existed before.
+        let old = gray2x1().try_bandjoin(&gray2x1()).unwrap();
+        assert_eq!(old.format().bytes_per_channel(), 1);
+    }
+
+    /**
+     * Tests that a band op handed a sample kind it cannot read answers a
+     * typed error rather than panicking out of a `Result`, the shape issue
+     * #694 landed, and that the message names the kind it was given rather
+     * than claiming the raster is float.
+     * Works by handing a float raster to three band ops, with the uint
+     * carrier as the positive control that the guard is about the kind.
+     * Input: float -> Err(UnsupportedSampleKind { kind: F32 }); uint -> Ok.
+     */
+    #[test]
+    fn band_ops_refuse_a_kind_they_cannot_read() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        for got in [f.try_bandmean(), f.try_bandand(), f.try_bandjoin(&f)] {
+            assert!(
+                matches!(
+                    got,
+                    Err(BandError::UnsupportedSampleKind {
+                        kind: SampleKind::F32,
+                        ..
+                    })
+                ),
+                "a float raster gave {got:?}"
+            );
+        }
+        assert_eq!(
+            f.try_bandmean().unwrap_err().to_string(),
+            "bandmean does not support F32 samples yet"
+        );
+        // Positive control: the uint carrier passes all three.
+        let u = uint32(1, 1, &[90_000]);
+        assert!(u.try_bandmean().is_ok());
+        assert!(u.try_bandand().is_ok());
+        assert!(u.try_bandjoin(&u).is_ok());
     }
 }

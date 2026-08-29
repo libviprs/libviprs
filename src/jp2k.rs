@@ -1801,6 +1801,18 @@ fn sample_depth(format: PixelFormat) -> Result<(u8, usize), EncodeError> {
              integer format first, so the quantisation is yours rather than the encoder's \
              (vips jp2ksave refuses the same image with `not an integer format`)"
         ))),
+        // `jp2ksave` *accepts* a `uint` image and does not round-trip it.
+        // Measured on `/opt/homebrew/bin/vips` 8.18.6, saving a `uint`
+        // raster and loading it back: 1 reads back as 2147483648, 255 as
+        // 2147484160, 65535 as 2147614720 and 70000 as 2147622912, which is
+        // 2^31 plus roughly twice the sample. No value survives. So there
+        // is nothing to be faithful to here, and a typed refusal is the
+        // implementation rather than a gap (issue #517).
+        PixelFormat::Uint32(_) => Err(EncodeError::encode(format!(
+            "jp2k: this encoder writes 8- and 16-bit samples and {format:?} is 32-bit; \
+             cast to an unsigned 8/16-bit format first (vips jp2ksave accepts a uint \
+             image but does not read it back: 70000 returns as 2147622912)"
+        ))),
     }
 }
 
