@@ -636,6 +636,13 @@ mod tests {
             i8s(&downscale_half(&rgba).unwrap())[0],
             i8s(&downscale_half(&rgb).unwrap())[0]
         );
+
+        // `downscale_to` has its own copy of this kernel, and its own copy
+        // of the rounding. Mutating only its divide left all 28 tests in
+        // this module green, a real NO TEST REDDENS, because every alpha
+        // fixture drove the sibling. The same two blocks go through it.
+        let to = downscale_to(&src, 2, 1).unwrap();
+        assert_eq!(i8s(&to), vec![-100, -100, -100, 4, -1, -1, -1, 2]);
     }
 
     fn solid_raster(w: u32, h: u32, pixel: &[u8], fmt: PixelFormat) -> Raster {
