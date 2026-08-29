@@ -310,13 +310,12 @@ feature list is what it is; that is the house style and it is not optional.
 
 ## Allocation instruments: one shape, two questions
 
-There is now a counting `#[global_allocator]` in the core crate, in
-`tests/convolution_image_sized_allocations.rs`, and #696 is planning another
-one to prove that every image-sized allocation on a path went through the
-fallible reservation helper. Two instruments answering roughly the same
-question is how a third gets invented, so the call is made here rather than
-per-lane: **there is one instrument shape, and #696 extends the existing one
-rather than building a second.**
+There is a counting `#[global_allocator]` in the core crate, in
+`tests/convolution_image_sized_allocations.rs`, and there is a `cfg(test)`
+probe over `raster::try_plane` in `src/raster.rs`. Two instruments answering
+roughly the same question is how a third gets invented, so the call was made
+here rather than per-lane: **there is one instrument shape, and #696 extended
+the existing one rather than building a second.**
 
 Concretely, the shape is the one that file already has, and it is deliberately
 small: a `CountingAlloc` wrapping `System`, a thread-local threshold that starts
@@ -343,9 +342,26 @@ you write depends on which you are asking:
   fitted to one image cannot pass as a rate. That is what the convolution
   budget file does.
 - **A funnel.** "Every image-sized allocation on this path went through the
-  fallible helper." Compare the same counter against the helper's
-  `cfg(test)` hook consumptions. That is #696's, and the counter it needs is the
-  one that already exists.
+  fallible helper." Count the helper's `cfg(test)` hook consumptions per entry
+  point and per module, at exact equality, and read them next to the budget for
+  the same operation. That is #696's, in
+  `raster::tests::every_plane_these_paths_reserve_goes_through_the_one_funnel`.
+
+  **The two halves cannot share a binary, and that is a fact about `cfg`, not
+  an oversight.** The probe is `cfg(test)`, so it exists only in the library's
+  own unit-test binary; `#[global_allocator]` is scoped to the integration-test
+  binary that installs it, and an integration test links the library built
+  *without* `cfg(test)`. So the funnel count lives in a unit test and the budget
+  lives in the integration test, and where a row in each agrees for the same
+  operation, every image-sized allocation on that path went through the helper.
+  `try_sharpen` is 6 in both. Do not "fix" this by publishing the probe: a
+  `#[doc(hidden)] pub` counter gated on `debug_assertions` would make the public
+  surface depend on a profile, which is the shape the panel already rejected
+  once on #709's feature-dependent `is_alloc_limit`.
+
+  Neither half is complete alone. The count cannot see a buffer that never
+  reaches the helper (a `Clone::clone`, a `.collect()`, a `vec![0u8; n]`); the
+  budget cannot see whether an allocation it charged was fallible.
 
 Either way the bar is the one the rest of this repo runs on: a guard that stays
 green under a mutation of the thing it claims to guard is worthless, so break it
@@ -357,7 +373,7 @@ exercises all four on purpose.
 
 **The cost this puts on anything touching `src/convolution.rs`**, which is
 worth knowing before you start rather than when the suite goes red: the budgets
-there are pinned at exact values, **sixteen rows of two numbers**, each
+there are pinned at exact values, **eighteen rows of two numbers**, each
 cross-checked at two image sizes. The file covers `conv`, `sobel`, `gaussblur`,
 `compass`, `sharpen` and `canny`, and the first four share one traversal, so a
 change to what `Scan` holds live reddens ten rows at once and a change to the
@@ -372,6 +388,18 @@ The file was called `sharpen_canny_image_sized_allocations.rs` until #575 put
 `conv`, `sobel`, `gaussblur` and `compass` rows in it. Same instrument, same
 accounting, one more set of rows, which is the rule above being followed rather
 than an exception to it.
+
+**One helper, one label per site.** Every buffer in the crate that scales with
+an image is reserved through `raster::try_plane` (or its `_len` / `_filled`
+forms), which takes a `site: &'static str` of the shape `module.what`. A test
+addresses a buffer by that label, with `with_plane_cap_at` to starve it and
+`counting_planes` to count it under a prefix. Do not add a fourth private
+`try_reserve_exact` helper with a ceiling of its own; add a label. And do not
+reach for the spare form unless the *same* site allocates twice on one path,
+which today is only `try_sharpen`'s LabS round trip: a spare over a prefix that
+matches several sites is the ordinal again, and the ordinal is what #696
+removed. `src/arithmetic.rs`'s `try_scratch` is the one copy left, held open on
+#696 because that file belonged to another lane when the rest landed.
 
 ## Before you push
 
