@@ -1,5 +1,15 @@
 .PHONY: ci fmt clippy test miri loom doc
 
+# The features CI's Check & Lint job runs clippy against, which is exactly the
+# `lint: true` rows of `EXPECTED` in `tests/ci_feature_coverage.rs`. That file
+# asserts this list matches, so the local gate and the hosted one cannot drift.
+#
+# Three of the twelve rows are deliberately absent, each for a reason the table
+# states: `s3` is the deprecated alias for `object-store-sink` and enables
+# nothing else; `pdfium-static` builds PDFium from source and no libviprs code
+# is gated on it; `test-util` only exposes existing doubles to dependents.
+LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k
+
 ## Run all CI workflows locally (mirrors .github/workflows/ci.yml)
 ci: fmt clippy test doc miri loom
 	@echo ""
@@ -21,12 +31,22 @@ fmt:
 	@echo "==> cargo fmt --check"
 	cargo fmt -- --check
 
-## Run clippy with and without pdfium feature (Check & Lint job)
+## Run clippy over every feature CI lints, because code behind a cfg nobody
+## names is linted by nothing. `main` was red under `packfile` and neither gate
+## could see it (issue #844). #816 closed the CI half; this closes the local
+## half, which matters more here because the handover says the local gate is
+## authoritative and GitHub Actions is not.
+##
+## One invocation per feature rather than `--all-features`, because a feature
+## can be red only in combination with the default set and `--all-features`
+## would not say which one.
 clippy:
 	@echo "==> cargo clippy"
 	RUSTFLAGS="-Dwarnings" cargo clippy --all-targets -- -D warnings
-	@echo "==> cargo clippy (pdfium)"
-	RUSTFLAGS="-Dwarnings" cargo clippy --all-targets --features pdfium -- -D warnings
+	@for f in $(LINTED_FEATURES); do \
+		echo "==> cargo clippy ($$f)"; \
+		RUSTFLAGS="-Dwarnings" cargo clippy --all-targets --features $$f -- -D warnings || exit 1; \
+	done
 
 ## Run tests (Test job)
 test:
