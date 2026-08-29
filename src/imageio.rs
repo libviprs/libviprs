@@ -41,6 +41,15 @@
 //! all five are rows, and the suffix only decides whether the file is written
 //! at all.
 //!
+//! **Ultra HDR is not in that table and is not missing from it.** `uhdrsave`
+//! registers no file suffix at all (measured on 8.18.6: an empty suffix list
+//! in `vips -l`, and `vips copy base.v out.uhdr` refused as an unknown
+//! format), and the four suffixes `uhdrload` claims on the way in at priority
+//! 100 all route to `jpegsave` on the way out. So there is no extension for
+//! this route to key on. Ultra HDR is written by name, through
+//! [`Raster::encode_to_buffer`] with `"uhdr"` or through
+//! [`Raster::encode_uhdr`] (issue #809).
+//!
 //! Structured EXIF tag writing (`exif-ifd0-*` fields into the TIFF
 //! directory of a JPEG APP1 segment) is also deferred to the foreign
 //! batch: those fields round-trip through `.v` and travel on the raster,

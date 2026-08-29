@@ -711,6 +711,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`"uhdr"` is a row in `Raster::encode_to_buffer`**, so Ultra HDR is reachable
+  from a shared save route and not only through `Raster::encode_uhdr` by name
+  (issue #809). It encodes at `uhdrsave`'s own default quality of 75, through
+  `uhdr::SaveOptions::default`, and `Raster::encode_to_target` gets it too.
+
+  One spelling and no file extension, both measured on the pinned vips 8.18.6.
+  `uhdrsave` registers an **empty** suffix list, `vips copy base.v out.uhdr` is
+  refused with "is not a known file format", and the four suffixes `uhdrload`
+  claims on the way in (`.jpg`, `.jpeg`, `.jpe`, `.jfif`, at priority 100
+  against `jpegload`'s 50) all route to `jpegsave` on the way out, whose output
+  `vips uhdrload` then refuses. So `Raster::save` gets **no** Ultra HDR row and
+  that absence is now pinned by a check rather than left as a gap somebody
+  closes later by making `.jpg` conditional on the raster's shape.
+
+  The row has an input contract the other rows do not, a 3-band `f32` raster
+  holding linear-light scRGB, and a raster that misses it is refused with
+  `EncodeError::InvalidParameter` naming the raster, not
+  `EncodeError::Unsupported` naming the format. This build can write Ultra HDR;
+  what is wrong is the input, and a caller can act on that.
+
 - **`.jp2` is a row in `Raster::save` and `"jp2k"` is one in
   `Raster::encode_to_buffer`** (issue #770). JPEG 2000 was wired into the
   content sniffer on the way in but into nothing shared on the way out, so
