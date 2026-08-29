@@ -27,7 +27,7 @@
 //!
 //! | libviprs method | libvips equivalent | result |
 //! |---|---|---|
-//! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
+//! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster at the image origin's offset, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
 //! | [`Raster::encode_jp2k`] | `jp2ksave_buffer` | `.jp2` bytes, always in a JP2 container |
 //! | [`Raster::save_jp2k`] | `jp2ksave` | `.jp2` file |
 //!
@@ -149,23 +149,56 @@
 //!   That third one libviprs does not read at all: `hayro-jpeg2000` refuses a
 //!   `colr` box it does not recognise. It is a refusal rather than a wrong
 //!   picture, and it is issue #771.
+//! * **The interpretation comes from the `colr` box, not the band count.**
+//!   `jp2kload` reads the box's `EnumCS` and maps openjpeg's five recognised
+//!   values onto a tag; anything else falls through to UNSPECIFIED, where it
+//!   guesses from the component count. This module does the same, and the
+//!   two rows that make it a rule rather than a coincidence are the ones where
+//!   the enum and the band count disagree: a **one**-component file tagged
+//!   CMYK is `cmyk`, and a **three**-component file tagged greyscale is `b-w`.
+//!   The element width picks between the flavours, so the same enum gives
+//!   `b-w` / `srgb` on an 8-bit file and `grey16` / `rgb16` on a 16-bit one.
+//!
+//!   One combination is outright broken in vips and is deliberately not
+//!   reproduced: a one-component file tagged sRGB, sYCC or e-YCC has its
+//!   header expanded to 3 bands by openjpeg while the tile decode still yields
+//!   1, so `vipsheader` reports `3 bands, srgb` and **any pixel read fails**.
+//!   This keeps the one real band and takes vips's tag, which is the half of
+//!   its answer that is not broken. The tag and the band count are independent
+//!   here, as [`Interpretation`] says
+//!   outright, so that costs nothing. Issue #767.
 //!
 //! # Divergences worth knowing about
 //!
-//! * **The image origin.** A codestream may start away from the grid origin.
-//!   On `origin57.j2k`, whose SIZ says `Xsiz = 37, XOsiz = 5`, this module
-//!   reports `32x24`, which is `Xsiz - XOsiz` and what the standard says the
-//!   image is. vips reports `27x17` with `xoffset = -5`, which is that width
-//!   minus the offset a second time. The two disagree on every file with a
-//!   non-zero origin and agree on every file `jp2ksave` writes, since it
-//!   always starts at zero. Filed as issue #766.
-//! * **The `colr` box's enumerated colour space does not decide the tag
-//!   here.** `jp2kload` reads `EnumCS` and not the band count, so a
-//!   one-component file tagged CMYK comes back `cmyk` and a three-component
-//!   one tagged greyscale comes back `b-w`. This module takes
-//!   `hayro-jpeg2000`'s colour-space answer, which agrees with vips on all 22
-//!   decodable fixtures and would disagree on those two synthetic re-taggings.
-//!   Filed as issue #767.
+//! * **The image origin, on the size only.** A codestream may start away from
+//!   the grid origin. On `origin57.j2k`, whose SIZ says `Xsiz = 37, XOsiz = 5,
+//!   Ysiz = 31, YOsiz = 7`, this module reports `32x24`, which is
+//!   `Xsiz - XOsiz` by `Ysiz - YOsiz` and what the standard says the image is.
+//!   vips reports `27x17`, that size less the origin a second time.
+//!
+//!   **vips's answer is the top-left crop of this one**, measured by hashing
+//!   it: our 32x24 cut to 27x17 at (0, 0) reproduces the capture's
+//!   `decoded_raster.sha256` exactly, so `jp2kload` decodes 768 samples and
+//!   hands back 459 of them. That is what decided #766 in this direction; the
+//!   rule from #732 and #733 is to adopt vips when a difference is inside the
+//!   carrier's noise and points both ways, and to keep ours when it is large
+//!   or one-directional, and dropping 40% of the picture is both.
+//!
+//!   The **offsets** are not a divergence at all: this loader stamps
+//!   `xoffset = -XOsiz`, `yoffset = -YOsiz`, which is exactly what
+//!   `vipsheader` reports for the same file and exactly what `extract_area`
+//!   stamps in this crate for a crop at the same place (#721). So the two
+//!   agree on where the image is and disagree only on how much of it there is.
+//!   Nothing `jp2ksave` writes reaches either, since it always starts at the
+//!   grid origin.
+//! * **A `colr` box this module cannot get past.** Three enumerated colour
+//!   spaces are still refused by the decoder where vips reads the file:
+//!   e-YCC (`EnumCS 24`, issue #848), anything openjpeg does not recognise
+//!   (issue #771), and CIELab (`EnumCS 14`), which also moves the pixels
+//!   rather than the label on the shapes that do decode (issue #849). All
+//!   three are `hayro-jpeg2000`'s colour-space resolution deciding more than
+//!   it should, so they are one upstream change and none of them is
+//!   reachable from here.
 
 use std::path::Path;
 
@@ -473,6 +506,7 @@ impl SaveOptions {
 /// value. The band count is the colour channels plus alpha, so a greyscale
 /// file stays one band.
 ///
+/// the image origin as a negative `xoffset` / `yoffset`,
 /// `icc-profile-data`, `bits-per-sample`, `jp2k-resolutions` and, when the
 /// image is more than one tile, `tile-width` and `tile-height` are lifted onto
 /// the raster. The first two use the names `jp2kload` uses; the third does not,
@@ -575,6 +609,20 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
     Err(EncodeError::unsupported("jp2k"))
 }
 
+/// The extension route's entry point (`imageio.rs`'s `.jp2` / `.j2k` / `.jpt`
+/// / `.j2c` / `.jpc` arm), at the `jp2ksave` defaults.
+///
+/// Takes no `keep_metadata`, for the same reason [`crate::jxl`]'s twin does
+/// not: there is nothing to drop. `jp2ksave.c` writes no ICC profile, no EXIF
+/// block and no XMP packet, so a stripped save and a kept one produce the same
+/// bytes and a flag here would be a promise with nothing behind it.
+#[cfg(feature = "jp2k")]
+pub(crate) fn encode_jp2k_for_save(raster: &Raster) -> Result<Vec<u8>, SaveError> {
+    raster
+        .encode_jp2k(SaveOptions::default())
+        .map_err(encode_to_save)
+}
+
 /// Carry an [`EncodeError`] onto the save spine, the way [`crate::jxl`] does:
 /// an I/O failure stays an I/O failure and everything else flattens onto the
 /// sink's message variant, which is the only shape [`SaveError::Encode`] has.
@@ -613,6 +661,13 @@ struct ContainerLayout {
     /// The payload of a `METH=2` `colr` box, which is an ICC profile, copied
     /// verbatim and unvalidated the way `jp2kload` copies it.
     icc: Option<Vec<u8>>,
+    /// The `EnumCS` of a `METH=1` `colr` box, which is what decides the
+    /// interpretation for vips and now for this module too (#767).
+    ///
+    /// `None` for a bare codestream, which has no `colr` box at all, and for a
+    /// `METH=2` box, which carries a profile instead. Both fall back to the
+    /// decoder's resolved colour space, which is where they were before.
+    enum_cs: Option<u32>,
 }
 
 /// One top-level or sub-box, as an offset range into the file.
@@ -727,12 +782,17 @@ impl ContainerLayout {
                 .map(|b| b.start)
                 .ok_or_else(|| container("no jp2c box, so the file carries no codestream"))?;
             let mut icc = None;
+            let mut enum_cs = None;
             for header in top.iter().filter(|b| &b.kind == b"jp2h") {
-                icc = walk_boxes(bytes, header.start, header.end)?
-                    .into_iter()
+                let boxes = walk_boxes(bytes, header.start, header.end)?;
+                let colr: Vec<&[u8]> = boxes
+                    .iter()
                     .filter(|b| &b.kind == b"colr")
-                    .find_map(|b| icc_payload(&bytes[b.start..b.end]));
-                if icc.is_some() {
+                    .map(|b| &bytes[b.start..b.end])
+                    .collect();
+                icc = colr.iter().copied().find_map(icc_payload);
+                enum_cs = colr.iter().copied().find_map(enumerated_colour_space);
+                if icc.is_some() || enum_cs.is_some() {
                     break;
                 }
             }
@@ -740,12 +800,14 @@ impl ContainerLayout {
                 codestream,
                 bare: false,
                 icc,
+                enum_cs,
             })
         } else if bytes.starts_with(CODESTREAM_SIGNATURE) {
             Ok(Self {
                 codestream: 0,
                 bare: true,
                 icc: None,
+                enum_cs: None,
             })
         } else {
             Err(container(
@@ -766,6 +828,23 @@ impl ContainerLayout {
 fn icc_payload(payload: &[u8]) -> Option<Vec<u8>> {
     match payload.first() {
         Some(2) if payload.len() > 3 => Some(payload[3..].to_vec()),
+        _ => None,
+    }
+}
+
+/// The `EnumCS` inside a `METH=1` `colr` box, or `None` for any other method.
+///
+/// The other half of [`icc_payload`], reading the same three-byte prelude the
+/// other way: `METH = 1` means the next four bytes are an enumerated colour
+/// space rather than a profile. A box too short to hold one is `None` rather
+/// than an error, the way a `METH=2` box too short to hold a profile is, since
+/// the decoder is the thing that decides whether the file is readable at all.
+#[cfg(feature = "jp2k")]
+fn enumerated_colour_space(payload: &[u8]) -> Option<u32> {
+    match payload.first() {
+        Some(1) if payload.len() >= 7 => Some(u32::from_be_bytes([
+            payload[3], payload[4], payload[5], payload[6],
+        ])),
         _ => None,
     }
 }
@@ -922,11 +1001,28 @@ impl CodestreamHeader {
         Ok(header)
     }
 
+    /// The image origin as the offset vips records for it: `-XOsiz` by
+    /// `-YOsiz`.
+    ///
+    /// Negative, because that is what `jp2kload` writes (`xoffset = -5` for
+    /// `origin57.j2k`, measured) and because it is this crate's own
+    /// convention for the same meaning: `extract_area` stamps `-left` /
+    /// `-top` (#721), and a codestream whose image region begins at `x = 5` on
+    /// the reference grid is exactly that crop of the grid.
+    ///
+    /// So the loader and vips agree on the offsets even where they disagree on
+    /// the size, which is the whole of the remaining #766 divergence.
+    fn origin_offset(&self) -> (i32, i32) {
+        (negated_origin(self.x_origin), negated_origin(self.y_origin))
+    }
+
     /// The image size, which is the reference grid less the image origin.
     ///
     /// This is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is what the standard
     /// says the image is and what `hayro-jpeg2000` reports. vips subtracts the
-    /// origin a second time; see the module docs and issue #766.
+    /// origin a second time and hands back the top-left crop of this, measured
+    /// by digest; see the module docs and issue #766. Where the image sits is
+    /// reported separately, by [`CodestreamHeader::origin_offset`].
     fn image_size(&self) -> (u32, u32) {
         (
             self.xsiz.saturating_sub(self.x_origin),
@@ -1151,7 +1247,25 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     }
 
     let mut raster = Raster::new(width, height, format, buffer).map_err(Jp2kError::Raster)?;
-    raster.meta.interpretation = Some(interpretation(image.color_space(), element_bytes));
+    // The `colr` box's enumerated colour space decides this where there is
+    // one and openjpeg recognises it, because that is what `jp2kload` reads
+    // and the component count is not (#767). Everything else, which is a bare
+    // codestream, a `METH=2` profile box, or an enum openjpeg does not know,
+    // falls back to the decoder's resolved colour space and the band-count
+    // guess inside it, which is what vips's UNSPECIFIED arm does too.
+    raster.meta.interpretation = Some(
+        layout
+            .enum_cs
+            .and_then(|enumcs| enumerated_interpretation(enumcs, element_bytes))
+            .unwrap_or_else(|| interpretation(image.color_space(), element_bytes)),
+    );
+    // Where the image sits on the reference grid, as the negative offset
+    // `jp2kload` records and `extract_area` stamps for the same meaning
+    // (#766, #721). Zero for everything `jp2ksave` writes, since it always
+    // starts at the grid origin.
+    let (xoffset, yoffset) = header.origin_offset();
+    raster.meta.xoffset = xoffset;
+    raster.meta.yoffset = yoffset;
     if let Some(icc) = layout.icc {
         raster
             .fields
@@ -1179,6 +1293,24 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         );
     }
     Ok(raster)
+}
+
+/// Negate an origin read off `SIZ`, saturating instead of wrapping.
+///
+/// `XOsiz` is a 32-bit field an attacker writes, and `-XOsiz` does not fit an
+/// `i32` above `2^31`. Going through `i64` first makes `2^31` negate exactly
+/// onto `i32::MIN` and everything above it saturate there, which is the one
+/// boundary worth getting right: `src/extract.rs`'s twin of this helper
+/// shipped saturating at `i32::MIN + 1` and survived review because the fix
+/// was "asserted only by reasoning" (#706). It is a private function of a
+/// `u32`, so reasoning was never necessary.
+///
+/// Deliberately a second copy rather than a shared helper: the twin is
+/// private to `crate::extract` and that module belongs to another lane. Six
+/// lines and a test beat a cross-module edit here.
+#[cfg(feature = "jp2k")]
+fn negated_origin(v: u32) -> i32 {
+    i32::try_from(-i64::from(v)).unwrap_or(i32::MIN)
 }
 
 /// Round a reconstructed sample onto the integer grid its precision defines.
@@ -1292,6 +1424,45 @@ fn interpretation(colour: &hayro_jpeg2000::ColorSpace, element_bytes: u64) -> In
             }
         }
     }
+}
+
+/// The interpretation an enumerated `colr` colour space maps to, or `None`
+/// when openjpeg does not recognise the value.
+///
+/// This is the whole of #767: `jp2kload` reads the `colr` box's `EnumCS` and
+/// **not** the component count, so a one-component file tagged CMYK is `cmyk`
+/// and a three-component one tagged greyscale is `b-w`. Taking the decoder's
+/// resolved colour space instead agrees with vips on every ordinary file and
+/// disagrees on exactly those.
+///
+/// The recognised set is openjpeg's five, and it is measured rather than read
+/// out of `opj_jp2_read_colr`: `oracle-captures/foreign-jp2k/oracle.json`'s
+/// `colour_space_to_interpretation` sweeps seven values over three shapes, and
+/// 14 (CIELab) behaves exactly like the undefined 99, which is what says both
+/// fall through to UNSPECIFIED. Two independent unrecognised values agreeing
+/// is what makes `None` a fallback rather than a special case for one number.
+///
+/// The element width picks between the flavours, which is the second half of
+/// the measurement: the enum that gives `b-w` and `srgb` on an 8-bit file
+/// gives `grey16` and `rgb16` on a 16-bit one.
+#[cfg(feature = "jp2k")]
+fn enumerated_interpretation(enumcs: u32, element_bytes: u64) -> Option<Interpretation> {
+    let wide = element_bytes > 1;
+    Some(match enumcs {
+        // 12 is CMYK, and it is the one answer the element width does not
+        // change: vips reports `cmyk` for the 8-bit and the 16-bit file alike.
+        12 => Interpretation::Cmyk,
+        // 17 is greyscale. Three components tagged with it come back `b-w`,
+        // which is the row that proves the band count is not consulted.
+        17 if wide => Interpretation::Grey16,
+        17 => Interpretation::Bw,
+        // 16 sRGB, 18 sYCC and 24 e-YCC all land on the RGB tag. The last two
+        // also turn the inverse YCC on, which is the decoder's job and not
+        // this function's.
+        16 | 18 | 24 if wide => Interpretation::Rgb16,
+        16 | 18 | 24 => Interpretation::Srgb,
+        _ => return None,
+    })
 }
 
 /// Map the codec's decode failure onto [`Jp2kError`].
@@ -2229,6 +2400,323 @@ mod tests {
      * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
      * 27x17.
      */
+
+    /// Rewrite a JP2's `METH = 1` `colr` box to name `enumcs`, leaving every
+    /// other byte alone.
+    ///
+    /// This is what `capture.py`'s `retag_colr` does to build the
+    /// `colour_space_to_interpretation` sweep, reproduced here so the sweep
+    /// can be asserted against committed fixtures rather than against the
+    /// capture's uncommitted `outputs/`.
+    #[cfg(feature = "jp2k")]
+    fn retagged(bytes: &[u8], enumcs: u32) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        let at = out
+            .windows(4)
+            .position(|w| w == b"colr")
+            .expect("a colr box");
+        assert_eq!(out[at + 4], 1, "METH must be 1 for a retag");
+        out[at + 7..at + 11].copy_from_slice(&enumcs.to_be_bytes());
+        out
+    }
+
+    /// Wrap a bare codestream in a minimal JP2 (signature, `ftyp`, `jp2h`
+    /// holding `ihdr` and a `METH = 1` `colr`, then `jp2c`) naming `enumcs`.
+    ///
+    /// The one-component half of the sweep needs this: the capture built its
+    /// one-component base with `vips jp2ksave` into `outputs/`, which is not
+    /// committed, and the only committed one-component files are bare
+    /// codestreams with no `colr` box at all.
+    #[cfg(feature = "jp2k")]
+    fn wrapped(codestream: &[u8], w: u32, h: u32, nc: u16, bpc: u8, enumcs: u32) -> Vec<u8> {
+        fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut b = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(kind);
+            b.extend_from_slice(payload);
+            b
+        }
+        let mut out: Vec<u8> = vec![0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0d, 0x0a, 0x87, 0x0a];
+        out.extend(boxed(b"ftyp", b"jp2 \x00\x00\x00\x00jp2 "));
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&nc.to_be_bytes());
+        ihdr.extend_from_slice(&[bpc - 1, 7, 0, 0]);
+        let mut colr = vec![1u8, 0, 0];
+        colr.extend_from_slice(&enumcs.to_be_bytes());
+        let mut jp2h = boxed(b"ihdr", &ihdr);
+        jp2h.extend(boxed(b"colr", &colr));
+        out.extend(boxed(b"jp2h", &jp2h));
+        out.extend(boxed(b"jp2c", codestream));
+        out
+    }
+
+    /**
+     * The `colr` box's enumerated colour space decides the interpretation,
+     * not the component count (issue #767).
+     * Every cell is `oracle-captures/foreign-jp2k/oracle.json`'s
+     * `colour_space_to_interpretation` record, which `capture.py` produced by
+     * retagging two codestreams with every enum openjpeg recognises and
+     * reading `vipsheader` back. The two rows that make the rule a rule are
+     * the ones where the enum and the band count disagree: a **one**-component
+     * file tagged CMYK is `cmyk`, and a **three**-component file tagged
+     * greyscale is `b-w`. A port that reads the band count gets both wrong,
+     * and this loader did.
+     * The element width picks between the flavours of each, which is why the
+     * sweep runs 8-bit and 16-bit: the same enum that gives `b-w` and `srgb`
+     * on an 8-bit file gives `grey16` and `rgb16` on a 16-bit one.
+     * Input: `rgb_lossless.jp2` retagged, `depth8u.j2k` wrapped in a minimal
+     * JP2, and a 16-bit RGB file this crate encodes, each at every enum ->
+     * Output: the interpretation `vipsheader` reported for that cell.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_colr_box_enum_decides_the_interpretation_not_the_component_count() {
+        // (enum, what vipsheader printed for 3 components 8-bit, for 1
+        // component 8-bit, and for 3 components 16-bit). `None` is a cell
+        // `hayro-jpeg2000` refuses before the tag is reached; each one is an
+        // issue of its own and they are asserted separately below.
+        let cells: &[(
+            u32,
+            Option<Interpretation>,
+            Option<Interpretation>,
+            Option<Interpretation>,
+        )] = &[
+            (
+                12,
+                Some(Interpretation::Cmyk),
+                Some(Interpretation::Cmyk),
+                Some(Interpretation::Cmyk),
+            ),
+            (
+                14,
+                Some(Interpretation::Srgb),
+                None,
+                Some(Interpretation::Rgb16),
+            ),
+            (
+                16,
+                Some(Interpretation::Srgb),
+                Some(Interpretation::Srgb),
+                Some(Interpretation::Rgb16),
+            ),
+            (
+                17,
+                Some(Interpretation::Bw),
+                Some(Interpretation::Bw),
+                Some(Interpretation::Grey16),
+            ),
+            (
+                18,
+                Some(Interpretation::Srgb),
+                None,
+                Some(Interpretation::Rgb16),
+            ),
+            // 20 (ROMM-RGB) and 21 (YPbPr) are registered JPEG 2000 values
+            // that openjpeg does not map, so vips takes the UNSPECIFIED arm
+            // and guesses from the band count. They are in the table because
+            // they are the only unrecognised enums `hayro-jpeg2000` reads
+            // rather than refuses, which makes them the only cells where the
+            // band-count fallback is observable on **one** component. Measured
+            // on 8.18.6 with a hand-built minimal JP2, the same wrapper the
+            // test uses, which vips reads exactly as it reads the capture's.
+            (
+                20,
+                Some(Interpretation::Srgb),
+                Some(Interpretation::Bw),
+                Some(Interpretation::Rgb16),
+            ),
+            (
+                21,
+                Some(Interpretation::Srgb),
+                Some(Interpretation::Bw),
+                Some(Interpretation::Rgb16),
+            ),
+            (24, None, None, None),
+            (99, None, None, None),
+        ];
+
+        let wide = Raster::new(
+            4,
+            3,
+            PixelFormat::Rgb16,
+            (0..4u32 * 3 * 3 * 2).map(|i| (i % 251) as u8).collect(),
+        )
+        .unwrap()
+        .encode_jp2k(SaveOptions::default())
+        .expect("a 16-bit RGB base for the wide half of the sweep");
+
+        let mut checked = 0;
+        for (enumcs, three_8, one_8, three_16) in cells {
+            let cases: [(&str, Vec<u8>, Option<Interpretation>); 3] = [
+                (
+                    "3 components, 8-bit",
+                    retagged(fixture("rgb_lossless.jp2"), *enumcs),
+                    *three_8,
+                ),
+                (
+                    "1 component, 8-bit",
+                    wrapped(fixture("depth8u.j2k"), 5, 1, 1, 8, *enumcs),
+                    *one_8,
+                ),
+                ("3 components, 16-bit", retagged(&wide, *enumcs), *three_16),
+            ];
+            for (shape, bytes, want) in cases {
+                match (decode_jp2k(&bytes, DecodeLimits::default()), want) {
+                    (Ok(raster), Some(want)) => {
+                        assert_eq!(
+                            raster.interpretation(),
+                            want,
+                            "EnumCS {enumcs} on {shape}: vips reports {want:?}"
+                        );
+                        checked += 1;
+                    }
+                    (Ok(raster), None) => panic!(
+                        "EnumCS {enumcs} on {shape} now decodes as {:?}; the decoder used to \
+                         refuse it, so #848 or #849 is fixed and this table is stale",
+                        raster.interpretation()
+                    ),
+                    (Err(_), None) => {}
+                    (Err(e), Some(want)) => {
+                        panic!("EnumCS {enumcs} on {shape} must decode as {want:?}, got {e}")
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 19, "the sweep has to reach every readable cell");
+    }
+
+    /**
+     * A `METH = 2` `colr` box is a profile and never an enumerated colour
+     * space, however its first four bytes read (issue #767).
+     * The two readers share the same three-byte `colr` prelude, so an
+     * enumerated-space reader that checked the length and not the method would
+     * take the first word of an ICC profile as an `EnumCS`. A real profile
+     * begins with its own size, and a 17-byte one would read as `EnumCS 17`
+     * and retag a **three**-band image `b-w`. Nothing in the fixture set
+     * happens to land on one of the five recognised values, so the sweep alone
+     * leaves that mutation alive; this builds the byte pattern on purpose, on
+     * three components, which is where honouring it and ignoring it give
+     * different answers.
+     * Input: `rgb_lossless.jp2` with its `colr` box switched to `METH = 2` and
+     * its payload set to `00 00 00 11` -> Output: `srgb`, the band-count
+     * guess, with those four bytes attached as the profile; and the same four
+     * bytes under `METH = 1` giving `b-w`, which is the control.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_meth_2_profile_is_never_read_as_an_enumerated_colour_space() {
+        fn retagged_meth(meth: u8, word: u32) -> Vec<u8> {
+            let mut bytes = fixture("rgb_lossless.jp2").to_vec();
+            let at = bytes
+                .windows(4)
+                .position(|w| w == b"colr")
+                .expect("a colr box");
+            bytes[at + 4] = meth;
+            bytes[at + 7..at + 11].copy_from_slice(&word.to_be_bytes());
+            bytes
+        }
+
+        // 17 is greyscale, the enum whose answer differs from the band-count
+        // guess on a three-band file. Under METH = 2 those four bytes are the
+        // profile and nothing else.
+        let profile = decode_jp2k(&retagged_meth(2, 17), DecodeLimits::default())
+            .expect("a METH=2 box decodes");
+        assert_eq!(
+            profile.interpretation(),
+            Interpretation::Srgb,
+            "three bands with no usable enum is the band-count guess, not the \
+             first word of the profile"
+        );
+        assert_eq!(
+            profile.icc_profile(),
+            Some(&[0u8, 0, 0, 17][..]),
+            "the four bytes are the profile, unvalidated, the way jp2kload copies it"
+        );
+
+        // The control that makes the assertion above mean something: the very
+        // same four bytes under METH = 1 *are* an enum and do retag the image.
+        let enumerated = decode_jp2k(&retagged_meth(1, 17), DecodeLimits::default())
+            .expect("a METH=1 box decodes");
+        assert_eq!(enumerated.interpretation(), Interpretation::Bw);
+        assert_eq!(enumerated.icc_profile(), None);
+    }
+
+    /**
+     * An enum openjpeg does not recognise falls back to the band count, which
+     * is the arm that keeps every ordinary file working (issue #767).
+     * `EnumCS 14` is CIELab and openjpeg maps it to nothing, so vips guesses
+     * from the component count exactly as it does for the undefined `99`.
+     * Two independent unrecognised values behaving the same way is what makes
+     * this a fallback rather than a fourteen-shaped special case.
+     * Input: `EnumCS 14` over the three shapes -> Output: `srgb` on three
+     * 8-bit components and `rgb16` on three 16-bit ones, which is the
+     * band-count guess and not a CIELab tag.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn an_enum_openjpeg_does_not_recognise_falls_back_to_the_band_count() {
+        let three = decode_jp2k(
+            &retagged(fixture("rgb_lossless.jp2"), 14),
+            DecodeLimits::default(),
+        )
+        .expect("CIELab on three components decodes");
+        assert_eq!(
+            three.interpretation(),
+            Interpretation::Srgb,
+            "the band count decides here, and there is no Lab tag in the answer"
+        );
+        assert_ne!(three.interpretation(), Interpretation::Lab);
+
+        // The control that says the fallback is the fallback and not the enum
+        // being honoured by accident: change nothing but the enum to one that
+        // *is* recognised and names a different space, and the answer moves.
+        let grey = decode_jp2k(
+            &retagged(fixture("rgb_lossless.jp2"), 17),
+            DecodeLimits::default(),
+        )
+        .expect("greyscale on three components decodes");
+        assert_eq!(grey.interpretation(), Interpretation::Bw);
+    }
+
+    /**
+     * A one-component file tagged sRGB keeps its one band and takes vips's
+     * tag, which is the half of vips's answer that is not broken (issue #767).
+     * This is the combination the capture calls out: openjpeg expands the
+     * header to 3 bands while the tile decode still yields 1, so `vipsheader`
+     * reports `3 bands, srgb` and **any pixel read fails** with `decoded
+     * image does not match container`. Reproducing that would mean writing a
+     * header promising pixels that never arrive.
+     * The tag and the band count are independent in this crate, which its own
+     * `Interpretation` doc says outright ("the pipeline does not validate that
+     * the band count matches the tag, exactly as in libvips"), so honouring
+     * the enum costs nothing and keeps #767's rule whole: the enum decides,
+     * and the band count is not allowed back into the decision for the one
+     * shape vips gets wrong.
+     * Input: `depth8u.j2k` wrapped with `EnumCS 16` -> Output: one band, five
+     * readable samples, tagged `srgb`.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_one_component_file_tagged_srgb_keeps_its_band_and_takes_the_tag() {
+        let raster = decode_jp2k(
+            &wrapped(fixture("depth8u.j2k"), 5, 1, 1, 8, 16),
+            DecodeLimits::default(),
+        )
+        .expect("the file has one decodable component whatever its colr box says");
+
+        assert_eq!(raster.format().channels(), 1, "one component, one band");
+        assert_eq!(raster.interpretation(), Interpretation::Srgb);
+        // The half that matters: the pixels are there. vips's 3-band answer
+        // cannot be read at all.
+        assert_eq!(raster.data().len(), 5);
+        assert_eq!(
+            raster.data(),
+            decoded("depth8u.j2k").data(),
+            "wrapping the same codestream in a JP2 must not change its samples"
+        );
+    }
+
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_image_origin_is_the_one_divergence_on_geometry() {
@@ -2244,6 +2732,131 @@ mod tests {
             "if this has become vips's answer the divergence in the module docs is stale \
              and issue #766 is fixed"
         );
+    }
+
+    /**
+     * What vips's 27x17 actually is, measured rather than argued: the
+     * **top-left crop** of the 32x24 this loader reports, so `jp2kload`
+     * silently drops 309 of the image's 768 samples on a codestream whose
+     * origin is not the grid origin (issue #766).
+     * This is what decided #766. "Two libraries report different sizes" says
+     * nothing about which is right; "one of them returns 40% of the picture"
+     * does. Cropping our decode to vips's dimensions at (0, 0) and hashing it
+     * has to reproduce the capture's `decoded_raster.sha256` byte for byte,
+     * and the uncropped digest has to differ, or the crop is not what happened.
+     * Input: `origin57.j2k` -> Output: our 32x24 cropped to 27x17 digests to
+     * vips's payload; our full 32x24 does not.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn vips_returns_the_top_left_crop_of_what_this_loader_decodes() {
+        use sha2::Digest;
+
+        let raster = decoded("origin57.j2k");
+        let (w, h) = (raster.width() as usize, raster.height() as usize);
+        let full = raster.data();
+
+        // `decoded_raster.sha256` for the `image_origin_offset` record, which
+        // is `vips rawsave` over the 459 bytes `jp2kload` handed back.
+        const VIPS_PAYLOAD: &str =
+            "d4c1e2f8b0f763add13ededfa4881780428c177187c6302a0616719e34b81f76";
+
+        let cropped: Vec<u8> = (0..17)
+            .flat_map(|y| (0..27).map(move |x| (y, x)))
+            .map(|(y, x)| full[y * w + x])
+            .collect();
+        assert_eq!(cropped.len(), 27 * 17);
+        assert_eq!(
+            crate::hex::hex_lower(&sha2::Sha256::digest(&cropped)),
+            VIPS_PAYLOAD,
+            "vips's whole answer is the top-left 27x17 of ours, so the 5 rightmost \
+             columns and 7 bottom rows are pixels it decoded and threw away"
+        );
+
+        // The control, so "the crop matches" cannot be "everything matches".
+        assert_eq!((w, h), (32, 24));
+        assert_ne!(
+            payload_digest(&raster),
+            VIPS_PAYLOAD,
+            "the uncropped decode must not digest to vips's, or there is no divergence"
+        );
+        assert_eq!(full.len() - cropped.len(), 309, "what vips drops");
+    }
+
+    /**
+     * The image origin travels as the negative `xoffset` / `yoffset` vips
+     * records for it, which is also this crate's own convention for a crop
+     * (issue #766, #721).
+     * `jp2kload` reports `xoffset = -5, yoffset = -7` for `origin57.j2k`, and
+     * `extract_area` in this crate stamps `-left` / `-top` for the same
+     * meaning, so the two agree on the offsets even where they disagree on the
+     * size. Before this the loader attached no offset at all, so a caller had
+     * no way to learn the image was not at the grid origin.
+     * Input: `origin57.j2k` and the other decodable fixtures -> Output:
+     * `-5 / -7` on the first, and `0 / 0` on the rest, matching every
+     * `header.xoffset` / `header.yoffset` in `oracle.json`.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_image_origin_travels_as_the_negative_offset_vips_records() {
+        let raster = decoded("origin57.j2k");
+        assert_eq!(
+            (raster.xoffset(), raster.yoffset()),
+            (-5, -7),
+            "the same numbers `vipsheader -a` prints for this file"
+        );
+
+        // The positive control, and the reason a sweep rather than one case:
+        // every other fixture starts at the grid origin and the capture
+        // records `xoffset: 0` for all of them, so a loader that stamped
+        // something unconditionally would pass the assertion above. Sweeping
+        // `FIXTURES` rather than a hand-written list keeps that true for a
+        // fixture added later.
+        let mut zeroed = 0;
+        for (name, bytes) in FIXTURES {
+            if *name == "origin57.j2k" {
+                continue;
+            }
+            let Ok(other) = decode_jp2k(bytes, DecodeLimits::default()) else {
+                continue; // the five malformed ones and the three refused carriers
+            };
+            assert_eq!(
+                (other.xoffset(), other.yoffset()),
+                (0, 0),
+                "{name}: XOsiz and YOsiz are 0 here and vips reports 0 / 0"
+            );
+            zeroed += 1;
+        }
+        assert!(
+            zeroed >= 18,
+            "the sweep has to reach the decodable fixtures, it reached {zeroed}"
+        );
+    }
+
+    /**
+     * The negated origin saturates rather than wrapping, on a `u32` that
+     * comes straight off an untrusted `SIZ`.
+     * `-XOsiz` does not fit an `i32` above `2^31`, and `XOsiz` is a 32-bit
+     * field an attacker writes. Reaching that branch through a real decode
+     * needs a file declaring an origin past two billion; testing the
+     * arithmetic needs nothing, because it is a private function of a `u32`.
+     * That is #706's lesson: its own twin of this helper shipped off by one,
+     * saturating at `i32::MIN + 1`, and survived because the fix was
+     * "asserted only by reasoning".
+     * Input: the four values around the boundary -> Output: exact negation
+     * below `2^31`, exactly `i32::MIN` at `2^31`, and `i32::MIN` above it.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_negated_origin_saturates_rather_than_wrapping() {
+        assert_eq!(negated_origin(0), 0);
+        assert_eq!(negated_origin(5), -5);
+        assert_eq!(negated_origin(i32::MAX as u32), -i32::MAX);
+        // 2^31 negates exactly onto i32::MIN, so this is the one value where
+        // "saturate" and "the right answer" are the same number.
+        assert_eq!(negated_origin(1 << 31), i32::MIN);
+        assert_eq!(negated_origin((1 << 31) + 1), i32::MIN);
+        assert_eq!(negated_origin(u32::MAX), i32::MIN);
     }
 
     // -----------------------------------------------------------------------

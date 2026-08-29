@@ -81,7 +81,7 @@ const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 10] = [
     (
         "src/jxl.rs",
         include_str!("../src/jxl.rs"),
-        &["SaveOptions"],
+        &["LoadOptions", "SaveOptions"],
     ),
     (
         "src/jp2k.rs",
@@ -101,7 +101,7 @@ const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 10] = [
     (
         "src/webp.rs",
         include_str!("../src/webp.rs"),
-        &["SaveOptions"],
+        &["LoadOptions", "SaveOptions"],
     ),
     ("src/svg.rs", include_str!("../src/svg.rs"), &["SvgOptions"]),
     (
@@ -223,6 +223,51 @@ fn gif_load_options_build_through_setters() {
     let d = gif::LoadOptions::default();
     assert_eq!(d.page, 0);
     assert_eq!(d.n, 1, "vips's gifload loads one page by default");
+}
+
+/// The animated WebP loader's options, added by issue #569 and spelled the
+/// same way `gif::LoadOptions` is: same fields, same sentinel, same
+/// defaults. Two sibling loaders answering one libvips argument differently
+/// is the thing this asserts against.
+#[test]
+fn webp_load_options_build_through_setters() {
+    let o = webp::LoadOptions::default().with_page(2).with_n(-1);
+    assert_eq!(o.page, 2);
+    assert_eq!(o.n, -1);
+
+    let d = webp::LoadOptions::default();
+    assert_eq!(d.page, 0);
+    assert_eq!(d.n, 1, "vips's webpload loads one page by default");
+    assert_eq!(
+        (d.page, d.n),
+        (
+            gif::LoadOptions::default().page,
+            gif::LoadOptions::default().n
+        ),
+        "the three animated loaders share one default"
+    );
+}
+
+/// The animated JPEG XL loader's options, added by issue #621. Same shape
+/// again, and the default is asserted against the other two rather than
+/// restated, so a drift in any one of them fails here.
+#[test]
+fn jxl_load_options_build_through_setters() {
+    let o = jxl::LoadOptions::default().with_page(2).with_n(-1);
+    assert_eq!(o.page, 2);
+    assert_eq!(o.n, -1);
+
+    let d = jxl::LoadOptions::default();
+    assert_eq!(d.page, 0);
+    assert_eq!(d.n, 1, "vips's jxlload loads one page by default");
+    assert_eq!(
+        (d.page, d.n),
+        (
+            webp::LoadOptions::default().page,
+            webp::LoadOptions::default().n
+        ),
+        "the three animated loaders share one default"
+    );
 }
 
 #[test]

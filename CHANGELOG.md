@@ -711,6 +711,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`.jp2` is a row in `Raster::save` and `"jp2k"` is one in
+  `Raster::encode_to_buffer`** (issue #770). JPEG 2000 was wired into the
+  content sniffer on the way in but into nothing shared on the way out, so
+  `save("x.jp2")` reported an unsupported extension and
+  `encode_to_buffer("jp2k")` an unsupported format, and the only route to the
+  encoder was `Raster::encode_jp2k` by name.
+
+  All five suffixes `jp2ksave` registers are live rows, and they are one arm
+  rather than five because vips writes the same bytes for all of them.
+  Measured on the pinned 8.18.6: `vips copy base.v out.EXT` over `jp2`, `j2k`,
+  `jpt`, `j2c` and `jpc` produces five files with one SHA-256 between them,
+  while `out.jp2000` is refused as an unknown format. So this is the one row in
+  the save table where the suffix does not pick the codec.
+
+  The extension route is gated on the feature, so without it the five fall
+  through to `UnsupportedExtension` like any other extension with no encoder
+  and the refusal message stops naming them. The format dispatch is **not**
+  gated, matching `"jxl"`: `encode_jp2k` without the feature already returns
+  `EncodeError::Unsupported { format: "jp2k" }`, so the row stays live and
+  reports the codec it cannot write rather than the caller's spelling.
+
+  `save_stripped` writes the same bytes as `save` here, because `jp2ksave.c`
+  has no code for an ICC profile, an EXIF block or an XMP packet. That is
+  asserted, with the `.webp` row beside it as the control that does differ.
+
 - **CI runs the non-default features it had been compiling out**, and a guard
   so the next one cannot be forgotten (issues #772, #816). `jp2k`, `avif`,
   `packfile`, `serde` and `tracing` all gate code behind
@@ -840,6 +865,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusing the file, and libviprs matches that), so a forty-byte file
   declaring a 65535x65535 frame on a 1x1 screen used to allocate 4 GiB
   through a budget that had only seen the 3-byte screen.
+
+- **Animated WebP and animated JPEG XL load** (issues #569, #621).
+  `webp::decode_webp_with` and `jxl::decode_jxl_with` take a `LoadOptions`
+  carrying libvips's `page` and `n`, decode the frames asked for and stack
+  them into one toilet-roll raster with the page geometry #564's model
+  derives. `decode_webp` and `decode_jxl` are those functions at their
+  default, which is page 0 and one frame, so nothing about the still path
+  moved.
+
+  Both structs are `#[non_exhaustive]` with `with_page` / `with_n` builders,
+  as #630 requires, and they are `gif::LoadOptions` field for field: same
+  `page: u32`, same `n: i32` with `-1` meaning every remaining page, same
+  argument order on the entry point. Three sibling loaders spelling one
+  libvips argument two ways is worse than carrying its sentinel, and
+  `non_exhaustive_options.rs` now asserts the three defaults against each
+  other rather than restating them.
+
+  An animation now carries `page-height` (when more than one page was
+  loaded), `delay` as a `MetadataValue::IntArray` of milliseconds, `loop`,
+  and the `gif-delay` / `gif-loop` compatibility fields vips attaches beside
+  them. `n-pages` still counts the pages of the *file*, as #635 pinned it.
+
+  **The delay array is subset to the pages actually loaded, and vips's is
+  not.** Measured on 8.18.6, `vipsheader -f delay 'anim4.webp[page=1,n=2]'`
+  prints the file's whole `45 67 200 12` onto a raster holding pages 1 and
+  2. Nothing on that raster records the offset, so that array cannot be
+  lined up with the pages that are there and a saver reading it writes the
+  wrong two delays, silently. Here `delay[i]` is the delay of loaded page
+  `i` and `delay.len() == pages_loaded()` always holds.
+
+  **Both formats are read-only and that is a decision, not an oversight.**
+  No pure-Rust encoder writes a WebP `ANIM`/`ANMF` or a JPEG XL animation
+  header, so an animation can be loaded and transformed and not saved back
+  in its own format. `encode_webp` and `encode_jxl` write a roll as **one
+  tall still image** rather than refusing it, which is a divergence from
+  `vips webpsave` and `vips jxlsave` on the same raster and is pinned as
+  one; refusing would fire on the ordinary path of loading two pages and
+  saving the result, and the pixels are a perfectly good image. A caller
+  who wants one frame uses `Raster::try_extract_page`, and a caller who
+  wants an animation saves GIF, which is the one animated format in this
+  crate with a pure-Rust encoder behind it.
+
+- `SourceError::PageOutOfRange` is the typed refusal for a `page` or
+  `page + n` naming pages a file does not have, shared by the animated
+  loaders (issues #569, #621). Distinct from `SourceError::PageLimitExceeded`,
+  which is the configured ceiling rather than the file's own count. vips
+  refuses the same requests, with `webp: bad page number`, and clamps none of
+  them: `[page=4]`, `[page=2,n=5]` and `[n=0]` on a four-page file all fail
+  there too.
 
 - **Analyze 7.5 (`.hdr` + `.img`) load** (issues #510, #640, #764).
   `decode_analyze_file` takes either half of the pair or the bare stem and
@@ -2716,6 +2790,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A JPEG 2000's `colr` box decides its interpretation, not its band count**
+  (issue #767). `jp2kload` reads the box's enumerated colour space and maps
+  openjpeg's five recognised values onto a tag; `decode_jp2k` was taking
+  `hayro-jpeg2000`'s resolved colour space instead, which agrees on every
+  ordinary file and disagrees wherever the enum and the component count
+  contradict each other.
+
+  The two rows that make it a rule, measured on the pinned 8.18.6 by retagging
+  `oracle-captures/foreign-jp2k/fixtures/rgb_lossless.jp2`'s `colr` box in
+  place: a **one**-component file tagged CMYK is `cmyk`, and a
+  **three**-component file tagged greyscale is `b-w`. Both used to come back
+  `srgb` here. The element width picks between the flavours, so the same enum
+  gives `b-w` / `srgb` on an 8-bit file and `grey16` / `rgb16` on a 16-bit one.
+
+  Anything openjpeg does not recognise falls back to the band-count guess,
+  which is where every file was before, and that arm is measured rather than
+  assumed: `EnumCS 14` (CIELab) behaves exactly like the undefined `99` across
+  all three shapes of the sweep, and two independent unrecognised values
+  agreeing is what makes it a fallback rather than a special case.
+
+  One combination is broken in vips and is deliberately not reproduced. A
+  one-component file tagged sRGB, sYCC or e-YCC has its header expanded to 3
+  bands by openjpeg while the tile decode still yields 1, so `vipsheader`
+  reports `3 bands, srgb` and any pixel read fails with "decoded image does not
+  match container". libviprs keeps the one real band and takes vips's tag,
+  which is the half of its answer that is not broken; `Interpretation` is
+  advisory metadata here and the pipeline does not validate it against the band
+  count, exactly as in libvips.
+
+  Three enums are still refused by the decoder where vips reads the file, all
+  of them `hayro-jpeg2000` deciding more than it should and none of them
+  reachable from this crate: e-YCC (#848), CIELab (#849, which moves the pixels
+  as well) and anything unrecognised (#771). The sweep in the tests carries
+  them as refusal cells and **fails if one starts decoding**, so an upstream
+  fix announces itself.
+
+- **A JPEG 2000 whose image starts away from the grid origin now says so**
+  (issue #766). `decode_jp2k` attached no `xoffset` / `yoffset` at all, so a
+  codestream declaring `XOsiz = 5, YOsiz = 7` came back looking as though it sat
+  at the origin. It now stamps `-XOsiz` / `-YOsiz`, which is both what
+  `vipsheader` reports for the same file and what `extract_area` stamps in this
+  crate for a crop at the same place (#721).
+
+  The size stays this crate's, and that is now measured rather than argued.
+  vips reports 27x17 for `origin57.j2k` where this reports 32x24
+  (`Xsiz - XOsiz` by `Ysiz - YOsiz`, what the standard calls the image), and
+  hashing the two settles which is which: our 32x24 cut to 27x17 **at (0, 0)**
+  reproduces the capture's `decoded_raster.sha256` byte for byte, so `jp2kload`
+  decodes 768 samples and hands back 459. Dropping 40% of the picture is neither
+  inside the carrier's noise nor two-directional, which is the test #732 and
+  #733 settled on for when to adopt vips and when not to.
+
+  Nothing `jp2ksave` writes reaches any of this: it always starts at the grid
+  origin, and every other fixture in `oracle-captures/foreign-jp2k/` reports
+  `0 / 0` on both sides.
+
 - **Six tests reached the filesystem with no `#[cfg_attr(miri, ignore)]`, and
   `merge-gate.yml` said none did** (issue #765). Any one of them ends the whole
   Miri session on its first syscall, because #711 turned isolation on and Miri
@@ -2906,6 +3036,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
+
+- **Animated WebP frames after the first no longer decode one grey level
+  low.** `image-webp` 0.2.4 runs its approximate alpha blend on fully opaque
+  pixels, where libwebp explicitly does not (`demux/anim_decode.c`,
+  `BlendPixelRowNonPremult`, which tests `src_alpha != 0xff` before blending).
+  With `src_a = 255` the approximation is `(s * 255 * ((1 << 24) / 255)) >> 24`,
+  which is `s - 1` for every `s` from 1 to 255, so every opaque channel of a
+  blended frame came back one low. `vips webpsave` writes frame 0 with
+  blending off and every later frame with it on, so a four-page roll read back
+  `74 20 38` where `vips rawsave 'x.webp[n=-1]'` read `75 21 39`, on every
+  page but the first.
+
+  libviprs now switches blending off on the frames that provably carry no
+  transparency before handing the bytes to the decoder: a `VP8 ` frame is
+  lossy and has no alpha channel, and a `VP8L` frame declares one in its
+  `alpha_is_used` header bit. Blending a fully opaque frame is the identity,
+  so clearing the bit cannot change the image and it routes the decoder onto
+  its exact copy path. The input is cloned only when there is a frame to
+  rewrite.
+
+  What is left is a frame that declares alpha *and* asks to be blended, where
+  the opaque pixels inside it are still one low. `vips webpsave` does not
+  write that combination (a transparent roll comes out with blending off on
+  every frame, measured), so no oracle fixture reaches it, and it is written
+  down at `disable_blending_on_opaque_frames` rather than hidden.
 
 - `EncodeError::Unsupported`'s own documentation no longer names four formats
   this crate encodes (issue #758). The variant's doc listed UHDR, FITS,
