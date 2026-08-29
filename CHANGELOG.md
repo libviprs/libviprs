@@ -3076,6 +3076,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Animated WebP frames are composited by this loader rather than by
+  `image-webp`, and come back byte-exact with vips (issues #837, #917). Every
+  blended page used to be a grey level low, which is #837, and translucent
+  pixels were out by up to 26 levels, which is #917.
+
+  **Both issues named the wrong reference implementation, mine included.**
+  They were written against libwebp's `anim_decode.c`, and vips does not call
+  it: `webp2vips.c` pulls each frame with `WebPDemuxGetFrame` and `WebPDecode`
+  and composites them itself. Three implementations, three answers:
+
+  | | `dst_factor_a` | rounding |
+  |---|---|---|
+  | vips | `(dst_a * (255 - src_a) + 127) >> 8` | `+ (1 << 12)` before the shift |
+  | libwebp | `(dst_a * (256 - src_a)) >> 8` | none |
+  | `image-webp` | `div_by_255(dst_a * (255 - src_a))` | none |
+
+  The rounding term is the whole of #837: with an opaque source the factor is
+  0 and the product is one short of `s << 24`, so vips carries it back and the
+  other two truncate. libwebp reaches the same answer by skipping the blend
+  for opaque pixels, which is what #837 saw, but that is a second route rather
+  than the reason.
+
+  vips's model is also simpler than libwebp's, and porting libwebp's first
+  made the adversarial header-lie fixture *worse*: clear the previous frame's
+  rectangle if it disposed to background, then paste this frame, blending only
+  when it is not the first and its own header asks for it. No key frames, no
+  per-pixel opacity test, no partial blend ranges.
+
+  `image-webp` exposes no per-frame decode, so the frames are recovered by
+  clearing every `ANMF` blend bit, which turns its `composite_frame` into a
+  verbatim copy of each frame's rectangle. That is done through a reader that
+  patches the bytes on the way past, so nothing is copied. The patch claims
+  nothing about the pixels, which is what separates it from the rewrite #863
+  withdrew: that one read `alpha_is_used` as proof of opacity, where this
+  decides what to do with a frame from the frame's own decoded alpha.
+
+  `webp::DECODER_PLANES_ANIMATED` goes 3 to 5 for the two planes this needs,
+  measured from both sides: `tests/webp_decode_working_set.rs` fails at four,
+  with the peak 8,644 bytes over the price on a 512x512 fixture.
+
 - An animated WebP's band count follows the rule vips applies rather than the
   `VP8X` alpha flag alone (issue #885). `webp2vips.c:413` starts from the flag
   and `:464-471` turns alpha on when **any** frame carries alpha of its own or
