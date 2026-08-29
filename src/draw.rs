@@ -1897,15 +1897,93 @@ mod tests {
         }
     }
 
-    /// A mask that is not single-band 8-bit is a documented no-op.
+    /**
+     * Tests that a mask which is not single-band `uchar` is a documented
+     * no-op, with masks that would visibly blend if the guard were dropped.
+     * The mutation sweep for #748 deleted the sample-kind half of that guard
+     * and **nothing reddened**, because this test used `Raster::zeroed`
+     * masks: an all-zero mask blends zero weight, so "refused" and "accepted
+     * with weight 0" produce the same black target and the assertion was
+     * vacuous (issue #915). Both masks are saturated now, so accepting
+     * either one writes the ink.
+     * `Gray16` is the case the kind test is really for: with the guard gone
+     * its samples are walked as bytes, at half the stride, and the low byte
+     * of each 16-bit value becomes the weight.
+     * Input: a saturated `Rgb8` mask and a saturated `Gray16` mask ->
+     * Output: the target is untouched by both.
+     */
     #[test]
     fn draw_mask_requires_single_band_8bit_mask() {
-        let rgb_mask = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
-        let gray16_mask = Raster::zeroed(4, 4, PixelFormat::Gray16).unwrap();
+        let rgb_mask = Raster::new(4, 4, PixelFormat::Rgb8, vec![255u8; 4 * 4 * 3]).unwrap();
+        let gray16_mask = Raster::new(4, 4, PixelFormat::Gray16, vec![255u8; 4 * 4 * 2]).unwrap();
+
+        // Positive control: a single-band uchar mask of the same value does
+        // blend, so the two assertions below are about the mask's format and
+        // not about a mask that could never have done anything.
+        let mut blended = black(4, 4);
+        blended.draw_mask(
+            &[200],
+            &Raster::new(4, 4, PixelFormat::Gray8, vec![255u8; 16]).unwrap(),
+            0,
+            0,
+        );
+        assert!(
+            blended.data().iter().any(|&b| b != 0),
+            "positive control failed: a saturated uchar mask must blend"
+        );
+
         let mut im = black(4, 4);
         im.draw_mask(&[200], &rgb_mask, 0, 0);
+        assert!(
+            im.data().iter().all(|&b| b == 0),
+            "a three-band mask must be refused"
+        );
         im.draw_mask(&[200], &gray16_mask, 0, 0);
-        assert!(im.data().iter().all(|&b| b == 0));
+        assert!(
+            im.data().iter().all(|&b| b == 0),
+            "a 16-bit mask must be refused, not walked as bytes"
+        );
+    }
+
+    /**
+     * Tests that `draw_smudge` clips its box average against the sample
+     * kind's own ceiling rather than against a constant.
+     * The mutation sweep for #748 replaced that ceiling with a flat `255.0`
+     * and **nothing reddened** (issue #915), because the module's only
+     * 16-bit smudge exercise never averages above 255, so the two constants
+     * agree everywhere it looks. Before #867 the line read
+     * `if bpc == 1 { 255 } else { 65535 }`, which is a sixteenth of a
+     * four-byte integer kind's range; the replacement reads the kind and had
+     * nothing holding it.
+     * Works on a `Gray16` raster filled well above 255, so the smudged
+     * average is a 16-bit value and a 255 ceiling would flatten it.
+     * Input: a uniform `Gray16` field of 40000 -> Output: the smudged pixels
+     * are still 40000, not 255.
+     */
+    #[test]
+    fn draw_smudge_clips_against_the_sample_kind_ceiling() {
+        const V: u16 = 40_000;
+        let data: Vec<u8> = std::iter::repeat_n(V.to_ne_bytes(), 6 * 6)
+            .flatten()
+            .collect();
+        let mut im = Raster::new(6, 6, PixelFormat::Gray16, data).unwrap();
+        im.draw_smudge(1, 1, 4, 4);
+
+        let out = im.data();
+        for (i, chunk) in out.as_chunks::<2>().0.iter().enumerate() {
+            assert_eq!(
+                u16::from_ne_bytes(*chunk),
+                V,
+                "sample {i} was clipped below its kind's ceiling"
+            );
+        }
+
+        // Positive control: the ceiling is genuinely above 255 here, so a
+        // constant-255 clip would have been visible rather than a no-op.
+        assert!(
+            u32::from(V) > 255,
+            "the fixture must sit above the 8-bit ceiling to separate the two"
+        );
     }
 
     /// Multi-band targets blend every channel against the same mask value.
