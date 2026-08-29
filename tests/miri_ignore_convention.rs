@@ -394,7 +394,7 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// eighteen, for exactly that reason. This is a count that two file-disjoint
 /// changes can both be right about and still break, so move it in the same
 /// change that moves the population.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 19;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 20;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -442,7 +442,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// **zero**: nothing in the tree reaches the filesystem through those
 /// spellings today, which is exactly why an unannotated test using one was
 /// invisible.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 282;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 287;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

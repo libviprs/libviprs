@@ -197,7 +197,15 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
+      # Full history, because `tests/changelog_release_claims.rs` answers the
+      # CHANGELOG's "has never been in a release" claims with `git grep` over
+      # every tag, and the default shallow checkout brings down no tags at all.
+      # Without this the guard fails loudly, which is deliberate: a tagless
+      # clone would otherwise satisfy every such claim by finding nothing, and
+      # that is the vacuous pass the guard exists to avoid (issue #947).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
