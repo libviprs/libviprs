@@ -3457,6 +3457,56 @@ mod tests {
     }
 
     /**
+     * Tests that this module's sample reader and writer round-trip every
+     * sample kind at its own stride and its own signedness.
+     * It exists because **no op-level test can catch a read-side
+     * signedness bug here**: `embed` and `insert` read a sample and write
+     * it back at the same kind, so reading `char` -100 as 156 and storing
+     * `156 as i8` gives -100 again and the canvas is identical. Mutating
+     * `read_s`'s `I8` arm to an unsigned read left all 74 tests in this
+     * module green, a real NO TEST REDDENS, and the round trip is what
+     * cancelled it. This cell does not cancel: `write_s` stores the two's
+     * complement and the read has to give the number back, so an unsigned
+     * read answers 255 where -1 was written.
+     * Works by sweeping [`ALL_KINDS`] rather than a hand-written list, and
+     * by writing at sample index 1 of a two-sample buffer so a wrong
+     * stride overwrites index 0 and is caught by the neighbour assertion.
+     * Input: each kind's `range()` endpoints and 0 -> Output: the same
+     * numbers back, index 0 still zero.
+     */
+    #[test]
+    fn read_s_and_write_s_round_trip_every_kind_at_its_own_stride() {
+        for kind in ALL_KINDS {
+            let bytes = kind.bytes();
+            let cases: [i64; 3] = match kind.range() {
+                Some((lo, hi)) => [lo, 0, hi],
+                None => [-128, 0, 127],
+            };
+            for v in cases {
+                let mut buf = vec![0u8; bytes * 2];
+                write_s(&mut buf, kind, 1, v);
+                assert_eq!(read_s(&buf, kind, 1), v, "{kind:?} did not round-trip {v}");
+                assert!(
+                    buf[..bytes].iter().all(|&b| b == 0),
+                    "{kind:?} wrote outside sample 1, so its stride is wrong"
+                );
+            }
+        }
+        // The width collisions, stated directly. `-1` is the same byte in
+        // both one-byte kinds and a different number, which is the exact
+        // substitution the round trip through an op cannot see.
+        let mut b8 = vec![0u8; 1];
+        write_s(&mut b8, SampleKind::I8, 0, -1);
+        assert_eq!(b8[0], 0xFF);
+        assert_eq!(read_s(&b8, SampleKind::U8, 0), 255);
+        assert_eq!(read_s(&b8, SampleKind::I8, 0), -1);
+        let mut b32 = vec![0u8; 4];
+        write_s(&mut b32, SampleKind::I32, 0, -1);
+        assert_eq!(read_s(&b32, SampleKind::U32, 0), 4_294_967_295);
+        assert_eq!(read_s(&b32, SampleKind::I32, 0), -1);
+    }
+
+    /**
      * Tests that the background ink clips into each carrier's own range at
      * both ends, driven directly rather than through an op, so the arms no
      * op can reach are held by something.
