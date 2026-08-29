@@ -5692,7 +5692,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_files_this_encoder_writes_are_the_files_vips_writes() {
-        let cases: [(u32, u32, PixelFormat, u32, u32, &str, &str); 4] = [
+        let cases: [(u32, u32, PixelFormat, u32, u32, &str, &str); 5] = [
             (
                 37,
                 21,
@@ -5734,6 +5734,24 @@ mod tests {
                 64,
                 "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
                 "9126c417a44238f3540e6735efea0f22741d07a6da32806b467dfb0b57cc7bdb",
+            ),
+            // The row where the tile's own coordinates decide the bytes, and
+            // the reason it is 37x27 rather than another power of two. A tile
+            // grid whose step is even and code-block aligned puts every tile
+            // origin at the same parity and the same code-block offset as the
+            // image origin, so encoding a tile as though it sat at (0, 0)
+            // produces the same bytes and nothing catches it: measured, that
+            // mutation is green against all four rows above. An odd step is
+            // what separates them, because the wavelet's interleave parity is
+            // `tcx0 % 2`.
+            (
+                200,
+                150,
+                PixelFormat::Rgb8,
+                37,
+                27,
+                "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
+                "ea70e0999c28dc436d00fcb19b859a3fb35207cec738d8277f1227f07d978aaf",
             ),
         ];
         for (width, height, format, tile_w, tile_h, fixture, expected) in cases {
@@ -5791,6 +5809,26 @@ mod tests {
         let untiled = source
             .encode_jp2k(SaveOptions::default())
             .expect("the default encode");
+
+        // A grid whose step is odd, so the tile origins do not share the image
+        // origin's parity. This is the shape that needs the tile's absolute
+        // coordinates to reach the encoder: on an even, code-block-aligned
+        // step every tile codes the same either way.
+        let odd = ramp(200, 150, PixelFormat::Rgb8);
+        let odd_tiled = odd
+            .encode_jp2k(
+                SaveOptions::default()
+                    .with_tile_width(NonZeroU32::new(37).expect("37 is non-zero"))
+                    .with_tile_height(NonZeroU32::new(27).expect("27 is non-zero")),
+            )
+            .expect("an odd tiled encode");
+        let from_odd = decode_jp2k(&odd_tiled, DecodeLimits::default()).expect("odd decode");
+        assert_eq!(int_field(&from_odd, "tile-width"), Some(37));
+        assert_eq!(
+            from_odd.data(),
+            odd.data(),
+            "a 6x6 grid on an odd step has to be lossless too"
+        );
 
         let from_tiled = decode_jp2k(&tiled, DecodeLimits::default()).expect("tiled decode");
         let from_untiled = decode_jp2k(&untiled, DecodeLimits::default()).expect("untiled decode");
