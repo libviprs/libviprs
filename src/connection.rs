@@ -205,12 +205,19 @@ pub fn decode_source<R: Read>(source: &mut Source<R>) -> Result<Raster, DecodeEr
     crate::source::decode_bytes(&bytes)
 }
 
-/// Encode a raster into a target in the named format.
+/// Encode a raster into a target in the named format, then write the encoded
+/// bytes to it.
 ///
-/// Dispatches `"jpeg"` / `"jpg"` / `"png"` to the sink encoders and
-/// `"v"` / `"vips"` to the native `.v` encoder, then writes the encoded bytes
-/// to the target. A leading `.` and letter case are ignored, so `"PNG"` and
-/// `".png"` both select PNG.
+/// The dispatch is [`Raster::encode_to_buffer`]'s, and **that** doc carries the
+/// list of format names, deliberately in one place. This one used to keep its
+/// own copy, which named five of the seventeen spellings the dispatch had by
+/// the time anyone measured it, because it was written when five was the whole
+/// of it and nothing connected the two afterwards. So a caller reading here
+/// concluded WebP was unsupported years after it was wired. The list is not
+/// repeated below, and a check refuses to let it come back (issue #881).
+///
+/// A leading `.` and letter case are ignored, so `PNG` and `.png` both select
+/// PNG.
 ///
 /// # Errors
 ///
@@ -488,6 +495,134 @@ mod tests {
                 "{spelling:?} must report the codec name it has no encoder for, got {err}"
             );
         }
+    }
+
+    /// Every format spelling `encode_for_format` has an arm for, read out of
+    /// this module's own source.
+    ///
+    /// Only arm *heads* are scanned, so a quoted name inside an arm body or a
+    /// comment (there are several: `"jp2k"` appears in three of them) is not
+    /// mistaken for a row.
+    fn wired_format_arms(src: &str) -> Vec<&str> {
+        let start = src
+            .find("fn encode_for_format(")
+            .expect("the dispatch lives in this file");
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("the function closes at column zero");
+        let mut names = Vec::new();
+        for line in body[..end].lines() {
+            let Some((head, _)) = line.split_once("=>") else {
+                continue;
+            };
+            if !head.trim_start().starts_with('"') {
+                continue;
+            }
+            for piece in head.split('|') {
+                let piece = piece.trim();
+                if let Some(inner) = piece.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+                    names.push(inner);
+                }
+            }
+        }
+        names
+    }
+
+    /// Every ``​`"name"`​`` in the doc block immediately above `marker`.
+    ///
+    /// The quoted-literal spelling is what it looks for, because that is how
+    /// the list is written: those are the exact argument values a caller
+    /// passes. Prose naming a format without quoting an argument (\"both
+    /// select PNG\") is not a list and is not matched.
+    ///
+    /// Used twice: once on [`Raster::encode_to_buffer`], which is the one place
+    /// the format list is written down for a caller, and once on
+    /// `encode_to_target`, which must name **none**, because a second copy of
+    /// the list is what drifted (issue #881).
+    fn documented_format_names<'a>(src: &'a str, marker: &str) -> Vec<&'a str> {
+        let at = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker} lives in this file"));
+        let mut names = Vec::new();
+        for line in src[..at].lines().rev() {
+            let line = line.trim_start();
+            if !line.starts_with("///") {
+                break;
+            }
+            let mut rest = line;
+            while let Some(i) = rest.find("`\"") {
+                rest = &rest[i + 2..];
+                let Some(j) = rest.find("\"`") else { break };
+                names.push(&rest[..j]);
+                rest = &rest[j + 2..];
+            }
+        }
+        names
+    }
+
+    /**
+     * Tests that the format list a caller is given and the arms the dispatch
+     * actually has name exactly the same set (issue #881).
+     *
+     * The extension route has had this since the `.jxl` arm landed while the
+     * refusal message still read "png, jpg/jpeg, gif, webp, and v/vips", so
+     * `save("x.avif")` told the caller JPEG XL was unsupported at the moment it
+     * became supported. `saveable_extensions()` is a function rather than a
+     * literal for that reason and
+     * `save_error_lists_exactly_the_wired_extensions` walks it back through
+     * `Raster::save`.
+     *
+     * The format route had nothing, and it drifted the same way and further:
+     * `encode_to_target`'s doc named five of the eighteen spellings the
+     * dispatch had, having been written when five was the whole of it, and
+     * three format lanes went past it without noticing. That is the reason
+     * #770, #809 and #880 could each go unnoticed as long as they did, so the
+     * fix is a check rather than an edit.
+     *
+     * Set equality, so it is red in both directions: an arm added without the
+     * doc moving, and a doc naming something with no arm behind it. The
+     * `encode_to_target` copy is gone and its doc now points here, so there is
+     * one list.
+     *
+     * The length assertion is the positive control. Both halves are source
+     * scans, and two scans that have stopped finding anything agree perfectly.
+     */
+    #[test]
+    fn the_format_dispatch_and_the_list_a_caller_is_given_cannot_drift_apart() {
+        const SRC: &str = include_str!("connection.rs");
+
+        let mut wired = wired_format_arms(SRC);
+        wired.sort_unstable();
+        wired.dedup();
+        let mut documented = documented_format_names(SRC, "    pub fn encode_to_buffer");
+        documented.sort_unstable();
+        documented.dedup();
+
+        assert!(
+            wired.len() >= 15,
+            "the arm scan found only {wired:?}, so it has stopped reading the dispatch"
+        );
+        assert_eq!(
+            wired, documented,
+            "the dispatch has arms for {wired:?} and the doc on `encode_to_buffer` names \
+             {documented:?}; a caller only ever sees the second"
+        );
+
+        // And there is exactly one list. `encode_to_target` kept a second copy
+        // and that copy is what drifted: measured on `origin/main` before this
+        // PR, the dispatch had 17 arms, `encode_to_buffer`'s doc named all 17,
+        // and `encode_to_target`'s named five. Its doc points here now and
+        // names none, so re-growing a list there is red rather than merely
+        // unfortunate. Two checked copies would be worse than one, because the
+        // check would then keep them agreeing rather than keeping there being
+        // one.
+        let second = documented_format_names(SRC, "pub fn encode_to_target<W: Write>");
+        assert!(
+            second.is_empty(),
+            "`encode_to_target` has grown its own format list again, naming {second:?}; \
+             it should defer to `Raster::encode_to_buffer` (issue #881)"
+        );
     }
 
     /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling, which
