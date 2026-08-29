@@ -215,8 +215,15 @@ jobs:
       #
       #   * `arithmetic::proptests::no_try_method_panics_on_a_float_raster` is
       #     256 property cases, each running a sweep of every `try_*` method in
-      #     `src/arithmetic.rs`. One sweep costs @@SWEEP@@, so the test costs
-      #     about @@PROPTEST@@ by itself.
+      #     `src/arithmetic.rs`. Measured at 2, 4 and 8 cases (33s, 53s, 94s,
+      #     with `MIRIFLAGS=-Zmiri-env-forward=PROPTEST_CASES`), which is
+      #     linear at 10.2s a case over a 12.7s base, so at 256 it is about 44
+      #     minutes. One test, half the ceiling.
+      #   * The plain test beside it,
+      #     `every_try_method_in_the_module_is_in_the_sweep`, is 284s on its
+      #     own, and the image work is not what costs: it scans 6800 lines of
+      #     module source with string operations, which the interpreter charges
+      #     for by the character.
       #   * Skipping every property test does not rescue it. `arithmetic::tests`
       #     spent 725s on 67 tests and then more than twenty minutes inside
       #     `hough_line_carries_more_than_65535_votes` without finishing.

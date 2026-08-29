@@ -2256,12 +2256,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Measured on wall time, ten cores, nightly-2026-08-20, isolation on:
   `arithmetic::proptests::no_try_method_panics_on_a_float_raster` is 256
-  property cases each running a sweep of every `try_*` method in the module;
-  skipping every property test does not rescue it either, because
-  `arithmetic::tests` spent 725s on 67 tests and then over twenty minutes
-  inside one more without finishing; and seventeen of the sixty-two lib modules
-  do not finish inside a 120 second bound. The slice that replaces it is
-  **584s for 436 tests**, with 116 ignored.
+  property cases at 10.2s each (33s, 53s and 94s at 2, 4 and 8 cases, linear),
+  so about 44 minutes for one test out of 1940. Skipping every property test
+  does not rescue it either, because `arithmetic::tests` spent 725s on 67 tests
+  and then over twenty minutes inside one more without finishing, and seventeen
+  of the sixty-two lib modules do not finish inside a 120 second bound. The
+  slice that replaces it is **584s for 436 tests**, with 116 ignored.
 
   A module is in if Miri can run it to completion inside 120 seconds, which is
   mechanical rather than a judgement about which code deserves interpreting.
